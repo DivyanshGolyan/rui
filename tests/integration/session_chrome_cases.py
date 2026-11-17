@@ -1,3 +1,4 @@
+from terminal_screen import VERTICAL_DIVIDER
 import json
 import os
 import pathlib
@@ -386,7 +387,7 @@ def assert_plain_panel(master, screen, *, left=None):
     assert frame.text == screen, (frame.text, screen)
     def pane_cells(index):
         cells = frame.cells[index]
-        divider = next((column for column, cell in enumerate(cells) if cell.data == "│"), None)
+        divider = next((column for column, cell in enumerate(cells) if cell.data == VERTICAL_DIVIDER), None)
         return cells[divider + 1:] if divider is not None else cells
 
     bounds = composer_bounds(screen)
@@ -403,7 +404,7 @@ def assert_plain_panel(master, screen, *, left=None):
     backgrounds = set()
     for index in range(bounds[0] + 1, prompt):
         line = composer_line(screen, index)
-        assert not any(char in line for char in "┌┐└┘│"), screen
+        assert not any(char in line for char in ("┌┐└┘" + VERTICAL_DIVIDER)), screen
         for cell in pane_cells(index):
             backgrounds.add(frame.colors(cell)[1])
     assert plain in backgrounds and len(backgrounds) <= 2, ("plain panel plus selection bar", backgrounds, screen)

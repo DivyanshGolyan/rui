@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from terminal_screen import VERTICAL_DIVIDER
 import json
 import os
 import shutil
@@ -59,7 +60,7 @@ def main():
         caller = spawn([str(fixture.RUI), "--store", str(store)], cwd=state,
                        env=env, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         launch = read_terminal(master, "Type a task", composer=True)
-        assert "+ New Session" in launch and "│" in launch, launch
+        assert "+ New Session" in launch and VERTICAL_DIVIDER in launch, launch
         initial = host_process.wait_for(
             lambda: json.loads(cli("session", "list", "--store", store, "--all"))["sessions"],
             "wide launch Session")

@@ -51,7 +51,7 @@
         "alt+i info"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -101,7 +101,7 @@
         "alt+i info"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ],
       "expect_next": {
         "Send failure witness": "Not confirmed · ctrl+r retries original"
@@ -163,7 +163,7 @@
         "alt+i info"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -213,7 +213,7 @@
         "alt+i info"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ],
       "expect_next": {
         "Send failure witness": "Not confirmed · ctrl+r retries original"
@@ -249,7 +249,7 @@
         "alt+i info"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ],
       "cast": [
         {
@@ -283,7 +283,7 @@
         "alt+i info"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -305,7 +305,7 @@
         "Settings": "{upgrade_version}"
       },
       "expect_regex": [
-        "^\\s*\\d+(?:\\.\\d+)? (?:MB|GB)\\s+{upgrade_version}\\s*(?:│.*)?$"
+        "^\\s*\\d+(?:\\.\\d+)? (?:MB|GB)\\s+{upgrade_version}\\s*(?:{divider}.*)?$"
       ],
       "comparison": {
         "before": {
@@ -315,7 +315,7 @@
           ],
           "expect_next": {},
           "expect_regex": [
-            "^\\s*Settings\\s+(?:rui \\d+(?:\\.\\d+)? (?:MB|GB)(?: [·.] tools \\d+(?:\\.\\d+)? (?:MB|GB))?\\s+)?{upgrade_version}\\s*(?:│.*)?$"
+            "^\\s*Settings\\s+(?:rui \\d+(?:\\.\\d+)? (?:MB|GB)(?: [·.] tools \\d+(?:\\.\\d+)? (?:MB|GB))?\\s+)?{upgrade_version}\\s*(?:{divider}.*)?$"
           ],
           "absent": [
             "Notifications",
@@ -346,7 +346,7 @@
         "Settings": "Update to {available_version}"
       },
       "expect_regex": [
-        "^\\s*\\d+(?:\\.\\d+)? (?:MB|GB)\\s+Update to {available_version}\\s*(?:│.*)?$"
+        "^\\s*\\d+(?:\\.\\d+)? (?:MB|GB)\\s+Update to {available_version}\\s*(?:{divider}.*)?$"
       ],
       "comparison": {
         "before": {
@@ -356,7 +356,7 @@
           ],
           "expect_next": {},
           "expect_regex": [
-            "^\\s*Settings\\s+(?:rui \\d+(?:\\.\\d+)? (?:MB|GB)(?: [·.] tools \\d+(?:\\.\\d+)? (?:MB|GB))?\\s+)?{upgrade_version}\\s*(?:│.*)?$"
+            "^\\s*Settings\\s+(?:rui \\d+(?:\\.\\d+)? (?:MB|GB)(?: [·.] tools \\d+(?:\\.\\d+)? (?:MB|GB))?\\s+)?{upgrade_version}\\s*(?:{divider}.*)?$"
           ],
           "absent": [
             "Notifications",
@@ -387,7 +387,7 @@
         "Settings": "Updating…"
       },
       "expect_regex": [
-        "^\\s*\\d+(?:\\.\\d+)? (?:MB|GB)\\s+Updating…\\s*(?:│.*)?$"
+        "^\\s*\\d+(?:\\.\\d+)? (?:MB|GB)\\s+Updating…\\s*(?:{divider}.*)?$"
       ],
       "comparison": {
         "before": {
@@ -398,7 +398,7 @@
           ],
           "expect_next": {},
           "expect_regex": [
-            "^\\s*Settings\\s+(?:rui \\d+(?:\\.\\d+)? (?:MB|GB)(?: [·.] tools \\d+(?:\\.\\d+)? (?:MB|GB))?\\s+)?{upgrade_version}\\s*(?:│.*)?$"
+            "^\\s*Settings\\s+(?:rui \\d+(?:\\.\\d+)? (?:MB|GB)(?: [·.] tools \\d+(?:\\.\\d+)? (?:MB|GB))?\\s+)?{upgrade_version}\\s*(?:{divider}.*)?$"
           ],
           "absent": [
             "Notifications",
@@ -431,7 +431,7 @@
         "Settings": "Update failed: Couldn't reach GitHub"
       },
       "expect_regex": [
-        "^\\s*(?:\\d+(?:\\.\\d+)? (?:MB|GB)\\s+)?Update failed: Couldn't reach GitHub\\s*(?:│.*)?$"
+        "^\\s*(?:\\d+(?:\\.\\d+)? (?:MB|GB)\\s+)?Update failed: Couldn't reach GitHub\\s*(?:{divider}.*)?$"
       ],
       "comparison": {
         "before": {
@@ -442,7 +442,7 @@
           ],
           "expect_next": {},
           "expect_regex": [
-            "^\\s*Settings\\s+(?:rui \\d+(?:\\.\\d+)? (?:MB|GB)(?: [·.] tools \\d+(?:\\.\\d+)? (?:MB|GB))?\\s+)?{upgrade_version}\\s*(?:│.*)?$"
+            "^\\s*Settings\\s+(?:rui \\d+(?:\\.\\d+)? (?:MB|GB)(?: [·.] tools \\d+(?:\\.\\d+)? (?:MB|GB))?\\s+)?{upgrade_version}\\s*(?:{divider}.*)?$"
           ],
           "absent": [
             "Notifications",
@@ -492,7 +492,7 @@
         }
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ],
       "comparison": {
         "before": {
@@ -537,7 +537,7 @@
         "Settings": "{upgrade_version}"
       },
       "expect_regex": [
-        "^\\s*\\d+(?:\\.\\d+)? (?:MB|GB)\\s+{upgrade_version}\\s*(?:│.*)?$"
+        "^\\s*\\d+(?:\\.\\d+)? (?:MB|GB)\\s+{upgrade_version}\\s*(?:{divider}.*)?$"
       ],
       "comparison": {
         "before": {
@@ -547,7 +547,7 @@
           ],
           "expect_next": {},
           "expect_regex": [
-            "^\\s*Settings\\s+(?:rui \\d+(?:\\.\\d+)? (?:MB|GB)(?: [·.] tools \\d+(?:\\.\\d+)? (?:MB|GB))?\\s+)?{upgrade_version}\\s*(?:│.*)?$"
+            "^\\s*Settings\\s+(?:rui \\d+(?:\\.\\d+)? (?:MB|GB)(?: [·.] tools \\d+(?:\\.\\d+)? (?:MB|GB))?\\s+)?{upgrade_version}\\s*(?:{divider}.*)?$"
           ],
           "absent": [
             "Notifications",
@@ -578,7 +578,7 @@
         "Settings": "Update to {available_version}"
       },
       "expect_regex": [
-        "^\\s*\\d+(?:\\.\\d+)? (?:MB|GB)\\s+Update to {available_version}\\s*(?:│.*)?$"
+        "^\\s*\\d+(?:\\.\\d+)? (?:MB|GB)\\s+Update to {available_version}\\s*(?:{divider}.*)?$"
       ],
       "comparison": {
         "before": {
@@ -588,7 +588,7 @@
           ],
           "expect_next": {},
           "expect_regex": [
-            "^\\s*Settings\\s+(?:rui \\d+(?:\\.\\d+)? (?:MB|GB)(?: [·.] tools \\d+(?:\\.\\d+)? (?:MB|GB))?\\s+)?{upgrade_version}\\s*(?:│.*)?$"
+            "^\\s*Settings\\s+(?:rui \\d+(?:\\.\\d+)? (?:MB|GB)(?: [·.] tools \\d+(?:\\.\\d+)? (?:MB|GB))?\\s+)?{upgrade_version}\\s*(?:{divider}.*)?$"
           ],
           "absent": [
             "Notifications",
@@ -619,7 +619,7 @@
         "Settings": "Updating…"
       },
       "expect_regex": [
-        "^\\s*\\d+(?:\\.\\d+)? (?:MB|GB)\\s+Updating…\\s*(?:│.*)?$"
+        "^\\s*\\d+(?:\\.\\d+)? (?:MB|GB)\\s+Updating…\\s*(?:{divider}.*)?$"
       ],
       "comparison": {
         "before": {
@@ -630,7 +630,7 @@
           ],
           "expect_next": {},
           "expect_regex": [
-            "^\\s*Settings\\s+(?:rui \\d+(?:\\.\\d+)? (?:MB|GB)(?: [·.] tools \\d+(?:\\.\\d+)? (?:MB|GB))?\\s+)?{upgrade_version}\\s*(?:│.*)?$"
+            "^\\s*Settings\\s+(?:rui \\d+(?:\\.\\d+)? (?:MB|GB)(?: [·.] tools \\d+(?:\\.\\d+)? (?:MB|GB))?\\s+)?{upgrade_version}\\s*(?:{divider}.*)?$"
           ],
           "absent": [
             "Notifications",
@@ -663,7 +663,7 @@
         "Settings": "Update failed: Couldn't reach GitHub"
       },
       "expect_regex": [
-        "^\\s*(?:\\d+(?:\\.\\d+)? (?:MB|GB)\\s+)?Update failed: Couldn't reach GitHub\\s*(?:│.*)?$"
+        "^\\s*(?:\\d+(?:\\.\\d+)? (?:MB|GB)\\s+)?Update failed: Couldn't reach GitHub\\s*(?:{divider}.*)?$"
       ],
       "comparison": {
         "before": {
@@ -674,7 +674,7 @@
           ],
           "expect_next": {},
           "expect_regex": [
-            "^\\s*Settings\\s+(?:rui \\d+(?:\\.\\d+)? (?:MB|GB)(?: [·.] tools \\d+(?:\\.\\d+)? (?:MB|GB))?\\s+)?{upgrade_version}\\s*(?:│.*)?$"
+            "^\\s*Settings\\s+(?:rui \\d+(?:\\.\\d+)? (?:MB|GB)(?: [·.] tools \\d+(?:\\.\\d+)? (?:MB|GB))?\\s+)?{upgrade_version}\\s*(?:{divider}.*)?$"
           ],
           "absent": [
             "Notifications",
@@ -724,7 +724,7 @@
         }
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ],
       "comparison": {
         "before": {
@@ -770,7 +770,7 @@
         "enter open"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -782,7 +782,7 @@
       "expect": ["+ New Session", "Settings"],
       "absent": ["Type a task", "enter open"],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -805,7 +805,7 @@
       ],
       "absent": [],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -834,7 +834,7 @@
         }
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -864,7 +864,7 @@
         "alt+i info"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -892,7 +892,7 @@
         "alt+i info"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -943,7 +943,7 @@
         "› Type a task": "#121933"
       },
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -967,7 +967,7 @@
         "enter retry"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -986,7 +986,7 @@
         "alt+i info"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -1016,7 +1016,7 @@
         "alt+i info"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -1044,7 +1044,7 @@
         "alt+i info"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -1095,7 +1095,7 @@
         "› Type a task": "#f3eee2"
       },
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -1119,7 +1119,7 @@
         "enter retry"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -1152,7 +1152,7 @@
         "No Sessions yet."
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -1234,7 +1234,7 @@
         }
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -1287,7 +1287,7 @@
         }
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -1333,7 +1333,7 @@
         "type to narrow"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ],
       "expect_dim": []
     },
@@ -1388,7 +1388,7 @@
         "type to narrow"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ],
       "expect_dim": [
         {
@@ -1446,7 +1446,7 @@
         "enter pick"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -1518,7 +1518,7 @@
         "append catal"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$",
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$",
         "/review +Verify the project and review\\s*$"
       ]
     },
@@ -1552,7 +1552,7 @@
         "Usage:"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -1591,7 +1591,7 @@
         "alt+i info"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -1630,7 +1630,7 @@
         "alt+i info"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -1672,7 +1672,7 @@
         "Archived Archive audit"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -1697,7 +1697,7 @@
         "/sessions"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -1730,7 +1730,7 @@
         "Archive audit"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -1767,7 +1767,7 @@
         "[Archived]"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -1801,7 +1801,7 @@
         "· archived"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -1846,7 +1846,7 @@
         "No archived Sessions"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -1876,7 +1876,7 @@
         "{session:Archive audit}"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -2053,7 +2053,7 @@
         "gpt-6.1-sol \u00b7 low"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -2102,7 +2102,7 @@
         "alt+i info"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -2175,7 +2175,7 @@
         "alt+i info"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -2211,7 +2211,7 @@
         "Type a task"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -2259,7 +2259,7 @@
         "Type a task"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -2313,7 +2313,7 @@
         "Type a task"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -2354,7 +2354,7 @@
         "Type a task"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -2404,7 +2404,7 @@
         "Filter:"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -2458,7 +2458,7 @@
         "Filter:"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -2515,7 +2515,7 @@
         "\u25be"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -2569,7 +2569,7 @@
         "enter start"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ],
       "sizes": [
         "140x40",
@@ -2648,7 +2648,7 @@
         "enter start"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ],
       "sizes": [
         "140x40",
@@ -2725,7 +2725,7 @@
         "enter start"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ],
       "sizes": [
         "140x40",
@@ -2771,7 +2771,7 @@
         "Type a task"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -2867,7 +2867,7 @@
         "Type a task"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -2902,7 +2902,7 @@
         "Type a task"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -2936,7 +2936,7 @@
         "Type a task"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -2995,7 +2995,7 @@
         "Type a task"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -3040,7 +3040,7 @@
         "Fail with an excerpt \u00b7 1"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ],
       "expect_next": {
         "\u2713 List project files": "\u00d7 Fail with exit 127",
@@ -3087,7 +3087,7 @@
         "\u25be"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -3139,7 +3139,7 @@
         "Fail with an excerpt \u00b7 1"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -3189,7 +3189,7 @@
       ],
       "note": "10a-tool-open: Ctrl-O selects the lowest tool; output is indented on its band, other rows folded; no extra mark; literal stored envelope in quiet colour",
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ],
       "expect_next": {
         "\u2713 List project files": "\u00d7 Fail with exit 127",
@@ -3300,7 +3300,7 @@
         "Fail with an excerpt \u00b7 1"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ],
       "expect_next": {
         "    src": "\u00d7 Fail with exit 127",
@@ -3352,7 +3352,7 @@
       ],
       "note": "10c-tool-open-long: twenty quiet stored-result rows, including status and label, then fourteen remaining lines",
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -3405,7 +3405,7 @@
       ],
       "note": "10d-tool-open-nocolor: the same open tool is indented without selection or output backgrounds; no extra mark; literal stored envelope in quiet colour",
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ],
       "expect_next": {
         "\u2713 List project files": "\u00d7 Fail with exit 127",
@@ -3445,7 +3445,7 @@
       ],
       "expect": "Keep this chat draft",
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -3470,7 +3470,7 @@
         "third"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -3491,7 +3491,7 @@
         "\u2193"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -3516,7 +3516,7 @@
         "\u2193"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -3552,7 +3552,7 @@
         "new"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -3583,7 +3583,7 @@
         "retry policy notes"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -3609,7 +3609,7 @@
         "retry policy notes"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -3651,7 +3651,7 @@
         "Waiting"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -3692,7 +3692,7 @@
         "No code block in the last answer."
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -3740,7 +3740,7 @@
         "Waiting"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -3782,7 +3782,7 @@
         }
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -3836,7 +3836,7 @@
         "\u25a0 Stop the slow job": "   Stopped"
       },
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -3885,7 +3885,7 @@
       ],
       "first_frame": true,
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -3898,7 +3898,7 @@
         }
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -3916,7 +3916,7 @@
         "enter sends"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -3941,7 +3941,7 @@
         "more lines \u00b7 shift+\u2193"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -3972,7 +3972,7 @@
         "Deny"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -3998,7 +3998,7 @@
         "more lines \u00b7 shift+\u2193"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -4022,7 +4022,7 @@
         }
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -4100,7 +4100,7 @@
         "Type a task"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -4134,7 +4134,7 @@
         "type to narrow"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -4164,7 +4164,7 @@
         "/effort"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -4211,7 +4211,7 @@
         "/configure"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -4227,7 +4227,7 @@
         }
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -4288,7 +4288,7 @@
         }
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ],
       "expect_background": {
         "/help           Verify": "#2b2f45"
@@ -4352,7 +4352,7 @@
         }
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ],
       "expect_background": {
         "/help           Verify": "#2b2f45"
@@ -4406,7 +4406,7 @@
         }
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ],
       "expect_background": {
         "/new            start": "#2b2f45"
@@ -4470,7 +4470,7 @@
         }
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ],
       "theme": "day",
       "expect_background": {
@@ -4535,7 +4535,7 @@
         }
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ],
       "theme": "day",
       "expect_background": {
@@ -4590,7 +4590,7 @@
         }
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ],
       "theme": "day",
       "expect_background": {
@@ -4626,7 +4626,7 @@
         }
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -4682,7 +4682,7 @@
         }
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -4736,7 +4736,7 @@
         "Retry deadline info · info"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -4782,7 +4782,7 @@
         "Type a task"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -4834,7 +4834,7 @@
         "Type a task"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -4870,7 +4870,7 @@
         "enter start"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -4905,7 +4905,7 @@
         "Type a task"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -4945,7 +4945,7 @@
         "Type a task"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -5005,7 +5005,7 @@
         "Type a task"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -5047,7 +5047,7 @@
         "Type a task"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -5091,7 +5091,7 @@
         "Type a task"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -5131,7 +5131,7 @@
         }
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -5158,7 +5158,7 @@
         "alt+i info"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -5183,7 +5183,7 @@
         "gpt-6.1-sol \u00b7 low"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -5204,7 +5204,7 @@
         "retry policy notes"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -5226,7 +5226,7 @@
         "\u2193"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -5249,7 +5249,7 @@
         "retry policy notes"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -5272,7 +5272,7 @@
         "Type a task"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -5299,7 +5299,7 @@
       ],
       "expect": "Host stopped",
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -5323,7 +5323,7 @@
         "Type a task"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -5349,7 +5349,7 @@
       ],
       "expect": "Detached. Host work continues.",
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -5406,7 +5406,7 @@
         }
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -5461,7 +5461,7 @@
         }
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -5494,7 +5494,7 @@
         "140x40"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -5522,7 +5522,7 @@
         "Opening…"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -5554,7 +5554,7 @@
         "Opening…"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -5586,7 +5586,7 @@
         "140x40"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -5655,7 +5655,7 @@
         }
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -5688,7 +5688,7 @@
         "The retry draft is ready."
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -5724,7 +5724,7 @@
         "Opening…"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ],
       "cast": [
         {
@@ -5772,7 +5772,7 @@
         "The retry draft is ready."
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -5805,7 +5805,7 @@
         "Opening…"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -5843,7 +5843,7 @@
         "Opening…"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -5882,7 +5882,7 @@
         "Opening…"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -5922,7 +5922,7 @@
         "Opening…"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -5949,7 +5949,7 @@
         "Alternate focus audit"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -5981,7 +5981,7 @@
         "Alternate focus audit"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -6014,7 +6014,7 @@
         "Alternate focus audit"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -6056,7 +6056,7 @@
         "Usage:"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -6096,7 +6096,7 @@
         "Usage:"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -6130,7 +6130,7 @@
       ],
       "absent_regex": [
         "^\\s*/discard\\s+",
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -6164,7 +6164,7 @@
       ],
       "absent_regex": [
         "^\\s*/recover\\s+",
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -6192,7 +6192,7 @@
         "\u203a /new unexpected"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -6213,7 +6213,7 @@
         }
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -6256,7 +6256,7 @@
         }
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -6283,7 +6283,7 @@
         "alt+i info"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -6302,7 +6302,7 @@
         "alt+i info"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -6329,7 +6329,7 @@
         "alt+i info"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ]
     },
     {
@@ -6363,7 +6363,7 @@
         "type to narrow"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ],
       "theme": "night",
       "sizes": [
@@ -6416,7 +6416,7 @@
         "Context +[0-9,]+ of [0-9,]+"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ],
       "theme": "night",
       "sizes": [
@@ -6457,7 +6457,7 @@
         "esc close"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:{divider}.*)?$"
       ],
       "theme": "night",
       "sizes": [

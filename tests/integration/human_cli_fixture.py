@@ -1,3 +1,4 @@
+from terminal_screen import HORIZONTAL_RULE, VERTICAL_DIVIDER
 import errno
 import fcntl
 import json
@@ -138,21 +139,21 @@ def chat_content_row(row):
 
 
 def conversation_text(frame):
-    return "\n".join(chat_content_row(row.partition("│")[2] if "│" in row else row)
+    return "\n".join(chat_content_row(row.partition(VERTICAL_DIVIDER)[2] if VERTICAL_DIVIDER in row else row)
                      for row in frame.split("\n"))
 
 
 def composer_line(screen, y):
     lines = screen.split("\n")
     line = lines[y] if y < len(lines) else ""
-    if not line.startswith((" ›", " >")) and "│" in line:
-        line = line.partition("│")[2]
+    if not line.startswith((" ›", " >")) and VERTICAL_DIVIDER in line:
+        line = line.partition(VERTICAL_DIVIDER)[2]
     return line
 
 
 def composer_bounds(screen):
     rules = [index for index in range(len(screen.split("\n")))
-             if set(composer_line(screen, index)) == {"─"}]
+             if set(composer_line(screen, index)) == {HORIZONTAL_RULE}]
     return tuple(rules[-2:]) if len(rules) >= 2 else None
 
 
@@ -206,7 +207,7 @@ def overview_title(frame):
 
 def overview_frame(master, accept, keys=b"", timeout=15, *, ready=True):
     return keyed_frame(master, keys, lambda screen, x, y: accept(screen) and overview_title(screen)
-                       and not re.search(r"(?m)(?:^|│)\s*[›>](?: |$)", screen), timeout)
+                       and not re.search(rf"(?m)(?:^|{re.escape(VERTICAL_DIVIDER)})\s*[›>](?: |$)", screen), timeout)
 
 
 def open_new_chat(master, timeout=15):
@@ -221,7 +222,7 @@ def panel_frame(master, accept, keys=b"", timeout=15):
 
 def assert_chat_info_layout(screen, *, context=None):
     rows = screen.split("\n")
-    contents = [row.rpartition("│")[2] if "│" in row else row for row in rows]
+    contents = [row.rpartition(VERTICAL_DIVIDER)[2] if VERTICAL_DIVIDER in row else row for row in rows]
     footers = [index for index, row in enumerate(contents) if row.endswith("esc")]
     assert footers == [len(rows) - 1], ("one plain panel footer at the bottom", screen)
     assert " · info" not in screen and "esc close" not in screen, screen
@@ -233,7 +234,7 @@ def assert_chat_info_layout(screen, *, context=None):
     assert prompts and max(prompts) < footers[0], ("info footer follows input", screen)
     effort = next(index for index in range(bounds[0] + 1, bounds[1]) if contents[index].startswith("   Effort"))
     assert bounds[0] < effort < min(prompts), ("panel inside input rules", screen)
-    assert not any(any(char in row for char in "┌┐└┘│") for row in contents[bounds[0] + 1:bounds[1]]), screen
+    assert not any(any(char in row for char in ("┌┐└┘" + VERTICAL_DIVIDER)) for row in contents[bounds[0] + 1:bounds[1]]), screen
     actions = next(index for index in range(bounds[0] + 1, bounds[1]) if "Rename" in contents[index])
     assert not contents[actions - 1].strip(), ("blank row before chat actions", screen)
     assert not any(row.strip().startswith("Context") and "unknown" in row for row in contents), screen
@@ -243,7 +244,7 @@ def assert_chat_info_layout(screen, *, context=None):
 
 
 def chat_info_geometry(screen):
-    content = [row.rpartition("│")[2] if "│" in row else row for row in screen.split("\n")]
+    content = [row.rpartition(VERTICAL_DIVIDER)[2] if VERTICAL_DIVIDER in row else row for row in screen.split("\n")]
     bounds = composer_bounds(screen)
     assert bounds is not None, ("composer rules", screen)
     panel_rows = range(bounds[0] + 1, bounds[1])
@@ -288,7 +289,7 @@ def app_settings_open(master):
 
 
 def model_choice_details(screen):
-    rows = [row.rpartition("│")[2] if "│" in row else row for row in screen.split("\n")]
+    rows = [row.rpartition(VERTICAL_DIVIDER)[2] if VERTICAL_DIVIDER in row else row for row in screen.split("\n")]
     field = next((index for index, row in enumerate(rows) if row.startswith("   Model")), None)
     matches = []
     more = None

@@ -1,3 +1,4 @@
+from terminal_screen import VERTICAL_DIVIDER
 from contextlib import contextmanager
 import fcntl
 import json
@@ -129,12 +130,12 @@ class World:
                                        and "Type a task" in frame and "enter open" not in frame
                                        and screen.capture.draft("", 2),
                                        "the wide launch chat beside the list")
-                assert "│" in launched, launched
+                assert VERTICAL_DIVIDER in launched, launched
                 if not keep_launch:
                     screen.keys(b"\x1b")
             if not keep_launch:
                 screen.wait(lambda frame: "+ New Session" in frame and "Settings" in frame
-                            and "Type a task" not in frame and "│" not in frame,
+                            and "Type a task" not in frame and VERTICAL_DIVIDER not in frame,
                             "the full overview and its pinned rows")
             yield screen
             if process.poll() is None:

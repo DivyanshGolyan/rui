@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from terminal_screen import VERTICAL_DIVIDER
 import contextlib
 import hashlib
 import http.server
@@ -692,7 +693,7 @@ class TerminalScreen:
 
     def launch_overview(self):
         frame = wait_for(self.observe, "wide launch chat beside the overview", timeout=15,
-                         ready=lambda screen: "+ New Session" in screen and "│" in screen
+                         ready=lambda screen: "+ New Session" in screen and VERTICAL_DIVIDER in screen
                          and "Type a task" in screen and self.capture.draft("", 2))
         assert "Settings" in frame, frame
         self.send("\x1b")
@@ -704,9 +705,9 @@ class TerminalScreen:
                                                   ("+ New Session", "Settings"))
                          and "Notifications" not in screen
                          and "Type a task" not in screen
-                         and not re.search(r"(?m)(?:^|│)\s*[›>](?: |$)", screen))
+                         and not re.search(rf"(?m)(?:^|{re.escape(VERTICAL_DIVIDER)})\s*[›>](?: |$)", screen))
         assert "Type a task" not in frame, ("overview has an editor", frame)
-        assert not re.search(r"(?m)(?:^|│)\s*[›>](?: |$)", frame), ("overview has a composer", frame)
+        assert not re.search(rf"(?m)(?:^|{re.escape(VERTICAL_DIVIDER)})\s*[›>](?: |$)", frame), ("overview has a composer", frame)
         return frame
 
     def empty_session(self, case, session):
@@ -728,7 +729,7 @@ class TerminalScreen:
     def empty_chat(self, case, session):
         facts = self.empty_session(case, session)
         frame = wait_for(self.observe, "empty chat model facts and chat-only footer", timeout=15,
-                         ready=lambda screen: shown(f"│ {facts['model']} · ", screen)
+                         ready=lambda screen: shown(f"{VERTICAL_DIVIDER} {facts['model']} · ", screen)
                          and "alt+i info" not in screen
                          and "Upgraded to " not in screen and " · upgraded to " not in screen)
         return frame
@@ -740,9 +741,9 @@ class TerminalScreen:
             if "Upgraded to " in frame or " · upgraded to " in frame:
                 return False
             rows = frame.splitlines()
-            return any(row.split("│", 1)[0].strip() == "Settings"
+            return any(row.split(VERTICAL_DIVIDER, 1)[0].strip() == "Settings"
                        and index + 1 < len(rows)
-                       and pattern.fullmatch(rows[index + 1].split("│", 1)[0])
+                       and pattern.fullmatch(rows[index + 1].split(VERTICAL_DIVIDER, 1)[0])
                        for index, row in enumerate(rows))
 
         return wait_for(self.observe, "quiet version below Settings without upgrade notices", timeout=15, ready=ready)

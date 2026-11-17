@@ -1056,7 +1056,7 @@ while True:
         self.assertGreater(len(default["states"]), 25)
 
     def test_regex_absences_validate_and_roundtrip_before_launch(self):
-        pattern = r"^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        pattern = r"^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:┆.*)?$"
         data = self.scenario()
         data["states"][0]["absent_regex"] = [pattern]
         validated = self.helper["validate_scenario"](data)
@@ -1069,12 +1069,12 @@ while True:
 
     def test_regex_absences_reject_dynamic_rows_in_readiness_and_saved_captures(self):
         state = {"name": "no-empty-rows", "steps": [], "expect": ["Settings"],
-                 "absent_regex": [r"^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"]}
+                 "absent_regex": [r"^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:┆.*)?$"]}
         clean = " + New Session\n   Existing conversation  3h\n   Settings"
         run = types.SimpleNamespace(meta={"sha": "a" * 40})
         for size in ((140, 40), (46, 30)):
             for sid, age in (("9xt4vy", "now"), ("emged6", "7m"), ("000000", "3h"), ("zzzzzz", "12d"),
-                             ("9xt4vy", "now │"), ("emged6", "7m│ Model")):
+                             ("9xt4vy", "now ┆"), ("emged6", "7m┆ Model")):
                 with self.subTest(size=size, sid=sid, age=age), tempfile.TemporaryDirectory() as temp:
                     bad = f"{clean}\n ○ {sid}                  {age}"
 
@@ -1101,11 +1101,11 @@ while True:
                     " ○ 9xt4vy", "text mentions ○ 9xt4vy  2m"):
             with self.subTest(named_or_nonrow=row):
                 self.assertIsNone(self.helper["frame_row_failure"](state, clean + "\n" + row))
-        for row in (" ○ 9xt4vy  now │", " ○ emged6  now│ Model", " ○ 000000  2m │chat text"):
+        for row in (" ○ 9xt4vy  now ┆", " ○ emged6  now┆ Model", " ○ 000000  2m ┆chat text"):
             with self.subTest(raw_sidebar=row):
                 self.assertIsNotNone(self.helper["frame_row_failure"](state, row))
-        for row in (" ○ New Session  now │", " ○ New Session  now │Model",
-                    " ○ Existing 9xt4vy  2m │chat", " ○ 9xt4vy extra  2m │chat"):
+        for row in (" ○ New Session  now ┆", " ○ New Session  now ┆Model",
+                    " ○ Existing 9xt4vy  2m ┆chat", " ○ 9xt4vy extra  2m ┆chat"):
             with self.subTest(named_sidebar=row):
                 self.assertIsNone(self.helper["frame_row_failure"](state, row))
         self.assertIsNone(self.helper["frame_row_failure"]({"name": "unrelated"}, " ○ 9xt4vy  now"))
@@ -1124,7 +1124,7 @@ while True:
             if state.get("first_run"):
                 continue
             with self.subTest(raw_id_excluded_in_state=name):
-                self.assertIsNotNone(self.helper["frame_row_failure"](state, " ○ 9xt4vy  now │ chat"))
+                self.assertIsNotNone(self.helper["frame_row_failure"](state, " ○ 9xt4vy  now ┆ chat"))
         for name in ("chat-empty", "start-model", "start-effort", "start-picked"):
             state = states[name]
             steps = state["steps"]
@@ -1132,7 +1132,7 @@ while True:
             self.assertEqual(steps[typed_ready + 1], {"wait": "○ New Session", "min_columns": 140})
             self.assertEqual(state["sizes"], [(140, 40), (46, 30)])
             self.assertIsNone(self.helper["frame_row_failure"](
-                {"name": name, "absent_regex": state["absent_regex"]}, " ○ New Session  now │chat"))
+                {"name": name, "absent_regex": state["absent_regex"]}, " ○ New Session  now ┆chat"))
         for name in ("empty-chat-left", "empty-chat-model-left", "empty-chat-two-left"):
             state = states[name]
             self.assertTrue(state["first_frame"])
@@ -1763,7 +1763,7 @@ while True:
 
     def test_initial_readiness_requires_complete_guided_account_controls(self):
         modal = (
-            '                                  ────────────────────────────────────────────────────────────────────────\n'
+            '                                  ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n'
             '                                   Sign in to Rui\n'
             '                                     Choose account  Credentials stay out of conversations.\n'
             '                                     ChatGPT         Use your subscription\n'
@@ -1977,7 +1977,7 @@ while True:
     def test_background_assertion_checks_committed_marker_cells_at_both_widths(self):
         marker = "› Type a task"
         for color, ground in (("e6ddc8", "f3eee2"), ("1a2246", "121933")):
-            for width, prefix in ((140, "sidebar │ "), (46, " ")):
+            for width, prefix in ((140, "sidebar ┆ "), (46, " ")):
                 for bad in (None, 0, len(marker) - 1):
                     with self.subTest(color=color, width=width, bad=bad), tempfile.TemporaryDirectory() as temp:
                         cells = tuple(Cell(char, None, False, bg=color if index != bad else ground)
@@ -2131,7 +2131,7 @@ while True:
             good = "\n" * (height - 1) + "gpt-6.1-sol · high\n"
             self.assertIsNone(failure(state, good))
             self.assertIsNotNone(failure(state, good + "\n"))
-            self.assertIsNotNone(failure(state, good + "   Settings  │\n"))
+            self.assertIsNotNone(failure(state, good + "   Settings  ┆\n"))
 
     def test_chat_footer_frames_hide_permanent_info_and_unused_context(self):
         states = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))["states"]
@@ -2790,7 +2790,7 @@ class UpgradeFramesTest(unittest.TestCase):
         reason = "Update failed: Couldn't reach GitHub"
         for before in (False, True):
             marker = "! Couldn't reach GitHub; nothing changed" if before else reason
-            chat = "  ──────────────\n  › Type a task\n  ──────────────\n gpt-6.1-sol · low · ~/code/rui"
+            chat = "  ┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n  › Type a task\n  ┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n gpt-6.1-sol · low · ~/code/rui"
             screens = [marker + "\nReading this Session…\n" + chat,
                        marker + "\nHost paused\n" + chat,
                        marker + "\nSettings\n gpt-6.1-sol · low",
@@ -2816,7 +2816,7 @@ class UpgradeFramesTest(unittest.TestCase):
             self.assertIn(reason, state["expect"])
             self.assertEqual(state["expect_next"], {"Settings": reason})
             for size in state["sizes"]:
-                suffix = "│ actual chat" if size[0] == 140 else ""
+                suffix = "┆ actual chat" if size[0] == 140 else ""
                 rows = f"Settings{suffix}\n{reason}{suffix}\n"
                 screens = [rows + "Reading this Session…", rows + "Host paused", rows]
                 observed = []
@@ -2836,10 +2836,10 @@ class UpgradeFramesTest(unittest.TestCase):
     def test_chat_readiness_requires_settled_composer_and_footer_in_chat_pane(self):
         ready = self.helper["frame_chat_ready"]
         for split in (False, True):
-            for prompt, rule in (("›", "─"), (">", "-")):
+            for prompt, rule in (("›", "┄"), (">", "-")):
                 for model in ("gpt-6.1-sol", "gpt-5.5", "vendor/model-v2"):
                     with self.subTest(split=split, prompt=prompt, model=model):
-                        prefix = " Upgrade witness │" if split else ""
+                        prefix = " Upgrade witness ┆" if split else ""
                         lines = [prefix + " › Upgrade witness", prefix + " " + rule * 30,
                                  prefix + " " + prompt + " retained draft", prefix + " " + rule * 30,
                                  prefix + f" {model} · low"]
@@ -2866,14 +2866,14 @@ class UpgradeFramesTest(unittest.TestCase):
                             self.assertTrue(ready(wrong))
                             self.assertFalse(ready(wrong, "Upgrade witness"))
         self.assertFalse(ready("Upgrade witness\nSettings\ngpt-6.1-sol · low"))
-        self.assertTrue(ready(" Upgrade witness │ details\n ──────\n › draft\n ──────\n model · low", "Upgrade witness"))
-        self.assertTrue(ready(" 界 │ Upgrade witness │ detail\n    │ ──────\n    │ › draft\n    │ ──────\n    │ model · low", "Upgrade witness"))
+        self.assertTrue(ready(" Upgrade witness ┆ details\n ┄┄┄┄┄┄\n › draft\n ┄┄┄┄┄┄\n model · low", "Upgrade witness"))
+        self.assertTrue(ready(" 界 ┆ Upgrade witness ┆ detail\n    ┆ ┄┄┄┄┄┄\n    ┆ › draft\n    ┆ ┄┄┄┄┄┄\n    ┆ model · low", "Upgrade witness"))
 
     def test_upgrade_relaunch_waits_for_the_same_settled_chat_on_both_sides(self):
         drive = self.helper["frame_drive_upgrade"]
         marker = "Upgrade witness"
         def chat(witness=marker, stale=""):
-            return (f" {witness}\n ──────────────\n › retained draft\n ──────────────\n"
+            return (f" {witness}\n ┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n › retained draft\n ┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
                     f" gpt-6.1-sol · low{stale}")
         for before in (False, True):
             version = "0.78.10000"
@@ -2949,14 +2949,14 @@ class UpgradeFramesTest(unittest.TestCase):
         row_failure = self.helper["frame_row_failure"]
         after = {"expect_regex": [pattern.replace("{upgrade_version}", r"0\.78\.10000") for pattern in current["expect_regex"]]}
         before = {"expect_regex": [pattern.replace("{upgrade_version}", r"0\.78\.10000") for pattern in current["comparison"]["before"]["expect_regex"]]}
-        for ending in ("", "│ Type a task 0.99.99999"):
+        for ending in ("", "┆ Type a task 0.99.99999"):
             self.assertIsNone(row_failure(after, " 7 MB     0.78.10000 " + ending))
             self.assertIsNone(row_failure(before, " Settings rui 7 MB 0.78.10000 " + ending))
             self.assertIsNotNone(row_failure(after, " rui 7 MB 0.78.10000 " + ending))
             self.assertIsNotNone(row_failure(after, " 7 MB 0x78x10000 " + ending))
             self.assertIsNotNone(row_failure(before, " Settings 0x78x10000 " + ending))
-        self.assertIsNotNone(row_failure(after, " 7 MB 0.77.10000 │ 0.78.10000"))
-        self.assertIsNotNone(row_failure(before, " Settings 0.77.10000 │ 0.78.10000"))
+        self.assertIsNotNone(row_failure(after, " 7 MB 0.77.10000 ┆ 0.78.10000"))
+        self.assertIsNotNone(row_failure(before, " Settings 0.77.10000 ┆ 0.78.10000"))
 
     def test_held_upgrade_after_readiness_uses_publication_and_control_not_chat_status(self):
         drive = self.helper["frame_drive_upgrade"]

@@ -55,7 +55,7 @@ class TerminalProcessTest(unittest.TestCase):
     def test_composer_oracles_follow_the_caret_pane(self):
         from human_cli_fixture import composer_empty, composer_ready
 
-        for prefix in (" ", "list text│ ", "中       │ "):
+        for prefix in (" ", "list text┆ ", "中       ┆ "):
             for text, caret in (("café", 6), ("x │ y", 7)):
                 with self.subTest(prefix=prefix, text=text):
                     capture = ScreenCapture(columns=80, rows=4)
@@ -75,7 +75,7 @@ class TerminalProcessTest(unittest.TestCase):
                     self.assertFalse(capture.draft("", 2))
 
         from human_cli_fixture import conversation_text
-        self.assertEqual(conversation_text("list│ › line1    01:23\nlist│   line2\n    │ edited 2"),
+        self.assertEqual(conversation_text("list┆ › line1    01:23\nlist┆   line2\n    ┆ edited 2"),
                          "› line1    01:23\n  line2\nedited 2")
 
     def test_draft_oracle_matches_empty_placeholder_without_losing_text_or_caret(self):
@@ -95,7 +95,7 @@ class TerminalProcessTest(unittest.TestCase):
             current.view = SimpleNamespace(cursor=SimpleNamespace(x=len(prefix) + caret, y=1))
             return current
 
-        for prefix in ([" "], ["l", "│", " "], ["中", "", "│", " "]):
+        for prefix in ([" "], ["l", "┆", " "], ["中", "", "┆", " "]):
             for prompt in ("› ", "> "):
                 for text in ("", "kept", "café", "é", "Type a task"):
                     normalized = unicodedata.normalize("NFC", text)
@@ -126,7 +126,7 @@ class TerminalProcessTest(unittest.TestCase):
     def test_empty_composer_accepts_placeholder_in_the_focused_pane(self):
         from human_cli_fixture import composer_empty
 
-        for prefix in (" ", "list text│ ", "中       │ "):
+        for prefix in (" ", "list text┆ ", "中       ┆ "):
             for mark in ("›", ">"):
                 for text in ("", " Type a task", " /copy", " draft", " Type a task extra", " x │ y"):
                     with self.subTest(prefix=prefix, mark=mark, text=text):
@@ -180,7 +180,7 @@ class TerminalProcessTest(unittest.TestCase):
         self.assertEqual(overview.call_args.args[2], b"\x1b[F")
         self.assertEqual(panel.call_args.args[2], b"\r")
         accept = panel.call_args.args[1]
-        for width, sidebar in ((50, ""), (161, " Memory 2 GB".ljust(31) + "│")):
+        for width, sidebar in ((50, ""), (161, " Memory 2 GB".ljust(31) + "┆")):
             with self.subTest(width=width):
                 pane_width = width - len(sidebar)
                 def frame(footer):
@@ -188,7 +188,7 @@ class TerminalProcessTest(unittest.TestCase):
                 self.assertTrue(accept(frame(" Settings     esc")))
                 for footer in (" Settings", " esc", " Settings esc extra", " Model esc", ""):
                     self.assertFalse(accept(frame(footer)))
-        self.assertFalse(accept("body\n Settings esc".ljust(31) + "│ Other esc"))
+        self.assertFalse(accept("body\n Settings esc".ljust(31) + "┆ Other esc"))
 
     def test_overview_retained_notice_requires_explicit_relaxation_and_complete_list(self):
         from human_cli_fixture import overview_frame
@@ -207,7 +207,7 @@ class TerminalProcessTest(unittest.TestCase):
                 self.assertTrue(relaxed(frame, 0, 0))
                 for marker in ("+ New Session", "Settings", notice):
                     self.assertFalse(relaxed(frame.replace(marker, "missing"), 0, 0))
-                for editor in ("Type a task", " › draft", " > draft", "sidebar │ › draft"):
+                for editor in ("Type a task", " › draft", " > draft", "sidebar ┆ › draft"):
                     self.assertFalse(relaxed(frame + "\n" + editor, 3, 3))
 
     def test_screen_theme_queries_keep_defaults_and_report_light_terminal(self):
@@ -572,8 +572,8 @@ class TerminalProcessTest(unittest.TestCase):
                               "\r\n? Needs approval\x1b[?2026l").encode())
                 generation = capture.generation
                 capture.feed(("\x1b[?2026h\x1b[H\x1b[2J  " + title +
-                              "\r\n    $ true\r\n────────────────────────\r\n"
-                              " › " + human.CHOICE + "\r\n────────────────────────").encode())
+                              "\r\n    $ true\r\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\r\n"
+                              " › " + human.CHOICE + "\r\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄").encode())
                 self.assertEqual(capture.generation, generation)
                 self.assertNotIn(human.CHOICE, capture.completed)
                 os.write(slave, b"\x1b[?2026l")
