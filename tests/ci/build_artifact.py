@@ -60,6 +60,8 @@ def compile_command(targets, part="all", *, jobs=None, pr_mode=False):
     mode = ["-Dpr-ci=true"] if pr_mode else []
     if jobs is None and platform.system() == "Linux" and platform.machine() == "x86_64":
         jobs = 8
+    elif jobs is None and platform.system() == "Darwin" and platform.machine() == "arm64":
+        jobs = 4
     if jobs is not None:
         mode.append(f"-j{jobs}")
     return ["zig", "build", "ci-build", *mode, "-Dci-targets=" + ",".join(targets), "-Dci-part=" + part]
