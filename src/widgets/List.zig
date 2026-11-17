@@ -2,6 +2,7 @@ const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 const Hover = @import("Hover.zig");
+const RowInset = @import("RowInset.zig");
 
 pub fn List(comptime Target: type) type {
     return struct {
@@ -12,6 +13,8 @@ pub fn List(comptime Target: type) type {
             end: u16,
             target: Target,
             selected: bool = false,
+            tint_start: ?u16 = null,
+            tint_end: ?u16 = null,
         };
         pub const Row = struct {
             lines: []const Line,
@@ -55,6 +58,7 @@ pub fn List(comptime Target: type) type {
         pub const Range = struct { first: u32 = 0, end: u32 = 0 };
 
         rows: Rows = .none,
+        inset_rows: bool = false,
         selected: ?u32 = null,
         on_press: ?Press = null,
         base_style: vaxis.Style = .{},
@@ -140,14 +144,18 @@ pub fn List(comptime Target: type) type {
                 @memset(surface.buffer, .{ .style = self.base_style });
                 if (surface.size.width == 0) return surface;
                 for (row.lines, 0..) |line, y| {
-                    var label: vxfw.RichText = .{ .text = line, .base_style = self.base_style, .width_basis = .parent, .softwrap = false };
-                    const drawn = try label.widget().draw(ctx.withConstraints(.{}, .{ .width = surface.size.width, .height = 1 }));
-                    if (drawn.size.height != 0) @memcpy(surface.buffer[y * surface.size.width ..][0..surface.size.width], drawn.buffer[0..surface.size.width]);
+                    if (self.owner.inset_rows) {
+                        try RowInset.draw(ctx, surface, @intCast(y), line, self.base_style);
+                    } else {
+                        var label: vxfw.RichText = .{ .text = line, .base_style = self.base_style, .width_basis = .parent, .softwrap = false };
+                        const drawn = try label.widget().draw(ctx.withConstraints(.{}, .{ .width = surface.size.width, .height = 1 }));
+                        if (drawn.size.height != 0) @memcpy(surface.buffer[y * surface.size.width ..][0..surface.size.width], drawn.buffer[0..surface.size.width]);
+                    }
                 }
                 if (self.hovered) |range| if (self.hover_style) |hover| for (0..surface.size.height) |y| {
                     for (range.start..range.end) |x| {
                         const focused = for (row.regions) |region| {
-                            if (region.selected and x >= region.start and x < region.end) break true;
+                            if (region.selected and x >= (region.tint_start orelse region.start) and x < (region.tint_end orelse region.end)) break true;
                         } else false;
                         if (!focused) {
                             const cell = &surface.buffer[y * surface.size.width + x];
@@ -155,8 +163,8 @@ pub fn List(comptime Target: type) type {
                         }
                     }
                 };
-                for (row.regions) |region| if (region.selected and region.start < surface.size.width) {
-                    for (0..surface.size.height) |y| for (region.start..@min(region.end, surface.size.width)) |x| {
+                for (row.regions) |region| if (region.selected and (region.tint_start orelse region.start) < surface.size.width) {
+                    for (0..surface.size.height) |y| for ((region.tint_start orelse region.start)..@min(region.tint_end orelse region.end, surface.size.width)) |x| {
                         const cell = &surface.buffer[y * surface.size.width + x];
                         cell.style = selection(cell.style, self.selection_style);
                     };
@@ -304,7 +312,7 @@ pub fn List(comptime Target: type) type {
                         if (region.start >= size.width) continue;
                         const region_rect: Hover.Rect = .{ .row = rect.row, .col = region.start, .width = @min(region.end, size.width) - region.start, .height = rect.height };
                         try hover_targets.append(ctx.arena, region_rect);
-                        if (self.hover.contains(region_rect)) row.hovered = .{ .start = region.start, .end = @min(region.end, size.width) };
+                        if (self.hover.contains(region_rect)) row.hovered = .{ .start = @min(region.tint_start orelse region.start, size.width), .end = @min(region.tint_end orelse region.end, size.width) };
                     }
                 }
                 const drawn = try row.widget().draw(ctx);

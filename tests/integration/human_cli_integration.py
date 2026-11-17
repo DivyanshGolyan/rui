@@ -1363,8 +1363,8 @@ def renderer_cases():
         master, writer = os.pipe()
         try:
             tty = Terminal(master, None, None)
-            os.write(writer, terminal_frame([" + New Session │", "  edited 2      │ edited 1", "                │ ⠹ Waiting"])
-                + terminal_frame([" + New Session │", "  edited 2      │ edited 2", "                │ ›"]))
+            os.write(writer, terminal_frame(["   + New Session │", "    edited 2      │ edited 1", "                  │ ⠹ Waiting"])
+                + terminal_frame(["   + New Session │", "    edited 2      │ edited 2", "                  │ ›"]))
             observed = tty.wait("edited 2", after=0)
             assert "\nedited 2" in conversation_text(observed), observed
         finally:
@@ -2996,6 +2996,7 @@ def main(selected="all"):
                 endpoint.responses.append(fixture.sse_answer(f"burst-answer-{index}",
                     f"burst-reason-{index}", f"burst-message-{index}", marker)[0])
                 observed = terminal_bulk(master, cluster * count + "\x7f" * count + "Z", marker)
+                print(f"editor burst {index}: {terminal_bulk.received} terminal bytes")
                 assert terminal_bulk.received < 100_000, ("tail deletion repainted the whole draft per key", terminal_bulk.received)
                 body = json.loads(endpoint.requests[-1])
                 actual = next(item["content"][0]["text"] for item in reversed(body["input"])
@@ -3119,6 +3120,9 @@ def main(selected="all"):
             proxy = canonical_fixture.ReplyProxy(host, "/v1/message", after_admission)
             os.write(master, b"observe after Host loss\r")
             terminal_gate(entered, master, observation_held, "accepted Message before activity loss", timeout=8)
+            optimistic = await_screen(master, "observe after Host loss", composer=True)
+            assert "Sending" not in optimistic, optimistic
+            assert conversation_text(optimistic).count("› observe after Host loss") == 1, optimistic
             after = set(json.loads(run(home, "request", "list")))
             assert len(after - before) == 1, (before, after)
             saved_key = (after - before).pop()

@@ -36,6 +36,7 @@ pub const RenderedRow = struct {
     provisional: bool,
     collapsed_targets: [16]View.Collapsed = undefined,
     collapsed_count: usize = 0,
+    message_key: ?[36]u8 = null,
 };
 
 pub const Configure = *const fn (std.process.Init, client.ReadContext, []const u8, []const u8, ChatInfo.Edit) anyerror!bool;
@@ -530,10 +531,20 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
             .assistant => |answer| .{ .source = .activity, .position = item.position, .ordinal = item.ordinal, .row = false, .content = answer.content },
             else => null,
         } };
-        row.provisional = try View.render(requests, job.store, job.session, job.sessionProvider(), item, page.facts.queued, page.facts.work.work.state.holdsQueue(), &capture, job.colour, job.home, .{ .viewport = job.width_method }, if (open) .{ .open = output.? } else .closed) or pending;
+        row.provisional = if (pending and item.value.admission.sender == null and item.value.admission.source_action == null) message: {
+            try View.message(requests, job.store, job.session, item, item.value.admission, .none, &capture, job.colour);
+            break :message true;
+        } else try View.render(requests, job.store, job.session, job.sessionProvider(), item, page.facts.queued, page.facts.work.work.state.holdsQueue(), &capture, job.colour, job.home, .{ .viewport = job.width_method }, if (open) .{ .open = output.? } else .closed) or pending;
         row.tight = View.tight(item.value);
         try capture.finish();
         row.length = capture.length;
+        if (row.length != 0) switch (item.value) {
+            .admission, .received, .user => |message| {
+                const key_bytes = message.key.slice();
+                if (key_bytes.len == 36) row.message_key = key_bytes[0..36].*;
+            },
+            else => {},
+        };
         if (row.length == 0 and !row.provisional) continue;
         job.result.rows[job.result.row_count] = row;
         job.result.row_count += 1;
@@ -681,6 +692,10 @@ const RowCapture = struct {
             self.in_body = true;
         }
         try self.write(bytes);
+    }
+
+    pub fn userMessage(self: *@This(), active: bool) !void {
+        try self.feed(if (active) TerminalText.user_message_on else TerminalText.user_message_off);
     }
 
     pub fn excluding(_: *@This(), _: u64) void {}
@@ -1430,17 +1445,27 @@ test "session_reads the queued row's line fails the read when the Host refuses i
     try std.testing.expectEqual(@as(usize, 1), host.contents);
 }
 
-test "session_reads Messages waiting at an opening show in the queued row, unless one is taken next" {
-    const tail = [_]FakeHost.Tail{ .{ .value = FakeHost.message(1) }, .{ .value = FakeHost.message(2) } };
+test "session_reads local queued Messages keep canonical full bands and exact identities while work holds the queue" {
+    var first = FakeHost.message(1).admission;
+    var second = FakeHost.message(2).admission;
+    try first.key.set("01234567-89ab-4cde-8012-0123456789ab");
+    try second.key.set("01234567-89ab-4cde-8012-0123456789ac");
+    const tail = [_]FakeHost.Tail{ .{ .value = .{ .admission = first } }, .{ .value = .{ .admission = second } } };
     var held: FakeHost = .{ .history = 20, .tail = &tail, .end = 22, .held = true };
     var behind: Job = .{ .session = "k7m2qx", .opening = true, .line_read = .{ .revision = 1, .end = 22 } };
     try held.read(&behind);
-    try std.testing.expectEqualStrings("", held.shown);
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, held.shown, "please wait"));
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, held.shown, "for the build"));
     try std.testing.expectEqual(@as(u64, 2), behind.result.queued.count);
+    try std.testing.expectEqual(@as(usize, 2), behind.result.row_count);
+    for (behind.result.rows[0..behind.result.row_count], [_][36]u8{ first.key.slice()[0..36].*, second.key.slice()[0..36].* }) |row, key| {
+        try std.testing.expect(row.length != 0 and row.provisional);
+        try std.testing.expectEqual(key, row.message_key.?);
+    }
     var idle: FakeHost = .{ .history = 20, .tail = &tail, .end = 22 };
     var opening: Job = .{ .session = "k7m2qx", .opening = true, .line_read = .{ .revision = 1, .end = 22 } };
     try idle.read(&opening);
-    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, idle.shown, "please wait"));
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, idle.shown, "please wait"));
     try std.testing.expectEqual(@as(?Key, .{ .position = 21 }), firstProvisional(&opening.result));
 }
 
@@ -1674,7 +1699,7 @@ test "session_reads visible fills do not refresh line work queue live or scan cu
     var job: Job = .{ .cursor = .{ .position = 80 }, .feed_page = .{ .direction = .backward, .kinds = .visible, .started_from = edge, .from = edge }, .open_status = true, .hint_wanted = true };
     try host.read(&job);
     try std.testing.expectEqual(@as(usize, 1), host.pages);
-    try std.testing.expectEqual(@as(usize, 0), host.contents);
+    try std.testing.expectEqual(@as(usize, 1), host.contents);
     try std.testing.expectEqual(@as(usize, 0), host.others);
     try std.testing.expect(job.result.line == null and job.result.hint == null and !job.result.status);
     try std.testing.expectEqual(@as(u64, 0), job.result.work.revision);
@@ -1682,7 +1707,7 @@ test "session_reads visible fills do not refresh line work queue live or scan cu
     try std.testing.expectEqual(@as(u64, 0), job.result.cursor.position);
     try std.testing.expectEqual(@as(u64, 80), job.cursor.position);
     try std.testing.expectEqual(@as(usize, 1), job.result.row_count);
-    try std.testing.expectEqual(@as(u64, 0), job.result.rows[0].length);
+    try std.testing.expect(job.result.rows[0].length != 0);
     try std.testing.expect(job.result.rows[0].provisional);
     try std.testing.expectEqualDeep(@as(?Key, .{ .position = 1 }), firstProvisional(&job.result));
 }
@@ -1759,14 +1784,14 @@ test "session_reads first provisional survives every continuation page" {
     try std.testing.expectEqual(@as(usize, 39), counted);
 }
 
-test "session_reads a hidden queued Admission replays when the queue becomes idle" {
+test "session_reads a full queued Message replays once when the queue becomes idle" {
     const tail = [_]FakeHost.Tail{.{ .value = FakeHost.message(1) }};
     var host: FakeHost = .{ .history = 0, .tail = &tail, .end = 1, .held = true };
     var job: Job = .{ .opening = true, .line_read = .{ .revision = 1, .end = 1 } };
     try host.read(&job);
     try std.testing.expectEqual(@as(usize, 1), job.result.row_count);
-    try std.testing.expectEqual(@as(u64, 0), job.result.rows[0].length);
-    try std.testing.expectEqual(@as(usize, 0), job.result.new_rows);
+    try std.testing.expect(job.result.rows[0].length != 0);
+    try std.testing.expectEqual(@as(usize, 1), job.result.new_rows);
     const edge = job.result.high;
     const replay = firstProvisional(&job.result);
     job.cursor = job.result.cursor;
@@ -2295,5 +2320,27 @@ test "quote body extraction clears provenance at bounded capture notices and spl
             try std.testing.expect(document.bodyAt(0));
             for (notice..document.length) |at| try std.testing.expect(!document.bodyAt(at));
         }
+    }
+}
+
+test "session_reads native queued personal bands preserve peer and background Action presentation" {
+    var peer: protocol.NamedPeer = .{ .session = .{} };
+    try peer.session.set("9f8e7d");
+    var incoming = FakeHost.message(1).admission;
+    incoming.sender = peer;
+    var background = FakeHost.message(2).admission;
+    background.source_action = 19;
+    const tail = [_]FakeHost.Tail{ .{ .value = .{ .received = incoming } }, .{ .value = .{ .received = background } } };
+    var host: FakeHost = .{ .history = 0, .tail = &tail, .end = 2, .held = true };
+    var job: Job = .{ .session = "k7m2qx", .opening = true, .line_read = .{ .revision = 1, .end = 2 } };
+    try host.read(&job);
+    try std.testing.expect(std.mem.indexOf(u8, host.shown, "Received message") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host.shown, "Background Action 19") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host.shown, TerminalText.user_message_on) == null);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, host.shown, "please wait"));
+    try std.testing.expectEqual(@as(usize, 2), job.result.row_count);
+    for (job.result.rows[0..job.result.row_count]) |row| {
+        try std.testing.expect(row.length != 0);
+        try std.testing.expect(!row.provisional and row.message_key == null);
     }
 }

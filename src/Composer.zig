@@ -21,10 +21,10 @@ ascii: bool = false,
 caret: bool = true,
 
 pub fn setCaps(self: *Self, caps: view.Caps) void {
-    self.style = widget_style.of(caps, .{ .background = .input_surface });
-    self.quiet = widget_style.of(caps, .{ .colour = .quiet, .background = .input_surface });
+    self.style = widget_style.of(caps, .{});
+    self.quiet = widget_style.of(caps, .{ .colour = .quiet });
     self.rule_style = widget_style.of(caps, .{ .colour = .quiet });
-    self.command_style = widget_style.of(caps, .{ .colour = .ink, .background = .input_surface });
+    self.command_style = widget_style.of(caps, .{ .colour = .ink });
     self.method = caps.width;
     self.ascii = !caps.unicode;
 }
@@ -96,7 +96,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         }, .{ .wrap = .none });
     }
     if (self.editor.text().len == 0) _ = window.child(.{ .x_off = prefix, .y_off = rule, .height = 1 }).printSegment(.{ .text = self.placeholder, .style = self.quiet }, .{ .wrap = .none });
-    if (self.caret) surface.cursor = .{ .row = text.cursor.?.row + rule, .col = text.cursor.?.col + prefix };
+    if (self.caret) surface.cursor = .{ .row = text.cursor.?.row + rule, .col = text.cursor.?.col + prefix, .shape = .block_blink };
     return surface;
 }
 
@@ -257,7 +257,7 @@ test "Composer inactive prompt uses quiet style and no caret without dimming dra
     try std.testing.expect(!inactive.readCell(3, 1).style.dim);
 }
 
-test "Composer surface role covers New Session and chat drafts in both themes and widths" {
+test "Composer stays untinted with a blinking block caret in both themes and widths" {
     const draft = "first\nsecond\nthird";
     var bytes: [draft.len]u8 = undefined;
     var editor: Editor = .init(&bytes);
@@ -266,7 +266,7 @@ test "Composer surface role covers New Session and chat drafts in both themes an
     for ([_]?view.Rgb{ null, .{ 255, 255, 255 } }) |background| {
         for ([_]view.Caps.Depth{ .direct, .indexed, .none }) |depth| {
             const caps: view.Caps = .{ .background = background, .depth = depth };
-            const input = widget_style.of(caps, .{ .background = .input_surface });
+            const input = widget_style.of(caps, .{});
             const ground = widget_style.of(caps, .{ .colour = .quiet });
             for ([_]u16{ 140, 46 }) |width| for ([_][]const u8{ "Type a task", "" }) |placeholder| {
                 for ([_]bool{ false, true }) |has_draft| for ([_]bool{ false, true }) |caret| {
@@ -282,6 +282,7 @@ test "Composer surface role covers New Session and chat drafts in both themes an
                         try std.testing.expectEqual(ground.bg, surface.readCell(col, surface.size.height - 1).style.bg);
                     }
                     try std.testing.expectEqual(caret, surface.cursor != null);
+                    if (surface.cursor) |cursor| try std.testing.expectEqual(vaxis.Cell.CursorShape.block_blink, cursor.shape);
                 };
             };
         }
@@ -291,8 +292,8 @@ test "Composer surface role covers New Session and chat drafts in both themes an
 test "Composer colours the list owner's exact word without taking TextArea's layout" {
     for ([_]?view.Rgb{ .{ 255, 255, 255 }, null }) |terminal| for ([_]@TypeOf(@as(view.Caps, .{}).depth){ .direct, .none }) |depth| {
         const caps: view.Caps = .{ .background = terminal, .depth = depth };
-        const ink = widget_style.of(caps, .{ .colour = .ink, .background = .input_surface });
-        const body = widget_style.of(caps, .{ .background = .input_surface });
+        const ink = widget_style.of(caps, .{ .colour = .ink });
+        const body = widget_style.of(caps, .{});
         const Case = struct { typed: []const u8, word: ?commands.Span = null };
         for ([_]Case{
             .{ .typed = "/new", .word = .{ .start = 0, .len = 4 } },

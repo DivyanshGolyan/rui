@@ -3,6 +3,8 @@ const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 const GroupedList = @import("GroupedList.zig");
 const Target = GroupedList.Target;
+const RowInset = @import("widgets/RowInset.zig");
+const widget_style = @import("widget_style.zig");
 
 // Independent input values: every overview target tag, both pin intentions,
 // and update snapshots with absent, available, running and completed status.
@@ -56,7 +58,7 @@ fn draw(list: *GroupedList, arena: std.mem.Allocator, width: u16, height: u16) !
 fn expectColumns(pressed: *Pressed, list: *GroupedList, events: *vxfw.EventContext, primary: Target, alternate: Target, first: Target, second: Target) !void {
     for (0..24) |column| {
         const col: i16 = @intCast(column);
-        const expected = if (column >= 4 and column < 9) first else if (column >= 12 and column < 17) second else primary;
+        const expected = if (column >= 6 and column < 11) first else if (column >= 14 and column < 19) second else primary;
         try pressed.expect(list, events, left(col, 0), expected);
         var right = left(col, 0);
         right.button = .right;
@@ -92,7 +94,17 @@ test "GroupedList press domain preserves every target and region boundary across
         var list: GroupedList = .{ .rows = .of(&source), .selected = if (selected) 0 else null, .on_press = pressed.handler() };
         var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
         defer events.cmds.deinit(events.alloc);
-        _ = try draw(&list, arena.allocator(), 24, 1);
+        const surface = try draw(&list, arena.allocator(), 24, 1);
+        const line = surface.children[0].surface;
+        try std.testing.expectEqualStrings("c", line.readCell(RowInset.left, 0).char.grapheme);
+        // Content starts after the inset. A region's tint includes padding on
+        // both sides, while its click bounds include only the shifted content.
+        for (0..24) |column| {
+            const expected = widget_style.of(list.caps, .{ .background = if (selected or (column >= 12 and column < 21)) .selection else .ground });
+            const actual = line.readCell(@intCast(column), 0).style;
+            try std.testing.expectEqual(expected.bg, actual.bg);
+            try std.testing.expectEqual(expected.reverse, actual.reverse);
+        }
         const next_primary = targets[(index + 4) % targets.len];
         const next_alternate = targets[(index + 5) % targets.len];
         const next_first = targets[(index + 6) % targets.len];
@@ -131,7 +143,7 @@ test "GroupedList press domain leaves gaps empty lines headings and outside cell
     for (0..8) |row| for (0..24) |column| {
         const expected: ?Target = switch (row) {
             0 => targets[0],
-            4 => if (column >= 2 and column < 7) .sessions else if (column >= 10 and column < 18) .archived else null,
+            4 => if (column >= 4 and column < 9) .sessions else if (column >= 12 and column < 20) .archived else null,
             5 => .settings,
             else => null,
         };
@@ -174,7 +186,7 @@ test "GroupedList press domain clears old targets for empty and zero size frames
             else => unreachable,
         }
         _ = try draw(&list, arena.allocator(), if (mode == 1) 0 else 24, if (mode == 2) 0 else 2);
-        for ([_]i16{ 0, 4, 8, 23 }) |column| {
+        for ([_]i16{ 0, 4, 6, 10, 11, 23 }) |column| {
             const mouse = left(column, 0);
             try pressed.expect(&list, &events, mouse, null);
             var right = mouse;
@@ -216,12 +228,12 @@ test "GroupedList press domain maps every target through scrolling past gaps and
         // does not use shown_at, the adapter's target table or scroll indices.
         for (surface.children) |child| {
             if (child.origin.row < 0 or child.origin.row >= 5 or child.surface.size.height == 0) continue;
-            const glyph = child.surface.readCell(0, 0).char.grapheme;
+            const glyph = child.surface.readCell(RowInset.left, 0).char.grapheme;
             const index: ?usize = if (glyph.len == 1 and glyph[0] >= 'A' and glyph[0] < 'A' + targets.len) glyph[0] - 'A' else null;
             if (index == selected) saw_selected = true;
-            for ([_]i16{ 0, 3, 4, 8, 9, 23 }) |col| {
+            for ([_]i16{ 0, 4, 5, 6, 10, 11, 12, 23 }) |col| {
                 const mouse = left(col, @intCast(child.origin.row));
-                const expected: ?Target = if (index) |at| targets[(at + @as(usize, if (col >= 4 and col < 9) 2 else 0)) % targets.len] else null;
+                const expected: ?Target = if (index) |at| targets[(at + @as(usize, if (col >= 6 and col < 11) 2 else 0)) % targets.len] else null;
                 try pressed.expect(&list, &events, mouse, expected);
                 const alternate: ?Target = if (index) |at| targets[(at + 1) % targets.len] else null;
                 var right = mouse;

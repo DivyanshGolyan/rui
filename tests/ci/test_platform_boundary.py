@@ -186,7 +186,7 @@ class PlatformBoundaryTest(unittest.TestCase):
         self.assertIn("src/a.zig: 2 platform sites outside src/os/", violations({"src/a.zig": 2})[0])
 
     def test_mac_specific_paths(self):
-        for path in ("src/os/socket.zig", "tests/integration/os_semantics.py", "src/host_launch.c",
+        for path in ("src/client.zig", "src/os/socket.zig", "tests/integration/os_semantics.py", "src/host_launch.c",
                      "src/build_transport.sh", "tests/integration/session_list_release_probe.c",
                      ".github/workflows/qualify-macos.yml", "install.sh", "build/darwin.zig",
                      "src/os/process.zig", "src/os/descriptor_limit.zig", "src/h2/Connection.zig",
@@ -205,6 +205,15 @@ class PlatformBoundaryTest(unittest.TestCase):
         self.assertFalse(select(["src/turn_policy.zig"], "review", AVAILABLE)["mac_required"])
         self.assertTrue(select(["tests/integration/terminal_leader.py"], "review", AVAILABLE)["mac_required"])
         self.assertFalse(select(["src/os/socket.zig"], "development", AVAILABLE)["mac_required"])
+
+    def test_client_process_observation_keeps_native_mac_upgrade_on_ready_prs(self):
+        from ci_plan import plan
+        from docs_only import ChangeKind
+        selection = select(["src/client.zig"], "review", AVAILABLE)
+        result = plan(selection, event_name="pull_request", draft=False,
+                      promotion=False, change_kind=ChangeKind.NORMAL)
+        self.assertTrue(result.outputs["native"])
+        self.assertIn("upgrade-integration", result.outputs["native_targets"])
 
     def test_linux_gate_requires_the_macos_type_check(self):
         self.assertIn("typecheck-macos", AVAILABLE)
