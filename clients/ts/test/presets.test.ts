@@ -90,7 +90,7 @@ test("a connect preset refuses an explicit null model", { skip }, async () => {
 
 test("the Host resolves omitted preset settings at creation and preserves explicit choices", { skip }, async () => {
 	const root = realpathSync(mkdtempSync(join(tmpdir(), "rui-ts-")));
-	const minimal: AgentSpec = { workspace: root };
+	const minimal = { workspace: root } satisfies AgentSpec;
 	const rui = await Rui.connect({
 		store: { sqlite: { dir: join(root, "store") } },
 		providers: { openai: { endpoint: "https://api.openai.com/v1/responses", key: "sk-ts-presets" } },

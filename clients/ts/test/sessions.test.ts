@@ -280,7 +280,8 @@ test("create parent inherits binding and refuses widening as field-specific requ
 			[{ workspace: tmpdir() }, "parent_workspace_forbidden"],
 			[{ parent: "zzzzzz" }, "unknown_session"],
 		] as const) {
-			await assert.rejects(rui.sessions.create({ ...childSpec, ...overrides }, { idempotencyKey: `parent:${code}` }),
+			// Exercise Host validation for values a JavaScript caller can still send.
+			await assert.rejects(rui.sessions.create({ ...childSpec, ...overrides } as never, { idempotencyKey: `parent:${code}` }),
 				(error: unknown) => error instanceof RuiRequestError && error.code === code);
 		}
 	} finally {

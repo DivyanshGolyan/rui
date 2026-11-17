@@ -17,8 +17,8 @@ const fields = [
 test("creation sends only chosen settings for every omitted and explicit field combination", async () => {
 	for (let mask = 0; mask < 1 << fields.length; mask++) {
 		const chosen = fields.filter((_, index) => (mask & (1 << index)) !== 0);
-		const spec: AgentSpec = Object.fromEntries(chosen.map(([name, value]) => [name, value]));
-		const expected = Object.fromEntries(chosen.map(([name, , value]) => [name, value]));
+		const spec: AgentSpec & { workspace: string } = { workspace: "/caller", ...Object.fromEntries(chosen.map(([name, value]) => [name, value])) };
+		const expected = { workspace: "/caller", ...Object.fromEntries(chosen.map(([name, , value]) => [name, value])) };
 		const before = structuredClone(spec);
 		const idempotencyKey = `chosen:${mask}`;
 		const link: Link = {
@@ -43,7 +43,7 @@ test("creation sends only chosen settings for every omitted and explicit field c
 });
 
 test("creation preserves empty tools and Host default requests without completing omissions", async () => {
-	const spec: AgentSpec = { model: "custom-model", tools: [], loadedTools: [], effort: null, compactAt: null };
+	const spec = { workspace: "/caller", model: "custom-model", tools: [], loadedTools: [], effort: null, compactAt: null } satisfies AgentSpec;
 	const sessions = new Sessions({
 		async exchange(path, build) {
 			assert.equal(path, "/v1/configure");
@@ -67,4 +67,30 @@ test("a named preset forwards only the chosen overrides", async () => {
 		},
 	});
 	await sessions.create(spec, { idempotencyKey: "chosen:preset" });
+});
+
+
+test("presets keep sparse settings until creation resolves a Workspace", () => {
+	const spec: AgentSpec = {};
+	const launch = launchFor({ presets: { review: spec } }, "/runtime");
+	try {
+		assert.deepEqual(JSON.parse(launch.document.subarray(4).toString("utf8")).presets.review, {});
+	} finally {
+		launch.document.fill(0);
+	}
+});
+
+test("child creation forwards the parent without inventing a Workspace or provider", async () => {
+	for (const spec of [{ parent: "p4rent" }, { parent: "p4rent", preset: "review" }] as const) {
+		const sessions = new Sessions({
+			async exchange(path, build) {
+				assert.equal(path, "/v1/configure");
+				const request = JSON.parse(build("/store"));
+				assert.deepEqual(request.configuration, { parent: "p4rent" });
+				assert.equal(request.preset, "preset" in spec ? spec.preset : undefined);
+				return Buffer.from(JSON.stringify({ answer: { status: "accepted", session: "abc123" } }));
+			},
+		});
+		await sessions.create(spec, { idempotencyKey: "chosen:parent" });
+	}
 });

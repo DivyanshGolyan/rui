@@ -17,7 +17,7 @@ export type ActionSelection = Extract<Schemas["ActionBackgroundReply"]["answer"]
 
 /** Session settings. The Host resolves omitted creation settings. */
 export interface AgentSpec {
-	/** The working directory for Bash. Required with `bash`, fixed for the Session's life. */
+	/** The Session Workspace, fixed for its life. Root creation requires it; children inherit it. */
 	workspace?: string;
 	/** `openai` or `codex`. Fixed for the Session's life. */
 	provider?: NonNullable<Schemas["AgentSpec"]["provider"]>;
@@ -44,11 +44,17 @@ export interface AgentSpec {
 /** The same agent spec accepted by creation and connect-time presets. */
 export type SessionSpec = AgentSpec;
 
-/** Chosen creation settings, optionally seeded by a named preset. */
-export type SessionCreate = ((AgentSpec & { preset?: never }) | ({ preset: string } & Partial<AgentSpec>)) & {
-	/** Create an attached child, inheriting provider, workspace and Bash environment. */
-	parent?: string;
-};
+/** Root creation carries a Workspace, supplied directly or by a preset. Children inherit it. */
+export type SessionCreate =
+	| (AgentSpec & { workspace: string; parent?: never; preset?: never })
+	| (AgentSpec & { preset: string; parent?: never })
+	| (Omit<AgentSpec, "workspace" | "provider"> & {
+		/** Create an attached child, inheriting provider, Workspace and Bash environment. */
+		parent: string;
+		workspace?: never;
+		provider?: never;
+		preset?: string;
+	});
 
 /** The settings `update` may change: everything but the ones fixed at creation. */
 export type SessionUpdate = Partial<Pick<SessionSpec, "model" | "instructions" | "outputSchema" | "tools" | "permissionMode" | "effort" | "compactAt" | "label" | "loadedTools" | "outputReservation">>;

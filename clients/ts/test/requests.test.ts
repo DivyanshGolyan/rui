@@ -136,7 +136,7 @@ test("interrupt selects its exact target from status and ignores non-model work"
 
 
 test("creation sends explicit settings without Host client defaults", async () => {
-	const spec: SessionSpec = { model: "custom-model", effort: null, compactAt: 1234, tools: [] as readonly string[], permissionMode: "ask" };
+	const spec = { workspace: "/caller", model: "custom-model", effort: null, compactAt: 1234, tools: [] as readonly string[], permissionMode: "ask" } satisfies SessionSpec;
 	const link: Link = {
 		async exchange(_path, build) {
 			const request = JSON.parse(build("store"));
@@ -147,7 +147,7 @@ test("creation sends explicit settings without Host client defaults", async () =
 			assert.deepEqual(request.configuration.tools, []);
 			assert.deepEqual(request.configuration.permissionMode, "ask");
 			assert.deepEqual(request.configuration.provider, undefined);
-			assert.deepEqual(request.configuration.workspace, undefined);
+			assert.equal(request.configuration.workspace, "/caller");
 			return Buffer.from(JSON.stringify({ answer: { status: "accepted", session: "abc123" } }));
 		},
 	};
@@ -221,10 +221,21 @@ test("creation can name a preset without inventing missing fields", async () => 
 
 function presetTypeContract(sessions: Sessions): void {
 	void sessions.create({ preset: "review" }, { idempotencyKey: "preset" });
+	void sessions.create({ preset: "review", workspace: "/caller" }, { idempotencyKey: "preset-workspace" });
+	void sessions.create({ workspace: "/caller" }, { idempotencyKey: "empty-settings" });
+	void sessions.create({ workspace: "/caller", instructions: "Do this" }, { idempotencyKey: "partial" });
+	void sessions.create({ parent: "p4rent" }, { idempotencyKey: "child" });
+	void sessions.create({ parent: "p4rent", preset: "review" }, { idempotencyKey: "child-preset" });
+	// @ts-expect-error root creation always carries the caller's Workspace
 	void sessions.create({}, { idempotencyKey: "empty" });
-	void sessions.create({ instructions: "Do this" }, { idempotencyKey: "partial" });
+	// @ts-expect-error disabling Bash does not make the root Workspace optional
+	void sessions.create({ tools: [] }, { idempotencyKey: "no-tools" });
+	// @ts-expect-error a child inherits its Workspace
+	void sessions.create({ parent: "p4rent", workspace: "/caller" }, { idempotencyKey: "child-workspace" });
+	// @ts-expect-error a child inherits its provider
+	void sessions.create({ parent: "p4rent", provider: "openai" }, { idempotencyKey: "child-provider" });
 	// @ts-expect-error an explicit null model is never valid
-	void sessions.create({ model: null }, { idempotencyKey: "null-model" });
+	void sessions.create({ workspace: "/caller", model: null }, { idempotencyKey: "null-model" });
 	// @ts-expect-error a preset name is never null
 	void sessions.create({ preset: null }, { idempotencyKey: "null" });
 	// @ts-expect-error presets only seed creation
@@ -239,7 +250,7 @@ test("unknown tool refusals preserve MCP advisory detail through request errors"
 		const detail = code === "mcp_server_unavailable" ? message : "spec.tools: lookup is not a known tool";
 		const link: Link = { exchange: async () => Buffer.from(JSON.stringify({ answer: { status: "rejected", code, message: detail } })) };
 		const session = new Session(link, "abc123");
-		const spec: SessionSpec = { model: "model-a", effort: null, compactAt: 1000, tools: ["lookup"], permissionMode: "ask" };
+		const spec = { workspace: "/caller", model: "model-a", effort: null, compactAt: 1000, tools: ["lookup"], permissionMode: "ask" } satisfies SessionSpec;
 		for (const request of [
 			() => new Sessions(link).create(spec, { idempotencyKey: "create" }),
 			() => session.update({ tools: ["lookup"] }),
