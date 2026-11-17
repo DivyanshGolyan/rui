@@ -78,24 +78,52 @@ test("connect presets seed creation, overrides win and edited presets replay by 
 	}
 });
 
-test("an invalid connect preset is a RuiStartError naming the preset and field", { skip }, async () => {
+test("a connect preset still requires a model", { skip }, async () => {
 	const root = realpathSync(mkdtempSync(join(tmpdir(), "rui-ts-")));
 	await assert.rejects(Rui.connect({
 		store: { sqlite: { dir: join(root, "store") } },
 		providers: { openai: { endpoint: "https://api.openai.com/v1/responses", key: "sk-ts-presets" } },
-		// @ts-expect-error Deliberately bypass the complete spec type to exercise Host refusal.
-		presets: { review: { model: "m", tools: [], compactAt: 1000, permissionMode: "ask" } },
-	}, { binary: binary ?? "rui" }), (error: unknown) => error instanceof RuiStartError && error.code === "settings_invalid" && /review.*effort/.test(error.message));
+		// @ts-expect-error Deliberately omit the required model to exercise Host refusal.
+		presets: { review: { tools: [] } },
+	}, { binary: binary ?? "rui" }), (error: unknown) => error instanceof RuiStartError && error.code === "settings_invalid" && /review.*model/.test(error.message));
 });
 
-test("a connect preset without tools is refused by the Host", { skip }, async () => {
+test("the Host resolves omitted preset settings at creation and preserves explicit choices", { skip }, async () => {
 	const root = realpathSync(mkdtempSync(join(tmpdir(), "rui-ts-")));
-	await assert.rejects(Rui.connect({
+	const minimal: AgentSpec = { model: "gpt-6.1-sol", workspace: root };
+	const rui = await Rui.connect({
 		store: { sqlite: { dir: join(root, "store") } },
 		providers: { openai: { endpoint: "https://api.openai.com/v1/responses", key: "sk-ts-presets" } },
-		// @ts-expect-error Deliberately omit tools to exercise Host refusal.
-		presets: { review: { model: "m", effort: "low", compactAt: 1000, permissionMode: "ask" } },
-	}, { binary: binary ?? "rui" }), (error: unknown) => error instanceof RuiStartError && error.code === "settings_invalid" && /review.*tools/.test(error.message));
+		execution: { paused: true },
+		presets: {
+			review: minimal,
+			restricted: { ...minimal, tools: [], compactAt: 1000, permissionMode: "ask" },
+		},
+	}, { binary: binary ?? "rui" });
+	try {
+		const direct = await rui.sessions.create(minimal, { idempotencyKey: "preset:direct" });
+		const fromPreset = await rui.sessions.create({ preset: "review" }, { idempotencyKey: "preset:sparse" });
+		const saved = await inspect(rui, fromPreset.id);
+		const directSettings = await inspect(rui, direct.id);
+		for (const field of ["model", "provider", "workspace", "tools", "loaded_tools", "permission_mode", "reasoning_effort", "compaction_trigger_override"]) {
+			assert.deepEqual(saved[field], directSettings[field], field);
+		}
+		assert.equal(saved.reasoning_effort, "low");
+		assert.equal(saved.permission_mode, "bypass");
+		assert.equal(saved.compaction_trigger_override, "945000");
+		assert.deepEqual(saved.tools, ["bash", "find_tools", "message_agent", "read_action", "read_transcript", "skill", "start_agent", "stop_action", "web_search"]);
+		assert.deepEqual(saved.loaded_tools, ["bash", "find_tools", "skill", "web_search"]);
+		const restricted = await rui.sessions.create({ preset: "restricted" }, { idempotencyKey: "preset:restricted" });
+		const explicit = await inspect(rui, restricted.id);
+		assert.deepEqual(explicit.tools, []);
+		assert.deepEqual(explicit.loaded_tools, []);
+		assert.equal(explicit.permission_mode, "ask");
+		assert.equal(explicit.compaction_trigger_override, "1000");
+		assert.equal(explicit.reasoning_effort, "low");
+		assert.equal((await rui.sessions.create({ preset: "review" }, { idempotencyKey: "preset:sparse" })).id, fromPreset.id);
+	} finally {
+		await rui.close();
+	}
 });
 
 for (const outputSchema of ["[]", "false", "not JSON"]) {

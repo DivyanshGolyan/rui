@@ -175,12 +175,14 @@ test("model updates serialize without changing omitted settings", async () => {
 
 function sessionTypeContract(spec: SessionSpec): void {
 	const { effort: _effort, ...withoutEffort } = spec;
-	// @ts-expect-error creation must specify reasoning, even when explicitly null
 	const missingEffort: SessionSpec = withoutEffort;
+	const minimal: SessionSpec = { model: "gpt-6.1-sol" };
+	// @ts-expect-error creation still needs a model
+	const missingModel: SessionSpec = {};
 	// @ts-expect-error compaction is never nullable
 	const nullCompaction: SessionUpdate = { compactAt: null };
 	const sparse: SessionUpdate = {};
-	void [missingEffort, nullCompaction, sparse];
+	void [missingEffort, minimal, missingModel, nullCompaction, sparse];
 }
 void sessionTypeContract;
 

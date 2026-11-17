@@ -15,7 +15,7 @@ type Schemas = components["schemas"];
 export type ActionStatus = Schemas["ReadActionReply"];
 export type ActionSelection = Extract<Schemas["ActionBackgroundReply"]["answer"], { status: "accepted" }>["action_selection"];
 
-/** The Session settings the Host takes today. */
+/** Session settings. The Host resolves omitted creation settings. */
 export interface AgentSpec {
 	/** The working directory for Bash. Required with `bash`, fixed for the Session's life. */
 	workspace?: string;
@@ -27,16 +27,16 @@ export interface AgentSpec {
 	/** JSON output schema object; `null` clears it. */
 	outputSchema?: Record<string, unknown> | null;
 	/** Configured allowed tool names, such as `bash` and `web_search`. */
-	tools: readonly string[];
+	tools?: readonly string[];
 	/** Loaded tool intent within `tools`; each Operation freezes its effective model offer. */
 	loadedTools?: readonly string[];
 	/** Tokens reserved for model output; null clears the override. */
 	outputReservation?: number | null;
-	permissionMode: "ask" | "bypass";
+	permissionMode?: "ask" | "bypass";
 	/** Reasoning effort. `null` sends none, so the provider uses its own; only for a model Rui does not list (D111). */
-	effort: Schemas["AgentSpec"]["effort"];
+	effort?: Schemas["AgentSpec"]["effort"];
 	/** Compact the conversation at this many tokens. */
-	compactAt: number;
+	compactAt?: number;
 	/** A name shown in lists. `null` clears it. */
 	label?: string | null;
 }
@@ -44,7 +44,7 @@ export interface AgentSpec {
 /** The same agent spec accepted by creation and connect-time presets. */
 export type SessionSpec = AgentSpec;
 
-/** Creation needs a complete spec, or a named preset with explicit overrides. */
+/** Creation needs a model, or a named preset with explicit overrides. */
 export type SessionCreate = ((AgentSpec & { preset?: never }) | ({ preset: string } & Partial<AgentSpec>)) & {
 	/** Create an attached child, inheriting provider, workspace and Bash environment. */
 	parent?: string;
