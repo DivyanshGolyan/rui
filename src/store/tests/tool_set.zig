@@ -179,6 +179,94 @@ fn configureMembership(storage: *Store, tools: []const []const u8, loaded: ?[]co
     return reply.accepted.session;
 }
 
+fn expectReportedToolNames(value: std.json.Value, expected: []const []const u8) !void {
+    try std.testing.expectEqual(expected.len, value.array.items.len);
+    for (expected, value.array.items) |name, actual| try std.testing.expectEqualStrings(name, actual.string);
+}
+
+fn expectFrozenToolNames(storage: *Store, binding: store_core.AttemptBinding, expected: []const []const u8) !void {
+    var view: TestingPage = undefined;
+    view.open(storage, binding);
+    defer view.close();
+    var settings: historical_domain.HistoricalSettings = undefined;
+    try view.settings(&settings);
+    try std.testing.expectEqual(@as(u64, expected.len), settings.tool_count);
+    var tool: historical_domain.HistoricalTool = .{};
+    for (expected) |name| {
+        try std.testing.expect(try view.nextTool(&tool));
+        try std.testing.expectEqualStrings(name, tool.name.slice());
+    }
+    try std.testing.expect(!try view.nextTool(&tool));
+}
+
+test "tool inspection distinguishes allowed loaded and frozen operation offers through edits" {
+    try store_testing.forEachEngine(struct {
+        fn run(engine: *store_testing.Case) !void {
+            var digests: [membership_records.len][32]u8 = undefined;
+            const host_tool_set = membershipToolSet(&digests);
+            const allowed: []const []const u8 = &.{ "bash", "fetch_page", "find_tools" };
+            const loaded: []const []const u8 = &.{ "fetch_page", "find_tools" };
+            const cases = [_]struct {
+                allowed: []const []const u8,
+                loaded: ?[]const []const u8,
+                effective: []const []const u8,
+                withdraw_mcp: bool = false,
+            }{
+                .{ .allowed = allowed, .loaded = loaded, .effective = loaded },
+                .{ .allowed = allowed, .loaded = null, .effective = allowed },
+                .{ .allowed = &.{}, .loaded = &.{}, .effective = &.{} },
+                .{ .allowed = &.{"bash"}, .loaded = null, .effective = &.{"bash"} },
+                .{ .allowed = allowed, .loaded = loaded, .effective = &.{"find_tools"}, .withdraw_mcp = true },
+            };
+            for (cases) |scenario| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStoreWith(engine, &storage, &tmp, std.testing.io, .{ .host_tool_set = &host_tool_set });
+                defer storage.close() catch unreachable;
+                const session = try configureMembership(&storage, scenario.allowed, scenario.loaded);
+                if (scenario.withdraw_mcp) try storage.saveHostToolSet(&tool_defs.built_in_tool_set);
+                try submitTestMessage(&storage, &tmp, "inspection-message", "inspection-message", session.slice(), "Inspect tool intent");
+                const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                try expectFrozenToolNames(&storage, binding, scenario.effective);
+
+                var update: wire_request.ConfigureCommand = .{};
+                update.session = session;
+                try update.key.set("inspection-edit");
+                const next_allowed: []const []const u8 = &.{ "find_tools", "web_search" };
+                const next_loaded: []const []const u8 = &.{"find_tools"};
+                update.configuration.tools = try .of(next_allowed);
+                update.configuration.loaded_tools = try .of(next_loaded);
+                try std.testing.expect(try storage.configure(&update, .{}) == .accepted);
+                for ([_]protocol.ReportProfile{ .current, .full }) |profile| {
+                    const bytes = try shared_fixtures.testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, profile);
+                    defer std.testing.allocator.free(bytes);
+                    const report = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
+                    defer report.deinit();
+                    const settings = report.value.object.get("session").?.object;
+                    try expectReportedToolNames(settings.get("tools").?, next_allowed);
+                    try expectReportedToolNames(settings.get("loaded_tools").?, next_loaded);
+                    if (profile == .full) {
+                        const full = report.value.object.get("full").?.object;
+                        const revisions = full.get("session_revisions").?.array.items;
+                        try std.testing.expectEqual(@as(usize, 2), revisions.len);
+                        try expectReportedToolNames(revisions[0].object.get("tools").?, scenario.allowed);
+                        try expectReportedToolNames(revisions[0].object.get("loaded_tools").?, scenario.loaded orelse scenario.allowed);
+                        try expectReportedToolNames(revisions[1].object.get("tools").?, next_allowed);
+                        try expectReportedToolNames(revisions[1].object.get("loaded_tools").?, next_loaded);
+                        const operations = full.get("model_operations").?.array.items;
+                        try std.testing.expectEqual(@as(usize, 1), operations.len);
+                        try std.testing.expectEqualStrings("1", operations[0].object.get("settings_revision").?.string);
+                        const offered = operations[0].object.get("offered_tools") orelse return error.MissingFrozenOperationOffer;
+                        try expectReportedToolNames(offered, scenario.effective);
+                    }
+                }
+                try expectFrozenToolNames(&storage, binding, scenario.effective);
+            }
+        }
+    }.run);
+}
+
 fn membershipCall(name: []const u8) TestingCall {
     const bash = std.mem.eql(u8, name, "bash");
     return .{

@@ -1905,8 +1905,8 @@ const fake_operations: Operations = .{
                 .provider = if (settings.provider.present) Seen.bounded(settings.provider.value) else null,
                 .model = if (settings.model.present) Seen.bounded(settings.model.value) else null,
                 .permission_mode = Seen.bounded(settings.permission_mode.value),
-                .tools = if (settings.tools) |tools| Seen.bounded(tools) else null,
-                .loaded_tools = if (settings.loaded_tools) |loaded| Seen.bounded(loaded) else null,
+                .tools = if (settings.tools) |tools| Seen.bounded(tools.cli) else null,
+                .loaded_tools = if (settings.loaded_tools) |loaded| Seen.bounded(loaded.cli) else null,
                 .label = if (settings.label.value) |label| Seen.bounded(label) else null,
                 .reasoning_effort = if (settings.reasoning_effort.present) Seen.bounded(settings.reasoning_effort.value orelse "") else null,
             };

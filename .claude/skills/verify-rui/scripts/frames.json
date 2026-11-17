@@ -3841,7 +3841,7 @@
       "expect": [
         "Effort",
         "Permissions",
-        "Tools",
+        "Allowed tools",
         "Folder",
         "Model",
         "Copy last answer",

@@ -152,7 +152,7 @@ pub fn Reply(comptime Capture: type) type {
                 .message => |*message| try writeMessage(reply.capture, message, text),
                 .conversation => |*entry| try writeConversation(reply.capture, entry),
                 .turn => |*turn| try writeTurn(reply.capture, turn),
-                .operation => |*operation| try writeOperation(reply.capture, operation, text),
+                .operation => |*operation| try reply.writeOperation(operation, text),
                 .call => |*call| try writeCall(reply.capture, call, text),
                 .action => |*action| try writeAction(reply.capture, action, text),
                 .decision => |*decision| try appendShape(reply.capture, FullJson.Decision.json_shape, .{ decision.command_key, decision.action, decision.decision, status(decision.accepted), decision.code }),
@@ -183,6 +183,19 @@ pub fn Reply(comptime Capture: type) type {
             try reply.capture.append(shape.loaded_tools);
             try reply.appendTools(revision.loaded_tools);
             try appendShape(reply.capture, shape.permission_mode, .{revision.permission_mode});
+        }
+
+        fn writeOperation(reply: *@This(), operation: *const session_report.Operation, text: anytype) !void {
+            const shape = FullJson.Operation;
+            try appendShape(reply.capture, shape.head, .{ operation.operation, operation.turn });
+            if (operation.resolution) |resolution| {
+                try appendShape(reply.capture, FullJson.Resolution.head, .{resolution.code});
+                try writeOptionalText(reply.capture, resolution.content, text);
+                try reply.capture.append(FullJson.Resolution.tail);
+            } else try reply.capture.append("null");
+            try appendShape(reply.capture, shape.tail, .{ operation.interrupted_by, operation.settings_revision, operation.request_id, operation.reasoning_effort });
+            try reply.appendTools(operation.offered_tools);
+            try reply.capture.append("}");
         }
 
         pub fn tail(reply: *@This()) !void {
@@ -291,17 +304,6 @@ fn writeTurn(capture: anytype, turn: *const session_report.Turn) !void {
         try appendShape(capture, FullJson.Outcome.json_shape, .{ outcome.code, if (outcome.content) |content| reference(content) else null });
     } else try capture.append("null");
     try capture.append("}");
-}
-
-fn writeOperation(capture: anytype, operation: *const session_report.Operation, text: anytype) !void {
-    const shape = FullJson.Operation;
-    try appendShape(capture, shape.head, .{ operation.operation, operation.turn });
-    if (operation.resolution) |resolution| {
-        try appendShape(capture, FullJson.Resolution.head, .{resolution.code});
-        try writeOptionalText(capture, resolution.content, text);
-        try capture.append(FullJson.Resolution.tail);
-    } else try capture.append("null");
-    try appendShape(capture, shape.tail, .{ operation.interrupted_by, operation.settings_revision, operation.request_id, operation.reasoning_effort });
 }
 
 fn writeCall(capture: anytype, call: *const session_report.Call, text: anytype) !void {
@@ -592,8 +594,8 @@ pub const FullJson = struct {
     pub const Operation = struct {
         pub const openapi_name = "domainreport_full_shapeFullOperation";
         const head = .{ "{\"operation\":\"", H.decimal, "\",\"turn\":\"", H.decimal, "\",\"resolution\":" };
-        const tail = .{ ",\"interrupted_by\":", H{ .optional_string = idempotency_key.max_bytes }, ",\"settings_revision\":\"", H.decimal, "\",\"request_id\":", H{ .optional_string = 256 }, ",\"reasoning_effort\":", H{ .optional_tag = model_capability.ReasoningEffort }, "}" };
-        pub const json_shape = head ++ .{H{ .optional_json = Resolution }} ++ tail;
+        const tail = .{ ",\"interrupted_by\":", H{ .optional_string = idempotency_key.max_bytes }, ",\"settings_revision\":\"", H.decimal, "\",\"request_id\":", H{ .optional_string = 256 }, ",\"reasoning_effort\":", H{ .optional_tag = model_capability.ReasoningEffort }, ",\"offered_tools\":" };
+        pub const json_shape = head ++ .{H{ .optional_json = Resolution }} ++ tail ++ .{ Tools, "}" };
     };
     pub const Call = struct {
         pub const openapi_name = "domainreport_full_shapeFullCall";

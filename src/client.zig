@@ -2311,30 +2311,37 @@ const Capture = struct {
         return err;
     }
 
-    fn writeTools(self: *Capture, value: []const u8) !void {
+    fn writeTools(self: *Capture, value: @import("configure_input.zig").ToolInput) !void {
+        var chosen: [protocol.max_tools][]const u8 = undefined;
+        var count: usize = 0;
+        switch (value) {
+            .cli => |text| if (!std.mem.eql(u8, text, "none")) {
+                var names = std.mem.splitScalar(u8, text, ',');
+                while (names.next()) |name| {
+                    if (count == chosen.len) return error.TooManyTools;
+                    chosen[count] = name;
+                    count += 1;
+                }
+            },
+            .names => |names| {
+                if (names.len > chosen.len) return error.TooManyTools;
+                @memcpy(chosen[0..names.len], names);
+                count = names.len;
+            },
+        }
+        for (chosen[0..count]) |name| if (!protocol.validToolName(name)) return error.InvalidToolName;
+        std.mem.sortUnstable([]const u8, chosen[0..count], {}, struct {
+            fn lessThan(_: void, left: []const u8, right: []const u8) bool {
+                return std.mem.order(u8, left, right) == .lt;
+            }
+        }.lessThan);
         try self.write("[");
-        if (!std.mem.eql(u8, value, "none")) {
-            var chosen: [protocol.max_tools][]const u8 = undefined;
-            var count: usize = 0;
-            var names = std.mem.splitScalar(u8, value, ',');
-            while (names.next()) |name| {
-                if (!protocol.validToolName(name)) return error.InvalidToolName;
-                if (count == chosen.len) return error.TooManyTools;
-                chosen[count] = name;
-                count += 1;
+        for (chosen[0..count], 0..) |name, index| {
+            if (index != 0) {
+                if (std.mem.eql(u8, chosen[index - 1], name)) return error.DuplicateToolName;
+                try self.write(",");
             }
-            std.mem.sortUnstable([]const u8, chosen[0..count], {}, struct {
-                fn lessThan(_: void, left: []const u8, right: []const u8) bool {
-                    return std.mem.order(u8, left, right) == .lt;
-                }
-            }.lessThan);
-            for (chosen[0..count], 0..) |name, index| {
-                if (index != 0) {
-                    if (std.mem.eql(u8, chosen[index - 1], name)) return error.DuplicateToolName;
-                    try self.write(",");
-                }
-                try self.writeJsonString(name);
-            }
+            try self.writeJsonString(name);
         }
         try self.write("]");
     }
@@ -3407,7 +3414,7 @@ test "capture creating Messages writes configuration and optional model admissio
                 .store = root,
                 .session = .create,
                 .model = .{ .present = true, .value = "custom" },
-                .tools = "none",
+                .tools = .{ .cli = "none" },
                 .permission_mode = .{ .present = true, .value = "ask" },
                 .compaction_trigger = .{ .present = true, .value = "1000" },
                 .reasoning_effort = .{ .present = true, .value = "low" },
@@ -5225,8 +5232,8 @@ test "capture loaded tools uses the tools comma-list grammar" {
         var captured = try captureConfigure(io, .{
             .store = root,
             .session = .create,
-            .tools = "bash,web_search",
-            .loaded_tools = names,
+            .tools = .{ .cli = "bash,web_search" },
+            .loaded_tools = .{ .cli = names },
         }, .{ .generated = root }).get();
         defer captured.close(io);
         var bytes: [2048]u8 = undefined;
@@ -5397,8 +5404,8 @@ test "Session settings client writes every setting and the Host parser preserves
         .provider = .{ .present = true, .value = "openai" },
         .model = .{ .present = true, .value = "gpt-5" },
         .instructions = .{ .state = .value, .path = try std.fmt.bufPrint(&instructions_path, "{s}/instructions.txt", .{root}) },
-        .tools = "bash,find_tools",
-        .loaded_tools = "bash",
+        .tools = .{ .cli = "bash,find_tools" },
+        .loaded_tools = .{ .cli = "bash" },
         .permission_mode = .{ .present = true, .value = "ask" },
         .output_schema = .{ .state = .value, .path = try std.fmt.bufPrint(&schema_path, "{s}/schema.json", .{root}) },
         .compaction_trigger = .{ .present = true, .value = "1000" },
@@ -5928,4 +5935,46 @@ test "read-only capture routing does not eagerly validate a replay body" {
     const observed = try inspectCapturedRequest(io, root, key.slice());
     try std.testing.expectEqualStrings(root, observed.paths.selector());
     try std.testing.expectEqualStrings(key.slice(), observed.identity.key.slice());
+}
+
+test "capture semantic tool arrays distinguish singleton none from the CLI sentinel" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(io, .fromMode(0o700));
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    const ToolInput = @import("configure_input.zig").ToolInput;
+    const cases = [_]struct { input: ToolInput, want: []const []const u8 }{
+        .{ .input = .{ .cli = "none" }, .want = &.{} },
+        .{ .input = .{ .names = &.{} }, .want = &.{} },
+        .{ .input = .{ .names = &.{"none"} }, .want = &.{"none"} },
+        .{ .input = .{ .names = &.{ "none", "lookup", "bash" } }, .want = &.{ "bash", "lookup", "none" } },
+        .{ .input = .{ .cli = "none,bash" }, .want = &.{ "bash", "none" } },
+    };
+    for (cases) |case| {
+        var captured = try captureConfigure(io, .{
+            .store = root,
+            .session = .{ .named = "k7m2qx" },
+            .tools = case.input,
+            .loaded_tools = case.input,
+        }, .{ .generated = root }).get();
+        defer captured.close(io);
+        var bytes: [4096]u8 = undefined;
+        const count = try captured.file.readPositionalAll(io, &bytes, 0);
+        const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes[0..count], .{});
+        defer parsed.deinit();
+        const spec = parsed.value.object.get("configuration").?.object;
+        for ([_][]const u8{ "tools", "loadedTools" }) |field| {
+            const names = spec.get(field).?.array.items;
+            try std.testing.expectEqual(case.want.len, names.len);
+            for (case.want, names) |expected, actual| try std.testing.expectEqualStrings(expected, actual.string);
+        }
+    }
+    for ([_]ToolInput{ .{ .cli = "bash,bash" }, .{ .names = &.{ "bash", "bash" } } }) |input| {
+        try std.testing.expectError(error.DuplicateToolName, captureConfigure(io, .{ .store = root, .session = .create, .tools = input }, .{ .generated = root }).get());
+    }
+    for ([_]ToolInput{ .{ .cli = "" }, .{ .names = &.{""} }, .{ .names = &.{"invalid,name"} } }) |input| {
+        try std.testing.expectError(error.InvalidToolName, captureConfigure(io, .{ .store = root, .session = .create, .loaded_tools = input }, .{ .generated = root }).get());
+    }
 }

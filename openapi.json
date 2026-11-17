@@ -14890,6 +14890,17 @@
               "max",
               null
             ]
+          },
+          "offered_tools": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{1,64}$"
+            },
+            "maxItems": 128,
+            "uniqueItems": true,
+            "x-rui-max-bytes": 4096,
+            "description": "None repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers."
           }
         },
         "required": [
@@ -14899,7 +14910,8 @@
           "interrupted_by",
           "settings_revision",
           "request_id",
-          "reasoning_effort"
+          "reasoning_effort",
+          "offered_tools"
         ],
         "additionalProperties": false
       },

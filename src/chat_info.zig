@@ -24,7 +24,7 @@ pub const SaveState = enum { idle, pending, saved, failed };
 pub const Edit = union(enum) {
     effort: ?catalog.ReasoningEffort,
     permission: @FieldType(status.Session, "permission"),
-    tools: tools.Selection,
+    tools: @import("configuration_admission.zig").ToolEdit,
     model: []const u8,
     label: []const u8,
 };
@@ -179,7 +179,7 @@ fn bind(self: *Self) void {
     self.fields = .{
         .{ .label = "Effort", .value = if (!self.ready) "unavailable" else if (self.session.effort_override) if (self.session.effort) |effort| @tagName(effort) else "model default" else "model default", .tail = self.failures[0] },
         .{ .label = "Permissions", .value = if (!self.ready) "unavailable" else if (self.session.permission == .bypass) "run without asking" else "ask first", .tail = self.failures[1] },
-        .{ .label = "Tools", .value = "", .tail = self.failures[2] },
+        .{ .label = "Allowed tools", .value = "", .tail = self.failures[2] },
         .{ .label = "Folder", .value = if (self.ready) self.session.workspace.slice() else "unavailable", .selectable = false },
         .{ .label = "Model", .value = if (self.ready) self.session.model.slice() else "unavailable", .tail = self.failures[4] },
         .{ .label = "Context", .value = "", .selectable = false, .visible = self.ready and self.session.context_estimate != null },
@@ -242,7 +242,7 @@ fn activate(raw: *anyopaque, ctx: *vxfw.EventContext, row: usize) !void {
         },
         1 => self.panel.openChoice(&.{ "run without asking", "ask first" }, if (self.session.permission == .bypass) 0 else 1),
         2 => {
-            self.tool_draft = self.session.tools;
+            self.tool_draft = self.session.builtInTools();
             self.updateTools();
             self.panel.openChoice(&self.tool_labels, null);
         },
@@ -393,7 +393,13 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
         if (input == .key_press and input.key_press.matches(vaxis.Key.enter, .{})) {
             const selected = draft.*;
             self.cancelChoice();
-            try self.save(ctx, 2, .{ .tools = selected });
+            var edit: @import("configuration_admission.zig").ToolEdit = .{};
+            edit.replaceBuiltIns(&self.session.tools, &self.session.loaded_tools, selected) catch |err| {
+                self.failures[2] = if (err == error.LoadedToolsNotAllowed) " · loaded tools aren't allowed" else " · too many tool names";
+                ctx.consumeAndRedraw();
+                return;
+            };
+            try self.save(ctx, 2, .{ .tools = edit });
             ctx.consumeAndRedraw();
             return;
         }
@@ -496,12 +502,12 @@ fn drawBodyContents(raw: *anyopaque, ctx: vxfw.DrawContext) !vxfw.Surface {
     var tool_text: std.Io.Writer.Allocating = .init(ctx.arena);
     if (self.ready) {
         var selected = self.session.tools.iterator();
-        while (selected.next()) |tool| {
+        while (selected.next()) |tool_name| {
             if (tool_text.written().len > 0) try tool_text.writer.writeAll(", ");
-            try tool_text.writer.writeAll(if (tool == .web_search) "web search" else @tagName(tool));
+            try tool_text.writer.writeAll(if (std.mem.eql(u8, tool_name, "web_search")) "web search" else tool_name);
         }
     }
-    self.fields[2].value = if (!self.ready) "unavailable" else if (tool_text.written().len == 0) "none" else tool_text.written();
+    self.fields[2].value = if (!self.ready) "unavailable" else if (tool_text.written().len == 0) "no tools" else tool_text.written();
     if (self.ready) {
         self.fields[3].value = try self.folderValue(ctx, size.width -| Panel.value_column);
         self.fields[4].value = try safe(ctx.arena, self.session.model.slice());
@@ -601,7 +607,7 @@ const Fixture = struct {
         status.sample(&self.session);
         self.session.label.set("Fix retry deadline") catch unreachable;
         self.session.effort_override = true;
-        self.session.tools = .initMany(&.{ .bash, .skill, .web_search });
+        self.session.tools = @import("command_input.zig").ToolsField.of(&.{ "bash", "skill", "web_search" }) catch unreachable;
         self.session.model.set("gpt-6.1-sol") catch unreachable;
         self.session.compaction_trigger = 244_800;
         self.session.context_estimate = 18;
@@ -703,7 +709,7 @@ test "Chat info draws standalone ground and facts at 99 and 46 columns" {
         try std.testing.expect(std.mem.indexOf(u8, text, " Fix retry deadline\n") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, "   Effort          high\n") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, "   Permissions     run without asking\n") != null);
-        try std.testing.expect(std.mem.indexOf(u8, text, "   Tools           bash, skill, web search\n") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "   Allowed tools   bash, skill, web search\n") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, "   Folder          ~/code/rui\n") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, "   Context         18 of 244,800\n") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, "   Rename     Archive     Copy last answer\n") != null);
@@ -766,15 +772,15 @@ test "Chat info effort permissions and tools choices pick and cancel typed edits
     try press(&page, &ctx, vaxis.Key.enter);
     try press(&page, &ctx, ' ');
     try std.testing.expect(!page.tool_draft.?.contains(.bash));
-    try std.testing.expect(page.session.tools.contains(.bash));
+    try std.testing.expect(page.session.tools.contains("bash"));
     try press(&page, &ctx, vaxis.Key.escape);
-    try std.testing.expect(page.session.tools.contains(.bash));
+    try std.testing.expect(page.session.tools.contains("bash"));
     try press(&page, &ctx, vaxis.Key.enter);
     try press(&page, &ctx, ' ');
     try press(&page, &ctx, vaxis.Key.enter);
-    try std.testing.expect(!fixture.edit.?.tools.contains(.bash));
-    try std.testing.expect(fixture.edit.?.tools.contains(.skill));
-    try std.testing.expect(fixture.edit.?.tools.contains(.web_search));
+    try std.testing.expect(!fixture.edit.?.tools.allowed.contains("bash"));
+    try std.testing.expect(fixture.edit.?.tools.allowed.contains("skill"));
+    try std.testing.expect(fixture.edit.?.tools.allowed.contains("web_search"));
 }
 
 test "Chat info read-only rows are skipped by arrows and never activated" {
@@ -1007,7 +1013,7 @@ test "Chat info pasted keys never approve a field choice" {
         try page.widget().handleEvent(&ctx, .paste_end);
         try std.testing.expectEqual(@as(?Edit, null), fixture.edit);
         try std.testing.expect(page.hasChoice());
-        if (row == 2) try std.testing.expect(page.tool_draft.?.eql(page.session.tools));
+        if (row == 2) try std.testing.expect(page.tool_draft.?.eql(page.session.builtInTools()));
         page.cancelChoice();
     }
 }
@@ -1904,4 +1910,64 @@ test "Chat info contains only chat settings and never an app Memory row" {
         try std.testing.expectEqual(@as(usize, 6), page.fields.len);
         _ = arena.reset(.retain_capacity);
     };
+}
+
+test "Chat info allowed picker retains MCP names on no-op cancellation and built-in edits" {
+    for ([_]enum { noop, cancel, remove_bash }{ .noop, .cancel, .remove_bash }) |mode| {
+        var fixture: Fixture = .{};
+        fixture.init();
+        fixture.session.tools = try .of(&.{ "bash", "find_tools", "lookup", "none" });
+        fixture.session.loaded_tools = try .of(&.{ "find_tools", "none" });
+        var page: Self = .{ .backend = fixture.backend() };
+        page.refresh();
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        _ = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 30 }, .cell_size = .{} });
+        try std.testing.expectEqualStrings("Allowed tools", page.fields[2].label);
+        try std.testing.expectEqualStrings("bash, find_tools, lookup, none", page.fields[2].value);
+        page.panel.selected = 2;
+        try press(&page, &ctx, vaxis.Key.enter);
+        if (mode != .noop) try press(&page, &ctx, ' ');
+        try press(&page, &ctx, if (mode == .cancel) vaxis.Key.escape else vaxis.Key.enter);
+        try std.testing.expectEqualStrings("bash find_tools lookup none", page.session.tools.names.slice());
+        try std.testing.expectEqualStrings("find_tools none", page.session.loaded_tools.names.slice());
+        if (mode == .cancel) {
+            try std.testing.expect(fixture.edit == null);
+        } else {
+            try std.testing.expectEqualStrings(if (mode == .noop) "bash find_tools lookup none" else "find_tools lookup none", fixture.edit.?.tools.allowed.names.slice());
+            try std.testing.expectEqualStrings("find_tools none", fixture.edit.?.tools.loaded.names.slice());
+        }
+    }
+}
+
+test "Chat info distinguishes empty allowed intent from an MCP tool named none" {
+    for ([_]bool{ false, true }) |singleton| {
+        var fixture: Fixture = .{};
+        fixture.init();
+        fixture.session.tools = try .of(if (singleton) &.{"none"} else &.{});
+        var page: Self = .{ .backend = fixture.backend() };
+        page.refresh();
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        _ = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 30 }, .cell_size = .{} });
+        try std.testing.expectEqualStrings(if (singleton) "none" else "no tools", page.fields[2].value);
+    }
+}
+
+test "Chat info explains invalid loaded membership on the allowed tools row" {
+    var fixture: Fixture = .{};
+    fixture.init();
+    fixture.session.tools = try .of(&.{"bash"});
+    fixture.session.loaded_tools = try .of(&.{"web_search"});
+    var page: Self = .{ .backend = fixture.backend() };
+    page.refresh();
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    page.panel.selected = 2;
+    try press(&page, &ctx, vaxis.Key.enter);
+    try press(&page, &ctx, vaxis.Key.enter);
+    try std.testing.expectEqualStrings(" · loaded tools aren't allowed", page.failures[2].?);
+    try std.testing.expect(fixture.edit == null);
 }

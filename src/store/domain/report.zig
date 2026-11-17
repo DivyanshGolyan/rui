@@ -1032,6 +1032,7 @@ fn Chunk(comptime L: type, comptime Watcher: type) type {
         after: L.S.Args,
         rows: u16 = 0,
         ready: ?bool = null,
+        decoded: Row = undefined,
         kept: [L.kept_rows]Row = undefined,
         count: u8 = 0,
         failure: ?Failure = null,
@@ -1070,7 +1071,7 @@ fn Chunk(comptime L: type, comptime Watcher: type) type {
         fn emit(chunk: *@This(), row: *const Row) Failure!void {
             try chunk.headers.open(chunk.list);
             chunk.first.* = false;
-            const values = try L.values(chunk.a, row);
+            const values = try L.values(chunk.a, row, chunk.state);
             try visitRow(chunk.a, chunk.watched, &values);
         }
     };
@@ -1112,7 +1113,7 @@ pub noinline fn readRun(a: *ReadAccess, comptime Ls: anytype, session_ref: []con
         break :blk result;
     };
     var headers: Headers(Watcher) = .{ .watched = watched, .lists = &tags };
-    var lists: RunState(Ls, Watcher) = undefined;
+    const lists = a.store.reportScratch(RunState(Ls, Watcher));
     inline for (0..Ls.len) |i| lists[i] = .{
         .after = .{ .session = session_ref },
         .status = .{ .previous = if (i == 0) null else &lists[i - 1].status },
@@ -1139,7 +1140,7 @@ pub noinline fn readRun(a: *ReadAccess, comptime Ls: anytype, session_ref: []con
                 a.readEach(L.S, list.after, L.S.limit, &list.chunk);
             }
         };
-        a.run() catch |err| return runFailure(a, Ls, Watcher, &lists, current, err);
+        a.run() catch |err| return runFailure(a, Ls, Watcher, lists, current, err);
         var blocked = false;
         inline for (Ls, 0..) |L, i| if (i >= current) {
             const list = &lists[i];
@@ -1458,7 +1459,7 @@ pub const Messages = struct {
         state.admission = row.admission_id.get();
     }
 
-    pub fn values(a: *ReadAccess, row: *const S.Row) !session_report.FullRow {
+    pub fn values(a: *ReadAccess, row: *const S.Row, _: *ListState(@This())) !session_report.FullRow {
         const projection = try command_domain.projectMessage(row, if (row.excluding_stop) |*stop| stop.slice() else null);
         const content: session_report.Text = .{ .id = row.content_id.get(), .length = row.content_length, .digest = row.content_digest };
         return .{ .message = .{
@@ -1539,7 +1540,7 @@ pub const Conversation = struct {
         if (!missing.catalogs_consistent or !missing.assistants_consistent) return error.CorruptStore;
     }
 
-    pub fn values(_: *ReadAccess, row: *const S.Row) error{CorruptStore}!session_report.FullRow {
+    pub fn values(_: *ReadAccess, row: *const S.Row, _: *ListState(@This())) error{CorruptStore}!session_report.FullRow {
         if (row.entry_kind < 1 or row.entry_kind > 4 or !row.consistent) return error.CorruptStore;
         return .{ .conversation = .{
             .ordinal = row.entry_ordinal.get(),
@@ -1583,7 +1584,7 @@ const Turns = struct {
     pub const list = session_report.FullList.turns;
     pub const kept_rows = 0;
 
-    pub fn values(_: *ReadAccess, row: *const S.Row) error{CorruptStore}!session_report.FullRow {
+    pub fn values(_: *ReadAccess, row: *const S.Row, _: *ListState(@This())) error{CorruptStore}!session_report.FullRow {
         if (row.input_cutoff < row.first_admission_id.get()) return error.CorruptStore;
         try checkOutcome(&row.outcome_code, row.outcome_content_id);
         return .{ .turn = .{
@@ -1604,7 +1605,8 @@ const full_operations = rsql.Page(.{
         .on = .{ .index = "model_operation_session_history" },
         .alias = "o",
         .columns = "o.turn_id,o.resolution_code,o.resolution_content_id,resolution.byte_length AS resolution_length," ++
-            "resolution.digest AS resolution_digest,o.interrupted_by_command_key,o.settings_revision,o.request_id,o.reasoning_effort",
+            "resolution.digest AS resolution_digest,o.interrupted_by_command_key,o.settings_revision,o.request_id,o.reasoning_effort," ++
+            tool_set.namesSql("o.tool_set_id") ++ " AS offered_tools",
         .joins = "LEFT JOIN content resolution ON resolution.content_id=o.resolution_content_id",
     }},
     .Row = struct {
@@ -1618,6 +1620,7 @@ const full_operations = rsql.Page(.{
         settings_revision: rsql.Positive,
         request_id: ?Bounded(256),
         reasoning_effort: ?model_capability.ReasoningEffort,
+        offered_tools: ?Bounded(tool_set.max_names_bytes),
     },
     .take = takes(Operations.kept_rows),
 });
@@ -1626,10 +1629,16 @@ const Operations = struct {
     pub const S = full_operations;
     pub const failed = error.OperationReadFailed;
     pub const list = session_report.FullList.model_operations;
-    pub const kept_rows = 4;
+    // Keep names with each retained row until resolution content can stream after the query.
+    // Two retained rows and the decode row fit the Store's existing report scratch.
+    pub const kept_rows = 2;
+    pub const State = struct { names: [tool_defs.max_tools][]const u8 = undefined };
 
-    pub fn values(_: *ReadAccess, row: *const S.Row) error{CorruptStore}!session_report.FullRow {
+    pub fn check(_: *State, row: *const S.Row) error{CorruptStore}!void {
         try checkOutcome(&row.resolution_code, row.resolution_content_id);
+    }
+
+    pub fn values(_: *ReadAccess, row: *const S.Row, state: *State) error{CorruptStore}!session_report.FullRow {
         return .{ .operation = .{
             .operation = row.operation_id.get(),
             .turn = row.turn_id.get(),
@@ -1639,6 +1648,7 @@ const Operations = struct {
             } else null,
             .interrupted_by = optionalSlice(&row.interrupted_by_command_key),
             .settings_revision = row.settings_revision.get(),
+            .offered_tools = try sortedToolNames(if (row.offered_tools) |*names| names.slice() else null, &state.names),
             .request_id = optionalSlice(&row.request_id),
             .reasoning_effort = row.reasoning_effort,
         } };
@@ -1693,7 +1703,7 @@ const Calls = struct {
     pub const list = session_report.FullList.tool_calls;
     pub const kept_rows = 8;
 
-    pub fn values(a: *ReadAccess, row: *const S.Row) !session_report.FullRow {
+    pub fn values(a: *ReadAccess, row: *const S.Row, _: *ListState(@This())) !session_report.FullRow {
         const name: session_report.Text = .{ .id = row.name_id.get(), .length = row.name_length, .digest = row.name_digest };
         const call_id: session_report.Text = .{ .id = row.call_id.get(), .length = row.call_id_length, .digest = row.call_id_digest };
         const arguments: session_report.Text = .{ .id = row.arguments_id.get(), .length = row.arguments_length, .digest = row.arguments_digest };
@@ -1744,7 +1754,7 @@ const Actions = struct {
     pub const list = session_report.FullList.actions;
     pub const kept_rows = 4;
 
-    pub fn values(_: *ReadAccess, row: *const S.Row) error{CorruptStore}!session_report.FullRow {
+    pub fn values(_: *ReadAccess, row: *const S.Row, _: *ListState(@This())) error{CorruptStore}!session_report.FullRow {
         return .{
             .action = .{
                 .action = row.action_id.get(),
@@ -1785,7 +1795,7 @@ const Decisions = struct {
     pub const list = session_report.FullList.permission_decisions;
     pub const kept_rows = 0;
 
-    pub fn values(_: *ReadAccess, row: *const S.Row) error{}!session_report.FullRow {
+    pub fn values(_: *ReadAccess, row: *const S.Row, _: *ListState(@This())) error{}!session_report.FullRow {
         return .{ .decision = .{
             .command_key = row.command_key.slice(),
             .action = row.action_id.slice(),
@@ -1821,7 +1831,7 @@ const Stops = struct {
     pub const list = session_report.FullList.session_stops;
     pub const kept_rows = 0;
 
-    pub fn values(_: *ReadAccess, row: *const S.Row) error{}!session_report.FullRow {
+    pub fn values(_: *ReadAccess, row: *const S.Row, _: *ListState(@This())) error{}!session_report.FullRow {
         return .{ .stop = .{
             .command_key = row.command_key.slice(),
             .accepted = row.accepted,
@@ -1863,7 +1873,7 @@ const Interruptions = struct {
         if (row.turn_id.slice().len == 0) return error.CorruptStore;
     }
 
-    pub fn values(_: *ReadAccess, row: *const S.Row) error{}!session_report.FullRow {
+    pub fn values(_: *ReadAccess, row: *const S.Row, _: *ListState(@This())) error{}!session_report.FullRow {
         return .{ .interruption = .{
             .command_key = row.command_key.slice(),
             .accepted = row.accepted,
@@ -1927,7 +1937,7 @@ const Results = struct {
     pub const list = session_report.FullList.tool_results;
     pub const kept_rows = 8;
 
-    pub fn values(_: *ReadAccess, row: *const S.Row) error{}!session_report.FullRow {
+    pub fn values(_: *ReadAccess, row: *const S.Row, _: *ListState(@This())) error{}!session_report.FullRow {
         return .{ .result = .{
             .operation = row.operation_id.get(),
             .call_ordinal = row.call_ordinal,
