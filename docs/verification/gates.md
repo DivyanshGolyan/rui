@@ -19,6 +19,7 @@ Anything else runs through `python3 tests/integration/host_process.py exec COMMA
 Entering stops a root process with that instruction, whether a build step or a person launched it.
 It also replaces the process environment with the variables `INHERITED` names there (PATH, HOME, TMPDIR, locale and named fixture inputs, each with its reason) plus `TERM=xterm-256color`, so a caller's `RUI_*`, TLS trust or proxy settings cannot change what a fixture proves.
 A fixture sets its own variables after entering, and its children inherit only those.
+`host_process.py exec-mysql COMMAND...` additionally holds the shared MySQL socket lease across exec; the TypeScript process tests use it to exclude the Store shard-zero prelude of server-global tests, two long history fixtures and the exact session Handler-read comparison.
 Importing host_process changes nothing, so tests/ci and fixture libraries can use it freely.
 `FixtureEntryTest` in [test_harness_contracts.py](../../tests/ci/test_harness_contracts.py) finds every fixture entry (each shell script, and each Python module with a main block), runs it with root simulated and requires that refusal.
 It also requires that every `measure-*` step goes through the exec entry.
@@ -84,7 +85,7 @@ Long, churn, full Debug and H2 targets follow their mappings, not an uncondition
 | Shared control, model and Host-process fixture helpers | `check`, both H2 targets and affected standalone Current or reply-delivery targets | `model_fixture.py` keeps all shared consumers. H2 and standalone consumers are outside the composed driver |
 | Standalone Current, reply-delivery and login-signal oracles | Owning integration target; login signal on Linux only | Neither composed gate runs them. Changes to their helpers keep these targets |
 | Canonical-failure oracle | `canonical-failure-integration` on both systems | Skip it when a composed gate is selected; the human CLI fixture runs all cases |
-| Build, dependencies or bootstrap | `check-full`, full Debug admission, long timeout and churn witnesses, relevant H2 and standalone targets, manual empty-cache evidence | Transport build, dependency pins and bootstrap select both H2 targets |
+| Build, dependencies, bootstrap or the CI artifact producer | `check-full`, full Debug admission, long timeout and churn witnesses, relevant H2 and standalone targets, manual empty-cache evidence | Transport build, dependency pins and bootstrap select both H2 targets |
 | Main admission, every ready PR | Successful plan and Linux aggregate on the immutable merge candidate: compile and format, `typecheck-macos` for compile inputs, `stack-frames` and the selected unit roots and integration targets. Normal changes also require policy. Native Mac runs only for [Mac paths](../../tests/ci/platform_boundary.py), the code Linux never executes as a Mac does; build plumbing is not one. The [upgrade check](../../.github/workflows/previous-release-upgrade.yml) runs on hosted Linux only for upgrade, installer and Store-format paths | The conservative documentation lane requires explicit empty product selections and skipped policy, native, upgrade and cache jobs. Admission requires the exact Mac and upgrade results the plan selected: success when selected, skipped otherwise. Required admission runs before main |
 | Promotion, manual | [Promote](../../.github/workflows/promote.yml) on main HEAD: Linux and macOS `check-full`, `test-logic` and `admission-debug-integration` with the batch's selected targets, `stack-frames`, the upgrade check on both systems, [renderer contracts](#renderer-contracts), then cold release builds | A failing job bisects each failed step over the batch since `stable` and files one `promotion-red` issue per cause. Only a fully green promotion publishes a release and advances `stable` |
 | Host stack frames (Zig the Host compiles: `server.zig` and the `host_modules` closure; other `src/` inputs, `build.zig`, `tests/ci/stack_frames.*`) | `stack-frames` on x86-64 Linux; `check` runs it, `check-full` does not | [stack_frames.py](../../tests/ci/stack_frames.py) reads the ReleaseSafe binary's prologues and direct calls. It fails on a frame over 8 KiB reachable from a Host thread or a function of a module in `host_modules` unless an exception in [stack_frames.json](../../tests/ci/stack_frames.json) names its cause, and on a thread whose deepest chain passes its `chain_ceiling`. Exceptions and ceilings only shrink. Calls through function pointers outside `host_modules` are not followed, and no other platform is measured |
@@ -116,14 +117,19 @@ Syntax checks, probe compilation and unrelated product tests do not qualify a re
 
 `check` runs formatting, ReleaseSafe native tests and process integrations, a Debug artifact and recovery smoke, ReleaseSmall deliverables and, on x86-64 Linux, `stack-frames`.
 Required functional assertions stay required when their fixture changes.
-Native and process suites run concurrently, except short-deadline Host-startup and Debug smoke cases, which follow the parallel batch.
+Native, Store and process suites run concurrently, except short-deadline Host-startup and Debug smoke cases, which follow the parallel batch.
+The Store unit root compiles once and runs as four concurrent processes through [the shared shard launcher](../../tests/ci/store_shards.py); native and each Store process retain separate 1200-second deadlines.
+Shard zero first runs the seven tests that change MySQL server-global settings, the two long admission-history fixtures and the exact session Handler-read comparison under an exclusive socket lease, then releases the other shards. The history fixtures retain their 300-second test deadline and avoid competing MySQL clients during setup/replay. The Handler test already reads the Store connection's session counters; its exclusive window also excludes peer DDL that could add internal dictionary reads through shared metadata caches. Its warm-up and strict equality remain unchanged. Native and live MySQL process fixtures share the ordinary phase.
+[Native unit roots](../../tests/ci/unit-roots.md) owns timing-based assignment, MySQL isolation and record aggregation.
+Explicit `-Dtest-filter` runs retain one filtered aggregate process.
 The Debug smoke covers streamed-capture failure and recovery, Store-lease exclusion, committed-but-lost Message replies, changed-source capture preservation and same-key configuration and Message replay after a Host crash.
 
 Human CLI caller, renderer, terminal-restoration and canonical-failure cases run as separate parallel peers in `check` and the `callers` partition.
 The driver waits for every peer before isolated cases and fails if any peer fails.
 The unsplit serial gate retains its original case order and assertions.
 
-`zig build check-full` runs routine native tests and process integrations serially after formatting and production builds.
+`zig build check-full` runs the native/Store unit group before its serial process integrations, after formatting and production builds.
+Within that group native and the four Store shard processes overlap, with the same per-process deadlines and MySQL isolation as `test` and `check`.
 Selected CI runs it on Linux for build or dependency changes; promotion runs it on macOS, and manual qualification runs it on request.
 Run the unsplit default locally for release qualification and isolated process-latency claims.
 It is not an every-edit gate.
@@ -131,7 +137,7 @@ Serial execution reduces unrelated load but does not establish scheduler order; 
 
 Linux Selected CI and each platform's qualification run the full gate as `-Dcheck-part=execution` and `-Dcheck-part=callers` on two isolated runners at the same revision.
 Both must pass.
-The execution partition overlaps native tests with its serial process fixtures; the unsplit gate remains serial.
+The execution partition overlaps the native/Store unit group with its serial process fixtures; the unsplit gate finishes the group before starting those fixtures.
 Their disjoint fixtures cover the full gate once; callers run Host-process, allocator, launch and Debug smoke cases serially after the parallel batch.
 [qualification.py](../../tests/ci/qualification.py) packs other Linux targets so a Selected run never exceeds ten shards.
 A long gate (`check`, `check-full`, `test`, `stack-frames`) runs alone, and beside one the short targets share three shards: they end inside the gate's run, so more shards would only repeat setup.
@@ -211,6 +217,8 @@ In PR mode only, that fixture also strips debug data, matching shipped Linux arc
 Promotion, release and default local builds retain Zig's default backend, as does the production binary used by `stack-frames`.
 
 Each platform builds its target closure once with `ci-build -Dci-targets=...`.
+Linux x86_64 producers use eight Zig async job slots so subprocess waits do not serialize independent compiles; this also applies to promotion's LLVM builds, while `-Dpr-ci` remains exclusive to pull requests.
+Changes to the shared artifact producer select the full Linux build gate and Debug admission so PR CI exercises the artifacts its command emits; promotion retains native macOS coverage.
 On Linux and macOS, when the selection compiles the single-threaded unit test binary alongside other gates, one producer builds only that binary (`-Dci-part=unit`) and another builds the rest (`-Dci-part=rest`); build.zig refuses a split whose selection never reaches the unit compile.
 [build_artifact.py](../../tests/ci/build_artifact.py) transfers the executables and pinned package sources through immutable same-run artifacts that expire after one day.
 Workers accept either one whole part or exactly the unit and rest parts, with disjoint executable inventories that together match the extracted tree, and verify each exact artifact ID, archive digest, run, source and tree, an attempt no later than their own (a rerun of failed jobs keeps its passed producer's artifact), platform selection, OS, architecture, compiler digest and executable hashes before use; runner image versions are logged, not compared.

@@ -201,7 +201,10 @@ test "core tool table routes every built-in and promotion excludes the full core
                 defer storage.close() catch unreachable;
                 var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
                 var command = try completeConfiguration("table-config", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
-                command.configuration.tools = try .of(&.{@tagName(tool)});
+                command.configuration.tools = if (tool == .stop_action)
+                    try .of(&.{ "read_action", "stop_action" })
+                else
+                    try .of(&.{@tagName(tool)});
                 const configured = try storage.configure(&command, .{});
                 try std.testing.expect(configured == .accepted);
                 const session = configured.accepted.session;
@@ -210,6 +213,7 @@ test "core tool table routes every built-in and promotion excludes the full core
                 const arguments = switch (tool) {
                     .bash => "{\"cmd\":\"true\",\"description\":\"Run table check\"}",
                     .message_agent => "{\"id\":\"zzzzzz\",\"text\":\"hi\"}",
+                    .stop_action => "{\"action\":\"1\"}",
                     else => "{}",
                 };
                 var encoded: std.Io.Writer.Allocating = .init(std.testing.allocator);
@@ -726,10 +730,10 @@ const NativePromotion = struct {
     }
 };
 
-test "historical fixture rewinds refuse retained pin background and stop-cutoff facts before DDL" {
+test "historical fixture rewinds refuse retained pin background and stop facts before DDL" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
-            const Evidence = enum { pin, refused_control, background, stop_cutoff };
+            const Evidence = enum { pin, refused_control, background, stop_cutoff, action_stop };
             inline for (std.enums.values(Evidence)) |evidence| {
                 inline for (.{ false, true }) |ending| {
                     var tmp = std.testing.tmpDir(.{});
@@ -750,6 +754,14 @@ test "historical fixture rewinds refuse retained pin background and stop-cutoff 
                             try std.testing.expect(storage.backgroundAction(.{ .command = &command }, .{}) == .rejected);
                         },
                         .background => _ = try NativePromotion.promoted(&storage, &tmp, session.slice()),
+                        .action_stop => {
+                            try submitTestMessage(&storage, &tmp, "rewind-action-message", "rewind-action-message", session.slice(), "run");
+                            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                            try settleTwoActionsForTesting(&storage, &tmp, model, "rewind-action-calls");
+                            const first = try store_testing.queryU64(&storage, "SELECT min(action_id) FROM action_operation", .{});
+                            const second = try store_testing.queryU64(&storage, "SELECT max(action_id) FROM action_operation", .{});
+                            try store_testing.exec(&storage, "INSERT INTO action_stop(source_action_id,target_action_id) VALUES(?1,?2)", .{ first, second });
+                        },
                         .stop_cutoff => {
                             _ = try NativePromotion.propose(&storage, &tmp, session.slice());
                             var stop = try completeSessionStop("rewind-stop", session.slice());
@@ -760,6 +772,7 @@ test "historical fixture rewinds refuse retained pin background and stop-cutoff 
                     const pins = try store_testing.queryU64(&storage, "SELECT count(*) FROM session_pin", .{});
                     const controls = try store_testing.queryU64(&storage, "SELECT count(*) FROM action_control_command", .{});
                     const stops = try store_testing.queryU64(&storage, "SELECT count(*) FROM session_stop WHERE action_cutoff>0", .{});
+                    const direct_stops = try store_testing.queryU64(&storage, "SELECT count(*) FROM action_stop", .{});
                     if (ending) {
                         try std.testing.expectError(error.TestExpectedEqual, store_testing.stageEndingMessageUpgrade(&storage, false));
                     } else {
@@ -768,6 +781,7 @@ test "historical fixture rewinds refuse retained pin background and stop-cutoff 
                     try std.testing.expectEqual(pins, try store_testing.queryU64(&storage, "SELECT count(*) FROM session_pin", .{}));
                     try std.testing.expectEqual(controls, try store_testing.queryU64(&storage, "SELECT count(*) FROM action_control_command", .{}));
                     try std.testing.expectEqual(stops, try store_testing.queryU64(&storage, "SELECT count(*) FROM session_stop WHERE action_cutoff>0", .{}));
+                    try std.testing.expectEqual(direct_stops, try store_testing.queryU64(&storage, "SELECT count(*) FROM action_stop", .{}));
                     try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM store_meta WHERE meta_key='format' AND meta_value=?1", .{comptime std.fmt.comptimePrint("{d}", .{@import("../schema.zig").schema_version})}));
                     try std.testing.expect(!storage.isFenced());
                     _ = try store_testing.configureTestSession(&storage, "rewind-still-usable");
@@ -883,11 +897,6 @@ test "native promotion preserves old Turn approval discovery without launching b
                 try NativePromotion.expectReported(&storage, &tmp, session.slice(), action, true, true);
                 try NativePromotion.finishModel(&storage, &tmp, continuation);
                 try NativePromotion.expectReported(&storage, &tmp, session.slice(), action, true, true);
-                try submitTestMessage(&storage, &tmp, "queued-after-terminal-file", "queued-after-terminal", session.slice(), "Continue later.");
-                const queued = try store_testing.observeCommandForTesting(&storage, "queued-after-terminal");
-                try std.testing.expectEqual(action, queued.kind.message.?.work.?.first_action.?);
-                const next_turn = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-                try NativePromotion.finishModel(&storage, &tmp, next_turn);
                 try std.testing.expect((try storage.admitNextActionAttempt(.fromFree(2, true), 30_000, .{})) == null);
                 if (choice == .stop) {
                     var stop = try completeSessionStop("stop-pending", session.slice());
@@ -1514,6 +1523,207 @@ test "native promotion owed stop refuses a foreground call and preserves an earl
                 try std.testing.expectEqual(ActionSettlement.session_stop, try storage.settleActionAttempt(binding, .succeeded, "Stopped", .{}));
                 try std.testing.expect((try storage.admitNextModelAttempt(.{})) == null);
                 try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE source_action_id=?1", .{action}));
+            }
+        }
+    }.run);
+}
+
+test "interrupt regression: a new Message declines pending approvals through the permission owner" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try configureTestSessionAsk(&storage, "message-decline-config");
+            try submitTestMessage(&storage, &tmp, "message-decline-first", "message-decline-first", session.slice(), "run");
+            const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try settleTwoActionsForTesting(&storage, &tmp, binding, "message-decline-calls");
+            try std.testing.expect((try storage.nextCoreWork(.fromFree(2, true))) == null);
+            try submitTestMessage(&storage, &tmp, "message-decline-next", "message-decline-next", session.slice(), "new instructions");
+            for (0..2) |_| {
+                const work = (try storage.nextCoreWork(.fromFree(2, true))).?;
+                try std.testing.expect(work == .auto_deny);
+                var late_allow: protocol.PermissionDecisionCommand = .{ .action_id = work.auto_deny.action_id, .decision = .allow_once };
+                late_allow.session = work.auto_deny.session;
+                const allow_key = try std.fmt.bufPrint(&late_allow.key.bytes, "late-allow-{d}", .{late_allow.action_id});
+                late_allow.key.len = allow_key.len;
+                const late_result = storage.decidePermission(&late_allow, .{});
+                try std.testing.expect(late_result == .rejected and late_result.rejected.code == .action_not_pending);
+                var decision: protocol.PermissionDecisionCommand = .{ .action_id = work.auto_deny.action_id };
+                decision.session = work.auto_deny.session;
+                const key = try std.fmt.bufPrint(&decision.key.bytes, "rui.core/message-decline/{d}", .{decision.action_id});
+                decision.key.len = key.len;
+                try std.testing.expect(storage.declineForMessage(&decision, .{}) == .accepted);
+                const content_id = try store_testing.queryU64(&storage, "SELECT resolution_content_id FROM action_operation WHERE action_id=?1 AND resolution_code='denied'", .{decision.action_id});
+                try expectContent(&storage, try testingContentReference(&storage, content_id), "declined: a new message arrived; ask again if still needed");
+            }
+            try std.testing.expect((try storage.nextCoreWork(.fromFree(2, true))) == null);
+            const continued = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try std.testing.expectEqual(binding.turn_id, continued.turn_id);
+            var page: store_testing.TestingPage = undefined;
+            page.open(&storage, continued);
+            defer page.close();
+            var position: u64 = 0;
+            var seen: usize = 0;
+            while (try page.nextEntry(position)) |entry| {
+                position = entry.position;
+                if (entry.kind != .tool_results) continue;
+                while (try page.nextToolResult()) |result| {
+                    var reader: store_testing.TestingReader = undefined;
+                    try page.openContent(result.output, &reader);
+                    defer reader.close();
+                    var bytes: [256]u8 = undefined;
+                    const length = try reader.read(0, &bytes);
+                    try std.testing.expectEqualStrings("declined: a new message arrived; ask again if still needed", bytes[0..length]);
+                    seen += 1;
+                }
+            }
+            try std.testing.expectEqual(@as(usize, 2), seen);
+        }
+    }.run);
+}
+
+test "interrupt regression: Message declines background approval through originating Turn lifecycle" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            for ([_]enum { current, continued, completed, selected }{ .current, .continued, .completed, .selected }) |stage| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                const session = try configureTestSessionAsk(&storage, "background-approval");
+                const action = try NativePromotion.promoted(&storage, &tmp, session.slice());
+                if (stage != .current) {
+                    const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                    if (stage == .completed or stage == .selected) try NativePromotion.finishModel(&storage, &tmp, continuation);
+                }
+                try submitTestMessage(&storage, &tmp, "background-new", "background-new", session.slice(), "new instructions");
+                if (stage == .selected) _ = try storage.admitNextModelAttempt(.{});
+                var allow: protocol.PermissionDecisionCommand = .{ .session = session, .action_id = action, .decision = .allow_once };
+                try allow.key.set("late-background-allow");
+                const result = storage.decidePermission(&allow, .{});
+                try std.testing.expect(result == .rejected and result.rejected.code == .action_not_pending);
+                const work = (try storage.nextCoreWork(.fromFree(2, true))).?;
+                try std.testing.expect(work == .auto_deny);
+                try std.testing.expectEqual(action, work.auto_deny.action_id);
+                var decision: protocol.PermissionDecisionCommand = .{ .session = session, .action_id = action };
+                try decision.key.set("background-message-denial");
+                try std.testing.expect(storage.declineForMessage(&decision, .{}) == .accepted);
+                const content = try store_testing.queryU64(&storage, "SELECT resolution_content_id FROM action_operation WHERE action_id=?1 AND resolution_code='denied'", .{action});
+                try expectContent(&storage, try testingContentReference(&storage, content), "declined: a new message arrived; ask again if still needed");
+            }
+        }
+    }.run);
+}
+
+test "interrupt regression: person and peer Messages decline approval alongside running Action promotion" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            for ([_]bool{ false, true }) |peer| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                const sender = try shared_fixtures.configureTestSessionWithMode(&storage, "sender", "bypass");
+                _ = try NativePromotion.propose(&storage, &tmp, sender.slice());
+                const sender_action = (try storage.admitNextActionAttempt(.fromFree(2, true), 30_000, .{})).?.permit.binding;
+                var sender_input: action_domain.ActionExecutionInput = undefined;
+                try storage.readActionExecutionInput(.bash, sender_action, &sender_input);
+                const target = try configureTestSessionAsk(&storage, "target");
+                try submitTestMessage(&storage, &tmp, "seed", "seed", target.slice(), "run both");
+                const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                try settleTwoActionsForTesting(&storage, &tmp, model, "mixed-calls");
+                const running_id = try store_testing.queryU64(&storage, "SELECT min(action_id) FROM action_operation WHERE parent_operation_id=?1", .{model.operation_id});
+                var allow: protocol.PermissionDecisionCommand = .{ .action_id = running_id, .decision = .allow_once };
+                try allow.key.set("allow-running");
+                allow.session = target;
+                try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
+                const running = (try storage.admitNextActionAttempt(.fromFree(2, true), 30_000, .{})).?.permit.binding;
+                try std.testing.expectEqual(running_id, running.action_id);
+                var cutoff: u64 = 0;
+                try storage.withActionLaunchHandoff(running, &cutoff, struct {
+                    fn capture(out: *u64, value: u64) !void {
+                        out.* = value;
+                    }
+                }.capture);
+                try std.testing.expect(!try storage.messageAfterActionLaunch(running, cutoff));
+                if (peer) {
+                    const text = "new peer message";
+                    const file = try tmp.dir.createFile(std.testing.io, "peer-message", .{ .read = true });
+                    try file.writeStreamingAll(std.testing.io, text);
+                    try file.sync(std.testing.io);
+                    var message = try store_testing.completeMessage("peer-message", target.slice(), file, text);
+                    defer message.removeTemporaryContent(std.testing.io) catch unreachable;
+                    message.sender = .{ .store = storage.selector, .session = sender };
+                    message.sender_handle = sender_input.sender_handle;
+                    try std.testing.expect(storage.submitMessageWithModel(&message, null, .{}) == .accepted);
+                } else {
+                    try submitTestMessage(&storage, &tmp, "person-message", "person-message", target.slice(), "new person message");
+                }
+                try std.testing.expect(try storage.messageAfterActionLaunch(running, cutoff));
+                try std.testing.expect(storage.backgroundAction(.{ .live_action = running.action_id }, .{}) == .accepted);
+                const work = (try storage.nextCoreWork(.fromFree(2, true))).?;
+                try std.testing.expect(work == .auto_deny);
+                var decision: protocol.PermissionDecisionCommand = .{ .action_id = work.auto_deny.action_id };
+                decision.session = work.auto_deny.session;
+                try decision.key.set("message-denial");
+                try std.testing.expect(storage.declineForMessage(&decision, .{}) == .accepted);
+                const content = try store_testing.queryU64(&storage, "SELECT resolution_content_id FROM action_operation WHERE action_id=?1 AND resolution_code='denied'", .{decision.action_id});
+                try expectContent(&storage, try testingContentReference(&storage, content), "declined: a new message arrived; ask again if still needed");
+                try std.testing.expect(!try storage.messageAfterActionLaunch(running, cutoff));
+            }
+        }
+    }.run);
+}
+
+test "interrupt regression: Message promotion watches running calls and ignores earlier and background-final inputs" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            for (0..3) |scenario| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                const session = try shared_fixtures.configureTestSessionWithMode(&storage, "watch-config", "bypass");
+                try submitTestMessage(&storage, &tmp, "watch-start", "watch-start", session.slice(), "start calls");
+                const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                if (scenario == 1) try submitTestMessage(&storage, &tmp, "stream-message", "stream-message", session.slice(), "while streaming");
+                try settleTwoActionsForTesting(&storage, &tmp, model, "watch-calls");
+                const first = (try storage.admitNextActionAttempt(.fromFree(2, true), 30_000, .{})).?.permit.binding;
+                const second = (try storage.admitNextActionAttempt(.fromFree(1, true), 30_000, .{})).?.permit.binding;
+                var cutoffs: [2]u64 = undefined;
+                const capture = struct {
+                    fn handoff(out: *u64, cutoff: u64) !void {
+                        out.* = cutoff;
+                    }
+                }.handoff;
+                try storage.withActionLaunchHandoff(first, &cutoffs[0], capture);
+                try storage.withActionLaunchHandoff(second, &cutoffs[1], capture);
+                switch (scenario) {
+                    0 => {
+                        try submitTestMessage(&storage, &tmp, "watch-message", "watch-message", session.slice(), "interrupt both");
+                        for ([_]@TypeOf(first){ first, second }, cutoffs) |binding, cutoff| {
+                            try std.testing.expect(try storage.messageAfterActionLaunch(binding, cutoff));
+                            try std.testing.expect(storage.backgroundAction(.{ .live_action = binding.action_id }, .{}) == .accepted);
+                            try std.testing.expect(!try storage.messageAfterActionLaunch(binding, cutoff));
+                        }
+                    },
+                    1 => {
+                        try std.testing.expect(!try storage.messageAfterActionLaunch(first, cutoffs[0]));
+                        try std.testing.expect(!try storage.messageAfterActionLaunch(second, cutoffs[1]));
+                    },
+                    2 => {
+                        try std.testing.expect(storage.backgroundAction(.{ .live_action = first.action_id }, .{}) == .accepted);
+                        _ = try storage.settleActionAttempt(first, .succeeded, "background final", .{});
+                        try std.testing.expect(!try storage.messageAfterActionLaunch(second, cutoffs[1]));
+                    },
+                    else => unreachable,
+                }
             }
         }
     }.run);

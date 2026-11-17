@@ -4,10 +4,12 @@ const installation_path = @import("installation_path.zig");
 const caller_error = @import("caller_error.zig");
 const ClientTask = @import("ClientTask.zig");
 const upgrade_status = @import("upgrade_status.zig");
+const release_candidate = @import("release_candidate.zig");
+const test_poll = @import("test_poll");
 const Self = @This();
 
 pub const Outcome = @import("session_upgrade.zig").Outcome;
-const Operation = enum { check, install };
+const Operation = enum { discover, check, install };
 
 init: std.process.Init = undefined,
 store: []const u8 = "",
@@ -16,6 +18,9 @@ task: ClientTask = .{},
 phase: std.atomic.Value(upgrade.Phase) = .init(.checking),
 gate: std.atomic.Value(enum(u8) { open, cancelled, committed }) = .init(.open),
 operation: Operation = .check,
+candidate: ?release_candidate.ReleaseCandidate = null,
+discovery_attempted: bool = false,
+discovery_adopted: bool = false,
 checked: ?upgrade.Check = null,
 result: ?upgrade.Result = null,
 cleanup: upgrade.CleanupReceipts = .{},
@@ -26,12 +31,51 @@ cancelling: bool = false,
 started: bool = false,
 finished: bool = false,
 
+pub fn discover(self: *Self, init: std.process.Init) !void {
+    std.debug.assert(!self.discovery_attempted);
+    self.discovery_attempted = true;
+    self.operation = .discover;
+    try self.begin(init, "");
+}
+
+pub fn discovering(self: *const Self) bool {
+    return self.operation == .discover;
+}
+
+pub fn retireDiscovery(self: *Self, cancelled: bool) !bool {
+    std.debug.assert(self.discovering() and self.started);
+    self.discovery_adopted = self.discovery_adopted or !self.finished;
+    if (cancelled) {
+        self.cancel();
+        self.cancelling = true;
+    }
+    if (!try self.advance()) return false;
+    if (cancelled or self.cancelling or (self.discovery_adopted and self.failure != null)) {
+        if (self.candidate) |*candidate| candidate.deinit(self.allocator);
+        self.candidate = null;
+        self.operation = .check;
+    } else if (self.failure != null or self.candidate == null) {
+        self.deinit();
+    } else {
+        std.debug.assert(self.checked == null and self.result == null and self.task.thread == null);
+        self.* = .{ .allocator = self.allocator, .candidate = self.candidate, .download = self.download, .discovery_attempted = true };
+    }
+    return true;
+}
+
+pub fn availability(self: *const Self) ?upgrade_status.Version {
+    if (!self.discovering() or !self.finished or self.cancelling or self.failure != null) return null;
+    const candidate = self.candidate orelse return null;
+    return newerRelease(@import("transport_options").version, candidate.version);
+}
+
 pub fn begin(self: *Self, init: std.process.Init, store: []const u8) !void {
     std.debug.assert(!self.started and self.task.thread == null);
     self.init = init;
     self.store = store;
     self.allocator = init.gpa;
     self.started = true;
+    self.discovery_attempted = true;
     if (self.cancelling) return self.finish();
     self.task.start(init.io, self, work) catch |err| {
         self.failure = err;
@@ -43,13 +87,20 @@ pub fn begin(self: *Self, init: std.process.Init, store: []const u8) !void {
 fn work(raw: *anyopaque, task: *ClientTask) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     switch (self.operation) {
-        .check => self.checked = try upgrade.check(self.init, self.allocator, self.store, &task.cancellation, &self.download),
+        .discover => self.candidate = try upgrade.discoverRelease(self.init, self.allocator, &task.cancellation, &self.download),
+        .check => self.checked = try upgrade.checkDiscovered(self.init, self.allocator, self.store, &task.cancellation, &self.download, &self.candidate),
         .install => self.result = try upgrade.install(self.init, self.allocator, &self.checked.?, &task.cancellation, .{ .context = self, .report = progress }, &self.cleanup, &self.download),
     }
 }
 
+fn newerRelease(running_text: []const u8, candidate: @import("release_candidate.zig").Version) ?upgrade_status.Version {
+    const running = @import("release_candidate.zig").Version.parse(running_text) catch return null;
+    return if (running.order(candidate) == .lt) version(candidate) else null;
+}
+
 fn progress(raw: *anyopaque, phase: upgrade.Phase) void {
     const self: *Self = @ptrCast(@alignCast(raw));
+    std.debug.assert(!self.finished);
     if (phase == .publishing) {
         if (self.gate.cmpxchgStrong(.open, .committed, .acq_rel, .acquire) != null) {
             self.task.cancellation.requestStop();
@@ -119,9 +170,10 @@ pub fn settle(self: *Self) void {
 pub fn deinit(self: *Self) void {
     self.settle();
     if (self.result) |*result| result.deinit(self.allocator);
+    if (self.candidate) |*candidate| candidate.deinit(self.allocator);
     if (self.checked) |*checked| checked.deinit(self.allocator);
     self.download.deinit(self.allocator);
-    self.* = .{};
+    self.* = .{ .discovery_attempted = self.discovery_attempted };
 }
 
 pub fn status(self: *const Self) upgrade_status.Run {
@@ -159,7 +211,7 @@ fn ending(self: *const Self) upgrade_status.Ended {
         if (!upgrade.compatible(result)) return .{ .incompatible = target };
         const restarted = result.hosts.totals().restarted != 0;
         if (result.installation == .unchanged and !restarted) {
-            if (selected.order(checked.candidate.version) == .gt) return .superseded;
+            if (selected.order(checked.candidate.version) == .gt) return .{ .superseded = target };
             return .{ .up_to_date = target };
         }
         return .{ .upgraded = .{ .version = target, .restarted = restarted } };
@@ -499,7 +551,7 @@ test "how a run ends, as the status bar names it" {
         .{ .job = .{ .operation = .install, .result = .{ .installation = unchanged, .hosts = .{ .version = .{ .schema = 1, .patch = 2 }, .entries = @constCast(&[_]@import("host_restart_all.zig").Entry{.{ .socket = "", .store = "", .state = .{ .outcome = .not_needed } }}) }, .store = "" } }, .ended = .{ .up_to_date = v }, .outcome = .compatible },
         .{ .job = .{ .operation = .install, .result = .{ .installation = unchanged, .hosts = .{ .version = .{ .schema = 1, .patch = 2 }, .entries = @constCast(&[_]@import("host_restart_all.zig").Entry{.{ .socket = "", .store = "", .state = .{ .outcome = already_ready } }}) }, .store = "" } }, .ended = .{ .up_to_date = v }, .outcome = .compatible },
         .{ .job = .{ .operation = .install, .result = .{ .installation = unchanged, .hosts = .{ .version = .{ .schema = 1, .patch = 2 }, .entries = @constCast(&[_]@import("host_restart_all.zig").Entry{.{ .socket = "", .store = "", .state = .{ .outcome = ready } }}) }, .store = "" } }, .ended = .{ .upgraded = .{ .version = v, .restarted = true } }, .outcome = .compatible },
-        .{ .job = .{ .operation = .install, .result = .{ .installation = .{ .unchanged = .{ .operation_build = "/b", .selected_after = "/b", .selected_version = .{ .schema = 60, .patch = 2 } } }, .hosts = .{ .version = .{ .schema = 60, .patch = 2 }, .entries = @constCast(&[_]@import("host_restart_all.zig").Entry{.{ .socket = "", .store = "", .state = .{ .outcome = .superseded } }}) }, .store = "" } }, .ended = .superseded, .outcome = .compatible },
+        .{ .job = .{ .operation = .install, .result = .{ .installation = .{ .unchanged = .{ .operation_build = "/b", .selected_after = "/b", .selected_version = .{ .schema = 60, .patch = 2 } } }, .hosts = .{ .version = .{ .schema = 60, .patch = 2 }, .entries = @constCast(&[_]@import("host_restart_all.zig").Entry{.{ .socket = "", .store = "", .state = .{ .outcome = .superseded } }}) }, .store = "" } }, .ended = .{ .superseded = .{ .schema = 60, .patch = 2 } }, .outcome = .compatible },
         .{ .job = .{ .operation = .install, .result = .{ .installation = installed, .hosts = .{ .version = .{ .schema = 1, .patch = 2 }, .entries = @constCast(&[_]@import("host_restart_all.zig").Entry{.{ .socket = "", .store = "", .state = .{ .outcome = .{ .client_incompatible = 123 } } }}) }, .store = "" } }, .ended = .{ .incompatible = v }, .outcome = .incompatible },
         .{ .job = .{ .operation = .install, .result = .{ .installation = installed, .hosts = .{ .version = .{ .schema = 1, .patch = 2 }, .entries = @constCast(&[_]@import("host_restart_all.zig").Entry{.{ .socket = "", .store = "", .state = .{ .outcome = .{ .unconfirmed = .verifying } } }}) }, .store = "" } }, .ended = .{ .incompatible = v }, .outcome = .incompatible },
         .{ .job = .{ .operation = .install, .result = .{ .installation = unchanged, .hosts = .{ .version = .{ .schema = 1, .patch = 2 }, .entries = @constCast(&[_]@import("host_restart_all.zig").Entry{.{ .socket = "", .store = "", .state = .{ .outcome = .replacement_observed } }}) }, .store = "" } }, .ended = .{ .incompatible = v }, .outcome = .incompatible },
@@ -514,7 +566,13 @@ test "how a run ends, as the status bar names it" {
         job.started = true;
         job.checked = news_check;
         job.finish();
-        try std.testing.expectEqualDeep(upgrade_status.Run{ .ended = .{ .how = case.ended, .outcome = case.outcome } }, job.status());
+        for (std.enums.values(upgrade.Phase)) |phase| {
+            job.phase.store(phase, .release);
+            try std.testing.expectEqualDeep(upgrade_status.Run{ .ended = .{ .how = case.ended, .outcome = case.outcome } }, job.status());
+            var buffer: [upgrade_status.max_line_bytes]u8 = undefined;
+            try std.testing.expect(std.mem.indexOf(u8, upgrade_status.line(job.status(), &buffer, .unicode).text, "Publishing") == null);
+            try std.testing.expect(std.mem.indexOf(u8, upgrade_status.fieldTail(job.status(), &buffer), "publishing") == null);
+        }
         job.result = null;
         job.checked = null;
         if (job.failure != null) try std.testing.expectEqualDeep(case.ended, job.ending());
@@ -543,7 +601,7 @@ test "a newer build already selected installs quietly: no older release found, t
     try std.testing.expectEqual(upgrade_status.Run.checking, job.status());
     job.result = .{ .installation = .{ .unchanged = .{ .operation_build = "/b", .selected_after = "/b", .selected_version = .{ .schema = 60, .patch = 2 } } }, .hosts = .{ .version = .{ .schema = 60, .patch = 2 }, .entries = @constCast(&[_]@import("host_restart_all.zig").Entry{.{ .socket = "", .store = "", .state = .{ .outcome = .superseded } }}) }, .store = "" };
     job.finish();
-    try std.testing.expectEqualDeep(upgrade_status.Run{ .ended = .{ .how = .superseded, .outcome = .compatible } }, job.status());
+    try std.testing.expectEqualDeep(upgrade_status.Run{ .ended = .{ .how = .{ .superseded = .{ .schema = 60, .patch = 2 } }, .outcome = .compatible } }, job.status());
     job.result = null;
     job.checked = null;
 }
@@ -636,45 +694,65 @@ test "Upgrade status derives every version from the publication target across ca
         .selected_after = "/pinned/target",
         .selected_version = target,
     };
-    const outcomes = [_]HostLifecycle.ActivationOutcome{
+    const outcomes = [_]?HostLifecycle.ActivationOutcome{
+        null,
+        .not_needed,
+        .superseded,
+        .cancelled,
         .{ .ready = .{ .instance = @splat(1), .pid = 42 } },
         .{ .already_ready = .{ .instance = @splat(2), .pid = 43 } },
         .{ .client_incompatible = 44 },
         .{ .unconfirmed = .verifying },
+        .{ .unsupported = .incompatible },
+        .replacement_observed,
+        .{ .failed = .starting },
+        .{ .refused = .{ .stage = .checking, .failure = @import("start_report.zig").Failure.init(.settings_invalid, "typed refusal") } },
     };
     for ([_]release.Version{ .{ .schema = 60, .patch = 9 }, target, .{ .schema = 62, .patch = 0 } }) |candidate| {
         for ([_]bool{ false, true }) |installed| {
             for (outcomes) |activation| {
-                var entries = [_]restart_all.Entry{.{ .socket = "/socket", .store = "/store", .state = .{ .outcome = activation } }};
+                var entries = [_]restart_all.Entry{.{ .socket = "/socket", .directory = "/store", .store = "opaque-store-identity", .state = .{ .outcome = activation orelse .not_needed } }};
+                const host_entries: []restart_all.Entry = if (activation == null) entries[0..0] else &entries;
                 var job: Self = .{ .started = true, .operation = .install, .checked = news_check };
                 job.checked.?.candidate.version = candidate;
                 job.checked.?.selected.released.version = if (installed) .{ .schema = 1, .patch = 0 } else target;
-                job.checked.?.hosts.entries = &entries;
+                job.checked.?.hosts.entries = host_entries;
                 const preparing = job.status();
-                try std.testing.expectEqualDeep(upgrade_status.Run{ .installing = .{ .found = .{ .host = .{ .running = 1 } } } }, preparing);
+                const already_current = !installed and target.order(candidate) != .lt and activation == null;
                 var buffer: [upgrade_status.max_line_bytes]u8 = undefined;
-                try std.testing.expectEqualStrings("Preparing Upgrade · restarts every eligible Host (1 found) · esc cancels", upgrade_status.line(preparing, &buffer, .unicode).text);
-                try std.testing.expectEqualStrings(" · preparing Upgrade…", upgrade_status.fieldTail(preparing, &buffer));
+                if (already_current) {
+                    try std.testing.expectEqual(upgrade_status.Run.checking, preparing);
+                    try std.testing.expectEqualStrings("Checking for updates…", upgrade_status.line(preparing, &buffer, .unicode).text);
+                    try std.testing.expectEqualStrings(" · checking for updates…", upgrade_status.fieldTail(preparing, &buffer));
+                } else {
+                    try std.testing.expectEqualDeep(upgrade_status.Run{ .installing = .{ .found = .{ .host = if (activation == null) .none else .{ .running = 1 } } } }, preparing);
+                    try std.testing.expectEqualStrings(if (activation == null) "Preparing Upgrade · no Hosts running · esc cancels" else "Preparing Upgrade · restarts every eligible Host (1 found) · esc cancels", upgrade_status.line(preparing, &buffer, .unicode).text);
+                    try std.testing.expectEqualStrings(" · preparing Upgrade…", upgrade_status.fieldTail(preparing, &buffer));
+                }
 
                 job.result = .{
                     .installation = if (installed) .{ .installed = receipt } else .{ .unchanged = receipt },
-                    .hosts = .{ .entries = &entries },
+                    .hosts = .{ .entries = host_entries },
                     .store = "/store",
                 };
                 job.finish();
-                const restarted = activation == .ready;
-                const incompatible = activation == .client_incompatible or activation == .unconfirmed;
+                const restarted = if (activation) |outcome| outcome == .ready else false;
+                const incompatible = if (activation) |outcome| outcome == .client_incompatible or outcome == .unconfirmed or outcome == .replacement_observed or outcome == .failed or outcome == .refused else false;
                 const superseded = !installed and !restarted and !incompatible and target.order(candidate) == .gt;
                 const ended: upgrade_status.Ended = if (incompatible)
                     .{ .incompatible = version(target) }
                 else if (superseded)
-                    .superseded
+                    .{ .superseded = version(target) }
                 else if (!installed and !restarted)
                     .{ .up_to_date = version(target) }
                 else
                     .{ .upgraded = .{ .version = version(target), .restarted = restarted } };
                 const run = job.status();
                 try std.testing.expectEqualDeep(ended, run.ended.how);
+                const control = upgrade_status.control("0.1.0", null, run, &buffer, .unicode);
+                try std.testing.expectEqualStrings("0.61.2", control.text);
+                try std.testing.expectEqual(.quiet, control.tone);
+                try std.testing.expect(control.enabled);
                 const line = upgrade_status.line(run, &buffer, .unicode).text;
                 try std.testing.expectEqualStrings(if (incompatible)
                     "Rui 0.61.2 installed · restart rui to continue · your draft is kept until you leave"
@@ -721,4 +799,113 @@ test "Upgrade publication version survives cancellation and restart discovery or
         try std.testing.expectEqualDeep(upgrade_status.Version{ .schema = 61, .patch = 2 }, if (failure == error.Cancelled) ended.upgraded.version else ended.incompatible);
         try std.testing.expect(job.hasGuidance());
     }
+}
+
+test "background discovery domain covers version order publication failure cancellation and once-only retirement" {
+    const Candidate = @import("release_candidate.zig").Version;
+    const running_version = Candidate.parse(@import("transport_options").version) catch null;
+    const newer_candidate = if (running_version) |running| running.order(.{ .schema = 999, .patch = 2 }) == .lt else false;
+    for ([_]struct { []const u8, Candidate, bool }{
+        .{ "0.60.1", .{ .schema = 60, .patch = 0 }, false },
+        .{ "0.60.1", .{ .schema = 60, .patch = 1 }, false },
+        .{ "0.60.1", .{ .schema = 60, .patch = 2 }, true },
+        .{ "0.60.1", .{ .schema = 61, .patch = 0 }, true },
+        .{ "0.60.1", .{ .schema = 59, .patch = 999 }, false },
+        .{ "source", .{ .schema = 60, .patch = 2 }, false },
+    }) |case| {
+        const available = newerRelease(case[0], case[1]);
+        try std.testing.expectEqual(case[2], available != null);
+        if (available) |found| try std.testing.expectEqualDeep(version(case[1]), found);
+    }
+    const Worker = struct {
+        fn run(raw: *anyopaque, _: *ClientTask) !void {
+            const job: *Self = @ptrCast(@alignCast(raw));
+            std.debug.assert(job.operation == .discover);
+        }
+    };
+    for (0..4) |case| {
+        var init: std.process.Init = undefined;
+        init.io = std.testing.io;
+        var job: Self = .{ .init = init, .allocator = std.testing.allocator, .started = true, .operation = .discover, .discovery_attempted = true, .candidate = try release_candidate.fromEffectiveUrl(std.testing.allocator, "https://fixture/releases/tag/v0.999.2", "https://fixture", "https://fixture", "linux-x86_64") };
+        defer job.deinit();
+        try std.testing.expectEqual(@as(?upgrade_status.Version, null), job.availability());
+        try job.task.start(init.io, &job, Worker.run);
+        try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), &job.task, ClientTask.completed);
+        if (case == 1) job.cancel();
+        if (case == 2) job.failure = error.ConnectionRefused;
+        if (case == 3) {
+            job.candidate.?.deinit(std.testing.allocator);
+            job.candidate = null;
+        }
+        try std.testing.expect(try job.advanceWith(Worker.run));
+        try std.testing.expect(job.finished and job.operation == .discover);
+        try std.testing.expect(job.task.thread == null and job.checked == null and job.result == null);
+        try std.testing.expectEqual(Outcome.unchanged, job.outcome);
+        try std.testing.expectEqual(case == 0 and newer_candidate, job.availability() != null);
+        job.deinit();
+        try std.testing.expect(job.discovery_attempted);
+        try std.testing.expect(!job.started and !job.cancelling);
+    }
+}
+
+test "discovery handoff domain retains validated candidate and transport only for its accepted attempt" {
+    const Worker = struct {
+        var release_worker: std.atomic.Value(bool) = .init(false);
+        var fail: bool = false;
+
+        fn run(raw: *anyopaque, _: *ClientTask) !void {
+            const job: *Self = @ptrCast(@alignCast(raw));
+            try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), &release_worker, test_poll.isSet);
+            job.download.family = .ipv4;
+            if (fail) {
+                job.download.stderr = try job.allocator.dupe(u8, "curl fixture final");
+                return error.ReleaseDownloadFailed;
+            }
+            job.candidate = try release_candidate.fromEffectiveUrl(job.allocator, "https://fixture/releases/tag/v0.999.2", "https://fixture", "https://fixture", "linux-x86_64");
+            job.candidate.?.sha256 = @splat(7);
+        }
+    };
+    for ([_]bool{ false, true }) |background_finished| for ([_]bool{ false, true }) |discovery_failed| for ([_]bool{ false, true }) |cancelled| {
+        var init: std.process.Init = undefined;
+        init.io = std.testing.io;
+        var job: Self = .{ .init = init, .allocator = std.testing.allocator, .started = true, .operation = .discover, .discovery_attempted = true };
+        defer job.deinit();
+        Worker.release_worker.store(background_finished, .release);
+        Worker.fail = discovery_failed;
+        defer Worker.release_worker.store(true, .release);
+        try job.task.start(init.io, &job, Worker.run);
+        if (background_finished) {
+            try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), &job.task, ClientTask.completed);
+            try std.testing.expect(try job.advance());
+        } else {
+            try std.testing.expect(!try job.retireDiscovery(cancelled));
+            try std.testing.expect(job.discovering() and job.task.thread != null and job.discovery_adopted);
+            Worker.release_worker.store(true, .release);
+            try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), &job.task, ClientTask.completed);
+        }
+        const candidate_url = if (job.candidate) |candidate| candidate.archive_url.ptr else null;
+        try std.testing.expect(try job.retireDiscovery(cancelled));
+        try std.testing.expect(!job.discovering() and job.task.thread == null and job.result == null and job.checked == null);
+        if (cancelled or (!background_finished and discovery_failed)) {
+            try std.testing.expect(job.started and job.finished and job.candidate == null);
+            const ended = job.status().ended;
+            try std.testing.expectEqual(Outcome.unchanged, ended.outcome);
+            try std.testing.expectEqualDeep(if (cancelled) upgrade_status.Ended.cancelled else upgrade_status.Ended{ .failed = .download }, ended.how);
+            if (!cancelled) try std.testing.expectEqualStrings("curl fixture final", job.download.stderr.?);
+        } else if (discovery_failed) {
+            try std.testing.expect(!job.started and !job.finished and job.candidate == null);
+            try std.testing.expectEqual(.automatic, job.download.family);
+            try std.testing.expect(job.download.stderr == null);
+        } else {
+            try std.testing.expect(!job.started and !job.finished and !job.cancelling);
+            try std.testing.expectEqual(candidate_url.?, job.candidate.?.archive_url.ptr);
+            try std.testing.expectEqual(.ipv4, job.download.family);
+            try std.testing.expectEqual(@as([32]u8, @splat(7)), job.candidate.?.sha256);
+            try std.testing.expect(!job.task.cancellation.stopped.load(.acquire));
+            try std.testing.expectEqual(.open, job.gate.load(.acquire));
+        }
+        job.deinit();
+        try std.testing.expect(job.candidate == null and job.download.stderr == null and !job.started);
+        try std.testing.expectEqual(.automatic, job.download.family);
+    };
 }

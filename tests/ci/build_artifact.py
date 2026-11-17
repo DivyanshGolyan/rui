@@ -53,14 +53,23 @@ def runner():
     return [os.environ.get("ImageOS"), os.environ.get("ImageVersion")]
 
 
+def compile_command(targets, part="all", *, jobs=None, pr_mode=False):
+    # Zig async slots also wait for subprocesses. Give every Linux x86_64
+    # producer the same overlap, including LLVM promotion builds. Local
+    # feedback supplies its own serialized budget without changing the graph.
+    mode = ["-Dpr-ci=true"] if pr_mode else []
+    if jobs is None and platform.system() == "Linux" and platform.machine() == "x86_64":
+        jobs = 8
+    if jobs is not None:
+        mode.append(f"-j{jobs}")
+    return ["zig", "build", "ci-build", *mode, "-Dci-targets=" + ",".join(targets), "-Dci-part=" + part]
+
+
 def build(targets, part="all"):
     prefix = Path(os.environ["RUNNER_TEMP"]) / "rui-compiled-build"
     if prefix.exists():
         shutil.rmtree(prefix)
-    # Zig async slots also wait for subprocesses; eight avoids serializing the
-    # independent compiles behind those waits on the four-core Linux producer.
-    mode = ["-Dpr-ci=true", "-j8"] if pr_ci() else []
-    subprocess.run(["zig", "build", "ci-build", *mode, "-Dci-targets=" + ",".join(targets), "-Dci-part=" + part,
+    subprocess.run([*compile_command(targets, part, pr_mode=pr_ci()),
                     "--prefix", str(prefix), "--summary", "all"], check=True)
     return prefix / "bin"
 

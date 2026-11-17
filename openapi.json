@@ -11877,6 +11877,18 @@
       "PageWork": {
         "type": "object",
         "properties": {
+          "creator": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 6,
+                "x-rui-max-bytes": 6
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "read_version": {
             "type": "string",
             "x-rui-max-bytes": 53
@@ -11934,6 +11946,7 @@
           }
         },
         "required": [
+          "creator",
           "read_version",
           "state",
           "turn",
@@ -12958,6 +12971,18 @@
               }
             ]
           },
+          "creator": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 6,
+                "x-rui-max-bytes": 6
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "label": {
             "anyOf": [
               {
@@ -13017,6 +13042,7 @@
           "tools",
           "permission_mode",
           "parent",
+          "creator",
           "label",
           "created_at",
           "revision",
@@ -14141,6 +14167,7 @@
                   "read_transcript",
                   "skill",
                   "start_agent",
+                  "stop_action",
                   "web_search"
                 ]
               },

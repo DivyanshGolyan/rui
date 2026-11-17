@@ -131,7 +131,7 @@ class AssertedTextSelectionTest(unittest.TestCase):
 
         graph = SimpleNamespace(targets=lambda path: {"test-logic"}, host=set(),
                                 live_conformance=set(), reached={"test-store": set()},
-                                compiled=set(), live_mysql=set())
+                                compiled=set(), live_mysql=set(), cores=set())
         text = "A fixture waits for this message"
         path = "src/render.zig"
         cases = [
@@ -189,7 +189,7 @@ class AssertedTextSelectionTest(unittest.TestCase):
     def test_only_changed_source_prose_gets_a_prevalence_scan(self):
         graph = SimpleNamespace(targets=lambda path: {"test-logic"}, host=set(),
                                 live_conformance=set(), reached={"test-store": set()},
-                                compiled=set(), live_mysql=set())
+                                compiled=set(), live_mysql=set(), cores=set())
         text = "A fixture waits for this message"
         table = {"host-launch-integration": {text, "Other unrelated screen prose"}}
         with (patch("select_tests.tree_fixture_literals", return_value=table) as scripts,
@@ -394,6 +394,14 @@ class RuleMatchTest(unittest.TestCase):
 
 
 class BuildModuleTest(unittest.TestCase):
+
+    def test_ci_producer_changes_compile_and_execute_its_integration_products(self):
+        result = select(["tests/ci/build_artifact.py"], "review", AVAILABLE)
+        for platform in ("targets", "native_targets"):
+            with self.subTest(platform=platform):
+                self.assertTrue({"check-full", "admission-debug-integration", "test-full"}
+                                <= set(result[platform]))
+        self.assertFalse(result["typecheck_macos"])
 
     def test_every_build_module_is_mapped(self):
         modules = {path.relative_to(build_files.ROOT).as_posix()
@@ -1816,6 +1824,7 @@ class FullCheckPartitionTest(unittest.TestCase):
             command = '''#!/bin/sh
 if [ "$1" = - ]; then exec "$TEST_PYTHON" "$@"; fi
 if [ "$(basename "${1:-}")" = host_process.py ] && [ "$2" = exec ]; then shift 2; exec "$@"; fi
+if [ "$(basename "${1:-}")" = store_shards.py ]; then shift 2; exec "$1"; fi
 fixture=$(basename "${1:-$0}")
 base_fixture=$fixture
 case "$fixture" in

@@ -312,8 +312,8 @@ Rui does not compact unchanged input again.
 
 ### Loading tools on demand
 
-The built-in catalog, in name order, is `bash`, `find_tools`, `message_agent`, `read_transcript`, `skill`, `start_agent`, `web_search`.
-Fresh Sessions default to `bash`, `skill` and `web_search`.
+The built-in catalog, in name order, is `bash`, `find_tools`, `message_agent`, `read_action`, `read_transcript`, `skill`, `start_agent`, `stop_action`, `web_search`.
+Fresh CLI and TUI Sessions allow all built-in tools and initially load `bash`, `find_tools`, `skill` and `web_search`.
 
 Set `--tools` to the tools a Session may use and `--loaded-tools` to the subset
 initially offered to its model.
@@ -322,7 +322,7 @@ For example:
 
 ```sh
 rui session configure --store "$RUI_STORE" --session "$RUI_ADDRESS" \
-  --tools bash,find_tools,message_agent,read_transcript,skill,start_agent,web_search \
+  --tools bash,find_tools,message_agent,read_action,read_transcript,skill,start_agent,stop_action,web_search \
   --loaded-tools bash,find_tools
 ```
 

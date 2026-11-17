@@ -478,12 +478,12 @@ class PrModeTest(unittest.TestCase):
         for constructor in (integration, ordinary):
             self.assertNotIn(".strip", constructor)
 
-    def test_only_linux_x64_pull_requests_use_the_fast_artifact(self):
+    def test_backend_and_job_limit_cover_each_event_and_platform(self):
         for event, system, machine, fast in (
-                ("pull_request", "Linux", "x86_64", True),
-                ("workflow_dispatch", "Linux", "x86_64", False),
-                ("pull_request", "Darwin", "arm64", False),
-                ("pull_request", "Linux", "aarch64", False)):
+                (event, system, machine,
+                 event == "pull_request" and system == "Linux" and machine == "x86_64")
+                for event in ("pull_request", "workflow_dispatch", "workflow_call", "push")
+                for system, machine in (("Linux", "x86_64"), ("Linux", "aarch64"), ("Darwin", "arm64"))):
             with self.subTest(event=event, system=system, machine=machine), \
                     patch.dict(os.environ, GITHUB_EVENT_NAME=event), \
                     patch.object(build_artifact.platform, "system", return_value=system), \
@@ -497,7 +497,10 @@ class PrModeTest(unittest.TestCase):
                 build_artifact.build(["check"])
                 command = run.call_args.args[0]
                 self.assertEqual("-Dpr-ci=true" in command, fast)
-                self.assertEqual("-j8" in command, fast)
+                self.assertEqual("-j8" in command, system == "Linux" and machine == "x86_64")
+                self.assertEqual(command.count("-j8"), int(system == "Linux" and machine == "x86_64"))
+                self.assertIn("-Dci-targets=check", command)
+                self.assertIn("-Dci-part=all", command)
                 self.assertEqual("-Dpr-ci=true" in run_selected.command(["check"]), fast)
 
 

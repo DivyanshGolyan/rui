@@ -641,20 +641,18 @@ test("activity search validates UTF-8 byte bounds and cancels between hits", asy
 	assert.equal((await iterator.next()).done, true);
 });
 
-test("session summaries preserve both parent references and top-level nulls", async () => {
-	const link: Link = {
-		exchange: async () => Buffer.from(JSON.stringify({
-			sessions: [
-				{ reference: "p33rs1", label: "caller", work: { state: { kind: "idle" } }, archive_state: "active", parent: null },
-				{ reference: "k7m2qx", label: "child", work: { state: { kind: "pending" } }, archive_state: "archiving", parent: "p33rs1" },
-			],
-			next: null,
-		})),
-	};
-	assert.deepEqual(await new Sessions(link).list(), [
-		{ id: "k7m2qx", label: "child", state: "pending", archiveState: "archiving", parent: "p33rs1" },
-		{ id: "p33rs1", label: "caller", state: "idle", archiveState: "active", parent: null },
-	]);
+test("session summaries preserve independent creator and parent references and nulls", async () => {
+	for (const parent of [null, "p33rs1"]) for (const creator of [null, "cr3at0"]) {
+		const link: Link = {
+			exchange: async () => Buffer.from(JSON.stringify({
+				sessions: [{ reference: "k7m2qx", label: "child", work: { state: { kind: "pending" } }, archive_state: "archiving", parent, creator }],
+				next: null,
+			})),
+		};
+		assert.deepEqual(await new Sessions(link).list(), [
+			{ id: "k7m2qx", label: "child", state: "pending", archiveState: "archiving", parent, creator },
+		]);
+	}
 });
 
 

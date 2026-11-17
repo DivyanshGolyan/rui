@@ -34,6 +34,7 @@ fn connection() !*wire.Connection {
         try root.open(.{ .address = .{ .unix_socket = config.socket }, .user = "root", .password = config.password, .database = "mysql" }, &refusal.writer);
         opened = true;
         for (schema.mysql_session) |sql| try run(sql);
+        try run("SET SESSION sql_log_bin=0");
         try run("SET SESSION cte_max_recursion_depth=1000000");
     }
     return &root;
@@ -93,7 +94,7 @@ pub fn open(storage: *Store, tmp: *std.testing.TmpDir, io: std.Io, options: test
             }
             const database_name = std.mem.sliceTo(&entry.name, 0);
             try root.query(try std.fmt.bufPrint(&buffer, "SELECT IS_USED_LOCK('{s}') IS NULL", .{database_name}));
-            if (try readU64() == 0) continue;
+            if (try readU64(&root) == 0) continue;
             entry.dirty = true;
             try empty(database_name);
             std.heap.page_allocator.free(entry.path);
@@ -128,15 +129,16 @@ pub fn open(storage: *Store, tmp: *std.testing.TmpDir, io: std.Io, options: test
                 try text.writer.writeAll(rest);
                 try run(text.written());
             }
-            try run("CREATE USER IF NOT EXISTS 'rui_conformance'@'localhost' IDENTIFIED BY 'rui_conformance'");
-            try run(try std.fmt.bufPrint(&buffer, "GRANT SELECT,INSERT,UPDATE ON {s}.* TO 'rui_conformance'@'localhost'", .{name}));
+            const config = (try dialect.rootConfig()).?;
+            try run(try std.fmt.bufPrint(&buffer, "CREATE USER IF NOT EXISTS '{s}'@'localhost' IDENTIFIED BY 'rui_conformance'", .{config.conformance_user}));
+            try run(try std.fmt.bufPrint(&buffer, "GRANT SELECT,INSERT,UPDATE ON {s}.* TO '{s}'@'localhost'", .{ name, config.conformance_user }));
         }
         databases.appendAssumeCapacity(.{ .name = fresh_name, .path = owned_path });
         break :name fresh_name;
     };
     const name = std.mem.sliceTo(&name_buffer, 0);
     const config = (try dialect.rootConfig()).?;
-    try storage.openTarget(io, .{ .mysql = .{ .address = .{ .unix_socket = config.socket }, .user = "rui_conformance", .password = "rui_conformance", .database = name } }, options.identity orelse path, .{ .served = options.served, .host_tool_set = options.host_tool_set });
+    try storage.openTarget(io, .{ .mysql = .{ .address = .{ .unix_socket = config.socket }, .user = config.conformance_user, .password = "rui_conformance", .database = name } }, options.identity orelse path, .{ .served = options.served, .host_tool_set = options.host_tool_set });
     storage.engine.mysql.state.testing_database = name_buffer;
 }
 
@@ -194,18 +196,18 @@ pub fn queryU64(storage: *Store, comptime sql: []const u8, args: anytype) !u64 {
     defer mutex.unlock(std.testing.io);
     try use(storage);
     try send(sql, args);
-    return readU64();
+    return readU64(&root);
 }
 
-fn readU64() !u64 {
+fn readU64(source: *wire.Connection) !u64 {
     const Row = struct { value: u64 };
     var columns: rows.Columns(Row) = undefined;
     var result: ?u64 = null;
-    while (!root.isReady()) switch (try root.next()) {
-        .columns => |n| columns = try rows.readColumns(Row, &root, n),
+    while (!source.isReady()) switch (try source.next()) {
+        .columns => |n| columns = try rows.readColumns(Row, source, n),
         .row => {
             var row: Row = undefined;
-            try rows.decodeRow(Row, &columns, &root, &row);
+            try rows.decodeRow(Row, &columns, source, &row);
             if (result == null) result = row.value;
         },
         .err => return error.QueryFailed,
@@ -263,7 +265,7 @@ pub fn rawQueryU64(storage: *Store, sql: []const u8) !u64 {
     defer mutex.unlock(std.testing.io);
     try use(storage);
     try root.query(sql);
-    return readU64();
+    return readU64(&root);
 }
 
 fn globalValue(comptime name: []const u8) !protocol.Bounded(32) {
@@ -318,6 +320,25 @@ fn refusesGlobal(comptime name: []const u8, bad: []const u8, expected: anyerror)
     try probe.open(.{ .address = .{ .unix_socket = config.socket }, .user = "root", .password = config.password, .database = "mysql" }, &refusal.writer);
     defer probe.close();
     try std.testing.expectError(expected, @import("engine/mysql_open.zig").open(probe, std.testing.io, .{ .database = "mysql" }, "/mysql-refusal-probe"));
+}
+
+test "store.mysql fixture disables binary logging only on its root session" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try openLive(&storage, &tmp);
+    defer storage.close() catch unreachable;
+    mutex.lockUncancelable(std.testing.io);
+    defer mutex.unlock(std.testing.io);
+    const fixture = try connection();
+    try fixture.query("SELECT @@session.sql_log_bin");
+    try std.testing.expectEqual(@as(u64, 0), try readU64(fixture));
+    const product = &storage.engine.mysql.state.connection;
+    try std.testing.expect(product.isReady());
+    try product.query("SELECT @@session.sql_log_bin");
+    try std.testing.expectEqual(@as(u64, 1), try readU64(product));
+    try fixture.query("SELECT @@global.log_bin");
+    try std.testing.expectEqual(@as(u64, 1), try readU64(fixture));
 }
 
 test "store.mysql fixture drain attributes write OKs even before failure" {
@@ -402,7 +423,7 @@ fn admitMetadata(name: []const u8, selector: []const u8) !Mysql {
     const config = (try dialect.rootConfig()).?;
     return Mysql.open(std.testing.io, .{
         .address = .{ .unix_socket = config.socket },
-        .user = "rui_conformance",
+        .user = config.conformance_user,
         .password = "rui_conformance",
         .database = name,
     }, selector, .{});
@@ -417,7 +438,7 @@ fn refusesMetadata(name: []const u8, selector: []const u8, expected: anyerror) !
     try std.testing.expectError(expected, admission);
     var buffer: [128]u8 = undefined;
     try root.query(try std.fmt.bufPrint(&buffer, "SELECT GET_LOCK('{s}',10)", .{name}));
-    try std.testing.expectEqual(@as(u64, 1), try readU64());
+    try std.testing.expectEqual(@as(u64, 1), try readU64(&root));
     try run("DO RELEASE_ALL_LOCKS()");
 }
 
@@ -513,14 +534,14 @@ test "store.mysql live metadata failures precede missing-key repair and ownershi
         };
         try run(case[0]);
         try root.query("SELECT epoch FROM store_owner WHERE owner_key=1");
-        const epoch = try readU64();
+        const epoch = try readU64(&root);
         try root.query("SELECT BIT_XOR(CRC32(CONCAT(meta_key,'=',meta_value))) FROM store_meta");
-        const before = try readU64();
+        const before = try readU64(&root);
         try refusesMetadata(name, selector.slice(), case[1]);
         try root.query("SELECT epoch FROM store_owner WHERE owner_key=1");
-        try std.testing.expectEqual(epoch, try readU64());
+        try std.testing.expectEqual(epoch, try readU64(&root));
         try root.query("SELECT BIT_XOR(CRC32(CONCAT(meta_key,'=',meta_value))) FROM store_meta");
-        try std.testing.expectEqual(before, try readU64());
+        try std.testing.expectEqual(before, try readU64(&root));
     }
     try run("DELETE FROM store_meta WHERE meta_key='unexpected'");
 }
@@ -543,9 +564,9 @@ test "store.mysql live metadata repair rolls back with a refused ownership updat
         defer run("DROP TRIGGER refuse_owner_update") catch @panic("cannot restore ownership updates");
         try refusesMetadata(name, name, error.StatementFailed);
         try root.query("SELECT count(*) FROM store_meta");
-        try std.testing.expectEqual(@as(u64, 0), try readU64());
+        try std.testing.expectEqual(@as(u64, 0), try readU64(&root));
         try root.query("SELECT epoch FROM store_owner WHERE owner_key=1");
-        try std.testing.expectEqual(epoch, try readU64());
+        try std.testing.expectEqual(epoch, try readU64(&root));
     }
     var repaired = try admitMetadata(name, name);
     const id = repaired.state.store_id;
@@ -553,9 +574,9 @@ test "store.mysql live metadata repair rolls back with a refused ownership updat
     try std.testing.expectEqual(epoch + 1, repaired.state.epoch);
     try repaired.close();
     try root.query("SELECT count(*) FROM store_meta");
-    try std.testing.expectEqual(@as(u64, 3), try readU64());
+    try std.testing.expectEqual(@as(u64, 3), try readU64(&root));
     try root.query("SELECT count(*) FROM store_meta WHERE meta_key='wire_version'");
-    try std.testing.expectEqual(@as(u64, 0), try readU64());
+    try std.testing.expectEqual(@as(u64, 0), try readU64(&root));
     var reopened = try admitMetadata(name, name);
     defer reopened.close() catch unreachable;
     try std.testing.expectEqualStrings(&id, &reopened.state.store_id);

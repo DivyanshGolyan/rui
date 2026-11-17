@@ -181,7 +181,7 @@ fn readChangedSessions(a: *ReadAccess, request: *const session_list.ListSessions
         .{ .last = .{ .delta = .changed, .since = next } });
 }
 
-const settings_columns = "session.session_ref,session.parent_ref,session.workspace,session.provider,session.model," ++ tool_set.namesSql("session.tool_set_id") ++ " AS tools,session.permission_mode,session.label,session.created_at,session.revision,session.next_position," ++
+const settings_columns = "session.session_ref,session.parent_ref,session.creator_ref,session.workspace,session.provider,session.model," ++ tool_set.namesSql("session.tool_set_id") ++ " AS tools,session.permission_mode,session.label,session.created_at,session.revision,session.next_position," ++
     command_domain.archive_state_sql ++ " AS archive_state," ++
     "(SELECT pin_command.command_seq FROM session_pin pin JOIN core_command pin_command ON pin_command.command_key=pin.command_key WHERE pin.session_ref=session.session_ref) AS pin_order," ++
     "(" ++ report_domain.person_message_sql ++ ") AS from_person_at," ++
@@ -208,7 +208,7 @@ const list_row = rsql.Read(.{
 
 const list_row_bare = rsql.Read(.{
     .sql = "SELECT " ++ settings_columns ++ "NULL AS first_admission,NULL AS first_position,NULL AS first_admitted_at,NULL AS first_sender," ++
-        "NULL AS first_length,NULL AS first_digest,NULL AS first_private FROM session" ++ last_line_joins ++ " WHERE session.session_ref=?1",
+        "NULL AS first_length,NULL AS first_digest,NULL AS first_private,NULL AS first_form FROM session" ++ last_line_joins ++ " WHERE session.session_ref=?1",
     .Args = struct { session: []const u8, first_action: ?u64 },
     .Row = ListRow,
     .cardinality = .each,
@@ -217,6 +217,7 @@ const list_row_bare = rsql.Read(.{
 const ListRow = struct {
     session_ref: SessionText,
     parent_ref: ?Bounded(session_id.bytes),
+    creator_ref: ?Bounded(session_id.bytes),
     workspace: Bounded(workspace_path.max_bytes),
     provider: provider_name.Provider,
     model: Bounded(model_capability.max_model_bytes),
@@ -240,13 +241,22 @@ const ListRow = struct {
     first_length: ?u64,
     first_digest: ?[32]u8,
     first_private: ?bool,
+    first_form: ?u8,
+};
+
+const ListScratch = struct {
+    firsts: [session_list.session_list_page_size]FirstCandidates,
+    works: [session_list.session_list_page_size]WorkRead,
+    shown: [session_list.session_list_page_size]ShownRow,
+    decoded: ListRow,
 };
 
 noinline fn readRows(a: *ReadAccess, references: []const change_ring.Id, visitor: anytype) !void {
     const now_ms = try store_core.readUnixMilliseconds(a.store.io);
     try visitor.head();
-    var firsts: [session_list.session_list_page_size]FirstCandidates = undefined;
-    var works: [session_list.session_list_page_size]WorkRead = undefined;
+    const scratch = a.store.reportScratch(ListScratch);
+    const firsts = &scratch.firsts;
+    const works = &scratch.works;
     for (references, firsts[0..references.len], works[0..references.len]) |*reference, *first, *work| {
         first.queue(a, reference);
         work.* = .{ .session = reference };
@@ -255,16 +265,16 @@ noinline fn readRows(a: *ReadAccess, references: []const change_ring.Id, visitor
     try runList(a);
     for (works[0..references.len]) |*work| try work.advance();
     try readWorks(a, works[0..references.len]);
-    var shown: [session_list.session_list_page_size]ShownRow = undefined;
+    const shown = &scratch.shown;
     for (references, firsts[0..references.len], works[0..references.len], shown[0..references.len]) |*reference, *first, *work, *row|
         row.* = .{ .reference = reference, .first = first.admission(), .work = work };
-    try readRowSettings(a, shown[0..references.len], std.math.cast(u64, now_ms) orelse return error.IntegerOutOfRange, visitor);
+    try readRowSettings(a, shown[0..references.len], &scratch.decoded, std.math.cast(u64, now_ms) orelse return error.IntegerOutOfRange, visitor);
 }
 
 const ShownRow = struct { reference: *const change_ring.Id, first: u64, work: *const WorkRead };
 
-noinline fn readRowSettings(a: *ReadAccess, rows: []const ShownRow, now_ms: u64, visitor: anytype) !void {
-    var read: RowsRead(@TypeOf(visitor)) = .{ .read_version = .{ .instance = a.store.instance, .generation = a.store.commitGeneration() }, .decoded = a.store.reportScratch(ListRow), .rows = rows, .now_ms = now_ms, .visitor = visitor };
+noinline fn readRowSettings(a: *ReadAccess, rows: []const ShownRow, decoded: *ListRow, now_ms: u64, visitor: anytype) !void {
+    var read: RowsRead(@TypeOf(visitor)) = .{ .read_version = .{ .instance = a.store.instance, .generation = a.store.commitGeneration() }, .decoded = decoded, .rows = rows, .now_ms = now_ms, .visitor = visitor };
     for (rows) |row| {
         const work = try row.work.work(0, now_ms);
         if (row.first == 0)
@@ -273,7 +283,10 @@ noinline fn readRowSettings(a: *ReadAccess, rows: []const ShownRow, now_ms: u64,
             a.readEach(list_row, .{ .session = row.reference, .first_action = work.first_action, .first = row.first }, 1, &read);
     }
     const ran = runList(a);
-    if (read.failure) |err| return err;
+    if (read.failure) |err| {
+        if (read.unsupported_first) |first| try report_domain.verifyFirstMessage(a, first);
+        return err;
+    }
     try ran;
     if (read.shown != rows.len) return error.CorruptStore;
 }
@@ -286,6 +299,7 @@ fn RowsRead(comptime Visitor: type) type {
         now_ms: u64,
         visitor: Visitor,
         shown: usize = 0,
+        unsupported_first: ?struct { first_admission: ?rsql.Positive, first_form: ?u8, first_length: ?u64, first_digest: ?[32]u8 } = null,
         failure: ?(ErrorOf(rowValues) || ErrorOf(@typeInfo(Visitor).pointer.child.row)) = null,
 
         pub fn visit(read: *@This(), row: *const ListRow) bool {
@@ -293,6 +307,7 @@ fn RowsRead(comptime Visitor: type) type {
             var sorted: [tool_name.max_tools][]const u8 = undefined;
             var last_text: Bounded(session_list.max_last_line_bytes) = undefined;
             var values = rowValues(read.rows, read.shown, read.now_ms, row, &sorted, &last_text) catch |err| {
+                if (err == error.InputPartsNotSupported) read.unsupported_first = .{ .first_admission = row.first_admission, .first_form = row.first_form, .first_length = row.first_length, .first_digest = row.first_digest };
                 read.failure = err;
                 return false;
             };
@@ -321,6 +336,7 @@ fn rowValues(rows: []const ShownRow, index: usize, now_ms: u64, row: *const List
         .pin_order = if (row.pin_order) |rank| rank.get() else null,
         .reference = row.session_ref.slice(),
         .parent = if (row.parent_ref) |*parent| parent.slice() else null,
+        .creator = if (row.creator_ref) |*creator| creator.slice() else null,
         .workspace = row.workspace.slice(),
         .provider = row.provider,
         .model = row.model.slice(),

@@ -265,13 +265,14 @@ def prove_model_action_read(state, *, deadline=None):
         first = json.loads(endpoint.requests[0])
         offered = [tool["name"] for item in first["input"] if item.get("type") == "additional_tools" for tool in item["tools"]]
         assert "read_action" in offered, first
-        pending = command("action", "read", "--store", store, "--session", session, "--action", identity)
-        model_read("pending-read", pending)
-        assert len(endpoint.requests) == 4 and not (workspace / "launches").exists()
         allow(case, store, "allow", session, identity)
         wait_for(lambda: (workspace / "ready").exists(), "fsynced single producer launch")
         pid = int((workspace / "launches").read_text())
         assert process_exists(pid)
+        running = command("action", "read", "--store", store, "--session", session, "--action", identity)
+        assert running["state"] == "attempted" and running["final"] is None, running
+        model_read("running-read", running)
+        assert len(endpoint.requests) == 4
         with endpoint.lock:
             endpoint.responses.append(fixture.sse_answer("delivered-answer", "delivered-reason", "delivered-message", "final delivered")[0])
         gate.release()
@@ -374,3 +375,91 @@ def prove_automatic_background(state, *, deadline=None):
         finally:
             dispose_all(gate.release, lambda: dispose_owner_case(host, endpoint, thread), lambda: (case / "witness.json").write_text(json.dumps(evidence, indent=2) + "\n"))
     return outcomes
+
+
+def prove_message_background_and_stop(state, *, deadline=None):
+    """A new Message interrupts a running call, then the model stops it."""
+    from bash_fixture import dispose_owner_case
+
+    deadline = time.monotonic() + 180 if deadline is None else deadline
+    case = state / "message-background-stop"
+    case.mkdir(mode=0o700)
+    workspace = case / "workspace"
+    workspace.mkdir()
+    store = case / "store"
+    gate = ReleaseGate(workspace / "producer-gate")
+    producer = (
+        "import os,pathlib; "
+        "pathlib.Path('ready').write_text(str(os.getpid())); "
+        "open('producer-gate','rb').read()"
+    )
+    args = json.dumps({"cmd": "exec " + shlex.join([sys.executable, "-c", producer]),
+                       "description": "Wait for a new message", "timeout_ms": 60000})
+    endpoint = fixture.SuccessEndpoint([
+        fixture.sse_tool_calls("message-target-calls", [("bash", "message-target-call", args)]),
+        fixture.sse_answer("message-answer", "message-reason", "message-output", "message acknowledged")[0],
+    ])
+    thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+    host = session = pid = None
+    evidence = {}
+
+    def wait_for(observe, description):
+        return fixture.wait_for(observe, description, deadline=deadline)
+
+    try:
+        thread.start()
+        host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses", active_capacity=2)
+        configured = fixture.command(
+            "session", "configure", "--store", store, "--key", "configure", "--record", case / "configure.json",
+            "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-sol",
+            "--tools", "bash,read_action", "--permission-mode", "ask",
+        )
+        session = configured["context"]["session"]
+        fixture.message(case, store, "target", session, "Start a long running command")
+        identity = wait_for(lambda: action_for(store, session), "target awaiting approval")["action"]
+        allow(case, store, "allow", session, identity)
+        wait_for(lambda: (workspace / "ready").exists(), "target process running")
+        pid = int((workspace / "ready").read_text())
+        assert process_exists(pid)
+        gate.assert_held()
+        fixture.message(case, store, "interrupt", session, "Please answer this message")
+        wait_for(lambda: fixture.completed_observation(store, "interrupt"), "new message answered")
+        assert fixture.read_result(store, "interrupt") == b"message acknowledged"
+        continuation = json.loads(endpoint.requests[1])
+        outputs = [item for item in continuation["input"] if item.get("type") == "function_call_output" and item.get("call_id") == "message-target-call"]
+        assert len(outputs) == 1 and json.loads(outputs[0]["output"]) == {"action": identity, "execution": "background", "accepted": True}, outputs
+        assert any("Please answer this message" in json.dumps(item) for item in continuation["input"] if item.get("role") == "user"), continuation
+        assert process_exists(pid)
+        with endpoint.lock:
+            endpoint.responses.extend([
+                fixture.sse_tool_calls("stop-calls", [("stop_action", "stop-call", json.dumps({"action": identity}))]),
+                fixture.sse_answer("stop-answer", "stop-reason", "stop-output", "stopped")[0],
+            ])
+        fixture.message(case, store, "stop-request", session, "Stop that action")
+        wait_for(lambda: fixture.completed_observation(store, "stop-request"), "model stop completed")
+        assert fixture.read_result(store, "stop-request") == b"stopped"
+        final = wait_for(
+            lambda: value if (value := fixture.command("action", "read", "--store", store, "--session", session, "--action", identity))["state"] == "resolved" else None,
+            "stopped Action resolution",
+        )
+        assert final["final"]["code"] == "cancelled", final
+        wait_for(lambda: not process_exists(pid), "stopped process retired")
+        assert fixture.completed_observation(store, f"rui.core/action-final/{identity}") is None
+        stop_input = json.loads(endpoint.requests[-1])
+        stop_outputs = [item for item in stop_input["input"] if item.get("type") == "function_call_output" and item.get("call_id") == "stop-call"]
+        assert len(stop_outputs) == 1, stop_input
+        stop_result = json.loads(stop_outputs[0]["output"])
+        assert stop_result["state"] == "resolved" and stop_result["final"]["code"] == "cancelled", stop_result
+        evidence.update(action=identity, pid=pid, final=final["final"], stop_output=stop_outputs[0])
+    finally:
+        failed = sys.exception() is not None
+        dispose_all(
+            gate.release,
+            lambda: fixture.command("session", "stop", "--store", store, "--session", session, "--key", "dispose", "--record", case / "dispose.json") if failed and session is not None and host is not None and host.poll() is None else None,
+            lambda: fixture.wait_for(lambda: not process_exists(pid), "owned producer disposal", timeout=5) if pid is not None else None,
+            lambda: dispose_owner_case(host, endpoint, thread),
+            lambda: (case / "witness.json").write_text(json.dumps(evidence, ensure_ascii=False, indent=2) + "\n"),
+            lambda: (case / "provider-requests.json").write_text(json.dumps([json.loads(body) for body in endpoint.requests], ensure_ascii=False, indent=2) + "\n"),
+            lambda: retain_failure_state("message background and stop failure state", case) if failed else None,
+        )
+    return evidence

@@ -19,6 +19,7 @@ INHERITED = (
     "RUI_UPGRADE_FAILURES", "RUI_RENDERER_RETAIN_COMPARISON", "RUI_ACTIVITY_MEASURE", "RUI_ACTIVITY_ITEM_BYTES",
     "RUI_MEASURE_GLIBC_TUNABLES",
     "ZIG_GLOBAL_CACHE_DIR", "ZIG_LOCAL_CACHE_DIR", "ZIG_LOCAL_PKG_DIR",
+    "RUI_UNIT_TEST_TIMEOUT",  # run_selected preserves Zig's per-test budget in concurrent roots.
     *live_engines.VARIABLES,
 )
 NETWORK = network_variables.NETWORK
@@ -36,11 +37,17 @@ def enter():
 
 if __name__ == "__main__":
     enter()
-    if sys.argv[1:2] != ["exec"] or len(sys.argv) < 3:
-        sys.exit("usage: host_process.py exec COMMAND [ARGUMENT...]")
+    if sys.argv[1:2] not in (["exec"], ["exec-mysql"]) or len(sys.argv) < 3:
+        sys.exit("usage: host_process.py {exec|exec-mysql} COMMAND [ARGUMENT...]")
+    if sys.argv[1] == "exec-mysql":
+        with live_engines.mysql_lease(os.environ) as descriptor:
+            if descriptor is not None:
+                os.set_inheritable(descriptor, True)
+            os.execvp(sys.argv[2], sys.argv[2:])
     os.execvp(sys.argv[2], sys.argv[2:])
 
 import atexit
+from contextlib import contextmanager
 import http.client
 import http.server
 import ctypes
@@ -461,6 +468,17 @@ def retain_failure_state(label, state):
 
 def canonical_fixture_root(path):
     return pathlib.Path(path).resolve(strict=True)
+
+
+@contextmanager
+def short_interface_directory():
+    """Own a private explicit-interface directory, independent of long TMPDIR.
+
+    Canonicalize /tmp first: on macOS it is an alias of /private/tmp. The
+    selected Host and all client/peer cleanup must retire before this scope ends.
+    """
+    with tempfile.TemporaryDirectory(prefix="rui-if-", dir=canonical_fixture_root("/tmp")) as directory:
+        yield canonical_fixture_root(directory)
 
 
 DARWIN_TEMPORARY_ROOT_BYTES = len("/private/var/folders/XX/" + "X" * 30 + "/T")

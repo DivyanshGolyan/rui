@@ -2,12 +2,12 @@
 import contextlib
 import hashlib
 import http.server
-import io
 import itertools
 import json
 import os
 import pathlib
 import re
+import secrets
 import shlex
 import shutil
 import signal
@@ -15,123 +15,22 @@ import socket
 import stat
 import subprocess
 import sys
-import tarfile
 import tempfile
 import threading
+from urllib.parse import quote
+
+import live_engines
+import settings_fixture
 
 import host_process
 import os_semantics
 from host_process import canonical_fixture_root, dispose_all, start_ready_process, stop_process, wait_for
 from terminal_process import COLUMNS, ROWS, answers_to, terminal_process
 from terminal_screen import ScreenCapture, shown
+from upgrade_fixture import Gate, Releases
 
 
 TERMINAL_COLUMNS = max(COLUMNS, 140)
-
-
-class Gate:
-
-    def __init__(self):
-        self.entered = threading.Event()
-        self.release = threading.Event()
-
-    def hold(self):
-        self.entered.set()
-        wait_for(self.release.is_set, "fixture release gate", timeout=45)
-
-
-class Releases:
-
-    def __init__(self, binary, version):
-        target = os_semantics.native_release_target()
-        assert target is not None, "Upgrade supports darwin-arm64 and linux-x86_64"
-        self.version = version
-        self.name = f"rui-{version}-{target}.tar.gz"
-        self.archive = self.make_archive(binary)
-        self.digest = hashlib.sha256(self.archive).hexdigest()
-        self.requests = []
-        self.gates = {}
-        self.status = {}
-        self.errors = []
-        self.latest_location = None
-        self.sums_name = None
-        owner = self
-
-        class Handler(http.server.BaseHTTPRequestHandler):
-            def do_GET(self):
-                owner.requests.append(self.path)
-                try:
-                    if self.path in owner.gates:
-                        owner.gates[self.path].hold()
-                    status = owner.status.get(self.path, 200)
-                    location = None
-                    if self.path == "/releases/latest":
-                        status = owner.status.get(self.path, 302)
-                        location = owner.latest_location if owner.latest_location is not None else owner.origin + "/releases/redirect"
-                        body = b""
-                    elif self.path == "/releases/redirect":
-                        status = owner.status.get(self.path, 302)
-                        location = owner.origin + f"/releases/tag/v{owner.version}"
-                        body = b""
-                    elif self.path == f"/releases/tag/v{owner.version}":
-                        body = b"fixture release page; HTML is not release metadata"
-                    elif self.path == owner.sums_path:
-                        body = f"{owner.digest}  {owner.sums_name or owner.name}\n".encode()
-                    elif self.path == owner.archive_path:
-                        body = owner.archive
-                    else:
-                        status, body = owner.status.get(self.path, 404), b"unexpected fixture endpoint"
-                    self.send_response(status)
-                    if location:
-                        self.send_header("Location", location)
-                    self.send_header("Content-Length", str(len(body)))
-                    self.end_headers()
-                    self.wfile.write(body)
-                except (BrokenPipeError, ConnectionResetError):
-                    pass
-                except BaseException as error:
-                    owner.errors.append(error)
-
-            def log_message(self, *args):
-                pass
-
-        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        self.server.daemon_threads = False
-        self.origin = f"http://127.0.0.1:{self.server.server_port}"
-        self.archive_path = f"/releases/download/v{version}/{self.name}"
-        self.sums_path = f"/releases/download/v{version}/SHA256SUMS"
-        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
-        self.thread.start()
-
-    def make_archive(self, binary, *, invalid=False):
-        output = io.BytesIO()
-        root = self.name.removesuffix(".tar.gz")
-        with tarfile.open(fileobj=output, mode="w:gz") as archive:
-            if invalid:
-                data = b"not an executable\n"
-                entry = tarfile.TarInfo(f"{root}/bin/rui")
-                entry.mode, entry.size = 0o755, len(data)
-                archive.addfile(entry, io.BytesIO(data))
-            else:
-                archive.add(binary, arcname=f"{root}/bin/rui", recursive=False)
-            notices = b"Synthetic Upgrade fixture notices; native executable supplied by caller.\n"
-            entry = tarfile.TarInfo(f"{root}/THIRD_PARTY_NOTICES.md")
-            entry.mode, entry.size = 0o644, len(notices)
-            archive.addfile(entry, io.BytesIO(notices))
-        return output.getvalue()
-
-    def gate_archive(self):
-        gate = self.gates[self.archive_path] = Gate()
-        return gate
-
-    def close(self):
-        for gate in self.gates.values():
-            gate.release.set()
-        self.server.shutdown()
-        self.server.server_close()
-        self.thread.join(timeout=5)
-        assert not self.thread.is_alive(), "release server did not retire"
-        assert not self.errors, self.errors
 
 
 class CurlAttempts:
@@ -235,7 +134,12 @@ class Case:
         return self.run("upgrade", "--store", self.store, *args, expect=expect)
 
     def build(self, name, version=None, *, managed=True):
-        build = (self.home / ".local/lib/rui" if managed else self.root) / name
+        # Cases can share HOME to exercise a whole-Host batch. Retained
+        # artifacts still belong to each Case, not to that shared installation
+        # selector. Keep one managed leaf (the production ownership shape).
+        owner = hashlib.sha256(os.fsencode(self.root)).hexdigest()[:16]
+        build = self.home / ".local/lib/rui" / f"{owner}-{name}" if managed else self.root / name
+        # Never reuse an installation or overwrite an executable of a live Host.
         (build / "bin").mkdir(parents=True)
         executable = build / "bin/rui"
         if version is None:
@@ -254,15 +158,15 @@ class Case:
     def old_selection(self):
         self.select(self.build("synthetic-selected-old", "0.1.0"))
 
-    def start_host(self, name="retained-real-host", *, managed=True, store_hex=False, extra=(), source=False):
+    def start_host(self, name="retained-real-host", *, managed=True, store_hex=False, extra=(), sources_only=False, source=False):
         build = self.build(name, managed=managed)
         if source:
             (build / "revision").write_text("synthetic-source-revision-marker\n")
         destination = ["--store-hex", os.fsencode(self.store).hex()] if store_hex else ["--store", self.store]
         provider = [] if any(str(value).startswith("providers.") or str(value).startswith("providers=") for value in extra) else ["--set", 'providers={"codex":{}}']
+        defaults = [] if sources_only else ["--set", 'execution.activeCapacity=2', *provider]
         process, ready = start_ready_process(
-            [build / "bin/rui", "host", "serve", *destination,
-             "--set", 'execution.activeCapacity=2', *provider, *extra], env=self.env)
+            [build / "bin/rui", "host", "serve", *destination, *defaults, *extra], env=self.env, isolate_providers=not sources_only)
         self.hosts.append(process)
         self.ready = ready
         status = self.status()
@@ -306,8 +210,10 @@ class Case:
 @contextlib.contextmanager
 def case(root, binary, releases, name):
     value = Case(root, binary, releases, name)
+    complete = False
     try:
         yield value
+        complete = True
     finally:
         for gate in releases.gates.values():
             gate.release.set()
@@ -317,6 +223,11 @@ def case(root, binary, releases, name):
             releases.latest_location = None
             releases.sums_name = None
         dispose_all(value.close, reset_publication)
+        # Bound disk lifetime to the case, like process lifetime. Keep the
+        # failed case (including cleanup failures) for diagnosis, not every
+        # successfully retired installation from the preceding matrices.
+        if complete:
+            shutil.rmtree(value.root)
 
 
 def peer_pid(path):
@@ -330,7 +241,7 @@ def proof_ready(c, previous, old_host):
     assert status["status"] == "ready", status
     assert status["instance"] != previous["instance"], "old Host was not replaced"
     assert status["store"] == previous["store"]
-    assert status["active_capacity"] == previous["active_capacity"] == "2"
+    assert status["active_capacity"] == previous["active_capacity"]
     pid = peer_pid(c.ready["socket"])
     assert pid != old_host.pid
     assert os_semantics.process_executable(pid) == c.link.resolve(), "ready process is not selected pinned build"
@@ -612,8 +523,8 @@ def lifecycle_cases(root, binary, releases):
         c.old_selection()
         relative_bash = os.path.relpath("/bin/bash", pathlib.Path.cwd())
         old_host, previous = c.start_host(extra=("--set", "tools.bash.path=" + str(relative_bash)))
-        output = c.finish_upgrade(c.spawn_upgrade())
-        assert "Installed Rui" in output and "left running: launch configuration cannot be safely reconstructed" in output, output
+        output = c.finish_upgrade(c.spawn_upgrade(), success=False)
+        assert "Installed Rui" in output and "refused at checking" in output and '"code":"settings_invalid"' in output, output
         assert old_host.poll() is None and c.status()["instance"] == previous["instance"]
         assert os_semantics.process_executable(old_host.pid) != c.link.resolve()
 
@@ -814,14 +725,27 @@ class TerminalScreen:
         self.empty_session(case, session)
         return frame
 
-    def empty_chat(self, case, session, *, expected_notice=None):
+    def empty_chat(self, case, session):
         facts = self.empty_session(case, session)
-        footer = "alt+i info" if expected_notice is None else expected_notice
-        assert footer, "empty chat requires an info action or an exact retained notice"
-        frame = wait_for(self.observe, "empty chat model facts and expected footer", timeout=15,
+        frame = wait_for(self.observe, "empty chat model facts and chat-only footer", timeout=15,
                          ready=lambda screen: shown(f"│ {facts['model']} · ", screen)
-                         and shown(footer, screen))
+                         and shown("alt+i info", screen)
+                         and "Upgraded to " not in screen and " · upgraded to " not in screen)
         return frame
+
+    def quiet_version(self, version):
+        pattern = re.compile(rf"\s*(?:\d+(?:\.\d+)? (?:MB|GB)\s+)?{re.escape(version)}\s*")
+
+        def ready(frame):
+            if "Upgraded to " in frame or " · upgraded to " in frame:
+                return False
+            rows = frame.splitlines()
+            return any(row.split("│", 1)[0].strip() == "Settings"
+                       and index + 1 < len(rows)
+                       and pattern.fullmatch(rows[index + 1].split("│", 1)[0])
+                       for index, row in enumerate(rows))
+
+        return wait_for(self.observe, "quiet version below Settings without upgrade notices", timeout=15, ready=ready)
 
     def leave_empty_chat(self, case, session):
         self.send("\x1b")
@@ -871,7 +795,266 @@ class TerminalScreen:
             (destination / f"{name}.txt").write_text(self.capture.completed + "\n")
 
 
+def refused_source_cases(root, binary, releases):
+    for source in ("saved-relative", "file-relative", "relative-file-name", "invalid-document", "stdin-file", "stdin-lifetime"):
+        with contextlib.ExitStack() as interfaces, case(root, binary, releases, f"refused-source-{source}") as c:
+            c.root.chmod(0o700)
+            c.store.mkdir(mode=0o700)
+            runtime = interfaces.enter_context(host_process.short_interface_directory())
+            document = {"interface": {"dir": str(runtime)}, "providers": {}}
+            saved = c.store / "host.json"
+            saved.write_text(json.dumps(document))
+            saved.chmod(0o600)
+            extra = ()
+            if source in ("saved-relative", "file-relative", "relative-file-name", "invalid-document"):
+                path = saved if source == "saved-relative" else c.root / "settings.json"
+                relative = os.path.relpath("/bin/bash", pathlib.Path.cwd())
+                settings = dict(document)
+                if source not in ("invalid-document", "relative-file-name"):
+                    settings["tools"] = {"bash": {"path": relative}}
+                path.write_text(json.dumps(settings))
+                path.chmod(0o600)
+                if path != saved:
+                    extra = ("--settings", os.path.relpath(path, pathlib.Path.cwd()) if source == "relative-file-name" else path)
+                old, previous = c.start_host(extra=extra)
+                if source == "invalid-document":
+                    path.write_text('{"unknownFutureGroup":{}}')
+            else:
+                build = c.build("retained-stdin-source")
+                extra = ("--settings", "-") if source == "stdin-file" else ("--set", "interface.lifetime=stdin", "--set", "providers={}")
+                old = subprocess.Popen([str(build / "bin/rui"), "host", "serve", "--store", str(c.store), *extra],
+                                       env=c.env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                c.hosts.append(old)
+                if source == "stdin-file":
+                    old.stdin.write(settings_fixture.frame(document))
+                    old.stdin.flush()
+                settings_fixture.wait_for_host(runtime / "rui.sock", c.store, old)
+                # Framed foreground serve owns a text startup line, not a
+                # public-status JSON envelope. Control already proved ready.
+                c.ready = {"socket": str(runtime / "rui.sock")}
+                previous = c.status()
+            c.select(c.build("selected-target"))
+            c.binary = c.link
+            output = c.run("host", "restart", "--all", expect=6, timeout=60)
+            assert "refused at checking" in output and '"code":"settings_invalid"' in output, (source, output)
+            assert old.poll() is None and c.status()["instance"] == previous["instance"], (source, output)
+    print("upgrade native: stdin, relative layers and invalid document refused before stop", flush=True)
+
+
+def mysql_restart_cases(root, binary, releases):
+    socket_path = os.environ.get(live_engines.MYSQL_SOCKET)
+    password = os.environ.get(live_engines.MYSQL_ROOT_PASSWORD)
+    if not socket_path or not password:
+        assert "mysql" not in os.environ.get(live_engines.REQUIRE, "").split(","), "required MySQL restart fixture has no server"
+        print("MySQL upgrade restart: skipped (no RUI_TEST_MYSQL_* server)", flush=True)
+        return
+    admin = pathlib.Path(os.environ["RUI_TEST_MYSQL_ADMIN"]).resolve()
+
+    def sql(text):
+        return subprocess.run([admin], input=text, text=True, capture_output=True, check=True, timeout=40).stdout.strip()
+
+    for placement in ("default", "external", "contended"):
+        database = "rui_upgrade_" + secrets.token_hex(6)
+        runtime = None
+        waiter = None
+        try:
+            sql(f"CREATE DATABASE {database} CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin")
+            ddl = subprocess.check_output([binary, "store", "schema", "--engine", "mysql"], text=True, timeout=20)
+            sql(f"USE {database};" + ddl)
+            with contextlib.ExitStack() as interfaces, case(root, binary, releases, "mysql-" + placement) as c, case(root, binary, releases, "mysql-later-" + placement) as later:
+                c.store.mkdir(mode=0o700)
+                c.env["PR6_PRIVATE_DATABASE_URL"] = f"mysql://root:{quote(password, safe='')}@{quote(socket_path, safe='')}/{database}"
+                document = {"store": {"mysql": {"url": {"env": "PR6_PRIVATE_DATABASE_URL"}}}, "providers": {}}
+                if placement != "default":
+                    runtime = interfaces.enter_context(host_process.short_interface_directory())
+                    document["interface"] = {"dir": str(runtime)}
+                saved = c.store / "host.json"
+                saved.write_text(json.dumps(document))
+                saved.chmod(0o600)
+                old, previous = c.start_host(sources_only=True)
+                runtime = pathlib.Path(c.ready["socket"]).parent
+                # Only the captured Host has this credential variable. Both
+                # target check and start must use its environment, not caller's.
+                c.env = dict(c.env)
+                del c.env["PR6_PRIVATE_DATABASE_URL"]
+                if placement == "contended":
+                    later.home, later.env, later.link = c.home, c.env, c.link
+                    later.store.mkdir(mode=0o700)
+                    later_runtime = interfaces.enter_context(host_process.short_interface_directory())
+                    later_saved = later.store / "host.json"
+                    later_saved.write_text(json.dumps({"interface": {"dir": str(later_runtime)}, "providers": {}}))
+                    later_saved.chmod(0o600)
+                    later_old, later_previous = later.start_host(sources_only=True)
+                    waiter = subprocess.Popen([admin], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                    waiter.stdin.write(f"SELECT GET_LOCK('{database}',30); SELECT SLEEP(15)")
+                    host_process.close_stdin(waiter)
+                    # Queue before old stop. MySQL grants the waiting session
+                    # the lock when old retires; the new Host must NOT bypass it.
+                    wait_for(lambda: sql(f"SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE STATE='User lock' AND INFO LIKE '%{database}%' AND ID<>CONNECTION_ID()") != "0", "queued competing Store lock", timeout=10)
+                c.select(c.build("selected-target"))
+                c.binary = c.link
+                output = c.run("host", "restart", "--all", expect=6 if placement == "contended" else 0, timeout=60)
+                if placement == "contended":
+                    assert "refused at starting" in output and '"code":"store_locked"' in output, output
+                    assert "1 restarted" in output and "1 failed" in output, output
+                    proof_ready(later, later_previous, later_old)
+                    assert old.poll() is not None and c.status()["status"] != "ready", output
+                else:
+                    assert "1 restarted" in output, output
+                    current = proof_ready(c, previous, old)
+                    assert current["store"] == previous["store"] and current["store"] != str(c.store), current
+        finally:
+            if waiter is not None:
+                # Let its bounded SQL finish and close its OWN connection;
+                # coordinator never polls or manipulates the database lock.
+                waiter.communicate(timeout=40)
+            sql(f"DROP DATABASE IF EXISTS {database}")
+            if runtime is not None and runtime.exists():
+                shutil.rmtree(runtime)
+    print("MySQL upgrade restart passed: default/moved interface, captured environment, typed DB-lock contention and later Host", flush=True)
+
+
+def adopted_replacement_case(root, binary, releases):
+    """Retire, hold our starter, install an external owner, then adopt it."""
+    with case(root, binary, releases, "adopted-replacement") as c:
+        old, previous = c.start_host()
+        alternate = c.build("concurrent-same-version")
+        c.select(c.build("selected-target"))
+        c.binary = c.link
+        gate = c.root / "before-start.gate"
+        gate.touch()
+        c.env["RUI_TEST_UPGRADE_BEFORE_START_GATE"] = str(gate)
+        restart = subprocess.Popen([str(c.binary), "host", "restart", "--all"], env=c.env,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        c.children.append(restart)
+        try:
+            wait_for(lambda: gate.with_name(gate.name + ".entered").exists(),
+                     "coordinator held after retirement and before its starter", timeout=20)
+            assert gate.exists() and restart.poll() is None
+            assert old.poll() is not None and c.status()["status"] == "unavailable"
+            child, ready = start_ready_process(
+                [alternate / "bin/rui", "host", "serve", "--store", c.store,
+                 "--set", "providers={}", "--set", "execution.activeCapacity=" + previous["active_capacity"]],
+                env=c.env, isolate_providers=False)
+            c.hosts.append(child)
+            assert c.status()["instance"] == ready["instance"] != previous["instance"]
+            assert gate.exists() and restart.poll() is None, "our starter was not held until the external Host was ready"
+        finally:
+            gate.unlink(missing_ok=True)
+        output = c.finish_upgrade(restart)
+        assert "1 restarted" in output, output
+        current = c.status()
+        assert current["instance"] == ready["instance"] != previous["instance"], (current, previous)
+        assert peer_pid(c.ready["socket"]) == child.pid
+        assert os_semantics.process_executable(child.pid) == alternate / "bin/rui"
+        assert os_semantics.process_executable(child.pid) != c.link.resolve()
+        print("upgrade native: deterministic adopted same-target-version owner verified (different managed executable)", flush=True)
+
+
+def known_target_case(root, binary, releases, baseline, known_bad):
+    """Downloaded real releases, verified by the caller, never stand-in Hosts."""
+    with case(root, binary, releases, "old-target-precondition") as c:
+        retained = c.build("running-baseline")
+        shutil.copy2(baseline, retained / "bin/rui")
+        old_binary = retained / "bin/rui"
+        old, ready = start_ready_process([old_binary, "host", "serve", "--store", c.store, "--active-capacity", "2"],
+                                         env=c.env, isolate_providers=False)
+        c.hosts.append(old)
+        c.ready = ready
+
+        def old_status():
+            return json.loads(subprocess.check_output([old_binary, "host", "status", "--store", c.store], env=c.env, text=True, timeout=15))
+
+        previous = old_status()
+        try:
+            for name, target, reason in (("no-settings-check", baseline, "launch configuration cannot be safely reconstructed"),
+                                         ("known-bad-check", known_bad, "target build cannot safely check")):
+                build = c.build(name)
+                shutil.copy2(target, build / "bin/rui")
+                c.select(build)
+                output = c.run("host", "restart", "--all", timeout=60)
+                assert "left running" in output and reason in output, output
+                assert old.poll() is None and old_status()["instance"] == previous["instance"], output
+            print("upgrade native: actual known-bad check and pre-check release targets refused before stop; old PID/instance unchanged", flush=True)
+        finally:
+            # Its owning historical client retains cleanup authority.
+            c.binary = old_binary
+
+
+def future_target_case(root, binary, releases):
+    """Two real native builds: target has a deliberately different wire owner."""
+    with case(root, binary, releases, "future-wire-target") as c:
+        c.old_selection()
+        old, previous = c.start_host()
+        output = c.upgrade()
+        assert "different Host protocol; inspect with the selected Rui client" in output, output
+        c.binary = c.link
+        current = proof_ready(c, previous, old)
+        assert current["version"] != previous["version"], (current, previous)
+        print("upgrade native: target-public status proved future-wire new instance and actual installed release", flush=True)
+
+
+def alias_restart_cases(root, binary, releases):
+    for spelling in ("symlink", "dot"):
+        for saved in (False, True):
+            with case(root, binary, releases, f"restart-alias-{spelling}-{saved}") as c:
+                canonical_store = c.store
+                canonical_store.mkdir(mode=0o700)
+                if saved:
+                    document = canonical_store / "host.json"
+                    document.write_text(json.dumps({"providers": {}, "execution": {"activeCapacity": 3}}))
+                    document.chmod(0o600)
+                if spelling == "symlink":
+                    alias = c.root / "host-alias"
+                    alias.symlink_to(canonical_store, target_is_directory=True)
+                else:
+                    alias = canonical_store / ".." / canonical_store.name
+                c.store = alias
+                old, previous = c.start_host(sources_only=True)
+                c.store = canonical_store
+                c.select(c.build("selected-alias"))
+                c.binary = c.link
+                output = c.run("host", "restart", "--all", timeout=60)
+                assert "1 restarted" in output, output
+                current = proof_ready(c, previous, old)
+                assert current["store"] == str(canonical_store), current
+                assert str(canonical_store) in output, output
+    print("upgrade native: absolute symlink/dot Host selectors restart with bare and saved sources", flush=True)
+
+
 def restart_all_cases(root, binary, releases):
+    alias_restart_cases(root, binary, releases)
+    adopted_replacement_case(root, binary, releases)
+    refused_source_cases(root, binary, releases)
+    mysql_restart_cases(root, binary, releases)
+    for source in ("bare", "saved", "file", "set"):
+        with case(root, binary, releases, f"restart-sources-{source}") as c:
+            extra = ()
+            if source in ("saved", "file"):
+                document = {"providers": {}, "execution": {"paused": True, "activeCapacity": 3},
+                            "tools": {"bash": {"path": "/bin/bash", "timeoutMs": 1500}}}
+                path = c.store / "host.json" if source == "saved" else c.root / "settings.json"
+                path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                path.parent.chmod(0o700)
+                path.write_text(json.dumps(document))
+                path.chmod(0o600)
+                if source == "file":
+                    extra = ("--settings", path)
+            elif source == "set":
+                extra = ("--set", "providers={}", "--set", "execution.paused=true", "--set", "execution.activeCapacity=3")
+            old, previous = c.start_host(f"retained-{source}", sources_only=True, extra=extra)
+            c.select(c.build(f"selected-{source}"))
+            c.binary = c.link
+            output = c.run("host", "restart", "--all", timeout=60)
+            assert "1 restarted" in output, output
+            current = proof_ready(c, previous, old)
+            for field in ("active_capacity", "paused", "capabilities"):
+                assert current[field] == previous[field], (source, field, previous, current)
+
+    # This suite runs under an isolated non-root fixture user: --all intentionally
+    # discovers every Host of that uid, not just the defaults-selected Store.
+    # Earlier lifecycle cases intentionally crash Hosts. Leave one explicitly
+    # here too: discovery must prove its lease free without deleting its socket.
     with case(root, binary, releases, "restart-all-crashed") as c:
         from model_fixture import crash_host
         process, _ = c.start_host("restart-all-crashed")
@@ -888,6 +1071,33 @@ def restart_all_cases(root, binary, releases):
         assert "[option_required]" in missing, missing
         rejected = c.run("host", "restart", "--all", "--store", c.store, expect=2)
         assert "[option_unknown]" in rejected, rejected
+
+    # The selector is DIR, not the moved SQLite wire Store. Public starter
+    # admission reloads its saved document; census also finds saved interfaces
+    # outside the shallow uid socket directory, without a registry.
+    for explicit in ("default", "uid", "external"):
+        with contextlib.ExitStack() as interfaces, case(root, binary, releases, f"restart-all-moved-storage-{explicit}") as c:
+            c.store.mkdir(mode=0o700)
+            document = {"store": {"sqlite": {"dir": str(c.root / "data")}},
+                        "execution": {"paused": True}, "providers": {}}
+            if explicit != "default":
+                runtime = (pathlib.Path(f"/tmp/rui-{os.geteuid()}") if explicit == "uid" else
+                           interfaces.enter_context(host_process.short_interface_directory()) / "nested" / "private-interface")
+                runtime.mkdir(mode=0o700, parents=True, exist_ok=True)
+                document["interface"] = {"dir": str(runtime)}
+            saved = c.store / "host.json"
+            saved.write_text(json.dumps(document))
+            saved.chmod(0o600)
+            original = saved.read_bytes()
+            old, previous = c.start_host("moved-storage-retained", extra=("--set", "providers={}"))
+            c.select(c.build("moved-storage-selected"))
+            c.binary = c.link
+            output = c.run("host", "restart", "--all", timeout=60)
+            assert f"{c.store}: restarted on {releases.version}" in output, output
+            assert "1 restarted" in output, output
+            current = proof_ready(c, previous, old)
+            assert current["paused"] is True and current["store"] == previous["store"], current
+            assert saved.read_bytes() == original, output
 
     with case(root, binary, releases, "restart-all-first") as first, \
             case(root, binary, releases, "restart-all-second") as second:
@@ -1085,7 +1295,7 @@ def proof_relaunched(c, screen, process):
 
     wait_for(observed, "selected release replaced the original TUI PID after terminal restoration",
              timeout=15, ready=lambda value: value[:3] == (installed, 2, 1))
-    screen.contains(f"Upgraded to {c.releases.version} · Host restarted")
+    screen.quiet_version(c.releases.version)
     assert screen.capture.alternate
 
 
@@ -1153,7 +1363,7 @@ def terminal_cases(root, binary, releases, artifacts):
             screen.start_upgrade()
             screen.contains(" · up to date")
             screen.close_settings()
-            screen.contains(f"Rui is up to date ({releases.version})")
+            screen.quiet_version(releases.version)
             assert os_semantics.process_executable(process.pid) == c.link.resolve()
             screen.ignored_overview_input("unchanged δ ignored", "unchanged δ ignored")
             screen.save(artifacts, "overview-unchanged")
@@ -1198,13 +1408,13 @@ def conversation_case(root, binary, releases, artifacts):
             screen.start_upgrade()
             screen.contains(" · publishing")
             screen.close_settings()
-            screen.contains("Publishing; cancelling no longer rolls back")
+            frame = screen.contains("Updating…")
+            assert "Publishing; cancelling" not in frame, frame
             screen.send("\x01\x0bconversation β draft\x01\x1b[C\x1b[C\x1b[C")
             screen.draft("conversation β draft", 5)
             published.unlink()
             proof_relaunched(c, screen, process)
-            screen.empty_chat(c, session,
-                              expected_notice=f"Upgraded to {c.releases.version} · Host restarted")
+            screen.empty_chat(c, session)
             screen.draft("conversation β draft", 5)
             screen.save(artifacts, "conversation-installed")
             proof_ready(c, previous, old_host)
@@ -1274,7 +1484,7 @@ def terminal_download_recovery(root, binary, releases, artifacts):
             screen.contains(f" · upgraded to {releases.version}")
             screen.save(artifacts, "download-recovered-settings")
             screen.close_settings()
-            screen.contains(f"Upgraded to {releases.version}")
+            screen.quiet_version(releases.version)
             proof_ready(c, previous, old_host)
             screen.save(artifacts, "download-recovered")
             curl.assert_attempts([("/releases/latest", "normal", 6),
@@ -1308,7 +1518,7 @@ def terminal_download_failure(root, binary, releases, artifacts):
             assert screen.entries == 1 and screen.restorations == 0, "failed check relaunched"
             screen.save(artifacts, "download-failure-settings")
             screen.close_settings()
-            screen.contains("Couldn't reach GitHub; nothing changed")
+            screen.contains("Update failed")
             receipt = exit_on_sigint(screen, process, "restored curl download failure report")
             assert b"curl: (22)" in receipt and b"403" in receipt, receipt.decode()
             assert b"could not download release information" in receipt, receipt.decode()
@@ -1336,7 +1546,7 @@ def terminal_cancellation_guidance(root, binary, releases, artifacts):
             screen.start_upgrade()
             screen.contains(f" · upgraded to {releases.version}")
             screen.close_settings()
-            screen.contains(f"Upgraded to {releases.version}")
+            screen.quiet_version(releases.version)
             proof_ready(c, previous, old_host)
             assert os_semantics.process_executable(process.pid) == binary
             screen.save(artifacts, "cancellation-guidance-installed")
@@ -1360,7 +1570,7 @@ def terminal_path_guidance(root, binary, releases, artifacts):
             screen.start_upgrade()
             screen.contains(f" · upgraded to {releases.version}")
             screen.close_settings()
-            screen.contains(f"Upgraded to {releases.version}")
+            screen.quiet_version(releases.version)
             proof_ready(c, previous, old_host)
             screen.ignored_overview_input("guidance ε ignored", "guidance ε ignored")
             assert os_semantics.process_executable(process.pid) == binary
@@ -1415,8 +1625,9 @@ def startup_cases(root, binary, releases, artifacts):
                     screen.start_upgrade()
                     screen.contains(" · publishing")
                     screen.close_settings()
-                    screen.contains("Publishing; cancelling no longer rolls back")
+                    frame = screen.contains("Updating…" if screen_kind == "resume" else "Publishing; cancelling no longer rolls back")
                     if screen_kind == "resume":
+                        assert "Publishing; cancelling" not in frame, frame
                         screen.send("\x01\x0bstartup α draft\x01\x1b[C\x1b[C\x1b[C")
                         screen.draft("startup α draft", 5)
                     else:
@@ -1435,8 +1646,7 @@ def startup_cases(root, binary, releases, artifacts):
                     proof_relaunched(c, screen, process)
                     proof_ready(c, previous, old_host)
                     if screen_kind == "resume":
-                        screen.empty_chat(c, session,
-                                          expected_notice=f"Upgraded to {c.releases.version} · Host restarted")
+                        screen.empty_chat(c, session)
                         screen.draft("startup α draft", 5)
                         screen.send("X")
                         screen.draft("staXrtup α draft", 6)
@@ -1602,7 +1812,7 @@ def terminal_cleanup_dual_failure(root, binary, releases, artifacts):
                 gate.release.set()
                 screen.contains(" · upgrade failed")
                 screen.close_settings()
-                screen.contains("Upgrade failed; nothing changed")
+                screen.contains("Update failed")
                 screen.save(artifacts, "dual-failure-status")
                 assert retained.is_dir(), "cleanup receipt did not identify an existing retained stage"
                 assert c.link.resolve() == c.original
@@ -1623,14 +1833,17 @@ def terminal_cleanup_dual_failure(root, binary, releases, artifacts):
 
 
 def main():
-    if len(sys.argv) not in (2, 3) or (len(sys.argv) == 3 and sys.argv[2] not in ("restart-all", "lifecycle", "custody", "download", "terminal", "startup")):
-        sys.exit("usage: python3 tests/integration/upgrade_integration.py PATH_TO_REAL_RUI [restart-all|lifecycle|custody|download|terminal|startup]")
-    selection = sys.argv[2] if len(sys.argv) == 3 else "all"
+    modes = ("restart-all", "lifecycle", "custody", "download", "terminal", "startup", "future-target", "known-target")
+    if len(sys.argv) not in (2, 3, 4, 5) or (len(sys.argv) >= 3 and sys.argv[2] not in modes):
+        sys.exit("usage: python3 tests/integration/upgrade_integration.py REAL_RUI [restart-all|lifecycle|custody|terminal|startup|future-target FUTURE_REAL_RUI|known-target BASELINE_RUI KNOWN_BAD_RUI]")
+    selection = sys.argv[2] if len(sys.argv) >= 3 else "all"
+    assert len(sys.argv) == (4 if selection == "future-target" else 5 if selection == "known-target" else 2 if selection == "all" else 3), "supply the native binaries required by this mode"
     binary = pathlib.Path(sys.argv[1]).resolve(strict=True)
+    target_binary = pathlib.Path(sys.argv[3]).resolve(strict=True) if selection == "future-target" else binary
     root = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-upgrade-"))
     version_home = root / "version-home"
     version_home.mkdir()
-    version_output = subprocess.check_output([str(binary), "--version"],
+    version_output = subprocess.check_output([str(target_binary), "--version"],
         env={**os.environ, "HOME": str(version_home)}, text=True, timeout=5)
     match = re.match(r"rui (0\.[0-9]+\.[0-9]+) \(", version_output)
     assert match, "supply a native release-identity actor (production owners), not an unreleased build"
@@ -1640,9 +1853,13 @@ def main():
     if artifacts is not None:
         artifacts.mkdir(parents=True, exist_ok=True)
         assert not artifacts.is_relative_to(root), "artifacts must outlive fixture root"
-    releases = Releases(binary, version)
+    releases = Releases(target_binary, version)
     complete = False
     try:
+        if selection == "future-target":
+            future_target_case(root, binary, releases)
+        if selection == "known-target":
+            known_target_case(root, binary, releases, pathlib.Path(sys.argv[3]).resolve(strict=True), pathlib.Path(sys.argv[4]).resolve(strict=True))
         if selection in ("restart-all", "lifecycle"):
             suite = {"restart-all": restart_all_cases, "lifecycle": lifecycle_cases}[selection]
             suite(root, binary, releases)
