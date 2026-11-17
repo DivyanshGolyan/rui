@@ -142,7 +142,7 @@ class OverviewTests(unittest.TestCase):
             def wait(self, predicate, *, label):
                 assert predicate(), label
 
-        frame = " + New Session\n   TD4 saved conversation\n   Settings"
+        frame = "   + New Session\n     TD4 saved conversation\n     Settings"
         escaped_overview(Terminal(frame), "TD4 saved conversation")
         for marker in ("+ New Session", "TD4 saved conversation", "Settings"):
             with self.subTest(missing=marker), self.assertRaisesRegex(AssertionError, "overview after expired standalone Esc"):

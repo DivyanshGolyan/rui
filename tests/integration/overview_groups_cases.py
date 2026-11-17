@@ -59,7 +59,7 @@ def needs_you():
         with w.overview(columns=99, rows=20) as screen:
             frame = screen.contains("Asks before running")
             lines = frame.split("\n")
-            headings = [line for line in lines if re.fullmatch(r" \S.* · \d+", line)]
+            headings = [line for line in lines if re.fullmatch(r"   \S.* · \d+", line)]
             assert headings == [], frame
             assert lines[0] == "   + New Session" and lines[1] == "     Sessions  Archived", frame
             asked = row(frame, "Asks before running")
@@ -102,7 +102,7 @@ def queued_in_active():
                 frame = screen.wait(lambda shown: "Second peer task" in shown and "First peer task" in shown,
                                     "both peer rows")
                 lines = frame.split("\n")
-                headings = [line for line in lines if re.fullmatch(r" \S.* · \d+", line)]
+                headings = [line for line in lines if re.fullmatch(r"   \S.* · \d+", line)]
                 assert headings == [], frame
                 assert "Queued" not in frame, frame
                 working = row(frame, "First peer task")

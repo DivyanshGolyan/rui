@@ -47,7 +47,7 @@ def finished(report):
 
 
 def row_of(frame, label):
-    found = [n + 1 for n, line in enumerate(frame.split("\n")) if re.match(rf" . {re.escape(label)}( |$)", line)]
+    found = [n + 1 for n, line in enumerate(frame.split("\n")) if re.match(rf"   . {re.escape(label)}( |$)", line)]
     assert len(found) == 1, (label, found, frame)
     return found[0]
 
@@ -150,7 +150,7 @@ def flat_list():
                                  "every finished peer without folding")
             lines = listed.split("\n")
             assert lines[0] == "   + New Session" and lines[1] == "     Sessions  Archived" and re.fullmatch(r"     (?:lead|peer-[0-6]) +(?:now|\d+[mhd])", lines[2]), listed
-            assert not any(re.fullmatch(r" \S.* · \d+", line) for line in lines), listed
+            assert not any(re.fullmatch(r"   \S.* · \d+", line) for line in lines), listed
             assert " more" not in listed, listed
             screen.click(4, 1)
             screen.wait(lambda frame: "Type a task" in frame and not is_overview(frame), "New Session opens chat")
