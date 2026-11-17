@@ -188,11 +188,12 @@ test "core tool table routes every built-in and promotion excludes the full core
                 const row = records.built_in_rows.get(tool);
                 const expected: records.Runner = switch (tool) {
                     .bash => .bash,
+                    .read_image => .read_image,
                     .web_search => .provider,
                     else => .core,
                 };
                 try std.testing.expectEqual(expected, row.runner);
-                try std.testing.expectEqual(row.runner, records.Runner.of(records.record(tool)));
+                try std.testing.expectEqual(expected, records.Runner.of(records.record(tool)));
 
                 var tmp = std.testing.tmpDir(.{});
                 defer tmp.cleanup();
@@ -212,6 +213,7 @@ test "core tool table routes every built-in and promotion excludes the full core
                 const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
                 const arguments = switch (tool) {
                     .bash => "{\"cmd\":\"true\",\"description\":\"Run table check\"}",
+                    .read_image => "{\"path\":\"image.png\"}",
                     .message_agent => "{\"id\":\"zzzzzz\",\"text\":\"hi\"}",
                     .stop_action => "{\"action\":\"1\"}",
                     else => "{}",
@@ -231,9 +233,17 @@ test "core tool table routes every built-in and promotion excludes the full core
                 try settleCallsForTesting(&storage, &tmp, binding, "table-calls", &calls);
                 const core = try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true });
                 const bash = try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{});
-                try std.testing.expectEqual(expected == .core, core != null);
+                try std.testing.expectEqual(expected == .core or expected == .read_image, core != null);
                 try std.testing.expectEqual(expected == .bash, bash != null);
-                if (core) |work| {
+                if (expected == .read_image) {
+                    const call = core.?.read_image;
+                    try std.testing.expectEqual(records.Runner.read_image, call.runner);
+                    try std.testing.expectEqualDeep(call, (try storage.nextAction(.read_image, .fromFree(1, false))).?);
+                    const attempted = (try storage.admitActionAttempt(call, 1234, .{})).?.permit.binding;
+                    try std.testing.expectEqual(binding.operation_id, attempted.parent_operation_id);
+                    try std.testing.expectEqual(binding.turn_id, attempted.turn_id);
+                    try std.testing.expect((try storage.nextCoreWork(.fromFree(1, false))) == null);
+                } else if (core) |work| {
                     const call = work.action;
                     try std.testing.expectEqualStrings(@tagName(tool), @tagName(call.tool));
                     try std.testing.expectEqual(binding.operation_id, call.binding.parent_operation_id);
@@ -467,7 +477,7 @@ test "runner action seam covers selection admission input settlement stop and re
             };
             const host_tool_set: tool_defs.HostToolSet = .{ .records = &records, .digests = &digests };
             const write_rounds: u64 = if (case.rerun) 4 else 2;
-            inline for (.{ .bash, .mcp }) |runner| {
+            inline for (.{ .bash, .mcp, .read_image }) |runner| {
                 for (0..4) |scenario| {
                     var tmp = std.testing.tmpDir(.{});
                     defer tmp.cleanup();
@@ -477,8 +487,13 @@ test "runner action seam covers selection admission input settlement stop and re
                     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
                     const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
                     var configure = try completeConfiguration("runner-seam", "", workspace, "model-a");
-                    const tool = if (runner == .bash) "bash" else "fetch_page";
-                    const arguments = if (runner == .bash) "{\"cmd\":\"printf seam\",\"description\":\"Print seam\",\"timeout_ms\":5678}" else "{}";
+                    const tool = switch (runner) {
+                        .bash => "bash",
+                        .mcp => "fetch_page",
+                        .read_image => "read_image",
+                        else => unreachable,
+                    };
+                    const arguments = if (runner == .bash) "{\"cmd\":\"printf seam\",\"description\":\"Print seam\",\"timeout_ms\":5678}" else if (runner == .read_image) "{\"path\":\"./image.png\"}" else "{}";
                     const encoded = try std.json.Stringify.valueAlloc(std.testing.allocator, arguments, .{});
                     defer std.testing.allocator.free(encoded);
                     configure.configuration.tools = try .of(&.{tool});
@@ -495,10 +510,14 @@ test "runner action seam covers selection admission input settlement stop and re
                     const selection_rounds = storage.testing_content_work.rounds;
                     const selected = (try storage.nextAction(runner, .{ .free_credit = .one, .mcp_open = true })).?;
                     if (runner == .bash) try std.testing.expectEqual(selection_rounds + 1, storage.testing_content_work.rounds);
-                    var wrong = selected;
-                    wrong.runner = if (runner == .bash) .mcp else .bash;
-                    try std.testing.expect((try storage.admitActionAttempt(wrong, 1234, .{})) == null);
-                    try storage.resolveAction(wrong, .spawn_failed, "Wrong runner must not resolve.", .{});
+                    inline for (.{ .bash, .mcp, .read_image }) |other| {
+                        if (runner != other) {
+                            var wrong = selected;
+                            wrong.runner = other;
+                            try std.testing.expect((try storage.admitActionAttempt(wrong, 1234, .{})) == null);
+                            try storage.resolveAction(wrong, .spawn_failed, "Wrong runner must not resolve.", .{});
+                        }
+                    }
                     try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND attempt_ordinal=0 AND resolution_code IS NULL", .{selected.action_id}));
                     try std.testing.expectEqual(runner, selected.runner);
                     try std.testing.expectEqual(selected.action_id, (try storage.nextAction(runner, .{ .free_credit = .one, .mcp_open = true })).?.action_id);
@@ -512,7 +531,12 @@ test "runner action seam covers selection admission input settlement stop and re
                     const expected_text: []const u8 = switch (scenario) {
                         0 => "Runner seam succeeded.",
                         1 => "Cancelled by Session stop.",
-                        2 => if (runner == .bash) "Bash outcome is indeterminate after Host recovery; the command was not replayed." else "Outcome unknown: the Host stopped while this MCP call was running; it was not retried.",
+                        2 => switch (runner) {
+                            .bash => "Bash outcome is indeterminate after Host recovery; the command was not replayed.",
+                            .mcp => "Outcome unknown: the Host stopped while this MCP call was running; it was not retried.",
+                            .read_image => "The Host stopped before saving this image read result. The read may have completed; it was not automatically repeated.",
+                            else => unreachable,
+                        },
                         else => "Runner seam rejected before execution.",
                     };
                     if (scenario == 1) {
@@ -537,8 +561,14 @@ test "runner action seam covers selection admission input settlement stop and re
                         try std.testing.expectEqual(@as(u64, if (runner == .bash) 5678 else 1234), input.timeout_ms);
                         try std.testing.expectEqual(@as(u64, arguments.len), input.arguments.length);
                         try std.testing.expectEqualSlices(u8, &protocol.contentDigest(arguments), &input.arguments.digest);
+                        inline for (.{ .bash, .mcp, .read_image }) |other| {
+                            if (runner != other) try std.testing.expectError(error.StaleActionAttemptBinding, storage.readActionExecutionInput(other, binding, &input));
+                        }
+                        try storage.readActionExecutionInput(runner, binding, &input);
                         if (runner == .bash) {
                             try std.testing.expectEqualStrings(workspace, input.runner.bash.workspace.slice());
+                        } else if (runner == .read_image) {
+                            try std.testing.expectEqualStrings(workspace, input.runner.read_image.workspace.slice());
                         } else {
                             try std.testing.expect(input.runner.mcp.parent == null);
                             try std.testing.expectEqualStrings(session.slice(), input.runner.mcp.root.slice());
@@ -567,6 +597,101 @@ test "runner action seam covers selection admission input settlement stop and re
                     try std.testing.expectEqualStrings(expected_code, actions[0].object.get("resolution").?.string);
                     try std.testing.expectEqualStrings(expected_text, actions[0].object.get("result").?.object.get("text").?.string);
                 }
+            }
+        }
+    }.run);
+}
+
+test "read_image exact permission frozen workspace capacity background and stop share the Action owner" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            for ([_]bool{ false, true }) |background| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                var opened = true;
+                defer if (opened) storage.close() catch unreachable;
+                var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+                const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+                var configure = try completeConfiguration("image-permission", "", workspace, "model-a");
+                configure.configuration.tools = try .of(&.{"read_image"});
+                try configure.configuration.permission_mode.value.set("ask");
+                const configured = try storage.configure(&configure, .{});
+                try std.testing.expect(configured == .accepted);
+                const session = configured.accepted.session;
+                try submitTestMessage(&storage, &tmp, "image-input", "image-message", session.slice(), "inspect");
+                const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                try settleCallsForTesting(&storage, &tmp, model, "image-calls", &.{
+                    .{ .item_id = "image-item", .name = "read_image", .encoded_call_id = "image-call", .decoded_call_id = "image-call", .encoded_arguments = "{\\\"path\\\":\\\"missing.png\\\"}", .decoded_arguments = "{\"path\":\"missing.png\"}" },
+                });
+                const action_id = try store_testing.queryU64(&storage, "SELECT action_id FROM action_operation", .{});
+                const forged: action_domain.ReadyAction = .{ .action_id = action_id, .runner = .read_image };
+                try std.testing.expect((try storage.nextAction(.read_image, .fromFree(1, false))) == null);
+                try std.testing.expect((try storage.nextAction(.bash, .fromFree(1, false))) == null);
+                try std.testing.expect((try storage.admitActionAttempt(forged, 1234, .{})) == null);
+                const unattempted: action_domain.ActionAttemptBinding = .{ .action_id = action_id, .parent_operation_id = model.operation_id, .turn_id = model.turn_id };
+                var input: action_domain.ActionExecutionInput = undefined;
+                try std.testing.expectError(error.StaleActionAttemptBinding, storage.readActionExecutionInput(.read_image, unattempted, &input));
+                var allow: protocol.PermissionDecisionCommand = .{ .action_id = action_id, .decision = .allow_once };
+                try allow.key.set("image-allow");
+                try allow.session.set(session.slice());
+                try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
+                if (background) {
+                    var promotion: @import("../../command_input.zig").ActionBackgroundCommand = .{ .action_id = action_id };
+                    try promotion.key.set("image-background");
+                    try promotion.session.set(session.slice());
+                    try std.testing.expect(storage.backgroundAction(.{ .command = &promotion }, .{}) == .accepted);
+                }
+                var patch: wire_request.ConfigureCommand = .{};
+                try patch.key.set("image-workspace-change");
+                try patch.session.set(session.slice());
+                patch.configuration.workspace.state = .value;
+                try patch.configuration.workspace.value.set("/");
+                const refused_workspace = try storage.configure(&patch, .{});
+                try std.testing.expect(refused_workspace == .rejected and refused_workspace.rejected.code == .workspace_is_immutable);
+                var update: wire_request.ConfigureCommand = .{};
+                try update.key.set("image-config-change");
+                try update.session.set(session.slice());
+                update.configuration.tools = try .of(&.{});
+                update.configuration.permission_mode.state = .value;
+                try update.configuration.permission_mode.value.set("bypass");
+                try std.testing.expect((try storage.configure(&update, .{})) == .accepted);
+                try storage.close();
+                opened = false;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                opened = true;
+                try std.testing.expect(storage.decidePermission(&allow, .{}).accepted.replayed);
+                for ([_]bool{ false, true }) |mcp_open| {
+                    try std.testing.expect((try storage.nextAction(.read_image, .fromFree(0, mcp_open))) == null);
+                    try std.testing.expect((try storage.nextCoreWork(.fromFree(0, mcp_open))) == null);
+                    const blocked = try storage.dispatchWork(false, .fromFree(0, mcp_open));
+                    try std.testing.expect(!blocked.mcp and !blocked.bash and !blocked.core);
+                    const ready = (try storage.nextAction(.read_image, .fromFree(1, mcp_open))).?;
+                    try std.testing.expectEqual(action_id, ready.action_id);
+                    try std.testing.expectEqual(background, ready.background);
+                    try std.testing.expectEqualDeep(action_domain.ReadyAction{ .action_id = action_id, .runner = .read_image, .background = background }, (try storage.nextCoreWork(.fromFree(1, mcp_open))).?.read_image);
+                    const work = try storage.dispatchWork(false, .fromFree(1, mcp_open));
+                    try std.testing.expect(work.mcp and !work.bash and !work.core);
+                    try std.testing.expect((try storage.admitNextActionAttempt(.fromFree(1, mcp_open), 1234, .{})) == null);
+                }
+                const selected = (try storage.nextAction(.read_image, .fromFree(1, false))).?;
+                const binding = (try storage.admitActionAttempt(selected, 1234, .{})).?.permit.binding;
+                try storage.readActionExecutionInput(.read_image, binding, &input);
+                try std.testing.expectEqualStrings(workspace, input.runner.read_image.workspace.slice());
+                try std.testing.expectError(error.StaleActionAttemptBinding, storage.readActionExecutionInput(.bash, binding, &input));
+                var wrong = binding;
+                wrong.turn_id += 1;
+                try std.testing.expectError(error.StaleActionAttemptBinding, storage.readActionExecutionInput(.read_image, wrong, &input));
+                wrong = binding;
+                wrong.parent_operation_id += 1;
+                try std.testing.expectError(error.StaleActionAttemptBinding, storage.readActionExecutionInput(.read_image, wrong, &input));
+                try std.testing.expect((try storage.admitActionAttempt(selected, 1234, .{})) == null);
+                var stop = try completeSessionStop("image-stop", session.slice());
+                try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+                try std.testing.expectEqual(ActionSettlement.session_stop, try storage.settleActionAttempt(binding, .succeeded, "Image read finished.", .{}));
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id WHERE a.action_id=?1 AND a.resolution_code='cancelled' AND c.digest=?2", .{ action_id, store_testing.Blob{ .bytes = &protocol.contentDigest("Stopped before this image read completed.") } }));
+                try std.testing.expectError(error.StaleActionAttemptBinding, storage.readActionExecutionInput(.read_image, binding, &input));
             }
         }
     }.run);
@@ -1422,6 +1547,71 @@ test "background owed stop suppresses final admission across settlement recovery
     }.run);
 }
 
+test "queue records source kinds and source predicates for person peer and action final" {
+    const sourced_input = @import("../domain/sourced_input.zig");
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            for ([_]enum { person, peer, action_final }{ .person, .peer, .action_final }) |source| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                const parent = try shared_fixtures.configureTestSessionWithMode(&storage, "source-parent", "bypass");
+                var configure: wire_request.ConfigureCommand = .{};
+                try configure.key.set("source-child");
+                configure.configuration = try shared_fixtures.testingAgentSpec(&.{"bash"}, "bypass");
+                configure.configuration.parent.state = .value;
+                try configure.configuration.parent.value.set(parent.slice());
+                const child = (try storage.configure(&configure, .{})).accepted.session;
+                const action = try NativePromotion.promoted(&storage, &tmp, child.slice());
+                const binding = (try storage.admitNextActionAttempt(.fromFree(2, true), 30_000, .{})).?.permit.binding;
+                const key: []const u8 = switch (source) {
+                    .person => blk: {
+                        try submitTestMessage(&storage, &tmp, "source-person", "source-person-key", child.slice(), "Person input");
+                        break :blk "source-person-key";
+                    },
+                    .peer => blk: {
+                        _ = try NativePromotion.propose(&storage, &tmp, parent.slice());
+                        const sender = (try storage.admitNextActionAttempt(.fromFree(2, true), 30_000, .{})).?.permit.binding;
+                        var input: action_domain.ActionExecutionInput = undefined;
+                        try storage.readActionExecutionInput(.bash, sender, &input);
+                        const text = "Peer input";
+                        const file = try tmp.dir.createFile(std.testing.io, "source-peer", .{ .read = true });
+                        try file.writeStreamingAll(std.testing.io, text);
+                        try file.sync(std.testing.io);
+                        var message = try store_testing.completeMessage("source-peer-key", child.slice(), file, text);
+                        defer message.removeTemporaryContent(std.testing.io) catch unreachable;
+                        message.sender = .{ .store = storage.selector, .session = parent };
+                        message.sender_handle = input.sender_handle;
+                        try std.testing.expect(storage.submitMessageWithModel(&message, null, .{}) == .accepted);
+                        break :blk "source-peer-key";
+                    },
+                    .action_final => blk: {
+                        _ = try storage.settleActionAttempt(binding, .succeeded, "Final input", .{});
+                        break :blk "";
+                    },
+                };
+                const where = " FROM message_admission m WHERE m.session_ref=?1 AND (m.command_key=?2 OR m.source_action_id=?3)";
+                const args = .{ child.slice(), key, action };
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*)" ++ where, args));
+                const kind: u64 = switch (source) {
+                    .person => 1,
+                    .peer => 2,
+                    .action_final => 3,
+                };
+                try std.testing.expectEqual(kind, try store_testing.queryU64(&storage, "SELECT m.source_kind" ++ where, args));
+                try std.testing.expectEqual(@as(u64, if (source == .person) 1 else 0), try store_testing.queryU64(&storage, "SELECT count(*)" ++ where ++ " AND " ++ sourced_input.personSql("m"), args));
+                try std.testing.expectEqual(@as(u64, if (source != .action_final) 1 else 0), try store_testing.queryU64(&storage, "SELECT count(*)" ++ where ++ " AND " ++ sourced_input.messageSql("m"), args));
+                const constraint_error = if (case.engine == .mysql) error.MysqlFixtureFailed else error.StatementFailed;
+                const contradictory_kind: u64 = if (source == .person) 2 else 1;
+                try std.testing.expectError(constraint_error, store_testing.exec(&storage, "UPDATE message_admission SET source_kind=?4 WHERE session_ref=?1 AND (command_key=?2 OR source_action_id=?3)", .{ child.slice(), key, action, contradictory_kind }));
+                try std.testing.expectEqual(kind, try store_testing.queryU64(&storage, "SELECT m.source_kind" ++ where, args));
+            }
+        }
+    }.run);
+}
+
 test "background owed stop excludes person peer and previously admitted final input at active and idle boundaries" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
@@ -1733,7 +1923,7 @@ test "compound Action Resolution read verifies the whole value before declining 
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             const Damage = enum { none, missing_last, extra_part, wrong_identity, nested_value, private_part, manifest_bytes };
-            for (std.enums.values(Damage)) |damage| {
+            inline for ([_]bool{ false, true }) |model_tool| for (std.enums.values(Damage)) |damage| {
                 errdefer std.debug.print("compound Resolution damage {s} failed\n", .{@tagName(damage)});
                 var tmp = std.testing.tmpDir(.{});
                 defer tmp.cleanup();
@@ -1772,9 +1962,15 @@ test "compound Action Resolution read verifies the whole value before declining 
                     .manifest_bytes => try store_testing.zeroContent(&storage, "SELECT resolution_content_id FROM action_operation WHERE resolution_code IS NOT NULL"),
                 }
                 var result: @import("../../action_read.zig").Read = undefined;
-                try std.testing.expectError(if (damage == .none) error.InputPartsNotSupported else error.CorruptStore, storage.readAction(&.{ .session = session, .action_id = binding.action_id }, &result));
+                const request: @import("../../action_read.zig").Request = .{ .session = session, .action_id = binding.action_id };
+                if (model_tool) {
+                    if (damage == .none) {
+                        try storage.readActionForTool(&request, &result);
+                        try std.testing.expect(result.status == .resolved_parts);
+                    } else try std.testing.expectError(error.CorruptStore, storage.readActionForTool(&request, &result));
+                } else try std.testing.expectError(if (damage == .none) error.InputPartsNotSupported else error.CorruptStore, storage.readAction(&request, &result));
                 try std.testing.expectEqual(damage != .none, storage.isFenced());
-            }
+            };
         }
     }.run);
 }

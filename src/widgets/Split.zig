@@ -32,11 +32,11 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const left_width = @min(self.left_width, size.width - 1);
     const right_width = size.width - left_width - 1;
     const children = try ctx.arena.alloc(vxfw.SubSurface, 3);
+    children[2] = .{ .origin = .{ .row = 0, .col = left_width + 1 }, .surface = try self.right.draw(ctx.withConstraints(.{}, .{ .width = right_width, .height = size.height })) };
     children[0] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = try self.left.draw(ctx.withConstraints(.{}, .{ .width = left_width, .height = size.height })) };
     const divider = try vxfw.Surface.init(ctx.cell_arena, self.widget(), .{ .width = 1, .height = size.height });
     @memset(divider.buffer, .{ .char = .{ .grapheme = divider_style.grapheme, .width = 1 }, .style = divider_style.style });
     children[1] = .{ .origin = .{ .row = 0, .col = left_width }, .surface = divider };
-    children[2] = .{ .origin = .{ .row = 0, .col = left_width + 1 }, .surface = try self.right.draw(ctx.withConstraints(.{}, .{ .width = right_width, .height = size.height })) };
     return .{ .widget = self.widget(), .size = size, .buffer = &.{}, .children = children };
 }
 
@@ -74,4 +74,14 @@ test "Split divides cells and selects only the named narrow pane" {
             try std.testing.expect(child.surface.size.height <= height);
         }
     };
+}
+
+test "Split default remains stitched at every row" {
+    const pane: vxfw.Text = .{ .text = "pane" };
+    const split: Self = .{ .left = pane.widget(), .right = pane.widget(), .left_width = 3, .min_width = 8, .narrow = .right };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 8, .height = 4 }, .cell_size = .{} };
+    const shown = try split.widget().draw(ctx);
+    for (shown.children[1].surface.buffer) |cell| try std.testing.expectEqualStrings("┆", cell.char.grapheme);
 }

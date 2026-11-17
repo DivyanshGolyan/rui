@@ -15,6 +15,7 @@ panel: ?Panel = null,
 facts: vxfw.Widget = empty.widget(),
 status: ?vxfw.Widget = empty.widget(),
 facts_at: enum { top, bottom } = .top,
+bottom: ?*@import("draft_layout.zig").FixedBottom = null,
 
 pub fn widget(self: *Self) vxfw.Widget {
     return .{ .userdata = self, .drawFn = draw };
@@ -24,13 +25,16 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const self: *Self = @ptrCast(@alignCast(raw));
     const size = ctx.max.size();
     if (size.width == 0 or size.height == 0) return vxfw.Surface.init(ctx.cell_arena, self.widget(), .{});
-    const facts_rows: u16 = @min(1, size.height - 1);
-    const status_room: u16 = @min(status_lines, size.height -| 1 -| facts_rows);
+    const layout = @import("draft_layout.zig");
+    const status_room = layout.fixedBottom(size.height, status_lines, .chat).status_rows;
     const status = if (status_room == 0) null else if (self.status) |shown| status: {
         const drawn = try shown.draw(ctx.withConstraints(.{ .width = size.width }, .{ .width = size.width, .height = status_room }));
         break :status if (drawn.size.height == 0) null else drawn;
     } else null;
-    const footer_rows = facts_rows + if (status) |drawn| @min(drawn.size.height, status_room) else 0;
+    const bottom = layout.fixedBottom(size.height, if (status) |drawn| drawn.size.height else 0, .chat);
+    if (self.bottom) |shared| shared.* = bottom;
+    const facts_rows = bottom.footer_rows;
+    const footer_rows = facts_rows + bottom.status_rows;
     const children = try ctx.arena.alloc(vxfw.SubSurface, 1 + facts_rows + @intFromBool(status != null));
     const room = size.height - footer_rows;
     self.composer.panel = if (self.panel) |panel| switch (panel) {

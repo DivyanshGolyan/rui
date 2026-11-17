@@ -126,7 +126,7 @@ pub const Settings = struct {
         if (input != .mouse) return;
         const mouse = input.mouse;
         if (mouse.button != .left or mouse.mods.alt or mouse.type != .press or mouse.col < 0 or mouse.col >= self.size.width) return;
-        const click: overview_view.Click = if (mouse.row == 1 and self.size.height > 1) .settings else if (self.update_target) |target| (if (target.contains(mouse.col, mouse.row)) .{ .update = self.update_identity } else return) else return;
+        const click: overview_view.Click = if (mouse.row == 1 and self.size.height > 1 and mouse.col >= 5 and mouse.col < @min(13, self.size.width -| 2)) .settings else if (self.update_target) |target| (if (target.contains(mouse.col, mouse.row)) .{ .update = self.update_identity } else return) else return;
         try self.on_click(self.userdata, ctx, click);
         ctx.consumeAndRedraw();
     }
@@ -134,11 +134,11 @@ pub const Settings = struct {
     fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
         const self: *Settings = @ptrCast(@alignCast(raw));
         const size = ctx.max.size();
-        const height = @min(3, size.height);
+        const height = @min(2, size.height);
         self.size = .{ .width = size.width, .height = height };
         self.update_target = null;
         self.update_identity = .{ .available = self.available, .run = self.run };
-        const target: Hover.Rect = .{ .row = 1, .width = size.width };
+        const target: Hover.Rect = .{ .row = 1, .col = @min(5, size.width), .width = @min(13, size.width -| 2) -| @min(5, size.width) };
         const surface = try vxfw.Surface.init(ctx.cell_arena, self.widget(), self.size);
         @memset(surface.buffer, .{ .style = widget_style.of(self.caps, .{ .colour = .quiet }) });
         self.hover.targets = &.{};
@@ -150,27 +150,29 @@ pub const Settings = struct {
         @memset(surface.buffer[size.width .. 2 * size.width], .{ .style = row_style });
         try @import("widgets/RowInset.zig").draw(ctx, surface, 1, &.{.{ .text = "   Settings", .style = widget_style.of(self.caps, .{ .colour = if (self.selected) .strong else .normal, .bold = self.selected, .background = ground }) }}, row_style);
         self.hover.targets = try ctx.arena.dupe(Hover.Rect, &.{target});
-        if (height < 3) return surface;
         const status = @import("upgrade_status.zig");
         var buffer: [status.max_line_bytes]u8 = undefined;
-        const update = status.control(@import("transport_options").version, self.available, self.run, &buffer, if (self.caps.unicode) .unicode else .ascii).fit(size.width -| 1);
-        const text_width = @import("display_text.zig").width(update.text, .terminal);
-        const fits = text_width + 1 <= size.width;
-        const right = if (fits) try std.fmt.allocPrint(ctx.arena, "{s} ", .{update.text}) else "";
-        const memory = try @import("memory_text.zig").sidebar(ctx.arena, self.memory, if (fits) size.width -| @as(u16, @intCast(text_width + 5)) else 0);
-        const footer: @import("widgets/Footer.zig") = .{ .left = if (memory.len > 0) try std.fmt.allocPrint(ctx.arena, "  {s}", .{memory}) else "", .right = right, .style = widget_style.of(self.caps, .{ .colour = .quiet }) };
-        const drawn = try footer.widget().draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = 1 }));
-        @memcpy(surface.buffer[2 * size.width ..], drawn.buffer);
-        if (fits) {
+        const update = status.control(@import("transport_options").version, self.available, self.run, &buffer, if (self.caps.unicode) .unicode else .ascii);
+        const busy = if (self.run) |run| run.going() else false;
+        const show_update = update.tone != .quiet or busy;
+        const text = if (show_update)
+            if (update.tone == .warning) "Update failed" else update.text
+        else
+            try @import("memory_text.zig").sidebar(ctx.arena, self.memory, size.width -| 15);
+        const text_width = @import("display_text.zig").width(text, .terminal);
+        if (text_width > 0 and text_width + 15 <= size.width) {
             const start: u16 = size.width - @as(u16, @intCast(text_width)) - 1;
-            const style = widget_style.of(self.caps, .{ .colour = switch (update.tone) {
+            const style = widget_style.of(self.caps, .{ .colour = if (!show_update) .quiet else switch (update.tone) {
                 .quiet => .quiet,
                 .link => .ink,
                 .warning => .attention,
-            } });
-            for (start..size.width - 1) |column| surface.buffer[2 * size.width + column].style = style;
-            if (update.enabled) {
-                const hit: Hover.Rect = .{ .row = 2, .col = start, .width = @intCast(text_width) };
+            }, .background = ground });
+            const stable = try ctx.arena.dupe(u8, text);
+            const label: vxfw.RichText = .{ .text = &.{.{ .text = stable, .style = style }}, .softwrap = false, .width_basis = .parent };
+            const drawn = try label.draw(ctx.withConstraints(.{}, .{ .width = @intCast(text_width), .height = 1 }));
+            @memcpy(surface.buffer[size.width + start ..][0..text_width], drawn.buffer[0..text_width]);
+            if (show_update and update.enabled) {
+                const hit: Hover.Rect = .{ .row = 1, .col = start, .width = @intCast(text_width) };
                 self.update_target = hit;
                 self.hover.targets = try ctx.arena.dupe(Hover.Rect, &.{ target, hit });
             }
@@ -215,59 +217,43 @@ test "sidebar bottom separates Settings memory and update targets across geometr
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const status = @import("upgrade_status.zig");
-    for ([_]?status.Run{ null, .checking, .cancelling, .{ .installing = .{ .found = .{ .host = .none } } }, .{ .ended = .{ .how = .{ .failed = .download }, .outcome = .unchanged } }, .{ .ended = .{ .how = .{ .upgraded = .{ .version = .{ .schema = 76, .patch = 0 }, .restarted = true } }, .outcome = .compatible } } }) |run| {
-        for ([_]?status.Version{ null, .{ .schema = 76, .patch = 0 } }) |available| for ([_]overview_view.Caps{ .{}, .{ .unicode = false }, .{ .background = .{ 255, 255, 255 } }, .{ .unicode = false, .background = .{ 255, 255, 255 } } }) |caps| for ([_]bool{ false, true }) |selected| for ([_]u16{ 0, 1, 8, 9, 10, 12, 13, 14, 15, 16, 17, 20, 21, 22, 23, 24, 25, 26, 28, 29, 30, 31, 34, 35, 36, 37, 44, 45, 46, 140 }) |width| for ([_]u16{ 0, 1, 2, 3, 4 }) |height| {
-            defer _ = arena.reset(.retain_capacity);
-            var clicks: Clicks = .{};
-            var settings: Settings = .{ .selected = selected, .caps = caps, .userdata = &clicks, .on_click = Clicks.take, .run = run, .available = available, .memory = .{ .rui = 38 * overview_view.mib, .tools = 120 * overview_view.mib } };
-            const frame = try settings.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = height }, .cell_size = .{} });
-            try std.testing.expectEqual(@min(height, 3), frame.size.height);
-            if (width >= 20 and height >= 3) {
-                try std.testing.expect(std.mem.startsWith(u8, try cells(arena.allocator(), frame, 1), "     Settings"));
-                const bottom = try cells(arena.allocator(), frame, 2);
-                try std.testing.expect(std.mem.indexOf(u8, bottom, "Settings") == null);
-                try std.testing.expect(std.mem.indexOf(u8, bottom, "rui") == null);
-                try std.testing.expect(std.mem.indexOf(u8, bottom, "tools") == null);
-                if (width >= 46) try std.testing.expect(std.mem.startsWith(u8, bottom, "  38 MB"));
-            }
-            if (width > 0 and height > 0) for (0..width) |column| {
-                const rule = frame.readCell(@intCast(column), 0);
-                try std.testing.expectEqualStrings(if (caps.unicode) "┄" else "-", rule.char.grapheme);
-                try std.testing.expectEqual(widget_style.line(caps, .horizontal).style, rule.style);
-            };
-            const busy = if (run) |active| active.going() else false;
-            const failed = if (run) |active| active == .ended and active.ended.how == .failed else false;
-            const success = if (run) |active| active == .ended and active.ended.how == .upgraded else false;
-            const wording = if (busy) (if (caps.unicode) "Updating…" else "Updating...") else if (failed) (if (width >= "Update failed: Couldn't reach GitHub".len + 1) "Update failed: Couldn't reach GitHub" else "Update failed") else if (success) "0.76.0" else if (available != null) "Update to 0.76.0" else @import("transport_options").version;
-            const label_width: usize = if (busy and caps.unicode) 9 else wording.len;
-            if (height >= 3 and width >= label_width + 1) {
-                const bottom = try cells(arena.allocator(), frame, 2);
-                try std.testing.expect(std.mem.endsWith(u8, bottom, try std.fmt.allocPrint(arena.allocator(), "{s} ", .{wording})));
-                const tone: overview_view.Colour = if (failed) .attention else if (!busy and !success and available != null) .ink else .quiet;
-                const style = widget_style.of(caps, .{ .colour = tone });
-                for (width - label_width - 1..width - 1) |column| try std.testing.expectEqual(style, frame.readCell(@intCast(column), 2).style);
-                try std.testing.expectEqual(width >= label_width + 10, std.mem.startsWith(u8, bottom, "  38 MB"));
-            }
-            if (height >= 3 and width < label_width + 1) try std.testing.expect(std.mem.indexOf(u8, try cells(arena.allocator(), frame, 2), "38 MB") == null);
-            const expected_target: ?Hover.Rect = if (height >= 3 and width >= label_width + 1 and !busy) .{ .row = 2, .col = @intCast(width - label_width - 1), .width = @intCast(label_width) } else null;
-            try std.testing.expectEqual(expected_target, settings.update_target);
-            const drawn_identity: @import("upgrade_status.zig").Target = .{ .available = settings.available, .run = run };
-            settings.available = .{ .schema = 77, .patch = 0 };
-            settings.run = .checking;
-            var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-            for (0..height + 1) |row| for (0..width + 1) |column| {
-                clicks.got = null;
-                try settings.widget().handleEvent(&events, .{ .mouse = .{ .col = @intCast(column), .row = @intCast(row), .button = .left, .type = .press, .mods = .{} } });
-                const expected: ?overview_view.Click = if (row == 1 and height > 1 and column < width) .settings else if (expected_target) |target| (if (target.contains(@intCast(column), @intCast(row))) .{ .update = drawn_identity } else null) else null;
-                try std.testing.expectEqual(expected, clicks.got);
-            };
-            _ = try settings.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 0, .height = 0 }, .cell_size = .{} });
-            try std.testing.expect(settings.update_target == null);
-            clicks.got = null;
-            try settings.widget().handleEvent(&events, .{ .mouse = .{ .col = 0, .row = 0, .button = .left, .type = .press, .mods = .{} } });
-            try std.testing.expectEqual(null, clicks.got);
+    const runs = [_]?status.Run{ null, .checking, .cancelling, .{ .installing = .{ .found = .{ .host = .none } } }, .{ .ended = .{ .how = .{ .failed = .download }, .outcome = .unchanged } }, .{ .ended = .{ .how = .{ .upgraded = .{ .version = .{ .schema = 76, .patch = 0 }, .restarted = true } }, .outcome = .compatible } } };
+    for (runs) |run| for ([_]?status.Version{ null, .{ .schema = 76, .patch = 0 } }) |available| for ([_]overview_view.Caps{ .{}, .{ .unicode = false }, .{ .depth = .none }, .{ .background = .{ 255, 255, 255 } }, .{ .unicode = false, .background = .{ 255, 255, 255 } } }) |caps| for ([_]bool{ false, true }) |selected| for ([_]u16{ 0, 1, 8, 9, 10, 12, 13, 14, 15, 16, 17, 20, 21, 22, 23, 24, 25, 26, 28, 29, 30, 31, 34, 35, 36, 37, 44, 45, 46, 140 }) |width| for ([_]u16{ 0, 1, 2, 3, 4 }) |height| {
+        defer _ = arena.reset(.retain_capacity);
+        var clicks: Clicks = .{};
+        var settings: Settings = .{ .selected = selected, .caps = caps, .userdata = &clicks, .on_click = Clicks.take, .run = run, .available = available, .memory = .{ .rui = 38 * overview_view.mib, .tools = 120 * overview_view.mib } };
+        const frame = try settings.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = height }, .cell_size = .{} });
+        try std.testing.expectEqual(@min(height, 2), frame.size.height);
+        if (width > 0 and height > 0) for (0..width) |column| {
+            const rule = frame.readCell(@intCast(column), 0);
+            try std.testing.expectEqualStrings(if (caps.unicode) "┄" else "-", rule.char.grapheme);
+            try std.testing.expectEqual(widget_style.line(caps, .horizontal).style, rule.style);
         };
-    }
+        const busy = if (run) |active| active.going() else false;
+        const failed = if (run) |active| active == .ended and active.ended.how == .failed else false;
+        const done = if (run) |active| active == .ended and active.ended.how == .upgraded else false;
+        const wording = if (busy) (if (caps.unicode) "Updating…" else "Updating...") else if (failed) "Update failed" else if (!done and available != null) "Update to 0.76.0" else "38 MB";
+        const label_width = @import("display_text.zig").width(wording, .terminal);
+        if (height >= 2 and width >= label_width + 15) {
+            const row = try cells(arena.allocator(), frame, 1);
+            try std.testing.expect(std.mem.endsWith(u8, row, try std.fmt.allocPrint(arena.allocator(), "{s} ", .{wording})));
+            try std.testing.expect(std.mem.indexOf(u8, row, "rui") == null);
+            const colour: overview_view.Colour = if (failed) .attention else if (!busy and !done and available != null) .ink else .quiet;
+            try std.testing.expectEqual(widget_style.of(caps, .{ .colour = colour, .background = if (selected) .selection else .ground }), frame.readCell(@intCast(width - label_width - 1), 1).style);
+        }
+        const expected_target: ?Hover.Rect = if (height >= 2 and width >= label_width + 15 and (failed or (!busy and !done and available != null))) .{ .row = 1, .col = @intCast(width - label_width - 1), .width = @intCast(label_width) } else null;
+        try std.testing.expectEqual(expected_target, settings.update_target);
+        const identity: status.Target = .{ .available = available, .run = run };
+        settings.available = .{ .schema = 77, .patch = 0 };
+        settings.run = .checking;
+        var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        for (0..height + 1) |row| for (0..width + 1) |column| {
+            clicks.got = null;
+            try settings.widget().handleEvent(&events, .{ .mouse = .{ .col = @intCast(column), .row = @intCast(row), .button = .left, .type = .press, .mods = .{} } });
+            const expected: ?overview_view.Click = if (row == 1 and height > 1 and column >= 5 and column < @min(13, width -| 2)) .settings else if (expected_target) |target| (if (target.contains(@intCast(column), @intCast(row))) .{ .update = identity } else null) else null;
+            try std.testing.expectEqual(expected, clicks.got);
+        };
+    };
 }
 
 test "Session pin alternate gestures never activate New Session or Settings" {

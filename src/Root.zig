@@ -48,6 +48,7 @@ drawn_focus: [std.enums.values(app_input.Target).len]Candidate = undefined,
 focus_rects: [std.enums.values(app_input.Target).len]?FocusRect = @splat(null),
 list: vxfw.Widget,
 divider: ?Split.Divider = null,
+bottom: @import("draft_layout.zig").FixedBottom = @import("draft_layout.zig").fixedBottom(0, 0, .overview),
 session: ?vxfw.Widget = null,
 session_keys: ?Keys = null,
 settings_page: AppSettings = .{},
@@ -347,6 +348,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const self: *Self = @ptrCast(@alignCast(raw));
     const size = ctx.max.size();
     self.size = size;
+    self.bottom = @import("draft_layout.zig").fixedBottom(size.height, 0, .overview);
     self.settings_page.narrow = size.width < split_at;
     const covering = self.input.layer.signInOpen();
     const children = try ctx.arena.alloc(vxfw.SubSurface, if (covering) 2 else 1);

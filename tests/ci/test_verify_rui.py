@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import urllib.request
 import types
 import unittest
 from unittest.mock import patch
@@ -25,6 +26,24 @@ from terminal_screen import Cell, Cursor, Frame
 def committed(text, columns=100, lines=20):
     rows = tuple(tuple(Cell(char, None, False) for char in row) for row in text.rstrip("\n").split("\n"))
     return Frame(columns, lines, Cursor(2, 3), False, rows, "121933", "d4cebf", "d4cebf")
+
+
+def sidebar_rows(label, layout):
+    layouts = {
+        "chat": ("─" * 40 + "┼" + "─" * 99, "│ gpt-6.1-sol · low"),
+        "settings": ("─" * 40 + "┤" + " " * 99, "│ Notifications"),
+        "ascii-chat": ("-" * 40 + "+" + "-" * 99, "| gpt-6.1-sol . low"),
+        "ascii-settings": ("-" * 40 + "+" + " " * 99, "| Notifications"),
+        "overview": ("─" * 46, ""),
+        "wide-overview": ("─" * 140, ""),
+        "ascii-overview": ("-" * 46, ""),
+        "ascii-wide-overview": ("-" * 140, ""),
+    }
+    rule, right = layouts[layout]
+    row = "     Settings  " + label
+    if right:
+        row = row.ljust(40) + right
+    return rule + "\n" + row
 
 
 class VerifyRuiTest(unittest.TestCase):
@@ -86,6 +105,55 @@ class VerifyRuiTest(unittest.TestCase):
                     expected += ["--test-retry-waits-ms", "50,100,150"]
                 self.assertEqual(captured["argv"], expected)
                 self.assertEqual(captured["env"]["HOST_ONLY"], "secret")
+
+    def test_image_consent_fixture_emits_one_typed_image_call_then_summary(self):
+        from host_process import wait_for
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            scratch = root / "scratch"
+            scratch.mkdir()
+            untrusted = root / "candidate/tests/integration"
+            untrusted.mkdir(parents=True)
+            (untrusted / "model_fixture.py").write_text('raise RuntimeError("candidate fixture loaded")\n')
+            (root / "run.json").write_text(json.dumps({
+                "id": "image-consent-test", "scratch": str(scratch),
+                "home": str(scratch / "home"), "store": str(scratch / "store"),
+                "project": str(scratch), "binary": "/unused/rui",
+                "source": str(root / "candidate"),
+            }))
+            with subprocess.Popen([sys.executable, str(SCRIPT), "_fixture", str(root)],
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE) as provider:
+                try:
+                    port = scratch / "fixture.port"
+                    wait_for(lambda: port.exists() or provider.poll() is not None,
+                             "image fixture port or child exit", timeout=10)
+                    self.assertTrue(port.exists(), "image fixture did not start")
+                    url = "http://127.0.0.1:" + port.read_text() + "/responses"
+                    user = {"role": "user", "content": "Review with an image consent check."}
+
+                    def request(items):
+                        body = json.dumps({"input": items}).encode()
+                        with urllib.request.urlopen(urllib.request.Request(url, body,
+                                {"Content-Type": "application/json"}), timeout=5) as reply:
+                            return [json.loads(line[6:]) for line in reply.read().decode().splitlines()
+                                    if line.startswith("data: {")]
+
+                    events = request([user])
+                    calls = [event["item"] for event in events
+                             if event.get("type") == "response.output_item.done"
+                             and event.get("item", {}).get("type") == "function_call"]
+                    self.assertEqual(len(calls), 1, events)
+                    self.assertEqual(calls[0]["name"], "read_image")
+                    self.assertEqual(json.loads(calls[0]["arguments"]), {"path": "design/checkout.png"})
+                    request([user, {"type": "function_call_output", "call_id": calls[0]["call_id"],
+                                    "output": "Image read denied."}])
+                    records = [json.loads(line) for line in (root / "evidence/provider.jsonl").read_text().splitlines()]
+                    self.assertEqual([row["kind"] for row in records if "kind" in row],
+                                     ["image-consent-call", "tool-summary"])
+                finally:
+                    provider.terminate()
+                    provider.communicate(timeout=5)
 
     def test_child_imports_user_site_with_synthetic_home(self):
         run_type = runpy.run_path(str(SCRIPT))["Run"]
@@ -158,6 +226,7 @@ class VerifyRuiTest(unittest.TestCase):
                         patch.object(sys, "argv", sys.argv[:]), patch.object(sys, "path", sys.path[:]), \
                         contextlib.redirect_stdout(io.StringIO()):
                     new(args)
+                    self.assertEqual(sys.path[0], str(SCRIPT.parents[4] / "tests/integration"))
                 self.assertEqual(sent_to, [] if no_sessions else ["fybw8c"])
                 self.assertEqual(len(started), 0 if no_sessions else 2)
                 saved = json.loads(next((root / "cache/runs").glob("*/run.json")).read_text())
@@ -172,6 +241,7 @@ class VerifyRuiTest(unittest.TestCase):
         listed = {"sessions": [{"reference": sid} for sid in normal.values()]}
         cases = [
             ("normal", {"sessions": normal, "no_sessions": False}, listed, 0, True),
+            ("tree build", {"sha": "tree-" + "a" * 64, "sessions": normal}, listed, 0, True),
             ("legacy normal", {"sessions": normal}, listed, 0, True),
             ("intentional empty", {"sessions": {}, "no_sessions": True}, {"sessions": []}, 0, True),
             ("unmarked empty", {"sessions": {}}, {"sessions": []}, 0, False),
@@ -231,7 +301,7 @@ class VerifyRuiTest(unittest.TestCase):
                         return types.SimpleNamespace(returncode=0, stdout='{"instance":"host"}', stderr="")
                     run.rui_cmd = unittest.mock.Mock(side_effect=command)
                     replacements = {"Run": lambda _path: run, "sha256": lambda _path: "hash",
-                        "load_build": lambda _sha: {"files_sha256": {"rui": "hash"}},
+                        "load_build": lambda identifier: {"sha": identifier, "head": "sha", "files_sha256": {"rui": "hash"}},
                         "process_start": lambda _pid: ("start",), "accessibility": lambda: "unused",
                         "append_jsonl": lambda _path, report: reports.append(report)}
                     with patch.dict(doctor.__globals__, replacements), \
@@ -247,6 +317,24 @@ class VerifyRuiTest(unittest.TestCase):
                     self.assertEqual(reports[0]["verdict"], "PASS" if expected else "ISSUES")
                     self.assertEqual(sum(call.args[:2] == ("session", "list")
                                          for call in run.rui_cmd.call_args_list), 1)
+
+    def test_tap_resolves_recorded_build_in_run_cache(self):
+        tap = runpy.run_path(str(SCRIPT))["tap_main"]
+        with tempfile.TemporaryDirectory() as temp:
+            cache = Path(temp) / "cache"
+            for identifier in ("a" * 40, "tree-" + "b" * 64):
+                with self.subTest(identifier=identifier):
+                    build = cache / "builds" / identifier
+                    build.mkdir(parents=True)
+                    (build / "manifest.json").write_text(json.dumps({"screen_library": identifier}))
+                    run = types.SimpleNamespace(root=cache / "runs" / "run",
+                                                meta={"sha": identifier, "source": "/source"})
+                    def require_screen(record):
+                        self.assertEqual(record["screen_library"], identifier)
+                        raise RuntimeError("build resolved")
+                    with patch.dict(tap.__globals__, {"Run": lambda _path: run, "require_screen": require_screen}), \
+                            self.assertRaisesRegex(RuntimeError, "build resolved"):
+                        tap(types.SimpleNamespace(run="run"))
 
     def test_scratch_root_follows_host_platform(self):
         for platform, expected in (("darwin", "/private/tmp"), ("linux", "/tmp")):
@@ -375,6 +463,17 @@ class FramesTest(unittest.TestCase):
                             self.run_frames_scenario(scenario, capture_ok=capture_ok, failing_state=failing)
                 self.assertEqual(resume.call_count, 2)
                 self.assertTrue(all(call.args[1] is False for call in resume.call_args_list))
+
+    def test_empty_composer_wait_with_clipped_split_rule(self):
+        for bar in ("│", "|"):
+            for draft in ("", " retained | draft"):
+                frame = committed("witness".ljust(40) + bar + " ›" + draft)._replace(cursor=Cursor(43, 0), visible=True)
+                outcomes = []
+                terminal = types.SimpleNamespace(wait=lambda predicate, *_args: outcomes.append(
+                    predicate(types.SimpleNamespace(completed=frame.text, frame=frame))))
+                with self.subTest(bar=bar, draft=draft):
+                    self.helper["frame_wait"](None, terminal, "witness", empty_composer=True)
+                    self.assertEqual(outcomes, [not draft])
 
     def test_empty_composer_wait_rejects_pre_enter_draft_and_accepts_feed_message(self):
         wait = self.helper["frame_wait"]
@@ -1080,7 +1179,7 @@ while True:
         self.assertGreater(len(default["states"]), 25)
 
     def test_regex_absences_validate_and_roundtrip_before_launch(self):
-        pattern = r"^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:┆.*)?$"
+        pattern = r"^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd])\b"
         data = self.scenario()
         data["states"][0]["absent_regex"] = [pattern]
         validated = self.helper["validate_scenario"](data)
@@ -1093,7 +1192,7 @@ while True:
 
     def test_regex_absences_reject_dynamic_rows_in_readiness_and_saved_captures(self):
         state = {"name": "no-empty-rows", "steps": [], "expect": ["Settings"],
-                 "absent_regex": [r"^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:┆.*)?$"]}
+                 "absent_regex": [r"^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd])\b"]}
         clean = " + New Session\n   Existing conversation  3h\n   Settings"
         run = types.SimpleNamespace(meta={"sha": "a" * 40})
         for size in ((140, 40), (46, 30)):
@@ -1145,6 +1244,15 @@ while True:
                     self.assertIsNotNone(failure(state, f" ○ 9xt4vy  now {divider} chat"))
                     self.assertIsNone(failure(state, f" ○ New Session  now {divider} chat"))
 
+    def test_read_image_raw_id_guard_uses_shared_divider_glyphs(self):
+        from terminal_screen import DIVIDER_GLYPHS
+        scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
+        state = next(state for state in scenario["states"] if state["name"] == "read-image-approval")
+        for divider in DIVIDER_GLYPHS:
+            with self.subTest(divider=divider):
+                self.assertIsNotNone(self.helper["frame_row_failure"](state, f" ○ 9xt4vy  2s {divider} chat"))
+                self.assertIsNone(self.helper["frame_row_failure"](state, f" ○ Named session  2s {divider} chat"))
+
     def test_empty_chat_roundtrips_and_current_chat_labels_exclude_raw_ids(self):
         scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
         states = {state["name"]: state for state in scenario["states"]}
@@ -1159,7 +1267,7 @@ while True:
             if state.get("first_run"):
                 continue
             with self.subTest(raw_id_excluded_in_state=name):
-                self.assertIsNotNone(self.helper["frame_row_failure"](state, " ○ 9xt4vy  now ┆ chat"))
+                self.assertIsNotNone(self.helper["frame_row_failure"](state, "─" * 20 + "┼" + "─" * 20 + "\n" + " ○ 9xt4vy  now".ljust(20) + "│ chat"))
         for name in ("chat-empty", "start-model", "start-effort", "start-picked"):
             state = states[name]
             steps = state["steps"]
@@ -1167,7 +1275,7 @@ while True:
             self.assertEqual(steps[typed_ready + 1], {"wait": "○ New Session", "min_columns": 140})
             self.assertEqual(state["sizes"], [(140, 40), (46, 30)])
             self.assertIsNone(self.helper["frame_row_failure"](
-                {"name": name, "absent_regex": state["absent_regex"]}, " ○ New Session  now ┆chat"))
+                {"name": name, "absent_sidebar_regex": state["absent_sidebar_regex"]}, " ○ New Session  now │chat"))
         for name in ("empty-chat-left", "empty-chat-model-left", "empty-chat-two-left"):
             state = states[name]
             self.assertTrue(state["first_frame"])
@@ -2813,8 +2921,8 @@ class UpgradeFramesTest(unittest.TestCase):
                 self.assertFalse(all(text in after_only for text in before["expect"]))
             else:
                 before = state["comparison"]["before"]
-                self.assertTrue(before["expect_regex"])
-                self.assertNotEqual(before["expect_regex"], state["expect_regex"])
+                self.assertTrue(before["expect_sidebar_regex"])
+                self.assertNotEqual(before["expect_sidebar_regex"], state["expect_sidebar_regex"])
                 if state["upgrade"] == "failure":
                     self.assertIn("! Couldn't reach GitHub; nothing changed", before["expect"])
                 if state["upgrade"] == "updating":
@@ -2822,7 +2930,7 @@ class UpgradeFramesTest(unittest.TestCase):
 
     def test_failure_frames_wait_for_public_chat_readiness_without_open_hints(self):
         settle = self.helper["frame_failure_settled"]
-        reason = "Update failed: Couldn't reach GitHub"
+        reason = "Update failed"
         for before in (False, True):
             marker = "! Couldn't reach GitHub; nothing changed" if before else reason
             chat = "  ┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n  › Type a task\n  ┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n gpt-6.1-sol · low · ~/code/rui"
@@ -2849,10 +2957,12 @@ class UpgradeFramesTest(unittest.TestCase):
             self.assertIn("enter open", state["absent"])
             self.assertIn("enter open", state["comparison"]["before"]["absent"])
             self.assertIn(reason, state["expect"])
-            self.assertEqual(state["expect_next"], {"Settings": reason})
+            self.assertEqual(state["expect_next"], {})
+            self.assertIn("Update failed:", state["absent"])
             for size in state["sizes"]:
-                suffix = "┆ actual chat" if size[0] == 140 else ""
-                rows = f"Settings{suffix}\n{reason}{suffix}\n"
+                layout = "chat" if size[0] == 140 else "overview"
+                suffix = "│ actual chat" if size[0] == 140 else ""
+                rows = sidebar_rows(reason, layout) + "\n"
                 screens = [rows + "Reading this Session…", rows + "Host paused", rows]
                 observed = []
                 def wait(predicate, _description, **_kwargs):
@@ -2866,7 +2976,10 @@ class UpgradeFramesTest(unittest.TestCase):
                     self.assertEqual(observed, [0, 1, 2])
                     self.assertIsNotNone(self.helper["frame_row_failure"](state, "Settings\nrui 7 MB " + reason))
                     self.assertIsNotNone(self.helper["frame_row_failure"](state, "Settings\nUpdate failed" + suffix))
-                    self.assertIsNone(self.helper["frame_row_failure"](state, f"Settings{suffix}\n7 MB {reason}{suffix}"))
+                    self.assertIsNone(self.helper["frame_row_failure"](state, rows))
+                    self.assertIsNotNone(self.helper["frame_row_failure"](state, rows.replace(reason, "7 MB  " + reason)))
+                    self.assertIsNotNone(self.helper["frame_row_failure"](state, rows.replace(reason, reason + ": Couldn't reach GitHub")))
+                    self.assertIsNotNone(self.helper["frame_row_failure"](state, rows.split("\n", 1)[1]))
 
     def test_chat_readiness_requires_settled_composer_and_footer_in_chat_pane(self):
         ready = self.helper["frame_chat_ready"]
@@ -2874,9 +2987,10 @@ class UpgradeFramesTest(unittest.TestCase):
             for prompt, rule in (("›", "┄"), (">", "-")):
                 for model in ("gpt-6.1-sol", "gpt-5.5", "vendor/model-v2"):
                     with self.subTest(split=split, prompt=prompt, model=model):
-                        prefix = " Upgrade witness ┆" if split else ""
+                        prefix = " Upgrade witness " + ("│" if rule == "─" else "|") if split else ""
+                        bottom = rule * (len(prefix) - 1) + ("┼" if rule == "─" else "+") + rule * 30 if split else " " + rule * 30
                         lines = [prefix + " › Upgrade witness", prefix + " " + rule * 30,
-                                 prefix + " " + prompt + " retained draft", prefix + " " + rule * 30,
+                                 prefix + " " + prompt + " retained draft", bottom,
                                  prefix + f" {model} · low"]
                         chat = "\n".join(lines)
                         self.assertTrue(ready(chat))
@@ -2901,8 +3015,70 @@ class UpgradeFramesTest(unittest.TestCase):
                             self.assertTrue(ready(wrong))
                             self.assertFalse(ready(wrong, "Upgrade witness"))
         self.assertFalse(ready("Upgrade witness\nSettings\ngpt-6.1-sol · low"))
-        self.assertTrue(ready(" Upgrade witness ┆ details\n ┄┄┄┄┄┄\n › draft\n ┄┄┄┄┄┄\n model · low", "Upgrade witness"))
-        self.assertTrue(ready(" 界 ┆ Upgrade witness ┆ detail\n    ┆ ┄┄┄┄┄┄\n    ┆ › draft\n    ┆ ┄┄┄┄┄┄\n    ┆ model · low", "Upgrade witness"))
+        self.assertTrue(ready(" Upgrade witness │ details\n ──────\n › draft\n ──────\n model · low", "Upgrade witness"))
+        self.assertTrue(ready(" 界 │ Upgrade witness │ detail\n    │ ──────\n    │ › draft\n────┼──────\n    │ model · low", "Upgrade witness"))
+
+    def test_rendered_junctions_and_content_in_chat_readiness(self):
+        split = self.helper["frame_split_row"]
+        ready = self.helper["frame_chat_ready"]
+        settle = self.helper["frame_failure_settled"]
+        self.assertEqual(split("draft │ content | more + text"), ("", "", "draft │ content | more + text"))
+        for rule, junction, bar in (("─", "┼", "│"), ("-", "+", "|")):
+            boundary = rule * 12 + junction + rule * 20
+            self.assertEqual(split(boundary), (rule * 12, junction, rule * 20))
+            for draft in ("Type a task", "retained │ draft | content + more"):
+                lines = [" witness".ljust(12) + bar + " witness │ content",
+                         "".ljust(12) + bar + " " + rule * 20, "".ljust(12) + bar + " › " + draft,
+                         boundary, "".ljust(12) + bar + " model · low"]
+                screen = "\n".join(lines)
+                with self.subTest(junction=junction, draft=draft):
+                    self.assertTrue(ready(screen, "witness"))
+                    self.assertEqual(ready(screen, empty=True), draft == "Type a task")
+                    self.assertFalse(ready(screen, "missing witness"))
+                    for before in (False, True):
+                        marker = "! Couldn't reach GitHub; nothing changed" if before else "Update failed"
+                        accepted = []
+                        def wait(predicate, _description):
+                            accepted.append(predicate(types.SimpleNamespace(completed=marker + "\n" + screen)))
+                        settle(types.SimpleNamespace(wait=wait), before)
+                        self.assertEqual(accepted, [draft == "Type a task"])
+        self.assertTrue(ready("witness | content\n ───────\n › retained | draft\n ───────\n model · low", "witness"))
+
+    def test_sidebar_rule_junctions_and_legacy_vertical_endings(self):
+        split = self.helper["frame_split_row"]
+        failure = self.helper["frame_row_failure"]
+        for line, separator in (("─" * 20 + "┤ Notifications", "┤"),
+                                ("-" * 20 + "+ Notifications", "+"),
+                                ("─" * 20 + "│ status", "│"),
+                                ("-" * 20 + "| ", "|")):
+            left, found, pane = split(line)
+            with self.subTest(separator=separator):
+                self.assertEqual((left, found, pane), (line[:20], separator, line[21:]))
+                bar = "|" if separator in "+|" else "│"
+                screen = line[:20] + separator + pane + "\n" + " Settings 0.78.10000".ljust(20) + bar + " chat"
+                self.assertIsNone(failure({"expect_sidebar_regex": [r" *Settings +0\.78\.10000 *"]}, screen))
+                result = failure({"expect_sidebar_regex": [r" *Settings +0\.78\.10000 *"],
+                                  "expect_sidebar_rule": True}, screen)
+                self.assertEqual(result is None, separator in "┤+")
+
+    def test_before_upgrade_regex_accepts_ascii_sidebar_divider(self):
+        scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
+        failure = self.helper["frame_row_failure"]
+        for state in (entry for entry in scenario["states"] if entry.get("upgrade") not in (None, "chat")):
+            patterns = [pattern.replace("{upgrade_version}", r"0\.78\.10000") for pattern in state["comparison"]["before"]["expect_sidebar_regex"]]
+            for divider in self.helper["DIVIDER_GLYPHS"]:
+                with self.subTest(state=state["name"], divider=divider):
+                    self.assertIsNone(failure({"expect_sidebar_regex": patterns}, "─" * 35 + ("┼" if divider == "│" else "+") + "─" * 20 + "\n" + " Settings rui 7 MB 0.78.10000".ljust(35) + divider + " Type a task"))
+                    self.assertIsNotNone(failure({"expect_sidebar_regex": patterns}, "─" * 35 + ("┼" if divider == "│" else "+") + "─" * 20 + "\n" + " Settings 0.77.10000".ljust(35) + divider + " 0.78.10000"))
+
+    def test_sidebar_absence_regex_rejects_ascii_divider(self):
+        scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
+        pattern = next(pattern for state in scenario["states"] for pattern in state.get("absent_sidebar_regex", [])
+                       if "[0123456789abcdefghjkmnpqrstvwxyz]{6}" in pattern)
+        for divider in self.helper["DIVIDER_GLYPHS"]:
+            with self.subTest(divider=divider):
+                self.assertIsNotNone(self.helper["frame_row_failure"](
+                    {"name": "test", "absent_sidebar_regex": [pattern]}, "─" * 20 + "┼" + "─" * 20 + "\n" + " ○ abcdef  now".ljust(20) + divider + " chat"))
 
     def test_upgrade_relaunch_waits_for_the_same_settled_chat_on_both_sides(self):
         drive = self.helper["frame_drive_upgrade"]
@@ -2937,6 +3113,37 @@ class UpgradeFramesTest(unittest.TestCase):
                                                        "frame_steps": lambda *_a, **_k: None}):
                     drive(run, terminal, state, (None, None, version))
                 self.assertEqual(observed, [0, 1, 2, 3])
+
+    def test_upgrade_and_failure_predicates_cover_layouts_and_drafts(self):
+        drive = self.helper["frame_drive_upgrade"]
+        settle = self.helper["frame_failure_settled"]
+        for split in (False, True):
+            for rule, bar, junction in (("─", "│", "┼"), ("-", "|", "+")):
+                for draft in ("Type a task", "retained draft"):
+                    prefix = " ".ljust(20) + bar if split else ""
+                    top = prefix + " " + rule * 20
+                    bottom = rule * 20 + junction + rule * 20 if split else " " + rule * 20
+                    screen = "\n".join([prefix + " Upgrade witness", top, prefix + " › " + draft,
+                                         bottom, prefix + " model · low"])
+                    for before in (False, True):
+                        with self.subTest(split=split, rule=rule, draft=draft, before=before), tempfile.TemporaryDirectory() as directory:
+                            marker = "! Couldn't reach GitHub; nothing changed" if before else "Update failed"
+                            results = []
+                            settle(types.SimpleNamespace(wait=lambda pred, _description: results.append(
+                                pred(types.SimpleNamespace(completed=marker + "\n" + screen)))), before)
+                            self.assertEqual(results, [draft == "Type a task"])
+                            root = Path(directory)
+                            selected = root / ".local/bin/rui"
+                            notice = "\nUpgraded to 0.78.10000" if before else ""
+                            terminal = types.SimpleNamespace(process=types.SimpleNamespace(pid=42),
+                                wait=lambda pred, _description, **_kw: results.append(pred(types.SimpleNamespace(completed=screen + notice))))
+                            run = types.SimpleNamespace(home=root, store=root / "store", meta={"upgrade_previous_instance": "old"},
+                                rui_cmd=lambda *_args: types.SimpleNamespace(returncode=0, stderr="", stdout='{"instance":"new"}'))
+                            state = {"upgrade": "chat", "open": "Upgrade witness", "comparison_side": "before" if before else "after"}
+                            with patch.dict(sys.modules, {"os_semantics": types.SimpleNamespace(process_executable=lambda _pid: selected.resolve())}), \
+                                 patch.dict(drive.__globals__, {"frame_wait": lambda *_a, **_k: None, "frame_steps": lambda *_a, **_k: None}):
+                                drive(run, terminal, state, (None, None, "0.78.10000"))
+                            self.assertTrue(results[-1])
 
     def test_narrow_upgrade_resize_reveals_the_list_without_closing_chat_specimens(self):
         reveal = self.helper["frame_upgrade_viewport"]
@@ -2978,20 +3185,37 @@ class UpgradeFramesTest(unittest.TestCase):
             reveal(None, terminal, {"upgrade": "chat"})
             self.assertEqual(events, [])
 
-    def test_split_sidebar_rows_bound_their_exact_version_before_chat_content(self):
+    def test_shared_sidebar_row_requires_divider_and_bounds_controls_before_chat_content(self):
         scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
-        current = next(state for state in scenario["states"] if state["name"] == "sidebar-current")
         row_failure = self.helper["frame_row_failure"]
-        after = {"expect_regex": [pattern.replace("{upgrade_version}", r"0\.78\.10000") for pattern in current["expect_regex"]]}
-        before = {"expect_regex": [pattern.replace("{upgrade_version}", r"0\.78\.10000") for pattern in current["comparison"]["before"]["expect_regex"]]}
-        for ending in ("", "┆ Type a task 0.99.99999"):
-            self.assertIsNone(row_failure(after, " 7 MB     0.78.10000 " + ending))
-            self.assertIsNone(row_failure(before, " Settings rui 7 MB 0.78.10000 " + ending))
-            self.assertIsNotNone(row_failure(after, " rui 7 MB 0.78.10000 " + ending))
-            self.assertIsNotNone(row_failure(after, " 7 MB 0x78x10000 " + ending))
-            self.assertIsNotNone(row_failure(before, " Settings 0x78x10000 " + ending))
-        self.assertIsNotNone(row_failure(after, " 7 MB 0.77.10000 ┆ 0.78.10000"))
-        self.assertIsNotNone(row_failure(before, " Settings 0.77.10000 ┆ 0.78.10000"))
+        for state in (entry for entry in scenario["states"] if entry.get("upgrade") not in (None, "chat")):
+            patterns = [pattern.replace("{available_version}", r"0\.99\.99999") for pattern in state["expect_sidebar_regex"]]
+            oracle = {"expect_sidebar_regex": patterns, "expect_sidebar_rule": True}
+            label = {"current": "", "available": "Update to 0.99.99999", "updating": "Updating…", "failure": "Update failed"}[state["upgrade"]]
+            for layout in ("chat", "settings", "ascii-chat", "ascii-settings", "overview", "wide-overview", "ascii-overview", "ascii-wide-overview"):
+                rendered = "Updating..." if layout.startswith("ascii") and label == "Updating…" else label
+                rows = sidebar_rows(rendered or "7 MB", layout)
+                rule, row = rows.split("\n")
+                with self.subTest(theme=state["theme"], kind=state["upgrade"], layout=layout):
+                    self.assertIn("{upgrade_version}", state["absent"])
+                    self.assertIsNone(row_failure(oracle, rows))
+                    if rendered:
+                        self.assertIsNotNone(row_failure(oracle, rows.replace(rendered, "7 MB  " + rendered, 1)))
+                    for wrong in (row, rule + "\n" + row.replace("Settings  ", "Settings\n"),
+                                  rule + "\n" + row.replace("Settings  ", "Settings  rui "),
+                                  rule + "\n" + row.replace("Settings  ", "Settings  tools 120 MB "),
+                                  rule + "\n" + row.replace("Settings  ", "Settings  0.78.10000 ")):
+                        self.assertIsNotNone(row_failure(oracle, wrong))
+                    if label:
+                        self.assertIsNotNone(row_failure(oracle, rule + "\n Settings 7 MB │ " + label))
+                    if layout == "chat":
+                        self.assertIsNotNone(row_failure(oracle, rows.replace("┼", "│", 1)))
+                    if state["upgrade"] == "available":
+                        self.assertIsNotNone(row_failure(oracle, rows.replace("0.99.99999", "0x99x99999")))
+        current = next(state for state in scenario["states"] if state["name"] == "sidebar-current")
+        before = {"expect_sidebar_regex": [pattern.replace("{upgrade_version}", r"0\.78\.10000") for pattern in current["comparison"]["before"]["expect_sidebar_regex"]]}
+        self.assertIsNone(row_failure(before, "─" * 35 + "┼" + "─" * 20 + "\n" + " Settings rui 7 MB 0.78.10000".ljust(35) + "│ Type a task"))
+        self.assertIsNotNone(row_failure(before, "─" * 35 + "┼" + "─" * 20 + "\n" + " Settings 0.77.10000".ljust(35) + "│ 0.78.10000"))
 
     def test_held_upgrade_after_readiness_uses_publication_and_control_not_chat_status(self):
         drive = self.helper["frame_drive_upgrade"]
@@ -3001,18 +3225,25 @@ class UpgradeFramesTest(unittest.TestCase):
             events.append(description)
         terminal = types.SimpleNamespace(wait=wait, mouse=lambda event: events.append(event["at"]))
         with tempfile.TemporaryDirectory() as directory, patch.dict(drive.__globals__, {
-                "frame_wait": lambda _run, _terminal, marker, **_kwargs: events.append(marker)}):
+                "frame_wait": lambda _run, _terminal, marker, **_kwargs: events.append(marker),
+                "frame_steps": lambda _run, _terminal, steps: events.append(steps)}):
             run = types.SimpleNamespace(home=Path(directory))
             drive(run, terminal, {"upgrade": "updating", "comparison_side": "after"}, (None, object(), "0.78.10000"))
-        self.assertEqual(events, ["Type a task", "0.78.10000", "0.78.10000", "published release held before Host activation"])
+        self.assertEqual(events, ["Type a task",
+                                 [{"mouse": {"at": "Settings", "do": "click"}}, {"wait": "Notifications"},
+                                  {"keys": ["Down"] * 5 + ["Enter"]}],
+                                 " · publishing", [{"keys": ["Esc"]}, {"gone": "Notifications"}],
+                                 "published release held before Host activation"])
 
-    def test_compact_row_oracle_rejects_old_memory_labels_and_nonliteral_version(self):
+    def test_failure_row_oracle_rejects_expanded_reason_and_split_row(self):
+        state = next(state for state in self.helper["load_scenario"](SCRIPT.with_name("frames.json"))["states"]
+                     if state["name"] == "sidebar-failure")
         row_failure = self.helper["frame_row_failure"]
-        state = {"expect_regex": [r"^\s*\d+(?:\.\d+)? (?:MB|GB)\s+0\.70\.10000\s*$"]}
-        self.assertIsNone(row_failure(state, "  38 MB       0.70.10000 "))
-        for row in ("rui 38 MB       0.70.10000", "38 MB tools 120 MB 0.70.10000", "38 MB 0x70x10000"):
+        self.assertIsNone(row_failure(state, "─" * 40 + "\n     Settings   Update failed"))
+        for row in ("Settings\n38 MB Update failed", "Settings 38 MB Update failed", "Settings Update failed: Couldn't reach GitHub",
+                    "Settings 38 MB │ Update failed"):
             with self.subTest(row=row):
-                self.assertIsNotNone(row_failure(state, row))
+                self.assertIsNotNone(row_failure(state, "─" * 40 + "\n" + row))
 
     def test_native_retry_journey_waits_for_archive_gate_before_release_and_settings(self):
         journey = self.helper["frame_upgrade_journey"]
@@ -3031,6 +3262,15 @@ class UpgradeFramesTest(unittest.TestCase):
                                             wait=lambda _predicate, description, **_kwargs: events.append(description))
             def capture(_run, _terminal, _out, specimen, _size, _reason):
                 events.append(specimen["name"])
+                if specimen["name"] == "retry-completed":
+                    self.assertEqual(specimen["expect"], ["Settings"])
+                    self.assertIn("0.70.10000", specimen["absent"])
+                    for layout in ("chat", "settings", "ascii-chat", "ascii-settings", "overview", "wide-overview", "ascii-overview", "ascii-wide-overview"):
+                        with self.subTest(retry_completed=layout):
+                            rows = sidebar_rows("7 MB", layout)
+                            self.assertIsNone(self.helper["frame_row_failure"](specimen, rows))
+                            self.assertIsNotNone(self.helper["frame_row_failure"](specimen, rows.replace("Settings  7 MB", "Settings  0.70.10000")))
+                    self.assertIsNotNone(self.helper["frame_row_failure"](specimen, "Settings\n7 MB 0.70.10000"))
                 return {"ok": True}
             with patch.dict(journey.__globals__, {"frame_ready": lambda *_args: None, "frame_capture": capture,
                                                  "frame_steps": lambda *_args: events.append("Settings Version")}):

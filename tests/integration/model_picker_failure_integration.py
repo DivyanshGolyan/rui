@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-from terminal_screen import VERTICAL_DIVIDER
 import json
 import os
 import shutil
@@ -9,6 +8,7 @@ import threading
 import codex_fixture
 import host_process
 import model_fixture as fixture
+from terminal_screen import split_pane_row
 from human_cli_fixture import AppModelCatalog, app_model_open, model_choice_frame, model_choice_shown, panel_frame, overview_frame, overview_title, open_new_chat, read_terminal, terminal_exit
 from terminal_process import close_pty, open_pty, spawn
 
@@ -60,7 +60,7 @@ def main():
         caller = spawn([str(fixture.RUI), "--store", str(store)], cwd=state,
                        env=env, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         launch = read_terminal(master, "Type a task", composer=True)
-        assert "+ New Session" in launch and VERTICAL_DIVIDER in launch, launch
+        assert "+ New Session" in launch and any(split_pane_row(row)[1] for row in launch.splitlines()), launch
         initial = host_process.wait_for(
             lambda: json.loads(cli("session", "list", "--store", store, "--all"))["sessions"],
             "wide launch Session")

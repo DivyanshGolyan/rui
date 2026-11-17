@@ -504,6 +504,15 @@ fn dropFinalInputUpgradeShape(storage: *Store) !void {
         }
     };
     if (storage.engine == .mysql) {
+        try Native.exec(storage, "ALTER TABLE message_admission MODIFY COLUMN message_admission_person_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN sender_session_ref IS NULL THEN session_ref END) STORED");
+        const kind_checks = " FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='message_admission' AND tc.CONSTRAINT_TYPE='CHECK' AND LOCATE('source_kind',cc.CHECK_CLAUSE)>0 LIMIT 1";
+        for (0..2) |_| {
+            try Native.exec(storage, "SET @rui_final_ddl=(SELECT CONCAT('ALTER TABLE message_admission DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`')" ++ kind_checks ++ ")");
+            try Native.exec(storage, "PREPARE rui_final FROM @rui_final_ddl");
+            try Native.exec(storage, "EXECUTE rui_final");
+            try Native.exec(storage, "DEALLOCATE PREPARE rui_final");
+        }
+        try Native.exec(storage, "ALTER TABLE message_admission DROP COLUMN source_kind");
         const checks = " FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='message_admission' AND tc.CONSTRAINT_TYPE='CHECK' AND LOCATE('source_action_id',cc.CHECK_CLAUSE)>0";
         try Native.exec(storage, "SET @rui_final_ddl=(SELECT CONCAT('ALTER TABLE message_admission DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`')" ++ checks ++ ")");
         try Native.exec(storage, "PREPARE rui_final FROM @rui_final_ddl");

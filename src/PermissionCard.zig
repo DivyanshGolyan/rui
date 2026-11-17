@@ -79,8 +79,8 @@ pub fn drawInput(self: *Self, ctx: vxfw.DrawContext, composer: ?vxfw.Widget) std
     self.hover.targets = &.{};
     if (size.width == 0 or size.height == 0) return .empty(self.widget());
     const draft = if (composer) |widget_| try widget_.draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = @min(size.height, @import("draft_layout.zig").cap(size.height) + 2) })) else null;
-    const input_height: u16 = if (draft) |drawn| drawn.size.height else @min(3, size.height);
-    const rule: u16 = if (input_height >= 3) 1 else 0;
+    const input_height: u16 = if (draft) |drawn| drawn.size.height else @min(@import("draft_layout.zig").min_rule_height, size.height);
+    const rule: u16 = if (input_height >= @import("draft_layout.zig").min_rule_height) 1 else 0;
     const body_height = size.height - input_height;
     self.choice_column = if (size.width >= 6 and size.height >= 4) input_choice.prompt_cells else 0;
     self.choice_width = size.width - 2 * self.choice_column;

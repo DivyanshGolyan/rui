@@ -369,15 +369,18 @@ class TerminalOutput:
 
 
 @contextmanager
-def terminal_process(args, *, env, cwd=None, columns=COLUMNS, rows=ROWS, feed=None, collected=None, condition=None):
+def terminal_process(args, *, env, cwd=None, columns=COLUMNS, rows=ROWS, feed=None, collected=None, condition=None, eof=False):
     master, slave = open_pty(columns, rows)
     process, output = None, None
     try:
         process = spawn(args, env=env, cwd=cwd, stdin=slave, stdout=slave, stderr=slave)
+        if eof:
+            close_pty(slave)
+            slave = None
         if feed is not None:
             output = process.output = TerminalOutput(process, master, feed, collected, condition)
         yield process, master
     finally:
         dispose_all(lambda: stop_process(process, timeout=5) if process is not None else None,
                     lambda: output.close() if output is not None else None,
-                    lambda: close_pty(master), lambda: close_pty(slave))
+                    lambda: close_pty(master), lambda: close_pty(slave) if slave is not None else None)

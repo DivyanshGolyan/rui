@@ -102,7 +102,7 @@ pub const Command = enum {
             .host_start => .{ .resource = .host, .name = "start", .description = "Start or connect to a managed Host. An already-running Host keeps its original settings.", .options = serve_grammar.settings_options, .retired_options = serve_grammar.retired_options },
             .host_set => .{ .resource = .host, .name = "set", .description = "Save one Host setting. @FILE reads a JSON value from a file.", .options = serve_grammar.host_destination, .positional = "PATH", .positional_tail = "VALUE", .requires = &.{ &.{""}, &.{"#2"} } },
             .host_unset => .{ .resource = .host, .name = "unset", .description = "Remove one saved Host setting, restoring its default.", .options = serve_grammar.host_destination, .positional = "PATH", .requires = &.{&.{""}} },
-            .host_settings => .{ .resource = .host, .name = "settings", .description = "Show saved Host settings with defaults, list --paths, or --check the effective settings without starting.", .options = serve_grammar.settings_options ++ &[_]Option{ flag("paths"), flag("check") }, .conflicts = &.{.{ .code = .host_settings_modes_conflict, .a = "paths", .b = "check" }} },
+            .host_settings => .{ .resource = .host, .name = "settings", .description = "Show saved Host settings with defaults, list --paths, or --check the effective settings without starting.", .options = serve_grammar.settings_options ++ &[_]Option{ flag("paths"), flag("check"), cli_grammar.hiddenFlag(@import("host_settings_handoff.zig").check_option) }, .conflicts = &.{.{ .code = .host_settings_modes_conflict, .a = "paths", .b = "check" }} },
             .host_pause => .{ .resource = .host, .name = "pause", .description = std.fmt.comptimePrint("Shut down the Host, interrupting all work in this Store. Saved work resumes when a Host starts again, including on the next rui; to end a Session's work for good, use rui session stop. Waits up to {d} seconds for the Host to release the Store and reports retirement confirmed or unconfirmed. Retry lost acknowledgment with the original --instance only.", .{product_defaults.host_shutdown_seconds}), .options = destination ++ &[_]Option{value("instance", "HEX")} },
             .host_status => .{ .resource = .host, .name = "status", .description = "Read protected Host readiness and capabilities without starting it.", .options = destination },
             .host_restart => .{ .resource = .host, .name = "restart", .description = "Restart every eligible running Host of this user on the selected installed build, one at a time. Saved work resumes; unsupported Hosts are left running with a reason. Requires --all.", .options = &.{flag("all")}, .requires = &.{&.{"all"}} },
@@ -182,13 +182,7 @@ const saved_identity = &[_]PositionalConflict{
     .{ .code = .handle_names_store_and_key, .option = "key" },
     .{ .code = .handle_names_store_and_key, .option = "key-hex" },
 };
-const tool_choices = blk: {
-    var text: []const u8 = "";
-    for (std.enums.values(@import("built_in_tool.zig").BuiltInTool), 0..) |tool, i| {
-        text = text ++ (if (i == 0) "" else ",") ++ @tagName(tool);
-    }
-    break :blk text ++ "|none";
-};
+const tool_choices = product_defaults.tools ++ "|none";
 const settings = settingOptions(.settings, false);
 const start_settings = settingOptions(.settings, true);
 
@@ -758,7 +752,7 @@ test "tool help lists every built-in including skill in name order" {
         var help: std.Io.Writer.Allocating = .init(std.testing.allocator);
         defer help.deinit();
         try command.definition().help(&help.writer);
-        try std.testing.expect(std.mem.indexOf(u8, help.written(), "--tools bash,find_tools,message_agent,read_action,read_transcript,skill,start_agent,stop_action,web_search|none") != null);
+        try std.testing.expect(std.mem.indexOf(u8, help.written(), "--tools " ++ product_defaults.tools ++ "|none") != null);
     }
 }
 

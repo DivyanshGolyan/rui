@@ -1,4 +1,4 @@
-from terminal_screen import HORIZONTAL_RULE, VERTICAL_DIVIDER
+from terminal_screen import RULE_GLYPHS, VERTICAL_DIVIDER, split_pane_row
 import errno
 import fcntl
 import json
@@ -11,9 +11,13 @@ import termios
 import threading
 import time
 
-import model_fixture as fixture
 import terminal_process as terminal_process_module
 from terminal_process import answers_to
+
+
+def _fixture():
+    import model_fixture
+    return model_fixture
 
 
 CHOICE = "Allow once    Deny"
@@ -44,7 +48,7 @@ def pick_deny(master):
 
 def run(home, *args, success=True, environment=None, input=None):
     env = {**os.environ, "HOME": str(home), **(environment or {})}
-    result = subprocess.run([str(fixture.RUI), *map(str, args)], env=env, capture_output=True, text=True, timeout=20, input=input)
+    result = subprocess.run([str(_fixture().RUI), *map(str, args)], env=env, capture_output=True, text=True, timeout=20, input=input)
     if success:
         assert result.returncode == 0, (args, result.stdout, result.stderr)
     else:
@@ -57,7 +61,7 @@ CAPTURE_NOTICE = re.compile(r"request: (\S+) \(wait: rui request wait \1; if unc
 
 def admit(home, *args, expect=0, environment=None, input=None, cwd=None):
     env = {**os.environ, "HOME": str(home), **(environment or {})}
-    result = subprocess.run([str(fixture.RUI), *map(str, args)], env=env, capture_output=True,
+    result = subprocess.run([str(_fixture().RUI), *map(str, args)], env=env, capture_output=True,
         text=True, timeout=20, input=input, cwd=cwd)
     assert result.returncode == expect, (args, result.stdout, result.stderr)
     notice = CAPTURE_NOTICE.match(result.stderr)
@@ -138,22 +142,23 @@ def chat_content_row(row):
     return row.removeprefix(" ")
 
 
+def pane_content(row):
+    return split_pane_row(row)[2]
+
+
 def conversation_text(frame):
-    return "\n".join(chat_content_row(row.partition(VERTICAL_DIVIDER)[2] if VERTICAL_DIVIDER in row else row)
-                     for row in frame.split("\n"))
+    return "\n".join(chat_content_row(pane_content(row)) for row in frame.split("\n"))
 
 
 def composer_line(screen, y):
     lines = screen.split("\n")
-    line = lines[y] if y < len(lines) else ""
-    if not line.startswith((" ›", " >")) and VERTICAL_DIVIDER in line:
-        line = line.partition(VERTICAL_DIVIDER)[2]
-    return line
+    return pane_content(lines[y]) if y < len(lines) else ""
 
 
 def composer_bounds(screen):
     rules = [index for index in range(len(screen.split("\n")))
-             if set(composer_line(screen, index)) == {HORIZONTAL_RULE}]
+             if len(set(composer_line(screen, index))) == 1
+             and composer_line(screen, index)[0] in RULE_GLYPHS]
     return tuple(rules[-2:]) if len(rules) >= 2 else None
 
 
@@ -207,7 +212,8 @@ def overview_title(frame):
 
 def overview_frame(master, accept, keys=b"", timeout=15, *, ready=True):
     return keyed_frame(master, keys, lambda screen, x, y: accept(screen) and overview_title(screen)
-                       and not re.search(rf"(?m)(?:^|{re.escape(VERTICAL_DIVIDER)})\s*[›>](?: |$)", screen), timeout)
+                       and not any(re.match(r"\s*[›>](?: |$)", pane_content(row))
+                                   for row in screen.split("\n")), timeout)
 
 
 def open_new_chat(master, timeout=15):
@@ -222,9 +228,9 @@ def panel_frame(master, accept, keys=b"", timeout=15):
 
 def assert_chat_info_layout(screen, *, context=None):
     rows = screen.split("\n")
-    contents = [row.rpartition(VERTICAL_DIVIDER)[2] if VERTICAL_DIVIDER in row else row for row in rows]
+    contents = [pane_content(row) for row in rows]
     footers = [index for index, row in enumerate(contents) if row.endswith("esc")]
-    assert footers == [len(rows) - 1], ("one plain panel footer at the bottom", screen)
+    assert footers == [chat_footer_row(screen)], ("one plain panel footer after the input", screen)
     assert " · info" not in screen and "esc close" not in screen, screen
     assert "alt+i info" not in screen, ("live chat footer must be substituted", screen)
     bounds = composer_bounds(screen)
@@ -244,7 +250,7 @@ def assert_chat_info_layout(screen, *, context=None):
 
 
 def chat_info_geometry(screen):
-    content = [row.rpartition(VERTICAL_DIVIDER)[2] if VERTICAL_DIVIDER in row else row for row in screen.split("\n")]
+    content = [pane_content(row) for row in screen.split("\n")]
     bounds = composer_bounds(screen)
     assert bounds is not None, ("composer rules", screen)
     panel_rows = range(bounds[0] + 1, bounds[1])
@@ -252,8 +258,8 @@ def chat_info_geometry(screen):
     composer = next(index for index in panel_rows if content[index].rstrip() in (" ›", " >") or content[index].startswith((" › ", " > ")))
     actions = [index for index in panel_rows
                if content[index].strip().startswith(("Rename", "Archive", "Copy last answer"))]
-    assert bounds is not None and actions and bounds[0] < effort <= actions[-1] < composer < bounds[1], screen
-    return {"top": bounds[0], "input": composer, "footer": len(content) - 1,
+    assert actions and bounds[0] < effort <= actions[-1] < composer < bounds[1], screen
+    return {"top": bounds[0], "input": composer, "footer": chat_footer_row(screen),
             "feed": content[:bounds[0]], "rows": content}
 
 
@@ -264,7 +270,7 @@ def footer_click(screen, *, column=None, marker=None):
     line = content[row]
     if marker is not None:
         column = line.index(marker)
-    assert column is not None and 0 <= column < len(line), (column, line)
+    assert column is not None and 0 <= column < len(content[row - 1]), (column, line)
     return f"\x1b[<0;{column + 1};{row + 1}M\x1b[<0;{column + 1};{row + 1}m".encode()
 
 
@@ -289,7 +295,7 @@ def app_settings_open(master):
 
 
 def model_choice_details(screen):
-    rows = [row.rpartition(VERTICAL_DIVIDER)[2] if VERTICAL_DIVIDER in row else row for row in screen.split("\n")]
+    rows = [pane_content(row) for row in screen.split("\n")]
     field = next((index for index, row in enumerate(rows) if row.startswith("   Model")), None)
     matches = []
     more = None
@@ -346,7 +352,7 @@ class AppModelCatalog:
 
     def hold(self, _):
         self.entered.set()
-        fixture.wait_for(self.release.is_set, "initial Model catalog release", timeout=20)
+        _fixture().wait_for(self.release.is_set, "initial Model catalog release", timeout=20)
         return True
 
     def close(self):
@@ -360,7 +366,7 @@ def app_model_open(master, query=b"", *, catalog=None):
     app_settings_open(master)
     shown = model_choice_frame(master, b"\r", query="")
     if catalog is not None:
-        fixture.wait_for(catalog.entered.is_set, "initial Model catalog requested")
+        _fixture().wait_for(catalog.entered.is_set, "initial Model catalog requested")
         catalog.release.set()
         panel_frame(master, lambda screen: not model_choice_shown(screen))
         catalog.close()

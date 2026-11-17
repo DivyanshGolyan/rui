@@ -398,8 +398,8 @@ def assert_plain_panel(master, screen, *, left=None):
     assert prompt > bounds[0] + 1, ("panel between lifted rule and draft", screen)
     plain = frame.colors(pane_cells(prompt)[-1])[1]
     if left is not None:
-        assert composer_line(screen, len(rows(screen)) - 1).split() == left.split() + ["esc"], screen
-        for cell in pane_cells(-1):
+        assert composer_line(screen, chat_footer_row(screen)).split() == left.split() + ["esc"], screen
+        for cell in pane_cells(chat_footer_row(screen)):
             assert frame.colors(cell)[1] == plain, screen
     backgrounds = set()
     for index in range(bounds[0] + 1, prompt):
@@ -526,9 +526,8 @@ def info_natural_height_case():
             columns = [width - 1]
             opened = None
             for column in columns:
-                click = f"\x1b[<0;{column + 1};{height}M\x1b[<0;{column + 1};{height}m".encode()
-                opened = chrome.frame(master, click,
-                                      lambda screen: "Copy last answer" in screen and rows(screen)[-1].endswith("esc") and "unavailable" not in screen)
+                opened = chrome.frame(master, footer_click(live, column=column),
+                                      lambda screen: "Copy last answer" in screen and footer(screen).endswith("esc") and "unavailable" not in screen)
                 assert_chat_info_layout(opened, context=True)
                 assert_plain_panel(master, opened, left="Natural height")
                 base = chat_info_geometry(opened)
@@ -559,7 +558,7 @@ def info_natural_height_case():
                 assert short["top"] - expanded["top"] == growth - 2, (choice, filtered)
                 assert short["input"] == base["input"], filtered
             else:
-                assert "kept draft" in choice and rows(choice)[-1].endswith("esc"), choice
+                assert "kept draft" in choice and footer(choice).endswith("esc"), choice
             closed = chrome.frame(master, b"\x1b", lambda screen:
                                   not model_choice_shown(screen) and "Copy last answer" in screen)
             assert chat_info_geometry(closed) == base, closed

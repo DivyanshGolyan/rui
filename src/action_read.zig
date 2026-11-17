@@ -27,5 +27,5 @@ pub const Final = struct { resolution: Resolution, window: Window };
 pub const Read = struct {
     session: Bounded(session_id.max_reference_bytes),
     action_id: u64,
-    status: union(enum) { pending: PendingState, resolved: Final },
+    status: union(enum) { pending: PendingState, resolved: Final, resolved_parts: Resolution },
 };
