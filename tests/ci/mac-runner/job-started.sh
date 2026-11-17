@@ -96,13 +96,17 @@ def clear_leftovers():
             print(f"Stopped {stopped} leftover processes", flush=True)
     temp = Path.home() / "tmp"
     if temp.is_dir() and not temp.is_symlink():
-        def writable_then_retry(function, path, _error):
-            os.chmod(os.path.dirname(path), 0o700)
-            function(path)
         for entry in temp.iterdir():
             try:
                 if entry.is_dir() and not entry.is_symlink():
-                    shutil.rmtree(entry, onexc=writable_then_retry)
+                    # Tests leave read-only directories; open them first (Python 3.11 has no onexc).
+                    entry.chmod(0o700)
+                    for root, directories, _files in os.walk(entry):
+                        for name in directories:
+                            path = os.path.join(root, name)
+                            if not os.path.islink(path):
+                                os.chmod(path, 0o700)
+                    shutil.rmtree(entry)
                 else:
                     entry.unlink()
             except OSError as error:
