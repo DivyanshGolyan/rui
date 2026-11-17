@@ -501,10 +501,12 @@ test "derived work facts are served across all work replies" {
             const list_work = list.value.object.get("sessions").?.array.items[0].object.get("work").?;
             var request: protocol.ActivityPage = .{};
             try request.session.set(session.slice());
-            const page = try storage.activityPageForTesting(request);
+            const page = try std.testing.allocator.create(@import("activity_facts.zig").Page);
+            defer std.testing.allocator.destroy(page);
+            try storage.activityPage(&request, page);
             var activity_buffer: [@import("activity_reply.zig").max_page_bytes]u8 = undefined;
             var activity_writer = std.Io.Writer.fixed(&activity_buffer);
-            try @import("activity_reply.zig").writePage(&activity_writer, &page);
+            try @import("activity_reply.zig").writePage(&activity_writer, page);
             const activity = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, activity_writer.buffered(), .{});
             defer activity.deinit();
             const observed = try store.testing.observeCommandForTesting(&storage, "facts-message");
@@ -529,11 +531,24 @@ test "client decodes approval observation while automatic denial is pending" {
             var storage: store.Store = undefined;
             try store.testing.testingStore(case, &storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
-            const fixtures = @import("store/tests.zig");
-            const session = try fixtures.configureTestSessionAsk(&storage, "decode-denial-config");
+            var workspace: [protocol.max_workspace_bytes]u8 = undefined;
+            var configure = try store.testingCompleteConfiguration("decode-denial-config", "", try store.testingCanonicalCwd(std.testing.io, &workspace), "model-a");
+            configure.configuration.tools = try .of(&.{"bash"});
+            configure.configuration.permission_mode.state = .value;
+            try configure.configuration.permission_mode.value.set("ask");
+            const configured = try storage.configure(&configure, .{});
+            try std.testing.expect(configured == .accepted);
+            const session = configured.accepted.session;
             try store.testingSubmitMessage(&storage, &tmp, "decode-denial-file", "decode-denial-first", session.slice(), "run");
             const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-            try fixtures.settleTwoActionsForTesting(&storage, &tmp, model, "decode-denial-calls");
+            try store.settleCallsForTesting(&storage, &tmp, model, "decode-denial-calls", &.{.{
+                .item_id = "denial-item",
+                .name = "bash",
+                .encoded_call_id = "denial-call",
+                .decoded_call_id = "denial-call",
+                .encoded_arguments = "{\\\"description\\\":\\\"Run\\\",\\\"cmd\\\":\\\"true\\\"}",
+                .decoded_arguments = "{\"description\":\"Run\",\"cmd\":\"true\"}",
+            }});
             try store.testingSubmitMessage(&storage, &tmp, "decode-denial-next-file", "decode-denial-next", session.slice(), "new instructions");
             const observed = try store.testing.observeCommandForTesting(&storage, "decode-denial-first");
             try std.testing.expectEqual(protocol.MessageRequestState.waiting_for_permission, observed.requestState().?);
