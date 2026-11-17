@@ -213,8 +213,11 @@ class PrepushTest(unittest.TestCase):
         without = dict(prepush.checks(paths, AVAILABLE, "BASE", "full"))
         with_server = dict(prepush.checks(paths, AVAILABLE, "BASE", "full", mysql=True))
         for full in (without, with_server):
-            self.assertEqual(set(full) - set(default), {"development selection", "macOS type check", "unfiltered unit compile", "stack frames", "live MySQL"})
-            self.assertEqual({name: full[name] for name in default}, default)
+            focused = {name for name in default if name.startswith("tests/ci:")}
+            self.assertEqual(set(full) - set(default), {"tests/ci (CI policy suite)", "development selection", "macOS type check", "unfiltered unit compile", "stack frames", "live MySQL"})
+            self.assertEqual(set(default) - set(full), focused)
+            self.assertEqual({name: full[name] for name in default if name not in focused},
+                             {name: command for name, command in default.items() if name not in focused})
             self.assertEqual(full["unfiltered unit compile"], prepush.unit_compile())
             self.assertEqual(full["stack frames"], ["zig", "build", "-j1", "stack-frames", "-Dcpu=baseline", "--summary", "line"])
         self.assertEqual(with_server["live MySQL"], ["env", "RUI_TEST_REQUIRE_ENGINES=mysql", "zig", "build", "test-store", "--summary", "line"])

@@ -7,7 +7,7 @@ File tools and tests read the working tree; unstaged and untracked-only edits
 do not select checks. GitHub CI owns review-phase acceptance.
 
 Default and --quick run the same cheap feedback. --full is an opt-in diagnostic
-that adds development builds, cross-compilation, all-unit compilation, stack
+that adds the CI policy suite, development builds, cross-compilation, all-unit compilation, stack
 frames and reachable live MySQL checks. UID-global Upgrade stays hosted.
 Generation runs only for the emitter's input closure or generated wire inputs.
 The hook reuses a passing receipt for the same tree and merge base.
@@ -82,9 +82,8 @@ SOURCE_POLICY = (
 )
 
 
-def policy_tests(paths, *, broad=False):
+def policy_tests(paths):
     focused = {}
-    shared = False
     for path in paths:
         if path.endswith(".md"):
             continue
@@ -93,15 +92,11 @@ def policy_tests(paths, *, broad=False):
             test = name if name.startswith("test_") else f"test_{name}"
             if (ROOT / "tests/ci" / test).is_file():
                 focused.setdefault(test, set()).add("*")
-            else:
-                shared = True
-        elif path.startswith(("tests/ci/", ".github/", ".claude/")) or path in ("build.zig", "build.zig.zon", ".agents/setup") or path.startswith("build/"):
-            shared = True
     for patterns, tests in SOURCE_POLICY:
         if any(matches(path, patterns) for path in paths):
             for module, test in tests:
                 focused.setdefault(module, set()).add(test)
-    return None if broad and shared else focused
+    return focused
 
 
 GENERATED = ("openapi.json", "clients/ts/src/wire.ts", "clients/ts/src/settings-kinds.ts")
@@ -408,13 +403,14 @@ def checks(paths, available, base, mode="default", mysql=False):
                                     "-Dtest-filter=functional cores stay within the core boundary"]
     if generation.intersection(paths):
         yield "generated files", [sys.executable, "-B", "tests/ci/prepush.py", "--regenerate"]
-    policy = policy_tests(paths, broad=mode == "full")
     pythonpath = os.pathsep.join(filter(None, (str(ROOT / "tests/integration"), os.environ.get("PYTHONPATH"))))
     unittest = ["env", f"PYTHONPATH={pythonpath}", sys.executable, "-B", "-m", "unittest", "discover", "-s", "tests/ci"]
-    if policy is None:
-        yield "tests/ci", unittest
+    if mode == "full":
+        skips = select(paths, "development", available)["policy_skips"]
+        yield "tests/ci (CI policy suite)", ["env", f"PYTHONPATH={pythonpath}", sys.executable, "-B",
+                                             "tests/ci/policy_suite.py", "--skips", json.dumps(skips)]
     else:
-        for module, filters in sorted(policy.items()):
+        for module, filters in sorted(policy_tests(paths).items()):
             command = [*unittest, "-p", module]
             if "*" not in filters:
                 for test in sorted(filters):
@@ -593,7 +589,7 @@ def main():
     parser.add_argument("--plan", action="store_true", help="print selected commands without executing them")
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--quick", action="store_true", help="alias for default cheap feedback, used by installed hooks")
-    modes.add_argument("--full", action="store_true", help="also compile the unit binaries unfiltered, run stack-frames "
+    modes.add_argument("--full", action="store_true", help="also run the CI policy suite, compile the unit binaries unfiltered, run stack-frames "
                        "and, with a reachable local MySQL, the selected targets that read it")
     parser.add_argument("--install-hook", action="store_true", help="install the git pre-push hook that runs --quick")
     parser.add_argument("--fix-whitespace", metavar="BASE", help=argparse.SUPPRESS)
