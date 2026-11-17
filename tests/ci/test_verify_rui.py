@@ -27,6 +27,24 @@ def committed(text, columns=100, lines=20):
     return Frame(columns, lines, Cursor(2, 3), False, rows, "121933", "d4cebf", "d4cebf")
 
 
+def sidebar_rows(label, layout):
+    layouts = {
+        "chat": ("─" * 40 + "┼" + "─" * 99, "│ gpt-6.1-sol · low"),
+        "settings": ("─" * 40 + "┤" + " " * 99, "│ Notifications"),
+        "ascii-chat": ("-" * 40 + "+" + "-" * 99, "| gpt-6.1-sol . low"),
+        "ascii-settings": ("-" * 40 + "+" + " " * 99, "| Notifications"),
+        "overview": ("─" * 46, ""),
+        "wide-overview": ("─" * 140, ""),
+        "ascii-overview": ("-" * 46, ""),
+        "ascii-wide-overview": ("-" * 140, ""),
+    }
+    rule, right = layouts[layout]
+    row = "     Settings  " + label
+    if right:
+        row = row.ljust(40) + right
+    return rule + "\n" + row
+
+
 class VerifyRuiTest(unittest.TestCase):
     def test_resize_ignores_inflight_spinner_until_reset_frame_commits(self):
         import io
@@ -2777,8 +2795,9 @@ class UpgradeFramesTest(unittest.TestCase):
             self.assertEqual(state["expect_next"], {})
             self.assertIn("Update failed:", state["absent"])
             for size in state["sizes"]:
+                layout = "chat" if size[0] == 140 else "overview"
                 suffix = "│ actual chat" if size[0] == 140 else ""
-                rows = f"{'─' * size[0]}{suffix}\n     Settings  {reason}{suffix}\n"
+                rows = sidebar_rows(reason, layout) + "\n"
                 screens = [rows + "Reading this Session…", rows + "Host paused", rows]
                 observed = []
                 def wait(predicate, _description, **_kwargs):
@@ -2844,24 +2863,26 @@ class UpgradeFramesTest(unittest.TestCase):
             patterns = [pattern.replace("{available_version}", r"0\.99\.99999") for pattern in state["expect_regex"]]
             oracle = {"expect_regex": patterns}
             label = {"current": "", "available": "Update to 0.99.99999", "updating": "Updating…", "failure": "Update failed"}[state["upgrade"]]
-            for width, _height in state["sizes"]:
-                ending = "│ Type a task" if width == 140 else ""
-                rule = "─" * min(width, 40) + ending + "\n"
-                row = "     Settings  " + (label if label else "7 MB") + " " + ending
-                with self.subTest(theme=state["theme"], kind=state["upgrade"], width=width):
+            for layout in ("chat", "settings", "ascii-chat", "ascii-settings", "overview", "wide-overview", "ascii-overview", "ascii-wide-overview"):
+                rendered = "Updating..." if layout.startswith("ascii") and label == "Updating…" else label
+                rows = sidebar_rows(rendered or "7 MB", layout)
+                rule, row = rows.split("\n")
+                with self.subTest(theme=state["theme"], kind=state["upgrade"], layout=layout):
                     self.assertIn("{upgrade_version}", state["absent"])
-                    self.assertIsNone(row_failure(oracle, rule + row))
-                    if label:
-                        self.assertIsNotNone(row_failure(oracle, rule + row.replace(label, "7 MB  " + label)))
-                    for wrong in (row, rule + row.replace("Settings  ", "Settings\n"),
-                                  rule + row.replace("Settings  ", "Settings  rui "),
-                                  rule + row.replace("Settings  ", "Settings  tools 120 MB "),
-                                  rule + row.replace("Settings  ", "Settings  0.78.10000 ")):
+                    self.assertIsNone(row_failure(oracle, rows))
+                    if rendered:
+                        self.assertIsNotNone(row_failure(oracle, rows.replace(rendered, "7 MB  " + rendered, 1)))
+                    for wrong in (row, rule + "\n" + row.replace("Settings  ", "Settings\n"),
+                                  rule + "\n" + row.replace("Settings  ", "Settings  rui "),
+                                  rule + "\n" + row.replace("Settings  ", "Settings  tools 120 MB "),
+                                  rule + "\n" + row.replace("Settings  ", "Settings  0.78.10000 ")):
                         self.assertIsNotNone(row_failure(oracle, wrong))
                     if label:
-                        self.assertIsNotNone(row_failure(oracle, rule + " Settings 7 MB │ " + label))
+                        self.assertIsNotNone(row_failure(oracle, rule + "\n Settings 7 MB │ " + label))
+                    if layout == "chat":
+                        self.assertIsNotNone(row_failure(oracle, rows.replace("┼", "│", 1)))
                     if state["upgrade"] == "available":
-                        self.assertIsNotNone(row_failure(oracle, (rule + row).replace("0.99.99999", "0x99x99999")))
+                        self.assertIsNotNone(row_failure(oracle, rows.replace("0.99.99999", "0x99x99999")))
         current = next(state for state in scenario["states"] if state["name"] == "sidebar-current")
         before = {"expect_regex": [pattern.replace("{upgrade_version}", r"0\.78\.10000") for pattern in current["comparison"]["before"]["expect_regex"]]}
         self.assertIsNone(row_failure(before, " Settings rui 7 MB 0.78.10000 │ Type a task"))
@@ -2915,7 +2936,11 @@ class UpgradeFramesTest(unittest.TestCase):
                 if specimen["name"] == "retry-completed":
                     self.assertEqual(specimen["expect"], ["Settings"])
                     self.assertIn("0.70.10000", specimen["absent"])
-                    self.assertIsNone(self.helper["frame_row_failure"](specimen, "─" * 46 + "\nSettings 7 MB"))
+                    for layout in ("chat", "settings", "ascii-chat", "ascii-settings", "overview", "wide-overview", "ascii-overview", "ascii-wide-overview"):
+                        with self.subTest(retry_completed=layout):
+                            rows = sidebar_rows("7 MB", layout)
+                            self.assertIsNone(self.helper["frame_row_failure"](specimen, rows))
+                            self.assertIsNotNone(self.helper["frame_row_failure"](specimen, rows.replace("Settings  7 MB", "Settings  0.70.10000")))
                     self.assertIsNotNone(self.helper["frame_row_failure"](specimen, "Settings\n7 MB 0.70.10000"))
                 return {"ok": True}
             with patch.dict(journey.__globals__, {"frame_ready": lambda *_args: None, "frame_capture": capture,

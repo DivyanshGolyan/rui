@@ -301,7 +301,7 @@
       "note": "Real release HTTP discovery and managed install; divider above Settings with memory or an update, current version hidden",
       "expect_next": {},
       "expect_regex": [
-        "^[─-]+(?:│[^\\n]*)?\\n *Settings +\\d+(?:\\.\\d+)? (?:MB|GB) *(?:│[^\\n]*)?$"
+        "^[─-]+(?:[┼┤+][^\\n]*)?\\n *Settings +\\d+(?:\\.\\d+)? (?:MB|GB) *(?:[│|][^\\n]*)?$"
       ],
       "comparison": {
         "before": {
@@ -342,7 +342,7 @@
       "note": "Real release HTTP discovery and managed install; divider above Settings with memory or an update, current version hidden",
       "expect_next": {},
       "expect_regex": [
-        "^[─-]+(?:│[^\\n]*)?\\n *Settings +Update to {available_version} *(?:│[^\\n]*)?$"
+        "^[─-]+(?:[┼┤+][^\\n]*)?\\n *Settings +Update to {available_version} *(?:[│|][^\\n]*)?$"
       ],
       "comparison": {
         "before": {
@@ -383,7 +383,7 @@
       "note": "Real release HTTP discovery and managed install; divider above Settings with memory or an update, current version hidden",
       "expect_next": {},
       "expect_regex": [
-        "^[─-]+(?:│[^\\n]*)?\\n *Settings +Updating… *(?:│[^\\n]*)?$"
+        "^[─-]+(?:[┼┤+][^\\n]*)?\\n *Settings +Updating(?:…|\\.\\.\\.) *(?:[│|][^\\n]*)?$"
       ],
       "comparison": {
         "before": {
@@ -427,7 +427,7 @@
       "note": "Real release HTTP discovery and managed install; divider above Settings with memory or an update, current version hidden",
       "expect_next": {},
       "expect_regex": [
-        "^[─-]+(?:│[^\\n]*)?\\n *Settings +Update failed *(?:│[^\\n]*)?$"
+        "^[─-]+(?:[┼┤+][^\\n]*)?\\n *Settings +Update failed *(?:[│|][^\\n]*)?$"
       ],
       "comparison": {
         "before": {
@@ -535,7 +535,7 @@
       "note": "Real release HTTP discovery and managed install; divider above Settings with memory or an update, current version hidden",
       "expect_next": {},
       "expect_regex": [
-        "^[─-]+(?:│[^\\n]*)?\\n *Settings +\\d+(?:\\.\\d+)? (?:MB|GB) *(?:│[^\\n]*)?$"
+        "^[─-]+(?:[┼┤+][^\\n]*)?\\n *Settings +\\d+(?:\\.\\d+)? (?:MB|GB) *(?:[│|][^\\n]*)?$"
       ],
       "comparison": {
         "before": {
@@ -576,7 +576,7 @@
       "note": "Real release HTTP discovery and managed install; divider above Settings with memory or an update, current version hidden",
       "expect_next": {},
       "expect_regex": [
-        "^[─-]+(?:│[^\\n]*)?\\n *Settings +Update to {available_version} *(?:│[^\\n]*)?$"
+        "^[─-]+(?:[┼┤+][^\\n]*)?\\n *Settings +Update to {available_version} *(?:[│|][^\\n]*)?$"
       ],
       "comparison": {
         "before": {
@@ -617,7 +617,7 @@
       "note": "Real release HTTP discovery and managed install; divider above Settings with memory or an update, current version hidden",
       "expect_next": {},
       "expect_regex": [
-        "^[─-]+(?:│[^\\n]*)?\\n *Settings +Updating… *(?:│[^\\n]*)?$"
+        "^[─-]+(?:[┼┤+][^\\n]*)?\\n *Settings +Updating(?:…|\\.\\.\\.) *(?:[│|][^\\n]*)?$"
       ],
       "comparison": {
         "before": {
@@ -661,7 +661,7 @@
       "note": "Real release HTTP discovery and managed install; divider above Settings with memory or an update, current version hidden",
       "expect_next": {},
       "expect_regex": [
-        "^[─-]+(?:│[^\\n]*)?\\n *Settings +Update failed *(?:│[^\\n]*)?$"
+        "^[─-]+(?:[┼┤+][^\\n]*)?\\n *Settings +Update failed *(?:[│|][^\\n]*)?$"
       ],
       "comparison": {
         "before": {

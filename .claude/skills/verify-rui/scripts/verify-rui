@@ -3031,7 +3031,7 @@ def frame_upgrade_journey(run, terminal, state, fixture, out, size):
         shot("retry-updating", ["Updating…"], ["Update failed", "Notifications"])
         gate.release.set()
         selected = run.home / ".local/bin/rui"
-        quiet = {"expect_regex": [r"^[─-]+(?:│[^\n]*)?\n *Settings +\d+(?:\.\d+)? (?:MB|GB) *(?:│[^\n]*)?$"]}
+        quiet = {"expect_regex": [r"^[─-]+(?:[┼┤+][^\n]*)?\n *Settings +\d+(?:\.\d+)? (?:MB|GB) *(?:[│|][^\n]*)?$"]}
         terminal.wait(lambda c: selected.resolve() != run.home / ".local/lib/rui/old/bin/rui"
                       and frame_row_failure(quiet, c.completed) is None
                       and "Updating…" not in c.completed and "Update failed" not in c.completed
