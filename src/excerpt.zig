@@ -76,6 +76,77 @@ pub const Window = struct {
 };
 pub const Fed = struct { written: usize };
 
+/// Samples must be read with the same source-byte allotment used by the caller:
+/// head and tail include complete UTF-8 units at their outer boundaries.
+pub const Seekable = struct { head: []const u8, tail: []const u8, tail_starts_line: bool, source_length: u64 };
+pub const Cut = struct { head_end: usize, tail_start: usize, left_out: u64, truncated: bool };
+
+pub const Utf8Unit = struct { source: usize, encoded: usize, valid: bool };
+/// Decode one source unit, replacing each invalid byte independently.
+pub fn utf8Unit(bytes: []const u8, at: usize) Utf8Unit {
+    const n = std.unicode.utf8ByteSequenceLength(bytes[at]) catch return .{ .source = 1, .encoded = 3, .valid = false };
+    if (at + n > bytes.len) return .{ .source = 1, .encoded = 3, .valid = false };
+    _ = std.unicode.utf8Decode(bytes[at..][0..n]) catch return .{ .source = 1, .encoded = 3, .valid = false };
+    return .{ .source = n, .encoded = n, .valid = true };
+}
+
+/// Length after replacing each invalid byte with U+FFFD, as Bash renders it.
+pub fn encodedLength(bytes: []const u8) usize {
+    var pos: usize = 0;
+    var count: usize = 0;
+    while (pos < bytes.len) {
+        const u = utf8Unit(bytes, pos);
+        pos += u.source;
+        count += u.encoded;
+    }
+    return count;
+}
+
+pub fn cutSeekable(text: Seekable, allowance: usize) Cut {
+    const length = encodedLength(text.head) + encodedLength(text.tail);
+    if (text.head.len == text.source_length and length <= allowance)
+        return .{ .head_end = text.head.len, .tail_start = text.head.len, .left_out = 0, .truncated = false };
+    const head_allowance = allowance / 2;
+    var end: usize = 0;
+    var encoded: usize = 0;
+    while (end < text.head.len) {
+        const u = utf8Unit(text.head, end);
+        if (u.encoded > head_allowance - encoded) break;
+        end += u.source;
+        encoded += u.encoded;
+    }
+    const window = end -| 256;
+    if (std.mem.lastIndexOfScalar(u8, text.head[window..end], '\n')) |newline| end = window + newline + 1;
+    const tail = if (text.head.len == text.source_length) text.head else text.tail;
+    var start: usize = 0;
+    encoded = encodedLength(tail);
+    while (encoded > allowance - head_allowance) {
+        const u = utf8Unit(tail, start);
+        start += u.source;
+        encoded -= u.encoded;
+    }
+    const starts_line = if (start == 0) text.tail_starts_line else tail[start - 1] == '\n';
+    if (!starts_line) if (std.mem.indexOfScalar(u8, tail[start..][0..@min(256, tail.len - start)], '\n')) |newline| {
+        start += newline + 1;
+    };
+    return .{ .head_end = end, .tail_start = start, .left_out = text.source_length - end - (tail.len - start), .truncated = true };
+}
+
+/// The last stream gets up to half first; earlier streams take the rest in
+/// order, then the last receives any remainder. Works for source or encoded lengths.
+pub fn allot(lengths: []const u64, total: usize, out: []usize) void {
+    std.debug.assert(lengths.len == out.len);
+    if (lengths.len == 0) return;
+    const last = lengths.len - 1;
+    const base: usize = @intCast(@min(lengths[last], total / 2));
+    var remaining = total - base;
+    for (lengths[0..last], 0..) |length, i| {
+        out[i] = @intCast(@min(length, remaining));
+        remaining -= out[i];
+    }
+    out[last] = base + @as(usize, @intCast(@min(lengths[last] - base, remaining)));
+}
+
 pub const Retained = struct { label: []const u8, path: ?[]const u8 };
 
 /// Caller supplies only truncated streams. A failed retention produces one
@@ -182,4 +253,31 @@ test "window matches legacy excerpt for P1 diagnostic and text volume" {
     try writer.writeAll("\"}]");
     const ended: result_text.Ended = .{ .server_name = "test", .ended = .{ .outcome = .{ .result = .{ .content = writer.buffered(), .structured = null, .is_error = false } } } };
     for ([_]usize{ 1, 2, 7, 97, 10_000, 20_000 }) |chunk| try compareOracle(ended, chunk);
+}
+
+test "seekable allot shares allowance and handles empty streams" {
+    var out: [3]usize = undefined;
+    allot(&.{ 100, 100, 100 }, 20, &out);
+    try std.testing.expectEqualSlices(usize, &.{ 10, 0, 10 }, &out);
+    allot(&.{ 2, 3, 100 }, 20, &out);
+    try std.testing.expectEqualSlices(usize, &.{ 2, 3, 15 }, &out);
+    allot(&.{ 0, 0, 0 }, 20, &out);
+    try std.testing.expectEqualSlices(usize, &.{ 0, 0, 0 }, &out);
+    allot(&.{}, 0, &.{});
+}
+
+test "seekable cuts preserve byte accounting and newline boundaries" {
+    const whole = Seekable{ .head = "abc\xffdef", .tail = "", .tail_starts_line = true, .source_length = 7 };
+    try std.testing.expectEqual(@as(usize, 9), encodedLength(whole.head));
+    try std.testing.expect(!cutSeekable(whole, 9).truncated);
+    const cut = cutSeekable(whole, 4);
+    try std.testing.expect(cut.truncated);
+    try std.testing.expectEqual(@as(usize, 2), cut.head_end);
+    try std.testing.expectEqual(@as(usize, 5), cut.tail_start);
+    try std.testing.expectEqual(@as(u64, 3), cut.left_out);
+    const lines = Seekable{ .head = "abc\ndef", .tail = "", .tail_starts_line = true, .source_length = 7 };
+    const line_cut = cutSeekable(lines, 6);
+    try std.testing.expectEqual(@as(usize, 3), line_cut.head_end);
+    try std.testing.expectEqual(@as(usize, 4), line_cut.tail_start);
+    try std.testing.expectEqual(@as(u64, 1), line_cut.left_out);
 }

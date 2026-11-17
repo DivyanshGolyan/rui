@@ -2119,3 +2119,69 @@ test "Bash capture reclaims MCP output from the same scratch budget" {
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
     try std.testing.expectEqual(@as(usize, 0), retention.occupied());
 }
+
+test "seekable cutter matches Bash formatResult stream pairs" {
+    const core = @import("excerpt.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(std.testing.io, "capture", .{ .read = true });
+    defer file.close(std.testing.io);
+    const gpa = std.testing.allocator;
+    const source = try gpa.alloc(u8, 24000);
+    defer gpa.free(source);
+    const samples = try gpa.alloc(u8, 20014);
+    defer gpa.free(samples);
+    const expected = try gpa.alloc(u8, 21000);
+    defer gpa.free(expected);
+    const actual = try gpa.alloc(u8, 21000);
+    defer gpa.free(actual);
+    for ([_]usize{ 0, 1, 9999, 10000, 10001, 24000 }) |n1| {
+        for ([_]usize{ 0, 3, 9999, 10001, 24000 }) |n2| {
+            for (0..4) |pattern| {
+                const lengths = [_]u64{ n1, n2 };
+                var takes: [2]usize = undefined;
+                core.allot(&lengths, excerpt_bytes, &takes);
+                const stderr_base: usize = @intCast(@min(n2, excerpt_bytes / 2));
+                const old_first = @min(n1, excerpt_bytes - stderr_base);
+                const old_second = stderr_base + @min(n2 - stderr_base, excerpt_bytes - stderr_base - old_first);
+                try std.testing.expectEqualSlices(usize, &.{ old_first, old_second }, &takes);
+                var excerpts: [2]Excerpt = undefined;
+                var offset: usize = 0;
+                for (lengths, 0..) |length, i| {
+                    for (source, 0..) |*byte, j| byte.* = switch (pattern) {
+                        0 => 'x',
+                        1 => if (j % 113 == 0) '\n' else 'y',
+                        2 => if (j % 7 == 0) 0xff else if (j % 101 == 0) '\n' else 'z',
+                        else => ("é🙂\xff\nabc")[j % "é🙂\xff\nabc".len],
+                    };
+                    // Different data per stream is already stored in the samples.
+                    try file.writePositionalAll(std.testing.io, source[0..@intCast(length)], 0);
+                    excerpts[i] = try readExcerpt(file, std.testing.io, length, takes[i], samples[offset..][0 .. takes[i] + 7]);
+                    offset += takes[i] + 7;
+                }
+                const encoded = [_]u64{ excerpts[0].encodedLength(), excerpts[1].encodedLength() };
+                var allowances: [2]usize = undefined;
+                core.allot(&encoded, excerpt_bytes, &allowances);
+                const base = @min(excerpts[1].encodedLength(), excerpt_bytes / 2);
+                const first = @min(excerpts[0].encodedLength(), excerpt_bytes - base);
+                const second = base + @min(excerpts[1].encodedLength() - base, excerpt_bytes - base - first);
+                try std.testing.expectEqualSlices(usize, &.{ first, second }, &allowances);
+                for (excerpts, 0..) |old, i| {
+                    var oracle = std.Io.Writer.fixed(expected);
+                    const omitted = try old.append(&oracle, allowances[i]);
+                    const cut = core.cutSeekable(.{ .head = old.head, .tail = old.tail, .tail_starts_line = old.tail_starts_line, .source_length = old.source_length }, allowances[i]);
+                    var got = std.Io.Writer.fixed(actual);
+                    _ = try appendValidUtf8Tail(&got, old.head[0..cut.head_end], allowances[i]);
+                    if (cut.truncated) {
+                        if (cut.head_end != 0 and old.head[cut.head_end - 1] != '\n') try got.writeByte('\n');
+                        try got.print("[{d} bytes left out]\n", .{cut.left_out});
+                        const tail = if (old.head.len == old.source_length) old.head else old.tail;
+                        _ = try appendValidUtf8Tail(&got, tail[cut.tail_start..], allowances[i]);
+                    }
+                    try std.testing.expectEqual(omitted, cut.truncated);
+                    try std.testing.expectEqualStrings(oracle.buffered(), got.buffered());
+                }
+            }
+        }
+    }
+}
