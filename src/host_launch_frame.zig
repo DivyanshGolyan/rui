@@ -99,6 +99,13 @@ test "frozen launch frame preserves OS-byte selector intent and file-origin sche
             }
         }.check, &failure));
         try std.testing.expectError(error.SettingsInvalid, inspect(owned.bytes[0 .. owned.bytes.len - 1]));
+        // Reject an over-bound declared composition without allocating or
+        // beginning any launch. This bound belongs to the frame, not a layer.
+        const length_bytes = owned.bytes[magic.len + 5 ..][0..8];
+        const length = std.mem.readInt(u64, length_bytes, .little);
+        std.mem.writeInt(u64, length_bytes, hs.max_composed_document_bytes + 1, .little);
+        try std.testing.expectError(error.SettingsInvalid, inspect(owned.bytes));
+        std.mem.writeInt(u64, length_bytes, length, .little);
         const tag = owned.bytes[0];
         owned.bytes[0] = '!';
         try std.testing.expectError(error.SettingsInvalid, inspect(owned.bytes));

@@ -866,6 +866,15 @@ def frozen_settings_launches(root, env):
                         expected_refusal="providers.openai.key")
     assert "frozen-source-test-key" not in json.dumps(report), report
 
+    for label, payload in (("missing", b""), ("future", b"rui-host-settings-v99\n")):
+        directory = private / ("refused-private-" + label)
+        failed = subprocess.run([str(RUI), "host", "start", "--store", directory,
+                                 "--settings-input-v1", "0"], input=payload,
+                                env=selected_env, capture_output=True, timeout=COMMAND_TIMEOUT)
+        assert failed.returncode == 2, (label, failed.returncode, failed.stdout, failed.stderr)
+        assert json.loads(failed.stdout)["rui_start_error"]["code"] == "settings_invalid", failed.stdout
+        assert not directory.exists() and not matching_processes(directory), "private refusal fell back to public sources"
+
     checked = 0
     # Every source door sees a valid changed B, malformed B, and removed B.
     # Rotate provider intent through omission, explicit none, and exact one.
