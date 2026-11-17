@@ -6091,17 +6091,37 @@ test "App Session's status bar never says Sent: an accepted Message's row is its
     for (browsing) |row| try std.testing.expect(std.mem.indexOf(u8, row, "Sent") == null);
 }
 
-test "App Session's Ctrl-X while the Session opens says why it stopped nothing, over Opening…, until the next key" {
-    var fixture: ChromeFixture = undefined;
-    try fixture.init();
-    defer fixture.deinit();
-    const self = fixture.self;
-    self.reading.opening = true;
-    try std.testing.expect(ChromeFixture.find(&try fixture.rows(), "Opening…") != null);
-    try fixture.press(.{ .codepoint = 'x', .mods = .{ .ctrl = true } });
-    try std.testing.expect(ChromeFixture.findEnding(&try fixture.rows(), "Session is opening.") != null);
-    try fixture.press(.{ .codepoint = 'a', .text = "a" });
-    try std.testing.expect(ChromeFixture.find(&try fixture.rows(), "Opening…") != null);
+test "SessionFrontend Ctrl-X opening notice overrides progress until next key without moving rows" {
+    for ([_]u16{ 46, 140 }) |width| {
+        var fixture: ChromeFixture = undefined;
+        try fixture.init();
+        defer fixture.deinit();
+        const self = fixture.self;
+        self.reading.opening = true;
+        const opening = try fixture.rowsAtWidth(width);
+        try std.testing.expectEqual(@as(?usize, 23), ChromeFixture.findEnding(&opening, "Opening…"));
+        try std.testing.expectEqualStrings("", self.chrome.status.bar.left);
+        try fixture.press(.{ .codepoint = 'x', .mods = .{ .ctrl = true } });
+        const stopped = try fixture.rowsAtWidth(width);
+        try std.testing.expectEqual(@as(?usize, 23), ChromeFixture.findEnding(&stopped, "Session is opening."));
+        for (stopped) |line| try std.testing.expect(std.mem.indexOf(u8, line, "Opening…") == null);
+        for (opening[0..23], stopped[0..23]) |before, during| try std.testing.expectEqualStrings(before, during);
+        try std.testing.expect(self.reading.opening);
+        try std.testing.expect(!self.chrome.stoppable);
+        try std.testing.expect(self.submission.intent == null and self.submission.task.thread == null);
+        const retained = try fixture.rowsAtWidth(width);
+        try std.testing.expectEqual(@as(?usize, 23), ChromeFixture.findEnding(&retained, "Session is opening."));
+        try std.testing.expectEqualStrings("Session is opening.", self.shown_notice.current(self.nowMs()).?);
+        try fixture.press(.{ .codepoint = 'a', .text = "a" });
+        const resumed = try fixture.rowsAtWidth(width);
+        try std.testing.expectEqual(@as(?usize, 23), ChromeFixture.findEnding(&resumed, "Opening…"));
+        for (resumed) |line| try std.testing.expect(std.mem.indexOf(u8, line, "Session is opening.") == null);
+        for (opening[0..21], resumed[0..21]) |before, after| try std.testing.expectEqualStrings(before, after);
+        try std.testing.expectEqualStrings(opening[22], resumed[22]);
+        try std.testing.expectEqualStrings("a", self.input.composition().bytes);
+        try std.testing.expect(self.shown_notice.current(self.nowMs()) == null);
+        try std.testing.expect(self.reading.opening);
+    }
 }
 
 test "App Session's facts row ends with the archive badge while the Session is archived or archiving" {
@@ -7184,11 +7204,16 @@ test "failed reply stale pre-admission scan must not authorize a fresh Ctrl-R af
     try self.settleMessageForRetryTest(true);
     try std.testing.expect(self.submission.intent == null);
     try std.testing.expect(!self.reader.completed());
+    const admitted_key = self.submission.accepted.?.key;
+    try std.testing.expect(self.submission.messageHeld());
     Worker.release.store(true, .release);
     try test_poll.waitUntil(self.init.io, test_poll.after(self.init.io, .fromSeconds(2)), &self.reader, RetrySettlementWorker.completed);
     try self.settleReader();
     try std.testing.expectEqualDeep(ending, self.live.latest_ending.?);
     try std.testing.expect(self.live.work.state == .idle and self.live.queued.count == 0);
+    try fixture.page(.fill_below, &.{.{ .key = 37, .text = "› new Message\n", .message_key = admitted_key }}, false, true);
+    try std.testing.expect(!self.submission.messageHeld());
+    try std.testing.expectEqualDeep(ending, self.live.latest_ending.?);
     const io = self.init.io;
     var tmp = try @import("socket_fixture.zig").Directory.init();
     defer tmp.cleanup();
@@ -7260,6 +7285,9 @@ test "failed reply retry completion before newer Message admission sends once an
     try self.settleMessageForRetryTest(true);
     try std.testing.expect(self.submission.intent == null);
     try std.testing.expectEqualSlices(u8, &retry_key, &self.submission.accepted.?.key);
+    try std.testing.expect(self.submission.messageHeld());
+    try fixture.page(.fill_below, &.{.{ .key = 37, .text = RetryFenceWorker.text, .message_key = retry_key }}, false, true);
+    try std.testing.expect(!self.submission.messageHeld());
     try held.keys("new Message\r");
     const newer_key = self.submission.key;
     try std.testing.expect(!std.mem.eql(u8, &retry_key, &newer_key));
@@ -8327,7 +8355,7 @@ test "failed reply retry settlement propagates transport errors and unexpected a
 
 test "SessionFrontend fixed and growing end replay cycles count arrivals once across reader pages" {
     const Host = struct {
-        fn respond(listener: *std.Io.net.Server, bytes: []const u8) !void {
+        fn respond(listener: *std.Io.net.Server, bytes: []const u8, content: bool) !void {
             const io = std.testing.io;
             var fds = [_]std.posix.pollfd{.{ .fd = listener.socket.handle, .events = std.posix.POLL.IN, .revents = 0 }};
             if (try std.posix.poll(&fds, 2000) == 0) return error.TestUnexpectedResult;
@@ -8345,10 +8373,10 @@ test "SessionFrontend fixed and growing end replay cycles count arrivals once ac
                     if (used == end + 4 + try std.fmt.parseInt(usize, request[start..finish], 10)) break;
                 }
             }
-            try std.testing.expectStringStartsWith(request[0..used], "POST /v1/activity-page HTTP/1.1\r\n");
+            try std.testing.expectStringStartsWith(request[0..used], if (content) "POST /v1/activity-content HTTP/1.1\r\n" else "POST /v1/activity-page HTTP/1.1\r\n");
             var header: [256]u8 = undefined;
             var writer = peer.writer(io, &.{});
-            try writer.interface.writeAll(try std.fmt.bufPrint(&header, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\n\r\n", .{bytes.len}));
+            try writer.interface.writeAll(try std.fmt.bufPrint(&header, "HTTP/1.1 200 OK\r\nContent-Type: {s}\r\nContent-Length: {d}\r\n{s}Connection: close\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\n\r\n", .{ if (content) "application/octet-stream" else "application/json", bytes.len, if (content) "X-Rui-Content-Bytes: 0\r\nX-Rui-Next-Offset: 0\r\n" else "" }));
             try writer.interface.writeAll(bytes);
         }
         fn page(frontend: *Self, listener: *std.Io.net.Server, read: feed_reads.Read, first: u64, last: u64, end: u64) !void {
@@ -8371,13 +8399,14 @@ test "SessionFrontend fixed and growing end replay cycles count arrivals once ac
             var buffer: [16384]u8 = undefined;
             var out = std.Io.Writer.fixed(&buffer);
             try activity_reply.writePage(&out, &facts);
-            try respond(listener, out.buffered());
+            try respond(listener, out.buffered(), false);
             if (read == .opening and facts.more) {
                 const endings: protocol.ActivityFacts = .{ .end = end, .direction = .backward, .work = facts.work };
                 var ending_out = std.Io.Writer.fixed(&buffer);
                 try activity_reply.writePage(&ending_out, &endings);
-                try respond(listener, ending_out.buffered());
+                try respond(listener, ending_out.buffered(), false);
             }
+            if (first == 1) try respond(listener, "", true);
             try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(2)), frontend, struct {
                 fn complete(self: *Self) bool {
                     return self.reader.completed();
