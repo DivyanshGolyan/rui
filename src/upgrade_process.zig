@@ -405,7 +405,6 @@ test "upgrade process download cancellation and expired deadline start no child"
     try std.testing.expectError(error.Timeout, download.outputUntil(allocator, io, request, null, 1024, missing, .fromNow(io, .{ .raw = .fromSeconds(-1), .clock = .awake })));
 }
 
-
 test "upgrade test gate is opt-in, acknowledges only held gates and bounds cancellation and timeout" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
