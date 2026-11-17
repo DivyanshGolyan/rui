@@ -195,6 +195,7 @@ jobs:
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
+          filter: blob:none
       - name: Select existing targets
         id: select
         env:
@@ -256,6 +257,7 @@ jobs:
           ref: ${{ github.sha }}
           # Import-cycle and caller-error allowances only shrink from trusted main history.
           fetch-depth: 0
+          filter: blob:none
       - name: Install the pinned packages tests/ci imports
         run: python3 -m pip install --disable-pip-version-check -r tests/integration/requirements.txt -r tests/ci/requirements.txt
       - name: Determine whether caller inventory needs its pinned-stdlib bootstrap
