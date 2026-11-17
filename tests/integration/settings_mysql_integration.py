@@ -18,6 +18,7 @@ import settings_fixture as frame_host
 import store_rounds_cases
 from request_routing_cases import capture_routing
 from attached_creation_cases import attached_creation
+from preset_creation_cases import preset_creation
 
 
 def main():
@@ -229,6 +230,9 @@ def main():
                 if started is not None:
                     command("host", "pause", "--store", directory, "--instance", started["instance"])
                     released()
+
+        preset_creation(rui, root / "cli-presets", good["store"], os.environ)
+        released()
 
         attached_directory = root / "attached-host"
         attached_env = dict(os.environ, RUI_SETTINGS_MYSQL_URL=url)

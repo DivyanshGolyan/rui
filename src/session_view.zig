@@ -59,7 +59,7 @@ pub fn clock(second: u64, buffer: *[5]u8) ?[]const u8 {
 }
 
 pub fn userPrefix(sink: anytype, colour: bool, admitted_at: u64) !void {
-    try sink.feed(Style.user.code(colour));
+    try sink.feed(Style.quiet.code(colour));
     try sink.feed("›");
     try sink.feed(Style.normal.code(colour));
     try sink.feed(" ");
@@ -478,7 +478,7 @@ fn toolState(code: protocol.ToolPresentation.Code) struct { glyph: []const u8, s
     return .{ .glyph = shown.unicode, .suffix = state.suffix, .style = Style.fromTone(shown.tone) };
 }
 
-test "list rows share every mark and script with the chat heading table" {
+test "list rows share chat heading marks except unmarked finished Sessions" {
     const overview = @import("overview_view.zig");
     const Case = struct {
         mark: marks.Mark,
@@ -522,10 +522,11 @@ test "list rows share every mark and script with the chat heading table" {
         defer arena.deinit();
         for ([_]bool{ true, false }) |unicode_script| {
             const caps: overview.Caps = .{ .unicode = unicode_script };
-            try std.testing.expect(!overview.markSpins(&state, .{ .row = 0 }, caps));
-            const row = try overview.rowSegments(arena.allocator(), &state, 0, 80, caps, 4);
+            try std.testing.expect(!overview.Lines.spins(&state, 0, caps));
+            const row = (try overview.Lines.at(arena.allocator(), &state, 0, 80, caps, 4)).?.segments;
             try std.testing.expectEqualStrings(" ", row[0].text);
-            try std.testing.expectEqualStrings(if (unicode_script) shared.unicode else shared.ascii, row[1].text);
+            const list_mark = if (case.state == .finished) marks.marks.get(.none) else shared;
+            try std.testing.expectEqualStrings(if (unicode_script) list_mark.unicode else list_mark.ascii, row[1].text);
             try std.testing.expectEqual(case.colour, row[1].style.colour);
         }
         if (case.tool) |code| {
@@ -537,6 +538,7 @@ test "list rows share every mark and script with the chat heading table" {
     }
     var states: std.enums.EnumSet(marks.Mark) = .full;
     states.remove(.newer);
+    states.remove(.none);
     try std.testing.expect(seen.eql(states));
 }
 
@@ -1152,6 +1154,8 @@ pub fn message(requests: client.Requests, store: []const u8, session: []const u8
         try print(sink, "{s}{s}{s}\n", .{ Style.quiet.code(colour), text, Style.normal.code(colour) });
     }
     if (value.sender) |sender| return peerLine(sink, .inbound, sender, value.admitted_at);
+    const personal = value.source_action == null;
+    if (comptime std.meta.hasMethod(@TypeOf(sink), "userMessage")) try sink.userMessage(personal);
     const block: Collapsed = .{ .source = .activity, .position = item.position, .ordinal = item.ordinal, .content = value.content, .row = item.value == .user };
     try inputPrefix(sink, colour, value.admitted_at, value.source_action);
     var body: UserBody(@TypeOf(sink)) = undefined;
@@ -1160,6 +1164,7 @@ pub fn message(requests: client.Requests, store: []const u8, session: []const u8
     if (try body.finishMessage(block)) {
         try sink.feed("\n");
     } else try Text.writeBody(sink, "\n");
+    if (comptime std.meta.hasMethod(@TypeOf(sink), "userMessage")) try sink.userMessage(false);
 }
 
 fn content(requests: client.Requests, store: []const u8, session: []const u8, item: protocol.ActivityItem, reference: protocol.ActivityItem.Content, target: anytype) !void {

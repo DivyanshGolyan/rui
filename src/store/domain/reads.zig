@@ -824,7 +824,7 @@ const HostedRead = struct {
 };
 
 const page_session = rsql.Read(.{
-    .sql = "SELECT model,permission_mode,revision,next_position,compaction_trigger,output_reservation,reasoning_effort,created_at,provider,workspace " ++
+    .sql = "SELECT model,permission_mode,revision,next_position,compaction_trigger,output_reservation,reasoning_effort,created_at,provider,workspace,creator_ref " ++
         "FROM session WHERE session_ref=?1",
     .Args = struct { session: []const u8 },
     .Row = struct {
@@ -838,6 +838,7 @@ const page_session = rsql.Read(.{
         created_at: rsql.Positive,
         provider: provider_name.Provider,
         workspace: *Bounded(workspace_path.max_bytes),
+        creator_ref: ?Bounded(session_id.bytes),
     },
     .cardinality = .optional,
 });
@@ -906,6 +907,7 @@ pub noinline fn activityPage(a: *ReadAccess, request: *const activity_read.Activ
     try last_line.finish(&page.work.last_line);
     page.work.read_version = .{ .instance = a.store.instance, .generation = a.store.commitGeneration() };
     page.work.revision = session.revision.get();
+    page.work.creator = session.creator_ref;
 }
 
 pub const activity_search_budget = 8 * 1024 * 1024;

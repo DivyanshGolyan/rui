@@ -46,7 +46,10 @@ pub const max_requests = 8;
 
 pub const list_interval_ms = 1000;
 
-pub const spin_interval_ms = 200;
+pub const spin_interval_ms = 100;
+
+pub const mark_column = 1;
+pub const text_column = 3;
 
 pub const max_handle_bytes = 36;
 
@@ -80,7 +83,7 @@ pub const rules = std.enums.EnumArray(Kind, Rule).init(.{
     .bash = .{ .mark = .active, .colour = .ink, .says = true, .spins = true, .stoppable = true },
     .approval = .{ .mark = .needs_you, .colour = .attention, .stoppable = true },
     .stopping = .{ .mark = .active, .colour = .ink, .says = true, .stoppable = false },
-    .finished = .{ .mark = .finished, .colour = .mark, .word = "finished", .stoppable = false },
+    .finished = .{ .mark = .none, .colour = .mark, .word = "finished", .stoppable = false },
     .failed = .{ .mark = .failed, .colour = .failure, .word = "failed", .cause = true, .stoppable = false },
     .stopped = .{ .mark = .stopped, .colour = .normal, .word = "stopped", .stoppable = false },
 });
@@ -325,6 +328,7 @@ pub const Event = union(enum) {
     memory: Memory,
 
     upgrade: upgrade_status.Run,
+    available_upgrade: ?upgrade_status.Version,
     conversed: Conversed,
 
     models: ModelsRead,
@@ -336,7 +340,7 @@ pub const Event = union(enum) {
     observed: Observed,
     conversation: ?Reference,
 
-    clicked: struct { target: Click },
+    clicked: struct { target: Click, upgrade_admitted: bool = true },
 
     unconfirmed: Unconfirmed,
 };
@@ -348,25 +352,8 @@ pub const Click = union(enum) {
     sessions,
     archived,
     settings,
+    update: upgrade_status.Target,
 };
-
-pub fn clickOf(state: *const State, item: Item) ?Click {
-    return switch (item) {
-        .empty, .views, .gap => null,
-        .new_session => .new_session,
-        .row => |at| .{ .open = state.rows.items[state.order.items[at]].reference },
-    };
-}
-
-pub fn pinClickOf(state: *const State, item: Item) ?Click {
-    return switch (item) {
-        .row => |at| blk: {
-            const row = state.rows.items[state.order.items[at]];
-            break :blk .{ .pin = .{ .reference = row.reference, .pinned = row.pin_order == null } };
-        },
-        .empty, .views, .gap, .new_session => null,
-    };
-}
 
 pub const Unconfirmed = struct { reference: Reference, recovery: submission.Recovery };
 
@@ -569,9 +556,8 @@ pub const Said = struct {
     stoppable: bool,
 };
 
-pub fn conversation(state: *const State, ref: Reference, work: Kind, caps: Caps, buffer: *[upgrade_status.max_line_bytes]u8) Said {
-    const line = statusSaid(state, caps, buffer);
-    return .{ .text = if (line) |value| value.text else null, .notice = footerNotice(state), .stoppable = stoppable(state, ref, work) };
+pub fn conversation(state: *const State, ref: Reference, work: Kind) Said {
+    return .{ .text = null, .notice = footerNotice(state), .stoppable = stoppable(state, ref, work) };
 }
 
 fn statusSaid(state: *const State, caps: Caps, buffer: *[upgrade_status.max_line_bytes]u8) ?StatusLine {
@@ -603,7 +589,7 @@ pub const Notice = struct {
     }
 };
 
-pub const Line = union(enum) { unread, requested, unavailable, read: u32 };
+const FirstLineRead = union(enum) { unread, requested, unavailable, read: u32 };
 
 pub const Row = struct {
     reference: Reference,
@@ -625,7 +611,7 @@ pub const Row = struct {
     first: ?First,
     from_person_at: ?u64,
     last_line: ?session_list.SavedLastLine = null,
-    line: Line = .unread,
+    line: FirstLineRead = .unread,
 
     fn work(self: *const Row) session_work.Work {
         return .{ .state = self.state, .turn = self.turn, .operation = self.operation, .first_action = self.first_action };
@@ -706,6 +692,8 @@ pub const State = struct {
     unsettled: usize = 0,
 
     status_changes: u64 = 0,
+
+    presentation_revision: u64 = 0,
 
     arrivals: Vec(Seen) = .{},
 
@@ -872,7 +860,11 @@ pub const State = struct {
                 });
                 try reindex(self);
             }
-            settleRow(self, &self.rows.items[at.?], .{ .read_version = read.read_version, .work = read.work, .last_line = read.last_line });
+            const row = &self.rows.items[at.?];
+            const before = RowPresentation.of(self, row);
+            settleRow(self, row, .{ .read_version = read.read_version, .work = read.work, .last_line = read.last_line });
+            const after = RowPresentation.of(self, row);
+            if (visible(self, row) and !before.eql(&after)) self.presentation_revision +%= 1;
             try arrange(self);
         };
         if (!read.opening or attention.Attention.of(read.work) == null) return;
@@ -1150,7 +1142,41 @@ fn lookup(keyed: []const Keyed, ref: Reference) ?u32 {
     return null;
 }
 
+const RowPresentation = struct {
+    name: Bounded(@max(max_label_bytes, max_line_bytes)),
+    kind: Kind,
+    since: u64,
+    archive: ArchiveState,
+    pin: ?@import("session_pin.zig").PinOrder,
+    yours: bool,
+    quiet: bool,
+
+    fn of(state: *const State, row: *const Row) RowPresentation {
+        return .{
+            .name = Bounded(@max(max_label_bytes, max_line_bytes)).from(title(state, row).text) catch unreachable,
+            .kind = shownKind(state, row),
+            .since = shownSince(state, row),
+            .archive = row.archive_state,
+            .pin = row.pin_order,
+            .yours = yours(row),
+            .quiet = rowQuiet(state, row),
+        };
+    }
+
+    fn eql(a: *const RowPresentation, b: *const RowPresentation) bool {
+        inline for (.{ "kind", "since", "archive", "pin", "yours", "quiet" }) |field| {
+            if (!std.meta.eql(@field(a, field), @field(b, field))) return false;
+        }
+        return a.name.eql(b.name.slice());
+    }
+};
+
 pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
+    switch (event) {
+        .tick, .list, .host, .memory, .observed, .first_line, .resized, .launch_size, .launch_poll, .list_settled => {},
+        else => state.presentation_revision +%= 1,
+    }
+
     var effects: Effects = .{};
     switch (event) {
         .input => |input| {
@@ -1160,7 +1186,10 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
         .list_settled => |frame| {
             const pending = state.browse_pending;
             state.browse_pending = false;
-            if (pending and frame.wide and frame.focused) try activateList(state, .browse, &effects);
+            if (pending and frame.wide and frame.focused) {
+                state.presentation_revision +%= 1;
+                try activateList(state, .browse, &effects);
+            }
         },
         .tick => |now_ms| try tick(state, now_ms, &effects),
         .list => |reply| {
@@ -1170,6 +1199,7 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
                     std.debug.assert(state.listing);
                     state.listing = false;
                     state.pending.items.len = 0;
+                    if (!state.list_stale) state.presentation_revision +%= 1;
                     state.list_stale = true;
                 },
             }
@@ -1187,6 +1217,7 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
                 },
                 .sessions => try selectView(state, .active, &effects),
                 .archived => try selectView(state, .archived, &effects),
+                .update => |target| if (input.upgrade_admitted and std.meta.eql(target, upgrade_status.Target{ .available = state.upgrade.available, .run = state.upgrade.run }) and !state.upgrading()) startUpgrade(state),
                 .settings => {
                     state.selected = .settings;
                     effects.add(.open_settings);
@@ -1321,7 +1352,11 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
                 effects.redraw = true;
             }
         },
-        .observed => |read| try state.observe(read),
+        .observed => |read| {
+            const trouble = band(state);
+            try state.observe(read);
+            if (!std.meta.eql(trouble, band(state))) state.presentation_revision +%= 1;
+        },
         .conversation => |ref| {
             const selected_at = if (state.selected == .session) position(state, state.selected.session) else null;
             state.conversing = ref;
@@ -1334,6 +1369,7 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
             effects.add(.{ .open = ref });
         },
         .host => |facts| {
+            if (!std.meta.eql(state.host, facts)) state.presentation_revision +%= 1;
             if (facts == null) state.launch = .done;
             state.host = facts;
             if (facts) |host| {
@@ -1345,13 +1381,13 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
                 state.read_instance = host.instance;
             }
         },
-        .memory => |memory| state.memory = memory,
+        .memory => |memory| {
+            if (!std.meta.eql(state.memory, @as(?Memory, memory))) state.presentation_revision +%= 1;
+            state.memory = memory;
+        },
         .upgrade => |run| {
             state.upgrade.stand(run);
             if (run == .ended) {
-                var said: [upgrade_status.max_line_bytes]u8 = undefined;
-                const line = upgrade_status.line(run, &said, .unicode);
-                if (line.lasts == .notice) state.say(if (line.tone == .attention) .attention else .normal, "{s}", .{line.text});
                 state.next_list_ms = 0;
             }
         },
@@ -1359,6 +1395,7 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
         .defaults_saved => |saved| {
             if (saved) |binding| state.default = binding;
         },
+        .available_upgrade => |available| state.upgrade.available = available,
         .start_upgrade => startUpgrade(state),
     }
     for (effects.slice()) |effect| switch (effect) {
@@ -1426,14 +1463,19 @@ pub fn writeDeparture(state: *const State, _: ?ReasoningEffort, writer: *std.Io.
 }
 
 fn tick(state: *State, now_ms: u64, effects: *Effects) error{OutOfMemory}!void {
+    const trouble = band(state);
     state.now_ms = now_ms;
     var changed = false;
+    var redraw = false;
     for (state.rows.items) |*row| {
         const was = std.meta.activeTag(row.state);
         if (row.read_version) |version| settleRow(state, row, .{ .read_version = version, .work = row.work(), .last_line = row.last_line });
-        changed = changed or was != std.meta.activeTag(row.state);
+        const settled = was != std.meta.activeTag(row.state);
+        changed = changed or settled;
+        redraw = redraw or (settled and visible(state, row));
     }
     if (changed) try arrange(state);
+    if (redraw or !std.meta.eql(trouble, band(state))) state.presentation_revision +%= 1;
     if (!state.listing and now_ms >= state.next_list_ms) {
         state.listing = true;
         state.listing_archive = state.archive;
@@ -1499,12 +1541,15 @@ fn listPage(state: *State, page: Page, effects: *Effects) error{OutOfMemory}!voi
     try readListing(state);
     try commit(state, answer);
     state.listing = false;
+    const held = state.holdsHost();
     state.upgrade.reobserved();
+    if (held != state.holdsHost()) state.presentation_revision +%= 1;
     try readFirstLines(state, effects);
 }
 
 fn rejectPage(state: *State, page: Page) void {
     state.pending.items.len = 0;
+    if (!state.list_stale) state.presentation_revision +%= 1;
     state.list_stale = true;
     state.token = null;
     if (page.answer != null) state.listing = false else state.listing_archive = null;
@@ -1525,6 +1570,11 @@ fn labelOf(text: []const u8) Bounded(max_label_bytes) {
 }
 
 fn commit(state: *State, answer: Answer) error{OutOfMemory}!void {
+    const selected = state.selected;
+    const trouble = band(state);
+    const summary = state.summary;
+    const count = state.order.items.len;
+    const stale = state.list_stale;
     const selected_at = if (state.selected == .session) position(state, state.selected.session) else null;
     const opening = state.token == null;
     if (answer.delta == .full) for (state.rows.items) |*row| {
@@ -1536,6 +1586,7 @@ fn commit(state: *State, answer: Answer) error{OutOfMemory}!void {
             var row = incoming;
             row.read_version = null;
             try state.rows.append(state.gpa, row);
+            if (visible(state, &row)) state.presentation_revision +%= 1;
         };
         if (before != state.rows.items.len) try reindex(state);
     }
@@ -1543,6 +1594,7 @@ fn commit(state: *State, answer: Answer) error{OutOfMemory}!void {
         const at = lookup(state.by_reference.items, incoming.reference).?;
         const row = &state.rows.items[at];
         const was = row.*;
+        const before = RowPresentation.of(state, row);
         const same = if (incoming.first) |first| if (row.first) |known| first.admission == known.admission else false else false;
         row.archive_state = incoming.archive_state;
         row.pin_order = incoming.pin_order;
@@ -1556,6 +1608,8 @@ fn commit(state: *State, answer: Answer) error{OutOfMemory}!void {
         row.listed = state.archive.includes(incoming.archive_state);
         settleRow(state, row, .{ .read_version = incoming.read_version.?, .work = incoming.work(), .last_line = incoming.last_line });
         retitle(state, row, title(state, &was).text);
+        const after = RowPresentation.of(state, row);
+        if (visible(state, row) and !before.eql(&after)) state.presentation_revision +%= 1;
     };
     for (state.rows.items) |row| if (!row.listed) {
         if (state.entryOf(row.reference)) |entry| {
@@ -1570,6 +1624,7 @@ fn commit(state: *State, answer: Answer) error{OutOfMemory}!void {
     state.list_stale = false;
     try arrange(state);
     reconcileSelection(state, selected_at, opening);
+    if (stale or count != state.order.items.len or !std.meta.eql(selected, state.selected) or !std.meta.eql(summary, state.summary) or !std.meta.eql(trouble, band(state))) state.presentation_revision +%= 1;
 }
 
 fn reconcileSelection(state: *State, selected_at: ?usize, opening: bool) void {
@@ -1687,7 +1742,7 @@ fn counts(state: *const State) Counts {
         .active => result.working += 1,
         .queued => result.queued += 1,
         .failed => result.failed += 1,
-        .waiting, .finished, .stopped, .newer => {},
+        .waiting, .finished, .stopped, .newer, .none => {},
     };
     return result;
 }
@@ -1735,10 +1790,12 @@ fn firstLine(state: *State, result: FirstLine) error{OutOfMemory}!void {
         row.line = .unavailable;
         return;
     };
-    const was = title(state, row).text;
+    const before = RowPresentation.of(state, row);
     try state.lines.append(state.gpa, session_line.cut(max_line_bytes, session_line.firstLine(bytes)));
     row.line = .{ .read = @intCast(state.lines.items.len - 1) };
-    retitle(state, row, was);
+    retitle(state, row, before.name.slice());
+    const after = RowPresentation.of(state, row);
+    if (visible(state, row) and !before.eql(&after)) state.presentation_revision +%= 1;
 }
 
 const StopTarget = struct { reference: Reference, work: Kind };
@@ -2210,7 +2267,7 @@ pub fn layout(state: *const State) Layout {
     return .{ .top = top, .list = .{ .start = top, .end = settings }, .settings = .{ .start = settings, .end = host }, .host = .{ .start = host, .end = input }, .input = input };
 }
 
-const settings_rows = 2;
+const settings_rows = 3;
 
 fn statusRows(state: *const State) u16 {
     var buffer: StatusBuffer = undefined;
@@ -2459,7 +2516,7 @@ fn providerBand(built: *Spans, trouble: Band, now_ms: u64) error{OutOfMemory}![]
             try std.fmt.allocPrint(built.arena, "{s} API key rejected. Save a new key, then rui host pause.", .{trouble.provider.?.shown()}),
         .quota => quota: {
             const used = if (trouble.resets_at) |at|
-                try std.fmt.allocPrint(built.arena, "Quota used up. Resets in {s}.", .{ageText(&buffer, at -| now_ms / 1000)})
+                try std.fmt.allocPrint(built.arena, "Quota used up. Resets in {s}.", .{(Age{ .remaining = at }).text(&buffer, now_ms)})
             else
                 "Quota used up.";
             if (trouble.provider.?.usage()) |usage| {
@@ -2488,78 +2545,155 @@ pub fn grouped(buffer: *[32]u8, count: u64) []const u8 {
     return buffer[0..used];
 }
 
-pub const Item = union(enum) { new_session, views, gap, row: usize, empty };
+pub const Drawn = struct {
+    first: usize = 0,
+    end: usize = 0,
+    header: bool = false,
+};
+
+pub fn nextRedrawAt(state: *const State, drawn: Drawn, caps: Caps, awake_ms: u64) ?u64 {
+    var next: ?u64 = null;
+    for (drawn.first..drawn.end) |at| {
+        const kind = Lines.kind(state, at) orelse break;
+        if (Lines.spins(state, at, caps)) {
+            const deadline = awake_ms +| (spin_interval_ms - awake_ms % spin_interval_ms);
+            next = @min(next orelse deadline, deadline);
+        }
+        if (kind == .row and hasAge(state, kind.row)) {
+            const row = &state.rows.items[state.order.items[kind.row]];
+            if ((Age{ .elapsed = shownSince(state, row) }).nextAt(state.now_ms)) |epoch_ms| {
+                const deadline = awake_ms +| (epoch_ms -| state.now_ms);
+                next = @min(next orelse deadline, deadline);
+            }
+        }
+    }
+    if (drawn.header) if (band(state)) |trouble| if (trouble.trouble == .quota) {
+        if (trouble.resets_at) |at| if ((Age{ .remaining = at }).nextAt(state.now_ms)) |epoch_ms| {
+            const deadline = awake_ms +| (epoch_ms -| state.now_ms);
+            next = @min(next orelse deadline, deadline);
+        };
+    };
+    return next;
+}
 
 const new_session_name = "New Session";
 
-fn pinGap(state: *const State) ?usize {
-    const order = state.order.items;
-    if (order.len < 2 or state.rows.items[order[0]].pin_order == null or state.rows.items[order[order.len - 1]].pin_order != null) return null;
-    var low: usize = 1;
-    var high = order.len - 1;
-    while (low < high) {
-        const mid = low + (high - low) / 2;
-        if (state.rows.items[order[mid]].pin_order != null) low = mid + 1 else high = mid;
+pub const Target = Click;
+
+/// An on-demand list line. Segments and regions live in the supplied arena.
+pub const Line = struct {
+    segments: []const Segment,
+    heading: bool = false,
+    target: ?Target = null,
+    alternate: ?Target = null,
+    regions: []const Region = &.{},
+    spins: bool = false,
+};
+
+pub const Region = struct { start: u16, end: u16, target: Target, selected: bool = false };
+
+/// Indexed projection of the committed visible order; never materializes the list.
+pub const Lines = struct {
+    const Entry = union(enum) { gap, row: usize, empty };
+
+    fn gapAt(state: *const State) ?usize {
+        const order = state.order.items;
+        if (order.len < 2 or state.rows.items[order[0]].pin_order == null or state.rows.items[order[order.len - 1]].pin_order != null) return null;
+        var low: usize = 1;
+        var high = order.len - 1;
+        while (low < high) {
+            const mid = low + (high - low) / 2;
+            if (state.rows.items[order[mid]].pin_order != null) low = mid + 1 else high = mid;
+        }
+        return low;
     }
-    return low;
-}
 
-pub fn listLength(state: *const State) usize {
-    return @max(1, state.order.items.len + @intFromBool(pinGap(state) != null));
-}
+    pub fn count(state: *const State) usize {
+        return @max(1, state.order.items.len + @intFromBool(gapAt(state) != null));
+    }
 
-fn listLine(state: *const State, at: usize) usize {
-    return at + @intFromBool(if (pinGap(state)) |gap| at >= gap else false);
-}
+    fn lineOf(state: *const State, row: usize) usize {
+        return row + @intFromBool(if (gapAt(state)) |gap| row >= gap else false);
+    }
 
-pub fn sessionsFrom(state: *const State, line: usize) usize {
-    const before = line -| @intFromBool(if (pinGap(state)) |gap| line > gap else false);
-    return state.order.items.len -| before;
-}
+    pub fn sessionsFrom(state: *const State, line: usize) usize {
+        const before = line -| @intFromBool(if (gapAt(state)) |gap| line > gap else false);
+        return state.order.items.len -| before;
+    }
 
-pub fn selectedLine(state: *const State) ?usize {
-    const ref = selectedSession(state) orelse return null;
-    return if (position(state, ref)) |at| listLine(state, at) else null;
-}
+    /// The conversation-first row whose name is bold, also highlighted off-list.
+    pub fn named(state: *const State) ?usize {
+        const ref = namedSession(state) orelse return null;
+        return if (position(state, ref)) |row| lineOf(state, row) else null;
+    }
 
-pub fn focusedLine(state: *const State, list_focused: bool) ?usize {
-    if (!list_focused) return selectedLine(state);
-    return switch (state.selected) {
-        .session => |ref| if (position(state, ref)) |at| listLine(state, at) else null,
-        .new_session, .sessions, .archived, .settings => null,
-    };
-}
+    /// Keyboard selection while focused; the open conversation otherwise.
+    pub fn highlighted(state: *const State, focused: bool) ?usize {
+        if (!focused) return named(state);
+        return switch (state.selected) {
+            .session => |ref| if (position(state, ref)) |row| lineOf(state, row) else null,
+            .new_session, .sessions, .archived, .settings => null,
+        };
+    }
 
-fn selectedSession(state: *const State) ?Reference {
-    return state.conversing orelse switch (state.selected) {
-        .session => |ref| ref,
-        .new_session, .sessions, .archived, .settings => null,
-    };
-}
+    fn namedSession(state: *const State) ?Reference {
+        return state.conversing orelse switch (state.selected) {
+            .session => |ref| ref,
+            .new_session, .sessions, .archived, .settings => null,
+        };
+    }
+
+    fn kind(state: *const State, line: usize) ?Entry {
+        if (line >= count(state)) return null;
+        if (state.order.items.len == 0) return .empty;
+        const row = if (gapAt(state)) |gap| blk: {
+            if (line == gap) return .gap;
+            break :blk line - @intFromBool(line > gap);
+        } else line;
+        return .{ .row = row };
+    }
+
+    /// The same animation decision used by rendering and redraw scheduling.
+    pub fn spins(state: *const State, line: usize, caps: Caps) bool {
+        const entry = kind(state, line) orelse return false;
+        return entry == .row and rowSpins(state, entry.row, caps);
+    }
+
+    pub fn at(arena: Allocator, state: *const State, line: usize, width: u16, caps: Caps, frame: u64) error{OutOfMemory}!?Line {
+        const entry = kind(state, line) orelse return null;
+        if (entry == .row) {
+            const row = &state.rows.items[state.order.items[entry.row]];
+            return .{
+                .segments = try rowSegments(arena, state, entry.row, width, caps, frame),
+                .target = .{ .open = row.reference },
+                .alternate = .{ .pin = .{ .reference = row.reference, .pinned = row.pin_order == null } },
+                .spins = rowSpins(state, entry.row, caps),
+            };
+        }
+        var built: Spans = .of(arena, caps, width);
+        built.begin();
+        const spans = if (entry == .empty) try emptyLine(&built, state) else &.{};
+        return .{ .segments = try segmentsOf(arena, spans, width, .{}), .heading = entry == .empty };
+    }
+};
 
 fn rowSelected(state: *const State, row: *const Row) bool {
-    const ref = selectedSession(state) orelse return false;
+    const ref = Lines.namedSession(state) orelse return false;
     return std.mem.eql(u8, &ref, &row.reference);
 }
 
-pub fn listItem(state: *const State, line: usize) ?Item {
-    if (line >= listLength(state)) return null;
-    if (state.order.items.len == 0) return .empty;
-    const at = if (pinGap(state)) |gap| blk: {
-        if (line == gap) return .gap;
-        break :blk line - @intFromBool(line > gap);
-    } else line;
-    return .{ .row = at };
+fn hasAge(state: *const State, row: usize) bool {
+    return rules.get(shownKind(state, &state.rows.items[state.order.items[row]])).mark != .active;
 }
 
-pub fn rowSegments(arena: Allocator, state: *const State, at: usize, width: u16, caps: Caps, frame: u64) error{OutOfMemory}![]const Segment {
+fn rowSegments(arena: Allocator, state: *const State, at: usize, width: u16, caps: Caps, frame: u64) error{OutOfMemory}![]const Segment {
     var built: Spans = .of(arena, caps, width);
     const row = &state.rows.items[state.order.items[at]];
     const quiet = rowQuiet(state, row);
     const rule = rules.get(shownKind(state, row));
     built.begin();
     const mark = marks.get(rule.mark);
-    const glyph = if (markSpins(state, .{ .row = at }, caps)) spinner[frame % spinner.len] else if (caps.unicode) mark.unicode else mark.ascii;
+    const glyph = if (rowSpins(state, at, caps)) spinner[frame % spinner.len] else if (caps.unicode) mark.unicode else mark.ascii;
     var words: [work_line.max_words_bytes]u8 = undefined;
     const progress = workLine(&words, state, row);
     const colour = if (progress) |line| switch (line.tone) {
@@ -2567,32 +2701,32 @@ pub fn rowSegments(arena: Allocator, state: *const State, at: usize, width: u16,
         .quiet => Colour.quiet,
         .attention => Colour.attention,
     } else rule.colour;
-    _ = try built.put(1, glyph, 1, .{ .colour = colour, .dim = quiet });
+    _ = try built.put(mark_column, glyph, 1, .{ .colour = colour, .dim = quiet });
     const named = title(state, row);
     const name = switch (row.archive_state) {
         .active, .archived => named.text,
         .archiving => try std.fmt.allocPrint(arena, "[Archiving] {s}", .{named.text}),
     };
     var buffer: [8]u8 = undefined;
-    const age = ageText(&buffer, (state.now_ms / 1000) -| shownSince(state, row));
+    const age = if (!hasAge(state, at)) "" else (Age{ .elapsed = shownSince(state, row) }).text(&buffer, state.now_ms);
     const end = width -| 1;
-    const age_cells = @min(built.measure(age), end -| 3);
+    const age_cells = @min(built.measure(age), end -| text_column);
     const name_end = end -| age_cells -| @intFromBool(age_cells != 0);
     const selected = rowSelected(state, row);
     const archived = if (row.archive_state == .archived and state.archive != .archived)
         if (caps.unicode) " · archived" else " . archived"
     else
         "";
-    const name_room: usize = name_end -| 3;
-    const name_cells = try built.put(3, name, name_room -| built.measure(archived), .{ .colour = if (selected) .strong else .normal, .bold = selected, .dim = quiet });
-    _ = try built.put(3 + name_cells, archived, name_room -| name_cells, .{ .colour = .quiet, .dim = quiet });
+    const name_room: usize = name_end -| text_column;
+    const name_cells = try built.put(text_column, name, name_room -| built.measure(archived), .{ .colour = if (selected) .strong else .normal, .bold = selected, .dim = quiet });
+    _ = try built.put(text_column + name_cells, archived, name_room -| name_cells, .{ .colour = .quiet, .dim = quiet });
     _ = try built.put(end -| age_cells, age, age_cells, .{ .colour = .quiet, .dim = quiet });
     return segmentsOf(arena, try built.finish(), width, .{ .dim = quiet });
 }
 
-pub fn markSpins(state: *const State, item: Item, caps: Caps) bool {
-    if (item != .row or state.list_stale or !caps.unicode or caps.depth == .none) return false;
-    const row = &state.rows.items[state.order.items[item.row]];
+fn rowSpins(state: *const State, at: usize, caps: Caps) bool {
+    if (state.list_stale or !caps.unicode or caps.depth == .none) return false;
+    const row = &state.rows.items[state.order.items[at]];
     return yours(row) and rules.get(shownKind(state, row)).spins;
 }
 
@@ -2614,48 +2748,33 @@ pub fn headerSegments(arena: Allocator, state: *const State, width: u16, caps: C
     return segmentsOf(arena, try providerBand(&built, trouble, state.now_ms), width, .{});
 }
 
-pub const ListRow = struct {
-    segments: []const Segment,
-    heading: bool,
-    selected: bool,
-    sessions: ?Columns = null,
-    archived: ?Columns = null,
-};
-
-pub const Columns = struct { start: u16, end: u16 };
-
-pub fn listSegments(arena: Allocator, state: *const State, item: Item, width: u16, caps: Caps, frame: u64) error{OutOfMemory}!ListRow {
-    if (item == .row) {
-        const row = &state.rows.items[state.order.items[item.row]];
-        return .{ .segments = try rowSegments(arena, state, item.row, width, caps, frame), .heading = false, .selected = rowSelected(state, row) };
-    }
+/// The fixed New Session and archive-filter controls, with captured tab regions.
+pub fn controls(arena: Allocator, state: *const State, width: u16, caps: Caps) error{OutOfMemory}![2]Line {
     var built: Spans = .of(arena, caps, width);
-    var result: ListRow = .{ .segments = &.{}, .heading = item == .empty, .selected = item == .new_session and state.selected == .new_session };
     built.begin();
-    const spans = switch (item) {
-        .new_session => new: {
-            _ = try built.put(2, "+ " ++ new_session_name, width -| 3, .{});
-            break :new try built.finish();
-        },
-        .views => views: {
-            inline for (.{ .{ "Sessions", Selection.sessions, ArchiveFilter.active, &result.sessions }, .{ "Archived", Selection.archived, ArchiveFilter.archived, &result.archived } }, 0..) |tab, index| {
-                const start = 2 + index * 10;
-                const active = state.archive == tab[2];
-                const focused = state.selected == tab[1];
-                const cells = try built.put(start, tab[0], width -| 1 -| start, .{
-                    .colour = if (active or focused) .strong else .quiet,
-                    .bold = active,
-                });
-                if (cells != 0) tab[3].* = .{ .start = @intCast(start), .end = @intCast(start + cells) };
-            }
-            break :views try built.finish();
-        },
-        .gap => &.{},
-        .empty => try emptyLine(&built, state),
-        .row => unreachable,
+    _ = try built.put(mark_column, "+", 1, .{});
+    _ = try built.put(text_column, new_session_name, width -| (text_column + 1), .{});
+    const new_session = try segmentsOf(arena, try built.finish(), width, .{});
+    built.begin();
+    var regions: [2]Region = undefined;
+    var region_count: usize = 0;
+    inline for (.{ .{ "Sessions", Selection.sessions, ArchiveFilter.active, Click.sessions }, .{ "Archived", Selection.archived, ArchiveFilter.archived, Click.archived } }, 0..) |tab, index| {
+        const start = text_column + index * 10;
+        const active = state.archive == tab[2];
+        const focused = state.selected == tab[1];
+        const cells = try built.put(start, tab[0], width -| 1 -| start, .{
+            .colour = if (active or focused) .strong else .quiet,
+            .bold = active,
+        });
+        if (cells > 0) {
+            regions[region_count] = .{ .start = @intCast(start), .end = @intCast(start + cells), .target = tab[3], .selected = focused };
+            region_count += 1;
+        }
+    }
+    return .{
+        .{ .segments = new_session, .target = .new_session },
+        .{ .segments = try segmentsOf(arena, try built.finish(), width, .{}), .regions = try arena.dupe(Region, regions[0..region_count]) },
     };
-    result.segments = try segmentsOf(arena, spans, width, .{});
-    return result;
 }
 
 pub fn newestEmpty(state: *const State) ?Reference {
@@ -2708,11 +2827,45 @@ fn title(state: *const State, row: *const Row) session_line.Name {
     return session_line.name(if (row.label) |*text| text.slice() else null, state.lineOf(row), &row.reference);
 }
 
-fn ageText(buffer: *[8]u8, seconds: u64) []const u8 {
-    const units = [_]struct { u64, u8 }{ .{ 86400, 'd' }, .{ 3600, 'h' }, .{ 60, 'm' } };
-    for (units) |unit| if (seconds >= unit[0]) return std.fmt.bufPrint(buffer, "{d}{c}", .{ @min(seconds / unit[0], 999), unit[1] }) catch unreachable;
-    return std.fmt.bufPrint(buffer, "{d}s", .{seconds}) catch unreachable;
-}
+const Age = union(enum) {
+    elapsed: u64,
+    remaining: u64,
+
+    const Unit = struct { seconds: u64, suffix: u8 };
+
+    fn unit(duration: u64) Unit {
+        for ([_]Unit{ .{ .seconds = 86400, .suffix = 'd' }, .{ .seconds = 3600, .suffix = 'h' } }) |value| {
+            if (duration >= value.seconds) return value;
+        }
+        return .{ .seconds = 60, .suffix = 'm' };
+    }
+
+    fn seconds(self: Age, now_ms: u64) u64 {
+        return switch (self) {
+            .elapsed => |since| now_ms / 1000 -| since,
+            .remaining => |until| until -| now_ms / 1000,
+        };
+    }
+
+    fn text(self: Age, buffer: *[8]u8, now_ms: u64) []const u8 {
+        const duration = self.seconds(now_ms);
+        if (duration < 60) return switch (self) {
+            .elapsed => "now",
+            .remaining => "under a minute",
+        };
+        const value = unit(duration);
+        return std.fmt.bufPrint(buffer, "{d}{c}", .{ @min(duration / value.seconds, 999), value.suffix }) catch unreachable;
+    }
+
+    fn nextAt(self: Age, now_ms: u64) ?u64 {
+        const duration = self.seconds(now_ms);
+        const value = unit(duration);
+        return switch (self) {
+            .elapsed => |since| if (duration / value.seconds >= 999) null else (since +| ((duration / value.seconds +| 1) *| value.seconds)) *| 1000,
+            .remaining => |until| if (duration < 60) until *| 1000 else (until -| (@min(duration / value.seconds, 999) * value.seconds - 1)) *| 1000,
+        };
+    }
+};
 
 const test_now_s = 1_792_937_000;
 
@@ -2867,8 +3020,7 @@ const Frame = struct {
         errdefer self.arena.deinit();
         const gpa = self.arena.allocator();
         const top = try headerSegments(gpa, state, width, caps);
-        var list_count: usize = 0;
-        while (listItem(state, list_count) != null) : (list_count += 1) {}
+        const list_count = Lines.count(state);
         const lines = try gpa.alloc([]const Segment, top.len + list_count + max_notice_rows + 2);
         var count: usize = 0;
         var start: usize = 0;
@@ -2882,13 +3034,13 @@ const Frame = struct {
             count += 1;
         }
         const first = count;
-        lines[count] = (try listSegments(gpa, state, .new_session, width, caps, frame)).segments;
-        count += 1;
-        lines[count] = (try listSegments(gpa, state, .views, width, caps, frame)).segments;
-        count += 1;
+        for (try controls(gpa, state, width, caps)) |control| {
+            lines[count] = control.segments;
+            count += 1;
+        }
         var list_at: usize = 0;
-        while (listItem(state, list_at)) |item| : (list_at += 1) {
-            lines[count] = (try listSegments(gpa, state, item, width, caps, frame)).segments;
+        while (list_at < Lines.count(state)) : (list_at += 1) {
+            lines[count] = ((try Lines.at(gpa, state, list_at, width, caps, frame)).?).segments;
             count += 1;
         }
         const last = count;
@@ -2985,18 +3137,16 @@ const mixed = [_]Listed{
 
 const kind_cases = [_]struct { state: WorkState, unicode: []const u8, ascii: []const u8, colour: Colour, stoppable: bool }{
     .{ .state = .{ .idle = ago(7200) }, .unicode = " ○ Write the notes                                                           2h", .ascii = " o Write the notes                                                           2h", .colour = .normal, .stoppable = false },
-    .{ .state = .{ .pending = ago(5) }, .unicode = " ◌ Write the notes                                                           5s", .ascii = " : Write the notes                                                           5s", .colour = .quiet, .stoppable = true },
-    .{ .state = .{ .working = ago(40) }, .unicode = " ⠹ Write the notes                                                          40s", .ascii = " * Write the notes                                                          40s", .colour = .ink, .stoppable = true },
-    .{ .state = .{ .retrying = .{ .since = test_now_s - 30, .due_at_ms = test_now_s * 1000 + 11_500, .cause = bounded(session_work.max_code_bytes, "provider_temporary_error"), .attempt = 2 } }, .unicode = " ⠹ Write the notes                                                          30s", .ascii = " * Write the notes                                                          30s", .colour = .attention, .stoppable = true },
-    .{ .state = .{ .bash = .{ .since = test_now_s - 75, .call = 0, .description = bounded(session_work.max_description_bytes, "Run the logic tests"), .running = 1, .approvals = 0 } }, .unicode = " ⠹ Write the notes                                                           1m", .ascii = " * Write the notes                                                           1m", .colour = .ink, .stoppable = true },
+    .{ .state = .{ .pending = ago(5) }, .unicode = " ◌ Write the notes                                                          now", .ascii = " : Write the notes                                                          now", .colour = .quiet, .stoppable = true },
+    .{ .state = .{ .working = ago(40) }, .unicode = " ⠹ Write the notes", .ascii = " * Write the notes", .colour = .ink, .stoppable = true },
+    .{ .state = .{ .retrying = .{ .since = test_now_s - 30, .due_at_ms = test_now_s * 1000 + 11_500, .cause = bounded(session_work.max_code_bytes, "provider_temporary_error"), .attempt = 2 } }, .unicode = " ⠹ Write the notes", .ascii = " * Write the notes", .colour = .attention, .stoppable = true },
+    .{ .state = .{ .bash = .{ .since = test_now_s - 75, .call = 0, .description = bounded(session_work.max_description_bytes, "Run the logic tests"), .running = 1, .approvals = 0 } }, .unicode = " ⠹ Write the notes", .ascii = " * Write the notes", .colour = .ink, .stoppable = true },
     .{ .state = .{ .approval = ago(3 * 60) }, .unicode = " ? Write the notes                                                           3m", .ascii = " ? Write the notes                                                           3m", .colour = .attention, .stoppable = true },
-    .{ .state = .{ .stopping = ago(8) }, .unicode = " ⠹ Write the notes                                                           8s", .ascii = " * Write the notes                                                           8s", .colour = .quiet, .stoppable = false },
-    .{ .state = .{ .finished = ago(12 * 60) }, .unicode = " ✓ Write the notes                                                          12m", .ascii = " + Write the notes                                                          12m", .colour = .mark, .stoppable = false },
+    .{ .state = .{ .stopping = ago(8) }, .unicode = " ⠹ Write the notes", .ascii = " * Write the notes", .colour = .quiet, .stoppable = false },
+    .{ .state = .{ .finished = ago(12 * 60) }, .unicode = "   Write the notes                                                          12m", .ascii = "   Write the notes                                                          12m", .colour = .mark, .stoppable = false },
     .{ .state = .{ .failed = .{ .since = test_now_s - 3 * 3600, .code = bounded(session_work.max_code_bytes, "provider_output_invalid"), .resets_at = null } }, .unicode = " × Write the notes                                                           3h", .ascii = " x Write the notes                                                           3h", .colour = .failure, .stoppable = false },
     .{ .state = .{ .stopped = .{ .since = test_now_s - 2 * 86400, .cause = .interruption } }, .unicode = " ■ Write the notes                                                           2d", .ascii = " # Write the notes                                                           2d", .colour = .normal, .stoppable = false },
 };
-
-var test_said: [upgrade_status.max_line_bytes]u8 = undefined;
 
 test "every work state follows the rules table, in Unicode and ASCII" {
     comptime std.debug.assert(kind_cases.len == std.enums.values(Kind).len);
@@ -3011,8 +3161,8 @@ test "every work state follows the rules table, in Unicode and ASCII" {
             const text = try screenText(&state, 80, 24, caps);
             defer std.testing.allocator.free(text);
             var lines = std.mem.splitScalar(u8, text, '\n');
-            try std.testing.expectEqualStrings("  + New Session", lines.next().?);
-            try std.testing.expectEqualStrings("  Sessions  Archived", lines.next().?);
+            try std.testing.expectEqualStrings(" + New Session", lines.next().?);
+            try std.testing.expectEqualStrings("   Sessions  Archived", lines.next().?);
             try std.testing.expectEqualStrings(expected, lines.next().?);
         }
         state.selected = .new_session;
@@ -3032,7 +3182,7 @@ test "a retry that has fallen due reads as queued in its group, mark and colour"
     const at = std.mem.indexOf(u8, text, "Write the notes").?;
     const start = std.mem.lastIndexOfScalar(u8, text[0..at], '\n').? + 1;
     const end = std.mem.indexOfScalarPos(u8, text, at, '\n') orelse text.len;
-    try std.testing.expectEqualStrings(" ◌ Write the notes                                                           2s", text[start..end]);
+    try std.testing.expectEqualStrings(" ◌ Write the notes                                                          now", text[start..end]);
     try std.testing.expect(std.mem.indexOf(u8, text, " Active ·") == null);
     var screen = try Frame.of(&state, 80, 24, .{ .depth = .none }, 0);
     defer screen.deinit();
@@ -3046,7 +3196,7 @@ test "overview rows draw a flat order without headings" {
     defer std.testing.allocator.free(text);
     inline for (.{ " Needs you ·", " Yours ·", " Active ·", " Idle ·", " Finished ·", " Stopped or failed ·", " more" }) |heading| try std.testing.expect(std.mem.indexOf(u8, text, heading) == null);
     try std.testing.expect(std.mem.indexOf(u8, text, "+ New Session") != null);
-    try std.testing.expectEqual(mixed.len, listLength(&state));
+    try std.testing.expectEqual(mixed.len, Lines.count(&state));
 }
 
 fn expectOrder(state: *const State, expected: []const []const u8) !void {
@@ -3117,7 +3267,7 @@ fn rowOf(arena: Allocator, state: *State, label: []const u8, width: u16, caps: C
     defer state.selected = selected;
     for (state.order.items, 0..) |index, at| {
         const row = &state.rows.items[index];
-        if (row.label != null and std.mem.eql(u8, row.label.?.slice(), label)) return rowSegments(arena, state, at, width, caps, 0);
+        if (row.label != null and std.mem.eql(u8, row.label.?.slice(), label)) return (try Lines.at(arena, state, Lines.lineOf(state, at), width, caps, 0)).?.segments;
     }
     return error.TestUnexpectedResult;
 }
@@ -3158,8 +3308,8 @@ test "row segments show each state mark name and state duration" {
     const a = arena.allocator();
     try expectRow(try rowOf(a, &state, "Fix flaky store test", 100, .{}), 100, &.{ .{ "?", .attention }, .{ "Fix flaky store test", .normal }, .{ "2m", .quiet } });
     try expectRow(try rowOf(a, &state, "Asking beside Bash", 100, .{}), 100, &.{ .{ "?", .attention }, .{ "Asking beside Bash", .normal }, .{ "1m", .quiet } });
-    try expectRow(try rowOf(a, &state, "Check install script", 100, .{}), 100, &.{ .{ "◌", .quiet }, .{ "Check install script", .normal }, .{ "10s", .quiet } });
-    try expectRow(try rowOf(a, &state, "Investigate retry storm", 100, .{}), 100, &.{ .{ "⠹", .attention }, .{ "Investigate retry storm", .normal }, .{ "30s", .quiet } });
+    try expectRow(try rowOf(a, &state, "Check install script", 100, .{}), 100, &.{ .{ "◌", .quiet }, .{ "Check install script", .normal }, .{ "now", .quiet } });
+    try expectRow(try rowOf(a, &state, "Investigate retry storm", 100, .{}), 100, &.{ .{ "⠹", .attention }, .{ "Investigate retry storm", .normal } });
     try expectRow(try rowOf(a, &state, "Benchmark memory", 100, .{}), 100, &.{ .{ "×", .failure }, .{ "Benchmark memory", .normal }, .{ "20m", .quiet } });
     try expectRow(try rowOf(a, &state, "Odd failure", 100, .{}), 100, &.{ .{ "×", .failure }, .{ "Odd failure", .normal }, .{ "1m", .quiet } });
     try expectRow(try rowOf(a, &state, "Stopped by me", 100, .{}), 100, &.{ .{ "■", .normal }, .{ "Stopped by me", .normal }, .{ "1m", .quiet } });
@@ -3276,7 +3426,7 @@ test "your Sessions at work turn the spinner in step, and every other mark holds
         try std.testing.expectEqualStrings("⠹", markOf(text, "Mine, retrying"));
         try std.testing.expectEqualStrings("⠹", markOf(text, "Mine, stopping"));
         try std.testing.expectEqualStrings("⠹", markOf(text, "Theirs, thinking"));
-        try std.testing.expectEqualStrings("✓", markOf(text, "Theirs, finished"));
+        try std.testing.expectEqualStrings("", markOf(text, "Theirs, finished"));
         var screen = try Frame.of(&state, 80, 24, .{}, frame);
         defer screen.deinit();
         try std.testing.expect(anySpins(&state, .{}));
@@ -3305,7 +3455,7 @@ test "your Sessions at work turn the spinner in step, and every other mark holds
 
 fn anySpins(state: *const State, caps: Caps) bool {
     var line: usize = 0;
-    while (listItem(state, line)) |item| : (line += 1) if (markSpins(state, item, caps)) return true;
+    while (line < Lines.count(state)) : (line += 1) if (Lines.spins(state, line, caps)) return true;
     return false;
 }
 
@@ -3360,22 +3510,55 @@ fn expectSaid(text: ?[]const u8, stoppable_: bool, said: Said) !void {
     try std.testing.expectEqual(stoppable_, said.stoppable);
 }
 
+test "conversation footer domain carries chat notices but never upgrade status" {
+    var state = try testState();
+    defer state.deinit();
+    const version: upgrade_status.Version = .{ .schema = 60, .patch = 0 };
+    const endings = [_]upgrade_status.Ended{
+        .{ .up_to_date = version },    .{ .superseded = version }, .cancelled,
+        .{ .refused = .source_build }, .{ .failed = .download },   .{ .upgraded = .{ .version = version, .restarted = true } },
+        .{ .incompatible = version },
+    };
+    const runs = [_]?upgrade_status.Run{
+        null,                                                                    .checking,                                                                .cancelling,
+        .{ .installing = .{ .found = .{ .host = .none }, .step = .preparing } }, .{ .installing = .{ .found = .{ .host = .none }, .step = .publishing } }, .{ .installing = .{ .found = .{ .host = .none }, .step = .restarting } },
+    };
+    for ([_]?upgrade_status.Version{ null, version }) |available| for (runs) |run| for ([_]bool{ false, true }) |notice| {
+        state.upgrade.available = available;
+        state.upgrade.run = run;
+        state.notice = null;
+        if (notice) state.say(.normal, "Copied 3 lines", .{});
+        const said = conversation(&state, "k7m2qx".*, .working);
+        try std.testing.expect(said.text == null);
+        try std.testing.expectEqualStrings(if (notice) "Copied 3 lines" else "", said.notice orelse "");
+    };
+    for (endings) |how| for (std.enums.values(upgrade_status.Outcome)) |outcome| {
+        state.notice = null;
+        state.upgrade.run = .checking;
+        _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = how, .outcome = outcome } } });
+        const said = conversation(&state, "k7m2qx".*, .finished);
+        try std.testing.expect(said.text == null);
+        try std.testing.expect(said.notice == null);
+        try std.testing.expect(!said.stoppable);
+    };
+}
+
 test "ctrl-x in a conversation stops its Session as on its row, listed or not" {
     var state = try testState();
     defer state.deinit();
     const ref = "k7m2qx".*;
     const ctrl_x: Conversed = .{ .reference = ref, .work = .working, .input = .stop };
-    try expectSaid(null, true, conversation(&state, ref, .working, .{}, &test_said));
+    try expectSaid(null, true, conversation(&state, ref, .working));
     try expectEffects(&.{.{ .stop = ref }}, try step(&state, .{ .conversed = ctrl_x }));
-    try std.testing.expect(!conversation(&state, ref, .working, .{}, &test_said).stoppable);
+    try std.testing.expect(!conversation(&state, ref, .working).stoppable);
     try expectEffects(&.{}, try step(&state, .{ .conversed = ctrl_x }));
     try expectNotice(&state, "k7m2qx: Stopping");
-    try expectSaid("k7m2qx: Stopping", false, conversation(&state, ref, .working, .{}, &test_said));
+    try expectSaid("k7m2qx: Stopping", false, conversation(&state, ref, .working));
     try expectEffects(&.{}, try step(&state, .{ .conversed = .{ .reference = ref, .work = .working, .input = .other } }));
-    try std.testing.expectEqual(@as(?[]const u8, null), conversation(&state, ref, .working, .{}, &test_said).text);
+    try std.testing.expectEqual(@as(?[]const u8, null), conversation(&state, ref, .working).text);
     try expectEffects(&.{}, try step(&state, .{ .stop = .{ .reference = ref, .outcome = .{ .failed = "session_not_found" } } }));
     try expectNotice(&state, "! k7m2qx not stopped: session_not_found");
-    try std.testing.expect(conversation(&state, ref, .working, .{}, &test_said).stoppable and !conversation(&state, ref, .finished, .{}, &test_said).stoppable);
+    try std.testing.expect(conversation(&state, ref, .working).stoppable and !conversation(&state, ref, .finished).stoppable);
     try expectEffects(&.{}, try step(&state, .{ .conversed = .{ .reference = ref, .work = .finished, .input = .stop } }));
     try expectNotice(&state, "k7m2qx is already finished.");
 }
@@ -3755,9 +3938,9 @@ test "a first line arriving titles its unlabelled row" {
     try expectEffects(&.{}, try step(&state, .{ .first_line = .{ .reference = "f6g7h8".*, .admission = 9, .line = null } }));
     try expectEffects(&.{}, try step(&state, .{ .first_line = .{ .reference = "p3q4r5".*, .admission = 5, .line = "not this one" } }));
     try std.testing.expectEqualStrings("summarize yesterday's CI failures", state.lineOf(state.find("h8q2mz".*).?).?);
-    try std.testing.expectEqual(Line.unavailable, state.find("f6g7h8".*).?.line);
-    try std.testing.expectEqual(Line.requested, state.find("p3q4r5".*).?.line);
-    try expectScreenLine(&state, position(&state, "h8q2mz".*).? + 2, " ✓ summarize yesterday's CI failures                                        12m");
+    try std.testing.expectEqual(FirstLineRead.unavailable, state.find("f6g7h8".*).?.line);
+    try std.testing.expectEqual(FirstLineRead.requested, state.find("p3q4r5".*).?.line);
+    try expectScreenLine(&state, position(&state, "h8q2mz".*).? + 2, "   summarize yesterday's CI failures                                        12m");
     try expectEffects(&.{}, try refresh(&state, .changed, testToken(2), &.{session("h8q2mz", .{ .working = ago(0) }, .{ .yours = true })}));
     try std.testing.expectEqualStrings("summarize yesterday's CI failures", state.lineOf(state.find("h8q2mz".*).?).?);
     const f6g7h8 = session("f6g7h8", .{ .idle = ago(0) }, .{ .workspace = "/home/d/code/other", .first = .{ .position = 1, .admission = 9, .sender = "k7m2qx".* } });
@@ -3765,13 +3948,13 @@ test "a first line arriving titles its unlabelled row" {
     var next_turn = mixed;
     next_turn[1].turn = 2;
     try expectEffects(&.{}, try refresh(&state, .full, testToken(4), &next_turn));
-    try std.testing.expectEqual(Line.unavailable, state.find("f6g7h8".*).?.line);
+    try std.testing.expectEqual(FirstLineRead.unavailable, state.find("f6g7h8".*).?.line);
     try std.testing.expectEqualStrings("summarize yesterday's CI failures", state.lineOf(state.find("h8q2mz".*).?).?);
     try expectEffects(&.{}, try step(&state, .{ .first_line = .{ .reference = "h8q2mz".*, .admission = 4, .line = "a second answer" } }));
     try expectEffects(&.{}, try step(&state, .{ .first_line = .{ .reference = "f6g7h8".*, .admission = 9, .line = "a late answer" } }));
     try std.testing.expectEqual(@as(usize, 1), state.lines.items.len);
     try std.testing.expectEqualStrings("summarize yesterday's CI failures", state.lineOf(state.find("h8q2mz".*).?).?);
-    try std.testing.expectEqual(Line.unavailable, state.find("f6g7h8".*).?.line);
+    try std.testing.expectEqual(FirstLineRead.unavailable, state.find("f6g7h8".*).?.line);
     var again: Reads = .{};
     again.items[0] = .{ .reference = "f6g7h8".*, .position = 2, .admission = 12 };
     again.len = 1;
@@ -3788,7 +3971,7 @@ test "a first line with no answer is asked for again by the next listing" {
     reads.len = 1;
     try expectEffects(&.{.{ .read_first_lines = reads }}, try respond(&state, .full, testToken(1), &rows));
     try expectEffects(&.{}, try step(&state, .{ .first_line = .{ .reference = "h8q2mz".*, .admission = 4, .line = null, .unanswered = true } }));
-    try std.testing.expectEqual(Line.unread, state.find("h8q2mz".*).?.line);
+    try std.testing.expectEqual(FirstLineRead.unread, state.find("h8q2mz".*).?.line);
     try expectEffects(&.{.{ .read_first_lines = reads }}, try refresh(&state, .not_modified, testToken(1), &.{}));
 }
 
@@ -3801,12 +3984,12 @@ test "Host facts change only the counts line, and a row from before a restart st
     defer state.deinit();
     const before = try screenText(&state, 80, 24, .{});
     defer std.testing.allocator.free(before);
-    try expectScreenLine(&state, 0, "  + New Session");
+    try expectScreenLine(&state, 0, " + New Session");
     _ = try step(&state, .{ .host = .{ .started_at = test_now_s - 20, .slots = 2, .slots_in_use = 2 } });
-    try expectScreenLine(&state, 0, "  + New Session");
+    try expectScreenLine(&state, 0, " + New Session");
     const after = try screenText(&state, 80, 24, .{});
     defer std.testing.allocator.free(after);
-    try std.testing.expectEqualStrings(before[std.mem.indexOf(u8, before, "  + New Session").?..], after[std.mem.indexOf(u8, after, "  + New Session").?..]);
+    try std.testing.expectEqualStrings(before[std.mem.indexOf(u8, before, " + New Session").?..], after[std.mem.indexOf(u8, after, " + New Session").?..]);
     try std.testing.expect(std.mem.indexOf(u8, after, " ⠹ Admitted before the restart") != null);
 }
 
@@ -3836,7 +4019,7 @@ test "the selection stays on its Session when it moves from active to finished" 
     try expectEffects(&.{ .{ .open = "e5f6g7".* }, .list_models }, try submit(&state));
     const text = try screenText(&state, 80, 24, .{});
     defer std.testing.allocator.free(text);
-    try std.testing.expect(std.mem.indexOf(u8, text, "✓ List unused build steps") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "   List unused build steps") != null);
     _ = try press(&state, .next);
     try expectSelected(&state, "h8q2mz");
     _ = try press(&state, .next);
@@ -3845,7 +4028,7 @@ test "the selection stays on its Session when it moves from active to finished" 
     try expectSelected(&state, "m1n2p3");
     _ = try refresh(&state, .changed, testToken(3), &.{session("m1n2p3", .{ .finished = ago(10 * 86400) }, .{ .label = "Explain provider output parsing" })});
     try expectSelected(&state, "m1n2p3");
-    try std.testing.expectEqual(state.order.items.len, listLength(&state));
+    try std.testing.expectEqual(state.order.items.len, Lines.count(&state));
 }
 
 fn sentRecords(state: *State, into: []StatusRecord) []StatusRecord {
@@ -3927,7 +4110,7 @@ test "overview selection walks both ends and every row without folding" {
     defer state.deinit();
     _ = try press(&state, .first);
     try std.testing.expectEqual(Selection.new_session, state.selected);
-    try std.testing.expectEqual(null, selectedLine(&state));
+    try std.testing.expectEqual(null, Lines.named(&state));
     _ = try press(&state, .previous);
     try std.testing.expectEqual(Selection.new_session, state.selected);
     _ = try press(&state, .next);
@@ -3935,11 +4118,11 @@ test "overview selection walks both ends and every row without folding" {
     for (state.order.items, 0..) |index, at| {
         _ = try press(&state, .next);
         try expectSelected(&state, &state.rows.items[index].reference);
-        try std.testing.expectEqual(@as(?usize, at), selectedLine(&state));
+        try std.testing.expectEqual(@as(?usize, at), Lines.named(&state));
     }
     _ = try press(&state, .next);
     try std.testing.expectEqual(Selection.settings, state.selected);
-    try std.testing.expectEqual(null, selectedLine(&state));
+    try std.testing.expectEqual(null, Lines.named(&state));
     _ = try press(&state, .next);
     try std.testing.expectEqual(Selection.settings, state.selected);
     var at = state.order.items.len;
@@ -3964,31 +4147,6 @@ test "one click on a row opens it, under Enter's rules" {
     state.upgrade.run = .checking;
     try expectEffects(&.{}, try step(&state, .{ .clicked = .{ .target = .{ .open = "g7h8j9".* } } }));
     try expectSelected(&state, "g7h8j9");
-}
-
-test "overview and sidebar map Session rows without a leading gap" {
-    var state = try opened(&mixed);
-    defer state.deinit();
-    for ([_]bool{ false, true }) |chat| {
-        state.conversing = if (chat) mixed[0].reference else null;
-        for (state.order.items, 0..) |index, at| {
-            const item = listItem(&state, at).?;
-            try std.testing.expectEqual(Item{ .row = at }, item);
-            try std.testing.expectEqualStrings(&state.rows.items[index].reference, &clickOf(&state, item).?.open);
-            state.selected = .{ .session = state.rows.items[index].reference };
-            try std.testing.expectEqual(@as(?usize, if (chat) position(&state, mixed[0].reference).? else at), selectedLine(&state));
-        }
-        try std.testing.expectEqual(null, listItem(&state, listLength(&state)));
-        state.selected = .new_session;
-        try std.testing.expectEqual(if (chat) position(&state, mixed[0].reference).? else null, selectedLine(&state));
-    }
-    var empty = try opened(&.{});
-    defer empty.deinit();
-    try std.testing.expectEqual(@as(usize, 1), listLength(&empty));
-    try std.testing.expectEqual(Item.empty, listItem(&empty, 0).?);
-    try std.testing.expectEqual(null, clickOf(&empty, .empty));
-    try std.testing.expectEqual(@as(usize, 0), sessionsFrom(&empty, 0));
-    try std.testing.expectEqual(null, listItem(&empty, 1));
 }
 
 test "a click that names a Session gone from the list since it was drawn changes nothing" {
@@ -4105,13 +4263,13 @@ test "the overview lists once a second, one listing at a time" {
     try expectEffects(&.{}, try step(&state, .{ .list = .failed }));
     try expectEffects(&.{.{ .list = testToken(1) }}, try step(&state, .{ .tick = start + 3 * list_interval_ms }));
     try expectEffects(&.{}, try step(&state, .{ .list = .failed }));
-    try expectScreenLine(&state, 0, "  + New Session");
+    try expectScreenLine(&state, 0, " + New Session");
     var screen = try Frame.of(&state, 80, 24, .{}, 0);
     defer screen.deinit();
     try expectScreenLine(&state, 2, " ? Review PR 412                                                             3m");
     try std.testing.expectEqual(Colour.attention, screen.styleAt(2, 1).?.colour);
     _ = try refresh(&state, .not_modified, testToken(1), &.{});
-    try expectScreenLine(&state, 0, "  + New Session");
+    try expectScreenLine(&state, 0, " + New Session");
 }
 
 test "a tick moves a retry that fell due to pending" {
@@ -4126,7 +4284,7 @@ test "a tick moves a retry that fell due to pending" {
     try std.testing.expect(std.mem.indexOf(u8, text, " ◌ Audit permission paths") != null);
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    try std.testing.expect(std.mem.endsWith(u8, try segmentText(arena.allocator(), try rowOf(arena.allocator(), &state, "Audit permission paths", 80, .{})), "0s "));
+    try std.testing.expect(std.mem.endsWith(u8, try segmentText(arena.allocator(), try rowOf(arena.allocator(), &state, "Audit permission paths", 80, .{})), "now "));
 }
 
 fn failedRow(ref: *const [6]u8, seconds_ago: u64, code: []const u8, resets_at: ?u64) Listed {
@@ -4234,6 +4392,7 @@ test "a quota band adds where its provider raises the limit only when the line h
         .{ .provider = .chatgpt, .width = 40, .shown = "Quota used up." },
         .{ .provider = .chatgpt, .resets_at = test_now_s + 1200, .width = 200, .shown = "Quota used up. Resets in 20m. " ++ usage },
         .{ .provider = .chatgpt, .resets_at = test_now_s + 1200, .width = 60, .shown = "Quota used up. Resets in 20m." },
+        .{ .provider = .openai, .resets_at = test_now_s + 59, .width = 200, .shown = "Quota used up. Resets in under a minute." },
         .{ .provider = .codex, .width = 200, .shown = "Quota used up." },
         .{ .provider = .openai, .resets_at = test_now_s + 1200, .width = 200, .shown = "Quota used up. Resets in 20m." },
     }) |case| {
@@ -4254,7 +4413,7 @@ test "the overview's rows draw each band" {
         if (segments.len == 0) continue;
         const text = try screenText(&state, 80, 24, .{});
         defer std.testing.allocator.free(text);
-        try std.testing.expect(std.mem.indexOf(u8, text, "  + New Session") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, " + New Session") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, "Host stopped") == null);
         try std.testing.expectEqual(Background.band, segments[0].style.background);
     }
@@ -4266,7 +4425,7 @@ test "the overview's rows draw an empty Store" {
     for ([_]u16{ 40, 80, 200 }) |width| {
         const text = try screenText(&state, width, 24, .{});
         defer std.testing.allocator.free(text);
-        try std.testing.expect(std.mem.startsWith(u8, text, "  + New Session") and std.mem.indexOf(u8, text, "Archived\n") != null);
+        try std.testing.expect(std.mem.startsWith(u8, text, " + New Session") and std.mem.indexOf(u8, text, "Archived\n") != null);
         try std.testing.expectEqualStrings("", footerRight(&state));
         try std.testing.expect(std.mem.indexOf(u8, text, "new Session ·") == null);
     }
@@ -4342,7 +4501,7 @@ test "bidi controls in a title cannot reorder a row" {
 test "untrusted text cannot reach the terminal as control bytes" {
     var state = try opened(&.{session("k7m2qx", .{ .working = ago(5) }, .{ .label = "Bell\x07 and \x1b[31mred" })});
     defer state.deinit();
-    try expectScreenLine(&state, 2, " ⠹ Bell? and ?[31mred                                                        5s");
+    try expectScreenLine(&state, 2, " ⠹ Bell? and ?[31mred");
 }
 
 test "overview idle rows never fold" {
@@ -4400,7 +4559,7 @@ test "the status bar says the Upgrade at work, else the newest notice, else an U
     try expectStatus(&state, "Preparing Upgrade · no Hosts running · esc cancels", .normal);
     _ = try press(&state, .next);
     _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = .{ .upgraded = .{ .version = .{ .schema = 60, .patch = 0 }, .restarted = false } }, .outcome = .compatible } } });
-    try std.testing.expectEqualStrings("Upgraded to 0.60.0", footerNotice(&state).?);
+    try std.testing.expect(footerNotice(&state) == null);
     try expectStatus(&state, "! Not confirmed · rui request recover " ++ key, .attention);
     _ = try press(&state, .next);
     try expectStatus(&state, "! Not confirmed · rui request recover " ++ key, .attention);
@@ -4463,7 +4622,7 @@ test "archive views remove changed rows outside the server filter and select the
     try std.testing.expectEqual(@as(usize, 1), state.rows.items.len);
     const text = try screenText(&state, 80, 24, .{});
     defer std.testing.allocator.free(text);
-    try std.testing.expect(std.mem.indexOf(u8, text, "✓ second") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "   second") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "[Archived]") == null);
     b.archive_state = .active;
     _ = try refresh(&state, .changed, testToken(4), &.{b});
@@ -4480,13 +4639,13 @@ test "archive row marker follows the whole filter and row-state domain" {
         state.selected = if (selected) .{ .session = "aaaaaa".* } else .new_session;
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
-        const segments = try rowSegments(arena.allocator(), &state, 0, width, .{ .unicode = unicode_marks }, 0);
+        const segments = (try Lines.at(arena.allocator(), &state, Lines.lineOf(&state, 0), width, .{ .unicode = unicode_marks }, 0)).?.segments;
         const text = try segmentText(arena.allocator(), segments);
         const expected = archive == .archived and filter != .archived;
         const marker = if (unicode_marks) " · archived" else " . archived";
         try std.testing.expectEqual(@as(usize, @intFromBool(expected)), std.mem.count(u8, text, marker));
         try std.testing.expect(std.mem.indexOf(u8, text, "[Archived]") == null);
-        try std.testing.expect(std.mem.startsWith(u8, std.mem.trimStart(u8, text, " "), if (unicode_marks) "✓ Archive audit" else "+ Archive audit"));
+        try std.testing.expect(std.mem.startsWith(u8, std.mem.trimStart(u8, text, " "), "Archive audit"));
         try std.testing.expectEqual(selected, (try styleOf(segments, "Archive audit")).bold);
         if (expected) {
             try std.testing.expect(std.mem.indexOf(u8, text, if (unicode_marks) "Archive audit · archived" else "Archive audit . archived") != null);
@@ -4504,7 +4663,7 @@ test "archive row marker survives a clipped name without overlapping the age" {
     state.rows.items[0].archive_state = .archived;
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    try expectRow(try rowSegments(arena.allocator(), &state, 0, 40, .{}, 0), 40, &.{ .{ "✓", .mark }, .{ "A long archived Sessi…", .strong }, .{ "· archived", .quiet }, .{ "1s", .quiet } });
+    try expectRow((try Lines.at(arena.allocator(), &state, Lines.lineOf(&state, 0), 40, .{}, 0)).?.segments, 40, &.{ .{ "A long archived Sess…", .strong }, .{ "· archived", .quiet }, .{ "now", .quiet } });
 }
 
 test "archive filter switch clears hidden data and discards every stale traversal page" {
@@ -4835,9 +4994,8 @@ test "overview quiet rows: a chat never written in recedes unless it needs you, 
         try std.testing.expectEqual(quiet, rowQuiet(&state, state.find(listed.reference).?));
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
-        const first = try listSegments(arena.allocator(), &state, .{ .row = 0 }, width, caps, 0);
+        const first = (try Lines.at(arena.allocator(), &state, Lines.lineOf(&state, 0), width, caps, 0)).?;
         const name = try styleOf(first.segments, "Quiet row");
-        try std.testing.expectEqual(selected, first.selected);
         try std.testing.expectEqual(selected, name.bold);
         try std.testing.expectEqual(if (selected) Colour.strong else Colour.normal, name.colour);
         for (first.segments) |segment| try std.testing.expectEqual(quiet, segment.style.dim);
@@ -4856,11 +5014,11 @@ test "overview one-line rows at 40 and 140 columns cover every work state" {
         defer state.deinit();
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
-        const first = try rowSegments(arena.allocator(), &state, 0, width, .{}, 0);
-        try expectLine(first, width, &.{ try std.fmt.allocPrint(arena.allocator(), "{s} A useful Session name", .{([_][]const u8{ "○", "◌", "⠹", "⠹", "⠹", "?", "⠹", "✓", "×", "■" })[index]}), age: {
-            var buffer: [8]u8 = undefined;
-            break :age try arena.allocator().dupe(u8, ageText(&buffer, (state.now_ms / 1000) -| listed.state.since()));
-        } });
+        const first = (try Lines.at(arena.allocator(), &state, Lines.lineOf(&state, 0), width, .{}, 0)).?.segments;
+        const prefix = try std.fmt.allocPrint(arena.allocator(), "{s}A useful Session name", .{([_][]const u8{ "○ ", "◌ ", "⠹ ", "⠹ ", "⠹ ", "? ", "⠹ ", "", "× ", "■ " })[index]});
+        var buffer: [8]u8 = undefined;
+        const expected = [_][]const u8{ prefix, (Age{ .elapsed = listed.state.since() }).text(&buffer, state.now_ms) };
+        try expectLine(first, width, expected[0..if (rules.get(shownKind(&state, &state.rows.items[0])).mark == .active) @as(usize, 1) else 2]);
         try std.testing.expectEqual(Colour.strong, (try styleOf(first, "A useful Session name")).colour);
         try std.testing.expect((try styleOf(first, "A useful Session name")).bold);
         const first_text = try segmentText(arena.allocator(), first);
@@ -4869,7 +5027,7 @@ test "overview one-line rows at 40 and 140 columns cover every work state" {
         try std.testing.expect(std.mem.indexOf(u8, first_text, "drift") == null);
         try std.testing.expect(std.mem.indexOf(u8, first_text, "All tests pass.") == null);
         state.selected = .new_session;
-        try std.testing.expectEqual(Colour.normal, (try styleOf(try rowSegments(arena.allocator(), &state, 0, width, .{}, 0), "A useful Session name")).colour);
+        try std.testing.expectEqual(Colour.normal, (try styleOf((try Lines.at(arena.allocator(), &state, Lines.lineOf(&state, 0), width, .{}, 0)).?.segments, "A useful Session name")).colour);
     };
 }
 
@@ -4881,10 +5039,10 @@ test "overview long name truncates while mark and state age remain visible" {
     defer state.deinit();
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    const first = try rowSegments(arena.allocator(), &state, 0, 40, .{}, 0);
-    try std.testing.expectEqualStrings(" ✓ abcdefghijklmnopqrstuvwxyzABCDE… 19s ", try segmentText(arena.allocator(), first));
+    const first = (try Lines.at(arena.allocator(), &state, Lines.lineOf(&state, 0), 40, .{}, 0)).?.segments;
+    try std.testing.expectEqualStrings("   abcdefghijklmnopqrstuvwxyzABCDE… now ", try segmentText(arena.allocator(), first));
     state.list_stale = true;
-    const faded = try rowSegments(arena.allocator(), &state, 0, 40, .{}, 0);
+    const faded = (try Lines.at(arena.allocator(), &state, Lines.lineOf(&state, 0), 40, .{}, 0)).?.segments;
     try std.testing.expectEqual(Colour.strong, (try styleOf(faded, "abcdefghijklmnopqrstuvwxyzABCDE…")).colour);
 }
 
@@ -5240,7 +5398,8 @@ test "Upgrade runs inline: Esc cancels it before the draft, checking or preparin
     try expectEffects(&.{.cancel_upgrade}, try press(&state, .clear));
 
     _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = .cancelled, .outcome = .unchanged } } });
-    try std.testing.expectEqualStrings("Upgrade cancelled; nothing changed", state.notice.?.text());
+    try std.testing.expect(state.notice == null);
+    try std.testing.expectEqualStrings("Upgrade cancelled; nothing changed", upgrade_status.line(state.upgrade.run.?, &buffer, .unicode).text);
     try expectEffects(&.{}, try step(&state, .start_upgrade));
     _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .host = .none } } } });
 
@@ -5289,7 +5448,7 @@ test "every place an Upgrade run can stand decides the hold, Esc and another Upg
         .{ .run = .{ .installing = .{ .found = found, .step = .restarting } }, .going = true, .escape = false },
         .{ .run = .cancelling, .going = true, .escape = true },
         .{ .run = .{ .ended = .{ .how = .cancelled, .outcome = .unchanged } }, .going = false, .escape = false },
-        .{ .run = .{ .ended = .{ .how = .superseded, .outcome = .unchanged } }, .going = false, .escape = false },
+        .{ .run = .{ .ended = .{ .how = .{ .superseded = upgrade_status.Version{ .schema = 60, .patch = 0 } }, .outcome = .unchanged } }, .going = false, .escape = false },
         .{ .run = .{ .ended = .{ .how = .{ .incompatible = upgrade_status.Version{ .schema = 60, .patch = 0 } }, .outcome = .incompatible } }, .going = false, .escape = false },
     };
     for (cases) |case| {
@@ -5402,7 +5561,7 @@ test "empty overview rows state only the empty archive filter without removed in
         state.archive = case.filter;
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
-        const row = try listSegments(arena.allocator(), &state, .empty, 80, .{}, 0);
+        const row = (try Lines.at(arena.allocator(), &state, 0, 80, .{}, 0)).?;
         const text = try segmentText(arena.allocator(), row.segments);
         try std.testing.expectEqualStrings(case.text, std.mem.trim(u8, text, " "));
         try std.testing.expect(std.mem.indexOf(u8, text, "Type a task") == null);
@@ -5551,7 +5710,7 @@ test "empty chat name and selection agree across listing arrival orders and firs
         _ = try step(&state, .{ .conversation = empty.reference });
         if (!listed_first) {
             try std.testing.expectEqual(@as(usize, 0), state.order.items.len);
-            try std.testing.expect(selectedLine(&state) == null);
+            try std.testing.expect(Lines.named(&state) == null);
             _ = try step(&state, .{ .observed = .{ .reference = empty.reference, .read_version = testToken(2), .work = .{ .state = failedRow("empty1", 1, "provider_http_401", null).state }, .opening = false } });
             try std.testing.expectEqual(@as(usize, 1), state.rows.items.len);
             try std.testing.expectEqual(@as(usize, 0), state.order.items.len);
@@ -5560,13 +5719,12 @@ test "empty chat name and selection agree across listing arrival orders and firs
         }
         for ([_]Selection{ .new_session, .settings, .{ .session = "other1".* } }) |navigation| {
             state.selected = navigation;
-            try std.testing.expectEqual(@as(?usize, 0), selectedLine(&state));
+            try std.testing.expectEqual(@as(?usize, 0), Lines.named(&state));
             try std.testing.expectEqualStrings("New Session", title(&state, &state.rows.items[state.order.items[0]]).text);
             for ([_]u16{ 46, 140 }) |width| {
                 var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
                 defer arena.deinit();
-                const built = try listSegments(arena.allocator(), &state, .{ .row = 0 }, width, .{}, 0);
-                try std.testing.expect(built.selected);
+                const built = (try Lines.at(arena.allocator(), &state, Lines.lineOf(&state, 0), width, .{}, 0)).?;
                 var name_found = false;
                 for (built.segments) |segment| {
                     try std.testing.expect(std.mem.indexOf(u8, segment.text, &empty.reference) == null);
@@ -5581,7 +5739,7 @@ test "empty chat name and selection agree across listing arrival orders and firs
         }
         _ = try step(&state, .{ .conversation = null });
         try std.testing.expectEqual(@as(usize, 0), state.order.items.len);
-        try std.testing.expect(selectedLine(&state) == null);
+        try std.testing.expect(Lines.named(&state) == null);
         var admitted = empty;
         admitted.first = .{ .position = 1, .admission = 4, .sender = null };
         _ = try refresh(&state, .changed, testToken(4), &.{admitted});
@@ -6023,7 +6181,9 @@ test "Session pin captured intent changes no selection or conversation and await
     _ = try step(&state, .{ .conversation = mixed[1].reference });
     state.selected = .{ .session = mixed[1].reference };
     const selected = state.selected;
-    const captured = pinClickOf(&state, .{ .row = 0 }).?;
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const captured = (try Lines.at(arena.allocator(), &state, 0, 80, .{}, 0)).?.alternate.?;
     const target = captured.pin.reference;
     const row = state.find(target).?;
     try std.testing.expect(row.pin_order == null);
@@ -6038,7 +6198,6 @@ test "Session pin captured intent changes no selection or conversation and await
     _ = try step(&state, .{ .pin = .{ .request = captured.pin, .outcome = .{ .unconfirmed = "pin-handle" } } });
     try std.testing.expectEqual(IntentAdmission.refused, (try step(&state, .{ .conversed = .{ .reference = target, .work = .idle, .input = .{ .pin = false } } })).intent_admission);
     try std.testing.expect(state.find(target).?.pin_order == null);
-    for ([_]Item{ .new_session, .gap, .empty }) |item| try std.testing.expect(pinClickOf(&state, item) == null);
     state.selected = selected;
 }
 
@@ -6084,15 +6243,15 @@ test "session list state ages are compact stable against redraw and reset on sta
         defer state.deinit();
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
-        const first = try segmentText(arena.allocator(), try rowSegments(arena.allocator(), &state, 0, 46, .{}, 0));
-        try std.testing.expect(std.mem.endsWith(u8, first, case[1] ++ " "));
-        const again = try segmentText(arena.allocator(), try rowSegments(arena.allocator(), &state, 0, 46, .{}, 9));
-        try std.testing.expect(std.mem.endsWith(u8, again, case[1] ++ " "));
+        const first = try segmentText(arena.allocator(), (try Lines.at(arena.allocator(), &state, Lines.lineOf(&state, 0), 46, .{}, 0)).?.segments);
+        try std.testing.expect(std.mem.endsWith(u8, first, if (rules.get(work).mark == .active) " " else case[1] ++ " "));
+        const again = try segmentText(arena.allocator(), (try Lines.at(arena.allocator(), &state, Lines.lineOf(&state, 0), 46, .{}, 9)).?.segments);
+        try std.testing.expect(std.mem.endsWith(u8, again, if (rules.get(work).mark == .active) " " else case[1] ++ " "));
         const now = state.now_ms;
         _ = try step(&state, .{ .conversation = "aaaaaa".* });
         _ = try step(&state, .{ .observed = .{ .reference = "aaaaaa".*, .read_version = testToken(2), .work = .{ .state = .{ .finished = .{ .since = test_now_s - 1 } } }, .opening = false } });
-        const changed = try segmentText(arena.allocator(), try rowSegments(arena.allocator(), &state, 0, 46, .{}, 0));
-        try std.testing.expectEqualStrings("1s ", changed[changed.len - 3 ..]);
+        const changed = try segmentText(arena.allocator(), (try Lines.at(arena.allocator(), &state, Lines.lineOf(&state, 0), 46, .{}, 0)).?.segments);
+        try std.testing.expectEqualStrings("now ", changed[changed.len - 4 ..]);
         try std.testing.expectEqual(now, state.now_ms);
     };
 }
@@ -6116,56 +6275,145 @@ test "approval rows require no command reads across waiting Action and conversat
     };
 }
 
-test "session list has exactly one noninteractive gap only between both pin groups" {
-    for (0..9) |n| for (0..n + 1) |pins| {
-        var rows: [8]Listed = undefined;
-        for (rows[0..n], 0..) |*row, i| {
-            var ref = "aaaaaa".*;
-            ref[5] += @intCast(i);
-            row.* = session(&ref, .{ .finished = ago(i + 1) }, .{});
-            row.pin_order = if (i < pins) i + 1 else null;
+test "list marks and ages domain covers every state age band width and list surface" {
+    try std.testing.expectEqual(@as(u64, 100), spin_interval_ms);
+    const ages = [_]struct { seconds: u64, text: []const u8 }{
+        .{ .seconds = 0, .text = "now" },
+        .{ .seconds = 59, .text = "now" },
+        .{ .seconds = 60, .text = "1m" },
+        .{ .seconds = 119, .text = "1m" },
+        .{ .seconds = 120, .text = "2m" },
+        .{ .seconds = 3599, .text = "59m" },
+        .{ .seconds = 3600, .text = "1h" },
+        .{ .seconds = 7200, .text = "2h" },
+        .{ .seconds = 86399, .text = "23h" },
+        .{ .seconds = 86400, .text = "1d" },
+    };
+    const expected_marks = [_][]const u8{ "○", "◌", "⠹", "⠹", "⠹", "?", "⠹", " ", "×", "■" };
+    const expected_ascii = [_][]const u8{ "o", ":", "*", "*", "*", "?", "*", " ", "x", "#" };
+    for (kind_cases, 0..) |case, kind| for (ages) |age| for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |sidebar| for ([_]bool{ false, true }) |unicode_marks| {
+        var work = case.state;
+        switch (work) {
+            inline else => |*value| value.since = test_now_s - age.seconds,
         }
-        var state = try opened(rows[0..n]);
+        if (work == .retrying) work.retrying.due_at_ms = (test_now_s + 120) * 1000;
+        var state = try opened(&.{session("aaaaaa", work, .{ .label = "Domain row", .yours = true })});
         defer state.deinit();
-        const both = pins > 0 and pins < n;
-        try std.testing.expectEqual(@max(1, n + @intFromBool(both)), listLength(&state));
-        var gaps: usize = 0;
-        var seen: usize = 0;
-        for (0..listLength(&state)) |line| {
-            const item = listItem(&state, line).?;
-            switch (item) {
-                .gap => {
-                    gaps += 1;
-                    try std.testing.expectEqual(pins, line);
-                    try std.testing.expect(clickOf(&state, item) == null);
-                    try std.testing.expect(pinClickOf(&state, item) == null);
-                },
-                .row => |at| {
-                    try std.testing.expectEqual(seen, at);
-                    const ref = state.rows.items[state.order.items[at]].reference;
-                    try std.testing.expectEqualStrings(&ref, &clickOf(&state, item).?.open);
-                    state.selected = .{ .session = ref };
-                    try std.testing.expectEqual(@as(?usize, line), focusedLine(&state, true));
-                    try std.testing.expectEqual(@as(?usize, line), selectedLine(&state));
-                    seen += 1;
-                },
-                .empty => try std.testing.expectEqual(@as(usize, 0), n),
-                else => return error.UnexpectedListItem,
-            }
-            const sessions_before = @min(n, line -| @intFromBool(both and line > pins));
-            try std.testing.expectEqual(n - sessions_before, sessionsFrom(&state, line));
+        if (sidebar) state.conversing = "aaaaaa".*;
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const caps: Caps = .{ .unicode = unicode_marks };
+        const segments = ((try Lines.at(arena.allocator(), &state, Lines.lineOf(&state, 0), width, caps, 2)).?).segments;
+        const text = try segmentText(arena.allocator(), segments);
+        const mark = if (unicode_marks) expected_marks[kind] else expected_ascii[kind];
+        const prefix = try std.fmt.allocPrint(arena.allocator(), " {s} Domain row", .{mark});
+        try std.testing.expectEqualStrings(prefix, text[0..prefix.len]);
+        const active = switch (work) {
+            .working, .retrying, .bash, .stopping => true,
+            else => false,
+        };
+        if (active) {
+            try std.testing.expectEqualStrings(prefix, std.mem.trimEnd(u8, text, " "));
+        } else {
+            const suffix = try std.fmt.allocPrint(arena.allocator(), "{s} ", .{age.text});
+            try std.testing.expectEqualStrings(suffix, text[text.len - suffix.len ..]);
         }
-        try std.testing.expectEqual(@as(usize, @intFromBool(both)), gaps);
-        try std.testing.expectEqual(n, seen);
-        state.selected = .new_session;
-        _ = try press(&state, .next);
-        try std.testing.expectEqual(Selection.sessions, state.selected);
-        for (state.order.items) |index| {
-            _ = try press(&state, .next);
-            try std.testing.expectEqualStrings(&state.rows.items[index].reference, &state.selected.session);
+        try std.testing.expect(std.mem.indexOf(u8, text, "✓") == null);
+        try std.testing.expectEqual(@as(usize, width), measured(caps, unicode_glyphs, text));
+        const action = try segmentText(arena.allocator(), ((try controls(arena.allocator(), &state, width, caps))[0]).segments);
+        try std.testing.expect(std.mem.startsWith(u8, action, " + New Session"));
+        try std.testing.expectEqual(@as(usize, text_column), std.mem.indexOf(u8, action, "New Session").?);
+    };
+}
+
+test "redraw deadline domain includes quota bands visible ages and eligible spinners" {
+    const Case = struct { remaining: ?u64, text: []const u8, delay: ?u64 };
+    const cases = [_]Case{
+        .{ .remaining = null, .text = "Quota used up.", .delay = null },
+        .{ .remaining = 0, .text = "", .delay = null },
+        .{ .remaining = 1, .text = "Quota used up. Resets in under a minute.", .delay = 750 },
+        .{ .remaining = 59, .text = "Quota used up. Resets in under a minute.", .delay = 58_750 },
+        .{ .remaining = 60, .text = "Quota used up. Resets in 1m.", .delay = 750 },
+        .{ .remaining = 61, .text = "Quota used up. Resets in 1m.", .delay = 1_750 },
+        .{ .remaining = 119, .text = "Quota used up. Resets in 1m.", .delay = 59_750 },
+        .{ .remaining = 120, .text = "Quota used up. Resets in 2m.", .delay = 750 },
+        .{ .remaining = 180, .text = "Quota used up. Resets in 3m.", .delay = 750 },
+        .{ .remaining = 200, .text = "Quota used up. Resets in 3m.", .delay = 20_750 },
+        .{ .remaining = 3599, .text = "Quota used up. Resets in 59m.", .delay = 59_750 },
+        .{ .remaining = 3600, .text = "Quota used up. Resets in 1h.", .delay = 750 },
+        .{ .remaining = 86399, .text = "Quota used up. Resets in 23h.", .delay = 3_599_750 },
+        .{ .remaining = 86400, .text = "Quota used up. Resets in 1d.", .delay = 750 },
+    };
+    const Screen = enum { unicode, indexed, ascii, colourless, stale, peer };
+    for (cases) |case| for ([_]bool{ false, true }) |header| for ([_]bool{ false, true }) |ages| for ([_]bool{ false, true }) |working| for (std.enums.values(Screen)) |screen| for ([_]u64{ 1000, 1099 }) |awake_ms| for ([_]u16{ 46, 140 }) |width| {
+        var state = try opened(&.{
+            failedRow("quota0", 120, "provider_quota", if (case.remaining) |seconds| test_now_s + seconds else null),
+            session("age000", .{ .idle = ago(50) }, .{ .label = "Age row", .yours = true }),
+            session("work00", .{ .working = ago(10) }, .{ .label = "Working row", .yours = screen != .peer }),
+        });
+        defer state.deinit();
+        state.now_ms += 250;
+        state.list_stale = screen == .stale;
+        const caps: Caps = .{ .unicode = screen != .ascii, .depth = if (screen == .colourless) .none else if (screen == .indexed) .indexed else .direct };
+        const row_age = position(&state, "age000".*).?;
+        const row_work = position(&state, "work00".*).?;
+        const drawn: Drawn = .{
+            .first = if (working) row_work else if (ages) row_age else 0,
+            .end = if (ages) row_age + 1 else if (working) row_work + 1 else 0,
+            .header = header,
+        };
+        try std.testing.expect(position(&state, "quota0".*).? >= drawn.end);
+        var expected: ?u64 = if (header) case.delay else null;
+        if (ages) expected = @min(expected orelse 9_750, 9_750);
+        if (working and (screen == .unicode or screen == .indexed)) {
+            const delay: u64 = if (awake_ms == 1000) 100 else 1;
+            expected = @min(expected orelse delay, delay);
         }
-        _ = try press(&state, .next);
-        try std.testing.expectEqual(Selection.settings, state.selected);
+        try std.testing.expectEqual(if (expected) |delay| @as(?u64, awake_ms + delay) else null, nextRedrawAt(&state, drawn, caps, awake_ms));
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const text = try segmentText(arena.allocator(), try headerSegments(arena.allocator(), &state, width, caps));
+        try std.testing.expectEqualStrings(case.text, std.mem.trim(u8, text, " "));
+        if (header and !ages and !working) if (case.delay) |delay| {
+            state.now_ms += delay;
+            const changed = try segmentText(arena.allocator(), try headerSegments(arena.allocator(), &state, width, caps));
+            try std.testing.expect(!std.mem.eql(u8, text, changed));
+        };
+    };
+}
+
+test "presentation age owner shares minute hour and day text boundaries without seconds" {
+    const cases = [_]struct { age: u64, text: []const u8, delay: ?u64 }{
+        .{ .age = 0, .text = "now", .delay = 59_750 },
+        .{ .age = 59, .text = "now", .delay = 750 },
+        .{ .age = 60, .text = "1m", .delay = 59_750 },
+        .{ .age = 3599, .text = "59m", .delay = 750 },
+        .{ .age = 3600, .text = "1h", .delay = 3_599_750 },
+        .{ .age = 86399, .text = "23h", .delay = 750 },
+        .{ .age = 86400, .text = "1d", .delay = 86_399_750 },
+        .{ .age = 999 * 86400, .text = "999d", .delay = null },
+    };
+    const now_ms = test_now_s * 1000 + 250;
+    for (cases) |case| {
+        const age: Age = .{ .elapsed = test_now_s - case.age };
+        var buffer: [8]u8 = undefined;
+        try std.testing.expectEqualStrings(case.text, age.text(&buffer, now_ms));
+        try std.testing.expectEqual(if (case.delay) |delay| @as(?u64, now_ms + delay) else null, age.nextAt(now_ms));
+    }
+}
+
+test "sidebar update admission binds drawn availability run and frontend readiness" {
+    const versions = [_]?upgrade_status.Version{ null, .{ .schema = 76, .patch = 0 }, .{ .schema = 77, .patch = 0 } };
+    const failed: upgrade_status.Run = .{ .ended = .{ .how = .{ .failed = .download }, .outcome = .unchanged } };
+    for (versions) |drawn| for (versions) |current| for ([_]?upgrade_status.Run{ null, failed, .checking }) |drawn_run| for ([_]?upgrade_status.Run{ null, failed, .checking }) |current_run| for ([_]bool{ false, true }) |admitted| {
+        var state: State = undefined;
+        try state.init(std.testing.allocator, .{ .cwd = "/w", .home = "/h" });
+        defer state.deinit();
+        _ = try step(&state, .{ .available_upgrade = current });
+        state.upgrade.run = current_run;
+        const expected = admitted and std.meta.eql(drawn, current) and std.meta.eql(drawn_run, current_run) and (current_run == null or !current_run.?.going());
+        _ = try step(&state, .{ .clicked = .{ .target = .{ .update = .{ .available = drawn, .run = drawn_run } }, .upgrade_admitted = admitted } });
+        if (expected) try std.testing.expect(state.upgrade.run.? == .checking) else try std.testing.expect(std.meta.eql(current_run, state.upgrade.run));
     };
 }
 
@@ -6306,4 +6554,302 @@ test "launch admission belongs to bare app startup" {
     _ = try step(&state, .{ .launch_start = .{ .explicit_session = false, .restoring = false } });
     _ = try step(&state, .{ .launch_size = .{ .size = .{ .width = 140, .height = 40 }, .wide = true } });
     try std.testing.expectEqual(.waiting, state.launch);
+}
+// Frozen against 03aa26d0. The fixture is in the base's visible order:
+// approval, work (newest first), done (newest first), pending. Input is sent
+// backwards; pinned ranks preserve the fixture order. No oracle reads order,
+// Lines, rules, or yours. This preserves the oracle from the base test.
+// Base semantics intentionally differ: focused highlight follows selected;
+// unfocused highlight AND bold names follow conversing orelse selected, even
+// when that reference is absent. Archive membership precedes empty projection.
+const LinesDomainBase = struct {
+    const Shape = enum { empty, unpinned, pinned, both };
+    const Fixture = struct { listed: Listed, spins: bool };
+    const Expected = struct { fixture: ?usize = null, gap: bool = false };
+    const absent: Reference = "zzzzzz".*;
+
+    fn fixtures() [12]Fixture {
+        return .{
+            .{ .listed = session("f00000", .{ .approval = ago(1) }, .{ .label = "Approval", .yours = true }), .spins = false },
+            .{ .listed = session("f00001", .{ .working = ago(2) }, .{ .label = "My work", .yours = true }), .spins = true },
+            .{ .listed = session("f00002", .{ .bash = .{ .since = test_now_s - 3, .call = 0, .description = bounded(session_work.max_description_bytes, "Build"), .running = 1, .approvals = 0 } }, .{ .label = "My Bash", .yours = true }), .spins = true },
+            .{ .listed = session("f00003", .{ .working = ago(4) }, .{ .label = "Other work" }), .spins = false },
+            .{ .listed = session("f00004", .{ .bash = .{ .since = test_now_s - 5, .call = 0, .description = bounded(session_work.max_description_bytes, "Build"), .running = 1, .approvals = 0 } }, .{ .label = "Other Bash" }), .spins = false },
+            .{ .listed = session("f00005", .{ .retrying = .{ .since = test_now_s - 6, .due_at_ms = (test_now_s + 60) * 1000, .cause = bounded(session_work.max_code_bytes, "provider_temporary_error"), .attempt = 2 } }, .{ .label = "Retry", .yours = true }), .spins = false },
+            .{ .listed = session("f00006", .{ .stopping = ago(7) }, .{ .label = "Stopping", .yours = true }), .spins = false },
+            .{ .listed = session("f00007", .{ .idle = ago(8) }, .{ .label = "Idle", .yours = true }), .spins = false },
+            .{ .listed = session("f00008", .{ .finished = ago(9) }, .{ .label = "Finished", .yours = true }), .spins = false },
+            .{ .listed = session("f00009", .{ .failed = .{ .since = test_now_s - 10, .code = bounded(session_work.max_code_bytes, "provider_output_invalid"), .resets_at = null } }, .{ .label = "Failed", .yours = true }), .spins = false },
+            .{ .listed = session("f00010", .{ .stopped = .{ .since = test_now_s - 11, .cause = .stop } }, .{ .label = "Stopped", .yours = true }), .spins = false },
+            .{ .listed = session("f00011", .{ .pending = ago(12) }, .{ .label = "Pending", .yours = true }), .spins = false },
+        };
+    }
+
+    fn selectionRef(selected: Selection) ?Reference {
+        return switch (selected) {
+            .session => |ref| ref,
+            .new_session, .sessions, .archived, .settings => null,
+        };
+    }
+
+    fn same(a: ?Reference, b: Reference) bool {
+        return if (a) |ref| std.mem.eql(u8, &ref, &b) else false;
+    }
+
+    fn lineOf(expected: []const Expected, fixture: []const Fixture, ref: ?Reference) ?usize {
+        for (expected, 0..) |line, at| {
+            if (line.fixture) |index| if (same(ref, fixture[index].listed.reference)) return at;
+        }
+        return null;
+    }
+
+    fn remaining(expected: []const Expected, start: usize) usize {
+        var count: usize = 0;
+        for (expected[@min(start, expected.len)..]) |line| count += @intFromBool(line.fixture != null);
+        return count;
+    }
+
+    fn checkMove(state: *State, expected: []const Expected, fixture: []const Fixture, selected: Selection) !void {
+        const at = lineOf(expected, fixture, selectionRef(selected)) orelse return;
+        // A next/previous pair round-trips every row, including the last row
+        // through Settings and the rows on either side of the pin gap.
+        move(state, .next);
+        var next: ?usize = null;
+        for (expected[at + 1 ..], at + 1..) |line, index| {
+            if (line.fixture != null) {
+                next = index;
+                break;
+            }
+        }
+        try std.testing.expectEqual(next, Lines.highlighted(state, true));
+        if (next) |index| {
+            try std.testing.expect(same(selectionRef(state.selected), fixture[expected[index].fixture.?].listed.reference));
+        } else try std.testing.expect(state.selected == .settings);
+        move(state, .previous);
+        try std.testing.expect(std.meta.eql(selected, state.selected));
+        try std.testing.expectEqual(@as(?usize, at), Lines.highlighted(state, true));
+    }
+    fn checkBoundaries() !void {
+        // Preserve the base's small-list and every pin-split boundaries without
+        // multiplying the work-state Cartesian domain above.
+        for (0..9) |total| for (0..total + 1) |pins| {
+            var rows: [8]Listed = undefined;
+            for (rows[0..total], 0..) |*row, index| {
+                var ref = "aaaaaa".*;
+                ref[5] += @intCast(index);
+                row.* = session(&ref, .{ .finished = ago(index + 1) }, .{});
+                row.pin_order = if (index < pins) 8 - index else null;
+            }
+            var state = try opened(rows[0..total]);
+            defer state.deinit();
+            var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer arena.deinit();
+            const gap = pins > 0 and pins < total;
+            const count = @max(1, total + @intFromBool(gap));
+            try std.testing.expectEqual(count, Lines.count(&state));
+            var before: usize = 0;
+            for (0..count) |line| {
+                const built = (try Lines.at(arena.allocator(), &state, line, 80, .{}, 0)).?;
+                try std.testing.expectEqual(total - before, Lines.sessionsFrom(&state, line));
+                if (total == 0 or (gap and line == pins)) {
+                    try std.testing.expect(built.target == null);
+                    try std.testing.expect(built.alternate == null);
+                    try std.testing.expectEqual(total == 0, built.heading);
+                } else {
+                    const ref = rows[before].reference;
+                    try std.testing.expectEqual(ref, built.target.?.open);
+                    try std.testing.expectEqual(ref, built.alternate.?.pin.reference);
+                    try std.testing.expectEqual(before >= pins, built.alternate.?.pin.pinned);
+                    state.selected = .{ .session = ref };
+                    try std.testing.expectEqual(@as(?usize, line), Lines.highlighted(&state, true));
+                    try std.testing.expectEqual(@as(?usize, line), Lines.named(&state));
+                    before += 1;
+                }
+            }
+            try std.testing.expectEqual(total, before);
+            try std.testing.expect((try Lines.at(arena.allocator(), &state, count, 80, .{}, 0)) == null);
+            try std.testing.expectEqual(@as(usize, 0), Lines.sessionsFrom(&state, count));
+            state.selected = .sessions;
+            for (rows[0..total]) |row| {
+                move(&state, .next);
+                try std.testing.expectEqual(row.reference, state.selected.session);
+            }
+            move(&state, .next);
+            try std.testing.expect(state.selected == .settings);
+        };
+    }
+};
+
+test "overview lines fixture domain preserves base targets focus bold archive and animation" {
+    var bytes_and_styles: u64 = 0;
+    const D = LinesDomainBase;
+    const caps_domain = [_]Caps{ .{}, .{ .depth = .none }, .{ .unicode = false } };
+    // One owned fixture per outer case; frame allocations are reused per line,
+    // keeping the full Cartesian product bounded independently of its size.
+    for (std.enums.values(D.Shape)) |shape| for (std.enums.values(ArchiveFilter)) |filter| for (std.enums.values(ArchiveState)) |archive| {
+        var fixture = D.fixtures();
+        const total: usize = if (shape == .empty) 0 else fixture.len;
+        const pins: usize = switch (shape) {
+            .empty, .unpinned => 0,
+            .pinned => total,
+            .both => total / 2,
+        };
+        for (fixture[0..total], 0..) |*entry, index| {
+            entry.listed.archive_state = archive;
+            entry.listed.pin_order = if (index < pins) @intCast(100 - index) else null;
+        }
+        if (pins > 1) {
+            // Covers the first == null arm of ownership, independently of
+            // from_person_at. Its pin keeps it visible with every conversation.
+            fixture[1].listed.first = null;
+            fixture[1].listed.from_person_at = null;
+        }
+        // Explicit base archive truth table; do not call Filter.includes.
+        const included = switch (filter) {
+            .active => archive != .archived,
+            .archived => archive == .archived,
+            .all => true,
+        };
+        const visible_count: usize = if (included) total else 0;
+        const gap = visible_count != 0 and pins != 0 and pins < total;
+        var expected_buffer: [13]D.Expected = undefined;
+        var count: usize = 0;
+        for (0..visible_count) |index| {
+            if (gap and index == pins) {
+                expected_buffer[count] = .{ .gap = true };
+                count += 1;
+            }
+            expected_buffer[count] = .{ .fixture = index };
+            count += 1;
+        }
+        if (count == 0) {
+            expected_buffer[0] = .{};
+            count = 1;
+        }
+        const expected = expected_buffer[0..count];
+        var input: [12]Listed = undefined;
+        for (0..total) |index| input[index] = fixture[total - 1 - index].listed;
+        var state = try testState();
+        defer state.deinit();
+        state.archive = filter;
+        state.listing_archive = filter;
+        _ = try step(&state, .{ .tick = test_now_s * 1000 });
+        _ = try respond(&state, .full, testToken(1), input[0..total]);
+        try std.testing.expectEqual(visible_count, state.order.items.len);
+
+        var selections: [17]Selection = undefined;
+        selections[0..5].* = .{ .new_session, .sessions, .archived, .settings, .{ .session = D.absent } };
+        for (fixture, 5..) |entry, index| selections[index] = .{ .session = entry.listed.reference };
+        for (selections) |selected| {
+            const selected_ref = D.selectionRef(selected);
+            const same_ref = selected_ref orelse fixture[0].listed.reference;
+            const other_ref = if (D.same(same_ref, fixture[0].listed.reference)) fixture[1].listed.reference else fixture[0].listed.reference;
+            for ([_]?Reference{ null, same_ref, other_ref, D.absent }) |conversing| for ([_]bool{ false, true }) |focused| for (caps_domain) |caps| for ([_]bool{ false, true }) |stale| {
+                state.selected = selected;
+                state.conversing = conversing;
+                state.list_stale = stale;
+                const bold_ref = conversing orelse selected_ref;
+                const expected_selected = D.lineOf(expected, &fixture, bold_ref);
+                const expected_highlight = D.lineOf(expected, &fixture, if (focused) selected_ref else bold_ref);
+                try std.testing.expectEqual(@max(1, visible_count + @intFromBool(gap)), Lines.count(&state));
+                try std.testing.expectEqual(expected_selected, Lines.named(&state));
+                const highlight = Lines.highlighted(&state, focused);
+                try std.testing.expectEqual(expected_highlight, highlight);
+                var highlights: usize = 0;
+                var row_at: usize = 0;
+                for (expected, 0..) |line, index| {
+                    try std.testing.expectEqual(D.remaining(expected, index), Lines.sessionsFrom(&state, index));
+                    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+                    defer arena.deinit();
+                    const row = (try Lines.at(arena.allocator(), &state, index, 80, caps, 3)) orelse return error.TestExpectedDomainLine;
+                    for (row.segments) |segment| {
+                        bytes_and_styles = std.hash.Wyhash.hash(bytes_and_styles, segment.text);
+                        bytes_and_styles = std.hash.Wyhash.hash(bytes_and_styles, &.{ @backingInt(segment.style.colour), @backingInt(segment.style.background), @intFromBool(segment.style.bold), @intFromBool(segment.style.dim), @intFromBool(segment.style.reverse) });
+                        try std.testing.expectEqual(Background.ground, segment.style.background);
+                    }
+                    if (highlight == index) {
+                        highlights += 1;
+                        try std.testing.expect(line.fixture != null);
+                    }
+                    if (line.fixture) |fixture_index| {
+                        const entry = fixture[fixture_index];
+                        row_at += 1;
+                        const target = row.target orelse return error.TestExpectedDomainTarget;
+                        try std.testing.expect(target == .open);
+                        try std.testing.expectEqual(entry.listed.reference, target.open);
+                        const alternate = row.alternate orelse return error.TestExpectedDomainAlternate;
+                        try std.testing.expect(alternate == .pin);
+                        try std.testing.expectEqual(entry.listed.reference, alternate.pin.reference);
+                        try std.testing.expectEqual(entry.listed.pin_order == null, alternate.pin.pinned);
+                        try std.testing.expectEqual(entry.spins and !stale and caps.unicode and caps.depth != .none, row.spins);
+                        try std.testing.expectEqual(entry.spins and !stale and caps.unicode and caps.depth != .none, Lines.spins(&state, index, caps));
+                        const name = if (entry.listed.first == null) "New Session" else entry.listed.label.?;
+                        try std.testing.expectEqual(D.same(bold_ref, entry.listed.reference), (try styleOf(row.segments, name)).bold);
+                        const text = try segmentText(arena.allocator(), row.segments);
+                        const marker = if (caps.unicode) " · archived" else " . archived";
+                        try std.testing.expectEqual(@as(usize, @intFromBool(archive == .archived and filter != .archived)), std.mem.count(u8, text, marker));
+                        try std.testing.expectEqual(@as(usize, @intFromBool(archive == .archiving)), std.mem.count(u8, text, "[Archiving]"));
+                        try std.testing.expect(!row.heading);
+                    } else {
+                        try std.testing.expect(row.target == null);
+                        try std.testing.expect(row.alternate == null);
+                        try std.testing.expect(!row.spins);
+                        try std.testing.expect(!Lines.spins(&state, index, caps));
+                        try std.testing.expectEqual(!line.gap, row.heading);
+                        const text = try segmentText(arena.allocator(), row.segments);
+                        if (line.gap) {
+                            try std.testing.expectEqualStrings("", std.mem.trim(u8, text, " "));
+                        } else {
+                            try std.testing.expect(std.mem.indexOf(u8, text, switch (filter) {
+                                .active => "No unarchived Sessions",
+                                .archived => "No archived Sessions",
+                                .all => "No Sessions",
+                            }) != null);
+                        }
+                    }
+                }
+                try std.testing.expect(highlights <= 1);
+                try std.testing.expectEqual(@as(usize, @intFromBool(expected_highlight != null)), highlights);
+                try std.testing.expectEqual(visible_count, row_at);
+                for ([_]usize{ count, count + 1, count + 20 }) |outside| {
+                    var outside_arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+                    defer outside_arena.deinit();
+                    try std.testing.expect((try Lines.at(outside_arena.allocator(), &state, outside, 80, caps, 3)) == null);
+                    try std.testing.expectEqual(@as(usize, 0), Lines.sessionsFrom(&state, outside));
+                }
+                if (focused) try D.checkMove(&state, expected, &fixture, selected);
+            };
+        }
+        // Full keyboard traversal independently checks both controls, every
+        // fixture row, the gap skip, and the Settings tail in both directions.
+        state.conversing = null;
+        state.selected = .new_session;
+        move(&state, .previous);
+        try std.testing.expect(state.selected == .new_session);
+        move(&state, .next);
+        try std.testing.expect(std.meta.eql(state.selected, if (filter == .archived) Selection.archived else Selection.sessions));
+        for (fixture[0..visible_count]) |entry| {
+            move(&state, .next);
+            try std.testing.expect(D.same(D.selectionRef(state.selected), entry.listed.reference));
+            try std.testing.expectEqual(D.lineOf(expected, &fixture, entry.listed.reference), Lines.highlighted(&state, true));
+        }
+        move(&state, .next);
+        try std.testing.expect(state.selected == .settings);
+        move(&state, .next);
+        try std.testing.expect(state.selected == .settings);
+        var back = visible_count;
+        while (back != 0) {
+            back -= 1;
+            move(&state, .previous);
+            try std.testing.expect(D.same(D.selectionRef(state.selected), fixture[back].listed.reference));
+            try std.testing.expectEqual(D.lineOf(expected, &fixture, fixture[back].listed.reference), Lines.highlighted(&state, true));
+        }
+        move(&state, .previous);
+        try std.testing.expect(std.meta.eql(state.selected, if (filter == .archived) Selection.archived else Selection.sessions));
+        move(&state, .previous);
+        try std.testing.expect(state.selected == .new_session);
+    };
+    try D.checkBoundaries();
+    // Recorded by running this same fixture domain against base 03aa26d0.
+    try std.testing.expectEqual(@as(u64, 0x50a2b94318a8b3e8), bytes_and_styles);
 }

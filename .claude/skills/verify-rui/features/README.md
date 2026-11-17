@@ -65,5 +65,7 @@ Working, queued, stopped and failed messages are Chat states; [work and stop](./
 - [Model choice and Effort](./model-choice.md): shared model filtering and effort choices in settings and chat.
 - [Archive and Archived](./archive.md): archive state, the Archived tab and restore.
 - [Working, queued and stopped](./work-stop.md): running tools, queued messages, stop, failed replies and Host recovery.
-- [Terminal themes and input focus](./appearance.md): night, day, mist, no-color, input tint and focus.
+- [Terminal themes and input focus](./appearance.md): night, day, mist, no-color, untinted input, chatfeed tint and focus.
 - [Named frames](./frames.md): scenario format, capture selection and evidence limits.
+
+- [Sidebar memory and updates](./sidebar-upgrade.md): native version, update, failure and post-upgrade chat frames.

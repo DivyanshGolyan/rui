@@ -346,10 +346,67 @@ def scan(source, relative="src/cli.zig", derived=None):
     return sorted(found)
 
 
+def running_source_violations(root=ROOT):
+    """Running argv translation has one path, never one per consumer.
+
+    This is a source gate like leaf locality, not a whole-program call graph.
+    Fresh CLI parsing is independent; test blocks and literal text do not count.
+    """
+    callers = {"currentArguments": [], "previousProviders": []}
+    for path in sorted((root / "src").rglob("*.zig")):
+        tokens = production(lex(path.read_text()))
+        for i, token in enumerate(tokens[:-1]):
+            if (token.text in callers and tokens[i + 1].text == "("
+                    and (i == 0 or tokens[i - 1].text != "fn")):
+                callers[token.text].append((path.relative_to(root).as_posix(), token.line))
+    found = []
+    current = callers["currentArguments"]
+    if len(current) != 1 or current[0][0] != "src/serve_grammar.zig":
+        found.append("running sources: currentArguments must have one production caller in src/serve_grammar.zig; "
+                     + repr(current))
+    previous = callers["previousProviders"]
+    if len(previous) != 1:
+        found.append("running sources: previousProviders must have one production caller; " + repr(previous))
+    return found
+
+
+def host_child_violations(root=ROOT):
+    """Only spawn composes Host-child argv, including array and slot forms.
+
+    Syntax readers compare strings; they don't assign a serve slot or construct
+    the adjacent command pair. A source gate (not a whole-program alias proof).
+    """
+    found = []
+    for path in sorted((root / "src").rglob("*.zig")):
+        tokens = production(lex(path.read_text()))
+        names = [t.text for t in tokens]
+        functions = []
+        for i, name in enumerate(names[:-2]):
+            if name != "fn" or names[i + 2] != "(":
+                continue
+            # Function bodies follow parameter/result syntax; no declaration in
+            # this gate's domain has a struct-literal result type.
+            brace = next((j for j in range(i + 3, len(names)) if names[j] in ("{", ";")), None)
+            if brace is not None and names[brace] == "{":
+                functions.append((brace, close_brace(tokens, brace), names[i + 1]))
+        for i, token in enumerate(tokens):
+            if unquote(token.text) != "serve":
+                continue
+            pair = i >= 2 and unquote(names[i - 2]) == "host" and names[i - 1] == ","
+            slot = i >= 2 and names[i - 2:i] == ["]", "="]
+            if not (pair or slot):
+                continue
+            owner = next((name for start, end, name in functions if start < i < end), None)
+            if path.relative_to(root).as_posix() != "src/host_start.zig" or owner != "spawn":
+                found.append(f"{path.relative_to(root).as_posix()}:{token.line}: Host child argv must be built only by host_start.spawn")
+    return found
+
+
 def violations(root=ROOT):
     derived = facts(root)
-    return [hit for path in surfaces(root)
-            for hit in scan(path.read_text(), path.relative_to(root).as_posix(), derived)]
+    return ([hit for path in surfaces(root)
+             for hit in scan(path.read_text(), path.relative_to(root).as_posix(), derived)]
+            + running_source_violations(root) + host_child_violations(root))
 
 
 if __name__ == "__main__":

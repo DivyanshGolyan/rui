@@ -29,6 +29,7 @@ test {
     _ = @import("widget_style.zig");
     _ = @import("InputArea.zig");
     _ = @import("GroupedList.zig");
+    _ = @import("GroupedList_press_tests.zig");
     _ = @import("OverviewLines.zig");
     _ = @import("Palette.zig");
     _ = @import("skill_palette_tests.zig");

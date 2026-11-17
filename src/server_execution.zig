@@ -2152,16 +2152,23 @@ fn advanceRefresh(host: *Host, slot: *ExecutionSlot) bool {
     return true;
 }
 
-fn beginForcedRefresh(host: *Host, slot: *ExecutionSlot, answered: *const AnsweredAttempt, refresh: providers.Credential.Refresh) bool {
+fn retireAnsweredResponse(response: *?provider.SealedResponse) void {
+    if (response.*) |*sealed| sealed.deinit();
+    response.* = null;
+}
+
+fn beginForcedRefresh(host: *Host, slot: *ExecutionSlot, answered: *const AnsweredAttempt, refresh: providers.Credential.Refresh, response: *?provider.SealedResponse) bool {
     const owner = answered.owner;
     const claimed = host.store.claimModelAuthRefresh(owner.binding) catch |err| {
         if (err != error.SupersededByControl) fenceDispatch(host, "credential refresh claim", err);
         slot.provider.transfer.deinit();
+        retireAnsweredResponse(response);
         finishCustodyNow(host, slot);
         return true;
     };
     if (!claimed) return false;
     slot.provider.transfer.deinit();
+    retireAnsweredResponse(response);
     moveSlot(host, slot, .model_refreshing, .{
         .owner = owner,
         .refresh = refresh,
@@ -2334,7 +2341,7 @@ fn completeTransfer(
     traceTransfer(host, &active.transfer, owner.binding);
     var error_response: execution.ErrorResponse = .ordinary;
     var answered_response: ?provider.SealedResponse = null;
-    defer if (answered_response) |*response| response.deinit();
+    defer retireAnsweredResponse(&answered_response);
     var http_status: ?u16 = null;
     switch (completion.outcome) {
         .transport_finished => |evidence| {
@@ -2386,7 +2393,7 @@ fn completeTransfer(
             if (failure.answered) {
                 const answered: AnsweredAttempt = .init(host, owner, &active.transfer);
                 if (execution.rejectsCredential(failure)) switch (active.rejection) {
-                    .refresh_once => |refresh| if (beginForcedRefresh(host, slot, &answered, refresh)) return,
+                    .refresh_once => |refresh| if (beginForcedRefresh(host, slot, &answered, refresh, &answered_response)) return,
                     .settle, .key_rejected => {},
                 };
                 const failure_record: store_module.ModelFailure = if (diagnostic) |detail|
@@ -2418,6 +2425,7 @@ fn completeTransfer(
         },
     }
     active.transfer.deinit();
+    retireAnsweredResponse(&answered_response);
     finishCustodyNow(host, slot);
 }
 
@@ -3264,6 +3272,173 @@ test "HTTP error capture retires before execution custody" {
         try std.testing.expectEqual(@as(u64, 17), used.load(.acquire));
         try std.testing.expect(slot == .free);
         try std.testing.expect(host.custody.reserve() != null);
+    }
+}
+
+test "forced refresh captures retire before custody publication across Store claims" {
+    const Case = enum { superseded, unreadable_store, declined, accepted };
+    const Fixture = struct {
+        tmp: std.testing.TmpDir,
+        storage: store_module.Store,
+        root: [platform.max_scratch_path_bytes]u8,
+        records: [1]execution.CustodyRecord,
+        host: Host,
+        slot: ExecutionSlot,
+        reactor: provider.Reactor,
+        workspace: Workspace,
+    };
+    const Boundary = struct {
+        var slot: *ExecutionSlot = undefined;
+        var custody: *execution.CustodyPool = undefined;
+        var token: execution.CustodyToken = undefined;
+        var binding: store_module.AttemptBinding = undefined;
+        var used: *std.atomic.Value(u64) = undefined;
+        var response_fd: std.Io.File.Handle = -1;
+        var response_charge: u64 = 0;
+        var closes: usize = 0;
+        var observing: bool = false;
+        var retirement_observed: bool = false;
+
+        fn close(userdata: ?*anyopaque, files: []const std.Io.File) void {
+            if (observing) {
+                for (files) |file| {
+                    if (file.handle != response_fd) continue;
+                    custody.checkAttached(token, .{ .model = binding }) catch unreachable;
+                    std.debug.assert(used.load(.acquire) >= 17 + response_charge);
+                    closes += 1;
+                }
+            }
+            std.testing.io.vtable.fileClose(userdata, files);
+        }
+
+        fn now(userdata: ?*anyopaque, clock: std.Io.Clock) std.Io.Timestamp {
+            if (observing and slot.* == .free) {
+                std.debug.assert(closes == 1);
+                std.debug.assert(std.c.fcntl(response_fd, std.c.F.GETFD) < 0);
+                std.debug.assert(used.load(.acquire) == 17);
+                custody.checkFree(token) catch unreachable;
+                retirement_observed = true;
+            }
+            return std.testing.io.vtable.now(userdata, clock);
+        }
+    };
+    var vtable = std.testing.io.vtable.*;
+    vtable.fileClose = Boundary.close;
+    vtable.now = Boundary.now;
+    const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+    for ([_]Case{ .superseded, .unreadable_store, .declined, .accepted }) |kind| {
+        const mapped = try pages.Mapped(Fixture).map();
+        defer mapped.unmap();
+        const fixture = mapped.value;
+        fixture.tmp = std.testing.tmpDir(.{});
+        defer fixture.tmp.cleanup();
+        try store_module.testingStoreWith(&.{ .engine = .sqlite }, &fixture.storage, &fixture.tmp, std.testing.io, .{});
+        defer fixture.storage.close() catch unreachable;
+        const root = fixture.root[0..try fixture.tmp.dir.realPath(std.testing.io, &fixture.root)];
+        const session = try store_module.testing.configureTestSession(&fixture.storage, "refresh-custody-config");
+        try store_module.testingSubmitMessage(&fixture.storage, &fixture.tmp, "refresh-custody-message", "refresh-custody-message", session.slice(), "hello");
+        var admitted = (try fixture.storage.admitNextModelAttempt(.{})).?;
+        fixture.records = @splat(.{});
+        fixture.host = .{
+            .io = io,
+            .allocator = std.testing.allocator,
+            .lease = undefined,
+            .store = &fixture.storage,
+            .hooks = .{ .phase_trace = true },
+            .custody = execution.CustodyPool.initialize(&fixture.records),
+        };
+        fixture.host.scratch_used.store(17, .release);
+        const budget = ScratchBudget{ .used = &fixture.host.scratch_used, .limit = 4 * 1024 * 1024 };
+        const token = fixture.host.custody.reserve().?;
+        const binding = try fixture.host.custody.attach(token, &admitted.permit);
+        fixture.slot = .{ .provider = .{
+            .owner = .{ .token = token, .binding = binding, .purpose = .assistant_response },
+            .rejection = .{ .refresh_once = .{
+                .source = .{ .path = root, .wire = .codex_device },
+                .generation = 7,
+            } },
+        } };
+        try fixture.reactor.init(std.testing.allocator, io, .{
+            .endpoints = .init(.{ .codex = "http://127.0.0.1:1/responses", .openai = null, .chatgpt = null }),
+            .capacity = 1,
+            .inactivity_seconds = 1,
+            .scratch_path = root,
+            .budget = budget,
+        });
+        defer fixture.reactor.deinit();
+        const request_file = try fixture.tmp.dir.createFile(io, "refresh-custody-request", .{ .read = true });
+        try request_file.writeStreamingAll(io, "{}");
+        try std.testing.expect(budget.charge(2));
+        var retained: ?named_scratch.Owner = null;
+        try fixture.slot.provider.transfer.start(&fixture.reactor, &.{
+            .file = request_file,
+            .length = 2,
+            .charged = 2,
+            .structured_output = false,
+            .provider = .codex,
+            .codec = .@"openai-responses/1",
+            .headers = .{ .count = 0 },
+        }, binding, .{ .response_workspace_bytes = @sizeOf(PendingFailure) }, &retained);
+        defer if (fixture.slot == .provider) {
+            fixture.slot.provider.transfer.deinit();
+            finishCustodyNow(&fixture.host, &fixture.slot);
+        };
+        const body = "{\"error\":{\"code\":\"invalid_api_key\"}}";
+        const response = &fixture.slot.provider.transfer.response;
+        try std.testing.expectEqual(@as(usize, @sizeOf(PendingFailure)), response.workspace.len);
+        try std.testing.expectEqual(h2.Verdict.accept, fixture.reactor.observe(&fixture.slot.provider.transfer.stream, .{ .body = body.len }));
+        try response.file.writePositionalAll(io, body, 0);
+        try response.seal(io, false, body.len);
+        try std.testing.expectEqual(@as(u64, @max(@sizeOf(PendingFailure), body.len)), response.charged);
+        try std.testing.expectEqual(@as(u64, 19) + response.charged, fixture.host.scratch_used.load(.acquire));
+        switch (kind) {
+            .superseded => {
+                var stop: protocol.SessionStopCommand = .{};
+                try stop.key.set("refresh-custody-stop");
+                try stop.session.set(session.slice());
+                try std.testing.expect(fixture.storage.stopSession(&stop, .{}) == .accepted);
+            },
+            .unreadable_store => try store_module.testingFailReadsOf(&fixture.storage, "model_operation"),
+            .declined => try std.testing.expect(try fixture.storage.claimModelAuthRefresh(binding)),
+            .accepted => {},
+        }
+        Boundary.slot = &fixture.slot;
+        Boundary.custody = &fixture.host.custody;
+        Boundary.token = token;
+        Boundary.binding = binding;
+        Boundary.used = &fixture.host.scratch_used;
+        Boundary.response_fd = response.file.handle;
+        Boundary.response_charge = response.charged;
+        Boundary.closes = 0;
+        Boundary.retirement_observed = false;
+        Boundary.observing = true;
+        defer Boundary.observing = false;
+        completeTransfer(&fixture.host, &fixture.workspace, &fixture.slot, .{
+            .transfer = &fixture.slot.provider.transfer,
+            .outcome = .{ .transport_finished = .{ .disposition = .permanent_http, .http_status = 401 } },
+            .queued_after = 0,
+        });
+        Boundary.observing = false;
+        try std.testing.expectEqual(@as(usize, 1), Boundary.closes);
+        try std.testing.expect(std.c.fcntl(Boundary.response_fd, std.c.F.GETFD) < 0);
+        try std.testing.expectEqual(@as(u64, 17), fixture.host.scratch_used.load(.acquire));
+        try std.testing.expectEqual(kind != .accepted, Boundary.retirement_observed);
+        try std.testing.expectEqual(kind != .unreadable_store, fixture.host.launchAllowed());
+        if (kind == .accepted) {
+            try std.testing.expect(fixture.slot == .model_refreshing);
+            try fixture.host.custody.checkAttached(token, .{ .model = binding });
+            try std.testing.expectEqual(@as(usize, 1), fixture.host.custody.occupied());
+            try std.testing.expectEqual(@as(u64, 1), try store_module.testing.queryU64(&fixture.storage, "SELECT count(*) FROM model_operation WHERE operation_id=?1 AND auth_refresh_claimed=1 AND last_failure_code IS NULL AND resolution_code IS NULL", .{binding.operation_id}));
+            finishCustodyNow(&fixture.host, &fixture.slot);
+        } else {
+            try std.testing.expect(fixture.slot == .free);
+            if (kind == .declined) try std.testing.expectEqual(@as(u64, 1), try store_module.testing.queryU64(&fixture.storage, "SELECT count(*) FROM model_operation WHERE operation_id=?1 AND auth_refresh_claimed=1 AND last_failure_code IS NULL AND resolution_code='provider_http_401'", .{binding.operation_id}));
+            if (kind == .superseded) try std.testing.expectEqual(@as(u64, 1), try store_module.testing.queryU64(&fixture.storage, "SELECT count(*) FROM model_operation WHERE operation_id=?1 AND auth_refresh_claimed=0 AND last_failure_code IS NULL AND interrupted_by_command_key='refresh-custody-stop'", .{binding.operation_id}));
+        }
+        try fixture.host.custody.checkFree(token);
+        try std.testing.expectEqual(@as(usize, 0), fixture.host.custody.occupied());
+        const reused = fixture.host.custody.reserve().?;
+        try fixture.host.custody.releaseUnused(reused);
     }
 }
 
@@ -5196,83 +5371,108 @@ test "pending compound overflow sent through immediate failure fences without a 
     try std.testing.expect(!fixture.storage.isFenced());
 }
 
-test "pending compound overflow from SSE retains original failure through split rejection settlement" {
-    var phase: []const u8 = "prepare real transfer";
-    errdefer std.debug.print("pending SSE overflow phase {s}\n", .{phase});
-    const mapped = try pages.Mapped(PendingOverflowFixture).map();
-    defer mapped.unmap();
-    const fixture = mapped.value;
-    fixture.* = .{ .tmp = undefined, .storage = undefined, .root = undefined, .root_length = undefined, .lease = undefined, .host = undefined, .work = undefined, .retention = undefined };
-    try fixture.init();
-    defer fixture.deinit();
-    const owner = try fixture.admit(0, "pending-sse", true);
-    var reactor: provider.Reactor = undefined;
-    try reactor.initForTesting(std.testing.allocator, std.testing.io, .{
-        .endpoints = .init(.{ .codex = "http://127.0.0.1:1/responses", .openai = null, .chatgpt = null }),
-        .capacity = 1,
-        .inactivity_seconds = 1,
-        .scratch_path = fixture.path(),
-        .budget = fixture.budget(),
-        .observation = .{ .names = .{ .request_id = "x-request-id" } },
-    });
-    defer reactor.deinit();
-    // Cleanup must precede the reactor even when an assertion leaves a prepared
-    // transfer in its slot. No reactor launch is needed to exercise completion.
-    defer shutdownExecution(&fixture.host, &fixture.slots, fixture.work.value);
-    const body = "data: {\"type\":\"error\",\"code\":\"context_length_exceeded\",\"message\":\"original SSE report\"}\n\n";
-    const report = "context_length_exceeded: original SSE report";
-    const correlation = "original-sse-request";
-    var retained: ?named_scratch.Owner = null;
-    const request_file = try fixture.tmp.dir.createFile(std.testing.io, "sse-overflow-request", .{ .read = true });
-    const request: provider.PreparedRequest = .{ .file = request_file, .length = 0, .charged = 0, .structured_output = false, .provider = .codex, .codec = .@"openai-responses/2", .headers = .{ .count = 0 } };
-    var transfer: provider.Transfer = undefined;
-    try transfer.start(&reactor, &request, owner.binding, .{ .response_workspace_bytes = @sizeOf(PendingFailure) }, &retained);
-    const slot = &fixture.slots[0];
-    moveSlot(&fixture.host, slot, .provider, .{ .owner = owner, .transfer = transfer });
-    try std.testing.expectEqual(h2.Verdict.accept, reactor.observe(&slot.provider.transfer.stream, .{ .head = .{
-        .kind = .final,
-        .status = 200,
-        .fields = &.{.{ .name = "x-request-id", .value = correlation }},
-    } }));
-    try std.testing.expectEqual(h2.Verdict.accept, reactor.observe(&slot.provider.transfer.stream, .{ .body = body.len }));
-    try slot.provider.transfer.response.file.writePositionalAll(std.testing.io, body, 0);
-    try slot.provider.transfer.response.seal(std.testing.io, false, body.len);
-    phase = "decode SSE and hand rejection to pending owner";
-    completeTransfer(&fixture.host, fixture.work.value, slot, .{
-        .transfer = &slot.provider.transfer,
-        .outcome = .{ .transport_finished = .{ .disposition = .success, .http_status = 200 } },
-        .queued_after = 0,
-    });
-    try std.testing.expect(slot.* == .model_failure_preparing);
-    const pending = slot.model_failure_preparing.response.state(PendingFailure);
-    try std.testing.expectEqual(error.ContextOverflow, fixture.work.value.interpretation.rejected.reason);
-    try std.testing.expectEqualStrings("provider_context_overflow", pending.code.slice());
-    try std.testing.expectEqualStrings(correlation, pending.request_id.slice());
-    try std.testing.expectEqualStrings(report, pending.report.slice());
-    var expected_buffer: [512]u8 = undefined;
-    var diagnostic: protocol.Bounded(512) = .{};
-    try diagnostic.set(fixture.work.value.interpretation.rejected.format(&expected_buffer));
-    try std.testing.expectEqualStrings(diagnostic.slice(), pending.diagnostic.slice());
-    // The decoding frame has retired both metadata and event-data owners. Only
-    // the response workspace backing the bounded floor walk remains charged.
-    try std.testing.expectEqual(@as(u64, @sizeOf(PendingFailure)), fixture.host.scratch_used.load(.acquire));
-    try std.testing.expectEqual(@as(usize, 1), fixture.host.custody.occupied());
-    fixture.work.value.provider_failure.clear();
-    try fixture.work.value.provider_failure.report.set("later unrelated provider report");
-    fixture.work.value.interpretation.rejected.code = "later_unrelated_rejection";
-    phase = "finish bounded floor walk with retained original failure";
-    var steps: usize = 0;
-    while (slot.* == .model_failure_preparing) : (steps += 1) {
-        try std.testing.expect(steps < 512);
-        const saved = slot.model_failure_preparing.response.state(PendingFailure);
-        try std.testing.expectEqualStrings("provider_context_overflow", saved.code.slice());
-        try std.testing.expectEqualStrings(correlation, saved.request_id.slice());
-        try std.testing.expectEqualStrings(report, saved.report.slice());
-        try std.testing.expectEqualStrings(diagnostic.slice(), saved.diagnostic.slice());
-        try std.testing.expect(advancePendingFailure(&fixture.host, &fixture.slots, fixture.work.value));
+test "pending compound overflow from HTTP and SSE retains original failure through response ownership transfer" {
+    const Transport = enum { http, sse };
+    for ([_]Transport{ .http, .sse }) |transport| {
+        var phase: []const u8 = "prepare real transfer";
+        errdefer std.debug.print("pending {s} overflow phase {s}\n", .{ @tagName(transport), phase });
+        const mapped = try pages.Mapped(PendingOverflowFixture).map();
+        defer mapped.unmap();
+        const fixture = mapped.value;
+        fixture.* = .{ .tmp = undefined, .storage = undefined, .root = undefined, .root_length = undefined, .lease = undefined, .host = undefined, .work = undefined, .retention = undefined };
+        try fixture.init();
+        defer fixture.deinit();
+        const owner = try fixture.admit(0, if (transport == .http) "pending-http" else "pending-sse", true);
+        var reactor: provider.Reactor = undefined;
+        try reactor.initForTesting(std.testing.allocator, std.testing.io, .{
+            .endpoints = .init(.{ .codex = "http://127.0.0.1:1/responses", .openai = null, .chatgpt = null }),
+            .capacity = 1,
+            .inactivity_seconds = 1,
+            .scratch_path = fixture.path(),
+            .budget = fixture.budget(),
+            .observation = .{ .names = .{ .request_id = "x-request-id" } },
+        });
+        defer reactor.deinit();
+        // Cleanup must precede the reactor even when an assertion leaves a
+        // prepared transfer in its slot. No reactor launch is needed.
+        defer shutdownExecution(&fixture.host, &fixture.slots, fixture.work.value);
+        const body: []const u8 = if (transport == .http)
+            "{\"error\":{\"code\":\"context_length_exceeded\",\"message\":\"original HTTP report\"}}"
+        else
+            "data: {\"type\":\"error\",\"code\":\"context_length_exceeded\",\"message\":\"original SSE report\"}\n\n";
+        const report: []const u8 = if (transport == .http) "context_length_exceeded: original HTTP report" else "context_length_exceeded: original SSE report";
+        const correlation: []const u8 = if (transport == .http) "original-http-request" else "original-sse-request";
+        const status: u16 = if (transport == .http) 400 else 200;
+        var retained: ?named_scratch.Owner = null;
+        const request_file = try fixture.tmp.dir.createFile(std.testing.io, "pending-overflow-request", .{ .read = true });
+        const request: provider.PreparedRequest = .{ .file = request_file, .length = 0, .charged = 0, .structured_output = false, .provider = .codex, .codec = .@"openai-responses/2", .headers = .{ .count = 0 } };
+        var transfer: provider.Transfer = undefined;
+        try transfer.start(&reactor, &request, owner.binding, .{ .response_workspace_bytes = @sizeOf(PendingFailure) }, &retained);
+        const slot = &fixture.slots[0];
+        moveSlot(&fixture.host, slot, .provider, .{ .owner = owner, .transfer = transfer });
+        try std.testing.expectEqual(h2.Verdict.accept, reactor.observe(&slot.provider.transfer.stream, .{ .head = .{
+            .kind = .final,
+            .status = status,
+            .fields = &.{.{ .name = "x-request-id", .value = correlation }},
+        } }));
+        try std.testing.expectEqual(h2.Verdict.accept, reactor.observe(&slot.provider.transfer.stream, .{ .body = body.len }));
+        try slot.provider.transfer.response.file.writePositionalAll(std.testing.io, body, 0);
+        try slot.provider.transfer.response.seal(std.testing.io, false, body.len);
+        const response_fd = slot.provider.transfer.response.file.handle;
+        try std.testing.expect(std.c.fcntl(response_fd, std.c.F.GETFD) >= 0);
+        phase = "decode provider failure and hand response to pending owner";
+        completeTransfer(&fixture.host, fixture.work.value, slot, .{
+            .transfer = &slot.provider.transfer,
+            .outcome = .{ .transport_finished = .{ .disposition = if (transport == .http) .permanent_http else .success, .http_status = status } },
+            .queued_after = 0,
+        });
+        try std.testing.expect(slot.* == .model_failure_preparing);
+        try std.testing.expectEqual(response_fd, slot.model_failure_preparing.response.file.handle);
+        try std.testing.expect(std.c.fcntl(response_fd, std.c.F.GETFD) >= 0);
+        try fixture.host.custody.checkAttached(owner.token, .{ .model = owner.binding });
+        try checkSlotCustodyAgreement(&fixture.slots, &fixture.host.custody, null);
+        const pending = slot.model_failure_preparing.response.state(PendingFailure);
+        const expected_kind: std.meta.Tag(store_module.ModelFailure) = if (transport == .http) .correlated else .rejected;
+        try std.testing.expectEqual(expected_kind, pending.kind);
+        try std.testing.expectEqualStrings("provider_context_overflow", pending.code.slice());
+        try std.testing.expectEqualStrings(correlation, pending.request_id.slice());
+        try std.testing.expectEqualStrings(report, pending.report.slice());
+        var diagnostic: protocol.Bounded(512) = .{};
+        if (transport == .sse) {
+            try std.testing.expectEqual(error.ContextOverflow, fixture.work.value.interpretation.rejected.reason);
+            var expected_buffer: [512]u8 = undefined;
+            try diagnostic.set(fixture.work.value.interpretation.rejected.format(&expected_buffer));
+        }
+        try std.testing.expectEqualStrings(diagnostic.slice(), pending.diagnostic.slice());
+        // Only the response workspace backing the bounded floor walk remains
+        // charged, including after the HTTP capture's local owner returns.
+        try std.testing.expectEqual(@as(u64, @sizeOf(PendingFailure)), fixture.host.scratch_used.load(.acquire));
+        try std.testing.expectEqual(@as(usize, 1), fixture.host.custody.occupied());
+        fixture.work.value.provider_failure.clear();
+        try fixture.work.value.provider_failure.report.set("later unrelated provider report");
+        if (transport == .sse) fixture.work.value.interpretation.rejected.code = "later_unrelated_rejection";
+        phase = "finish bounded floor walk with retained original failure";
+        var steps: usize = 0;
+        while (slot.* == .model_failure_preparing) : (steps += 1) {
+            try std.testing.expect(steps < 512);
+            try std.testing.expect(std.c.fcntl(response_fd, std.c.F.GETFD) >= 0);
+            try fixture.host.custody.checkAttached(owner.token, .{ .model = owner.binding });
+            const saved = slot.model_failure_preparing.response.state(PendingFailure);
+            try std.testing.expectEqual(expected_kind, saved.kind);
+            try std.testing.expectEqualStrings("provider_context_overflow", saved.code.slice());
+            try std.testing.expectEqualStrings(correlation, saved.request_id.slice());
+            try std.testing.expectEqualStrings(report, saved.report.slice());
+            try std.testing.expectEqualStrings(diagnostic.slice(), saved.diagnostic.slice());
+            try std.testing.expect(advancePendingFailure(&fixture.host, &fixture.slots, fixture.work.value));
+        }
+        try std.testing.expect(steps > 1);
+        try std.testing.expect(std.c.fcntl(response_fd, std.c.F.GETFD) < 0);
+        if (transport == .http) {
+            try std.testing.expectEqual(@as(u64, 1), try store_module.testing.queryU64(&fixture.storage, "SELECT count(*) FROM model_operation WHERE operation_id=?1 AND resolution_code='context_overflow' AND last_failure_code='provider_context_overflow' AND request_id=?2 AND resolution_content_id IS NULL", .{ owner.binding.operation_id, correlation }));
+        } else {
+            try std.testing.expectEqual(@as(u64, 1), try store_module.testing.queryU64(&fixture.storage, "SELECT count(*) FROM model_operation o JOIN content c ON c.content_id=o.resolution_content_id WHERE o.operation_id=?1 AND resolution_code='context_overflow' AND last_failure_code='provider_context_overflow' AND request_id=?2 AND c.digest=?3", .{ owner.binding.operation_id, correlation, store_module.testing.Blob{ .bytes = &protocol.contentDigest(diagnostic.slice()) } }));
+        }
+        try fixture.expectReleased();
+        try std.testing.expect(fixture.host.launchAllowed());
     }
-    try std.testing.expect(steps > 1);
-    try std.testing.expectEqual(@as(u64, 1), try store_module.testing.queryU64(&fixture.storage, "SELECT count(*) FROM model_operation o JOIN content c ON c.content_id=o.resolution_content_id WHERE o.operation_id=?1 AND resolution_code='context_overflow' AND last_failure_code='provider_context_overflow' AND request_id=?2 AND c.digest=?3", .{ owner.binding.operation_id, correlation, store_module.testing.Blob{ .bytes = &protocol.contentDigest(diagnostic.slice()) } }));
-    try fixture.expectReleased();
-    try std.testing.expect(fixture.host.launchAllowed());
 }

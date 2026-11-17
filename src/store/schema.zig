@@ -16,7 +16,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631;
-pub const schema_version: u32 = 79;
+pub const schema_version: u32 = 80;
 
 pub const IdentityMismatch = struct {
     saved_selector: Bounded(store_path.max_bytes) = .{},
@@ -58,6 +58,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 77, .digest = 0x180d1a249b979d56 },
     .{ .schema_version = 78, .digest = 0xa3f9fee49afacee2 },
     .{ .schema_version = 79, .digest = 0x73f89feb47e61ded },
+    .{ .schema_version = 80, .digest = 0xa19f085a8611c762 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -725,6 +726,17 @@ pub const migrations = [_]Migration{
             "UPDATE core_command SET secondary_content_id=primary_content_id,primary_content_id=NULL WHERE kind=2 AND accepted=0",
         },
     },
+    .{
+        .from = 79,
+        .sqlite = &.{
+            "ALTER TABLE session ADD COLUMN creator_ref TEXT REFERENCES session(session_ref) CHECK(creator_ref IS NULL OR creator_ref<>session_ref)",
+            "UPDATE session SET creator_ref=parent_ref",
+        },
+        .mysql = &.{
+            "ALTER TABLE session ADD COLUMN creator_ref VARCHAR(6) AFTER obligation_since, ADD FOREIGN KEY(creator_ref) REFERENCES session(session_ref), ADD CHECK(creator_ref IS NULL OR creator_ref<>session_ref)",
+            "UPDATE session SET creator_ref=parent_ref",
+        },
+    },
 };
 
 comptime {
@@ -1112,6 +1124,7 @@ pub const tables = [_]Table{
             .{ .name = "workspace_key", .type = .int },
             .{ .name = "parent_ref", .type = .{ .text = null }, .nullable = true },
             .{ .name = "obligation_since", .type = .int, .nullable = true, .sqlite_added = true, .check = "obligation_since IS NULL OR obligation_since>0" },
+            .{ .name = "creator_ref", .type = .{ .text = null }, .nullable = true, .sqlite_added = true, .check = "creator_ref IS NULL OR creator_ref<>session_ref" },
         },
         .primary_key = &.{"session_ref"},
         .uniques = &.{&.{"created_seq"}},
@@ -1122,6 +1135,7 @@ pub const tables = [_]Table{
             references("loaded_tool_set_id", "tool_set", &.{"tool_set_id"}),
             references("output_schema_content_id", "content", content_reference),
             references("parent_ref", "session", session_reference),
+            references("creator_ref", "session", session_reference),
         },
     },
     .{
@@ -3246,4 +3260,89 @@ test "model call timing format 68 migration preserves format 67 resolutions with
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT operation_id,attempt_ordinal,resolution_code,resolved_at FROM model_operation EXCEPT SELECT * FROM old_model_resolutions)"));
     try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, "UPDATE model_operation SET latency_ms=-1"));
     try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, "UPDATE model_operation SET first_event_ms=-1"));
+}
+
+test "schema 80 creator migration retains all prior session facts and backfills only known parents" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [store_path.max_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var path_buffer: [store_path.max_bytes + 32]u8 = undefined;
+    const path = try std.fmt.bufPrintSentinel(&path_buffer, "{s}/creator.sqlite3", .{root}, 0);
+    var raw: ?*c.sqlite3 = null;
+    defer _ = c.sqlite3_close(raw);
+    try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_open(path, &raw));
+    const database = raw.?;
+    try sqlite.exec(database, @embedFile("migration_baseline.sqlite.sql"));
+    try sqlite.exec(database, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
+    try sqlite.exec(database, @embedFile("migration_baseline_rows.sql"));
+    for (migrations) |step| {
+        if (step.from >= 79) break;
+        for (step.sqlite) |statement| try sqlite.exec(database, statement);
+    }
+    try sqlite.exec(database, "UPDATE session SET parent_ref='d8mv7p' WHERE session_ref='brhkcj'");
+    try sqlite.exec(database, "UPDATE session SET parent_ref='brhkcj' WHERE session_ref='rhvzwc'");
+    const old_columns = comptime blk: {
+        var names: []const u8 = "";
+        for (tables) |table| {
+            if (!std.mem.eql(u8, table.name, "session")) continue;
+            for (table.columns) |column| {
+                if (std.mem.eql(u8, column.name, "creator_ref")) continue;
+                if (names.len != 0) names = names ++ ",";
+                names = names ++ column.name;
+            }
+        }
+        break :blk names;
+    };
+    try sqlite.exec(database, "CREATE TEMP TABLE original_sessions AS SELECT " ++ old_columns ++ " FROM session");
+    try sqlite.exec(database, "PRAGMA foreign_keys=ON;PRAGMA legacy_alter_table=OFF;PRAGMA user_version=79");
+    try sqlite.exec(database, identity_sql);
+    const meta = try sqlite.prepare(database, "INSERT INTO store_meta(meta_key,meta_value) VALUES('store_selector',?1),('format','79')");
+    defer _ = c.sqlite3_finalize(meta);
+    try sqlite.bindText(meta, 1, root);
+    try sqlite.expectDone(meta);
+    for (0..2) |_| {
+        try openExisting(std.testing.io, database, root, null, null);
+        try std.testing.expectEqual(schema_version, try sqlite.pragmaInt(database, "PRAGMA user_version"));
+        try std.testing.expectEqual(@as(u32, 3), try sqlite.pragmaInt(database, "SELECT count(*) FROM session"));
+        try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM original_sessions EXCEPT SELECT " ++ old_columns ++ " FROM session)"));
+        try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT " ++ old_columns ++ " FROM session EXCEPT SELECT * FROM original_sessions)"));
+        try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT count(*) FROM session WHERE session_ref='d8mv7p' AND creator_ref IS NULL"));
+        try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT count(*) FROM session WHERE session_ref='brhkcj' AND creator_ref='d8mv7p'"));
+        try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT count(*) FROM session WHERE session_ref='rhvzwc' AND creator_ref='brhkcj'"));
+        try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM pragma_foreign_key_check"));
+        try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, "UPDATE session SET creator_ref='zzzzzz' WHERE session_ref='d8mv7p'"));
+        try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, "UPDATE session SET creator_ref=session_ref WHERE session_ref='d8mv7p'"));
+    }
+}
+
+test "schema 80 creator migration matches canonical SQLite and MySQL column constraints" {
+    const step = migrations[79 - migration_baseline];
+    try std.testing.expectEqual(@as(u32, 79), step.from);
+    try std.testing.expectEqual(@as(usize, 2), step.sqlite.len);
+    try std.testing.expectEqual(@as(usize, 2), step.mysql.len);
+    const session = comptime blk: {
+        for (tables) |table| if (std.mem.eql(u8, table.name, "session")) break :blk table;
+        unreachable;
+    };
+    const creator = comptime blk: {
+        for (session.columns) |column| if (std.mem.eql(u8, column.name, "creator_ref")) break :blk column;
+        unreachable;
+    };
+    try std.testing.expect(creator.nullable and creator.sqlite_added);
+    try std.testing.expectEqualStrings("ALTER TABLE session ADD COLUMN" ++ comptime columnDefinition(session, creator), step.sqlite[0]);
+    try std.testing.expectEqualStrings("UPDATE session SET creator_ref=parent_ref", step.sqlite[1]);
+    try std.testing.expectEqualStrings(step.sqlite[1], step.mysql[1]);
+    const canonical_session_mysql = comptime blk: {
+        for (objects(.mysql)) |object| if (std.mem.eql(u8, object.name, "session")) break :blk object.sql;
+        unreachable;
+    };
+    const obligation_position = std.mem.indexOf(u8, canonical_session_mysql, "obligation_since BIGINT").?;
+    const creator_position = std.mem.indexOf(u8, canonical_session_mysql, "creator_ref VARCHAR(6)").?;
+    const generated_position = std.mem.indexOf(u8, canonical_session_mysql, "session_obligation_parent_lead").?;
+    try std.testing.expect(obligation_position < creator_position and creator_position < generated_position);
+    try std.testing.expect(std.mem.indexOf(u8, step.mysql[0], "ADD COLUMN creator_ref VARCHAR(6) AFTER obligation_since") != null);
+    try std.testing.expect(std.mem.indexOf(u8, canonical_session_mysql, "CHECK(" ++ creator.check.? ++ ")") != null);
+    try std.testing.expect(std.mem.indexOf(u8, step.mysql[0], "CHECK(" ++ creator.check.? ++ ")") != null);
+    try std.testing.expect(std.mem.indexOf(u8, step.mysql[0], "FOREIGN KEY(creator_ref) REFERENCES session(session_ref)") != null);
 }

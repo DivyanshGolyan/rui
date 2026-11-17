@@ -536,7 +536,6 @@ const context_compound_bytes = rsql.Read(.{
     .Row = struct { uncovered_bytes: u64 },
     .cardinality = .one,
 });
-
 pub const context_compound_bytes_sql = context_compound_bytes.sql;
 
 const pressure_pending_bound = rsql.Read(.{

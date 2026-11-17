@@ -86,7 +86,7 @@ def json_strings(value):
 
 def permission_row(frame, mode):
     value = "run without asking" if mode == "bypass" else "ask first"
-    return f"Permissions {value} Tools" in " ".join(frame.split())
+    return f"Permissions {value} Allowed tools" in " ".join(frame.split())
 
 
 def home_path(home, path):
@@ -1087,7 +1087,7 @@ def silent_read_edit_cases():
 
 
 def wait_for_listed_call(tty):
-    running = re.compile(r"⠹ Held call · (?:[0-9]+s|[0-9]+m [0-9]+s|[0-9]+h [0-9]+m)")
+    running = re.compile(r"[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Held call *")
     tty.wait(predicate=lambda: any(running.fullmatch(row) for row in conversation_text(tty.capture.completed).splitlines()), timeout=30)
 
 
@@ -1095,18 +1095,17 @@ def listed_call_readiness_cases():
     from terminal_screen import ScreenCapture
 
     class OfferedFrames:
-        def __init__(self, elapsed):
+        def __init__(self, spinner):
             self.capture = ScreenCapture(80, 24)
             self.frames = (
-                "⠹ Held call\n◌ Queued · 0s",
-                "✓ Held call · 42s",
-                "⠹ Other call · 42s",
-                "prefix ⠹ Held call · 42s",
-                "⠹ Held call · 42s extra",
-                "⠹ Held call · " + elapsed,
+                "   Held call                  now",
+                " ◌ Held call                  now",
+                " ⠹ Other call",
+                "prefix ⠹ Held call",
+                " ⠹ Held call                  now",
+                " " + spinner + " Held call",
             )
             self.offered = None
-            self.frame("⠹ Held call · 99s")
             self.frame(self.frames[0])
 
         def frame(self, text):
@@ -1120,8 +1119,8 @@ def listed_call_readiness_cases():
                     return self.capture.completed
             raise AssertionError(("running listed call was not accepted", self.capture.completed))
 
-    for elapsed in ("0s", "2m 3s", "1h 2m"):
-        tty = OfferedFrames(elapsed)
+    for spinner in "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏":
+        tty = OfferedFrames(spinner)
         wait_for_listed_call(tty)
         assert tty.offered == len(tty.frames) - 1, ("listed call accepted before current running row", tty.capture.completed)
 
@@ -1364,8 +1363,8 @@ def renderer_cases():
         master, writer = os.pipe()
         try:
             tty = Terminal(master, None, None)
-            os.write(writer, terminal_frame(["  + New Session │", "  edited 2      │ edited 1", "                │ ⠹ Waiting"])
-                + terminal_frame(["  + New Session │", "  edited 2      │ edited 2", "                │ ›"]))
+            os.write(writer, terminal_frame(["   + New Session │", "    edited 2      │ edited 1", "                  │ ⠹ Waiting"])
+                + terminal_frame(["   + New Session │", "    edited 2      │ edited 2", "                  │ ›"]))
             observed = tty.wait("edited 2", after=0)
             assert "\nedited 2" in conversation_text(observed), observed
         finally:
@@ -1828,9 +1827,14 @@ def main(selected="all"):
     import fresh_tool_profile_cases
     import session_chrome_cases
     import terminal_restoration_cases
+    import tool_intent_cases
     from terminal_process_test import prove_terminal_process
     split_callers = selected == "callers"
-    assert selected in ("all", "callers", "caller-core", "renderer", "compiled-models", "terminal-waits", "help", "copy", "provider-lines", "session-chrome", "tool-profiles"), selected
+    assert selected in ("all", "callers", "caller-core", "renderer", "compiled-models", "terminal-waits", "help", "copy", "provider-lines", "session-chrome", "tool-intent", "tool-profiles"), selected
+    if selected in ("all", "callers", "caller-core", "tool-intent"):
+        tool_intent_cases.main()
+    if selected == "tool-intent":
+        return
     if selected in ("all", "callers", "caller-core", "tool-profiles"):
         fresh_tool_profile_cases.main()
     if selected == "tool-profiles":
@@ -2479,7 +2483,7 @@ def main(selected="all"):
         try:
             greeting = read_terminal(master, "› ")
             assert all(noise not in greeting for noise in ("Session:", "Workspace:", "Provider:", "Model:", "Permission:", "Store:", queued)), greeting
-            assert "\n› first input" in conversation_text(greeting) and "\nfirst answer" in conversation_text(greeting), greeting
+            assert "\n  › first input" in conversation_text(greeting) and "\nfirst answer" in conversation_text(greeting), greeting
             binding = chat_info_frame(master)
             bound_session = fixture.command("session", "inspect", "--store", store, "--session", session)["session"]
             assert bound_session["workspace"] == str(workspace.resolve()) and bound_session["provider"] == "codex", bound_session
@@ -2985,7 +2989,7 @@ def main(selected="all"):
                     observed = terminal_step(master, typed, f"edited {index}")
                 assert f"edited {index}" in conversation_text(observed), observed
                 if index == 2:
-                    assert "\n› line1\n  line2" in "\n".join(map(untimed, conversation_text(observed).split("\n"))), observed
+                    assert "\n  › line1\n    line2" in "\n".join(map(untimed, conversation_text(observed).split("\n"))), observed
                     assert "\nedited 2" in conversation_text(observed), observed
                 await_screen(master, "", composer=True)
                 body = json.loads(endpoint.requests[-1])
@@ -2997,6 +3001,7 @@ def main(selected="all"):
                 endpoint.responses.append(fixture.sse_answer(f"burst-answer-{index}",
                     f"burst-reason-{index}", f"burst-message-{index}", marker)[0])
                 observed = terminal_bulk(master, cluster * count + "\x7f" * count + "Z", marker)
+                print(f"editor burst {index}: {terminal_bulk.received} terminal bytes")
                 assert terminal_bulk.received < 100_000, ("tail deletion repainted the whole draft per key", terminal_bulk.received)
                 body = json.loads(endpoint.requests[-1])
                 actual = next(item["content"][0]["text"] for item in reversed(body["input"])
@@ -3011,7 +3016,7 @@ def main(selected="all"):
                 os.write(master, b"\x7f")
                 time.sleep(0.025)
             observed = terminal_step(master, "Z", "paced edited")
-            assert "\n› Z" in conversation_text(observed), observed
+            assert "\n  › Z" in conversation_text(observed), observed
             body = json.loads(endpoint.requests[-1])
             actual = next(item["content"][0]["text"] for item in reversed(body["input"])
                 if item.get("role") == "user")
@@ -3120,6 +3125,9 @@ def main(selected="all"):
             proxy = canonical_fixture.ReplyProxy(host, "/v1/message", after_admission)
             os.write(master, b"observe after Host loss\r")
             terminal_gate(entered, master, observation_held, "accepted Message before activity loss", timeout=8)
+            optimistic = await_screen(master, "observe after Host loss", composer=True)
+            assert "Sending" not in optimistic, optimistic
+            assert conversation_text(optimistic).count("› observe after Host loss") == 1, optimistic
             after = set(json.loads(run(home, "request", "list")))
             assert len(after - before) == 1, (before, after)
             saved_key = (after - before).pop()

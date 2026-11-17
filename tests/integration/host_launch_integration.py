@@ -693,6 +693,69 @@ def new_host_provider_policy(root, env):
           "no authorization headers or forwarding", flush=True)
 
 
+def detached_settings_checks(root, env):
+    """--check uses detached admission, resolves/seals, and never starts/stops a Host."""
+    directory = root / "detached-checks"
+    host_ok(env, "set", "--store", directory, "providers", "{}")
+    sources = directory / "document.json"
+    sources.write_text("{}")
+    sources.chmod(0o600)
+    original_files = {path.name for path in directory.iterdir()}
+    cases = (
+        ("bare", {}, (), None),
+        ("nonplacement", {"execution": {"activeCapacity": 3}}, (), None),
+        ("stdin-lifetime", {"interface": {"lifetime": "stdin"}}, (), "no stdin"),
+        ("relative-path", {"tools": {"bash": {"path": "relative/bash"}}}, (), "absolute path"),
+        ("relative-secret", {"providers": {"openai": {"key": {"file": "relative/key"}}}}, (), "absolute path"),
+        ("unsaved-placement", {"interface": {"dir": str(root / "elsewhere")}}, (), "unsaved Store or interface"),
+        ("unknown-leaf", {"unknown": True}, (), "unknown"),
+        ("zero-capacity", {"execution": {"activeCapacity": 0}}, (), None),
+        ("invalid-count", {"execution": {"activeCapacity": -1}}, (), "execution.activeCapacity"),
+        ("seal", {"providers": {"codex": {"endpoint": "https://example.com/responses",
+                   "credentialFile": str(root / "unread-credential")}}}, (), "providers.codex.endpoint"),
+        ("resolve", {"providers": {"openai": {"key": {"env": "DETACHED_CHECK_ABSENT_KEY"}}}}, (), "providers.openai.key"),
+    )
+    for name, document, assignments, reason in cases:
+        sources.write_text(json.dumps(document))
+        sources.chmod(0o600)
+        checked = host_command(env, "settings", "--check", "--store", directory,
+                               "--settings", sources, *assignments)
+        if reason is None:
+            assert checked.returncode == 0 and not checked.stdout, (name, checked)
+        else:
+            assert checked.returncode == 2, (name, checked)
+            failure = json.loads(checked.stdout)["rui_start_error"]
+            assert failure["code"] == "settings_invalid" and reason in failure["message"], (name, failure)
+        assert not matching_processes(directory), (name, checked)
+    for arguments, reason in (
+            (("--settings", "-"), "no stdin"),
+            (("--settings", "relative.json"), "absolute path"),
+            (("--set", "tools.bash=@relative.json"), "@FILE"),
+            (("--set", "interface.lifetime=stdin"), "no stdin")):
+        checked = host_command(env, "settings", "--check", "--store", directory, *arguments)
+        assert checked.returncode == 2, (arguments, checked)
+        failure = json.loads(checked.stdout)["rui_start_error"]
+        assert failure["code"] == "settings_invalid" and reason in failure["message"], failure
+    # No database, diagnostics or lease was created by a check.
+    assert {path.name for path in directory.iterdir()} == original_files
+    assert json.loads((directory / "host.json").read_text()) == {"providers": {}}
+    absent = root / "check-does-not-create"
+    checked = host_command(env, "settings", "--check", "--store", absent, "--set", "providers={}")
+    assert checked.returncode == 0 and not absent.exists(), checked
+    started = run_start(directory, env)
+    assert started.returncode == 0, started
+    try:
+        before = status(directory, env)
+        checked = host_command(env, "settings", "--check", "--store", directory,
+                               "--set", "interface.lifetime=stdin")
+        assert checked.returncode == 2, checked
+        after = status(directory, env)
+        assert before["instance"] == after["instance"] and after["status"] == "ready", (before, after)
+    finally:
+        forced_crash_cleanup(directory)
+    print("detached settings check passed: sources, detached refusal, placement, resolution/seal, no Store effects, live Host unchanged", flush=True)
+
+
 def resume_saved_host(root, env, directory, reference):
     with terminal_process([RUI, "session", "resume", "--store", directory, "--", reference], env=env, cwd=root) as (caller, master):
         output = bytearray()
@@ -1050,8 +1113,63 @@ def launch_fixture_root():
         shutil.rmtree(root)
 
 
+def contended_starters(root, env):
+    # A fixture-held real lease makes the child lose without any scheduler race.
+    # The existing acknowledged gate pins its parent's first unavailable probe
+    # AFTER that child's store_locked report and startup EOF.
+    for outcome in ("ready", "absent", "dies"):
+        store = root / f"contended-{outcome}"
+        store.mkdir(mode=0o700)
+        gate = root / f"contended-{outcome}.gate"
+        gate.touch(mode=0o600)
+        loser = winner = None
+        lock = os.fdopen(os.open(store / "host.lock", os.O_RDWR | os.O_CREAT, 0o600), "r+b")
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            loser = subprocess.Popen(
+                [RUI, "host", "start", "--store", store, "--set", "providers={}"],
+                env={**env, "RUI_TEST_HOST_STORE_LOCKED_GATE": str(gate)},
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, start_new_session=True)
+            wait_for(lambda: gate.with_suffix(gate.suffix + ".entered").exists(),
+                     "the losing child's closed startup channel and unavailable owner", timeout=5)
+            assert loser.poll() is None, "loser settled before its readiness budget"
+            lock.close()
+            lock = None
+            if outcome != "absent":
+                winner, ready = start_ready_process(
+                    [RUI, "host", "serve", "--store", store, "--set", "providers={}"],
+                    env=env, required_fields={"active_capacity": str(DEFAULT_ACTIVE_CAPACITY)})
+                winning_instance = instance(status(store, env), DEFAULT_ACTIVE_CAPACITY)
+                if outcome == "dies":
+                    stop_process(winner)
+                    winner = None
+                    assert status(store, env)["status"] == "unavailable"
+            gate.unlink()
+            stdout, stderr = loser.communicate(timeout=COMMAND_TIMEOUT)
+            if outcome == "ready":
+                assert loser.returncode == 0, (loser.returncode, stdout, stderr)
+                assert instance(json.loads(stdout), DEFAULT_ACTIVE_CAPACITY) == winning_instance
+                assert instance(status(store, env), DEFAULT_ACTIVE_CAPACITY) == winning_instance
+                assert wait_for_processes(store, 1) == [winner.pid]
+                assert "store_locked" not in stdout + stderr, (stdout, stderr)
+            else:
+                assert loser.returncode == 1, (loser.returncode, stdout, stderr)
+                assert json.loads(stdout) == {"rui_start_error": {
+                    "code": "store_locked", "message": "another Host owns this Store"}}, stdout
+                assert status(store, env)["status"] == "unavailable"
+                assert not matching_processes(store), "refused starter left a Host"
+        finally:
+            gate.unlink(missing_ok=True)
+            dispose_all(lambda: lock.close() if lock is not None else None,
+                        lambda: stop_process(loser) if loser is not None else None,
+                        lambda: stop_process(winner) if winner is not None else None,
+                        lambda: forced_crash_cleanup(store))
+    print("contended starters: delayed ready owner adopted; absent and retired winners preserve typed refusal", flush=True)
+
+
 def main():
-    assert len(sys.argv) in (2, 3), "usage: host_launch_integration.py /absolute/path/to/rui [startup-limits|store-identity|provider-policy]"
+    assert len(sys.argv) in (2, 3), "usage: host_launch_integration.py /absolute/path/to/rui [startup-limits|store-identity|provider-policy|detached-checks|contention]"
     from host_launch_exit_test import check_exit_reader, check_process_discovery, check_failure_retention, check_provider_disposal
     with launch_fixture_root() as root_text:
         root = canonical_fixture_root(pathlib.Path(root_text))
@@ -1060,6 +1178,12 @@ def main():
         credential = root / "credentials" / "missing.json"
         env = environment(home, credential)
         check_provider_disposal(dispose_provider_case, stop_endpoint)
+        if len(sys.argv) == 3 and sys.argv[2] == "contention":
+            contended_starters(root, env)
+            return
+        if len(sys.argv) == 3 and sys.argv[2] == "detached-checks":
+            detached_settings_checks(root, env)
+            return
         if len(sys.argv) == 3 and sys.argv[2] == "selection":
             saved_settings(root, env)
             return
@@ -1080,6 +1204,7 @@ def main():
             assert sys.argv[2] == "startup-limits"
             return
         assert_launch_adapter(root, env)
+        contended_starters(root, env)
 
         held_store = root / "held-store"
         held, _ = start_ready_process(
@@ -1113,6 +1238,7 @@ def main():
             stop_process(held)
 
         new_host_provider_policy(root, env)
+        detached_settings_checks(root, env)
         saved_settings(root, env)
         saved_settings_served(root, env)
 

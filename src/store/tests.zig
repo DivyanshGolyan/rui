@@ -108,6 +108,7 @@ const tool_continuation_selection = model_admission_domain.tool_continuation_sel
 const output_metadata_record_bytes = output_format.output_metadata_record_bytes;
 
 test {
+    _ = @import("creator_tests.zig");
     _ = @import("domain/configuration.zig");
     _ = @import("domain/session_obligation.zig");
     _ = @import("rsql.zig");

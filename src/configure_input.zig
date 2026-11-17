@@ -20,6 +20,12 @@ pub const OptionalFile = struct {
     path: []const u8 = "",
 };
 
+/// Borrowed through capture; only CLI spelling interprets "none" as empty.
+pub const ToolInput = union(enum) {
+    cli: []const u8,
+    names: []const []const u8,
+};
+
 pub const ConfigureInput = struct {
     store: []const u8,
     session: union(enum) {
@@ -27,14 +33,15 @@ pub const ConfigureInput = struct {
         create,
     },
     parent: OptionalText = .{},
+    preset: OptionalText = .{},
     require_model: bool = false,
     reload_skills: bool = false,
     workspace: OptionalText = .{},
     provider: OptionalText = .{},
     model: OptionalText = .{},
     instructions: OptionalFile = .{},
-    tools: ?[]const u8 = null,
-    loaded_tools: ?[]const u8 = null,
+    tools: ?ToolInput = null,
+    loaded_tools: ?ToolInput = null,
     permission_mode: OptionalText = .{},
     output_schema: OptionalFile = .{},
     compaction_trigger: OptionalPolicy = .{},
@@ -54,8 +61,8 @@ pub const ConfigureInput = struct {
         if (!self.compaction_trigger.present or self.compaction_trigger.value == null) self.compaction_trigger = .{ .present = true, .value = compactionTrigger(provider.?, model, compaction) };
         if (self.tools == null) {
             const tool_defaults = product_defaults.creationTools(@import("model_catalog.zig").acceptsImages(model), can_read_images);
-            self.tools = tool_defaults.allowed;
-            if (self.loaded_tools == null) self.loaded_tools = tool_defaults.loaded;
+            self.tools = .{ .cli = tool_defaults.allowed };
+            if (self.loaded_tools == null) self.loaded_tools = .{ .cli = tool_defaults.loaded };
         }
         if (!self.permission_mode.present) self.permission_mode = .{ .present = true, .value = if (saved_permission) |mode| @tagName(mode) else product_defaults.permission_mode };
     }
@@ -103,8 +110,8 @@ test "a fresh Session sends concrete defaults where its caller named none" {
     input.completeCreation(.openai, "unlisted-model", true, null, null, &compaction);
     try std.testing.expectEqualStrings("115200", input.compaction_trigger.value.?);
     try std.testing.expectEqualStrings(product_defaults.reasoning_effort, input.reasoning_effort.value.?);
-    try std.testing.expectEqualStrings(product_defaults.tools, input.tools.?);
-    try std.testing.expectEqualStrings(product_defaults.loaded_tools, input.loaded_tools.?);
+    try std.testing.expectEqualStrings(product_defaults.tools, input.tools.?.cli);
+    try std.testing.expectEqualStrings(product_defaults.loaded_tools, input.loaded_tools.?.cli);
     try std.testing.expectEqualStrings(product_defaults.permission_mode, input.permission_mode.value);
     try std.testing.expect(!input.workspace.present and !input.output_reservation.present and !input.label.present);
 
@@ -140,13 +147,13 @@ test "a fresh Session keeps every setting its caller named" {
     var input: ConfigureInput = .{
         .store = "",
         .session = .create,
-        .tools = "",
+        .tools = .{ .cli = "" },
         .permission_mode = .{ .present = true, .value = "plan" },
         .compaction_trigger = policy("00042"),
         .reasoning_effort = policy("high"),
     };
     input.completeCreation(.openai, "gpt-6.1-sol", true, .max, null, &compaction);
-    try std.testing.expectEqualStrings("", input.tools.?);
+    try std.testing.expectEqualStrings("", input.tools.?.cli);
     try std.testing.expectEqualStrings("plan", input.permission_mode.value);
     try std.testing.expectEqualStrings("00042", input.compaction_trigger.value.?);
     try std.testing.expectEqualStrings("high", input.reasoning_effort.value.?);
@@ -179,6 +186,20 @@ test "an update resets only the settings it names to default" {
     try std.testing.expect(!reset.compaction_trigger.present);
 }
 
+test "fresh creation preserves semantic empty and singleton none tool specifications" {
+    for ([_][]const []const u8{ &.{}, &.{"none"} }) |names| {
+        var compaction: [20]u8 = undefined;
+        var input: ConfigureInput = .{ .store = "", .session = .create, .tools = .{ .names = names }, .loaded_tools = .{ .names = names } };
+        input.completeCreation(.openai, "unlisted-model", true, null, null, &compaction);
+        try std.testing.expectEqual(names.len, input.tools.?.names.len);
+        try std.testing.expectEqual(names.len, input.loaded_tools.?.names.len);
+        for (names, input.tools.?.names, input.loaded_tools.?.names) |expected, allowed, loaded| {
+            try std.testing.expectEqualStrings(expected, allowed);
+            try std.testing.expectEqualStrings(expected, loaded);
+        }
+    }
+}
+
 test "parent creation completes required defaults and preserves only explicit inherited-field overrides" {
     for ([_]bool{ false, true }) |overrides| {
         var compaction: [20]u8 = undefined;
@@ -193,8 +214,8 @@ test "parent creation completes required defaults and preserves only explicit in
         input.completeCreation(.openai, "gpt-6.1-sol", true, .high, .ask, &compaction);
         try std.testing.expectEqualStrings("k7m2qx", input.parent.value);
         try std.testing.expectEqualStrings("gpt-6.1-sol", input.model.value);
-        try std.testing.expectEqualStrings(product_defaults.tools, input.tools.?);
-        try std.testing.expectEqualStrings(product_defaults.loaded_tools, input.loaded_tools.?);
+        try std.testing.expectEqualStrings(product_defaults.tools, input.tools.?.cli);
+        try std.testing.expectEqualStrings(product_defaults.loaded_tools, input.loaded_tools.?.cli);
         try std.testing.expectEqualStrings("ask", input.permission_mode.value);
         try std.testing.expectEqualStrings("high", input.reasoning_effort.value.?);
         try std.testing.expectEqualStrings("945000", input.compaction_trigger.value.?);
@@ -204,13 +225,13 @@ test "parent creation completes required defaults and preserves only explicit in
             try std.testing.expectEqualStrings("codex", input.provider.value);
             try std.testing.expectEqualStrings("/parent", input.workspace.value);
         }
-        input.tools = "";
-        input.loaded_tools = "";
+        input.tools = .{ .cli = "" };
+        input.loaded_tools = .{ .cli = "" };
         input.permission_mode = .{ .present = true, .value = "bypass" };
         input.compaction_trigger = policy("42");
         input.completeCreation(.codex, "unlisted-model", true, null, .ask, &compaction);
-        try std.testing.expectEqualStrings("", input.tools.?);
-        try std.testing.expectEqualStrings("", input.loaded_tools.?);
+        try std.testing.expectEqualStrings("", input.tools.?.cli);
+        try std.testing.expectEqualStrings("", input.loaded_tools.?.cli);
         try std.testing.expectEqualStrings("bypass", input.permission_mode.value);
         try std.testing.expectEqualStrings("42", input.compaction_trigger.value.?);
     }
@@ -225,7 +246,7 @@ test "parent fully explicit creation needs neither binding nor preferences and p
             .provider = if (overrides) .{ .present = true, .value = "codex" } else .{},
             .workspace = if (overrides) .{ .present = true, .value = "/parent" } else .{},
             .model = .{ .present = true, .value = "unlisted-model" },
-            .tools = "bash",
+            .tools = .{ .cli = "bash" },
             .permission_mode = .{ .present = true, .value = "ask" },
             .reasoning_effort = policy("high"),
             .compaction_trigger = policy("1000"),
@@ -277,7 +298,7 @@ test "creation default completion preserves Overview omitted binding and require
             try std.testing.expectEqualStrings("", input.model.value);
         }
         try std.testing.expectEqualStrings("/workspace", input.workspace.value);
-        try std.testing.expectEqualStrings(product_defaults.tools, input.tools.?);
+        try std.testing.expectEqualStrings(product_defaults.tools, input.tools.?.cli);
         try std.testing.expectEqualStrings("ask", input.permission_mode.value);
         try std.testing.expectEqualStrings("high", input.reasoning_effort.value.?);
         try std.testing.expectEqualStrings("115200", input.compaction_trigger.value.?);
@@ -296,11 +317,11 @@ test "fresh creation preserves explicitly restricted tool selections with or wit
                 .{ .tools = "none", .loaded = null },
                 .{ .tools = "none", .loaded = "none" },
             }) |case| {
-                var input: ConfigureInput = .{ .store = "", .session = .create, .tools = case.tools, .loaded_tools = case.loaded };
+                var input: ConfigureInput = .{ .store = "", .session = .create, .tools = .{ .cli = case.tools }, .loaded_tools = if (case.loaded) |loaded| .{ .cli = loaded } else null };
                 input.completeCreation(.codex, model, can_read_images, null, null, &compaction);
-                try std.testing.expectEqualStrings(case.tools, input.tools.?);
+                try std.testing.expectEqualStrings(case.tools, input.tools.?.cli);
                 if (case.loaded) |loaded| {
-                    try std.testing.expectEqualStrings(loaded, input.loaded_tools.?);
+                    try std.testing.expectEqualStrings(loaded, input.loaded_tools.?.cli);
                 } else try std.testing.expect(input.loaded_tools == null);
             }
         }
@@ -311,10 +332,42 @@ test "fresh creation preserves explicitly loaded tools with default allowed tool
     var compaction: [20]u8 = undefined;
     for ([_]bool{ false, true }) |can_read_images| {
         for ([_][]const u8{ "find_tools", "read_image", "none" }) |loaded| {
-            var input: ConfigureInput = .{ .store = "", .session = .create, .loaded_tools = loaded };
+            var input: ConfigureInput = .{ .store = "", .session = .create, .loaded_tools = .{ .cli = loaded } };
             input.completeCreation(.codex, "unlisted-model", can_read_images, null, null, &compaction);
-            try std.testing.expectEqualStrings(product_defaults.creationTools(true, can_read_images).allowed, input.tools.?);
-            try std.testing.expectEqualStrings(loaded, input.loaded_tools.?);
+            try std.testing.expectEqualStrings(product_defaults.creationTools(true, can_read_images).allowed, input.tools.?.cli);
+            try std.testing.expectEqualStrings(loaded, input.loaded_tools.?.cli);
+        }
+    }
+}
+
+test "image defaults preserve semantic tool selections and explicitly loaded names" {
+    for ([_]bool{ false, true }) |can_read_images| {
+        for ([_][]const u8{ "gpt-6.1-sol", "unlisted-model", "gpt-3.5-turbo" }) |model| {
+            for ([_][]const []const u8{ &.{}, &.{"none"}, &.{"bash"}, &.{"read_image"}, &.{ "bash", "find_tools" } }) |names| {
+                for ([_]bool{ false, true }) |explicit_loaded| {
+                    var compaction: [20]u8 = undefined;
+                    var input: ConfigureInput = .{
+                        .store = "",
+                        .session = .create,
+                        .tools = .{ .names = names },
+                        .loaded_tools = if (explicit_loaded) .{ .names = names } else null,
+                    };
+                    input.completeCreation(.codex, model, can_read_images, null, null, &compaction);
+                    try std.testing.expectEqual(names.len, input.tools.?.names.len);
+                    for (names, input.tools.?.names) |expected, actual| try std.testing.expectEqualStrings(expected, actual);
+                    if (explicit_loaded) {
+                        try std.testing.expectEqual(names.len, input.loaded_tools.?.names.len);
+                        for (names, input.loaded_tools.?.names) |expected, actual| try std.testing.expectEqualStrings(expected, actual);
+                    } else try std.testing.expect(input.loaded_tools == null);
+                }
+                var compaction: [20]u8 = undefined;
+                var input: ConfigureInput = .{ .store = "", .session = .create, .loaded_tools = .{ .names = names } };
+                input.completeCreation(.codex, model, can_read_images, null, null, &compaction);
+                const defaults = product_defaults.creationTools(@import("model_catalog.zig").acceptsImages(model), can_read_images);
+                try std.testing.expectEqualStrings(defaults.allowed, input.tools.?.cli);
+                try std.testing.expectEqual(names.len, input.loaded_tools.?.names.len);
+                for (names, input.loaded_tools.?.names) |expected, actual| try std.testing.expectEqualStrings(expected, actual);
+            }
         }
     }
 }
@@ -335,8 +388,8 @@ test "fresh Session image tool defaults require model support and an opener with
                 var compaction: [20]u8 = undefined;
                 input.completeCreation(.openai, case.model, can_read_images, null, null, &compaction);
                 const images = case.images and can_read_images;
-                try std.testing.expectEqual(images, std.mem.indexOf(u8, input.tools.?, "read_image") != null);
-                try std.testing.expectEqual(images, std.mem.indexOf(u8, input.loaded_tools.?, "read_image") != null);
+                try std.testing.expectEqual(images, std.mem.indexOf(u8, input.tools.?.cli, "read_image") != null);
+                try std.testing.expectEqual(images, std.mem.indexOf(u8, input.loaded_tools.?.cli, "read_image") != null);
             }
         }
     }
@@ -348,16 +401,44 @@ test "model changes and policy resets preserve existing Session tool intent" {
             var input: ConfigureInput = .{
                 .store = "",
                 .session = .{ .named = "k7m2qx" },
-                .tools = tools,
-                .loaded_tools = loaded,
+                .tools = if (tools) |names| .{ .cli = names } else null,
+                .loaded_tools = if (loaded) |names| .{ .cli = names } else null,
                 .model = .{ .present = true, .value = "gpt-3.5-turbo" },
                 .compaction_trigger = policy("default"),
                 .reasoning_effort = policy("default"),
             };
             var compaction: [20]u8 = undefined;
             input.completeReset(.openai, input.model.value, &compaction);
-            try std.testing.expectEqual(tools, input.tools);
-            try std.testing.expectEqual(loaded, input.loaded_tools);
+            if (tools) |names| {
+                try std.testing.expectEqualStrings(names, input.tools.?.cli);
+            } else try std.testing.expect(input.tools == null);
+            if (loaded) |names| {
+                try std.testing.expectEqualStrings(names, input.loaded_tools.?.cli);
+            } else try std.testing.expect(input.loaded_tools == null);
         }
     }
+}
+
+test "fresh creation preserves explicitly restricted tool selections" {
+    var compaction: [20]u8 = undefined;
+    for ([_]struct { tools: []const u8, loaded: ?[]const u8 }{
+        .{ .tools = "bash", .loaded = null },
+        .{ .tools = "bash,find_tools", .loaded = "find_tools" },
+        .{ .tools = "none", .loaded = "none" },
+    }) |case| {
+        var input: ConfigureInput = .{ .store = "", .session = .create, .tools = .{ .cli = case.tools }, .loaded_tools = if (case.loaded) |loaded| .{ .cli = loaded } else null };
+        input.completeCreation(.codex, "unlisted-model", true, null, null, &compaction);
+        try std.testing.expectEqualStrings(case.tools, input.tools.?.cli);
+        if (case.loaded) |loaded| {
+            try std.testing.expectEqualStrings(loaded, input.loaded_tools.?.cli);
+        } else try std.testing.expect(input.loaded_tools == null);
+    }
+}
+
+test "fresh creation preserves explicitly loaded tools with default allowed tools" {
+    var compaction: [20]u8 = undefined;
+    var input: ConfigureInput = .{ .store = "", .session = .create, .loaded_tools = .{ .cli = "find_tools" } };
+    input.completeCreation(.codex, "unlisted-model", true, null, null, &compaction);
+    try std.testing.expectEqualStrings(product_defaults.tools, input.tools.?.cli);
+    try std.testing.expectEqualStrings("find_tools", input.loaded_tools.?.cli);
 }

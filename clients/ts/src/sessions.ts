@@ -26,9 +26,9 @@ export interface AgentSpec {
 	instructions?: string;
 	/** JSON output schema object; `null` clears it. */
 	outputSchema?: Record<string, unknown> | null;
-	/** Tool names the Host offers, such as `bash` and `web_search`. */
+	/** Configured allowed tool names, such as `bash` and `web_search`. */
 	tools: readonly string[];
-	/** Tools loaded from the first model request. */
+	/** Loaded tool intent within `tools`; each Operation freezes its effective model offer. */
 	loadedTools?: readonly string[];
 	/** Tokens reserved for model output; null clears the override. */
 	outputReservation?: number | null;
@@ -86,6 +86,8 @@ export interface SessionSummary {
 	state: string;
 	archiveState: SessionArchiveState;
 	parent: string | null;
+	/** Session that started this Session, including a detached agent. */
+	creator: Schemas["SessionRow"]["creator"];
 }
 
 type CurrentReport = Extract<Schemas["InspectSessionReply"], { profile: "current"; work: unknown }>;
@@ -103,7 +105,10 @@ export interface SessionStatus {
 	label: CurrentReport["session"]["label"];
 	model: CurrentReport["session"]["model"];
 	effort: CurrentReport["session"]["reasoning_effort"];
+	/** Configured allowed tool names. */
 	tools: CurrentReport["session"]["tools"];
+	/** Loaded tool intent; an active Operation keeps its frozen model offer. */
+	loadedTools: CurrentReport["session"]["loaded_tools"];
 	permissionMode: CurrentReport["session"]["permission_mode"];
 	latestOutcome: CurrentReport["work"]["latest_outcome"];
 }
@@ -220,6 +225,7 @@ export class Session {
 			model: reply.session.model,
 			effort: reply.session.reasoning_effort,
 			tools: reply.session.tools,
+			loadedTools: reply.session.loaded_tools,
 			permissionMode: reply.session.permission_mode,
 			latestOutcome: reply.work.latest_outcome,
 		};
@@ -441,7 +447,7 @@ export class Sessions {
 				),
 			);
 			for (const row of page.sessions) {
-				summaries.push({ id: row.reference, label: row.label, state: row.work.state.kind, archiveState: row.archive_state, parent: row.parent });
+				summaries.push({ id: row.reference, label: row.label, state: row.work.state.kind, archiveState: row.archive_state, parent: row.parent, creator: row.creator });
 			}
 			if (page.next === null || !("after" in page.next)) return summaries.reverse();
 			after = page.next.after;

@@ -54,6 +54,7 @@ pub const View = struct {
     progress: ?[]const u8 = null,
     stoppable: bool = false,
     details: bool = false,
+    repair_details: bool = false,
     facts: Identity = .{},
     notice: ?[]const u8 = null,
     overview: ?[]const u8 = null,
@@ -82,6 +83,7 @@ pick: Chip,
 close: Chip,
 keys: chrome.FooterKeys = chrome.footerKeys(.closed),
 details: Chip,
+repair_details: bool = false,
 list_visible: bool = false,
 stoppable: bool = false,
 
@@ -118,6 +120,7 @@ pub fn place(self: *Self, screen: *AppScreen.Session, input: *@import("InputArea
     self.stoppable = view.stoppable;
     self.keys = chrome.footerKeys(view.choice);
     self.details.label = if (view.details) "alt+d details" else "";
+    self.repair_details = view.repair_details;
     self.state.text = stateText(self.status.bar.left, self.status.key.label);
     self.state.style = if (self.status.bar.tone == .attention) self.status.attention else self.status.quiet;
     input.facts = .{ .userdata = self, .drawFn = drawFooter };
@@ -150,11 +153,19 @@ fn drawFooter(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vx
         self.status.key.label = "";
         self.details.label = "";
     }
-    if (self.facts.identity.current) |facts| {
-        if (facts.folder != null) self.details.label = "";
+    const repair_details = self.repair_details and self.keys.other_actions;
+    if (repair_details) {
+        self.status.key.label = "";
+        if (primary.width() + self.details.width() + self.status.stop.width() + 9 > ctx.max.width.?) primary.label = "";
+        if (self.details.width() + self.status.stop.width() + 6 > ctx.max.width.?) self.status.stop.label = "";
+    } else {
+        if (self.facts.identity.current) |facts| {
+            if (facts.folder != null) self.details.label = "";
+        }
+        const primary_width = primary.width() + self.status.key.width() + self.status.stop.width() + 9;
+        if (primary_width + self.details.width() > ctx.max.width.?) self.details.label = "";
     }
-    const primary_width = primary.width() + self.status.key.width() + self.status.stop.width() + 9;
-    if (primary_width + self.details.width() > ctx.max.width.?) self.details.label = "";
+    const notice = if (repair_details) null else self.status.bar.notice;
     const keys = [_]*Chip{ primary, secondary, &self.details, &self.status.key, &self.status.stop };
     var right: std.ArrayList(u8) = .empty;
     for (keys) |key| if (key.label.len != 0) {
@@ -162,10 +173,10 @@ fn drawFooter(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vx
         try right.appendSlice(ctx.arena, key.label);
     };
     const footer = try ctx.arena.create(Footer);
-    footer.* = .{ .left = "", .right = right.items, .notice = if (self.status.bar.notice) |notice| try chrome.noticeLine(ctx.arena, notice) else null, .style = self.facts.style };
-    if (self.status.bar.notice) |notice| {
+    footer.* = .{ .left = "", .right = right.items, .notice = if (notice) |text| try chrome.noticeLine(ctx.arena, text) else null, .style = self.facts.style };
+    if (notice) |text| {
         var tone = self.facts.style;
-        if (std.mem.startsWith(u8, notice, "!")) tone.fg = self.status.attention.fg;
+        if (std.mem.startsWith(u8, text, "!")) tone.fg = self.status.attention.fg;
         footer.right_style = tone;
     }
     const size = ctx.max.size();
@@ -207,7 +218,7 @@ fn drawFooter(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vx
     }
     var col: usize = right_col;
     var first = true;
-    for (keys) |key| if (self.status.bar.notice == null and key.label.len != 0) {
+    for (keys) |key| if (notice == null and key.label.len != 0) {
         if (!first) col += ctx.stringWidth(" · ");
         first = false;
         if (col < surface.size.width) {
@@ -332,6 +343,11 @@ test "SessionChrome puts notices in Footer without a state row and preserves nee
         const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 12 }, .cell_size = .{} };
         self.place(&screen, &input, .{ .width = width, .facts = .{ .name = "Archive audit", .archive = .archived } });
         const idle = try input.widget().draw(ctx);
+        self.place(&screen, &input, .{ .width = width, .facts = .{ .name = "Archive audit", .archive = .archived }, .progress = "Opening…" });
+        const opening = try input.widget().draw(ctx);
+        try std.testing.expectEqual(idle.size.height, opening.size.height);
+        try std.testing.expectEqualStrings("", self.state.text);
+        try std.testing.expectEqualStrings("Opening…", self.status.bar.notice.?);
         self.place(&screen, &input, .{ .width = width, .facts = .{ .name = "Archive audit", .archive = .archived }, .notice = "Copied 3 lines", .stoppable = true });
         const noticed = try input.widget().draw(ctx);
         try std.testing.expectEqual(idle.size.height, noticed.size.height);
@@ -423,7 +439,7 @@ test "SessionChrome transient reply categories appear once in Footer and never i
     defer arena.deinit();
     var screen: AppScreen.Session = undefined;
     screen.input = input.widget();
-    for ([_][]const u8{ "Copied 3 lines", "Configured.", "! Unknown command /nope", "! Copy unavailable", "Opening tool output…", "No earlier message.", "Restored chat", "Upgraded to 0.60.0" }) |notice| for ([_]u16{ 46, 99 }) |width| {
+    for ([_][]const u8{ "Copied 3 lines", "Configured.", "! Unknown command /nope", "! Copy unavailable", "Opening tool output…", "No earlier message.", "Restored chat" }) |notice| for ([_]u16{ 46, 99 }) |width| {
         self.place(&screen, &input, .{ .width = width, .facts = .{ .name = "Chat" }, .notice = notice });
         const drawn = try input.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 30 }, .cell_size = .{} });
         try std.testing.expectEqual(@as(u16, 4), drawn.size.height);

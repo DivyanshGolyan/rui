@@ -344,18 +344,18 @@ test "production turn preserves skipped continuation preference through actual S
                 pub fn turnsPaused(_: *@This()) bool {
                     return false;
                 }
-                pub fn admitNewModel(self: *@This(), paused: bool) turn.Admission {
-                    return self.admit(if (paused) .open_turn_message else .message);
-                }
-                pub fn admitToolContinuation(self: *@This()) turn.Admission {
-                    return self.admit(.tool_continuation);
-                }
-                // Store admissions above complete synchronously in this fixture.
+                // Store admissions finish synchronously in this context.
                 pub fn pendingModelAdmission(_: *const @This()) ?turn.PendingModelAdmission {
                     return null;
                 }
                 pub fn advanceModelAdmission(_: *@This()) bool {
                     return false;
+                }
+                pub fn admitNewModel(self: *@This(), paused: bool) turn.Admission {
+                    return self.admit(if (paused) .open_turn_message else .message);
+                }
+                pub fn admitToolContinuation(self: *@This()) turn.Admission {
+                    return self.admit(.tool_continuation);
                 }
                 pub fn hasTransport(_: *@This()) bool {
                     return false;
