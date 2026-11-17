@@ -673,11 +673,11 @@ const resolve_action = rsql.Write(.{
 });
 
 pub const SettleAttempt = struct {
-    pub const rounds = transition.rounds(.{ .facts = .{.always}, .content = .{.always} });
+    pub const rounds = transition.rounds(.{ .facts = .{.always}, .content = .{.always}, .parts = .{.paged} });
     pub const round_budget = 3;
     pub const commit: transition.Commit = .transaction;
     pub const begin: ?rounds.At = .facts;
-    pub const Input = struct { binding: ActionAttemptBinding, code: ActionResolutionCode, result: []const u8 };
+    pub const Input = struct { binding: ActionAttemptBinding, code: ActionResolutionCode, result: []const u8, saving: *@import("content_parts.zig").Saving, io: std.Io };
     pub const Result = ActionSettlement;
     pub const Ordinary = store_core.Ordinary.action_attempt;
     pub const Guards = store_core.Ordinary.action_attempt;
@@ -687,13 +687,12 @@ pub const SettleAttempt = struct {
     final_input: sourced_input.Final = .{},
     facts: settle_facts.Result = undefined,
     code: ActionResolutionCode = undefined,
-    text: []const u8 = &.{},
-    content: content_domain.Import = undefined,
     completion: turn_domain.stopped_turn.Result = null,
 
     pub fn step(t: *SettleAttempt, r: *transition.Round(SettleAttempt), ran: ?rounds.At) !transition.Next(SettleAttempt) {
         const binding = t.input.binding;
         const at = ran orelse {
+            t.input.saving.restart();
             r.read(settle_facts, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id }, &t.facts);
             return .{ .round = .facts };
         };
@@ -703,16 +702,21 @@ pub const SettleAttempt = struct {
                 if (found.turn_id.get() != binding.turn_id) return error.StaleActionAttemptBinding;
                 const stopped = found.direct_stop or (found.stopped and found.runner != .mcp);
                 t.code = if (stopped) .cancelled else t.input.code;
-                t.text = if (found.direct_stop) "Action was stopped." else if (stopped) found.runner.stoppedText(t.input.code, t.input.result) else t.input.result;
-                t.content = .ofBytes(t.text, false);
-                content_domain.lookup(r, &t.content);
+                if (stopped) {
+                    const text = if (found.direct_stop) "Action was stopped." else found.runner.stoppedText(t.input.code, t.input.result);
+                    t.input.saving.* = try .init(.{ .text = .{ .slice = text } });
+                }
+                if (try t.input.saving.step(r, t.input.io, r.faults()) != .round) return error.ContentChanged;
                 if (found.stopped) r.read(turn_domain.stopped_turn, .{ .turn_id = binding.turn_id, .resolving_action_id = binding.action_id }, &t.completion);
                 return .{ .round = .content };
             },
-            .content => {
+            .content, .parts => {
                 if (r.faults().content_import) return error.InjectedContentImportFailure;
+                const content_id = switch (try t.input.saving.step(r, t.input.io, r.faults())) {
+                    .round => return .{ .round = .parts },
+                    .saved => |saved| saved.content_id,
+                };
                 const positions = try r.positions(found.session);
-                const content_id = try content_domain.importBytes(r, &t.content, t.text);
                 r.write(resolve_action, .{
                     .action_id = binding.action_id,
                     .code = t.code,

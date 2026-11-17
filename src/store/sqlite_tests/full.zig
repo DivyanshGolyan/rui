@@ -533,3 +533,64 @@ test "Full history's step faults keep main's names, and its content and stop rea
         } else try std.testing.expectError(case[1], testingFullHistory(&storage, &tmp, session.slice(), null));
     }
 }
+
+test "Full rejects an invalid canonical form before emitting any list" {
+    const BeforeOutput = struct {
+        called: bool = false,
+
+        fn reject(self: *@This()) error{UnexpectedFullOutput}!void {
+            self.called = true;
+            return error.UnexpectedFullOutput;
+        }
+
+        pub fn missing(self: *@This(), _: protocol.ReportProfile) error{UnexpectedFullOutput}!void {
+            return self.reject();
+        }
+
+        pub fn current(self: *@This(), _: protocol.ReportProfile, _: *const @import("../../session_report.zig").Current) error{UnexpectedFullOutput}!void {
+            return self.reject();
+        }
+
+        pub fn open(self: *@This(), _: @import("../../session_report.zig").List) error{UnexpectedFullOutput}!void {
+            return self.reject();
+        }
+
+        pub fn row(self: *@This(), _: *const @import("../../session_report.zig").Row) error{UnexpectedFullOutput}!void {
+            return self.reject();
+        }
+
+        pub const end = reject;
+        pub const tail = reject;
+
+        pub fn fullOpen(self: *@This(), _: @import("../../session_report.zig").FullList) error{UnexpectedFullOutput}!void {
+            return self.reject();
+        }
+
+        pub fn fullRow(self: *@This(), _: *const @import("../../session_report.zig").FullRow, _: *report_domain.FullText) error{UnexpectedFullOutput}!void {
+            return self.reject();
+        }
+
+        pub const fullEnd = reject;
+    };
+    for ([_]i64{ 2, -1 }) |form| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try configureTestSessionAsk(&storage, "invalid-form-full-config");
+        try submitTestMessage(&storage, &tmp, "invalid-form-full-first", "invalid-form-full-first", session.slice(), "first");
+        try submitTestMessage(&storage, &tmp, "invalid-form-full-message", "invalid-form-full-message", session.slice(), "pending");
+        // Stopped pending input lies outside Current pressure and its first
+        // Message stays valid, isolating Full's early canonical-form check.
+        var stop = try completeSessionStop("invalid-form-full-stop", session.slice());
+        try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+        try sqlite.exec(storage.sqliteDatabase(), "PRAGMA ignore_check_constraints=ON");
+        try store_testing.sqlite_only.exec(&storage, "UPDATE content SET form=?1 WHERE content_id=(SELECT content_id FROM message_admission WHERE command_key='invalid-form-full-message')", .{form});
+        try sqlite.exec(storage.sqliteDatabase(), "PRAGMA ignore_check_constraints=OFF");
+        var before: BeforeOutput = .{};
+        try std.testing.expectError(error.CorruptStore, storage.readSessionReport(session.slice(), .full, &before));
+        try std.testing.expect(!before.called);
+        try std.testing.expect(storage.isFenced());
+    }
+}

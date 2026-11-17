@@ -39,7 +39,7 @@ test "CLI choice enums preserve protocol tags and derive reset and recovery spel
     try std.testing.expectEqual(effort.len + 1, choice.len);
     for (effort, choice[0..effort.len]) |expected, actual| try std.testing.expectEqualStrings(expected, actual);
     try std.testing.expectEqualStrings("default", choice[effort.len]);
-    const expected = [_][]const u8{ "configure", "message", "session-stop", "session-archive", "model-interruption", "permission-decision", "session-pin", "action-background" };
+    const expected = [_][]const u8{ "configure", "message", "session-stop", "session-archive", "model-interruption", "permission-decision", "session-pin", "action-background", "action-stop" };
     inline for (comptime std.meta.tags(RecoveryKind), expected) |kind, name| {
         try std.testing.expectEqualStrings(name, @tagName(kind));
         const command = commandKind(kind);

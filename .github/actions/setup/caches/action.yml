@@ -200,13 +200,6 @@ runs:
       with:
         path: ${{ runner.temp }}/rui-zig
         key: ${{ steps.save-keys.outputs.compiler-key }}
-    - name: Compact superseded Linux CLI outputs before a complete publication
-      if: ${{ always() && inputs.save-only == 'true' && inputs.work-outcome == 'success' && runner.os == 'Linux' && runner.arch == 'X64' && steps.save-keys.outputs.build-key != '' }}
-      shell: bash
-      env:
-        SETUP_OUTCOME: ${{ inputs.setup-outcome }}
-        WORK_OUTCOME: ${{ inputs.work-outcome }}
-      run: python3 -B tests/ci/cache_snapshot.py --prune
     - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       if: ${{ always() && inputs.save-only == 'true' && steps.save-keys.outputs.build-key != '' }}
       with:

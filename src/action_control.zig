@@ -48,6 +48,15 @@ test "promotion preserves fulfillment and stop without reserving capacity" {
     }
 }
 
+pub const StopReply = union(enum) {
+    accepted: struct { replayed: bool, action_id: u64, resolution: ?u64 },
+    rejected: struct { replayed: bool, code: Rejection },
+    conflict,
+    infrastructure_failure,
+};
+
+pub const StopObservation = struct { action_id: u64, resolution: ?u64 };
+
 pub const StopFacts = struct {
     final_position: ?u64,
     stop_selected: bool,

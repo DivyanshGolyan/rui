@@ -1,0 +1,32 @@
+name: PR labels
+on:
+  # pull_request_target runs main's labeler, never the PR's code, so fork PRs
+  # get labels too. The body names the Goal issue, so edits relabel.
+  pull_request_target:
+    types: [opened, edited, reopened, synchronize]
+  # Relabel every open PR, for example after labelling a workstream issue.
+  workflow_dispatch:
+permissions:
+  contents: read
+  issues: read
+  pull-requests: write
+concurrency:
+  group: pr-labels-${{ github.event.pull_request.number || 'all' }}
+jobs:
+  label:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Add the workstream label of each PR's Goal issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          if [ -n "$PR_NUMBER" ]; then
+            python3 -B tests/ci/pr_labels.py --pr "$PR_NUMBER"
+          else
+            python3 -B tests/ci/pr_labels.py --all-open
+          fi

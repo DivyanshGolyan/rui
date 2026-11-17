@@ -5,7 +5,7 @@ const {tmpdir} = require('node:os');
 const {join} = require('node:path');
 const {test} = require('node:test');
 const prune = require('../../.github/scripts/prune-caches.cjs');
-const {saveKey} = require('../../.github/actions/setup/caches/save-keys.cjs');
+const {publicationKeys, saveKey} = require('../../.github/actions/setup/caches/save-keys.cjs');
 
 function cache(id, ref, platform = 'Linux-X64', part = 'all') {
   return {
@@ -543,6 +543,76 @@ test('capture only missing exact keys, preserving fallback and cold misses even 
   assert.match(action, /JOB_SUCCESS: \$\{\{ job.status == 'success' \}\}/);
   const setup = readFileSync(`${__dirname}/../../.github/actions/setup/action.yml`, 'utf8');
   assert.match(setup, /test "\$\("\$RUNNER_TEMP\/rui-zig\/zig" version\)" = 0\.17\.1\n        echo "RUI_CACHE_COMPILER_READY=true"/);
+});
+
+function publisherEnv(work = 'success') {
+  return {
+    PATH: process.env.PATH, RUI_CACHE_BUILD_KEY: `rui-build-v4-Linux-X64-0.17.1-${'a'.repeat(64)}-compiled.${'b'.repeat(64)}-${'c'.repeat(64)}`,
+    GITHUB_REF: 'refs/heads/main', GITHUB_EVENT_NAME: 'push', RUNNER_OS: 'Linux', RUNNER_ARCH: 'X64',
+    SETUP_OUTCOME: 'success', WORK_OUTCOME: work, JOB_SUCCESS: String(work === 'success'),
+    GITHUB_RUN_ID: '42', GITHUB_RUN_ATTEMPT: '2', RUI_CACHE_COMPILER_READY: 'true',
+    RUI_CACHE_COMPILER_KEY: 'compiler', RUI_CACHE_PACKAGES_KEY: 'packages', RUI_CACHE_RUNNER_KEY: 'runner',
+  };
+}
+
+test('every complete or partial build candidate passes the same final publication owner', () => {
+  for (const work of ['success', 'failure', 'cancelled']) {
+    for (const setup of ['success', 'failure']) {
+      for (const exact of [false, true]) {
+        const env = {...publisherEnv(work), SETUP_OUTCOME: setup};
+        if (exact) env.RUI_CACHE_BUILD_KEY = '';
+        const calls = [];
+        const result = publicationKeys(env, (key, actualEnv) => {
+          calls.push(key);
+          assert.equal(actualEnv, env);
+          assert.equal(actualEnv.RUI_CACHE_BUILD_KEY, env.RUI_CACHE_BUILD_KEY);
+          return {key: ''};
+        });
+        const candidate = saveKey({kind: 'build', key: env.RUI_CACHE_BUILD_KEY, setupOutcome: setup,
+          workOutcome: work, runId: '42', runAttempt: '2'});
+        assert.deepEqual(calls, candidate ? [candidate] : [], `${work}/${setup}/${exact}`);
+        assert.equal(result.build, '');
+        assert.equal(result.compiler, 'compiler');
+        assert.equal(result.runner, saveKey({kind: 'runner', key: 'runner', setupOutcome: setup,
+          workOutcome: work, runId: '42', runAttempt: '2'}));
+      }
+    }
+  }
+  const env = publisherEnv();
+  assert.equal(publicationKeys(env, key => ({key, invalidated_manifests: 0})).build, env.RUI_CACHE_BUILD_KEY);
+  assert.equal(publicationKeys({...env, JOB_SUCCESS: 'false'}, key => ({key, invalidated_manifests: 0})).build,
+    env.RUI_CACHE_BUILD_KEY, 'later job failure preserves completed, compacted work');
+});
+
+test('a bad compaction bridge response suppresses only the build publication', () => {
+  const env = publisherEnv();
+  const reports = [null, [], false, 'scalar', 0, {}, {key: 'replacement'}, {key: env.RUI_CACHE_BUILD_KEY, skipped: 'audit failed'}];
+  const originalLog = console.log;
+  const messages = [];
+  console.log = message => messages.push(message);
+  try {
+    for (const report of reports) {
+      assert.deepEqual(publicationKeys(env, () => report),
+        {compiler: 'compiler', build: '', packages: 'packages', runner: 'runner'});
+    }
+    assert.deepEqual(publicationKeys(env, () => { throw new Error('child failed'); }),
+      {compiler: 'compiler', build: '', packages: 'packages', runner: 'runner'});
+  } finally { console.log = originalLog; }
+  assert.equal(messages.length, reports.length + 1);
+  assert.ok(messages.every(line => line.startsWith('Build cache publication declined: ')));
+});
+
+test('real publication bridge declines untrimmed Linux partials and complete candidates without qualified work', () => {
+  for (const work of ['success', 'failure', 'cancelled']) {
+    const env = publisherEnv(work);
+    const result = publicationKeys(env);
+    assert.equal(result.build, '', work);
+    assert.equal(result.compiler, 'compiler', work);
+    assert.equal(result.runner, work === 'success' ? 'runner' : 'runner-partial-42-2', work);
+  }
+  const action = readFileSync(`${__dirname}/../../.github/actions/setup/caches/action.yml`, 'utf8');
+  assert.doesNotMatch(action, /cache_snapshot\.py --prune/,
+    'the action cannot bypass the publication owner with an independent success-only GC step');
 });
 
 function saveGuard(step, values, successful) {

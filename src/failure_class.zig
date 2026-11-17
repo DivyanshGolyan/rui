@@ -16,6 +16,9 @@ pub const Class = enum {
     other,
 };
 
+pub const ordered_input_not_supported = "local_ordered_input_not_supported";
+pub const ordered_input_limit = "local_ordered_input_limit";
+
 pub const sign_in_prefix = "provider_sign_in_";
 
 pub const api_key_rejected = "provider_api_key_rejected";
@@ -54,6 +57,8 @@ test "saved failure codes name what the person can do" {
         .{ "provider_plan", Class.plan },
         .{ "provider_model_unavailable", Class.model },
         .{ "provider_usage_limit_reached", Class.other },
+        .{ ordered_input_not_supported, Class.other },
+        .{ ordered_input_limit, Class.other },
         .{ "provider_http_401", Class.sign_in },
         .{ "provider_sign_in_required", Class.sign_in },
         .{ "provider_sign_in_refresh_token_expired", Class.sign_in },
