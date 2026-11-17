@@ -159,9 +159,10 @@ pub fn messageDeclinesApprovalSql(comptime action: []const u8) []const u8 {
 }
 
 test "automatic Message denial keeps its original selection predicate" {
+    const actual = comptime messageDeclinesApprovalSql("action");
     try std.testing.expectEqualStrings(
         "EXISTS(SELECT 1 FROM message_admission m WHERE m.session_ref=action.session_ref AND m.source_kind IN (1,2) AND m.admission_position>action.approval_position)",
-        messageDeclinesApprovalSql("action"),
+        actual,
     );
 }
 
