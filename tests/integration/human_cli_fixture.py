@@ -265,7 +265,7 @@ def footer_click(screen, *, column=None, marker=None):
     line = content[row]
     if marker is not None:
         column = line.index(marker)
-    assert column is not None and 0 <= column < len(line), (column, line)
+    assert column is not None and 0 <= column < len(content[row - 1]), (column, line)
     return f"\x1b[<0;{column + 1};{row + 1}M\x1b[<0;{column + 1};{row + 1}m".encode()
 
 

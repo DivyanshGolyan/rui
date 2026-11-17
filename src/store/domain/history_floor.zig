@@ -105,14 +105,15 @@ pub fn firstMessageSkillSql(comptime e: []const u8, comptime first_message: []co
         ".source_skill_admission_id AND owner.session_position=" ++ first_message ++ "))";
 }
 
-pub const item_bytes_sql = "coalesce((SELECT bag.byte_length FROM content bag WHERE bag.content_id=i.extras_content_id),0) + " ++
+pub const item_bytes_sql = "SELECT coalesce(sum(coalesce(item_extras.byte_length,0) + " ++
     "(SELECT coalesce(sum(coalesce(p.text_length,text.byte_length,0)+coalesce(bag.byte_length,0)),0) FROM model_output_part p " ++
     "LEFT JOIN content text ON text.content_id=p.text_content_id LEFT JOIN content bag ON bag.content_id=p.extras_content_id " ++
     "WHERE p.operation_id=i.operation_id AND p.item_ordinal=i.item_ordinal) + " ++
     "coalesce((SELECT name.byte_length+call_id.byte_length+arguments.byte_length FROM model_tool_call tool_call " ++
     "JOIN content name ON name.content_id=tool_call.name_content_id JOIN content call_id ON call_id.content_id=tool_call.call_id_content_id " ++
     "JOIN content arguments ON arguments.content_id=tool_call.arguments_content_id " ++
-    "WHERE tool_call.operation_id=i.operation_id AND tool_call.item_ordinal=i.item_ordinal AND tool_call.session_ref=i.session_ref),0)";
+    "WHERE tool_call.operation_id=i.operation_id AND tool_call.item_ordinal=i.item_ordinal AND tool_call.session_ref=i.session_ref),0)),0) " ++
+    "FROM model_output_item i LEFT JOIN content item_extras ON item_extras.content_id=i.extras_content_id";
 
 const units = rsql.Read(.{
     .sql = "SELECT e.session_position AS start,content.content_id,content.form,content.digest,content.byte_length,content.byte_length+coalesce((SELECT sum(body.byte_length) FROM message_skill skill " ++
@@ -120,7 +121,7 @@ const units = rsql.Read(.{
         "JOIN conversation_entry e @index(conversation_entry_history) ON e.session_ref=current.session_ref " ++
         "JOIN content ON content.content_id=e.content_id " ++
         "WHERE current.operation_id=?1 AND e.session_position<?2 AND e.session_position>?3 AND e.entry_kind=1 AND e.session_position!=?4 UNION ALL " ++
-        "SELECT o.admission_position,NULL,NULL,NULL,NULL,(SELECT coalesce(sum(" ++ item_bytes_sql ++ "),0) FROM model_output_item i WHERE i.operation_id=o.operation_id)+" ++
+        "SELECT o.admission_position,NULL,(SELECT max(result.form) FROM action_operation a JOIN content result ON result.content_id=" ++ tool_fulfillment.actionContentSql("a") ++ " WHERE a.parent_operation_id=o.operation_id),NULL,NULL,(" ++ item_bytes_sql ++ " WHERE i.operation_id=o.operation_id)+" ++
         "coalesce((SELECT sum(result.byte_length) FROM action_operation a JOIN content result ON result.content_id=" ++ tool_fulfillment.actionContentSql("a") ++ " " ++
         "WHERE a.parent_operation_id=o.operation_id),0) FROM model_operation current " ++
         "JOIN model_operation o @index(model_operation_context_history) ON o.session_ref=current.session_ref " ++
@@ -131,6 +132,19 @@ const units = rsql.Read(.{
     .Row = struct { start: rsql.Positive, content_id: ?u64, form: ?u8, digest: ?[32]u8, byte_length: ?u64, size: u64 },
     .cardinality = .each,
     .compound = true,
+});
+
+// The output and all its Tool Results remain one indivisible history unit.
+// Only units containing parts need this bounded follow-up scan.
+const result_parts = rsql.Read(.{
+    .sql = "SELECT a.action_id,c.content_id,c.form,c.digest,c.byte_length FROM model_operation current " ++
+        "JOIN model_operation parent ON parent.session_ref=current.session_ref AND parent.admission_position=?2 " ++
+        "JOIN action_operation a ON a.parent_operation_id=parent.operation_id " ++
+        "JOIN content c ON c.content_id=" ++ tool_fulfillment.actionContentSql("a") ++ " " ++
+        "WHERE current.operation_id=?1 AND a.action_id>?3 AND c.form<>0 ORDER BY a.action_id LIMIT 16",
+    .Args = struct { operation: u64, position: u64, after: u64 },
+    .Row = struct { action_id: u64, content_id: u64, form: u8, digest: [32]u8, byte_length: u64 },
+    .cardinality = .{ .at_most = 16 },
 });
 
 const base_floor_read = rsql.Read(.{
@@ -261,6 +275,10 @@ pub const Preparation = struct {
     search: FloorSearch = undefined,
     facts: floor_facts.Row = undefined,
     cursor: ?@import("../../os/pages.zig").Mapped(content_parts.Cursor) = null,
+    results: result_parts.Result = undefined,
+    result_row: usize = 0,
+    result_after: u64 = 0,
+    results_loaded: bool = false,
     stage: enum { start, walk, done } = .start,
     ready: bool = false,
     prepared: ?Prepared = null,
@@ -274,6 +292,24 @@ pub const Preparation = struct {
         self.cursor = null;
     }
 
+    fn weigh(self: *Preparation, a: anytype, value: content_domain.Value) !?content_parts.Cursor.Weight {
+        if (self.cursor == null) {
+            const cursor = try @import("../../os/pages.zig").Mapped(content_parts.Cursor).map();
+            cursor.value.init(value);
+            self.cursor = cursor;
+        }
+        const cursor = self.cursor.?.value;
+        switch (try cursor.step(a)) {
+            .raw => {},
+            .rows => try store_access.runAs(a, error.CorruptStore),
+            .part, .done => unreachable,
+        }
+        if (!cursor.certified) return null;
+        const weight = cursor.weight;
+        self.deinit();
+        return weight;
+    }
+
     pub fn step(self: *Preparation, a: anytype) !bool {
         if (self.ready) return true;
         if (self.stage == .start) {
@@ -285,23 +321,37 @@ pub const Preparation = struct {
         }
         if (self.search.compound) |row| {
             if (self.search.weight == null) {
-                if (self.cursor == null) {
+                if (row.content_id == null) {
+                    if (!self.results_loaded) {
+                        a.read(result_parts, .{ .operation = self.search.operation, .position = row.start.get(), .after = self.result_after }, &self.results);
+                        try store_access.runAs(a, error.CorruptStore);
+                        self.result_row = 0;
+                        self.results_loaded = true;
+                        return false;
+                    }
+                    if (self.result_row < self.results.len) {
+                        const result = self.results.items[self.result_row];
+                        const value = try content_domain.Value.of(result.content_id, result.form, result.byte_length, result.digest);
+                        if (try self.weigh(a, value)) |weight| {
+                            self.search.compound.?.size = row.size - result.byte_length +| weight.bytes;
+                            self.result_after = result.action_id;
+                            self.result_row += 1;
+                        }
+                        return false;
+                    }
+                    if (self.results.len == 16) {
+                        self.results_loaded = false;
+                        return false;
+                    }
+                    self.results_loaded = false;
+                    self.result_after = 0;
+                    self.search.compound.?.byte_length = 0;
+                    self.search.weight = .{};
+                } else {
                     const value = try content_domain.Value.of(row.content_id.?, row.form.?, row.byte_length.?, row.digest.?);
-                    const cursor = try @import("../../os/pages.zig").Mapped(content_parts.Cursor).map();
-                    cursor.value.init(value);
-                    self.cursor = cursor;
+                    if (try self.weigh(a, value)) |weight| self.search.weight = weight;
+                    return false;
                 }
-                const cursor = self.cursor.?.value;
-                switch (try cursor.step(a)) {
-                    .raw => {},
-                    .rows => try store_access.runAs(a, error.CorruptStore),
-                    .part, .done => unreachable,
-                }
-                if (cursor.certified) {
-                    self.search.weight = cursor.weight;
-                    self.deinit();
-                }
-                return false;
             }
         }
         if (try self.search.next(a)) {

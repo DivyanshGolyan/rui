@@ -94,6 +94,9 @@ class TerminalProcessTest(unittest.TestCase):
                 self.assertEqual(composer_line(screen, 2), " " + prompt + " literal │ and +")
                 self.assertEqual(chat_footer_row(screen), 4)
                 self.assertEqual(footer_click(screen, marker="model"), b"\x1b[<0;43;5M\x1b[<0;43;5m")
+                self.assertEqual(footer_click(screen, column=70), b"\x1b[<0;71;5M\x1b[<0;71;5m")
+                with self.assertRaises(AssertionError):
+                    footer_click(screen, column=71)
                 self.assertEqual(pane_content(horizontal * 40 + ending + " " * 20), " " * 20)
                 self.assertIsNone(composer_bounds("\n".join((horizontal * 40 + ending + " " * 20,
                                                               left + vertical + horizontal * 30))))

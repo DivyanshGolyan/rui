@@ -1085,7 +1085,7 @@ test "historical compound detection ignores Messages beyond the frozen cutoff" {
     }.run);
 }
 
-test "historical compound action-final provenance fences before reading the forged resolution" {
+test "historical compound action-final provenance fences a Message that differs from its Resolution" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
@@ -1114,9 +1114,8 @@ test "historical compound action-final provenance fences before reading the forg
             try store_testing.submitTestMessageParts(&storage, &tmp, "forged-final-parts", session.slice(), &.{ .{ .bytes = "first" }, .{ .bytes = "second" } });
             const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             const content = try store_testing.queryU64(&storage, "SELECT content_id FROM message_admission WHERE command_key='forged-final-parts'", .{});
-            // Keep the immutable background acknowledgment plain, and forge
-            // only the final Resolution and its otherwise consistent Message.
-            try store_testing.exec(&storage, "UPDATE action_operation SET resolution_content_id=?1 WHERE action_id=?2", .{ content, action });
+            // Keep the canonical Resolution plain and forge its otherwise
+            // consistent final Message to reference an unrelated compound value.
             try store_testing.exec(&storage, "UPDATE core_command SET primary_content_id=?1 WHERE command_key IN (SELECT command_key FROM message_admission WHERE source_action_id=?2)", .{ content, action });
             try store_testing.exec(&storage, "UPDATE message_admission SET content_id=?1 WHERE source_action_id=?2", .{ content, action });
             try store_testing.exec(&storage, "UPDATE conversation_entry SET content_id=?1 WHERE source_admission_id IN (SELECT admission_id FROM message_admission WHERE source_action_id=?2)", .{ content, action });

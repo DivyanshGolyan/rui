@@ -729,7 +729,7 @@ class TerminalScreen:
         facts = self.empty_session(case, session)
         frame = wait_for(self.observe, "empty chat model facts and chat-only footer", timeout=15,
                          ready=lambda screen: shown(f"│ {facts['model']} · ", screen)
-                         and shown("alt+i info", screen)
+                         and "alt+i info" not in screen
                          and "Upgraded to " not in screen and " · upgraded to " not in screen)
         return frame
 

@@ -132,7 +132,8 @@ pub const HistoricalPart = struct {
 
 pub const HistoricalToolResult = struct {
     call_id: HistoricalContent,
-    output: HistoricalContent,
+    output: ?HistoricalContent = null,
+    input: ?HistoricalInput = null,
 };
 
 pub const RequestPage = struct {
@@ -1108,7 +1109,13 @@ const output_boundary = rsql.Read(.{
         first_message_sql ++ " AS first_message," ++
         "EXISTS(SELECT 1 FROM conversation_entry message JOIN content input ON input.content_id=message.content_id " ++
         "WHERE message.session_ref=current.session_ref AND message.entry_kind=1 AND message.session_position<current.admission_position " ++
-        "AND input.form<>0 AND (message.session_position>" ++ selected_floor_sql ++ " OR message.session_position=(" ++ first_message_sql ++ "))) AS compound_inputs " ++
+        "AND input.form<>0 AND (message.session_position>" ++ selected_floor_sql ++ " OR message.session_position=(" ++ first_message_sql ++ "))) OR " ++
+        "EXISTS(SELECT 1 FROM model_operation source JOIN model_tool_call called ON called.operation_id=source.operation_id " ++
+        "LEFT JOIN action_operation action ON action.parent_operation_id=called.operation_id AND action.call_ordinal=called.call_ordinal " ++
+        "JOIN content input ON input.content_id=" ++ tool_fulfillment.contentSql("called", "action") ++ " " ++
+        "WHERE source.session_ref=current.session_ref AND source.admission_position>" ++ selected_floor_sql ++ " " ++
+        "AND source.admission_position<current.admission_position AND " ++ store_schema.resolutionIs("source.resolution_code", .tool_proposals) ++ " " ++
+        "AND " ++ tool_fulfillment.positionSql("called", "action") ++ "<current.admission_position AND input.form<>0) AS compound_inputs " ++
         "FROM model_operation current LEFT JOIN model_operation base ON base.operation_id=" ++ selected_base_sql ++ " " ++
         "JOIN session_revision current_revision ON current_revision.session_ref=current.session_ref AND current_revision.revision=current.settings_revision " ++
         "LEFT JOIN session_revision base_revision ON base_revision.session_ref=base.session_ref AND base_revision.revision=base.settings_revision " ++
@@ -1288,9 +1295,14 @@ fn entryAfter(a: *ReadAccess, view: *RequestPage, after_position: u64) !?*const 
     }
     if (ordinary.source_action) |source| {
         const final = try action_read_domain.readResolution(a, source.session.slice(), source.id);
-        const reference = if (ordinary.content) |*value| value else return error.CorruptStore;
-        if (reference.content_id != final.location.content_id or reference.length != final.location.reference.length or
-            !std.mem.eql(u8, &reference.digest, &final.location.reference.digest)) return error.CorruptStore;
+        if (ordinary.input) |input| {
+            if (!std.meta.eql(input.value, final.value)) return error.CorruptStore;
+        } else {
+            const reference = if (ordinary.content) |*value| value else return error.CorruptStore;
+            if (final.value.reference != .bytes or reference.content_id != final.location.content_id or
+                reference.length != final.location.reference.length or
+                !std.mem.eql(u8, &reference.digest, &final.location.reference.digest)) return error.CorruptStore;
+        }
     }
     return ordinary;
 }
@@ -1938,7 +1950,7 @@ fn historicalEntry(view: *RequestPage, row: *const historical_entries.Row) error
         switch (try input_parts.Form.decode(row.form orelse return error.CorruptStore)) {
             .bytes => {},
             .parts => {
-                if (kind != .user or row.source_action != null) return error.CorruptStore;
+                if (kind != .user) return error.CorruptStore;
                 input = .{ .view = view, .value = try content_domain.Value.of(content_id.get(), row.form.?, content.?.length, content.?.digest) };
                 content = null;
             },
@@ -2355,7 +2367,7 @@ fn readHistoricalToolResultHeld(
     defer entry.release();
     var access: ReadAccess = .open(&entry);
     defer access.deinit();
-    return entry.finish(error{InputPartsNotSupported}, nextGroupResult(&access, view));
+    return entry.finish(Ordinary.none, nextGroupResult(&access, view));
 }
 
 const group_results = rsql.Read(.{
@@ -2412,11 +2424,13 @@ fn nextGroupResult(a: *ReadAccess, view: *RequestPage) !?HistoricalToolResult {
     const output_id = (row.output_content_id orelse return error.CorruptStore).get();
     var output_metadata = try pageMetadata(row.output_length, row.output_digest, row.output_private);
     output_metadata.form = row.output_form orelse return error.CorruptStore;
-    _ = try @import("content_parts.zig").publicMetadata(a, output_id, &output_metadata);
-    const output = try viewContent(view, output_id, &output_metadata, false);
+    if (output_metadata.private) return error.CorruptStore;
+    const value = try content_domain.Value.of(output_id, output_metadata.form, output_metadata.byte_length, output_metadata.digest);
+    const input: ?HistoricalInput = if (value.reference == .parts) .{ .view = view, .value = value } else null;
+    const output = if (input == null) try viewContent(view, output_id, &output_metadata, false) else null;
     page.results_next += 1;
     view.active_tool_group_count += 1;
-    return .{ .call_id = call_id, .output = output };
+    return .{ .call_id = call_id, .output = output, .input = input };
 }
 
 fn viewContent(view: *RequestPage, content_id: u64, row: *const content_metadata.Row, private: bool) error{CorruptStore}!HistoricalContent {

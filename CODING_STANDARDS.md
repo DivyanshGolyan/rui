@@ -228,7 +228,7 @@ A new TUI interaction still needs the independent plain-PTY journey in [landing]
 
 Ready CI owns selected broad unit and integration tests, Mac checks, stack frames, live engines, migrations and premerge all-unit compilation obligations ([canonical gates](docs/verification/gates.md#canonical-gates)).
 `python3 tests/ci/prepush.py --full` remains an opt-in diagnostic, not a publication toll.
-It adds development targets, Mac typechecking, unfiltered unit compilation, stack frames and selected reachable local MySQL checks.
+It adds the CI policy suite with the same unchanged-input self-check skips, development targets, Mac typechecking, unfiltered unit compilation, stack frames and selected reachable local MySQL checks.
 UID-global Upgrade remains hosted on an ordinary runner; local output records it as deferred, never passed.
 Use a full composed suite (`zig build test`, `check`, the review-phase selection or a local mirror of CI) only to diagnose a CI red.
 In Claude Code, `.claude/hooks/block_full_runs.py` requires `RUI_CI_RED=<run or issue>` for those commands.

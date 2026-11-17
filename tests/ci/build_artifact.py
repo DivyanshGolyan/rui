@@ -54,16 +54,12 @@ def runner():
 
 
 def compile_command(targets, part="all", *, jobs=None, pr_mode=False):
-    # Zig async slots also wait for subprocesses. Keep enough slots to overlap
-    # native compiler processes, including LLVM promotion builds. The smaller
-    # Mac pool gets four slots; Linux x86_64 retains eight. Local feedback can
-    # supply its own serialized budget without changing the graph.
+    # Zig async slots also wait for subprocesses. Give every Linux x86_64
+    # producer the same overlap, including LLVM promotion builds. Local
+    # feedback supplies its own serialized budget without changing the graph.
     mode = ["-Dpr-ci=true"] if pr_mode else []
-    if jobs is None:
-        if platform.system() == "Linux" and platform.machine() == "x86_64":
-            jobs = 8
-        elif platform.system() == "Darwin" and platform.machine() == "arm64":
-            jobs = 4
+    if jobs is None and platform.system() == "Linux" and platform.machine() == "x86_64":
+        jobs = 8
     if jobs is not None:
         mode.append(f"-j{jobs}")
     return ["zig", "build", "ci-build", *mode, "-Dci-targets=" + ",".join(targets), "-Dci-part=" + part]

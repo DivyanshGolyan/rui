@@ -302,7 +302,9 @@ class AdmissionTest(unittest.TestCase):
         self.assertIn('        run: python3 -B tests/ci/client_locality.py\n', policy)
 
     def test_policy_skips_only_the_named_unchanged_self_checks(self):
-        script = step_script(job(CHECK.read_text(), 'policy'), 'Run tests/ci, less self-checks whose inputs are unchanged')
+        policy = job(CHECK.read_text(), 'policy')
+        script = 'python3 -B tests/ci/policy_suite.py --skips "$SKIPS"'
+        self.assertIn('        run: ' + script + '\n', policy)
         modules = {
             'test_alpha': 'class Alpha(unittest.TestCase):\n    def test_one(self): pass\n    def test_two(self): pass\n',
             'test_beta': ('class Kept(unittest.TestCase):\n    def test_kept(self): pass\n'
@@ -311,6 +313,8 @@ class AdmissionTest(unittest.TestCase):
             'test_gamma_more': 'class More(unittest.TestCase):\n    def test_more(self): pass\n',
         }
         with tempfile.TemporaryDirectory() as root:
+            Path(root, 'tests/ci').mkdir(parents=True)
+            Path(root, 'tests/ci/policy_suite.py').write_text((ROOT / 'tests/ci/policy_suite.py').read_text())
             for name, body in modules.items():
                 path = Path(root, 'tests/ci', name + '.py')
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -361,7 +365,7 @@ class AdmissionTest(unittest.TestCase):
             checkouts = re.findall(r'(?ms)^      - uses: actions/checkout@.*?(?=^      - |\Z)', body)
             for checkout in checkouts:
                 with self.subTest(job=name):
-                    expected = '${{ github.sha }}' if name in ('plan', 'policy') else '${{ needs.plan.outputs.candidate_ref }}'
+                    expected = '${{ github.sha }}' if name in ('plan', 'policy', 'mac_runner') else '${{ needs.plan.outputs.candidate_ref }}'
                     self.assertIn('ref: ' + expected, checkout)
         self.assertIn('candidate_ref: ${{ steps.select.outputs.candidate_ref }}', job(text, 'plan'))
         self.assertIn('CANDIDATE_REF: ${{ github.sha }}', job(text, 'plan'))

@@ -376,3 +376,76 @@ test "a floor rejects unknown Message content forms instead of dropping their un
     try std.testing.expect(storage.isFenced());
     try std.testing.expectEqual(@as(u64, 1), try store_testing.sqliteQueryU64(storage.sqliteDatabase(), "SELECT count(*) FROM model_operation WHERE operation_id=?1 AND history_floor IS NULL AND history_level IS NULL AND resolution_code IS NULL", .{compaction.operation_id}));
 }
+
+test "a compaction's floor weighs compound Action Resolutions as a whole Tool Result group" {
+    const large = try std.testing.allocator.alloc(u8, 200_000);
+    defer std.testing.allocator.free(large);
+    @memset(large, 'r');
+    for ([_]usize{ 1, 16, 17 }) |count| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try tests.configureTestSessionWithMode(&storage, "result-floor-config", "bypass");
+        try submitTestMessage(&storage, &tmp, "result-floor-first", "result-floor-first", session.slice(), "first");
+        const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        var names: [17][24]u8 = undefined;
+        var calls: [17]tests.TestingCall = undefined;
+        for (calls[0..count], names[0..count], 0..) |*call, *name, index| {
+            const id = try std.fmt.bufPrint(name, "result-call-{d}", .{index});
+            call.* = .{
+                .item_id = id,
+                .name = "bash",
+                .encoded_call_id = id,
+                .decoded_call_id = id,
+                .encoded_arguments = "{\\\"cmd\\\":\\\"one\\\",\\\"description\\\":\\\"Run command\\\"}",
+                .decoded_arguments = "{\"cmd\":\"one\",\"description\":\"Run command\"}",
+            };
+        }
+        try tests.settleCallsForTesting(&storage, &tmp, first, "result-floor-output", calls[0..count]);
+        for (0..count) |index| {
+            const selected = (try storage.nextAction(.bash, .fromFree(1, true))).?;
+            const action = (try storage.admitActionAttempt(selected, 30_000, .{})).?.permit.binding;
+            try store_testing.settleTestActionParts(&storage, &tmp, action, &.{
+                .{ .bytes = if (index + 1 == count) large else "small" },
+                .{ .bytes = @embedFile("../../codecs/fixtures/image-input/pixel.png"), .kind = .{ .image = .{} } },
+            });
+        }
+        const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        try settleItemsForTesting(&storage, &tmp, continuation, &.{
+            "{\"type\":\"message\",\"id\":\"floor-answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}",
+        }, "done");
+        try submitTestMessage(&storage, &tmp, "result-floor-newest", "result-floor-newest", session.slice(), "newest");
+        const newest = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        try storage.settleModelAttemptFailure(newest, .{ .uncorrelated = "provider_context_overflow" }, .context_overflow, .{});
+        const compaction = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        const candidate = try TestingFloorWalk.deeper(&storage, compaction.operation_id);
+        if (candidate == null) std.debug.print("compound Action Resolution floor missing candidate at count {d}\n", .{count});
+        try std.testing.expect(candidate != null);
+        const room = candidate.?;
+        try std.testing.expectEqual(@as(u8, 2), room.choice.level);
+        const continuation_position = try store_testing.queryU64(&storage, "SELECT admission_position FROM model_operation WHERE operation_id=?1", .{continuation.operation_id});
+        try std.testing.expectEqual(continuation_position - 1, room.choice.floor);
+        try storage.settleModelAttemptFailure(compaction, .{ .uncorrelated = "provider_context_overflow" }, .context_overflow, .{});
+        const retry = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        var view: store_testing.TestingPage = undefined;
+        view.open(&storage, retry);
+        defer view.close();
+        try std.testing.expectEqual(room.choice.floor, (try view.coverage()).floor.position);
+        var after: u64 = 0;
+        var messages: usize = 0;
+        var outputs: usize = 0;
+        while (try view.nextEntry(after)) |entry| {
+            after = entry.position;
+            switch (entry.kind) {
+                .user => messages += 1,
+                .provider_output => outputs += 1,
+                .instruction, .operation => {},
+                .tool_results, .skill => return error.TestUnexpectedResult,
+            }
+        }
+        try std.testing.expectEqual(@as(usize, 2), messages);
+        try std.testing.expectEqual(@as(usize, 1), outputs);
+    }
+}

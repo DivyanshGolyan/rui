@@ -13,7 +13,7 @@ from urllib.parse import quote
 import live_engines
 import model_fixture as fixture
 from host_process import dispose_all, stop_process, wait_for
-from human_cli_fixture import admit, terminal_exit
+from human_cli_fixture import admit, composer_ready, terminal_exit
 from overview_fixture import Screen, world
 from settings_fixture import mcp_server
 from terminal_process import close_pty, open_pty, register_capture, spawn
@@ -80,8 +80,9 @@ def resume(w, session, columns, rows):
                         env=w.env, cwd=w.workspace, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         screen = Screen(process, master, columns, rows)
         register_capture(master, screen.capture)
-        screen.wait(lambda frame: ("Type a task" in frame or "alt+i info" in frame) and "Opening…" not in frame,
-                    "resumed Session composer with Chat info available")
+        screen.wait(lambda frame: screen.capture.frame is not None
+                    and composer_ready(frame, screen.capture.frame.cursor.x, screen.capture.frame.cursor.y),
+                    "resumed Session composer ready")
         yield screen
         screen.keys(b"\x03")
         _, errors = terminal_exit(process, master)
