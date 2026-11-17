@@ -207,7 +207,7 @@ const rejected_calls = rsql.Read(.{
 const actionable_permissions = rsql.Read(.{
     .sql = "SELECT action.action_id,action.permission_revision FROM action_operation action " ++
         "JOIN model_operation operation ON operation.operation_id=action.parent_operation_id JOIN turn active ON active.turn_id=operation.turn_id " ++
-        "WHERE action.session_ref=?1 AND action.authorized=0 AND " ++ action_domain.eligibleSql("action", "operation", "active") ++ " ORDER BY action.action_id",
+        "WHERE action.session_ref=?1 AND " ++ action_domain.permissionDecisionEligibleSql("action", "active", false) ++ " AND " ++ action_domain.eligibleSql("action", "operation", "active") ++ " ORDER BY action.action_id",
     .Args = struct { session: []const u8 },
     .Row = struct { action_id: rsql.Positive, permission_revision: rsql.Positive },
     .cardinality = .each,

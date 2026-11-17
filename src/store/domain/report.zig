@@ -507,6 +507,7 @@ fn WorkLatest(comptime Args: type, comptime session: []const u8) type {
     return rsql.Read(.{
         .sql = "SELECT t.turn_id,t.operation_id,t.input_cutoff,t.outcome_code,t.outcome_content_id,t.outcome_at,t.outcome_position," ++
             "coalesce(o.resolution_code,o.last_failure_code) AS operation_code,o.retry_due_at_ms,o.attempt_ordinal,o.attempt_at,o.retry_scheduled_at,o.resolved_at," ++
+            "(o.resolution_code IS NULL AND " ++ command_domain.currentModelOperationSql("o", "t") ++ ") AS interruptible," ++
             "(SELECT @payload(content) FROM content WHERE content_id=o.resolution_content_id AND byte_length<=" ++ std.fmt.comptimePrint("{d}", .{Quota.max_bytes}) ++
             " AND t.outcome_code NOT IN ('completed','cancelled')) AS diagnostic," ++
             "(SELECT stopped_at FROM session_stop @index(session_stop_turn) WHERE selected_turn_id=t.turn_id ORDER BY position LIMIT 1) AS stopped_at " ++
@@ -532,6 +533,7 @@ const WorkLatestRow = struct {
     attempt_at: ?rsql.Positive,
     retry_scheduled_at: ?rsql.Positive,
     resolved_at: ?rsql.Positive,
+    interruptible: bool,
     diagnostic: ?rsql.Blob(Quota.max_bytes),
     stopped_at: ?rsql.Positive,
 };
@@ -540,7 +542,8 @@ fn firstApprovalSql(comptime session: []const u8) []const u8 {
     return "SELECT approval.action_id FROM action_operation approval " ++
         "JOIN model_operation source_operation ON source_operation.operation_id=approval.parent_operation_id " ++
         "JOIN turn source_turn ON source_turn.turn_id=source_operation.turn_id " ++
-        "WHERE approval.session_ref=" ++ session ++ " AND approval.authorized=0 AND approval.resolution_code IS NULL AND " ++
+        "WHERE approval.session_ref=" ++ session ++ " AND " ++
+        action_domain.permissionDecisionEligibleSql("approval", "source_turn", false) ++ " AND " ++
         action_domain.eligibleSql("approval", "source_operation", "source_turn") ++ " ORDER BY approval.action_id LIMIT 1";
 }
 
@@ -812,6 +815,7 @@ pub const WorkRead = struct {
             .operation_id = row.operation_id.get(),
             .input_cutoff = row.input_cutoff.get(),
             .stopped_at = optional(row.stopped_at),
+            .interruptible = row.interruptible,
             .op = undefined,
         };
         if (row.resolved_at) |at| {

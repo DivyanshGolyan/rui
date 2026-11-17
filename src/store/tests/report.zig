@@ -642,3 +642,78 @@ test "derived work facts are served across all work replies" {
         }
     }.run);
 }
+
+test "served work intents imply admission across permission and control states" {
+    try store_testing.forEachEngine(struct {
+        const Scenario = enum { idle, queued, in_flight, approval, message_decline, mixed };
+        const Intent = enum { stop, interrupt, decide };
+
+        fn run(case: *store_testing.Case) !void {
+            for (std.enums.values(Scenario)) |scenario| for (std.enums.values(Intent)) |intent| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                const session = try configureTestSessionAsk(&storage, "intent-domain-config");
+                var old_action: u64 = 0;
+                if (scenario != .idle) {
+                    try submitTestMessage(&storage, &tmp, "intent-input", "intent-first", session.slice(), "run");
+                    if (scenario != .queued) {
+                        const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                        if (scenario != .in_flight) {
+                            try settleTwoActionsForTesting(&storage, &tmp, model, "intent-calls");
+                            old_action = try store_testing.queryU64(&storage, "SELECT min(action_id) FROM action_operation WHERE session_ref=?1", .{session.slice()});
+                            if (scenario == .mixed) {
+                                var promote: @import("../../command_input.zig").ActionBackgroundCommand = .{ .session = session, .action_id = old_action };
+                                try promote.key.set("intent-promote");
+                                try std.testing.expect(storage.backgroundAction(.{ .command = &promote }, .{}) == .accepted);
+                                const other = try store_testing.queryU64(&storage, "SELECT max(action_id) FROM action_operation WHERE session_ref=?1", .{session.slice()});
+                                var deny: protocol.PermissionDecisionCommand = .{ .session = session, .action_id = other, .decision = .deny };
+                                try deny.key.set("intent-deny-sibling");
+                                try std.testing.expect(storage.decidePermission(&deny, .{}) == .accepted);
+                            }
+                            if (scenario == .message_decline or scenario == .mixed) {
+                                try submitTestMessage(&storage, &tmp, "intent-next-file", "intent-next", session.slice(), "new instructions");
+                            }
+                            if (scenario == .mixed) {
+                                const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                                try settleTwoActionsForTesting(&storage, &tmp, next, "intent-next-calls");
+                            }
+                        }
+                    }
+                }
+                var request: protocol.ActivityPage = .{};
+                request.session = session;
+                const work = (try store_core.activityPageForTesting(&storage, request)).work.work;
+                try std.testing.expectEqual(scenario != .idle, work.actions.stop);
+                try std.testing.expectEqual(scenario == .in_flight, work.actions.interrupt != null);
+                try std.testing.expectEqual(scenario == .approval or scenario == .mixed, work.actions.decide != null);
+                try std.testing.expectEqual(work.actions.decide, work.first_action);
+                if (scenario == .mixed) try std.testing.expect(work.actions.decide.? > old_action);
+                if (scenario == .message_decline or scenario == .mixed) {
+                    var late: protocol.PermissionDecisionCommand = .{ .session = session, .action_id = old_action, .decision = .allow_once };
+                    try late.key.set("intent-late-allow");
+                    const rejected = storage.decidePermission(&late, .{});
+                    try std.testing.expect(rejected == .rejected and rejected.rejected.code == .action_not_pending);
+                }
+                switch (intent) {
+                    .stop => if (work.actions.stop) {
+                        var stop = try completeSessionStop("intent-stop", session.slice());
+                        try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+                    },
+                    .interrupt => if (work.actions.interrupt) |target| {
+                        var interrupt: protocol.ModelInterruptionCommand = .{ .session = session, .turn_id = target.turn, .operation_id = target.operation };
+                        try interrupt.key.set("intent-interrupt");
+                        try std.testing.expect(storage.interruptModel(&interrupt, .{}) == .accepted);
+                    },
+                    .decide => if (work.actions.decide) |action| {
+                        var decision: protocol.PermissionDecisionCommand = .{ .session = session, .action_id = action, .decision = .allow_once };
+                        try decision.key.set("intent-decide");
+                        try std.testing.expect(storage.decidePermission(&decision, .{}) == .accepted);
+                    },
+                }
+            };
+        }
+    }.run);
+}

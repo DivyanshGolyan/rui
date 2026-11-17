@@ -82,6 +82,7 @@ pub const Inputs = struct {
         operation_id: u64,
         input_cutoff: u64,
         stopped_at: ?u64 = null,
+        interruptible: bool = false,
         terminal: ?Terminal = null,
         op: Op,
         actions: Inputs.Actions = .{},
@@ -170,7 +171,7 @@ pub fn derive(inputs: Inputs) error{CorruptStore}!Work {
     const current = if (inputs.latest) |turn| turn.terminal == null and turn.stopped_at == null else false;
     work.actions.stop = current or inputs.oldest_pending != null or inputs.owed_since != null;
     if (inputs.latest) |turn| {
-        if (current and turn.op == .in_flight) work.actions.interrupt = .{ .turn = turn.turn_id, .operation = turn.operation_id };
+        if (current and turn.interruptible and turn.op == .in_flight) work.actions.interrupt = .{ .turn = turn.turn_id, .operation = turn.operation_id };
     }
     work.actions.decide = inputs.first_action;
     return work;
@@ -258,7 +259,7 @@ fn bounded(comptime capacity: usize, text: []const u8) error{CorruptStore}!Bound
 }
 
 fn activeTurn(op: Inputs.Op, actions: Inputs.Actions) Inputs.Turn {
-    return .{ .turn_id = 7, .operation_id = 19, .input_cutoff = 5, .op = op, .actions = actions };
+    return .{ .turn_id = 7, .operation_id = 19, .input_cutoff = 5, .op = op, .actions = actions, .interruptible = op == .in_flight };
 }
 
 fn proposals(at: u64) Inputs.Op {
@@ -622,7 +623,7 @@ test "work loses whether a model operation is current" {
 
 test "actions derive from work inputs" {
     const pending = Inputs.Pending{ .at = 600, .position = 60 };
-    for (0..16) |mask| {
+    for (0..32) |mask| {
         const queued: ?Inputs.Pending = if (mask & 1 != 0) pending else null;
         const owed: ?u64 = if (mask & 2 != 0) 600 else null;
         const decision: ?u64 = if (mask & 4 != 0) 41 else null;
@@ -637,14 +638,15 @@ test "actions derive from work inputs" {
         };
         for (turns, 0..) |initial, index| {
             var turn = initial;
-            if (mask & 8 != 0) if (turn) |*t| {
-                t.stopped_at = 450;
-            };
+            if (turn) |*t| {
+                if (mask & 8 != 0) t.stopped_at = 450;
+                if (mask & 16 != 0) t.interruptible = false;
+            }
             // first_action requires a latest Turn, even when it refers to an older Action.
             if (turn == null and decision != null) continue;
             const work = try derive(.{ .now_ms = 0, .created_at = 1, .latest = turn, .oldest_pending = queued, .owed_since = owed, .first_action = decision });
             try std.testing.expectEqual((index >= 1 and index <= 3 and mask & 8 == 0) or queued != null or owed != null, work.actions.stop);
-            try std.testing.expectEqual(index == 1 and mask & 8 == 0, work.actions.interrupt != null);
+            try std.testing.expectEqual(index == 1 and mask & 8 == 0 and mask & 16 == 0, work.actions.interrupt != null);
             if (work.actions.interrupt) |target| {
                 try std.testing.expectEqual(@as(u64, 7), target.turn);
                 try std.testing.expectEqual(@as(u64, 19), target.operation);

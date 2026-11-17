@@ -147,6 +147,13 @@ pub fn messageDeclinesApprovalSql(comptime action: []const u8) []const u8 {
     return "EXISTS(SELECT 1 FROM message_admission m WHERE m.session_ref=" ++ action ++ ".session_ref AND m.source_action_id IS NULL AND m.admission_position>" ++ action ++ ".approval_position)";
 }
 
+/// A permission decision can be admitted for this Action. Automatic denials
+/// also admit the Actions already superseded by a new Message.
+pub fn permissionDecisionEligibleSql(comptime action: []const u8, comptime turn: []const u8, comptime automatic: bool) []const u8 {
+    return action ++ ".authorized=0 AND " ++ action ++ ".resolution_code IS NULL AND (" ++ turn ++ ".outcome_code IS NULL OR " ++ action ++ ".background_position IS NOT NULL)" ++
+        (if (automatic) "" else " AND NOT " ++ messageDeclinesApprovalSql(action));
+}
+
 pub fn actionStoppedSql(comptime action: []const u8, comptime operation: []const u8) []const u8 {
     return "(" ++ stoppedSql(action ++ ".session_ref", selectedStopSql(action, operation)) ++ " OR EXISTS(SELECT 1 FROM action_stop direct_stop WHERE direct_stop.target_action_id=" ++ action ++ ".action_id))";
 }
