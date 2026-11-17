@@ -377,6 +377,7 @@ pub fn activate(init: std.process.Init, allocator: std.mem.Allocator, observatio
     Progress.send(progress, .awaiting_retirement);
     if (!try retired(init.io, private, plan)) return .{ .unconfirmed = .awaiting_retirement };
     Progress.send(progress, .starting);
+    process.waitForTestGate(allocator, init.io, init.environ_map.get("RUI_TEST_UPGRADE_BEFORE_START_GATE"), null, .fromSeconds(300)) catch return .{ .unconfirmed = .starting };
     const start_argv = try arguments(arena.allocator(), executable, request, .start);
     const started = process.runIn(private, init.io, start_argv, null, 8192, .fromSeconds(300), context) catch return .{ .unconfirmed = .starting };
     defer process.dispose(private, started);

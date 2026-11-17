@@ -93,6 +93,22 @@ class PrepushTest(unittest.TestCase):
                     self.assertIn("tests/ci: test_verify_rui_map.py", commands)
                     self.assertIn("test_verify_rui_map.py", commands["tests/ci: test_verify_rui_map.py"])
 
+    def test_upgrade_fixture_changes_select_their_existing_policy_consumers(self):
+        for path, consumer in (
+            ("tests/integration/previous_release_upgrade.py", "test_previous_release_upgrade.py"),
+            ("tests/integration/host_serve_dialect.py", "test_previous_release_upgrade.py"),
+            ("tests/integration/upgrade_integration.py", "test_upgrade_fixture.py"),
+        ):
+            for mode in ("default", "quick"):
+                for deleted in ((), (path,)):
+                    with self.subTest(path=path, mode=mode, deleted=deleted):
+                        if deleted:
+                            (self.root / path).unlink(missing_ok=True)
+                        self.commands([path], deleted=deleted)
+                        checks = dict(prepush.checks([path], AVAILABLE, "BASE", mode))
+                        self.assertIn("tests/ci: " + consumer, checks)
+                        self.assertIn(consumer, checks["tests/ci: " + consumer])
+
     def test_docs_only_select_whitespace(self):
         self.assertEqual(self.commands(["AGENTS.md"]), {"whitespace": WHITESPACE})
 

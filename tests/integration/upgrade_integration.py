@@ -1003,50 +1003,40 @@ def mysql_restart_cases(root, binary, releases):
 
 
 def adopted_replacement_case(root, binary, releases):
-    """A different retained installation of the target VERSION may win start."""
-    for attempt in range(6):
-        with case(root, binary, releases, f"adopted-replacement-{attempt}") as c:
-            old, previous = c.start_host()
-            alternate = c.build("concurrent-same-version")
-            c.select(c.build("selected-target"))
-            c.binary = c.link
-            external, failures = [], []
-
-            def compete():
-                try:
-                    old.wait(timeout=20)
-                    child, ready = start_ready_process(
-                        [alternate / "bin/rui", "host", "serve", "--store", c.store,
-                         "--set", "providers={}", "--set", "execution.activeCapacity=" + previous["active_capacity"]],
-                        env=c.env, isolate_providers=False)
-                    c.hosts.append(child)
-                    external.append((child, ready))
-                except host_process.HostStartError as err:
-                    # Losing this real Store-lock race is expected. Other
-                    # startup failures are not evidence that adoption worked.
-                    if '"code":"store_locked"' not in str(err):
-                        failures.append(err)
-                except Exception as err:
-                    failures.append(err)
-
-            competitor = threading.Thread(target=compete)
-            competitor.start()
-            try:
-                output = c.run("host", "restart", "--all", timeout=60)
-            finally:
-                competitor.join(timeout=25)
-            assert not competitor.is_alive() and not failures, failures
-            assert "1 restarted" in output, output
-            if external:
-                child, ready = external[0]
-                current = c.status()
-                assert current["instance"] == ready["instance"] != previous["instance"], (current, previous)
-                assert peer_pid(c.ready["socket"]) == child.pid
-                assert os_semantics.process_executable(child.pid) == alternate / "bin/rui"
-                assert os_semantics.process_executable(child.pid) != c.link.resolve()
-                print("upgrade native: adopted same-target-version owner verified (different managed executable)", flush=True)
-                return
-    raise AssertionError("no external starter won the Store-lock race; adoption witness was not reached")
+    """Retire, hold our starter, install an external owner, then adopt it."""
+    with case(root, binary, releases, "adopted-replacement") as c:
+        old, previous = c.start_host()
+        alternate = c.build("concurrent-same-version")
+        c.select(c.build("selected-target"))
+        c.binary = c.link
+        gate = c.root / "before-start.gate"
+        gate.touch()
+        c.env["RUI_TEST_UPGRADE_BEFORE_START_GATE"] = str(gate)
+        restart = subprocess.Popen([str(c.binary), "host", "restart", "--all"], env=c.env,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        c.children.append(restart)
+        try:
+            wait_for(lambda: gate.with_name(gate.name + ".entered").exists(),
+                     "coordinator held after retirement and before its starter", timeout=20)
+            assert gate.exists() and restart.poll() is None
+            assert old.poll() is not None and c.status()["status"] == "unavailable"
+            child, ready = start_ready_process(
+                [alternate / "bin/rui", "host", "serve", "--store", c.store,
+                 "--set", "providers={}", "--set", "execution.activeCapacity=" + previous["active_capacity"]],
+                env=c.env, isolate_providers=False)
+            c.hosts.append(child)
+            assert c.status()["instance"] == ready["instance"] != previous["instance"]
+            assert gate.exists() and restart.poll() is None, "our starter was not held until the external Host was ready"
+        finally:
+            gate.unlink(missing_ok=True)
+        output = c.finish_upgrade(restart)
+        assert "1 restarted" in output, output
+        current = c.status()
+        assert current["instance"] == ready["instance"] != previous["instance"], (current, previous)
+        assert peer_pid(c.ready["socket"]) == child.pid
+        assert os_semantics.process_executable(child.pid) == alternate / "bin/rui"
+        assert os_semantics.process_executable(child.pid) != c.link.resolve()
+        print("upgrade native: deterministic adopted same-target-version owner verified (different managed executable)", flush=True)
 
 
 def known_target_case(root, binary, releases, baseline, known_bad):

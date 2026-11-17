@@ -185,17 +185,7 @@ pub fn install(init: std.process.Init, allocator: std.mem.Allocator, checked: *c
 }
 
 fn waitAfterPublication(init: std.process.Init, cancellation: ?*const client.Cancellation) !void {
-    if (init.environ_map.get("RUI_TEST_UPGRADE_AFTER_PUBLICATION_GATE")) |gate| {
-        while (true) {
-            try process.check(cancellation);
-            const file = std.Io.Dir.cwd().openFile(init.io, gate, .{}) catch |err| {
-                if (err == error.FileNotFound) break;
-                return err;
-            };
-            file.close(init.io);
-            try std.Io.sleep(init.io, .fromMilliseconds(10), .awake);
-        }
-    }
+    return process.waitForTestGate(init.arena.allocator(), init.io, init.environ_map.get("RUI_TEST_UPGRADE_AFTER_PUBLICATION_GATE"), cancellation, .fromSeconds(300));
 }
 
 pub fn compatible(result: *const Result) bool {
