@@ -1296,7 +1296,8 @@ while True:
         self.assertIn("code · file", states["slash"]["absent"])
         escape = states["draft-chat-choice-escape"]
         self.assertNotIn("Draft lifecycle", escape["expect"])  # Sidebar is hidden at 46 columns.
-        self.assertIn("alt+i info", escape["expect"])
+        self.assertIn("gpt-6.1-sol", escape["expect"])
+        self.assertIn("alt+i info", escape["absent"])
         self.assertEqual(escape["steps"][-1], {"gone": "enter pick"})
         for suffix, theme, ink in (("", "night", "#a9b6ec"), ("-day", "day", "#1f2d6b")):
             with self.subTest(theme=theme):
@@ -2117,19 +2118,40 @@ while True:
         for name in ("chat-no-new-session", "chat-sidebar-rows"):
             state = states[name]
             self.assertIn("+ New Session", state["absent"])
-            self.assertEqual(state["expect_last"], "alt+i info")
+            self.assertEqual(state["expect_last"], "gpt-6.1-sol")
+            self.assertIn("alt+i info", state["absent"])
         self.assertEqual(states["chat-no-new-session"]["sizes"][0], (140, 40))
         self.assertIn({"wait": "Schema migration"}, states["chat-no-new-session"]["steps"])
         self.assertEqual(states["chat-sidebar-rows"]["sizes"], [(140, 40)])
         for label in ("Schema migration", "Sidebar chat", "Batch job"):
             self.assertIn(label, states["chat-sidebar-rows"]["expect"])
         failure = self.helper["frame_row_failure"]
-        state = {"expect_last": "alt+i info"}
+        state = {"expect_last": "gpt-6.1-sol"}
         for height in (30, 40):
-            good = "\n" * (height - 1) + "Sidebar chat  alt+i info\n"
+            good = "\n" * (height - 1) + "gpt-6.1-sol · high\n"
             self.assertIsNone(failure(state, good))
             self.assertIsNotNone(failure(state, good + "\n"))
             self.assertIsNotNone(failure(state, good + "   Settings  │\n"))
+
+    def test_chat_footer_frames_hide_permanent_info_and_unused_context(self):
+        states = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))["states"]
+        for state in states:
+            with self.subTest(state=state["name"]):
+                self.assertNotIn("alt+i info", state["expect"])
+                self.assertNotEqual(state.get("expect_last"), "alt+i info")
+                for step in state["steps"]:
+                    if "wait" in step:
+                        self.assertNotIn("alt+i info", step["wait"])
+                        self.assertNotRegex(step["wait"], r"\d+% left")
+        effort = next(state for state in states if state["name"] == "chat-effort")
+        self.assertIn({"wait": "gpt-6.1-sol · low"}, effort["steps"])
+        fresh = next(state for state in states if state["name"] == "chat-footer-below-half")
+        self.assertEqual(fresh["sizes"], [(140, 40), (46, 30)])
+        self.assertEqual(fresh["open"], "Context budget witness")
+        self.assertEqual(fresh["cast"][0]["messages"], ["Check context budget"])
+        self.assertEqual(fresh["expect_last"], "gpt-6.1-sol")
+        for text in ("context left", "100% left", "alt+i info"):
+            self.assertIn(text, fresh["absent"])
 
     def test_stop_waits_for_a_running_bash_not_an_approval(self):
         running = self.helper["frame_bash_running"]
@@ -2738,7 +2760,7 @@ class UpgradeFramesTest(unittest.TestCase):
                 self.assertIn("Upgraded to {upgrade_version}", before["expect"])
                 self.assertNotIn("Upgraded to ", before["absent"])
                 self.assertNotIn("alt+i info", before["expect"])
-                after_only = "Upgrade witness alt+i info"
+                after_only = "› Upgrade witness\n gpt-6.1-sol · low"
                 self.assertFalse(all(text in after_only for text in before["expect"]))
             else:
                 before = state["comparison"]["before"]
@@ -2754,8 +2776,12 @@ class UpgradeFramesTest(unittest.TestCase):
         reason = "Update failed: Couldn't reach GitHub"
         for before in (False, True):
             marker = "! Couldn't reach GitHub; nothing changed" if before else reason
-            screens = [marker + "\nReading this Session… alt+i info", marker + "\nHost paused alt+i info",
-                       marker + ("\n" if before else "\nalt+i info")]
+            chat = "  ──────────────\n  › Type a task\n  ──────────────\n gpt-6.1-sol · low · ~/code/rui"
+            screens = [marker + "\nReading this Session…\n" + chat,
+                       marker + "\nHost paused\n" + chat,
+                       marker + "\nSettings\n gpt-6.1-sol · low",
+                       marker + "\n" + chat.replace("Type a task", "wrong chat draft"),
+                       marker + "\n" + chat]
             observed = []
             def wait(predicate, _description):
                 for index, plain in enumerate(screens):
@@ -2765,7 +2791,7 @@ class UpgradeFramesTest(unittest.TestCase):
                 self.fail("settled failure conversation was not accepted")
             with self.subTest(before=before):
                 settle(types.SimpleNamespace(wait=wait), before)
-                self.assertEqual(observed, [0, 1, 2])
+                self.assertEqual(observed, [0, 1, 2, 3, 4])
         scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
         for state in (entry for entry in scenario["states"] if entry.get("upgrade") == "failure"):
             self.assertNotIn("expect_last", state)
@@ -2792,6 +2818,76 @@ class UpgradeFramesTest(unittest.TestCase):
                     self.assertIsNotNone(self.helper["frame_row_failure"](state, "Settings\nrui 7 MB " + reason))
                     self.assertIsNotNone(self.helper["frame_row_failure"](state, "Settings\nUpdate failed" + suffix))
                     self.assertIsNone(self.helper["frame_row_failure"](state, f"Settings{suffix}\n7 MB {reason}{suffix}"))
+
+    def test_chat_readiness_requires_settled_composer_and_footer_in_chat_pane(self):
+        ready = self.helper["frame_chat_ready"]
+        for split in (False, True):
+            for prompt, rule in (("›", "─"), (">", "-")):
+                for model in ("gpt-6.1-sol", "gpt-5.5", "vendor/model-v2"):
+                    with self.subTest(split=split, prompt=prompt, model=model):
+                        prefix = " Upgrade witness │" if split else ""
+                        lines = [prefix + " › Upgrade witness", prefix + " " + rule * 30,
+                                 prefix + " " + prompt + " retained draft", prefix + " " + rule * 30,
+                                 prefix + f" {model} · low"]
+                        chat = "\n".join(lines)
+                        self.assertTrue(ready(chat))
+                        self.assertFalse(ready(chat, empty=True))
+                        self.assertTrue(ready(chat.replace("retained draft", "Type a task"), empty=True))
+                        self.assertTrue(ready(chat, "Upgrade witness"))
+                        self.assertFalse(ready(chat, "Different witness"))
+                        for stale in ("Opening…", "Reading this Session…", "Host paused", "Notifications"):
+                            self.assertFalse(ready(chat + "\n" + stale))
+                        self.assertTrue(ready("\n".join(lines[:-1] + [prefix + " low"])))
+                        self.assertTrue(ready("\n".join(lines[:-1] + [prefix + " Update failed"])))
+                        self.assertFalse(ready("\n".join(lines[:-1] + [prefix + " "])))
+                        multiline = lines[:3] + [prefix + "   another line"] + lines[3:]
+                        self.assertTrue(ready("\n".join(multiline), "Upgrade witness"))
+                        self.assertFalse(ready("\n".join(multiline), empty=True))
+                        self.assertFalse(ready("\n".join(lines[:1] + [prefix + " " + rule * 30,
+                                                    prefix + " " + prompt + " Upgrade witness"] + lines[3:])
+                                               .replace("› Upgrade witness", "› Other chat"), "Upgrade witness"))
+                        self.assertFalse(ready("\n".join(lines[:2] + [prefix + " no composer"] + lines[3:])))
+                        if split:
+                            wrong = "\n".join(line.replace("› Upgrade witness", "› Another chat") for line in lines)
+                            self.assertTrue(ready(wrong))
+                            self.assertFalse(ready(wrong, "Upgrade witness"))
+        self.assertFalse(ready("Upgrade witness\nSettings\ngpt-6.1-sol · low"))
+        self.assertTrue(ready(" Upgrade witness │ details\n ──────\n › draft\n ──────\n model · low", "Upgrade witness"))
+        self.assertTrue(ready(" 界 │ Upgrade witness │ detail\n    │ ──────\n    │ › draft\n    │ ──────\n    │ model · low", "Upgrade witness"))
+
+    def test_upgrade_relaunch_waits_for_the_same_settled_chat_on_both_sides(self):
+        drive = self.helper["frame_drive_upgrade"]
+        marker = "Upgrade witness"
+        def chat(witness=marker, stale=""):
+            return (f" {witness}\n ──────────────\n › retained draft\n ──────────────\n"
+                    f" gpt-6.1-sol · low{stale}")
+        for before in (False, True):
+            version = "0.78.10000"
+            notice = f"\nUpgraded to {version}" if before else ""
+            screens = [chat("Another chat") + notice, chat(stale="\nReading this Session…") + notice,
+                       chat() + ("" if before else "\nNotifications"), chat() + notice]
+            observed = []
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                selected = root / ".local/bin/rui"
+                process = types.SimpleNamespace(pid=42)
+                def wait(predicate, _description, **_kwargs):
+                    for index, plain in enumerate(screens):
+                        observed.append(index)
+                        if predicate(types.SimpleNamespace(completed=plain)):
+                            return
+                    self.fail("settled same-chat relaunch was not accepted")
+                terminal = types.SimpleNamespace(wait=wait, mouse=lambda _event: None, process=process)
+                run = types.SimpleNamespace(home=root, store=root / "store",
+                                            meta={"upgrade_previous_instance": "old"},
+                                            rui_cmd=lambda *_args: types.SimpleNamespace(returncode=0, stderr="", stdout='{"instance":"new"}'))
+                state = {"upgrade": "chat", "open": marker, "comparison_side": "before" if before else "after"}
+                os_semantics = types.SimpleNamespace(process_executable=lambda _pid: selected.resolve())
+                with self.subTest(before=before), patch.dict(sys.modules, {"os_semantics": os_semantics}), \
+                        patch.dict(drive.__globals__, {"frame_wait": lambda *_a, **_k: None,
+                                                       "frame_steps": lambda *_a, **_k: None}):
+                    drive(run, terminal, state, (None, None, version))
+                self.assertEqual(observed, [0, 1, 2, 3])
 
     def test_narrow_upgrade_resize_reveals_the_list_without_closing_chat_specimens(self):
         reveal = self.helper["frame_upgrade_viewport"]
