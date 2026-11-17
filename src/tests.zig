@@ -1,6 +1,7 @@
 test {
     _ = @import("InputCapture.zig");
     _ = @import("host_start.zig");
+    _ = @import("host_launch_transfer.zig");
     _ = @import("server_mcp_settings.zig");
     _ = @import("testing/host_settings.zig");
     _ = @import("relaunch_handoff.zig");
@@ -26,6 +27,7 @@ test {
     _ = @import("widget_style.zig");
     _ = @import("InputArea.zig");
     _ = @import("GroupedList.zig");
+    _ = @import("GroupedList_press_tests.zig");
     _ = @import("OverviewLines.zig");
     _ = @import("Palette.zig");
     _ = @import("skill_palette_tests.zig");

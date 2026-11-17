@@ -97,6 +97,7 @@ const SubjectTypes = struct {
         action_id: u64,
         decision: protocol.PermissionDecision,
     };
+    pub const action_stop = action_background;
     pub const action_background = struct {
         session: protocol.Bounded(protocol.max_session_bytes),
         action_id: u64,
@@ -119,6 +120,7 @@ pub fn MutationResult(comptime kind: command_spec.CommandKind) type {
         .model_interruption => command_reply.ModelInterruptionReply,
         .permission_decision => command_reply.PermissionDecisionReply,
         .action_background => @import("action_control.zig").Reply,
+        .action_stop => @import("action_control.zig").StopReply,
     };
 }
 
@@ -144,7 +146,7 @@ fn ControlRenderer(comptime kind: command_spec.CommandKind) type {
                 .session_stop, .session_archive, .session_pin => .{subject},
                 .model_interruption => .{ subject.session.slice(), subject.turn_id, subject.operation_id },
                 .permission_decision => .{ subject.session.slice(), subject.action_id, subject.decision },
-                .action_background => .{ subject.session.slice(), subject.action_id },
+                .action_background, .action_stop => .{ subject.session.slice(), subject.action_id },
                 .configure, .message => unreachable,
             };
             try switch (result) {
@@ -154,6 +156,7 @@ fn ControlRenderer(comptime kind: command_spec.CommandKind) type {
                     .session_pin => .{value.pinned},
                     .model_interruption, .permission_decision => .{},
                     .action_background => .{ value.selection.kind, value.selection.position },
+                    .action_stop => .{value.resolution},
                     .configure, .message => unreachable,
                 }),
                 .rejected => |value| response.appendShape(shapes.rejected, .{value.replayed} ++ target ++ .{value.code}),
@@ -239,6 +242,10 @@ pub fn renderFullCommandObservation(
         .session_archive => |archive| if (archive) |value| try response.appendShape(shapes.session_archive, .{ value.archived, value.completion }),
         .model_interruption => |target| try response.appendShape(shapes.model_interruption, .{ target.session.slice(), target.turn_id, target.operation_id }),
         .permission_decision => |permission| try response.appendShape(shapes.permission_decision, .{ permission.action_id, permission.decision }),
+        .action_stop => |selected| {
+            try response.appendShape(shapes.action_target, .{selected.action_id});
+            if (observation.status == .accepted) try response.appendShape(shapes.action_stop, .{selected.resolution});
+        },
         .action_background => |selected| {
             try response.appendShape(shapes.action_target, .{selected.action_id});
             if (selected.selection) |selection| try response.appendShape(shapes.action_selection, .{ selection.kind, selection.position });

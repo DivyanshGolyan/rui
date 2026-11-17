@@ -45,6 +45,7 @@ pub const Command = enum {
     action_inspect,
     action_read,
     action_background,
+    action_stop,
     action_allow,
     action_deny,
     action_read_call_id,
@@ -91,6 +92,7 @@ pub const Command = enum {
             .request_read_result => .{ .resource = .request, .name = "read-result", .description = "Stream the originally bound saved answer, skill refusal or reload acknowledgement, without waiting or substituting newer Session work. Use HANDLE or --store and --key.", .options = destination ++ key, .positional = "HANDLE", .positional_conflicts = saved_identity, .requires = &.{&.{ "", "key", "key-hex" }} },
             .request_list => .{ .resource = .request, .name = "list", .description = "Enumerate local generated captures as JSON. This is not Store history or guaranteed correlation after all output from concurrent calls is lost." },
             .action_inspect => .{ .resource = .action, .name = "inspect", .description = "Read the exact saved Action proposal before allowing or denying it. Inspection grants nothing.", .options = destination ++ session ++ action, .requires = need_action },
+            .action_stop => .{ .resource = .action, .name = "stop", .description = "Stop one owned Action. Preserve its existing Resolution if ended; read completion with action read. Reuse the captured request handle to recover a lost reply.", .options = destination ++ session ++ action ++ capture, .mutation = true, .requires = need_action },
             .action_background => .{ .resource = .action, .name = "background", .description = "Release the original tool call with an immutable receipt and let this same Action continue under its Session. Read completion with action read; no automatic final input or model wake is delivered.", .options = destination ++ session ++ action ++ capture, .mutation = true, .requires = need_action },
             .action_allow => .{ .resource = .action, .name = "allow", .description = "Admit permission to run this exact inspected Action once; the Host revalidates its target.", .options = destination ++ session ++ action ++ capture, .mutation = true, .requires = need_action },
             .action_deny => .{ .resource = .action, .name = "deny", .description = "Admit denial of this exact inspected Action.", .options = destination ++ session ++ action ++ capture, .mutation = true, .requires = need_action },
@@ -100,7 +102,7 @@ pub const Command = enum {
             .host_start => .{ .resource = .host, .name = "start", .description = "Start or connect to a managed Host. An already-running Host keeps its original settings.", .options = serve_grammar.settings_options, .retired_options = serve_grammar.retired_options },
             .host_set => .{ .resource = .host, .name = "set", .description = "Save one Host setting. @FILE reads a JSON value from a file.", .options = serve_grammar.host_destination, .positional = "PATH", .positional_tail = "VALUE", .requires = &.{ &.{""}, &.{"#2"} } },
             .host_unset => .{ .resource = .host, .name = "unset", .description = "Remove one saved Host setting, restoring its default.", .options = serve_grammar.host_destination, .positional = "PATH", .requires = &.{&.{""}} },
-            .host_settings => .{ .resource = .host, .name = "settings", .description = "Show saved Host settings with defaults, list --paths, or --check the effective settings without starting.", .options = serve_grammar.settings_options ++ &[_]Option{ flag("paths"), flag("check") }, .conflicts = &.{.{ .code = .host_settings_modes_conflict, .a = "paths", .b = "check" }} },
+            .host_settings => .{ .resource = .host, .name = "settings", .description = "Show saved Host settings with defaults, list --paths, or --check the effective settings without starting.", .options = serve_grammar.settings_options ++ &[_]Option{ flag("paths"), flag("check"), cli_grammar.hiddenFlag(@import("host_settings_handoff.zig").check_option) }, .conflicts = &.{.{ .code = .host_settings_modes_conflict, .a = "paths", .b = "check" }} },
             .host_pause => .{ .resource = .host, .name = "pause", .description = std.fmt.comptimePrint("Shut down the Host, interrupting all work in this Store. Saved work resumes when a Host starts again, including on the next rui; to end a Session's work for good, use rui session stop. Waits up to {d} seconds for the Host to release the Store and reports retirement confirmed or unconfirmed. Retry lost acknowledgment with the original --instance only.", .{product_defaults.host_shutdown_seconds}), .options = destination ++ &[_]Option{value("instance", "HEX")} },
             .host_status => .{ .resource = .host, .name = "status", .description = "Read protected Host readiness and capabilities without starting it.", .options = destination },
             .host_restart => .{ .resource = .host, .name = "restart", .description = "Restart every eligible running Host of this user on the selected installed build, one at a time. Saved work resumes; unsupported Hosts are left running with a reason. Requires --all.", .options = &.{flag("all")}, .requires = &.{&.{"all"}} },
@@ -571,7 +573,7 @@ test "typed choices share enum names with help and refuse unknown values" {
         .{ .command = .session_start, .name = "provider", .choices = &.{ "codex", "openai", "chatgpt" } },
         .{ .command = .session_configure, .name = "reasoning-effort", .choices = &.{ "none", "low", "medium", "high", "xhigh", "max", "default" } },
         .{ .command = .defaults_configure, .name = "notifications", .choices = &.{ "on", "off" } },
-        .{ .command = .request_recover, .name = "kind", .choices = &.{ "configure", "message", "session-stop", "session-archive", "model-interruption", "permission-decision", "session-pin", "action-background" } },
+        .{ .command = .request_recover, .name = "kind", .choices = &.{ "configure", "message", "session-stop", "session-archive", "model-interruption", "permission-decision", "session-pin", "action-background", "action-stop" } },
         .{ .command = .session_inspect, .name = "profile", .choices = &.{ "current", "full" } },
         .{ .command = .session_inspect, .name = "failed-response", .choices = &.{ "body", "metadata" } },
     };
@@ -704,7 +706,7 @@ test "Session IDs in positional argv name the missing selector flag" {
     _ = try expectRefusal(.session_send, &.{ "--to", "k7m2qx", "v948er" }, .message_not_stdin, "v948er");
     _ = try expectRefusal(.session_send, &.{ "--record", "--to", "v948er" }, .session_id_needs_to, "v948er");
     _ = try expectRefusal(.session_send, &.{"message text"}, .message_not_stdin, "message text");
-    inline for (.{ Command.session_inspect, Command.session_stop, Command.session_archive, Command.session_unarchive, Command.session_pin, Command.session_unpin, Command.session_interrupt_model, Command.session_read_conversation, Command.action_allow, Command.action_deny, Command.action_background }) |command| {
+    inline for (.{ Command.session_inspect, Command.session_stop, Command.session_archive, Command.session_unarchive, Command.session_pin, Command.session_unpin, Command.session_interrupt_model, Command.session_read_conversation, Command.action_allow, Command.action_deny, Command.action_background, Command.action_stop }) |command| {
         _ = try expectRefusal(command, &.{"v948er"}, .session_id_needs_session, "v948er");
     }
 }

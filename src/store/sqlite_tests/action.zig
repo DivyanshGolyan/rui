@@ -181,7 +181,8 @@ test "a stale Action settlement leaves the Store byte-identical" {
     {
         const entry = try store_core.enter(&storage, .none);
         defer entry.release();
-        var interposed: Interposed = .{ .inner = .{ .input = .{ .binding = open, .code = .failed, .result = "A result the guard refuses." } }, .storage = &storage };
+        var saving = try @import("../domain/content_parts.zig").Saving.init(.{ .text = .{ .slice = "A result the guard refuses." } });
+        var interposed: Interposed = .{ .inner = .{ .input = .{ .binding = open, .code = .failed, .result = "A result the guard refuses.", .saving = &saving, .io = storage.io } }, .storage = &storage };
         try std.testing.expectError(error.StaleActionAttemptBinding, entry.finishTransaction(error{StaleActionAttemptBinding}, .{}, transition.run(&entry, Interposed, &interposed, .{})));
     }
     try std.testing.expect(!storage.isFenced());

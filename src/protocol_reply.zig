@@ -1587,6 +1587,7 @@ pub const CommandObservation = struct {
     permission_target: ?struct { action: u64, decision: protocol.PermissionDecision } = null,
     action_target: ?u64 = null,
     action_selection: ?@import("action_control.zig").Selection = null,
+    resolution_position: ?u64 = null,
 
     pub const ContentReference = mutation_answer.ContentReference;
 
@@ -1664,6 +1665,10 @@ pub const CommandObservation = struct {
         }
         if (self.permission_target) |target| try writer.print(",\"permission_target\":{{\"action\":\"{d}\",\"decision\":\"{s}\"}}", .{ target.action, @tagName(target.decision) });
         if (self.action_target) |action| try writer.print(",\"action_target\":{{\"action\":\"{d}\"}}", .{action});
+        if (self.kind == .action_stop and self.status == .accepted) {
+            try writer.writeAll(",\"resolution_position\":");
+            if (self.resolution_position) |p| try writer.print("\"{d}\"", .{p}) else try writer.writeAll("null");
+        }
         if (self.action_selection) |selection| try writer.print(",\"action_selection\":{{\"kind\":\"{s}\",\"position\":\"{d}\"}}", .{ @tagName(selection.kind), selection.position });
         try writer.writeByte('}');
     }
@@ -1765,6 +1770,7 @@ pub const CommandObservation = struct {
         if (comptime @hasField(Facts, "completion")) observed.completion = std.meta.stringToEnum(protocol.SessionStopCompletion, facts.completion.status.slice()) orelse return error.InvalidObservation;
         if (comptime @hasField(Facts, "interruption_target")) observed.interruption_target = .{ .session = facts.interruption_target.session.value, .turn = try decimalId(facts.interruption_target.turn, true), .operation = try decimalId(facts.interruption_target.operation, true) };
         if (comptime @hasField(Facts, "permission_target")) observed.permission_target = .{ .action = try decimalId(facts.permission_target.action, true), .decision = std.meta.stringToEnum(protocol.PermissionDecision, facts.permission_target.decision.slice()) orelse return error.InvalidObservation };
+        if (comptime @hasField(Facts, "resolution_position")) observed.resolution_position = if (facts.resolution_position) |p| try decimalId(p, false) else null;
         if (comptime @hasField(Facts, "action_target")) observed.action_target = try decimalId(facts.action_target.action, true);
         if (comptime @hasField(Facts, "action_selection")) observed.action_selection = .{ .kind = std.meta.stringToEnum(@FieldType(@import("action_control.zig").Selection, "kind"), facts.action_selection.kind.slice()) orelse return error.InvalidObservation, .position = try decimalId(facts.action_selection.position, false) };
         try observed.validate();
@@ -3217,6 +3223,8 @@ fn observationFieldSample() !CommandObservation {
     sample.permission_target = .{ .action = 29, .decision = .allow_once };
     sample.action_target = 29;
     sample.action_selection = .{ .kind = .background, .position = 31 };
+    sample.kind = .action_stop;
+    sample.resolution_position = 31;
     return sample;
 }
 
@@ -3273,6 +3281,8 @@ test "keyed observation validates every operation shape and binding" {
         .{ "model_interruption", ",\"interruption_target\":{\"session\":\"k7m2qx\",\"turn\":\"3\",\"operation\":\"7\"}", ",\"interruption_target\":{\"session\":\"k7m2qx\",\"turn\":\"0\",\"operation\":\"0\"}" },
         .{ "permission_decision", ",\"permission_target\":{\"action\":\"29\",\"decision\":\"allow_once\"}", ",\"permission_target\":{\"action\":\"0\",\"decision\":\"deny\"}" },
         .{ "action_background", ",\"action_target\":{\"action\":\"29\"},\"action_selection\":{\"kind\":\"background\",\"position\":\"31\"}", ",\"action_target\":{\"action\":\"29\"}" },
+        .{ "action_stop", ",\"action_target\":{\"action\":\"29\"},\"resolution_position\":null", ",\"action_target\":{\"action\":\"29\"}" },
+        .{ "action_stop", ",\"action_target\":{\"action\":\"29\"},\"resolution_position\":\"31\"", ",\"action_target\":{\"action\":\"29\"}" },
     }) |case| {
         const accepted = prefix ++ "\"kind\":\"" ++ case[0] ++ "\",\"status\":\"accepted\"" ++ case[1] ++ "}}";
         const observed = try CommandObservation.parse(.{ .status = 200, .body = accepted }, "k");

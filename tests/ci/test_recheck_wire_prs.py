@@ -587,7 +587,7 @@ class AdapterTest(unittest.TestCase):
         workflow = (Path(__file__).resolve().parents[2] / ".github/workflows/check.yml").read_text()
         policy, admission = workflow_job(workflow, "policy"), workflow_job(workflow, "admission")
         self.assertIn("fetch-depth: 0", policy)
-        self.assertIn("unittest.defaultTestLoader.discover('tests/ci')", policy)
+        self.assertIn('python3 -B tests/ci/policy_suite.py --skips "$SKIPS"', policy)
         needs = re.search(r"needs: \[([^\]]+)\]", admission)[1].split(", ")
         self.assertIn("policy", needs)
 

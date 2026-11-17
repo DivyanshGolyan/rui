@@ -1083,3 +1083,313 @@ test "built-in instructions contribute to unanchored pressure but not eligible u
         }
     }.run);
 }
+
+fn compoundPressureForTesting(storage: *Store, session: []const u8) !@import("../../turn_policy.zig").CompactionFacts {
+    const domain = @import("../domain/model_admission.zig");
+    const mapped = try @import("../../os/pages.zig").Mapped(domain.PartsPressure.Read).map();
+    defer mapped.unmap();
+    mapped.value.* = .{};
+    defer mapped.value.deinit();
+    while (true) {
+        if (try compoundPressureReadForTesting(storage, session, mapped.value)) |facts| return facts;
+        while (!try storage.advancePartsPressure(mapped.value)) {}
+    }
+}
+
+fn compoundPressureReadForTesting(storage: *Store, session: []const u8, parts: *@import("../domain/model_admission.zig").PartsPressure.Read) !?@import("../../turn_policy.zig").CompactionFacts {
+    const entry = try store_core.enter(storage, .none);
+    defer entry.release();
+    var access: @import("../access.zig").Access(.read, error{}) = .open(&entry);
+    defer access.deinit();
+    const domain = @import("../domain/model_admission.zig");
+    var read = domain.CompactionRead.init(session, std.math.maxInt(i64), .codex, "model-a", model_capability.compactionPolicy("model-a", 1000, 0));
+    read.pressure = if (parts.ready) parts else null;
+    while (read.queue(&access)) {
+        try @import("../access.zig").runAs(&access, error.CorruptStore);
+        read.advance(&access) catch |err| {
+            if (err != error.PartsPressureRequired) return err;
+            const coverage = read.bytes_args;
+            parts.deinit();
+            parts.init(coverage.session, coverage.covered, coverage.frontier, coverage.results, std.math.maxInt(i64));
+            parts.boundary = read.boundary;
+            return null;
+        };
+    }
+    return read.facts;
+}
+
+test "compound pressure counts Text bytes and keeps unknown images separate in report and admission" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            const policy = @import("../../turn_policy.zig");
+            const png = @embedFile("../../codecs/fixtures/image-input/pixel.png");
+            const filler: [64]u8 = @splat('t');
+            for ([_]usize{ 0, 39, 40, 41, 64 }) |length| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                const session = try configureTestSession(&storage, "compound-pressure-config");
+                var patch: wire_request.ConfigureCommand = .{};
+                try patch.key.set("compound-pressure-policy");
+                try patch.session.set(session.slice());
+                patch.configuration.compaction_trigger.state = .value;
+                try patch.configuration.compaction_trigger.value.set("1000");
+                patch.configuration.output_reservation.state = .value;
+                try patch.configuration.output_reservation.value.set("0");
+                try std.testing.expect(try storage.configure(&patch, .{}) == .accepted);
+                try submitTestMessage(&storage, &tmp, "compound-pressure-first", "compound-pressure-first", session.slice(), "first");
+                const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                try store_testing.submitTestMessageParts(&storage, &tmp, "compound-pressure-next", session.slice(), &.{
+                    .{ .bytes = filler[0..length] },
+                    .{ .bytes = png, .kind = .{ .image = .{} } },
+                });
+                try settleCallsForTestingWithFaults(&storage, &tmp, first, "compound-pressure-answer", &.{}, .{}, "{\"input_tokens\":990,\"output_tokens\":0}");
+                const facts = try compoundPressureForTesting(&storage, session.slice());
+                try std.testing.expectEqual(@as(u64, length), facts.uncovered_bytes);
+                try std.testing.expectEqual(@as(u64, 1), facts.unknown_images);
+                try std.testing.expectEqual(@as(?u64, 990 + length / 4), policy.comparedPressure(facts));
+                const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                try std.testing.expectEqual(if (length >= 40) ModelOperationKind.compaction else ModelOperationKind.assistant_response, try storage.modelOperationKind(next));
+                if (length < 40) {
+                    const projected = try compoundPressureForTesting(&storage, session.slice());
+                    try std.testing.expectEqual(facts.uncovered_bytes, projected.uncovered_bytes);
+                    try std.testing.expectEqual(facts.unknown_images, projected.unknown_images);
+                }
+            }
+        }
+    }.run);
+}
+
+fn configureCompoundPressureForTesting(storage: *Store, tmp: *std.testing.TmpDir, image_only: bool) !protocol.Bounded(protocol.max_session_bytes) {
+    const session = try configureTestSession(storage, "bounded-pressure-config");
+    var patch: wire_request.ConfigureCommand = .{};
+    try patch.key.set("bounded-pressure-policy");
+    try patch.session.set(session.slice());
+    patch.configuration.compaction_trigger.state = .value;
+    try patch.configuration.compaction_trigger.value.set("1000");
+    patch.configuration.output_reservation.state = .value;
+    try patch.configuration.output_reservation.value.set("0");
+    try std.testing.expect(try storage.configure(&patch, .{}) == .accepted);
+    try submitTestMessage(storage, tmp, "bounded-pressure-first", "bounded-pressure-first", session.slice(), "first");
+    const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const text: [39]u8 = @splat('t');
+    const parts = [_]store_testing.MessagePart{
+        .{ .bytes = &text },
+        .{ .bytes = @embedFile("../../codecs/fixtures/image-input/pixel.png"), .kind = .{ .image = .{} } },
+    };
+    try store_testing.submitTestMessageParts(storage, tmp, "bounded-pressure-compound", session.slice(), parts[if (image_only) 1 else 0..]);
+    try settleCallsForTestingWithFaults(storage, tmp, first, "bounded-pressure-answer", &.{}, .{}, "{\"input_tokens\":990,\"output_tokens\":0}");
+    return session;
+}
+
+test "bounded compound admission freezes its pending prefix while later input arrives at every step" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try configureCompoundPressureForTesting(&storage, &tmp, false);
+            const Prep = @import("../domain/model_admission.zig").AdmissionPreparation;
+            const mapped = try @import("../../os/pages.zig").Mapped(Prep).map();
+            defer mapped.unmap();
+            const preparation = mapped.value;
+            preparation.init();
+            defer preparation.deinit();
+            try std.testing.expect(try storage.admitModelAttemptStep(.message, .{}, null, preparation) == .progress);
+            const cutoff = preparation.read.cutoff;
+            var step: usize = 0;
+            while (!preparation.pendingReady()) : (step += 1) {
+                try std.testing.expect(step < 64);
+                var meter: shared_fixtures.RoundMeter = .{ .storage = &storage };
+                meter.start();
+                try std.testing.expect(try storage.admitModelAttemptStep(.message, .{}, null, preparation) == .progress);
+                meter.stop(.advancePartsPressure);
+                const work = meter.measured.get(.advancePartsPressure).?;
+                try std.testing.expect(work.rounds + work.content_rounds <= 1);
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_operation WHERE session_ref=?1", .{session.slice()}));
+                var key_buffer: [64]u8 = undefined;
+                const key = try std.fmt.bufPrint(&key_buffer, "bounded-pressure-later-{d}", .{step});
+                try submitTestMessage(&storage, &tmp, key, key, session.slice(), "later");
+            }
+            const result = try storage.admitModelAttemptStep(.message, .{}, null, preparation);
+            try std.testing.expect(result == .done and result.done != null);
+            const binding = result.done.?.permit.binding;
+            try std.testing.expectEqual(ModelOperationKind.assistant_response, try storage.modelOperationKind(binding));
+            try std.testing.expectEqual(cutoff, try store_testing.queryU64(&storage, "SELECT input_cutoff FROM model_operation WHERE operation_id=?1", .{binding.operation_id}));
+            try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, "SELECT count(*) FROM conversation_entry WHERE session_ref=?1 AND entry_kind=1", .{session.slice()}));
+            try std.testing.expect(!preparation.pending() and preparation.kind == null and preparation.read.cursor == null);
+        }
+    }.run);
+}
+
+test "bounded compound admission invalidates revised and stopped work and releases cancelled Cursor storage" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            const Change = enum { revision, stop, cancel };
+            for (std.enums.values(Change)) |change| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                const session = try configureCompoundPressureForTesting(&storage, &tmp, false);
+                const Prep = @import("../domain/model_admission.zig").AdmissionPreparation;
+                const mapped = try @import("../../os/pages.zig").Mapped(Prep).map();
+                defer mapped.unmap();
+                const preparation = mapped.value;
+                preparation.init();
+                defer preparation.deinit();
+                try std.testing.expect(try storage.admitModelAttemptStep(.message, .{}, null, preparation) == .progress);
+                const revision = preparation.revision;
+                if (change == .cancel) {
+                    while (preparation.read.cursor == null) try std.testing.expect(try storage.admitModelAttemptStep(.message, .{}, null, preparation) == .progress);
+                    preparation.deinit();
+                    try std.testing.expect(!preparation.pending() and preparation.read.cursor == null);
+                    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_operation WHERE session_ref=?1", .{session.slice()}));
+                    continue;
+                }
+                while (!preparation.pendingReady()) try std.testing.expect(try storage.admitModelAttemptStep(.message, .{}, null, preparation) == .progress);
+                if (change == .stop) {
+                    var command = try completeSessionStop("bounded-pressure-stop", session.slice());
+                    try std.testing.expect(storage.stopSession(&command, .{}) == .accepted);
+                    const result = try storage.admitModelAttemptStep(.message, .{}, null, preparation);
+                    try std.testing.expect(result == .done and result.done == null);
+                    try std.testing.expect(!preparation.pending());
+                } else {
+                    var patch: wire_request.ConfigureCommand = .{};
+                    try patch.key.set("bounded-pressure-revised");
+                    try patch.session.set(session.slice());
+                    patch.configuration.output_reservation.state = .value;
+                    try patch.configuration.output_reservation.value.set("1");
+                    try std.testing.expect(try storage.configure(&patch, .{}) == .accepted);
+                    try std.testing.expect(try storage.admitModelAttemptStep(.message, .{}, null, preparation) == .progress);
+                    try std.testing.expect(preparation.revision > revision and !preparation.pendingReady());
+                    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_operation WHERE session_ref=?1", .{session.slice()}));
+                }
+            }
+        }
+    }.run);
+}
+
+test "canonical compound pressure fences a missing complete index before a pending image can select compaction" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            for ([_]bool{ false, true }) |under_limit| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                const session = try configureCompoundPressureForTesting(&storage, &tmp, true);
+                if (under_limit) {
+                    var patch: wire_request.ConfigureCommand = .{};
+                    try patch.key.set("compound-pressure-under-limit");
+                    try patch.session.set(session.slice());
+                    patch.configuration.compaction_trigger.state = .value;
+                    try patch.configuration.compaction_trigger.value.set("2000");
+                    try std.testing.expect(try storage.configure(&patch, .{}) == .accepted);
+                }
+                const manifest_bytes = try store_testing.queryU64(&storage, "SELECT c.byte_length FROM message_admission m JOIN content c ON c.content_id=m.content_id WHERE m.session_ref=?1 AND c.form=1", .{session.slice()});
+                // The saved usage is 990 tokens. Exercise both a manifest that
+                // would itself cross the byte limit and one that would pass it.
+                const byte_limit: u64 = if (under_limit) 4040 else 40;
+                try std.testing.expectEqual(under_limit, manifest_bytes < byte_limit);
+                try store_testing.exec(&storage, "DELETE FROM content_part WHERE content_id IN (SELECT content_id FROM message_admission WHERE session_ref=?1)", .{session.slice()});
+                try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM content_part", .{}));
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_operation WHERE session_ref=?1", .{session.slice()}));
+                try std.testing.expectError(error.CorruptStore, storage.admitModelAttempt(.message, .{}));
+                try std.testing.expect(storage.isFenced());
+            }
+        }
+    }.run);
+}
+
+test "canonical compound pressure classification cannot overflow a near i64 byte limit" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try configureCompoundPressureForTesting(&storage, &tmp, true);
+            var patch: wire_request.ConfigureCommand = .{};
+            try patch.key.set("compound-pressure-large-trigger");
+            try patch.session.set(session.slice());
+            patch.configuration.compaction_trigger.state = .value;
+            try patch.configuration.compaction_trigger.value.set("3000000000000000000");
+            try std.testing.expect(try storage.configure(&patch, .{}) == .accepted);
+            try store_testing.submitTestMessageParts(&storage, &tmp, "compound-pressure-second-image", session.slice(), &.{
+                .{ .bytes = @embedFile("../../codecs/fixtures/image-input/pixel.png"), .kind = .{ .image = .{} } },
+            });
+            const binding = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
+            try std.testing.expectEqual(ModelOperationKind.assistant_response, try storage.modelOperationKind(binding));
+            try std.testing.expect(!storage.isFenced());
+        }
+    }.run);
+}
+
+test "compound Action Resolution pressure counts Text bytes and images through usage coverage" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            const policy = @import("../../turn_policy.zig");
+            const png = @embedFile("../../codecs/fixtures/image-input/pixel.png");
+            const text: [64]u8 = @splat('r');
+            for ([_]usize{ 0, 39, 40, 41, 64 }) |length| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                const session = try shared_fixtures.configureTestSessionWithMode(&storage, "result-pressure-config", "bypass");
+                var patch: wire_request.ConfigureCommand = .{};
+                try patch.key.set("result-pressure-policy");
+                try patch.session.set(session.slice());
+                patch.configuration.compaction_trigger.state = .value;
+                try patch.configuration.compaction_trigger.value.set("1000");
+                patch.configuration.output_reservation.state = .value;
+                try patch.configuration.output_reservation.value.set("0");
+                try std.testing.expect(try storage.configure(&patch, .{}) == .accepted);
+                try submitTestMessage(&storage, &tmp, "result-pressure-first", "result-pressure-first", session.slice(), "first");
+                const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                const calls = [_]TestingCall{.{
+                    .item_id = "result-item",
+                    .name = "bash",
+                    .encoded_call_id = "result-call",
+                    .decoded_call_id = "result-call",
+                    .encoded_arguments = "{\\\"cmd\\\":\\\"one\\\",\\\"description\\\":\\\"Run command\\\"}",
+                    .decoded_arguments = "{\"cmd\":\"one\",\"description\":\"Run command\"}",
+                }};
+                try settleCallsForTestingWithFaults(&storage, &tmp, first, "result-pressure-output", &calls, .{}, "{\"input_tokens\":990,\"output_tokens\":0}");
+                const selected = (try storage.nextAction(.bash, .fromFree(1, true))).?;
+                const action = (try storage.admitActionAttempt(selected, 30_000, .{})).?.permit.binding;
+                try store_testing.settleTestActionParts(&storage, &tmp, action, &.{
+                    .{ .bytes = text[0..length] },
+                    .{ .bytes = png, .kind = .{ .image = .{} } },
+                });
+                const facts = try compoundPressureForTesting(&storage, session.slice());
+                std.testing.expectEqual(@as(u64, length), facts.uncovered_bytes) catch |err| {
+                    std.debug.print("compound Action Resolution pressure uncovered Text bytes mismatch at length {d}\n", .{length});
+                    return err;
+                };
+                try std.testing.expectEqual(@as(u64, 1), facts.unknown_images);
+                try std.testing.expectEqual(@as(?u64, 990 + length / 4), policy.comparedPressure(facts));
+                const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                try std.testing.expectEqual(if (length >= 40) ModelOperationKind.compaction else ModelOperationKind.assistant_response, try storage.modelOperationKind(next));
+                if (length < 40) {
+                    // A later provider usage report covers the complete value.
+                    try store_testing.settleItemsForTestingWithUsage(&storage, &tmp, next, &.{
+                        "{\"type\":\"message\",\"id\":\"covered-answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}",
+                    }, "done", "{\"input_tokens\":100,\"output_tokens\":0}");
+                    const covered = try compoundPressureForTesting(&storage, session.slice());
+                    try std.testing.expectEqual(@as(u64, 0), covered.uncovered_bytes);
+                    try std.testing.expectEqual(@as(u64, 0), covered.unknown_images);
+                }
+            }
+        }
+    }.run);
+}

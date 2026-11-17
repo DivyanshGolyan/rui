@@ -2392,6 +2392,19 @@ test "each marker renders its SQLite spelling" {
     try std.testing.expectEqualStrings("group_concat(tool.name,',')", comptime render(.sqlite, "@list(tool.name)"));
 }
 
+test "canonical form classification keeps filtered count portable inside an aggregate case" {
+    const text = "SELECT CASE WHEN @count_where(c.form<>0)=0 THEN coalesce(sum(c.byte_length),0) END AS bytes FROM content c";
+    try std.testing.expectEqual(@as(?[]const u8, null), comptime statementError(.read, text, struct {}, struct { bytes: ?u64 }));
+    try std.testing.expectEqualStrings(
+        "SELECT CASE WHEN count(*) FILTER (WHERE c.form<>0)=0 THEN coalesce(sum(c.byte_length),0) END AS bytes FROM content c",
+        comptime render(.sqlite, text),
+    );
+    try std.testing.expectEqualStrings(
+        "SELECT CASE WHEN count(CASE WHEN c.form<>0 THEN 1 END)=0 THEN coalesce(sum(c.byte_length),0) END AS bytes FROM content c",
+        comptime render(.mysql, text),
+    );
+}
+
 test "markers nest, and text outside them is copied" {
     try std.testing.expectEqualStrings(
         "x IS NULL OR (length(CAST(x AS BLOB))=6 AND (x NOT GLOB '*[^a-f]*' AND length(x)=length(CAST(x AS BLOB)))) AND '@octets(y)'='@'",

@@ -57,6 +57,7 @@ Obtain independent opinions on material design questions.
 Every PR body has a visible `Goal: #123 <how this change serves the issue>` line, using an issue number or full GitHub issue URL and at least three explanation words.
 For housekeeping, red-main reverts, model trials or similar work without an issue, use `No issue: <reason>` instead.
 The plan checks the text, not whether the issue exists.
+[PR labels](.github/workflows/pr-labels.yml) gives the PR the workstream label (`TUI`, `Host parity`, `CI`, ...) of its Goal issue or that issue's nearest labelled parent, so file new work under its workstream issue, and label a new workstream issue when it is created.
 
 ### Shape before code
 
@@ -227,7 +228,7 @@ A new TUI interaction still needs the independent plain-PTY journey in [landing]
 
 Ready CI owns selected broad unit and integration tests, Mac checks, stack frames, live engines, migrations and premerge all-unit compilation obligations ([canonical gates](docs/verification/gates.md#canonical-gates)).
 `python3 tests/ci/prepush.py --full` remains an opt-in diagnostic, not a publication toll.
-It adds development targets, Mac typechecking, unfiltered unit compilation, stack frames and selected reachable local MySQL checks.
+It adds the CI policy suite with the same unchanged-input self-check skips, development targets, Mac typechecking, unfiltered unit compilation, stack frames and selected reachable local MySQL checks.
 UID-global Upgrade remains hosted on an ordinary runner; local output records it as deferred, never passed.
 Use a full composed suite (`zig build test`, `check`, the review-phase selection or a local mirror of CI) only to diagnose a CI red.
 In Claude Code, `.claude/hooks/block_full_runs.py` requires `RUI_CI_RED=<run or issue>` for those commands.

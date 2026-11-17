@@ -16,7 +16,7 @@ from textwrap import dedent
 from unittest.mock import patch
 
 import build_files
-from select_tests import (BUILD_HUB, BUILD_MODULES, CACHE_POLICY, CHECK_COVERS, FIXTURES, LIVE_POSTGRES_TARGETS, LIVE_RULES,
+from select_tests import (ACCEPTANCE_INPUTS, BUILD_HUB, BUILD_MODULES, CACHE_POLICY, CHECK_COVERS, FIXTURES, LIVE_POSTGRES_TARGETS, LIVE_RULES,
                           POLICY_SELF_CHECKS, RENDERER_HARNESSES, RULES, SCREEN_TARGETS, SETUP_PARTS, TEST_CODE, UNIT_ROOTS, Graph, covers, execution_batches, matches, select,
                           setup_requirements, tree_graph, uses_live_mysql, live_mysql_suites, mysql_provisioning)
 from qualification import LONG_GATES, NATIVE, RESOURCES, SHARDS_BESIDE_LONG_GATE, qualification, shards
@@ -996,21 +996,21 @@ class SelectionTest(unittest.TestCase):
         for name, part, artifact in (('macos_build', 'compiled', 'compiled-macos'),
                                      ('macos_build_unit', 'compiled-unit', 'compiled-macos-unit')):
             job = jobs[name]
-            self.assertIn('needs: plan', job)
-            self.assertIn('runs-on: macos-15', job)
+            self.assertIn('needs: [plan, mac_runner]', job)
+            self.assertIn("runs-on: ${{ fromJSON(needs.mac_runner.outputs.runs_on || '\"macos-15\"') }}", job)
             self.assertIn('timeout-minutes: 60', job)
             self.assertIn('check-part: ' + part + '\n', job)
             self.assertIn('TARGETS: ${{ needs.plan.outputs.native_targets }}', job)
             self.assertIn('artifact: ${{ steps.publish.outputs.artifact-id }}', job)
             self.assertIn('name: ' + artifact + '-${{ github.run_attempt }}', job)
             self.assertIn('if-no-files-found: error', job)
-        self.assertIn("if: ${{ needs.plan.outputs.macos_split == 'true' }}", jobs['macos_build_unit'])
+        self.assertIn("if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.macos_split == 'true' }}", jobs['macos_build_unit'])
         self.assertIn('build "$TARGETS" --part unit', jobs['macos_build_unit'])
         self.assertIn("PART: ${{ needs.plan.outputs.macos_split == 'true' && 'rest' || 'all' }}",
                       jobs['macos_build'])
         self.assertIn('build "$TARGETS" --part "$PART"', jobs['macos_build'])
         suites = jobs['macos_suites']
-        self.assertIn('needs: [plan, macos_build, macos_build_unit]', suites)
+        self.assertIn('needs: [plan, mac_runner, macos_build, macos_build_unit]', suites)
         self.assertIn('max-parallel: 3', suites)
         self.assertIn('ARTIFACT_ID: ${{ needs.macos_build.outputs.artifact }}', suites)
         self.assertIn('UNIT_ARTIFACT_ID: ${{ needs.macos_build_unit.outputs.artifact }}', suites)
@@ -1677,6 +1677,13 @@ fi
                     self.assertEqual(workflow.count(diagnostic_gate), 1)
                     self.assertIn('tests/ci/cache_snapshot_proof.py', producer)
                     workflow = workflow.replace(diagnostic_gate, '', 1)
+                    mac_gate = ("publish-caches: ${{ github.ref == 'refs/heads/main' && "
+                                "needs.mac_runner.outputs.self_hosted != 'true' && 'true' || 'false' }}")
+                    for name in ('macos_build', 'macos_build_unit', 'macos_suites'):
+                        native = re.search(r'(?ms)^  ' + name + r':\n(.*?)(?=^  [\w-]+:\n|\Z)', workflow)[1]
+                        self.assertEqual(native.count(mac_gate), 1, name)
+                    self.assertEqual(workflow.count(mac_gate), 3)
+                    workflow = workflow.replace(mac_gate, '')
                 self.assertNotIn('publish-caches', workflow, f'{path.name} native checks must keep publishing')
         self.assertNotIn('actions/cache', Path('.github/actions/setup/action.yml').read_text())
         setup = Path('.github/actions/setup/caches/action.yml').read_text()
@@ -1694,14 +1701,11 @@ fi
             path = lambda body: re.search(r'(?ms)^        path: (.*?)(?=^        key:)', body).group(1)
             self.assertEqual(path(restore), path(save))
         self.assertIn("node .github/actions/setup/caches/save-keys.cjs", setup)
-        compaction = setup.index('run: python3 -B tests/ci/cache_snapshot.py --prune')
-        self.assertLess(setup.index('id: save-keys'), compaction)
-        self.assertLess(compaction, setup.index('key: ${{ steps.save-keys.outputs.build-key }}'))
-        compact_step = setup[setup.rfind('    - name:', 0, compaction):compaction]
-        for guard in ("inputs.save-only == 'true'", "inputs.work-outcome == 'success'",
-                      "runner.os == 'Linux'", "runner.arch == 'X64'",
-                      "steps.save-keys.outputs.build-key != ''"):
-            self.assertIn(guard, compact_step)
+        self.assertNotIn('cache_snapshot.py --prune', setup)
+        self.assertLess(setup.index('id: save-keys'), setup.index('key: ${{ steps.save-keys.outputs.build-key }}'))
+        publication = Path('.github/actions/setup/caches/save-keys.cjs').read_text()
+        self.assertIn("'tests/ci/cache_snapshot.py', '--publication-key', key", publication)
+        self.assertIn('Object.entries(publicationKeys(env))', publication)
 
     def test_ci_test_methods_cannot_silently_replace_another_check(self):
         for path in Path('tests/ci').glob('test_*.py'):
@@ -1714,12 +1718,12 @@ fi
     def test_batches_share_builds_but_isolate_timing_witnesses(self):
         targets = ["test", "dispatch-integration", "transport-h2-integration",
                    "test-full", "admission-debug-integration",
-                   "host-launch-integration", "check-full"]
+                   "host-launch-integration", "check-full", "upgrade-integration"]
         self.assertEqual(execution_batches(targets), [
             ["test", "dispatch-integration"],
             ["transport-h2-integration"],
             ["test-full"], ["admission-debug-integration"],
-            ["host-launch-integration"], ["check-full"],
+            ["host-launch-integration"], ["check-full"], ["upgrade-integration"],
         ])
         self.assertEqual(execution_batches([]), [])
 
@@ -1733,6 +1737,23 @@ fi
             self.assertFalse(select([path], "review", AVAILABLE)["typecheck_macos"], path)
         self.assertTrue(select(["tests/ci/quarantine.json", "src/TerminalText.zig"], "development",
                                AVAILABLE)["typecheck_macos"])
+
+    def test_acceptance_owner_edits_always_select_compiler_backed_regression(self):
+        mutations = {
+            "build.zig": ('    darwin.configureAcceptance(b, ci.directory);\n', ''),
+            "build/darwin.zig": ('if (artifacts != null and b.graph.host.result.os.tag == .macos)',
+                                 'if (artifacts != null)'),
+            "build/ci.zig": ('run.expectExitCode(0);', 'run.expectExitCode(1);'),
+            "tests/ci/native_acceptance_test.py": ('self.assertTrue(observed)', 'self.assertFalse(observed)'),
+        }
+        self.assertEqual(set(mutations), set(ACCEPTANCE_INPUTS))
+        for path, (before, after) in mutations.items():
+            with self.subTest(path=path):
+                self.assertTrue(Path(path).is_file())
+                self.assertTrue(select([path], "review", AVAILABLE,
+                                       contents={path: (before, after)})["cache_execution_checks"])
+                self.assertFalse(select([path], "development", AVAILABLE,
+                                        contents={path: (before, after)})["cache_execution_checks"])
 
     def test_cache_proof_tracks_cache_policy_not_every_runtime_edit(self):
         def cache(path, before=None, after=None):
@@ -1749,7 +1770,7 @@ fi
             self.assertFalse(cache(path), path)
 
         build = "    const run = b.addRunArtifact(tests);\n    run.has_side_effects = true;\n"
-        self.assertFalse(cache("build.zig", build, build + "    // A build comment.\n    const other = b.step(\"x\", \"y\");\n"))
+        self.assertTrue(cache("build.zig", build, build + "    // A build comment.\n    const other = b.step(\"x\", \"y\");\n"))
         self.assertTrue(cache("build.zig", build, build.replace("    run.has_side_effects = true;\n", "")))
         action = Path(".github/actions/setup/action.yml").read_text()
         fixtures = Path(".github/actions/setup/fixtures/action.yml").read_text()

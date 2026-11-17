@@ -379,9 +379,9 @@ pub const SettleFailure = struct {
     pub const round_budget = 2;
     pub const commit: transition.Commit = .transaction;
     pub const begin: ?rounds.At = .refusal;
-    pub const Input = struct { io: std.Io, binding: AttemptBinding, failure: *const ModelFailure, disposition: *const ModelFailureClass };
+    pub const Input = struct { entry: *const store_core.Entry, floor: *history_floor_domain.FloorSearch, prepared: ?*const history_floor_domain.Prepared = null, io: std.Io, binding: AttemptBinding, failure: *const ModelFailure, disposition: *const ModelFailureClass };
     pub const Result = void;
-    pub const Ordinary = store_core.Ordinary.attempt_binding;
+    pub const Ordinary = store_core.Ordinary.attempt_binding || error{FloorPreparationRequired};
     pub const Guards = store_core.Ordinary.attempt_binding;
     pub const Declined = error{};
 
@@ -390,7 +390,7 @@ pub const SettleFailure = struct {
     retry_random: u64 = 0,
     facts: attempt_facts.Result = undefined,
     content: FailureContent = .{ .diagnostic = null, .report = null },
-    reads: union { source: refused_effort_source.Result, floor: history_floor_domain.FloorSearch, context: context_changed.Result } = undefined,
+    reads: union { source: refused_effort_source.Result, floor: *history_floor_domain.FloorSearch, context: context_changed.Result } = undefined,
 
     fn disposition(t: *const SettleFailure) ModelFailureClass {
         if (t.input.disposition.* != .effort_change_refused) return t.input.disposition.*;
@@ -432,7 +432,8 @@ pub const SettleFailure = struct {
                 const row = try currentAttempt(&t.facts, binding);
                 if (t.disposition() != .context_overflow) return t.settle(r, false);
                 if (row.compaction) {
-                    t.reads = .{ .floor = .{ .operation = binding.operation_id } };
+                    t.input.floor.* = .{ .operation = binding.operation_id, .entry = t.input.entry, .prepared = t.input.prepared };
+                    t.reads = .{ .floor = t.input.floor };
                     t.reads.floor.start(r);
                     return .{ .round = .floor };
                 }
@@ -441,7 +442,7 @@ pub const SettleFailure = struct {
                 return .{ .round = .context };
             },
             .floor, .floor_page => {
-                if (t.reads.floor.next(r)) return .{ .round = .floor_page };
+                if (try t.reads.floor.next(r)) return .{ .round = .floor_page };
                 return t.settle(r, t.reads.floor.room() != null);
             },
             .context => return t.settle(r, turn_policy.recoversOverflow(.assistant_response, try model_admission_domain.contextChanged(&t.reads.context))),

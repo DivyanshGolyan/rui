@@ -33,6 +33,8 @@ const providers = @import("providers.zig");
 const api_key = @import("api_key.zig");
 const host_start = @import("host_start.zig");
 const host_settings = @import("host_settings.zig");
+const settings_handoff = @import("host_settings_handoff.zig");
+const launch_transfer = @import("host_launch_transfer.zig");
 const start_report = @import("start_report.zig");
 const new_session_selection = @import("new_session_selection.zig");
 const platform = @import("platform.zig");
@@ -289,6 +291,7 @@ noinline fn clientCommand(init: std.process.Init, command: cli_args.Command, par
         .request_list => try requests(init),
         .action_read => try readAction(init, parsed),
         .action_background => try backgroundAction(init, parsed),
+        .action_stop => try requestActionStop(init, parsed),
         .action_inspect => try inspectAction(init, .{ .io = init.io }, parsed.get("store"), parsed.get("session").?, (try parsed.number(u64, "action")).?),
         .action_allow => try decideAction(init, parsed, .allow_once),
         .action_deny => try decideAction(init, parsed, .deny),
@@ -1079,6 +1082,10 @@ fn hostSettings(init: std.process.Init, command: cli_args.Command, parsed: *cons
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const selected = try selectedStore(init, parsed.get("store"), &selected_buffer);
     var failure: start_report.Failure = undefined;
+    if (parsed.has(settings_handoff.input_option) or (parsed.has(settings_handoff.check_option) and !parsed.has("check"))) {
+        failure = .init(.settings_invalid, "private launch protocol requires its matching check or start entry");
+        return writeRefusal(init.io, &failure, .invalid);
+    }
     var output: std.Io.File.Writer = .init(.stdout(), init.io, &.{});
     if (command == .host_settings and parsed.has("paths")) return host_start.listPaths(&output.interface);
     if (command == .host_settings and parsed.has("check")) {
@@ -1087,7 +1094,16 @@ fn hostSettings(init: std.process.Init, command: cli_args.Command, parsed: *cons
         settings.* = .{};
         defer settings.deinit();
         var fixtures: providers.Fixtures = .{};
-        _ = try admitHost(init, parsed, selected, settings, &fixtures, &failure, .detached);
+        if (parsed.has(settings_handoff.check_option)) {
+            var frozen = host_start.freezeStart(init, .{ .dir = selected, .settings_file = parsed.get("settings"), .assignments = parsed.all("set") }, settings, &failure) catch |err| {
+                if (err == error.SettingsInvalid) return writeRefusal(init.io, &failure, .invalid);
+                return err;
+            };
+            defer frozen.deinit(init.gpa);
+            settings.deinit();
+            _ = try admitHost(init, .{ .frozen = frozen.bytes }, selected, settings, &fixtures, &failure, .detached);
+            try std.Io.File.stdout().writeStreamingAll(init.io, frozen.bytes);
+        } else _ = try admitHost(init, .{ .layered = parsed }, selected, settings, &fixtures, &failure, .detached);
         return;
     }
     const result = if (command == .host_settings)
@@ -1104,6 +1120,20 @@ fn host(init: std.process.Init, command: cli_args.Command, parsed: *const cli_ar
     var fallback: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const selected = try selectedStore(init, parsed.get("store"), &fallback);
     if (command == .host_start) {
+        if (parsed.get(settings_handoff.input_option)) |descriptor| {
+            var failure: start_report.Failure = undefined;
+            const fd = std.fmt.parseInt(c_int, descriptor, 10) catch unreachable;
+            if (fd != 0) {
+                failure = .init(.settings_invalid, "private starter input must be its anonymous stdin descriptor");
+                return writeRefusal(init.io, &failure, .invalid);
+            }
+            var frozen = launch_transfer.readHandoff(init.gpa, init.io, fd) catch {
+                failure = .init(.settings_invalid, "missing, malformed or unsupported private settings handoff");
+                return writeRefusal(init.io, &failure, .invalid);
+            };
+            defer frozen.deinit(init.gpa);
+            return startHostRequest(init, .{ .dir = selected, .settings_file = parsed.get("settings"), .assignments = parsed.all("set"), .frozen = frozen.bytes }, false, .{});
+        }
         return startHostForTerminal(init, selected, false, parsed.get("settings"), parsed.all("set"), null);
     }
     if (command == .host_pause) return pauseHost(init.io, selected, if (parsed.get("instance")) |instance| try protocol.parseInstanceId(instance) else null);
@@ -1232,11 +1262,15 @@ fn startHostForTerminal(init: std.process.Init, selected: []const u8, quiet: boo
 }
 
 fn startHostForTerminalUsing(init: std.process.Init, selected: []const u8, quiet: bool, settings_file: ?[]const u8, assignments: []const []const u8, readiness: ?*const provider_selection.Readinesses, ops: HostLaunchOps) !void {
+    _ = readiness; // Credential defaults belong to the child intake owner.
+    return startHostRequest(init, .{ .dir = selected, .settings_file = settings_file, .assignments = assignments }, quiet, ops);
+}
+
+fn startHostRequest(init: std.process.Init, request: host_start.Spawn, quiet: bool, ops: HostLaunchOps) !void {
     var progress: TerminalHostProgress = .{};
     var result: HostLaunchResult = .failed(.setup, error.HostLaunchFailed);
-    _ = readiness; // Credential defaults belong to the child intake owner.
-    host_start.spawn(init, .{ .dir = selected, .settings_file = settings_file, .assignments = assignments }, ops, .{ .context = &progress, .report = TerminalHostProgress.report }, &result);
-    try reportHostLaunch(init.io, &result, quiet, assignments.len != 0 or settings_file != null, progress.shown);
+    host_start.spawn(init, request, ops, .{ .context = &progress, .report = TerminalHostProgress.report }, &result);
+    try reportHostLaunch(init.io, &result, quiet, request.assignments.len != 0 or request.settings_file != null, progress.shown);
 }
 
 const launchFailure = host_start.launchFailure;
@@ -2084,25 +2118,48 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const selected = try selectedStore(init, parsed.get("store"), &selected_buffer);
     var preparation_failure: start_report.Failure = undefined;
-    const prepared = try admitHost(init, parsed, selected, settings, &tuning.fixtures, &preparation_failure, .foreground);
+    const prepared = if (parsed.get(settings_handoff.input_option)) |descriptor| frozen: {
+        const fd = std.fmt.parseInt(c_int, descriptor, 10) catch unreachable;
+        if (fd != settings_handoff.child_descriptor) {
+            preparation_failure = .init(.settings_invalid, "private child input is not its reserved launch descriptor");
+            return writeRefusal(io, &preparation_failure, .invalid);
+        }
+        var frozen = launch_transfer.readHandoff(init.gpa, io, fd) catch {
+            preparation_failure = .init(.settings_invalid, "missing, malformed or unsupported private settings handoff");
+            return writeRefusal(io, &preparation_failure, .invalid);
+        };
+        defer frozen.deinit(init.gpa);
+        tuning.admitted_directory = selected;
+        break :frozen try admitHost(init, .{ .frozen = frozen.bytes }, selected, settings, &tuning.fixtures, &preparation_failure, .detached);
+    } else try admitHost(init, .{ .layered = parsed }, selected, settings, &tuning.fixtures, &preparation_failure, .foreground);
     var failure: ?start_report.Failure = null;
     return finishServe(io, host_start.shutdownPolicy(settings), host_start.storeKind(settings), &failure, server.serve(io, std.heap.c_allocator, selected, prepared, tuning, &failure));
 }
 
 /// Shared by serve and settings --check: intake, then the proxy precondition,
 /// then Store selection and preparation. Refusals are reported here.
-fn admitHost(init: std.process.Init, parsed: *const cli_args.Parsed, selected: []const u8, settings: *host_settings.Settings, fixtures: *providers.Fixtures, failure: *start_report.Failure, admission: host_start.Admission) !host_settings.Prepared {
-    host_start.intake(init, parsed, selected, settings, fixtures, failure, admission) catch |err| {
+const HostAdmissionSource = union(enum) { layered: *const cli_args.Parsed, frozen: []const u8 };
+
+fn admitHost(init: std.process.Init, source: HostAdmissionSource, selected: []const u8, settings: *host_settings.Settings, fixtures: *providers.Fixtures, failure: *start_report.Failure, admission: host_start.Admission) !host_settings.Prepared {
+    const intake = switch (source) {
+        .layered => |parsed| host_start.intake(init, parsed, selected, settings, fixtures, failure, admission),
+        .frozen => |bytes| host_start.intakeFrozen(init, bytes, selected, settings, fixtures.*, failure),
+    };
+    intake catch |err| {
         if (err == error.SettingsInvalid) return writeRefusal(init.io, failure, caller_exit.knownError(err));
         return err;
     };
-    const served = providers.fromSettings(settings, fixtures.*);
+    return finishHostAdmission(init, selected, settings, fixtures.*, failure);
+}
+
+fn finishHostAdmission(init: std.process.Init, selected: []const u8, settings: *host_settings.Settings, fixtures: providers.Fixtures, failure: *start_report.Failure) !host_settings.Prepared {
+    const served = providers.fromSettings(settings, fixtures);
     if (try served.proxyRefusal(std.heap.c_allocator)) |reason| {
         stderr.diagnostic("rui: https_proxy/HTTPS_PROXY {s}; Rui tunnels only through an http:// proxy. The Host did not start.\n", .{reason});
         recordExit(.environment);
         return error.Reported;
     }
-    return host_start.admitSelected(init, selected, settings, fixtures.*, failure) catch |err| {
+    return host_start.admitSelected(init, selected, settings, fixtures, failure) catch |err| {
         if (err == error.SettingsInvalid) return writeRefusal(init.io, failure, caller_exit.knownError(err));
         return err;
     };
@@ -3180,6 +3237,19 @@ fn backgroundAction(init: std.process.Init, parsed: *const cli_args.Parsed) !voi
     try sendCapturedMutation(.{ .io = init.io, .drop_reply = parsed.get("test-drop-reply") }, &captured, .{ .map = init.environ_map }, null, .json);
 }
 
+fn requestActionStop(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
+    var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const input: client.ActionStopInput = .{
+        .store = try selectedStore(init, parsed.get("store"), &selected_buffer),
+        .session = parsed.get("session").?,
+        .action_id = (try parsed.number(u64, "action")).?,
+    };
+    var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const target = try captureTarget(init, parsed, &directory_buffer);
+    var captured = try client.captureActionStop(init.io, input, target);
+    try sendCapturedMutation(.{ .io = init.io, .drop_reply = parsed.get("test-drop-reply") }, &captured, .{ .map = init.environ_map }, null, .json);
+}
+
 fn decideAction(init: std.process.Init, parsed: *const cli_args.Parsed, decision: @FieldType(client.PermissionDecisionInput, "decision")) !void {
     const io = init.io;
     var input = client.PermissionDecisionInput{
@@ -3566,8 +3636,9 @@ fn writeSavedRejection(out: *std.Io.Writer, reply: protocol_reply.MutationReply)
         .model_interruption => "interrupt-model",
         .permission_decision => |target| if (target.decision == .allow_once) "allow" else "deny",
         .action_background => "background",
+        .action_stop => "stop",
     };
-    try caller_error.writeSavedLine(out, savedRejectionCode(answer), .{ .resource = if (reply.target == .permission_decision or reply.target == .action_background) "action" else "session", .operation = operation });
+    try caller_error.writeSavedLine(out, savedRejectionCode(answer), .{ .resource = if (reply.target == .permission_decision or reply.target == .action_background or reply.target == .action_stop) "action" else "session", .operation = operation });
 }
 
 fn reportUnconfirmed(context: protocol_reply.MutationIdentity, replay: client.Replay, err: anyerror) void {
@@ -3636,6 +3707,7 @@ fn presentMutationReply(writer: *std.Io.Writer, reply: protocol_reply.MutationRe
         .model_interruption => |target| try writer.print("target Turn: {d}; Operation: {d}\n", .{ target.turn, target.operation }),
         .permission_decision => |target| try writer.print("target Action: {d}; decision: {s}\n", .{ target.action, @tagName(target.decision) }),
         .action_background => |action| try writer.print("target Action: {d}\n", .{action}),
+        .action_stop => |action| try writer.print("target Action: {d}\n", .{action}),
         else => {},
     }
     const answer = reply.answer catch |err| {
@@ -3666,6 +3738,9 @@ fn presentMutationReply(writer: *std.Io.Writer, reply: protocol_reply.MutationRe
         },
         .session_archive => |value| try writer.print("archived: {}; completion: {s}\n", .{ value.archived, @tagName(value.completion) }),
         .session_pin => |value| try writer.print("pinned: {}\n", .{value.pinned}),
+        .action_stop => |position| {
+            if (position) |p| try writer.print("Resolution position: {d}\n", .{p});
+        },
         .action_background => |selection| try writer.print("Action selection: {s}; position: {d}\n", .{ @tagName(selection.kind), selection.position }),
         .model_interruption, .permission_decision => {},
     };
@@ -3717,6 +3792,7 @@ fn writeMutationJson(writer: *std.Io.Writer, reply: protocol_reply.MutationReply
         .model_interruption => |target| try writer.print(",\"request_target\":{{\"turn\":\"{d}\",\"operation\":\"{d}\"}}", .{ target.turn, target.operation }),
         .permission_decision => |target| try writer.print(",\"request_target\":{{\"action\":\"{d}\",\"decision\":\"{s}\"}}", .{ target.action, @tagName(target.decision) }),
         .action_background => |action| try writer.print(",\"request_target\":{{\"action\":\"{d}\"}}", .{action}),
+        .action_stop => |action| try writer.print(",\"request_target\":{{\"action\":\"{d}\"}}", .{action}),
         else => {},
     }
     const answer = reply.answer catch |err| {
@@ -3737,6 +3813,7 @@ fn writeMutationJson(writer: *std.Io.Writer, reply: protocol_reply.MutationReply
         try std.json.Stringify.value(reply.context.session.slice(), .{}, writer);
     }
     if (reply.target == .permission_decision) try writer.print(",\"action\":\"{d}\",\"decision\":\"{s}\"", .{ reply.target.permission_decision.action, @tagName(reply.target.permission_decision.decision) });
+    if (reply.target == .action_stop) try writer.print(",\"action\":\"{d}\"", .{reply.target.action_stop});
     if (reply.target == .action_background) try writer.print(",\"action\":\"{d}\"", .{reply.target.action_background});
     switch (answer.result) {
         .accepted => |accepted| switch (accepted) {
@@ -3752,6 +3829,10 @@ fn writeMutationJson(writer: *std.Io.Writer, reply: protocol_reply.MutationReply
             },
             .session_archive => |value| try writer.print(",\"archived\":{}", .{value.archived}),
             .session_pin => |value| try writer.print(",\"pinned\":{}", .{value.pinned}),
+            .action_stop => |position| {
+                try writer.writeAll(",\"resolution_position\":");
+                if (position) |p| try writer.print("\"{d}\"", .{p}) else try writer.writeAll("null");
+            },
             .action_background => |selection| try writer.print(",\"action_selection\":{{\"kind\":\"{s}\",\"position\":\"{d}\"}}", .{ @tagName(selection.kind), selection.position }),
             .model_interruption, .permission_decision => {},
         },
@@ -4416,7 +4497,7 @@ const LaunchFixture = struct {
     fn verify(raw: ?*anyopaque, _: std.Io, _: *const platform.Paths, pid: c_int, started: u64, _: []const u8, _: ?i128, _: *protocol_reply.HostInfoFacts) bool {
         return cast(raw).exact_identity and cast(raw).scenario != .competitor and pid == 42 and started == 12;
     }
-    fn launch(raw: ?*anyopaque, _: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, argc: usize, fd: *c_int, report_fd: *c_int, pid: *c_int, started: *c_ulonglong) c_int {
+    fn launch(raw: ?*anyopaque, _: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, argc: usize, _: c_int, fd: *c_int, report_fd: *c_int, pid: *c_int, started: *c_ulonglong) c_int {
         pid.* = 42;
         started.* = 12;
         const self = cast(raw);
@@ -4427,6 +4508,7 @@ const LaunchFixture = struct {
         std.debug.assert(std.mem.eql(u8, std.mem.span(argv[3].?), "--store"));
         var at: usize = 5;
         while (at < argc) : (at += 2) {
+            if (std.mem.eql(u8, std.mem.span(argv[at].?), "--" ++ settings_handoff.input_option)) continue;
             std.debug.assert(std.mem.eql(u8, std.mem.span(argv[at].?), "--set"));
             self.assignments += 1;
             if (self.expected_assignment) |expected| self.assignments_match = self.assignments_match and std.mem.eql(u8, expected, std.mem.span(argv[at + 1].?));
@@ -4443,7 +4525,7 @@ const LaunchFixture = struct {
         const self = cast(raw);
         if (fd == self.report_fd) {
             self.report_reads += 1;
-            if (self.delay_refusal) return -1;
+            if (self.delay_refusal) return -@as(isize, @backingInt(std.posix.E.AGAIN));
             if (self.report_reads != 1) return 0;
             const failure: ?start_report.Failure = switch (self.scenario) {
                 .competitor, .competitor_pending, .competitor_absent, .competitor_died => .init(.store_locked, "another Host owns this Store"),
@@ -4458,7 +4540,7 @@ const LaunchFixture = struct {
             return 0;
         }
         self.reads += 1;
-        if (self.delay_refusal and self.scenario == .competitor) return -1;
+        if (self.delay_refusal and self.scenario == .competitor) return -@as(isize, @backingInt(std.posix.E.AGAIN));
         switch (self.scenario) {
             .migration_success, .migration_timeout, .migration_both, .migration_eof, .migration_final => {
                 const text: []const u8 = switch (self.scenario) {
@@ -4466,11 +4548,11 @@ const LaunchFixture = struct {
                         1 => "rui: backing up and migrating [store_",
                         2 => "migrating]\n",
                         20 => migrated,
-                        else => return -1,
+                        else => return -@as(isize, @backingInt(std.posix.E.AGAIN)),
                     },
-                    .migration_both => if (self.reads == 1) migrating ++ migrated else return -1,
+                    .migration_both => if (self.reads == 1) migrating ++ migrated else return -@as(isize, @backingInt(std.posix.E.AGAIN)),
                     .migration_eof => if (self.reads == 1) migrating else return 0,
-                    .migration_final => if (self.reads == 2) migrating else return -1,
+                    .migration_final => if (self.reads == 2) migrating else return -@as(isize, @backingInt(std.posix.E.AGAIN)),
                     else => unreachable,
                 };
                 if (self.scenario != .migration_final) self.migration_announced = self.reads >= (if (self.scenario == .migration_success or self.scenario == .migration_timeout) @as(usize, 2) else 1);
@@ -4480,13 +4562,13 @@ const LaunchFixture = struct {
             },
             else => {},
         }
-        if (self.scenario == .timeout or self.scenario == .interrupted) return -1; // EAGAIN, not EOF.
+        if (self.scenario == .timeout or self.scenario == .interrupted) return -@as(isize, @backingInt(std.posix.E.AGAIN)); // EAGAIN, not EOF.
         if (self.scenario == .closed) return 0;
         if (self.scenario == .full and self.reads == 1) {
             @memset(bytes, 'x');
             return @intCast(bytes.len);
         }
-        if (self.reads == 1 and (self.scenario == .success or self.scenario == .invalid_url or self.scenario == .missing_key)) return -1;
+        if (self.reads == 1 and (self.scenario == .success or self.scenario == .invalid_url or self.scenario == .missing_key)) return -@as(isize, @backingInt(std.posix.E.AGAIN));
         const text = switch (self.scenario) {
             .refusal => if (self.reads == 1) refusal else "",
             .identity => if (self.reads == 1) identity else "",

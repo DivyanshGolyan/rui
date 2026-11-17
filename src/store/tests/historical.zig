@@ -933,3 +933,207 @@ test "a request page keeps a failed question after its row scratch was decoded" 
         }
     }.run);
 }
+
+test "historical compound Cursor certifies complete manifests before yielding and bounds each read" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            const Damage = enum { none, late_missing, late_length, extra_row, manifest_digest };
+            for ([_]usize{ 17, 65 }) |count| for (std.enums.values(Damage)) |damage| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                const session = try configureTestSession(&storage, "compound-cursor-config");
+                var text: [65][16]u8 = undefined;
+                var parts: [65]store_testing.MessagePart = undefined;
+                for (parts[0..count], text[0..count], 0..) |*part, *buffer, ordinal|
+                    part.* = .{ .bytes = try std.fmt.bufPrint(buffer, "part {d}", .{ordinal}) };
+                try store_testing.submitTestMessageParts(&storage, &tmp, "compound-cursor-message", session.slice(), parts[0..count]);
+                const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                var view: TestingPage = undefined;
+                view.open(&storage, binding);
+                defer view.close();
+                var settings: HistoricalSettings = undefined;
+                try view.settings(&settings);
+                try std.testing.expect(view.page.compound_inputs);
+                const message = (try view.nextEntry(0)).?;
+                try std.testing.expect(message.content == null);
+                const input = message.input.?;
+                if (count == 65) try std.testing.expect(input.value.reference.parts.length > 2048);
+                switch (damage) {
+                    .none => {},
+                    .late_missing => try store_testing.exec(&storage, "DELETE FROM content_part WHERE content_id=?1 AND ordinal=?2", .{ input.value.content_id, count - 1 }),
+                    .late_length => {
+                        const shorter = try store_testing.queryU64(&storage, "SELECT part_content_id FROM content_part WHERE content_id=?1 AND ordinal=0", .{input.value.content_id});
+                        try store_testing.exec(&storage, "UPDATE content_part SET part_content_id=?3 WHERE content_id=?1 AND ordinal=?2", .{ input.value.content_id, count - 1, shorter });
+                    },
+                    .extra_row => try store_testing.exec(&storage, "INSERT INTO content_part(content_id,ordinal,part_content_id) SELECT content_id,?2,part_content_id FROM content_part WHERE content_id=?1 AND ordinal=0", .{ input.value.content_id, count }),
+                    .manifest_digest => try store_testing.zeroContent(&storage, "SELECT primary_content_id FROM core_command WHERE command_key='compound-cursor-message'"),
+                }
+                try view.page.openMessage(input);
+                if (damage != .none) {
+                    try std.testing.expectError(error.CorruptStore, view.nextMessagePart());
+                    try std.testing.expect(storage.isFenced());
+                    continue;
+                }
+                var ordinal: usize = 0;
+                var reads: usize = 0;
+                while (true) {
+                    const part = view.page.nextMessagePart() catch |err| {
+                        try std.testing.expectEqual(error.PageRead, err);
+                        const work = ViewRounds.start(&storage);
+                        try storage.readRequestPage(&view.page);
+                        const taken = work.taken();
+                        try std.testing.expect(taken.rounds <= 1 and taken.content_rounds <= 1);
+                        try std.testing.expect(taken.rounds + taken.content_rounds <= 1);
+                        reads += 1;
+                        continue;
+                    } orelse break;
+                    try std.testing.expectEqual(@as(std.meta.Tag(@import("../../input_parts.zig").Kind), .text), std.meta.activeTag(part.kind));
+                    var reader: TestingReader = undefined;
+                    try view.openContent(part.content, &reader);
+                    defer reader.close();
+                    var buffer: [16]u8 = undefined;
+                    const length = try reader.read(0, &buffer);
+                    try std.testing.expectEqualStrings(parts[ordinal].bytes, buffer[0..length]);
+                    ordinal += 1;
+                }
+                try std.testing.expectEqual(count, ordinal);
+                try std.testing.expect(reads > count);
+                try std.testing.expect(view.page.message_cursor == null);
+                try std.testing.expect(!storage.isFenced());
+            };
+        }
+    }.run);
+}
+
+fn expectSelectedCompound(storage: *Store, binding: AttemptBinding, expected: usize) !void {
+    var view: TestingPage = undefined;
+    view.open(storage, binding);
+    defer view.close();
+    var settings: HistoricalSettings = undefined;
+    try view.settings(&settings);
+    try std.testing.expectEqual(expected != 0, view.page.compound_inputs);
+    var position: u64 = 0;
+    var found: usize = 0;
+    while (try view.nextEntry(position)) |entry| {
+        position = entry.position;
+        if (entry.input != null) found += 1;
+    }
+    try std.testing.expectEqual(expected, found);
+}
+
+test "historical compound detection follows compatible base floors own floors and retained first Messages" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            for ([_]bool{ false, true }) |first_compound| for ([_]bool{ false, true }) |change_model| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                const session = try configureTestSession(&storage, "compound-selection-config");
+                if (first_compound) {
+                    try store_testing.submitTestMessageParts(&storage, &tmp, "compound-selection-first", session.slice(), &.{ .{ .bytes = "first a" }, .{ .bytes = "first b" } });
+                } else try submitTestMessage(&storage, &tmp, "compound-selection-first", "compound-selection-first", session.slice(), "first");
+                const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                try settleItemsForTesting(&storage, &tmp, first, &.{"{\"type\":\"message\",\"id\":\"s1\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"answer\"}]}"}, "answer");
+                try store_testing.submitTestMessageParts(&storage, &tmp, "compound-selection-second", session.slice(), &.{ .{ .bytes = "second a" }, .{ .bytes = "second b" } });
+                const second = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                try settleItemsForTesting(&storage, &tmp, second, &.{"{\"type\":\"message\",\"id\":\"s2\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"answer\"}]}"}, "answer");
+                try submitTestMessage(&storage, &tmp, "compound-selection-third", "compound-selection-third", session.slice(), "third");
+                const full = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                try storage.settleModelAttemptFailure(full, .{ .uncorrelated = "provider_context_overflow" }, .context_overflow, .{});
+                const base = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                try store_testing.setHistoryFloorForTesting(&storage, base.operation_id, "third", 1);
+                try settleCompactionForTesting(&storage, &tmp, base, &.{.compaction});
+                if (change_model) {
+                    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+                    const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+                    var command = try completeConfiguration("compound-selection-model", session.slice(), workspace, "model-b");
+                    try std.testing.expect((try storage.configure(&command, .{})) == .accepted);
+                }
+                // Give the successor new context so its overflow can request
+                // another compaction instead of correctly exhausting this Turn.
+                try submitTestMessage(&storage, &tmp, "compound-selection-fourth", "compound-selection-fourth", session.slice(), "fourth");
+                const request = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                try expectSelectedCompound(&storage, request, @intFromBool(first_compound) + @as(usize, @intFromBool(change_model)));
+                try storage.settleModelAttemptFailure(request, .{ .uncorrelated = "provider_context_overflow" }, .context_overflow, .{});
+                const own = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                try store_testing.setHistoryFloorForTesting(&storage, own.operation_id, "third", 1);
+                try expectSelectedCompound(&storage, own, @intFromBool(first_compound));
+            };
+        }
+    }.run);
+}
+
+test "historical compound detection ignores Messages beyond the frozen cutoff" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try configureTestSession(&storage, "compound-frozen-config");
+            try submitTestMessage(&storage, &tmp, "compound-frozen-first", "compound-frozen-first", session.slice(), "first");
+            const frozen = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try store_testing.submitTestMessageParts(&storage, &tmp, "compound-frozen-late", session.slice(), &.{ .{ .bytes = "late a" }, .{ .bytes = "late b" } });
+            try expectSelectedCompound(&storage, frozen, 0);
+        }
+    }.run);
+}
+
+test "historical compound action-final provenance fences a Message that differs from its Resolution" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try shared_fixtures.configureTestSessionWithMode(&storage, "forged-final-config", "bypass");
+            try submitTestMessage(&storage, &tmp, "forged-final-input", "forged-final-input", session.slice(), "run");
+            const source = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            const arguments = "{\"description\":\"Run no-op command\",\"cmd\":\"true\"}";
+            const encoded = try std.json.Stringify.valueAlloc(std.testing.allocator, arguments, .{});
+            defer std.testing.allocator.free(encoded);
+            try settleCallsForTesting(&storage, &tmp, source, "forged-final-call", &.{.{
+                .item_id = "forged-final-item",
+                .name = "bash",
+                .encoded_call_id = "forged-final-call",
+                .decoded_call_id = "forged-final-call",
+                .encoded_arguments = encoded[1 .. encoded.len - 1],
+                .decoded_arguments = arguments,
+            }});
+            const action = try store_testing.queryU64(&storage, "SELECT action_id FROM action_operation WHERE parent_operation_id=?1", .{source.operation_id});
+            try std.testing.expect(storage.backgroundAction(.{ .live_action = action }, .{}) == .accepted);
+            const effect = (try storage.admitNextActionAttempt(.fromFree(1, true), 30_000, .{})).?.permit.binding;
+            _ = try storage.settleActionAttempt(effect, .succeeded, "plain final", .{});
+            try store_testing.submitTestMessageParts(&storage, &tmp, "forged-final-parts", session.slice(), &.{ .{ .bytes = "first" }, .{ .bytes = "second" } });
+            const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            const content = try store_testing.queryU64(&storage, "SELECT content_id FROM message_admission WHERE command_key='forged-final-parts'", .{});
+            // Keep the canonical Resolution plain and forge its otherwise
+            // consistent final Message to reference an unrelated compound value.
+            try store_testing.exec(&storage, "UPDATE core_command SET primary_content_id=?1 WHERE command_key IN (SELECT command_key FROM message_admission WHERE source_action_id=?2)", .{ content, action });
+            try store_testing.exec(&storage, "UPDATE message_admission SET content_id=?1 WHERE source_action_id=?2", .{ content, action });
+            try store_testing.exec(&storage, "UPDATE conversation_entry SET content_id=?1 WHERE source_admission_id IN (SELECT admission_id FROM message_admission WHERE source_action_id=?2)", .{ content, action });
+            var view: TestingPage = undefined;
+            view.open(&storage, binding);
+            defer view.close();
+            var settings: HistoricalSettings = undefined;
+            try view.settings(&settings);
+            var position: u64 = 0;
+            while (true) {
+                const entry = view.nextEntry(position) catch |err| {
+                    try std.testing.expectEqual(error.CorruptStore, err);
+                    break;
+                } orelse return error.MissingCorruptionFailure;
+                position = entry.position;
+                if (entry.kind == .tool_results) while (try view.nextToolResult()) |_| {};
+            }
+            try std.testing.expect(storage.isFenced());
+        }
+    }.run);
+}
