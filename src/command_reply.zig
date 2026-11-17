@@ -71,6 +71,7 @@ pub const CommandObservation = struct {
         permission_decision: struct { action_id: u64, decision: mutation_answer.PermissionDecision },
         session_pin: ?mutation_answer.SessionPinObservation,
         action_background: @import("action_control.zig").Observation,
+        action_stop: @import("action_control.zig").StopObservation,
     } = .{ .configure = .{} },
 
     pub fn requestState(self: *const CommandObservation) ?message_observation.MessageRequestState {

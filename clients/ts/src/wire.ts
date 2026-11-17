@@ -191,6 +191,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/control/action-stop": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Selects one owned Action for stop, preserving an existing Resolution. Read completion with read-action. Retried by its key. */
+        post: operations["actionStop"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/read-action": {
         parameters: {
             query?: never;
@@ -486,6 +503,60 @@ export interface components {
             version: "20";
             /** @constant */
             kind: "action_background";
+            store: string;
+            key: string;
+            session: string;
+            action: components["schemas"]["Decimal"];
+        };
+        ActionStopConflictReply: {
+            /** @constant */
+            version: "20";
+            /** @constant */
+            type: "action_stop_reply";
+            answer: {
+                /** @constant */
+                status: "conflict";
+                /** @constant */
+                replayed: false;
+                session: string;
+                action: components["schemas"]["Decimal"];
+                /** @constant */
+                code: "idempotency_key_conflict";
+            };
+        };
+        ActionStopReply: {
+            /** @constant */
+            version: "20";
+            /** @constant */
+            type: "action_stop_reply";
+            answer: {
+                /** @constant */
+                status: "accepted";
+                replayed: boolean;
+                session: string;
+                action: components["schemas"]["Decimal"];
+                resolution_position: components["schemas"]["Decimal"] | null;
+            };
+        } | {
+            /** @constant */
+            version: "20";
+            /** @constant */
+            type: "action_stop_reply";
+            answer: {
+                /** @constant */
+                status: "rejected";
+                replayed: boolean;
+                session: string;
+                action: components["schemas"]["Decimal"];
+                /** @enum {string} */
+                code: "invalid_session_reference" | "invalid_target" | "unknown_session" | "unknown_action" | "target_mismatch" | "source_stopped" | "action_not_backgroundable" | "background_unavailable";
+            };
+        };
+        ActionStopRequest: {
+            /** @constant */
+            version: "20";
+            /** @constant */
+            kind: "action_stop";
             store: string;
             key: string;
             session: string;
@@ -2855,6 +2926,56 @@ export interface components {
             type: "command_observation";
             key: string;
             /** @constant */
+            delta: "full";
+            since: string | null;
+            observation: {
+                /** @enum {string} */
+                status: "absent" | "accepted" | "rejected";
+                /** @constant */
+                kind: "action_stop";
+                target: string;
+                action_target: {
+                    action: components["schemas"]["Decimal"];
+                };
+            } | {
+                /** @enum {string} */
+                status: "absent" | "accepted" | "rejected";
+                /** @constant */
+                kind: "action_stop";
+                target: string;
+                code: string;
+                action_target: {
+                    action: components["schemas"]["Decimal"];
+                };
+            } | {
+                /** @enum {string} */
+                status: "absent" | "accepted" | "rejected";
+                /** @constant */
+                kind: "action_stop";
+                target: string;
+                action_target: {
+                    action: components["schemas"]["Decimal"];
+                };
+                resolution_position: components["schemas"]["Decimal"] | null;
+            } | {
+                /** @enum {string} */
+                status: "absent" | "accepted" | "rejected";
+                /** @constant */
+                kind: "action_stop";
+                target: string;
+                code: string;
+                action_target: {
+                    action: components["schemas"]["Decimal"];
+                };
+                resolution_position: components["schemas"]["Decimal"] | null;
+            };
+        } | {
+            /** @constant */
+            version: "20";
+            /** @constant */
+            type: "command_observation";
+            key: string;
+            /** @constant */
             delta: "not_modified";
             since: string;
         };
@@ -4095,6 +4216,53 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ActionBackgroundConflictReply"] | components["schemas"]["ErrorReply"];
+                };
+            };
+            /** @description A refusal or failure. */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorReply"];
+                };
+            };
+        };
+    };
+    actionStop: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description The wire version this document describes. Any other version is refused. */
+                "X-Rui-Wire-Version": components["parameters"]["WireVersion"];
+                /** @description The Host instance (from host-info) the request is meant for; a different instance refuses it. */
+                "X-Rui-Host-Instance"?: components["parameters"]["HostInstance"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ActionStopRequest"];
+            };
+        };
+        responses: {
+            /** @description The reply. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ActionStopReply"];
+                };
+            };
+            /** @description The key was used before with different input (the conflict reply), or the request names another Store or Host instance (a refusal). */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ActionStopConflictReply"] | components["schemas"]["ErrorReply"];
                 };
             };
             /** @description A refusal or failure. */

@@ -112,6 +112,7 @@ pub const routes = [_]Route{
     commandRoute(.model_interruption),
     commandRoute(.permission_decision),
     commandRoute(.action_background),
+    commandRoute(.action_stop),
     .{
         .path = "/v1/read-action",
         .kind = .read_action,
@@ -1766,7 +1767,7 @@ test "statuses, media types and required headers match what the Host sends" {
     var document: Document = .init(arena.allocator());
     const built = try document.build();
     const paths = built.object.get("paths").?.object;
-    const mutations = [_]protocol.CommandKind{ .configure, .message, .session_stop, .session_archive, .session_pin, .model_interruption, .permission_decision, .action_background };
+    const mutations = [_]protocol.CommandKind{ .configure, .message, .session_stop, .session_archive, .session_pin, .model_interruption, .permission_decision, .action_background, .action_stop };
     for (mutations) |kind| {
         const responses = paths.get(kind.route()).?.object.get("post").?.object.get("responses").?.object;
         try std.testing.expect(responses.contains("409"));

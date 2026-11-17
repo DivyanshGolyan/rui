@@ -994,6 +994,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
         .failure = failure.fg,
         .band = style.of(self.app_caps, .{ .background = .bar }).bg,
         .user_band = style.of(self.app_caps, .{ .background = .user_message }).bg,
+        .no_depth = self.app_caps.depth == .none,
         .selection = style.of(self.app_caps, .{ .background = .selection }).bg,
     };
     const facts_style = quiet;
@@ -4576,7 +4577,7 @@ test "chat info opens from the chat line above the input at 140 and 46 columns a
     }
 }
 
-test "chat info hint click and Alt-I share natural panel opening and Escape restores the feed" {
+test "chat footer background click and Alt-I share natural panel opening and Escape restores the feed" {
     for ([_]u16{ 46, 140 }) |width| {
         const held = try HeldFrontend.create();
         defer held.destroy();
@@ -4588,11 +4589,7 @@ test "chat info hint click and Alt-I share natural panel opening and Escape rest
         const ordinary = try held.draw();
         const input = ordinary.children[0].surface.children[1];
         const facts = input.surface.children[1];
-        var info_column: ?i16 = null;
-        for (facts.surface.children) |child| if (child.surface.widget.eql(held.self.chrome.info.widget())) {
-            info_column = @intCast(input.origin.col + facts.origin.col + child.origin.col);
-        };
-        const col = info_column orelse return error.TestUnexpectedResult;
+        const col: i16 = @intCast(input.origin.col + facts.origin.col);
         const row: i16 = @intCast(input.origin.row + facts.origin.row);
         var ctx = held.context();
         defer ctx.cmds.deinit(held.arena.allocator());
@@ -5910,10 +5907,10 @@ test "App Session shell gutter and back control follow list visibility through r
         try std.testing.expectEqualStrings(" ", screen.readCell(start, sent).?.char.grapheme);
         try std.testing.expectEqualStrings(" ", screen.readCell(start, sent + 1).?.char.grapheme);
         try std.testing.expectEqualStrings("✓", screen.readCell(start + 1, sent + 1).?.char.grapheme);
-        try std.testing.expectEqualStrings(if (wide) "d" else "‹", screen.readCell(start + 1, 25).?.char.grapheme);
+        try std.testing.expectEqualStrings(if (wide) "g" else "‹", screen.readCell(start + 1, 25).?.char.grapheme);
         var facts: std.Io.Writer.Allocating = .init(arena);
         for (start..width) |column| try facts.writer.writeAll(screen.readCell(@intCast(column), 25).?.char.grapheme);
-        try std.testing.expectEqualStrings(if (wide) " demo · gpt-5.5 · low · 100% left" else " ‹ demo · gpt-5.5 · low · 100% left", std.mem.trimEnd(u8, facts.written()[0..std.mem.indexOf(u8, facts.written(), "alt+i info").?], " "));
+        try std.testing.expectEqualStrings(if (wide) " gpt-5.5 · low" else " ‹ demo · gpt-5.5 · low", std.mem.trimEnd(u8, facts.written(), " "));
         try std.testing.expect(fixture.root.session.?.eql(fixture.widget));
         try std.testing.expectEqualStrings("kept draft", self.input.composition().bytes);
         try std.testing.expectEqualDeep(anchor, fixture.screen.anchor);
@@ -6073,7 +6070,7 @@ test "App Session's status bar never says Sent: an accepted Message's row is its
     defer fixture.deinit();
     const self = fixture.self;
     try std.testing.expect(std.mem.startsWith(u8, (try fixture.rows())[23], "‹ k7m2qx"));
-    try std.testing.expect(std.mem.endsWith(u8, (try fixture.rows())[23], "alt+i info"));
+    try std.testing.expect(std.mem.indexOf(u8, (try fixture.rows())[23], "alt+i info") == null);
     ChromeFixture.overview_says = "Port overview to vxfw finished";
     defer ChromeFixture.overview_says = null;
     try std.testing.expect(ChromeFixture.findEnding(&try fixture.rows(), "Port overview to vxfw finished") != null);
@@ -6156,7 +6153,7 @@ test "App Session Footer clips identity in terminal cells" {
     try self.line.label.?.set("Port the overview to vxfw and keep its key table");
     try self.line.model.set("gpt-6-sol");
     const shown = try fixture.rows();
-    try std.testing.expect(std.mem.startsWith(u8, shown[23], "‹ Port the overview to vxfw and keep… · gpt-6-sol · low · 100% left"));
+    try std.testing.expect(std.mem.startsWith(u8, shown[23], "‹ Port the overview to vxfw and keep its key table · gpt-6-sol · low"));
     try std.testing.expectEqualStrings("Port the overview to vxfw and keep its key table", self.line.label.?.slice());
     try std.testing.expect(session_line.cells(shown[23], .unicode) <= 80);
 }
@@ -6626,9 +6623,9 @@ test "App Session footer takes list visibility from Root across desktop and phon
         var row: std.Io.Writer.Allocating = .init(arena);
         for (chat_col..case.width) |col| try row.writer.writeAll(screen.readCell(@intCast(col), 29).?.char.grapheme);
         try std.testing.expectEqual(@as(usize, if (case.list) 0 else 1), std.mem.count(u8, row.written(), "‹"));
-        try std.testing.expect(std.mem.indexOf(u8, row.written(), "k7m2qx") != null);
+        try std.testing.expectEqual(!case.list, std.mem.indexOf(u8, row.written(), "k7m2qx") != null);
         try std.testing.expectEqualStrings("─", screen.readCell(chat_col, 28).?.char.grapheme);
-        try std.testing.expect(std.mem.trim(u8, row.written(), " ").len != 0);
+        try std.testing.expectEqual(!case.list, std.mem.trim(u8, row.written(), " ").len != 0);
     }
 }
 
@@ -9295,7 +9292,7 @@ test "chat info supplies the one bottom footer after the input and both dividers
         try held.keys("\x07");
         if (choice) try held.keys("\x07");
         try std.testing.expect(!held.self.info_open);
-        try std.testing.expect((try rowWith(held, "alt+i info")) != null);
+        try std.testing.expect((try rowWith(held, "alt+i info")) == null);
         try std.testing.expectEqualStrings("kept draft", held.self.input.composition().bytes);
     };
 }
@@ -9630,7 +9627,7 @@ test "chat footer facts use current Session permission and applied default or ex
         self.line.asks = ask;
         var buffer: [session_chrome.facts_bytes]u8 = undefined;
         const text = session_chrome.factsRow(&buffer, self.footerFacts(), "ref", null, width, .unicode);
-        const want = if (explicit) (if (ask) "Chat · model · low · 62% left · ask" else "Chat · model · low · 62% left") else (if (ask) "Chat · model · high · 62% left · ask" else "Chat · model · high · 62% left");
+        const want = if (explicit) (if (ask) "Chat · model · low · ask" else "Chat · model · low") else (if (ask) "Chat · model · high · ask" else "Chat · model · high");
         try std.testing.expectEqualStrings(want, text);
     };
 }
@@ -9846,7 +9843,7 @@ test "chat footer permission transitions follow the current line with absent cur
             for ([_]u16{ 140, 46 }) |width| {
                 var buffer: [session_chrome.facts_bytes]u8 = undefined;
                 const text = session_chrome.factsRow(&buffer, facts, "ref", null, width, .unicode);
-                try std.testing.expectEqualStrings(if (ask) "Chat · model · low · 62% left · ask" else "Chat · model · low · 62% left", text);
+                try std.testing.expectEqualStrings(if (ask) "Chat · model · low · ask" else "Chat · model · low", text);
             }
         }
         self.line.read = null;
@@ -10310,9 +10307,10 @@ test "App Session composer click recovers submission from every drawn focus targ
             try std.testing.expect(!modalFocus(&held.self));
             try std.testing.expect(held.root.input.layer == .main);
         }
-        for ([_]focus.Target{ .input, .model, .effort, .info }) |target| {
+        for ([_]focus.Target{ .input, .model, .effort }) |target| {
             try std.testing.expect(std.mem.indexOfScalar(focus.Target, visited.slice(), target) != null);
         }
+        try std.testing.expect(std.mem.indexOfScalar(focus.Target, visited.slice(), .info) == null);
         try std.testing.expectEqual(width == 46, std.mem.indexOfScalar(focus.Target, visited.slice(), .back) != null);
         try std.testing.expectEqual(width == 140, std.mem.indexOfScalar(focus.Target, visited.slice(), .list) != null);
     }

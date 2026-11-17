@@ -11,6 +11,10 @@ on:
       base:
         description: Base commit; selection covers base..ref
         required: true
+      native_targets:
+        description: Optional JSON native target array for macOS diagnostics
+        type: string
+        default: ''
       cache_profile:
         description: Record Linux producer cache contents and filesystem reuse
         type: boolean
@@ -51,6 +55,114 @@ concurrency:
 # Leave setup uncapped: cold fetch outliers still have the original job budget.
 
 jobs:
+  mac_runner:
+    continue-on-error: true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      runs_on: ${{ steps.decide.outputs.runs_on || '"macos-15"' }}
+      self_hosted: ${{ steps.decide.outputs.self_hosted || 'false' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        continue-on-error: true
+        with:
+          ref: ${{ github.sha }}
+          sparse-checkout: tests/ci/mac_runner.py
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - name: Read the runner status snapshot
+        continue-on-error: true
+        env:
+          MAC_RUNNER_STATUS_TOKEN: ${{ secrets.MAC_RUNNER_STATUS_TOKEN }}
+        run: |
+          if [ -n "$MAC_RUNNER_STATUS_TOKEN" ]; then
+            curl --fail --silent --show-error --max-time 10 \
+              -H "Authorization: Bearer $MAC_RUNNER_STATUS_TOKEN" \
+              -H 'Accept: application/vnd.github+json' \
+              "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/runners?per_page=100" \
+              -o "$RUNNER_TEMP/mac-runners.json" || rm -f "$RUNNER_TEMP/mac-runners.json"
+          fi
+      - name: Read the workflow queue snapshot
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          QUEUE_PATH: ${{ runner.temp }}/mac-queue.json
+        run: |
+          rm -f "$QUEUE_PATH" "$QUEUE_PATH.tmp"
+          trap 'rm -f "$QUEUE_PATH.tmp"' EXIT
+          timeout 60s python3 - <<'PY'
+          import json
+          import os
+          import urllib.parse
+          import urllib.request
+
+          base = os.environ['GITHUB_API_URL'].rstrip('/') + '/repos/' + os.environ['GITHUB_REPOSITORY'] + '/actions'
+          headers = {'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
+                     'Accept': 'application/vnd.github+json'}
+
+          def pages(path, key, params):
+              rows = []
+              page = 1
+              while True:
+                  query = urllib.parse.urlencode(dict(params, per_page=100, page=page))
+                  request = urllib.request.Request(base + path + '?' + query, headers=headers)
+                  with urllib.request.urlopen(request, timeout=10) as response:
+                      data = json.load(response)
+                  batch = data[key]
+                  if not isinstance(batch, list) or type(data['total_count']) is not int:
+                      raise ValueError('Malformed Actions API response')
+                  rows.extend(batch)
+                  if len(batch) < 100:
+                      if len(rows) < data['total_count']:
+                          raise ValueError('Incomplete Actions API response')
+                      return rows
+                  page += 1
+
+          runs = []
+          for status in ('queued', 'in_progress'):
+              runs.extend(pages('/runs', 'workflow_runs', {'status': status}))
+          counts = {'mac_queued': 0, 'hosted_queued': 0, 'hosted_running': 0}
+          seen = set()
+          for run in runs:
+              run_id = run['id']
+              if type(run_id) is not int or run_id <= 0:
+                  raise ValueError('Invalid workflow run ID')
+              if run_id in seen:
+                  continue
+              seen.add(run_id)
+              for job in pages('/runs/' + str(run_id) + '/jobs', 'jobs', {}):
+                  labels, status = job['labels'], job['status']
+                  if not isinstance(labels, list) or any(not isinstance(label, str) for label in labels) or not isinstance(status, str):
+                      raise ValueError('Malformed workflow job')
+                  if 'rui-mac' in labels and status == 'queued':
+                      counts['mac_queued'] += 1
+                  if 'macos-15' in labels:
+                      if status == 'queued':
+                          counts['hosted_queued'] += 1
+                      elif status == 'in_progress':
+                          counts['hosted_running'] += 1
+          path = os.environ['QUEUE_PATH']
+          with open(path + '.tmp', 'w') as output:
+              json.dump(counts, output)
+          os.replace(path + '.tmp', path)
+          PY
+      - name: Choose the Mac runner with hosted fallback
+        id: decide
+        if: ${{ always() }}
+        continue-on-error: true
+        env:
+          INPUTS: ${{ toJSON(inputs) }}
+          RUI_MAC_RUNNER: ${{ vars.RUI_MAC_RUNNER }}
+          RUNNERS_PATH: ${{ runner.temp }}/mac-runners.json
+          QUEUE_PATH: ${{ runner.temp }}/mac-queue.json
+        run: python3 -B tests/ci/mac_runner.py
+      - name: Explain an unavailable routing decision
+        if: ${{ always() && steps.decide.outcome != 'success' }}
+        continue-on-error: true
+        run: echo 'Hosted macOS is selected because the routing step was unavailable.' >> "$GITHUB_STEP_SUMMARY"
   plan:
     if: ${{ !github.event.repository.private }}
     runs-on: ubuntu-24.04
@@ -92,6 +204,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           PROMOTION: ${{ inputs.promotion || false }}
           COMPILE_ONLY: ${{ inputs.compile_only || false }}
+          NATIVE_TARGETS: ${{ inputs.native_targets || '' }}
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$CANDIDATE_REF"
@@ -106,9 +219,10 @@ jobs:
           from ci_plan import plan
           selection = json.load(open('selection.json'))
           kind = classify(selection['base'], selection['head'])
+          native = {'native_targets': json.loads(os.environ['NATIVE_TARGETS'])} if os.environ.get('NATIVE_TARGETS') else {}
           result = plan(selection, event_name=os.environ['EVENT_NAME'],
                         draft=os.environ['DRAFT'] == 'true', promotion=os.environ['PROMOTION'] == 'true',
-                        change_kind=kind, compile_only=os.environ['COMPILE_ONLY'] == 'true')
+                        change_kind=kind, compile_only=os.environ['COMPILE_ONLY'] == 'true', **native)
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
               print('candidate_ref=' + os.environ['CANDIDATE_REF'], file=f)
               for key, value in result.outputs.items():
@@ -162,20 +276,7 @@ jobs:
       - name: Run tests/ci, less self-checks whose inputs are unchanged
         env:
           SKIPS: ${{ needs.plan.outputs.policy_skips }}
-        run: |
-          python3 -B - <<'PY'
-          import json, os, sys, unittest
-          skips = json.loads(os.environ['SKIPS'])
-          print('Self-checks with unchanged inputs (select_tests.POLICY_SELF_CHECKS):', skips or 'none')
-          def kept(suite):
-              for test in suite:
-                  if isinstance(test, unittest.TestSuite):
-                      yield from kept(test)
-                  elif not test.id().startswith(tuple(unit + '.' for unit in skips)):
-                      yield test
-          suite = unittest.TestSuite(kept(unittest.defaultTestLoader.discover('tests/ci')))
-          sys.exit(not unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful())
-          PY
+        run: python3 -B tests/ci/policy_suite.py --skips "$SKIPS"
       - name: Reject undefined fixture names before native builds
         # ruff is pinned in tests/ci/requirements.txt, which the pre-push hook installs too.
         run: python3 -m ruff check --select F821 tests
@@ -366,9 +467,9 @@ jobs:
           setup-outcome: ${{ steps.setup.outcome }}
           work-outcome: ${{ steps.compile.outcome }}
   macos_build:
-    needs: plan
-    if: ${{ needs.plan.outputs.native == 'true' }}
-    runs-on: macos-15
+    needs: [plan, mac_runner]
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.native == 'true' }}
+    runs-on: ${{ fromJSON(needs.mac_runner.outputs.runs_on || '"macos-15"') }}
     # Match the cold Release producer budget without extending acceptance deadlines.
     timeout-minutes: 60
     outputs:
@@ -380,6 +481,7 @@ jobs:
       - uses: ./.github/actions/setup
         id: setup
         with:
+          publish-caches: ${{ github.ref == 'refs/heads/main' && needs.mac_runner.outputs.self_hosted != 'true' && 'true' || 'false' }}
           targets: ${{ needs.plan.outputs.native_targets }}
           check-part: compiled
       - name: Compile selected gates once, never test acceptance
@@ -390,7 +492,10 @@ jobs:
         env:
           TARGETS: ${{ needs.plan.outputs.native_targets }}
           PART: ${{ needs.plan.outputs.macos_split == 'true' && 'rest' || 'all' }}
-        run: python3 -B tests/ci/build_artifact.py build "$TARGETS" --part "$PART"
+        run: |
+          sysctl hw.ncpu hw.memsize vm.swapusage
+          /usr/bin/time -l python3 -B tests/ci/build_artifact.py build "$TARGETS" --part "$PART"
+          sysctl vm.swapusage
       - name: Save reusable caches even after failure
         if: ${{ always() }}
         uses: ./.github/actions/setup/caches
@@ -409,9 +514,9 @@ jobs:
   macos_build_unit:
     # Keep the parallel unit roots off the cores building the other gates.
     # One extra Mac briefly; suites still use at most three of the five Macs.
-    needs: plan
-    if: ${{ needs.plan.outputs.macos_split == 'true' }}
-    runs-on: macos-15
+    needs: [plan, mac_runner]
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.macos_split == 'true' }}
+    runs-on: ${{ fromJSON(needs.mac_runner.outputs.runs_on || '"macos-15"') }}
     # A cold cache compiles the unit roots from scratch; match the cold producer budget.
     timeout-minutes: 60
     outputs:
@@ -423,6 +528,7 @@ jobs:
       - uses: ./.github/actions/setup
         id: setup
         with:
+          publish-caches: ${{ github.ref == 'refs/heads/main' && needs.mac_runner.outputs.self_hosted != 'true' && 'true' || 'false' }}
           check-part: compiled-unit
       - name: Compile the unit test roots once, never test acceptance
         id: compile
@@ -468,6 +574,8 @@ jobs:
         with:
           targets: '["test-logic"]'
           check-part: cache-execution
+      - name: Prove acceptance freshness, diagnostics and independent overlap
+        run: python3 -B -m unittest discover -s tests/ci -p native_acceptance_test.py -v
       - name: Prove warm compilation does not cache test acceptance
         id: compile
         # Cache timing: green 351 s, run 42755585733; minimum margin 120 s.
@@ -737,10 +845,10 @@ jobs:
         run: python3 -B tests/ci/failure_cause.py explain
   macos_suites:
     name: macos suites (${{ matrix.name }})
-    needs: [plan, macos_build, macos_build_unit]
+    needs: [plan, mac_runner, macos_build, macos_build_unit]
     # A skipped unit producer is expected only for an unsplit selection.
     if: ${{ !cancelled() && needs.plan.outputs.native == 'true' && needs.macos_build.result == 'success' && needs.macos_build_unit.result == (needs.plan.outputs.macos_split == 'true' && 'success' || 'skipped') }}
-    runs-on: macos-15
+    runs-on: ${{ fromJSON(needs.mac_runner.outputs.runs_on || '"macos-15"') }}
     timeout-minutes: ${{ inputs.promotion && 300 || 35 }}
     strategy:
       # Start alongside Linux; bound Mac occupancy while keeping suites isolated.
@@ -754,6 +862,7 @@ jobs:
       - uses: ./.github/actions/setup
         id: setup
         with:
+          publish-caches: ${{ github.ref == 'refs/heads/main' && needs.mac_runner.outputs.self_hosted != 'true' && 'true' || 'false' }}
           targets: ${{ toJSON(matrix.targets) }}
           compiled: 'true'
       - name: Use the verified producer artifact or compile locally
@@ -787,6 +896,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(uname -m)" = arm64
+          echo "Native execution CPUs: $(sysctl -n hw.logicalcpu); memory bytes: $(sysctl -n hw.memsize)"
           echo "Source SHA $(git rev-parse HEAD); actual native $(uname -s)/$(uname -m)" | tee -a "$GITHUB_STEP_SUMMARY"
           python3 -B tests/ci/run_selected.py "$TARGETS" --check-part "$CHECK_PART" --ci-artifacts .zig-cache/o/ci-compiled --quarantine "$QUARANTINE" $RETRY
       - name: Retain bounded failed-fixture diagnostics

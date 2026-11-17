@@ -42,12 +42,13 @@
       ],
       "expect": [
         "Optimistic send witness",
-        "alt+i info"
+        "gpt-6.1-sol"
       ],
       "absent": [
         "Sending…",
         "Sending...",
-        "Not confirmed"
+        "Not confirmed",
+        "alt+i info"
       ],
       "absent_regex": [
         "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
@@ -92,11 +93,12 @@
       "expect": [
         "Send failure witness",
         "Not confirmed · ctrl+r retries original",
-        "alt+i info"
+        "gpt-6.1-sol"
       ],
       "absent": [
         "Sending…",
-        "Sending..."
+        "Sending...",
+        "alt+i info"
       ],
       "absent_regex": [
         "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
@@ -152,12 +154,13 @@
       ],
       "expect": [
         "Optimistic send witness",
-        "alt+i info"
+        "gpt-6.1-sol"
       ],
       "absent": [
         "Sending…",
         "Sending...",
-        "Not confirmed"
+        "Not confirmed",
+        "alt+i info"
       ],
       "absent_regex": [
         "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
@@ -202,11 +205,12 @@
       "expect": [
         "Send failure witness",
         "Not confirmed · ctrl+r retries original",
-        "alt+i info"
+        "gpt-6.1-sol"
       ],
       "absent": [
         "Sending…",
-        "Sending..."
+        "Sending...",
+        "alt+i info"
       ],
       "absent_regex": [
         "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
@@ -237,11 +241,12 @@
       "expect": [
         "first line",
         "second line",
-        "alt+i info"
+        "gpt-6.1-sol"
       ],
       "absent": [
         "Browsing · Esc returns",
-        "enter retry"
+        "enter retry",
+        "alt+i info"
       ],
       "absent_regex": [
         "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
@@ -270,11 +275,12 @@
       "expect": [
         "first line",
         "second line",
-        "alt+i info"
+        "gpt-6.1-sol"
       ],
       "absent": [
         "Browsing · Esc returns",
-        "enter retry"
+        "enter retry",
+        "alt+i info"
       ],
       "absent_regex": [
         "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
@@ -457,7 +463,7 @@
       "open": "Upgrade witness",
       "steps": [],
       "expect": [
-        "alt+i info",
+        "gpt-6.1-sol",
         "Upgrade witness"
       ],
       "absent": [
@@ -471,7 +477,8 @@
         "Updating…",
         "Publishing; cancelling no longer rolls back",
         "restart rui to continue",
-        "enter open"
+        "enter open",
+        "alt+i info"
       ],
       "note": "Real release HTTP discovery and managed install; comparison uses native controls on each revision",
       "cast": [
@@ -688,7 +695,7 @@
       "open": "Day upgrade witness",
       "steps": [],
       "expect": [
-        "alt+i info",
+        "gpt-6.1-sol",
         "Day upgrade witness"
       ],
       "absent": [
@@ -702,7 +709,8 @@
         "Updating…",
         "Publishing; cancelling no longer rolls back",
         "restart rui to continue",
-        "enter open"
+        "enter open",
+        "alt+i info"
       ],
       "note": "Real release HTTP discovery and managed install; comparison uses native controls on each revision",
       "cast": [
@@ -808,11 +816,12 @@
       "steps": [],
       "expect": [
         "Surface witness",
-        "alt+i info"
+        "gpt-6.1-sol"
       ],
       "absent": [
-        "Browsing \u00b7 Esc returns",
-        "enter retry"
+        "Browsing · Esc returns",
+        "enter retry",
+        "alt+i info"
       ],
       "cast": [
         {
@@ -843,15 +852,16 @@
       ],
       "expect": [
         "Surface witness",
-        "alt+i info",
+        "gpt-6.1-sol",
         "First draft row",
         "Second draft row",
         "Third draft row"
       ],
       "absent": [
-        "Browsing \u00b7 Esc returns",
+        "Browsing · Esc returns",
         "enter retry",
-        "Type a task"
+        "Type a task",
+        "alt+i info"
       ],
       "absent_regex": [
         "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
@@ -874,11 +884,12 @@
       ],
       "expect": [
         "Surface witness",
-        "alt+i info"
+        "gpt-6.1-sol"
       ],
       "absent": [
         "Browsing · Esc returns",
-        "enter retry"
+        "enter retry",
+        "alt+i info"
       ],
       "absent_regex": [
         "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
@@ -890,10 +901,21 @@
       "theme": "night",
       "open": "overview",
       "steps": [
-        {"wait": "+ New Session"},
-        {"wait": "Type a task", "min_columns": 100},
-        {"keys": ["Esc"]},
-        {"gone": "Type a task"},
+        {
+          "wait": "+ New Session"
+        },
+        {
+          "wait": "Type a task",
+          "min_columns": 100
+        },
+        {
+          "keys": [
+            "Esc"
+          ]
+        },
+        {
+          "gone": "Type a task"
+        },
         {
           "wait": "Input tint chat"
         },
@@ -909,12 +931,13 @@
       ],
       "expect": [
         "› Type a task",
-        "alt+i info"
+        "gpt-6.1-sol"
       ],
       "absent": [
         "Browsing · Esc returns",
         "enter retry",
-        "enter start"
+        "enter start",
+        "alt+i info"
       ],
       "expect_background": {
         "› Type a task": "#121933"
@@ -955,11 +978,12 @@
       "steps": [],
       "expect": [
         "Surface witness",
-        "alt+i info"
+        "gpt-6.1-sol"
       ],
       "absent": [
-        "Browsing \u00b7 Esc returns",
-        "enter retry"
+        "Browsing · Esc returns",
+        "enter retry",
+        "alt+i info"
       ],
       "absent_regex": [
         "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
@@ -980,15 +1004,16 @@
       ],
       "expect": [
         "Surface witness",
-        "alt+i info",
+        "gpt-6.1-sol",
         "First draft row",
         "Second draft row",
         "Third draft row"
       ],
       "absent": [
-        "Browsing \u00b7 Esc returns",
+        "Browsing · Esc returns",
         "enter retry",
-        "Type a task"
+        "Type a task",
+        "alt+i info"
       ],
       "absent_regex": [
         "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
@@ -1011,11 +1036,12 @@
       ],
       "expect": [
         "Surface witness",
-        "alt+i info"
+        "gpt-6.1-sol"
       ],
       "absent": [
         "Browsing · Esc returns",
-        "enter retry"
+        "enter retry",
+        "alt+i info"
       ],
       "absent_regex": [
         "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
@@ -1027,10 +1053,21 @@
       "theme": "day",
       "open": "overview",
       "steps": [
-        {"wait": "+ New Session"},
-        {"wait": "Type a task", "min_columns": 100},
-        {"keys": ["Esc"]},
-        {"gone": "Type a task"},
+        {
+          "wait": "+ New Session"
+        },
+        {
+          "wait": "Type a task",
+          "min_columns": 100
+        },
+        {
+          "keys": [
+            "Esc"
+          ]
+        },
+        {
+          "gone": "Type a task"
+        },
         {
           "wait": "Input tint chat"
         },
@@ -1046,12 +1083,13 @@
       ],
       "expect": [
         "› Type a task",
-        "alt+i info"
+        "gpt-6.1-sol"
       ],
       "absent": [
         "Browsing · Esc returns",
         "enter retry",
-        "enter start"
+        "enter start",
+        "alt+i info"
       ],
       "expect_background": {
         "› Type a task": "#f3eee2"
@@ -1543,7 +1581,7 @@
           "wait": "Type a task"
         },
         {
-          "wait": "\u25cb New Session",
+          "wait": "○ New Session",
           "min_columns": 140
         },
         {
@@ -1553,15 +1591,16 @@
       "expect": [
         "Type a task",
         "~/code/rui",
-        "alt+i info"
+        "gpt-6.1-sol"
       ],
       "absent": [
         "Old chat remains.",
         "/new",
-        "/clear"
+        "/clear",
+        "alt+i info"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
       ]
     },
     {
@@ -1581,7 +1620,7 @@
           "wait": "Type a task"
         },
         {
-          "wait": "\u25cb New Session",
+          "wait": "○ New Session",
           "min_columns": 140
         },
         {
@@ -1591,15 +1630,16 @@
       "expect": [
         "Type a task",
         "~/code/rui",
-        "alt+i info"
+        "gpt-6.1-sol"
       ],
       "absent": [
         "Old chat remains.",
         "/new",
-        "/clear"
+        "/clear",
+        "alt+i info"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
       ]
     },
     {
@@ -2030,10 +2070,21 @@
       "note": "01a-new-empty-chat: New Session opens the only input and its Session footer facts",
       "open": "overview",
       "steps": [
-        {"wait": "+ New Session"},
-        {"wait": "Type a task", "min_columns": 100},
-        {"keys": ["Esc"]},
-        {"gone": "Type a task"},
+        {
+          "wait": "+ New Session"
+        },
+        {
+          "wait": "Type a task",
+          "min_columns": 100
+        },
+        {
+          "keys": [
+            "Esc"
+          ]
+        },
+        {
+          "gone": "Type a task"
+        },
         {
           "keys": [
             "Home",
@@ -2044,23 +2095,54 @@
           "wait": "Type a task"
         },
         {
-          "wait": "\u25cb New Session",
+          "wait": "○ New Session",
           "min_columns": 140
         }
       ],
       "expect": [
         "Type a task",
-        "gpt-6.1-sol \u00b7 low",
+        "gpt-6.1-sol · low",
         "code/rui",
-        "alt+i info"
+        "gpt-6.1-sol"
       ],
       "absent": [
         "enter start",
-        "Configured."
+        "Configured.",
+        "alt+i info"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
       ]
+    },
+    {
+      "name": "chat-footer-below-half",
+      "note": "Completed short chat has nonzero context usage below half; hide context and info hints at both widths",
+      "open": "Context budget witness",
+      "cast": [
+        {
+          "label": "Context budget witness",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "messages": [
+            "Check context budget"
+          ]
+        }
+      ],
+      "steps": [],
+      "expect": [
+        "Check context budget",
+        "gpt-6.1-sol"
+      ],
+      "absent": [
+        "context left",
+        "100% left",
+        "alt+i info"
+      ],
+      "sizes": [
+        "140x40",
+        "46x30"
+      ],
+      "expect_last": "gpt-6.1-sol"
     },
     {
       "name": "draft-chat-choice-escape",
@@ -2094,15 +2176,15 @@
         }
       ],
       "expect": [
-        "gpt-6.1-sol",
-        "alt+i info"
+        "gpt-6.1-sol"
       ],
       "absent": [
-        "\u203a /effort",
-        "enter pick"
+        "› /effort",
+        "enter pick",
+        "alt+i info"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
       ]
     },
     {
@@ -2995,7 +3077,7 @@
           }
         },
         {
-          "wait": "gpt-6.1-sol \u00b7 low \u00b7 100% left"
+          "wait": "gpt-6.1-sol \u00b7 low"
         },
         {
           "gone": "Configured."
@@ -5035,11 +5117,12 @@
       ],
       "expect": [
         "Check this sidebar.",
-        "alt+i info"
+        "gpt-6.1-sol"
       ],
-      "expect_last": "alt+i info",
+      "expect_last": "gpt-6.1-sol",
       "absent": [
-        "+ New Session"
+        "+ New Session",
+        "alt+i info"
       ],
       "cast": [
         {
@@ -5053,7 +5136,7 @@
         }
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
       ]
     },
     {
@@ -5074,12 +5157,13 @@
         "Batch job",
         "Check this sidebar."
       ],
-      "expect_last": "alt+i info",
+      "expect_last": "gpt-6.1-sol",
       "absent": [
-        "+ New Session"
+        "+ New Session",
+        "alt+i info"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
       ]
     },
     {
@@ -6152,11 +6236,12 @@
       ],
       "expect": [
         "Next minute witness",
-        "alt+i info"
+        "gpt-6.1-sol"
       ],
       "absent": [
-        "Browsing \u00b7 Esc returns",
-        "enter retry"
+        "Browsing · Esc returns",
+        "enter retry",
+        "alt+i info"
       ],
       "cast": [
         {
@@ -6170,7 +6255,7 @@
         }
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
       ]
     },
     {
@@ -6188,15 +6273,16 @@
       ],
       "expect": [
         "Next minute witness",
-        "alt+i info",
+        "gpt-6.1-sol",
         "Retained chatfeed draft"
       ],
       "absent": [
-        "Browsing \u00b7 Esc returns",
-        "enter retry"
+        "Browsing · Esc returns",
+        "enter retry",
+        "alt+i info"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
       ]
     },
     {
@@ -6207,14 +6293,15 @@
       "steps": [],
       "expect": [
         "Next minute witness",
-        "alt+i info"
+        "gpt-6.1-sol"
       ],
       "absent": [
-        "Browsing \u00b7 Esc returns",
-        "enter retry"
+        "Browsing · Esc returns",
+        "enter retry",
+        "alt+i info"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
       ]
     },
     {
@@ -6232,15 +6319,16 @@
       ],
       "expect": [
         "Next minute witness",
-        "alt+i info",
+        "gpt-6.1-sol",
         "Retained chatfeed draft"
       ],
       "absent": [
-        "Browsing \u00b7 Esc returns",
-        "enter retry"
+        "Browsing · Esc returns",
+        "enter retry",
+        "alt+i info"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
       ]
     }
   ]

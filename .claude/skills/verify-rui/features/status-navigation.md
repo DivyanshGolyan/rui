@@ -1,6 +1,6 @@
 # Chat info and navigation
 
-Alt-I or the clickable **alt+i info** hint opens Chat info above the input. Recent messages stay visible above the panel, and your draft stays in place. With the panel closed, the feed scrolls through messages and tool results; Ctrl-O opens tool output in place or a collapsed message's full text.
+Alt-I or the clickable chat footer opens Chat info above the input. Recent messages stay visible above the panel, and your draft stays in place. With the panel closed, the feed scrolls through messages and tool results; Ctrl-O opens tool output in place or a collapsed message's full text.
 
 ## Sub-features
 
@@ -15,17 +15,17 @@ Alt-I or the clickable **alt+i info** hint opens Chat info above the input. Rece
 
 ## How to get to it (user POV)
 
-Open a chat and press Alt-I or click **alt+i info**. Use Up/Down and Enter on fields, or click them. Esc closes an open choice first, then info. Clicking the chat's model or effort word opens that choice directly; see [Model choice](./model-choice.md).
+Open a chat and press Alt-I or click the chat footer outside its controls. Use Up/Down and Enter on fields, or click them. Esc closes an open choice first, then info. Clicking the chat's model or effort word opens that choice directly; see [Model choice](./model-choice.md).
 
 For an unresolved or rejected submission, Alt-D or **alt+d details** opens the separate repair page. An environment-too-large refusal also offers clickable **details**. Read it with the scroll keys or wheel; Esc returns to the chat.
 
 ## Driving it with verify-rui
 
-Frame states: `chat`, `fold-hover`, `tool-open`, `tool-open-two`, `tool-open-long`, `tool-open-nocolor`, `chat-scrolled`, `chat-top`, `chat-new-below`, `markdown`, `markdown-wrapped`, `chat-info`, `chat-info-model`, `chat-info-archive`, `chat-info-copied`, `chat-info-stacked-actions`
+Frame states: `chat-footer-below-half`, `chat`, `fold-hover`, `tool-open`, `tool-open-two`, `tool-open-long`, `tool-open-nocolor`, `chat-scrolled`, `chat-top`, `chat-new-below`, `markdown`, `markdown-wrapped`, `chat-info`, `chat-info-model`, `chat-info-archive`, `chat-info-copied`, `chat-info-stacked-actions`
 
-Run `$V frames FULLSHA --only chat,fold-hover,tool-open,tool-open-two,tool-open-long,tool-open-nocolor,chat-scrolled,chat-top,chat-new-below,markdown,markdown-wrapped,chat-info,chat-info-model,chat-info-archive,chat-info-copied,chat-info-stacked-actions`.
+Run `$V frames FULLSHA --only chat-footer-below-half,chat,fold-hover,tool-open,tool-open-two,tool-open-long,tool-open-nocolor,chat-scrolled,chat-top,chat-new-below,markdown,markdown-wrapped,chat-info,chat-info-model,chat-info-archive,chat-info-copied,chat-info-stacked-actions`.
 
-Use both 140×40 and 46×30 captures. In the info states, two completed answer lines must stay above the panel, and **keep this retry draft** must stay in the input. Opening Model should use only the space its matches need; filtering should return that space. Check one info footer on the physical last row, no extra blank notice row, and no **Context** for these fixtures without an estimate.
+Use both 140×40 and 46×30 captures. The completed short chat in `chat-footer-below-half` must omit context and the permanent info hint. In the info states, two completed answer lines must stay above the panel, and **keep this retry draft** must stay in the input. Opening Model should use only the space its matches need; filtering should return that space. Check one info footer on the physical last row, no extra blank notice row, and no **Context** for these fixtures without an estimate.
 
 For a live recipe, open a terminal on `demo` with `doctor` PASS. Send `--keys M-i`, wait for **Copy last answer** with `--after GEN`, then capture. From Effort, Down then Enter opens Permissions; choose **ask first** and compare the saved Session inspection. From Effort, Down three times then Enter opens Model because Folder is read only. Type a filter, close the choice with Esc, wait for a new frame, then close info. Your draft must remain unchanged and no message should be sent.
 

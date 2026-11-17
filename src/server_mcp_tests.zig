@@ -263,9 +263,9 @@ fn run(case: Case) !void {
         if (entry.kind != .tool_results) continue;
         while (try view.nextToolResult()) |result| {
             var reader: store.testing.TestingReader = undefined;
-            try view.openContent(result.output, &reader);
+            try view.openContent(result.output.?, &reader);
             defer reader.close();
-            const bytes = try allocator.alloc(u8, @intCast(result.output.length));
+            const bytes = try allocator.alloc(u8, @intCast(result.output.?.length));
             defer allocator.free(bytes);
             try std.testing.expectEqual(bytes.len, try reader.read(0, bytes));
             try expectHere(@src(), std.mem.indexOf(u8, bytes, expected) != null);
