@@ -2461,15 +2461,14 @@ fn perform(self: *Self, action: ConversationAction) !void {
                 self.dirty = true;
                 return;
             }
-            if (action == .close) if (self.menu.current(self.menuSource())) |shown| {
-                shown.close();
+            if (action == .close and self.menu.closeIfDrawn(self.menuSource())) {
                 switch (slash_commands.draftOf(self.input.composition().bytes)) {
                     .word, .command => self.input.clear(),
                     .message => {},
                 }
                 self.dirty = true;
                 return;
-            };
+            }
             self.dropMessageRequest();
             screen.moveRow(.selector);
             if (action == .close and self.settledView()) {
@@ -9325,6 +9324,36 @@ test "chat info supplies the one bottom footer after the input and both dividers
         try std.testing.expect((try rowWith(held, "alt+i info")) == null);
         try std.testing.expectEqualStrings("kept draft", held.self.input.composition().bytes);
     };
+}
+
+test "App Session Escape closes drawn command list before leaving chat" {
+    for ([_]struct { width: u16, height: u16 }{ .{ .width = 140, .height = 40 }, .{ .width = 46, .height = 30 } }) |size| {
+        for ([_][]const u8{ "/", "/ne" }) |draft| for ([_]bool{ false, true }) |new_skills| {
+            const held = try HeldFrontend.create();
+            defer held.destroy();
+            held.size = .{ .width = size.width, .height = size.height };
+            held.root.size = .{ .width = size.width, .height = size.height };
+            try held.frame();
+            try held.keys(draft);
+            try held.frame();
+            try std.testing.expectEqual(.drawn, held.self.menu.shown.?.seen);
+            if (new_skills) {
+                _ = held.self.dropSkills();
+                const ask = held.self.skills.ask(draft[1..]).?;
+                try std.testing.expect(held.self.skills.answer(ask.read, .{}, draft[1..]) == null);
+                try std.testing.expect(held.self.menu.current(held.self.menuSource()) == null);
+            }
+            try held.keys("\x1b");
+            try std.testing.expectEqual(@as(?Outcome, null), held.left);
+            try std.testing.expect(held.root.session != null);
+            try std.testing.expect(held.root.input.mainFocused());
+            try std.testing.expectEqualStrings("", held.self.input.composition().bytes);
+            try held.frame();
+            try std.testing.expect(held.self.menu.current(held.self.menuSource()) == null);
+            try held.keys("\x1b");
+            try std.testing.expectEqual(@as(?Outcome, .returned), held.left);
+        };
+    }
 }
 
 test "App Session palette total budget stays between input rules and reserves feed rows" {
