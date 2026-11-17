@@ -733,7 +733,7 @@ pub const migrations = [_]Migration{
             "UPDATE session SET creator_ref=parent_ref",
         },
         .mysql = &.{
-            "ALTER TABLE session ADD COLUMN creator_ref VARCHAR(6), ADD FOREIGN KEY(creator_ref) REFERENCES session(session_ref), ADD CHECK(creator_ref IS NULL OR creator_ref<>session_ref)",
+            "ALTER TABLE session ADD COLUMN creator_ref VARCHAR(6) AFTER obligation_since, ADD FOREIGN KEY(creator_ref) REFERENCES session(session_ref), ADD CHECK(creator_ref IS NULL OR creator_ref<>session_ref)",
             "UPDATE session SET creator_ref=parent_ref",
         },
     },
@@ -3337,7 +3337,11 @@ test "schema 80 creator migration matches canonical SQLite and MySQL column cons
         for (objects(.mysql)) |object| if (std.mem.eql(u8, object.name, "session")) break :blk object.sql;
         unreachable;
     };
-    try std.testing.expect(std.mem.indexOf(u8, canonical_session_mysql, "creator_ref VARCHAR(6)") != null);
+    const obligation_position = std.mem.indexOf(u8, canonical_session_mysql, "obligation_since BIGINT").?;
+    const creator_position = std.mem.indexOf(u8, canonical_session_mysql, "creator_ref VARCHAR(6)").?;
+    const generated_position = std.mem.indexOf(u8, canonical_session_mysql, "session_obligation_parent_lead").?;
+    try std.testing.expect(obligation_position < creator_position and creator_position < generated_position);
+    try std.testing.expect(std.mem.indexOf(u8, step.mysql[0], "ADD COLUMN creator_ref VARCHAR(6) AFTER obligation_since") != null);
     try std.testing.expect(std.mem.indexOf(u8, canonical_session_mysql, "CHECK(" ++ creator.check.? ++ ")") != null);
     try std.testing.expect(std.mem.indexOf(u8, step.mysql[0], "CHECK(" ++ creator.check.? ++ ")") != null);
     try std.testing.expect(std.mem.indexOf(u8, step.mysql[0], "FOREIGN KEY(creator_ref) REFERENCES session(session_ref)") != null);
