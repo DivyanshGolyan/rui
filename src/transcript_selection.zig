@@ -28,6 +28,14 @@ pub const Range = struct {
 
 pub const Row = RowFor(Document);
 
+// Selection composes with an existing reverse-video band in either theme.
+pub fn highlight(cells: []vaxis.Cell, columns: []const bool) void {
+    std.debug.assert(cells.len == columns.len);
+    for (cells, columns) |*cell, selected| if (selected) {
+        cell.style.reverse = !cell.style.reverse;
+    };
+}
+
 pub fn RowFor(comptime Doc: type) type {
     return struct {
         const Self = @This();
@@ -285,4 +293,42 @@ test "copying code across wrapped and blank band rows contains only code text" {
         defer gpa.free(whole.text.bytes);
         try std.testing.expectEqualStrings(text, whole.text.bytes);
     }
+}
+
+test "selection contrasts with sent bands and padding at both widths" {
+    const testing = std.testing;
+    for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |colour| for ([_]bool{ false, true }) |wrapped| {
+        var document: viewport.Sized(1024, true) = .{ .sidenotes = true };
+        try document.append(TerminalText.user_message_on ++ "› ");
+        const count: usize = if (!wrapped) 5 else if (width == 46) 75 else 265;
+        for (0..count) |_| try document.append("x");
+        try document.append("\n" ++ TerminalText.user_message_off);
+        try document.prepare();
+        const layout: viewport.Layout = .{ .width = width, .method = .unicode };
+        const height = document.lineRows(layout, 0);
+        try testing.expectEqual(@as(u16, if (wrapped) 5 else 3), height);
+        var cells: [140 * 5]vaxis.Cell = @splat(.{});
+        var screen: vaxis.Screen = .{ .width = width, .height = height, .width_method = .unicode, .buf = cells[0 .. @as(usize, width) * height] };
+        const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = height, .screen = &screen };
+        const colours: viewport.Colours = .{ .user_band = .{ .index = 2 }, .no_depth = !colour };
+        _ = document.draw(window, .{}, true, true, .{}, colours);
+        var positions = document.rowsFrom(layout, .{});
+        var columns: [140]bool = undefined;
+        for (0..height) |row_index| {
+            const position = positions.next().?;
+            const row_cells = cells[row_index * width ..][0..width];
+            const row: RowFor(@TypeOf(document)) = .{ .document = &document, .cells = row_cells, .line = document.selectionLine(layout, position) };
+            row.covered(.{ .from = 0, .to = document.text().len }, columns[0..width]);
+            const old = row_cells[0].style.reverse;
+            const old_text = row_cells[4].style.reverse;
+            const old_unselected = row_cells[1].style.reverse;
+            try testing.expectEqual(!colour, old);
+            try testing.expect(columns[0] and columns[4]);
+            columns[1] = false;
+            highlight(row_cells, columns[0..width]);
+            try testing.expectEqual(!old, row_cells[0].style.reverse);
+            try testing.expectEqual(!old_text, row_cells[4].style.reverse);
+            try testing.expectEqual(old_unselected, row_cells[1].style.reverse);
+        }
+    };
 }

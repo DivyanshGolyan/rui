@@ -228,7 +228,7 @@ fn spotAt(self: *const Self, gpa: std.mem.Allocator, at: Cell) !?Spot {
     const cells = try gpa.alloc(vaxis.Cell, self.drawn.width);
     defer gpa.free(cells);
     self.paintRow(cells, line);
-    return self.keyed((Row{ .document = &self.window.document, .cells = cells, .line = line.offset }).spot(col));
+    return self.keyed((Row{ .document = &self.window.document, .cells = cells, .line = self.window.document.selectionLine(self.layout(), line) }).spot(col));
 }
 
 fn retryAt(self: *const Self, gpa: std.mem.Allocator, at: Cell) !?resident.RetryHit {
@@ -495,10 +495,8 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
             for (0..self.size.height) |row| {
                 const position = (rows.next() orelse break) orelse continue;
                 const cells = surface.buffer[row * self.size.width ..][0..self.size.width];
-                (Row{ .document = &self.window.document, .cells = cells, .line = position.offset }).covered(range, columns);
-                for (cells, columns) |*cell, selected| if (selected) {
-                    cell.style.reverse = true;
-                };
+                (Row{ .document = &self.window.document, .cells = cells, .line = self.window.document.selectionLine(self.layout(), position) }).covered(range, columns);
+                selecting.highlight(cells, columns);
             }
         }
     }
@@ -1245,11 +1243,20 @@ test "FeedView optimistic multiline band and attached note stay inside the viewp
         defer arena.deinit();
         const frame = try testFrame(&view, arena.allocator(), width, 6);
         try std.testing.expectEqual(@as(usize, width) * 6, frame.buffer.len);
-        try std.testing.expectEqual(@as(u32, 3), window.tail_rows);
-        try std.testing.expectEqualStrings("›", testCell(frame, 3, 0));
-        try std.testing.expectEqualStrings("s", testCell(frame, 4, 2));
+        try std.testing.expectEqual(@as(u32, 5), window.tail_rows);
+        try std.testing.expectEqualStrings("›", testCell(frame, 2, 2));
+        try std.testing.expectEqualStrings("s", testCell(frame, 3, 4));
         try std.testing.expectEqualStrings("N", testCell(frame, 5, 2));
-        for (3..5) |row| for (0..width) |col| try std.testing.expectEqual(if (colour) view.colours.user_band else view.style.bg, frame.readCell(col, row).style.bg);
+        for (2..4) |row| for (0..width) |col| {
+            const cell = frame.readCell(col, row);
+            try std.testing.expectEqual(if (colour) view.colours.user_band else view.style.bg, cell.style.bg);
+            try std.testing.expectEqual(!colour, cell.style.reverse);
+        };
+        for ([_]u16{ 1, 4 }) |row| {
+            const cell = frame.readCell(0, row);
+            try std.testing.expectEqualStrings(" ", cell.char.grapheme);
+            if (colour) try std.testing.expectEqual(view.colours.user_band, cell.style.bg) else try std.testing.expect(cell.style.reverse);
+        }
         try std.testing.expectEqual(view.style.bg, frame.readCell(2, 5).style.bg);
         try std.testing.expectEqual(if (colour) view.colours.quiet else view.style.fg, frame.readCell(2, 5).style.fg);
         try std.testing.expectEqual(@as(usize, 0), window.count);
@@ -1299,7 +1306,7 @@ test "FeedView canonical failure annotation is exact-key frame decoration rather
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         const first = try testFrame(&view, arena.allocator(), width, 6);
-        try std.testing.expectEqualStrings("›", testCell(first, 4, 0));
+        try std.testing.expectEqualStrings("›", testCell(first, 3, 2));
         try std.testing.expectEqualStrings("N", testCell(first, 5, 2));
         try std.testing.expectEqual(@as(usize, 1), window.count);
         try std.testing.expectEqual(@as(u32, 0), window.tail_rows);
@@ -1308,7 +1315,45 @@ test "FeedView canonical failure annotation is exact-key frame decoration rather
         try std.testing.expectEqualDeep(first.buffer, repeated.buffer);
         view.message_note.?.key = @splat('B');
         const other = try testFrame(&view, arena.allocator(), width, 6);
-        try std.testing.expectEqualStrings("›", testCell(other, 5, 0));
+        try std.testing.expectEqualStrings("›", testCell(other, 4, 2));
         try std.testing.expectEqualStrings(original, window.document.text());
     }
+}
+
+test "FeedView separates consecutive padded messages on the chat ground" {
+    for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |colour| {
+        const window = try testWindow();
+        defer std.testing.allocator.destroy(window);
+        var short: viewport.Sized(512, true) = .{};
+        try short.append(PendingText.user_message_on ++ "› short\n" ++ PendingText.user_message_off);
+        try short.prepare();
+        var long: viewport.Sized(512, true) = .{};
+        try long.append(PendingText.user_message_on ++ "› ");
+        const count: usize = if (width == 46) 75 else 265;
+        for (0..count) |_| try long.append("x");
+        try long.append("\n" ++ PendingText.user_message_off);
+        try long.prepare();
+        try window.append(&.{
+            .{ .key = .{ .position = 1 }, .text = resident.Text.fromDocument(&short) },
+            .{ .key = .{ .position = 2 }, .text = resident.Text.fromDocument(&long) },
+        });
+        var anchor: Feed = .{};
+        var view: Self = .{ .window = window, .anchor = &anchor, .colour = colour, .style = .{ .bg = .{ .index = 8 } }, .colours = .{ .user_band = .{ .index = 10 } } };
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const frame = try testFrame(&view, arena.allocator(), width, 10);
+        try std.testing.expectEqualStrings("›", testCell(frame, 2, 2));
+        try std.testing.expectEqualStrings("›", testCell(frame, 6, 2));
+        for (0..width) |column| {
+            const gap = frame.readCell(@intCast(column), 4);
+            try std.testing.expectEqualStrings(" ", gap.char.grapheme);
+            try std.testing.expectEqual(view.style.bg, gap.style.bg);
+            try std.testing.expect(!gap.style.reverse);
+            for ([_]u16{ 3, 5 }) |row| {
+                const padding = frame.readCell(@intCast(column), row);
+                try std.testing.expectEqualStrings(" ", padding.char.grapheme);
+                if (colour) try std.testing.expectEqual(view.colours.user_band, padding.style.bg) else try std.testing.expect(padding.style.reverse);
+            }
+        }
+    };
 }
