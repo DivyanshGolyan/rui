@@ -1291,19 +1291,28 @@ test "saved and legacy explicit interfaces share private directory admission bef
     defer std.testing.allocator.destroy(settings);
     const id = "0123456789abcdef0123456789abcdef";
     for ([_]u16{ 0o700, 0o755, 0o777, 0o000 }) |mode| {
+        errdefer std.debug.print("explicit interface admission: mode={o}\n", .{mode});
         try runtime.dir.setPermissions(io, .fromMode(mode));
         defer runtime.dir.setPermissions(io, .fromMode(0o700)) catch @panic("restore interface privacy");
         for ([_]enum { legacy_mysql, saved_mysql, moved_sqlite }{ .legacy_mysql, .saved_mysql, .moved_sqlite }) |door| {
+            errdefer std.debug.print("explicit interface admission: lookup={s}\n", .{@tagName(door)});
             settings.* = .{};
             defer settings.deinit();
             try settings.interface.dir.text.set(directory);
             settings.interface.dir.anchored = false;
             if (door == .saved_mysql) settings.store = .{ .mysql = .{} } else try settings.store.sqlite.dir.text.set(host.root[0..host.root_len]);
             const paths = if (door == .legacy_mysql) mysqlClientPaths(io, id, directory) else placementPaths(io, settings);
-            // Private-directory admission excludes other-user permissions.
-            // A mode-000 directory is private too; connecting may separately
-            // fail for lack of search permission (openDir can use O_PATH).
-            if (mode == 0o700 or mode == 0) {
+            // Privacy and path-open authority are independent. The owned
+            // descriptor proves mode 000 is private on every OS, but Darwin's
+            // O_RDONLY directory open (unlike Linux O_PATH) requires read access.
+            if (mode == 0) {
+                try validatePrivateDirectory(runtime.dir, io);
+                if (@hasField(std.posix.O, "PATH")) {
+                    _ = try paths;
+                } else {
+                    try std.testing.expectError(error.AccessDenied, paths);
+                }
+            } else if (mode == 0o700) {
                 _ = try paths;
             } else {
                 try std.testing.expectError(error.InsecureDirectoryPermissions, paths);

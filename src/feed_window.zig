@@ -72,6 +72,7 @@ pub const Opened = struct {
 
 pub const LatestEnding = @import("feed_reads.zig").Ending(Key);
 pub const RetryHit = union(enum) { link: Key, padding };
+pub const message_note_capacity = 64 + 4 * @import("outcome_code.zig").max_bytes;
 pub const MessageNote = struct { key: [36]u8, text: []const u8 };
 pub const Presentation = struct {
     latest_ending: ?LatestEnding = null,
@@ -80,7 +81,7 @@ pub const Presentation = struct {
 };
 
 const NoteLine = struct {
-    document: viewport.Sized(256, true) = .{},
+    document: viewport.Sized(message_note_capacity, true) = .{},
     fn init(self: *NoteLine, window: *const Window, entry: Window.Stored, offset: usize, presentation: Presentation) bool {
         const note = presentation.message_note orelse return false;
         const key = entry.message_key orelse return false;

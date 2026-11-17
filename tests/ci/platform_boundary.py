@@ -23,6 +23,7 @@ import build_files
 ROOT = Path(__file__).resolve().parents[2]
 
 MAC_PATHS = (
+    "src/client.zig",
     "src/os/*", "tests/integration/os_semantics.py",
     "tests/integration/terminal_process.py", "tests/integration/terminal_leader.py",
     "tests/integration/terminal_restoration_cases.py",

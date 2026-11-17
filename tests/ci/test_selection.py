@@ -1248,23 +1248,30 @@ class SelectionTest(unittest.TestCase):
                 self.assertIn("current-facts-integration", combined[family])
 
     def test_policy_self_checks_run_only_when_their_inputs_change(self):
-        driver, admission, publication, artifact, formal = (unit for unit, _ in POLICY_SELF_CHECKS)
+        driver, admission, publication, artifact, locality, formal = (unit for unit, _ in POLICY_SELF_CHECKS)
         for paths, run in (
                 (["src/cli.zig", "src/store/Store.zig", "tests/integration/human_cli_integration.py",
-                  "README.md", "clients/ts/src/wire.ts"], set()),
-                (["tests/ci/select_tests.py"], {driver, admission, publication, artifact}),
+                  "README.md", "clients/ts/src/wire.ts"], {locality}),
+                (["tests/ci/select_tests.py"], {driver, admission, publication, artifact, locality}),
                 (["tests/ci/requirements.txt"], {driver, admission, publication, artifact}),
                 (["tests/formal/mysql_ownership/MysqlOwnership.tla"], {formal}),
                 (["tests/ci/test_formal_models.py"], {driver, admission, publication, artifact, formal}),
                 (["build.zig"], {driver, admission}),
                 ([".github/workflows/release.yml"], {admission}),
-                (["src/wire_version.zig"], {driver}),
+                (["src/wire_version.zig"], {driver, locality}),
                 (["tests/integration/check.sh"], {driver}),
-                (["tests/integration/host_process.py", "src/cli.zig"], {driver})):
+                (["tests/integration/host_process.py", "src/cli.zig"], {driver, locality}),
+                (["clients/ts/src/nested/client.ts"], {locality}),
+                (["tests/ci/client_locality.py"], {driver, admission, publication, artifact, locality}),
+                (["tests/ci/test_client_locality.py"], {driver, admission, publication, artifact, locality}),
+                (["tests/ci/caller_errors.py"], {driver, admission, publication, artifact, locality}),
+                (["tests/ci/import_architecture.py"], {driver, admission, publication, artifact, locality}),
+                (["tests/ci/host_settings_locality.py"], {driver, admission, publication, artifact, locality}),
+                (["tests/ci/stack_frames.json"], {driver, admission, publication, artifact, locality})):
             for phase in ("development", "review"):
                 with self.subTest(paths=paths, phase=phase):
                     skips = select(paths, phase, AVAILABLE)["policy_skips"]
-                    self.assertEqual(set(skips), {driver, admission, publication, artifact, formal} - run)
+                    self.assertEqual(set(skips), {driver, admission, publication, artifact, locality, formal} - run)
 
     def test_ci_policy_does_not_make_build_qualification_universal(self):
         for path in (".github/workflows/check.yml",
