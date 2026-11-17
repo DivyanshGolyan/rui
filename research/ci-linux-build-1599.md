@@ -121,3 +121,17 @@ The raw compiler lifecycle, publisher and maintenance logs, source provenance an
 The opt-in paired diagnostic begins after a successful ordinary LLVM producer. It checkpoints the main-only cache, protects its installed production CLIs (and the upgrade fixture when selected) and tests unchanged and fixed-source-edit producers in both LLVM and PR profiles. Each control/candidate arm restores the same manifests and mutable outputs, runs the existing inode restat and compares named compile/cache statuses plus verbose C/link commands. Existing executable trees stay in place with inode/metadata guards; an unexpected write fails the experiment. This bounds disk use while preserving evidence. The diagnostic also streams identical tar+zstd commands before and after compaction, recording compressed bytes and elapsed time without storing two multi-GB archives. Publication is disabled for diagnostics, including main dispatches.
 
 Qualification remains pending until these actual paired builds and hosted byte measurements finish. This in-place comparison does not independently reproduce a second complete tar extraction or a fresh-inode checkout. Ordinary PR restore timing after compaction also requires a trusted main publication: branch and PR workflows restore main's caches and cannot publish the optimized snapshot themselves. Keep that distinction when adding the before/after setup and producer timing table.
+
+
+### Fresh ordinary PR baseline before part 2 publication
+
+The newest three successful ordinary PR producers after #1601, collected at 2026-11-17T07:45:45Z, show continued archive growth. All three compiler restores hit the same 86,862,966-byte archive; all build restores were prefix hits.
+
+| Baseline | Setup s | Compile s | linux_build s | Build archive B | Restore / download / extract s |
+|---|---:|---:|---:|---:|---:|
+| PR [44034556280](https://github.com/DivyanshGolyan/rui/actions/runs/44034556280/job/133889572371), attempt 2 | 358 | 267 | 642 | 7,313,055,640 | 313.469 / 62.769 / 250.179 |
+| PR [44033721963](https://github.com/DivyanshGolyan/rui/actions/runs/44033721963/job/133871683724) | 192 | 326 | 528 | 7,313,055,640 | 164.439 / 30.283 / 133.869 |
+| PR [44025518071](https://github.com/DivyanshGolyan/rui/actions/runs/44025518071/job/133844918998) | 258 | 215 | 486 | 7,022,722,895 | 223.486 / 25.210 / 198.073 |
+| Fresh three-job median | 258 | 267 | 528 | 7,313,055,640 | 223.486 / 30.283 / 198.073 |
+
+Two observations are attempts from the same PR; workloads and runners differ, and two parent workflows failed outside these successful producers. This is an observational pre-compaction baseline, with no speedup inference. Full keys, target/part lists, REST timestamps, raw logs, 50 passing extraction/selection checks and checksums are retained under `/mnt/project-files/ci-speed-1116/linux-build-1599-measurements/part2-before/`.
