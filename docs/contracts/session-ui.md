@@ -789,6 +789,7 @@ The composer uses the same `› ` marker as submitted User messages.
 The input has no tint: its draft and placeholder use the plain chat ground, not a separate input surface.
 Its caret is a fat blinking block.
 The input stays bottom-anchored in its existing layout, with the rules above and below it in their existing positions; changing the surface or caret does not move either rule, the input or footer.
+Rules and dividers, including the input rules, overview list bottom rule, panel top rules and pane divider, use the shared `widget_style.line` running stitch: `┄` horizontally and `┆` vertically in the theme thread colour. ASCII uses `-` and `|`; no-colour mode retains the glyph without a foreground colour. Labels on rules keep their quiet text style.
 Submitted User messages instead occupy a faint tint band, with upright text (never italics) and a quiet prompt mark.
 The band leaves two tinted columns before the mark and wraps the text within its inset, retaining the timestamp in its right margin.
 The first and last lines have a full blank tinted row above and below, using reverse video when there is no colour depth.

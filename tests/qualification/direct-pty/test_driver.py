@@ -23,7 +23,7 @@ class NavigationTests(unittest.TestCase):
     @staticmethod
     def screen(first, count, chip="↓"):
         return "\n".join([f"History line {n:03d}" for n in range(first, first + count)]
-                         + [chip, "─" * 80, " › ", "─" * 80, " ‹ fixture"])
+                         + [chip, "┄" * 80, " › ", "┄" * 80, " ‹ fixture"])
 
     def test_continuous_feed_ranges_and_reserved_chip(self):
         for feed_rows in (8, 18, 19, 27):
@@ -51,7 +51,7 @@ class NavigationTests(unittest.TestCase):
             self.assertEqual(navigation_first(live_first, rows, {"pages": 2, "lines": 1}),
                              live_first - 2 * (rows // 2) - 1)
             with self.assertRaisesRegex(AssertionError, "navigation composer rule"):
-                navigation_rows(screen.replace("─", " "))
+                navigation_rows(screen.replace("┄", " "))
 
     def test_chrome_geometry_comes_from_input_rules_with_one_footer(self):
         with patch.object(sys, "argv", [sys.argv[0], sys.executable]):
@@ -63,10 +63,10 @@ class NavigationTests(unittest.TestCase):
                     for right in ("alt+i info", "! Unknown command /nosuch"):
                         with self.subTest(persistent=persistent, draft=draft, split=split, right=right):
                             feed = 24 - 1 - len(persistent) - 3 - 1
-                            lines = (["history"] * feed + ["", "─" * 46, " › " + draft, "─" * 46]
+                            lines = (["history"] * feed + ["", "┄" * 46, " › " + draft, "┄" * 46]
                                      + [" ‹ Chat · Archived    " + right] + persistent)
                             if split:
-                                lines = [" " * 40 + "│" + line for line in lines]
+                                lines = [" " * 40 + "┆" + line for line in lines]
                             screen = "\n".join(lines)
                             self.assertEqual(composer_bounds(screen), (feed + 1, feed + 3))
                             self.assertTrue(composing(screen, draft))
@@ -76,7 +76,7 @@ class NavigationTests(unittest.TestCase):
                             self.assertEqual(status(screen), "\n".join(persistent))
                             self.assertIn(f";{24 - len(persistent)}M".encode(), footer_click(screen, column=1))
                             self.assertIn(f";{24 - len(persistent)}M".encode(), footer_click(screen, marker="Chat"))
-                            self.assertFalse(composing(screen.replace("─", " "), draft))
+                            self.assertFalse(composing(screen.replace("┄", " "), draft))
 
     def test_chat_info_observes_fields_footer_and_fitted_folder(self):
         with patch.object(sys, "argv", [sys.argv[0], sys.executable]):
@@ -90,11 +90,11 @@ class NavigationTests(unittest.TestCase):
             def wait(self, predicate, *, label):
                 assert predicate(), label
 
-        lines = ["History line 099", "TD4 history end", "─" * 80, " Chat",
+        lines = ["History line 099", "TD4 history end", "┄" * 80, " Chat",
                  "   Effort          low", "   Permissions     run without asking",
                  "   Allowed tools   bash", "   Folder          …/long-parent/specimen",
                  "   Model           gpt-6-luna", "",
-                 "   Rename     Archive     Copy last answer", "", "─" * 80, " › ", "─" * 80,
+                 "   Rename     Archive     Copy last answer", "", "┄" * 80, " › ", "┄" * 80,
                  " Chat                esc"]
         chat_info_ready(Terminal(lines), "specimen")
         for label in ("Effort", "Permissions", "Allowed tools", "Folder", "Model", "Rename", "Archive", "Copy last answer", "Chat", "esc"):
@@ -156,7 +156,7 @@ class OverviewTests(unittest.TestCase):
         for editor, failure in (("Type a task", "overview has an editor"),
                                 (" › ab", "overview has a composer"),
                                 (" > ab", "overview has a composer"),
-                                ("sidebar │ › ab", "overview has a composer")):
+                                ("sidebar ┆ › ab", "overview has a composer")):
             with self.subTest(editor=editor), self.assertRaisesRegex(AssertionError, failure):
                 escaped_overview(Terminal(frame + "\n" + editor), "TD4 saved conversation")
 

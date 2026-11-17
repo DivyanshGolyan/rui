@@ -8,7 +8,8 @@ import threading
 import codex_fixture
 import host_process
 import model_fixture as fixture
-from human_cli_fixture import split_pane_row, AppModelCatalog, app_model_open, model_choice_frame, model_choice_shown, panel_frame, overview_frame, overview_title, open_new_chat, read_terminal, terminal_exit
+from terminal_screen import split_pane_row
+from human_cli_fixture import AppModelCatalog, app_model_open, model_choice_frame, model_choice_shown, panel_frame, overview_frame, overview_title, open_new_chat, read_terminal, terminal_exit
 from terminal_process import close_pty, open_pty, spawn
 
 

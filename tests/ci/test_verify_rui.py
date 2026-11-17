@@ -494,6 +494,30 @@ class FramesTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "empty_composer"):
                 self.helper["validate_scenario"](data)
 
+    def test_frame_glyph_owner_accepts_legacy_stitch_and_ascii_in_both_layouts(self):
+        from terminal_screen import DIVIDER_GLYPHS, RULE_GLYPHS
+        wait = self.helper["frame_wait"]
+        ready = self.helper["frame_chat_ready"]
+        for rule, divider in zip(RULE_GLYPHS, DIVIDER_GLYPHS):
+            for split in (False, True):
+                prefix = f"sidebar {divider} " if split else ""
+                prompt = ">" if divider == "|" else "›"
+                samples = [f"{prefix}{prompt} witness\n{prefix}{prompt}",
+                           f"{prefix}{prompt} witness\n{prefix}{prompt} draft"]
+                frames = [committed(text)._replace(cursor=Cursor(len(prefix) + len(prompt), 1), visible=True)
+                          for text in samples]
+                outcomes = []
+                terminal = types.SimpleNamespace(wait=lambda predicate, *_args: outcomes.extend(
+                    predicate(types.SimpleNamespace(completed=frame.text, frame=frame)) for frame in frames))
+                with self.subTest(rule=rule, divider=divider, split=split):
+                    wait(None, terminal, "witness", empty_composer=True)
+                    self.assertEqual(outcomes, [True, False])
+                    chat = "\n".join([prefix + "witness", prefix + rule * 12,
+                                       prefix + prompt + " Type a task", prefix + rule * 12,
+                                       prefix + "model · low"])
+                    self.assertTrue(ready(chat, "witness", empty=True))
+                    self.assertFalse(ready(chat.replace("Type a task", "draft"), empty=True))
+
     def test_dim_expectations_validate_and_assert_saved_cells_not_text_alone(self):
         for value in (None, {}, [{"text": "", "dim": True}], [{"text": "Row", "dim": 1}],
                       [{"text": "Row", "dim": True, "min_columns": False}],
@@ -1173,7 +1197,7 @@ while True:
         run = types.SimpleNamespace(meta={"sha": "a" * 40})
         for size in ((140, 40), (46, 30)):
             for sid, age in (("9xt4vy", "now"), ("emged6", "7m"), ("000000", "3h"), ("zzzzzz", "12d"),
-                             ("9xt4vy", "now │"), ("emged6", "7m│ Model")):
+                             ("9xt4vy", "now ┆"), ("emged6", "7m┆ Model")):
                 with self.subTest(size=size, sid=sid, age=age), tempfile.TemporaryDirectory() as temp:
                     bad = f"{clean}\n ○ {sid}                  {age}"
 
@@ -1200,14 +1224,34 @@ while True:
                     " ○ 9xt4vy", "text mentions ○ 9xt4vy  2m"):
             with self.subTest(named_or_nonrow=row):
                 self.assertIsNone(self.helper["frame_row_failure"](state, clean + "\n" + row))
-        for row in (" ○ 9xt4vy  now │", " ○ emged6  now│ Model", " ○ 000000  2m │chat text"):
+        for row in (" ○ 9xt4vy  now ┆", " ○ emged6  now┆ Model", " ○ 000000  2m ┆chat text"):
             with self.subTest(raw_sidebar=row):
                 self.assertIsNotNone(self.helper["frame_row_failure"](state, row))
-        for row in (" ○ New Session  now │", " ○ New Session  now │Model",
-                    " ○ Existing 9xt4vy  2m │chat", " ○ 9xt4vy extra  2m │chat"):
+        for row in (" ○ New Session  now ┆", " ○ New Session  now ┆Model",
+                    " ○ Existing 9xt4vy  2m ┆chat", " ○ 9xt4vy extra  2m ┆chat"):
             with self.subTest(named_sidebar=row):
                 self.assertIsNone(self.helper["frame_row_failure"](state, row))
         self.assertIsNone(self.helper["frame_row_failure"]({"name": "unrelated"}, " ○ 9xt4vy  now"))
+
+    def test_raw_id_guard_recognizes_legacy_and_stitched_dividers_in_old_recipes(self):
+        from terminal_screen import DIVIDER_GLYPHS
+        failure = self.helper["frame_row_failure"]
+        for recipe_glyph in DIVIDER_GLYPHS[:2]:
+            pattern = r"^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:" + recipe_glyph + r".*)?$"
+            state = {"name": "read-image-approval", "absent_regex": [pattern]}
+            for divider in DIVIDER_GLYPHS:
+                with self.subTest(recipe=recipe_glyph, frame=divider):
+                    self.assertIsNotNone(failure(state, f" ○ 9xt4vy  now {divider} chat"))
+                    self.assertIsNone(failure(state, f" ○ New Session  now {divider} chat"))
+
+    def test_read_image_raw_id_guard_uses_shared_divider_glyphs(self):
+        from terminal_screen import DIVIDER_GLYPHS
+        scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
+        state = next(state for state in scenario["states"] if state["name"] == "read-image-approval")
+        for divider in DIVIDER_GLYPHS:
+            with self.subTest(divider=divider):
+                self.assertIsNotNone(self.helper["frame_row_failure"](state, f" ○ 9xt4vy  2s {divider} chat"))
+                self.assertIsNone(self.helper["frame_row_failure"](state, f" ○ Named session  2s {divider} chat"))
 
     def test_empty_chat_roundtrips_and_current_chat_labels_exclude_raw_ids(self):
         scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
@@ -1862,7 +1906,7 @@ while True:
 
     def test_initial_readiness_requires_complete_guided_account_controls(self):
         modal = (
-            '                                  ────────────────────────────────────────────────────────────────────────\n'
+            '                                  ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n'
             '                                   Sign in to Rui\n'
             '                                     Choose account  Credentials stay out of conversations.\n'
             '                                     ChatGPT         Use your subscription\n'
@@ -2076,7 +2120,7 @@ while True:
     def test_background_assertion_checks_committed_marker_cells_at_both_widths(self):
         marker = "› Type a task"
         for color, ground in (("e6ddc8", "f3eee2"), ("1a2246", "121933")):
-            for width, prefix in ((140, "sidebar │ "), (46, " ")):
+            for width, prefix in ((140, "sidebar ┆ "), (46, " ")):
                 for bad in (None, 0, len(marker) - 1):
                     with self.subTest(color=color, width=width, bad=bad), tempfile.TemporaryDirectory() as temp:
                         cells = tuple(Cell(char, None, False, bg=color if index != bad else ground)
@@ -2230,7 +2274,7 @@ while True:
             good = "\n" * (height - 1) + "gpt-6.1-sol · high\n"
             self.assertIsNone(failure(state, good))
             self.assertIsNotNone(failure(state, good + "\n"))
-            self.assertIsNotNone(failure(state, good + "   Settings  │\n"))
+            self.assertIsNotNone(failure(state, good + "   Settings  ┆\n"))
 
     def test_chat_footer_frames_hide_permanent_info_and_unused_context(self):
         states = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))["states"]
@@ -2889,7 +2933,7 @@ class UpgradeFramesTest(unittest.TestCase):
         reason = "Update failed"
         for before in (False, True):
             marker = "! Couldn't reach GitHub; nothing changed" if before else reason
-            chat = "  ──────────────\n  › Type a task\n  ──────────────\n gpt-6.1-sol · low · ~/code/rui"
+            chat = "  ┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n  › Type a task\n  ┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n gpt-6.1-sol · low · ~/code/rui"
             screens = [marker + "\nReading this Session…\n" + chat,
                        marker + "\nHost paused\n" + chat,
                        marker + "\nSettings\n gpt-6.1-sol · low",
@@ -2940,7 +2984,7 @@ class UpgradeFramesTest(unittest.TestCase):
     def test_chat_readiness_requires_settled_composer_and_footer_in_chat_pane(self):
         ready = self.helper["frame_chat_ready"]
         for split in (False, True):
-            for prompt, rule in (("›", "─"), (">", "-")):
+            for prompt, rule in (("›", "┄"), (">", "-")):
                 for model in ("gpt-6.1-sol", "gpt-5.5", "vendor/model-v2"):
                     with self.subTest(split=split, prompt=prompt, model=model):
                         prefix = " Upgrade witness " + ("│" if rule == "─" else "|") if split else ""
@@ -3022,7 +3066,7 @@ class UpgradeFramesTest(unittest.TestCase):
         failure = self.helper["frame_row_failure"]
         for state in (entry for entry in scenario["states"] if entry.get("upgrade") not in (None, "chat")):
             patterns = [pattern.replace("{upgrade_version}", r"0\.78\.10000") for pattern in state["comparison"]["before"]["expect_sidebar_regex"]]
-            for divider in ("│", "|"):
+            for divider in self.helper["DIVIDER_GLYPHS"]:
                 with self.subTest(state=state["name"], divider=divider):
                     self.assertIsNone(failure({"expect_sidebar_regex": patterns}, "─" * 35 + ("┼" if divider == "│" else "+") + "─" * 20 + "\n" + " Settings rui 7 MB 0.78.10000".ljust(35) + divider + " Type a task"))
                     self.assertIsNotNone(failure({"expect_sidebar_regex": patterns}, "─" * 35 + ("┼" if divider == "│" else "+") + "─" * 20 + "\n" + " Settings 0.77.10000".ljust(35) + divider + " 0.78.10000"))
@@ -3031,7 +3075,7 @@ class UpgradeFramesTest(unittest.TestCase):
         scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
         pattern = next(pattern for state in scenario["states"] for pattern in state.get("absent_sidebar_regex", [])
                        if "[0123456789abcdefghjkmnpqrstvwxyz]{6}" in pattern)
-        for divider in ("│", "|"):
+        for divider in self.helper["DIVIDER_GLYPHS"]:
             with self.subTest(divider=divider):
                 self.assertIsNotNone(self.helper["frame_row_failure"](
                     {"name": "test", "absent_sidebar_regex": [pattern]}, "─" * 20 + "┼" + "─" * 20 + "\n" + " ○ abcdef  now".ljust(20) + divider + " chat"))
@@ -3040,7 +3084,7 @@ class UpgradeFramesTest(unittest.TestCase):
         drive = self.helper["frame_drive_upgrade"]
         marker = "Upgrade witness"
         def chat(witness=marker, stale=""):
-            return (f" {witness}\n ──────────────\n › retained draft\n ──────────────\n"
+            return (f" {witness}\n ┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n › retained draft\n ┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
                     f" gpt-6.1-sol · low{stale}")
         for before in (False, True):
             version = "0.78.10000"
