@@ -1,3 +1,4 @@
+const {execFileSync} = require('node:child_process');
 const {appendFileSync} = require('node:fs');
 
 function saveKey({kind, key, setupOutcome, workOutcome,
@@ -21,18 +22,46 @@ function saveKey({kind, key, setupOutcome, workOutcome,
   }
 }
 
-function main(env) {
+function publishBuild(key, env) {
+  const output = execFileSync('python3', ['-B', 'tests/ci/cache_snapshot.py', '--publication-key', key],
+    {env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit']});
+  console.log(output.trim());
+  return JSON.parse(output);
+}
+
+function publicationKeys(env, prepareBuild = publishBuild) {
   const common = {
     setupOutcome: env.SETUP_OUTCOME, workOutcome: env.WORK_OUTCOME,
     compilerReady: env.RUI_CACHE_COMPILER_READY === 'true',
     successful: env.JOB_SUCCESS === 'true',
     runId: env.GITHUB_RUN_ID, runAttempt: env.GITHUB_RUN_ATTEMPT,
   };
+  const keys = {};
   for (const kind of ['compiler', 'build', 'packages', 'runner']) {
-    const key = saveKey({...common, kind, key: env[`RUI_CACHE_${kind.toUpperCase()}_KEY`]});
+    let key = saveKey({...common, kind, key: env[`RUI_CACHE_${kind.toUpperCase()}_KEY`]});
+    if (kind === 'build' && key) {
+      try {
+        const report = prepareBuild(key, env);
+        if (!report || typeof report !== 'object' || Array.isArray(report) ||
+            !['', key].includes(report.key) || (report.key && Object.hasOwn(report, 'skipped'))) {
+          throw new Error('Invalid build publication report');
+        }
+        key = report.key;
+      } catch (error) {
+        console.log(`Build cache publication declined: ${error.message}`);
+        key = '';
+      }
+    }
+    keys[kind] = key;
+  }
+  return keys;
+}
+
+function main(env) {
+  for (const [kind, key] of Object.entries(publicationKeys(env))) {
     appendFileSync(env.GITHUB_OUTPUT, `${kind}-key=${key}\n`);
   }
 }
 
-module.exports = {saveKey};
+module.exports = {publicationKeys, saveKey};
 if (require.main === module) main(process.env);
