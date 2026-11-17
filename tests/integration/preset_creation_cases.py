@@ -134,11 +134,24 @@ def preset_creation(binary, root, store_settings, env):
         native_session = native["answer"]["session"]
         restricted(inspect(native_session)["session"])
 
-        loaded_only, loaded_capture = capture("--preset", "restricted", "--loaded-tools", "none",
+        loaded_only, loaded_capture = capture("--preset", "restricted", "--loaded-tools", "find_tools",
                                               "--test-drop-reply", "after-commit")
-        assert loaded_capture["configuration"] == {"loadedTools": []}, loaded_capture
+        assert loaded_capture["configuration"] == {"loadedTools": ["find_tools"]}, loaded_capture
         loaded_session = recover(loaded_only)["context"]["session"]
-        restricted(inspect(loaded_session)["session"], loaded=())
+        restricted(inspect(loaded_session)["session"], loaded=("find_tools",))
+
+        loaded_refusals = []
+        for argument, members, code in (
+            ("none", [], "loaded_tools_unreachable"),
+            ("web_search", ["web_search"], "loaded_tools_not_in_tools"),
+        ):
+            handle, rejected_capture = capture("--preset", "restricted", "--loaded-tools", argument, expect=3)
+            assert rejected_capture["configuration"] == {"loadedTools": members}, rejected_capture
+            refusal = recover(handle, expect=3)["answer"]
+            assert refusal["replayed"] is True and refusal["code"] == code, refusal
+            observed = value("request", "inspect", handle)["observation"]
+            assert observed == {"status": "rejected", "kind": "configure", "target": "", "code": code}, observed
+            loaded_refusals.append((handle, code))
 
         override, changed_capture = capture("--preset", "restricted", "--model", "override-model",
             "--tools", "none", "--loaded-tools", "none", "--permission-mode", "bypass",
@@ -196,6 +209,9 @@ def preset_creation(binary, root, store_settings, env):
         assert recover(base)["answer"]["session"] == session
         assert recover(override)["answer"]["session"] == changed_session
         assert recover(loaded_only)["answer"]["session"] == loaded_session
+        for handle, code in loaded_refusals:
+            refusal = recover(handle, expect=3)["answer"]
+            assert refusal["replayed"] is True and refusal["code"] == code, refusal
         assert value("request", "inspect", base)["observation"] == original_admission
 
         # Changing a field hidden by an explicit override preserves the effective resolution.
