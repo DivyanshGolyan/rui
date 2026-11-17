@@ -19,6 +19,22 @@ def _enabled(value):
     return value is True or value == "true"
 
 
+def admission(event_name, event, actor, triggering_actor, repository, allowlist=ALLOWLIST):
+    """Apply the shared trusted-run policy to routing and the protected Mac hook."""
+    if actor not in allowlist or triggering_actor not in allowlist:
+        return False, "Both actors must be allowlisted to use the personal Mac."
+    if event_name == "pull_request":
+        pr = _object(_object(event).get("pull_request"))
+        head_repo = _object(_object(pr.get("head")).get("repo")).get("full_name")
+        if not repository or head_repo != repository:
+            return False, "A pull request must have its head repository here to use the personal Mac."
+        if _object(pr.get("user")).get("login") not in allowlist:
+            return False, "The pull request author must be allowlisted to use the personal Mac."
+    elif event_name != "workflow_dispatch":
+        return False, "This event type is not admitted on the personal Mac."
+    return True, "The run satisfies the trusted Mac admission policy."
+
+
 def decide(event_name, event, actor, triggering_actor, repository, inputs, switch, runners):
     """Return a runs-on value and one sentence explaining the scheduling snapshot."""
     if switch == "off":
@@ -26,17 +42,9 @@ def decide(event_name, event, actor, triggering_actor, repository, inputs, switc
     inputs = _object(inputs)
     if _enabled(inputs.get("promotion")) or _enabled(inputs.get("compile_only")):
         return HOSTED, "Hosted macOS is required for promotion and compile-only runs."
-    if actor not in ALLOWLIST or triggering_actor not in ALLOWLIST:
-        return HOSTED, "Hosted macOS is selected because both actors must be allowlisted."
-    if event_name == "pull_request":
-        pr = _object(_object(event).get("pull_request"))
-        head_repo = _object(_object(pr.get("head")).get("repo")).get("full_name")
-        if not repository or head_repo != repository:
-            return HOSTED, "Hosted macOS is required for a pull request from a fork or missing head repository."
-        if _object(pr.get("user")).get("login") not in ALLOWLIST:
-            return HOSTED, "Hosted macOS is selected because the pull request author is not allowlisted."
-    elif event_name != "workflow_dispatch":
-        return HOSTED, "Hosted macOS is required for this event type."
+    admitted, reason = admission(event_name, event, actor, triggering_actor, repository)
+    if not admitted:
+        return HOSTED, reason
     if runners is None:
         return HOSTED, "Hosted macOS is selected because runner status is unavailable."
     if isinstance(runners, list):

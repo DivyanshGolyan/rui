@@ -24,6 +24,10 @@ import stat
 import subprocess
 import sys
 
+# This directory and the installed module are root-owned; -I/-S excludes the checkout.
+sys.path.insert(0, str(Path(sys.argv[1]).parent))
+from mac_runner import admission
+
 
 def reject(message):
     raise ValueError(message)
@@ -52,24 +56,19 @@ try:
     if os.environ.get("GITHUB_REPOSITORY") != expected:
         reject("wrong repository")
     event_name = os.environ.get("GITHUB_EVENT_NAME")
-    if event_name not in ("pull_request", "workflow_dispatch"):
-        reject("unsupported event")
-    actor = login(os.environ.get("GITHUB_ACTOR"))
-    triggering_actor = login(os.environ.get("GITHUB_TRIGGERING_ACTOR"))
-    if actor not in allowed or triggering_actor not in allowed:
-        reject("actor is not allowlisted")
+    actor = os.environ.get("GITHUB_ACTOR")
+    triggering_actor = os.environ.get("GITHUB_TRIGGERING_ACTOR")
     event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(),
                        object_pairs_hook=object_without_duplicates)
     if event["repository"]["full_name"] != expected:
         reject("wrong event repository")
     if login(event["sender"]["login"]) != actor:
         reject("event sender differs from actor")
-    if event_name == "pull_request":
-        pr = event["pull_request"]
-        if pr["head"]["repo"]["full_name"] != expected or pr["base"]["repo"]["full_name"] != expected:
-            reject("fork pull request")
-        if login(pr["user"]["login"]) not in allowed:
-            reject("pull request author is not allowlisted")
+    if event_name == "pull_request" and event["pull_request"]["base"]["repo"]["full_name"] != expected:
+        reject("wrong pull request base")
+    admitted, reason = admission(event_name, event, actor, triggering_actor, expected, allowed)
+    if not admitted:
+        reject(reason)
     # Admission comes first: rejected work must not mutate even the build cache.
     cache_root = Path.home() / ".cache"
     if cache_root.is_symlink():

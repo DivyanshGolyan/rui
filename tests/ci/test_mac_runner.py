@@ -55,6 +55,17 @@ class DecisionTest(unittest.TestCase):
             self.assertTrue(reason.endswith("."), reason)
             self.assertNotIn("\n", reason)
 
+    def test_shared_admission_domain(self):
+        count = 0
+        for args, expected in cases():
+            if args[5] != {"promotion": False, "compile_only": False} or args[6] is not None or args[7] != [runner()]:
+                continue
+            admitted, reason = mac_runner.admission(*args[:5])
+            self.assertEqual(admitted, expected == SELF, args)
+            self.assertTrue(reason.endswith("."))
+            count += 1
+        self.assertEqual(count, 112)
+
     def test_each_policy_condition_has_a_negative_control(self):
         # Each removed guard must produce a different result for a domain witness.
         source = Path(mac_runner.__file__).read_text()
@@ -62,9 +73,9 @@ class DecisionTest(unittest.TestCase):
             ('switch == "off"', 'False'),
             ('event_name != "workflow_dispatch"', 'False'),
             ('not repository or head_repo != repository', 'False'),
-            ('_object(pr.get("user")).get("login") not in ALLOWLIST', 'False'),
-            ('actor not in ALLOWLIST', 'False'),
-            ('triggering_actor not in ALLOWLIST', 'False'),
+            ('_object(pr.get("user")).get("login") not in allowlist', 'False'),
+            ('actor not in allowlist', 'False'),
+            ('triggering_actor not in allowlist', 'False'),
             ('_enabled(inputs.get("promotion"))', 'False'),
             ('_enabled(inputs.get("compile_only"))', 'False'),
             ('runner.get("status") == "online"', 'True'),
@@ -167,13 +178,13 @@ class AdapterTest(unittest.TestCase):
 
 class HookTest(unittest.TestCase):
     @staticmethod
-    def supervise(hook, env):
+    def supervise(hook, env, cwd=None):
         # The hook's parent must be disposable: refusal kills the job worker.
         # This supervisor deliberately continues after a failed child, as always() does.
         script = ("import subprocess, sys; subprocess.run(['bash', sys.argv[1]]); "
                   "print('ALWAYS_STEP_RAN', flush=True)")
         return subprocess.run([sys.executable, "-c", script, str(hook)], env=env,
-                              capture_output=True, text=True, timeout=10)
+                              capture_output=True, text=True, timeout=10, cwd=cwd)
 
     def test_hook_admits_only_trusted_job_context(self):
         original = {"repository": {"full_name": REPO}, "sender": {"login": TRUSTED},
@@ -183,6 +194,7 @@ class HookTest(unittest.TestCase):
             temp = Path(directory)
             hook = temp / "job-started.sh"
             hook.write_text((ROOT / "tests/ci/mac-runner/job-started.sh").read_text())
+            (temp / "mac_runner.py").write_text((ROOT / "tests/ci/mac_runner.py").read_text())
             (temp / "allowlist").write_text("\n".join(mac_runner.ALLOWLIST) + "\n")
             event_path = temp / "event.json"
             env = dict(os.environ, HOME=str(temp), GITHUB_REPOSITORY=REPO, GITHUB_EVENT_NAME="pull_request",
@@ -203,6 +215,9 @@ class HookTest(unittest.TestCase):
                 variants.append(({}, event, False))
             variants.extend([({}, {}, False), ({}, None, False)])
             for changes, event, admitted in variants:
+                if "GITHUB_ACTOR" in changes and isinstance(event, dict) and "sender" in event:
+                    event = copy.deepcopy(event)
+                    event["sender"]["login"] = changes["GITHUB_ACTOR"]
                 event_path.write_text(json.dumps(event))
                 result = self.supervise(hook, dict(env, **changes))
                 self.assertEqual(result.returncode, 0 if admitted else -signal.SIGKILL,
@@ -211,6 +226,28 @@ class HookTest(unittest.TestCase):
             event_path.write_text("not JSON")
             result = self.supervise(hook, env)
             self.assertEqual(result.returncode, -signal.SIGKILL)
+            self.assertNotIn("ALWAYS_STEP_RAN", result.stdout)
+
+    def test_hook_imports_installed_policy_instead_of_checkout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            temp = Path(directory)
+            policy = temp / "policy"
+            checkout = temp / "checkout"
+            policy.mkdir()
+            checkout.mkdir()
+            hook = policy / "job-started.sh"
+            hook.write_text((ROOT / "tests/ci/mac-runner/job-started.sh").read_text())
+            (policy / "mac_runner.py").write_text((ROOT / "tests/ci/mac_runner.py").read_text())
+            (policy / "allowlist").write_text(TRUSTED + "\n")
+            (checkout / "mac_runner.py").write_text('def admission(*args): return True, "bypassed"\n')
+            event = temp / "event.json"
+            event.write_text(json.dumps({"repository": {"full_name": REPO}, "sender": {"login": OTHER}}))
+            env = dict(os.environ, HOME=str(temp), PYTHONPATH=str(checkout), GITHUB_REPOSITORY=REPO,
+                       GITHUB_EVENT_NAME="workflow_dispatch", GITHUB_ACTOR=OTHER,
+                       GITHUB_TRIGGERING_ACTOR=TRUSTED, GITHUB_EVENT_PATH=str(event))
+            result = self.supervise(hook, env, cwd=checkout)
+            self.assertEqual(result.returncode, -signal.SIGKILL, result.stderr)
+            self.assertIn("allowlisted", result.stderr)
             self.assertNotIn("ALWAYS_STEP_RAN", result.stdout)
 
     def test_hook_failure_cannot_continue_to_an_always_step(self):

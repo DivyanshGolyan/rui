@@ -92,8 +92,9 @@ root_install() {
     if /bin/launchctl print "system/$LABEL" >/dev/null 2>&1; then
         /bin/launchctl bootout "system/$LABEL"
     fi
-    /bin/rm -f "$RUNNER_HOME/.rui-runner-hooks/job-started.sh" "$RUNNER_HOME/.rui-runner-hooks/allowlist"
+    /bin/rm -f "$RUNNER_HOME/.rui-runner-hooks/job-started.sh" "$RUNNER_HOME/.rui-runner-hooks/allowlist" "$RUNNER_HOME/.rui-runner-hooks/mac_runner.py"
     /usr/bin/install -o root -g wheel -m 755 "$stage/job-started.sh" "$RUNNER_HOME/.rui-runner-hooks/job-started.sh"
+    /usr/bin/install -o root -g wheel -m 644 "$stage/mac_runner.py" "$RUNNER_HOME/.rui-runner-hooks/mac_runner.py"
     /usr/bin/install -o root -g wheel -m 644 "$stage/allowlist" "$RUNNER_HOME/.rui-runner-hooks/allowlist"
     /bin/rm -f "$RUNNER_HOME/.rui-runner-hooks/runner.tar.gz"
     /usr/bin/install -o root -g wheel -m 644 "$stage/runner.tar.gz" "$RUNNER_HOME/.rui-runner-hooks/runner.tar.gz"
@@ -240,7 +241,7 @@ else
 fi
 stage=$(/usr/bin/mktemp -d /private/tmp/rui-mac-runner.XXXXXXXX)
 trap '/bin/rm -rf "$stage"' EXIT
-/bin/cp "$SCRIPT_DIR/install.sh" "$SCRIPT_DIR/job-started.sh" "$stage/"
+/bin/cp "$SCRIPT_DIR/install.sh" "$SCRIPT_DIR/job-started.sh" "$SCRIPT_DIR/../mac_runner.py" "$stage/"
 python3 "$SCRIPT_DIR/../mac_runner.py" allowlist > "$stage/allowlist"
 [[ -s $stage/allowlist ]] || fail 'The runner allowlist is empty.'
 printf '%s\n' "$runner_python" > "$stage/python-path"
