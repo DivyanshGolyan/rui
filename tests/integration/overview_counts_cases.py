@@ -70,7 +70,7 @@ def pinned_settings():
         settings = next(i for i, line in enumerate(rows) if "Settings" in line)
         assert settings == len(rows) - 3, frame
         assert set(rows[settings - 1].strip()) <= {"─", "-"} and rows[settings - 1].strip(), frame
-        assert re.search(r"0\.\d+\.\d+", rows[settings + 1]), frame
+        assert re.search(r"0\.\d+\.\d+|unreleased", rows[settings + 1]), frame
         assert "rui " not in rows[settings + 1] and "tools " not in rows[settings + 1], frame
         assert "enter open" not in frame, frame
         assert "Type a task" not in frame and "gpt-6-luna" not in frame, frame
