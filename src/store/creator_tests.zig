@@ -75,7 +75,7 @@ test "session creator records immediate attached and detached start_agent origin
                     .decoded_arguments = "{}",
                 }});
                 const action = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
-                const spec = try fixtures.testingAgentSpec(&.{}, "ask");
+                var spec = try fixtures.testingAgentSpec(&.{}, "ask");
                 const Capture = struct {
                     child: protocol.Bounded(protocol.session_id_bytes) = .{},
                     fn call(context: *anyopaque, admission: Store.MessageAdmission) void {
