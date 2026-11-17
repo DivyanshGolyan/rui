@@ -115,12 +115,17 @@ pub const Saving = struct {
     }
 
     noinline fn writeManifest(self: *Saving, a: anytype) !void {
+        const sink = try a.contentSink(self.content_id, self.value.length);
+        defer sink.close();
+        try self.writeManifestTo(sink);
+    }
+
+    // Keep manifest encoding scratch out of the sink-opening call chain.
+    noinline fn writeManifestTo(self: *Saving, sink: anytype) !void {
         const loan = self.source.captured;
         var cursor = loan.cursor();
         var encoder: parts.Manifest.Encoder = .{};
         var entry: [parts.Manifest.max_entry_bytes]u8 = undefined;
-        const sink = try a.contentSink(self.content_id, self.value.length);
-        defer sink.close();
         var offset: u64 = 0;
         while (try cursor.next()) |selected| {
             const identity: parts.Identity = .{ .length = selected.range.length, .digest = selected.range.digest, .kind = selected.kind };
