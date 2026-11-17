@@ -452,10 +452,8 @@ fn appInputHostDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Er
 }
 
 fn paintDivider(self: *Self) void {
-    self.root.divider = .{
-        .grapheme = if (self.caps.unicode) "│" else "|",
-        .style = @import("widget_style.zig").of(self.caps, .{ .colour = .quiet }),
-    };
+    const cell = @import("widget_style.zig").line(self.caps, .vertical);
+    self.root.divider = .{ .grapheme = cell.char.grapheme, .style = cell.style };
 }
 
 fn paintCursor(self: *Self) !void {
@@ -953,6 +951,7 @@ fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: AppScreen.Overview.Part) s
     const normal = @import("widget_style.zig").of(self.caps, .{});
     self.sign_in.style = normal;
     self.sign_in.unicode = self.caps.unicode;
+    self.sign_in.caps = self.caps;
     self.sign_in.selection_style = @import("widget_style.zig").of(self.caps, .{ .background = .selection });
     self.sign_in.quiet = @import("widget_style.zig").of(self.caps, .{ .colour = .quiet });
     self.app_screen.style = normal;
@@ -3331,7 +3330,7 @@ test "Host line and Settings tail show together without overlap at wide and narr
         try std.testing.expectEqual(at.settings.end, at.host.start);
         try std.testing.expectEqual(@as(u16, 1), at.host.len());
         try std.testing.expectEqual(at.host.end, at.input);
-        try std.testing.expect(std.mem.startsWith(u8, try shown.line(at.settings.start), "─"));
+        try std.testing.expect(std.mem.startsWith(u8, try shown.line(at.settings.start), "┄"));
         try std.testing.expect(std.mem.startsWith(u8, try shown.line(at.settings.start + 1), "     Settings"));
         try std.testing.expectEqualStrings(@import("transport_options").version, std.mem.trim(u8, try shown.line(at.settings.start + 2), " "));
         try std.testing.expect(std.mem.startsWith(u8, try shown.line(at.host.start), "■ Host stopped ·"));
@@ -4890,7 +4889,7 @@ test "App shell divider follows overview locale across layouts and screen select
     const session: vxfw.Text = .{ .text = "Session" };
     for ([_]struct { locale: []const u8, glyph: []const u8, unicode: bool }{
         .{ .locale = "C", .glyph = "|", .unicode = false },
-        .{ .locale = "en_US.UTF-8", .glyph = "│", .unicode = true },
+        .{ .locale = "en_US.UTF-8", .glyph = "┆", .unicode = true },
     }) |case| {
         try rig.environ.put("LC_ALL", case.locale);
         var cancellation: client.Cancellation = .{};
@@ -4911,7 +4910,7 @@ test "App shell divider follows overview locale across layouts and screen select
                     if (open and width >= Root.split_at) {
                         const divider = layout.children[1].surface;
                         for (divider.buffer) |cell| try std.testing.expectEqualStrings(case.glyph, cell.char.grapheme);
-                        try std.testing.expectEqualDeep(@import("widget_style.zig").of(overview.caps, .{ .colour = .quiet }), divider.buffer[0].style);
+                        try std.testing.expectEqualDeep(@import("widget_style.zig").line(overview.caps, .vertical).style, divider.buffer[0].style);
                     } else try std.testing.expect(layout.widget.eql(if (open) session.widget() else overview.widget()));
                     var screen: vaxis.Screen = try .init(arena.allocator(), .{ .cols = width, .rows = 24, .x_pixel = 0, .y_pixel = 0 });
                     const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 24, .screen = &screen };
@@ -8132,7 +8131,7 @@ test "wide launch creates a focused empty chat and Escape returns to overview" {
     var split = try rig.shown(140, 40);
     defer split.deinit();
     const divider = split.screen.readCell(Root.list_width, 0).?.char.grapheme;
-    try std.testing.expect(std.mem.eql(u8, divider, "│") or std.mem.eql(u8, divider, "|"));
+    try std.testing.expect(std.mem.eql(u8, divider, "┆") or std.mem.eql(u8, divider, "|"));
     try std.testing.expect(std.mem.indexOf(u8, try split.text(), "enter open") == null);
     try std.testing.expect(try rig.press("\x1b[D") == null);
     try std.testing.expect(overview.root.input.listFocused());

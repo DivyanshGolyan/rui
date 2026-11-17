@@ -198,7 +198,7 @@ fn bind(self: *Self) void {
     self.panel.hover_style = widget_style.of(caps, .{ .background = .hover });
     self.panel.title_style = widget_style.of(caps, .{ .colour = .strong, .bold = true });
     self.panel.quiet = widget_style.of(caps, .{ .colour = .quiet });
-    self.panel.rule_style = widget_style.of(caps, .{ .colour = .rule });
+    self.panel.caps = caps;
     self.model_choice.show_more = self.standalone == null;
     self.model_choice.ground = self.panel.ground;
     self.model_choice.selection = self.panel.selection;

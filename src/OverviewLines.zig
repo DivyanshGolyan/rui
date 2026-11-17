@@ -143,7 +143,7 @@ pub const Settings = struct {
         @memset(surface.buffer, .{ .style = widget_style.of(self.caps, .{ .colour = .quiet }) });
         self.hover.targets = &.{};
         if (height == 0 or size.width == 0) return surface;
-        for (0..size.width) |column| surface.writeCell(@intCast(column), 0, .{ .char = .{ .grapheme = if (self.caps.unicode) "─" else "-", .width = 1 }, .style = widget_style.of(self.caps, .{ .colour = .quiet }) });
+        for (0..size.width) |column| surface.writeCell(@intCast(column), 0, widget_style.line(self.caps, .horizontal));
         if (height < 2) return surface;
         const ground: overview_view.Background = if (self.selected) .selection else if (self.hover.contains(target)) .hover else .ground;
         const row_style = widget_style.of(self.caps, .{ .background = ground });
@@ -232,8 +232,8 @@ test "sidebar bottom separates Settings memory and update targets across geometr
             }
             if (width > 0 and height > 0) for (0..width) |column| {
                 const rule = frame.readCell(@intCast(column), 0);
-                try std.testing.expectEqualStrings(if (caps.unicode) "─" else "-", rule.char.grapheme);
-                try std.testing.expectEqual(widget_style.of(caps, .{ .colour = .quiet }), rule.style);
+                try std.testing.expectEqualStrings(if (caps.unicode) "┄" else "-", rule.char.grapheme);
+                try std.testing.expectEqual(widget_style.line(caps, .horizontal).style, rule.style);
             };
             const busy = if (run) |active| active.going() else false;
             const failed = if (run) |active| active == .ended and active.ended.how == .failed else false;

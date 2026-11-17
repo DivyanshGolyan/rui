@@ -47,7 +47,7 @@ focus_frame: app_input.Frame = .{},
 drawn_focus: [std.enums.values(app_input.Target).len]Candidate = undefined,
 focus_rects: [std.enums.values(app_input.Target).len]?FocusRect = @splat(null),
 list: vxfw.Widget,
-divider: Split.Divider = .{},
+divider: ?Split.Divider = null,
 session: ?vxfw.Widget = null,
 session_keys: ?Keys = null,
 settings_page: AppSettings = .{},
@@ -438,7 +438,7 @@ test "App root keeps the overview whole and places the list beside an open child
                 try std.testing.expectEqual(vxfw.RelativePoint{ .row = 0, .col = 0 }, layout.children[0].origin);
                 try std.testing.expectEqual(@as(u16, 40), layout.children[0].surface.size.width);
                 try std.testing.expectEqual(@as(i17, 40), layout.children[1].origin.col);
-                try std.testing.expectEqualStrings("│", layout.children[1].surface.buffer[0].char.grapheme);
+                try std.testing.expectEqualStrings("┆", layout.children[1].surface.buffer[0].char.grapheme);
                 try std.testing.expectEqual(vxfw.RelativePoint{ .row = 0, .col = 41 }, layout.children[2].origin);
                 try std.testing.expectEqual(size.width - 41, layout.children[2].surface.size.width);
                 try std.testing.expect(layout.children[2].surface.widget.eql(if (active) opened.widget() else whole.widget()));

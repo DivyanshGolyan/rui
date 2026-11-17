@@ -202,7 +202,7 @@ fn bind(self: *Self) void {
     self.panel.hover_style = widget_style.of(caps, .{ .background = .hover });
     self.panel.title_style = widget_style.of(caps, .{ .colour = .strong, .bold = true });
     self.panel.quiet = widget_style.of(caps, .{ .colour = .quiet });
-    self.panel.rule_style = widget_style.of(caps, .{ .colour = .rule });
+    self.panel.caps = caps;
     self.model_choice.show_more = true;
     self.model_choice.ground = self.panel.ground;
     self.model_choice.selection = self.panel.selection;
@@ -617,8 +617,8 @@ test "App settings and nested Keys share Composer input lines and preserve the d
             try std.testing.expect(composer.widget.eql(input.composer.widget()));
             try std.testing.expectEqual(@as(i17, 1), composer.children[0].origin.row);
             try std.testing.expect(composer.children[0].surface.widget.eql(page.bodyWidget()));
-            try std.testing.expectEqualStrings("─", composer.readCell(0, 0).char.grapheme);
-            try std.testing.expectEqualStrings("─", composer.readCell(0, composer.size.height - 1).char.grapheme);
+            try std.testing.expectEqualStrings("┄", composer.readCell(0, 0).char.grapheme);
+            try std.testing.expectEqualStrings("┄", composer.readCell(0, composer.size.height - 1).char.grapheme);
             try std.testing.expectEqualStrings("r", composer.readCell(3, composer.size.height - 2).char.grapheme);
             try std.testing.expectEqualStrings("S", shown.children[1].surface.readCell(1, 0).char.grapheme);
             try std.testing.expectEqualStrings("retained draft", editor.text());

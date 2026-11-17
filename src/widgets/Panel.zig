@@ -53,7 +53,7 @@ selection: vaxis.Style = .{ .reverse = true },
 hover_style: vaxis.Style = .{ .ul_style = .single },
 title_style: vaxis.Style = .{ .bold = true },
 quiet: vaxis.Style = .{},
-rule_style: vaxis.Style = .{},
+caps: @import("../overview_view.zig").Caps = .{},
 scroll: usize = 0,
 targets: []const Target = &.{},
 hover: Hover = .{},
@@ -249,7 +249,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         self.body.height = 0;
         return surface;
     }
-    if (self.top_rule) for (0..size.width) |col| surface.writeCell(@intCast(col), 0, .{ .char = .{ .grapheme = if (self.unicode) "─" else "-", .width = 1 }, .style = self.rule_style });
+    if (self.top_rule) for (0..size.width) |col| surface.writeCell(@intCast(col), 0, @import("../widget_style.zig").line(self.caps, .horizontal));
     var children: std.array_list.Managed(vxfw.SubSurface) = .init(ctx.arena);
     if (self.show_title and size.height > title_row) {
         _ = paint(ctx, surface, try displayText(ctx.arena, self.title, self.unicode), 1, title_row, self.title_style);
@@ -445,7 +445,7 @@ pub fn displayText(arena: std.mem.Allocator, text: []const u8, unicode: bool) st
         const scalar = std.unicode.utf8Decode(text[at..end]) catch 0xfffd;
         out[used] = switch (scalar) {
             0...0x7f => @intCast(scalar),
-            '─' => '-',
+            '┄' => '-',
             '✓' => '+',
             '·', '…' => '.',
             '↑' => '^',
@@ -691,9 +691,9 @@ test "Panel reserves failure words beside long ASCII and Unicode field values" {
 test "Panel shared ASCII rendering keeps rules choices tails and canonical values" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    try std.testing.expectEqualStrings("- + . . ^v <> ?", try displayText(arena.allocator(), "─ ✓ · … ↑↓ ‹› 界", false));
+    try std.testing.expectEqualStrings("- + . . ^v <> ?", try displayText(arena.allocator(), "┄ ✓ · … ↑↓ ‹› 界", false));
     const original = "model 界";
-    var panel: Self = .{ .title = "Title", .unicode = false, .fields = &.{.{ .label = "Model", .value = original, .tail = " · saving…" }} };
+    var panel: Self = .{ .title = "Title", .unicode = false, .caps = .{ .unicode = false }, .fields = &.{.{ .label = "Model", .value = original, .tail = " · saving…" }} };
     panel.openChoice(&.{ "one", "✓ two" }, 1);
     for ([_]u16{ 1, 19, 28, 46, 99 }) |width| {
         const drawn = try panel.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 9 }, .cell_size = .{} });
@@ -1082,7 +1082,7 @@ test "Panel explicit choice scope never persists into normal page events or draw
     try panel.choiceEvent(&events, .{ .key_press = .{ .codepoint = vaxis.Key.enter } }, 1);
     try std.testing.expectEqual(@as(?usize, 1), fixture.activated);
     const page = try panel.widget().draw(ctx);
-    try std.testing.expectEqualStrings("─", page.readCell(0, 0).char.grapheme);
+    try std.testing.expectEqualStrings("┄", page.readCell(0, 0).char.grapheme);
     try std.testing.expectEqualStrings("M", page.readCell(3, 2).char.grapheme);
     try pressKey(&panel, &events, vaxis.Key.up);
     try pressKey(&panel, &events, vaxis.Key.enter);
@@ -1151,7 +1151,7 @@ test "Panel optional title row moves fields and preserves top rule" {
         try std.testing.expectEqual(titled_height - 1, compact.size.height);
         try std.testing.expectEqual(@as(?u16, @intFromBool(rule)), panel.fieldRow(0));
         try std.testing.expectEqualStrings("F", compact.readCell(3, @intFromBool(rule)).char.grapheme);
-        if (rule) try std.testing.expectEqualStrings("─", compact.readCell(0, 0).char.grapheme);
+        if (rule) try std.testing.expectEqualStrings("┄", compact.readCell(0, 0).char.grapheme);
     }
 }
 
@@ -1179,7 +1179,7 @@ test "Panel hosted top rule option preserves title subtitle and bounded field ta
     try std.testing.expectEqual(@as(?usize, 0), fixture.activated);
     panel.top_rule = true;
     const standalone = try panel.widget().draw(ctx);
-    try std.testing.expectEqualStrings("─", standalone.readCell(0, 0).char.grapheme);
+    try std.testing.expectEqualStrings("┄", standalone.readCell(0, 0).char.grapheme);
     try std.testing.expectEqual(hosted.size.height + 1, standalone.size.height);
     panel.top_rule = false;
     for ([_]u16{ 0, 1, 2, 3, 46 }) |width| for (0..8) |height| {

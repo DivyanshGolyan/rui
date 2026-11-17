@@ -210,7 +210,7 @@ test "InputArea approval has one document title above a choice between composer 
         try std.testing.expectEqualStrings("A", screen.readCell(3, choice).?.char.grapheme);
         try std.testing.expect(screen.readCell(3, choice).?.style.reverse);
         for (0..width) |col| for ([_]u16{ choice - 1, choice + 1 }) |row| {
-            try std.testing.expectEqualStrings("─", screen.readCell(@intCast(col), row).?.char.grapheme);
+            try std.testing.expectEqualStrings("┄", screen.readCell(@intCast(col), row).?.char.grapheme);
         };
         _ = consent.route(.printable);
         const drafting = try input.widget().draw(ctx);
@@ -240,7 +240,7 @@ test "InputArea has no empty status row below the footer" {
         const idle = try input.widget().draw(ctx);
         try std.testing.expectEqual(@as(u16, 4), idle.size.height);
         try std.testing.expectEqual(@as(usize, 2), idle.children.len);
-        try std.testing.expectEqualStrings("─", idle.children[0].surface.readCell(0, 2).char.grapheme);
+        try std.testing.expectEqualStrings("┄", idle.children[0].surface.readCell(0, 2).char.grapheme);
         try std.testing.expectEqual(@as(i17, 3), idle.children[1].origin.row);
 
         notice.text = "Copied 12 lines";

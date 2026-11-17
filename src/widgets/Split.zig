@@ -8,9 +8,9 @@ right: vxfw.Widget,
 left_width: u16,
 min_width: u16,
 narrow: enum { left, right },
-divider: Divider = .{},
+divider: ?Divider = null,
 
-pub const Divider = struct { grapheme: []const u8 = "│", style: vaxis.Style = .{} };
+pub const Divider = struct { grapheme: []const u8, style: vaxis.Style = .{} };
 
 pub fn widget(self: *const Self) vxfw.Widget {
     return .{ .userdata = @constCast(self), .drawFn = draw };
@@ -26,13 +26,15 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         children[0] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = try child.draw(ctx.withConstraints(.{}, ctx.max)) };
         return .{ .widget = self.widget(), .size = size, .buffer = &.{}, .children = children };
     }
-    std.debug.assert(ctx.stringWidth(self.divider.grapheme) == 1);
+    const default = @import("../widget_style.zig").line(.{}, .vertical);
+    const divider_style = self.divider orelse Divider{ .grapheme = default.char.grapheme, .style = default.style };
+    std.debug.assert(ctx.stringWidth(divider_style.grapheme) == 1);
     const left_width = @min(self.left_width, size.width - 1);
     const right_width = size.width - left_width - 1;
     const children = try ctx.arena.alloc(vxfw.SubSurface, 3);
     children[0] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = try self.left.draw(ctx.withConstraints(.{}, .{ .width = left_width, .height = size.height })) };
     const divider = try vxfw.Surface.init(ctx.cell_arena, self.widget(), .{ .width = 1, .height = size.height });
-    @memset(divider.buffer, .{ .char = .{ .grapheme = self.divider.grapheme, .width = 1 }, .style = self.divider.style });
+    @memset(divider.buffer, .{ .char = .{ .grapheme = divider_style.grapheme, .width = 1 }, .style = divider_style.style });
     children[1] = .{ .origin = .{ .row = 0, .col = left_width }, .surface = divider };
     children[2] = .{ .origin = .{ .row = 0, .col = left_width + 1 }, .surface = try self.right.draw(ctx.withConstraints(.{}, .{ .width = right_width, .height = size.height })) };
     return .{ .widget = self.widget(), .size = size, .buffer = &.{}, .children = children };

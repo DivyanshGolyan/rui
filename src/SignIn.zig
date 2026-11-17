@@ -194,6 +194,7 @@ style: vaxis.Style = .{},
 quiet: vaxis.Style = .{},
 selection_style: vaxis.Style = .{ .reverse = true },
 unicode: bool = true,
+caps: @import("overview_view.zig").Caps = .{},
 form: ?pages.Mapped(Form) = null,
 issue: ?[]const u8 = null,
 paste: Paste = .none,
@@ -1140,7 +1141,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         .ground = self.style,
         .selection = self.selection_style,
         .quiet = self.quiet,
-        .rule_style = self.quiet,
+        .caps = self.caps,
         .scroll = self.scroll,
     };
     const panel_surface = try panel.widget().draw(ctx.withConstraints(.{}, .{ .width = width, .height = size.height - footer_height }));

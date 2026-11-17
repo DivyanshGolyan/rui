@@ -1008,6 +1008,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     self.app_card.quiet = quiet;
     self.app_card.hover_style = hover;
     self.app_card.method = self.app_caps.width;
+    self.app_card.caps = self.app_caps;
     self.app_preview.style = normal;
     self.app_preview.colours = colours;
     self.app_preview.hover_style = hover;
@@ -5928,7 +5929,7 @@ test "App Session shell gutter and back control follow list visibility through r
         const wide = width >= 100;
         const start: u16 = if (wide) 41 else 0;
         try std.testing.expectEqual(wide, fixture.root.listVisible());
-        if (wide) try std.testing.expectEqualStrings("│", screen.readCell(40, 0).?.char.grapheme);
+        if (wide) try std.testing.expectEqualStrings("┆", screen.readCell(40, 0).?.char.grapheme);
         var sent: u16 = 0;
         while (!std.mem.eql(u8, screen.readCell(start + 1, sent).?.char.grapheme, "›")) sent += 1;
         try std.testing.expectEqualStrings(" ", screen.readCell(start, sent).?.char.grapheme);
@@ -5964,7 +5965,7 @@ test "App Session shows running calls in order above the input, with +N more run
     try std.testing.expectEqualStrings("+2 more running · info", shown[first + 3]);
     try std.testing.expect(std.mem.eql(u8, shown[first + 4], "⠹ Thinking · 12s") or std.mem.eql(u8, shown[first + 4], "⠹ Thinking · 13s"));
     try std.testing.expectEqualStrings("", shown[first + 5]);
-    try std.testing.expect(std.mem.startsWith(u8, shown[first + 6], "─"));
+    try std.testing.expect(std.mem.startsWith(u8, shown[first + 6], "┄"));
     var waiting: usize = 0;
     for (shown) |line| waiting += @intFromBool(std.mem.startsWith(u8, line, "⠹ Thinking"));
     try std.testing.expectEqual(@as(usize, 1), waiting);
@@ -5988,7 +5989,7 @@ test "App Session shows the newest waiting Message as ◌ [N ·] its first line,
     try std.testing.expectEqualStrings("◌ 3 · also update docs/using-rui.md", three[row]);
     try std.testing.expect(std.mem.startsWith(u8, three[row - 1], "⠹ Thinking"));
     try std.testing.expectEqualStrings("", three[row + 1]);
-    try std.testing.expect(std.mem.startsWith(u8, three[row + 2], "─"));
+    try std.testing.expect(std.mem.startsWith(u8, three[row + 2], "┄"));
     for (three) |line| try std.testing.expect(std.ascii.findIgnoreCase(line, "queued") == null);
     self.live.queued.count = 1;
     self.live.queued.oldest_position = 70;
@@ -6015,7 +6016,7 @@ test "SessionFrontend optimistic submission keeps input rows fixed" {
             try std.testing.expect(std.mem.indexOf(u8, line, "Sending") == null);
         }
         try std.testing.expectEqual(@as(usize, 1), messages);
-        try std.testing.expect(std.mem.startsWith(u8, idle[20], "─"));
+        try std.testing.expect(std.mem.startsWith(u8, idle[20], "┄"));
         for (idle[20..24], pending[20..24]) |before, during| try std.testing.expectEqualStrings(before, during);
         self.submission.state = .unconfirmed;
         const unconfirmed = try fixture.rowsAtWidth(width);
@@ -6651,7 +6652,7 @@ test "App Session footer takes list visibility from Root across desktop and phon
         for (chat_col..case.width) |col| try row.writer.writeAll(screen.readCell(@intCast(col), 29).?.char.grapheme);
         try std.testing.expectEqual(@as(usize, if (case.list) 0 else 1), std.mem.count(u8, row.written(), "‹"));
         try std.testing.expectEqual(!case.list, std.mem.indexOf(u8, row.written(), "k7m2qx") != null);
-        try std.testing.expectEqualStrings("─", screen.readCell(chat_col, 28).?.char.grapheme);
+        try std.testing.expectEqualStrings("┄", screen.readCell(chat_col, 28).?.char.grapheme);
         try std.testing.expectEqual(!case.list, std.mem.trim(u8, row.written(), " ").len != 0);
     }
 }
@@ -9251,8 +9252,8 @@ test "chat input stays untinted and bottom anchored with fixed rules at 140 and 
                         const plain = style.of(held.self.app_caps, .{ .colour = .quiet });
                         const rows: u16 = if (draft.len == 0) 1 else 3;
                         const first = size.height - rows - 2;
-                        try std.testing.expectEqualStrings("─", rendered.readCell(0, first - 1).?.char.grapheme);
-                        try std.testing.expectEqualStrings("─", rendered.readCell(0, size.height - 2).?.char.grapheme);
+                        try std.testing.expectEqualStrings("┄", rendered.readCell(0, first - 1).?.char.grapheme);
+                        try std.testing.expectEqualStrings("┄", rendered.readCell(0, size.height - 2).?.char.grapheme);
                         if (!list_focused) {
                             try std.testing.expectEqual(@as(u16, size.height - 3), rendered.cursor.row);
                             try std.testing.expectEqual(vaxis.Cell.CursorShape.block_blink, rendered.cursor_shape);
@@ -9311,7 +9312,7 @@ test "chat info supplies the one bottom footer after the input and both dividers
                 try std.testing.expect(std.mem.startsWith(u8, line, " Fix retry deadline"));
                 try std.testing.expect(std.mem.endsWith(u8, std.mem.trimEnd(u8, line, " "), "esc"));
             } else if (row == size.height - 2 or row == @as(usize, @intCast(input.origin.row))) {
-                try std.testing.expect(std.mem.startsWith(u8, line, "──"));
+                try std.testing.expect(std.mem.startsWith(u8, line, "┄┄"));
             } else if (row == size.height - 3) {
                 try std.testing.expect(std.mem.indexOf(u8, line, "kept draft") != null);
             }
