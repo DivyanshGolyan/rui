@@ -3077,7 +3077,7 @@
           }
         },
         {
-          "wait": "gpt-6.1-sol \u00b7 low \u00b7 100% left"
+          "wait": "gpt-6.1-sol \u00b7 low"
         },
         {
           "gone": "Configured."
