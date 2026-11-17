@@ -136,6 +136,16 @@ class CauseTest(unittest.TestCase):
         with mock.patch.object(Path, "read_text", return_value=shell):
             self.assertEqual(report_issue.fixtures(), {"host-stop": "tests/integration/host_stop_integration.py"})
 
+    def test_checked_termination_preserves_failed_command_attribution(self):
+        for term in ("exited with code 42", "terminated with signal SIGTERM"):
+            for expected in ("", " (expected exited with code 0)"):
+                with self.subTest(term=term, expected=expected):
+                    log = logged(f"error: process {term}{expected}",
+                                 "failed command: sh -c 'exec \"$@\" >&2' rui-acceptance python3 "
+                                 "/w/tests/integration/host_stop_integration.py /tmp/rui")
+                    self.assertEqual(len(report_issue.COMMAND.findall(report_issue.untimed(log))), 1)
+                    self.assertTrue(report_issue.failure_causes(log, self.cases))
+
     def test_launcher_command_aliases_do_not_add_a_second_cause_to_a_zig_failure(self):
         for launcher in ("tests/ci/store_shards.py", "tests/integration/../ci/store_shards.py",
                          "tests/integration/./../ci/store_shards.py"):

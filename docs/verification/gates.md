@@ -145,7 +145,11 @@ A long gate (`check`, `check-full`, `test`, `stack-frames`) runs alone, and besi
 Only non-promotion manually dispatched runs whose diff touches no strict path rerun a failed batch once and report both results; a pass after the rerun is a flake to fix.
 Ready PRs, promotions and the documentation lane never rerun, except a batch that failed only on [listed flakes](#listed-flakes).
 Qualification keeps one job per target. macOS packs native work into at most three workers: execution plus portable logic, callers, and remaining native targets.
-Composed gates, long witnesses, launch, Debug admission, reply delivery and H2 stay isolated from other target batches.
+Composed gates, long witnesses, launch, Debug admission, reply delivery, H2 and UID-wide Upgrade stay isolated from other target batches.
+Within a macOS worker using verified CI artifacts, independent acceptance commands overlap through Zig's existing DAG scheduler.
+The shared build CI owner checks their exit status and keeps execution fresh while buffering combined output on stderr; inherited terminal I/O would hold Zig's global stderr lock.
+Compilation, generated outputs, explicit I/O checks and Zig test protocols keep their existing owners.
+The compiler-backed acceptance regression runs explicitly in the existing compiler-equipped `cache_execution` job alongside the warm-cache execution proof; its explicit `ACCEPTANCE_INPUTS` also select that job and focused local feedback, while it stays outside the five-minute Python policy suite.
 A Selected checks dispatch can supply a JSON `native_targets` array to reproduce an exact native selection through the same producer, matrix and acceptance owners; this diagnostic mode disables retries and quarantine.
 The `linux` and `macos` statuses fail if any selected job fails or is cancelled.
 A failing aggregate names each failed job of its run and whether infrastructure or a check failed it ([failure_cause.py](../../tests/ci/failure_cause.py)), so a red never reads only as an exit code.

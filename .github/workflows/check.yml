@@ -574,6 +574,8 @@ jobs:
         with:
           targets: '["test-logic"]'
           check-part: cache-execution
+      - name: Prove acceptance freshness, diagnostics and independent overlap
+        run: python3 -B -m unittest discover -s tests/ci -p native_acceptance_test.py -v
       - name: Prove warm compilation does not cache test acceptance
         id: compile
         # Cache timing: green 351 s, run 42755585733; minimum margin 120 s.
@@ -894,6 +896,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(uname -m)" = arm64
+          echo "Native execution CPUs: $(sysctl -n hw.logicalcpu); memory bytes: $(sysctl -n hw.memsize)"
           echo "Source SHA $(git rev-parse HEAD); actual native $(uname -s)/$(uname -m)" | tee -a "$GITHUB_STEP_SUMMARY"
           python3 -B tests/ci/run_selected.py "$TARGETS" --check-part "$CHECK_PART" --ci-artifacts .zig-cache/o/ci-compiled --quarantine "$QUARANTINE" $RETRY
       - name: Retain bounded failed-fixture diagnostics

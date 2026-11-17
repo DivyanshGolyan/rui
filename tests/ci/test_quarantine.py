@@ -101,6 +101,12 @@ class ListedTest(unittest.TestCase):
     def test_a_run_failing_only_on_a_listed_signature_is_a_listed_flake(self):
         self.assertEqual(listed(FLAKY_RUN + summary(1)), [FLAKE])
 
+    def test_checked_native_failures_keep_the_same_quarantine_scope(self):
+        checked = FLAKY_RUN.replace('error: process exited with code 1',
+                                   'error: process exited with code 1 (expected exited with code 0)')
+        self.assertEqual(listed(checked + summary(1)), [FLAKE])
+        self.assertEqual(listed(checked + OTHER_FIXTURE + summary(2)), [])
+
     def test_any_other_failure_in_the_batch_keeps_it_red(self):
         for name, output in (("another fixture", FLAKY_RUN + OTHER_FIXTURE + summary(2)),
                              ("a Zig test", FLAKY_RUN + ZIG_TEST + summary(2)),

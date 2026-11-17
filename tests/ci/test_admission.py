@@ -100,14 +100,15 @@ class PlanFixture:
         self.git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '--allow-empty', '-qm', 'fixture')
         return self.git('rev-parse', 'HEAD')
 
-    def run(self, base=None, candidate=None, event='pull_request', draft=False, promotion=False, compile_only=False, branch_head=''):
+    def run(self, base=None, candidate=None, event='pull_request', draft=False, promotion=False, compile_only=False, branch_head='', native_targets=None):
         self.output = self.root / 'output'
         self.output.write_text('')
         script = step_script(job(CHECK.read_text(), 'plan'), 'Select existing targets')
         env = dict(os.environ, PYTHONDONTWRITEBYTECODE='1', BASE=base or self.base, DRAFT=str(draft).lower(), EVENT_NAME=event,
                    PROMOTION=str(promotion).lower(), COMPILE_ONLY=str(compile_only).lower(), BRANCH_HEAD=branch_head,
                    GITHUB_REF_NAME='5/merge', CANDIDATE_REF=candidate or self.git('rev-parse', 'HEAD'),
-                   GITHUB_OUTPUT=str(self.output), GITHUB_STEP_SUMMARY=str(self.root / 'summary'))
+                   GITHUB_OUTPUT=str(self.output), GITHUB_STEP_SUMMARY=str(self.root / 'summary'),
+                   NATIVE_TARGETS=json.dumps(native_targets) if native_targets is not None else '')
         return subprocess.run(['bash', '-c', script], cwd=self.repo, env=env,
                               capture_output=True, text=True)
 
@@ -516,6 +517,17 @@ class CandidatePlanTest(unittest.TestCase):
             self.assertEqual(fixture.plan(self, base=stale)['change_kind'], 'normal')
             self.assert_documentation_plan(fixture.plan(self, base=pr_base))
 
+    def test_manual_native_targets_reach_existing_producers_and_matrix(self):
+        with PlanFixture() as fixture:
+            output = fixture.plan(self, event='workflow_dispatch', native_targets=['test-logic'])
+            self.assertEqual(json.loads(output['native_targets']), ['test-logic'])
+            self.assertEqual(output['native'], 'true')
+            self.assertEqual(output['retry'], 'false')
+            self.assertEqual(output['quarantine'], 'off')
+            [row] = json.loads(output['macos_matrix'])['include']
+            self.assertEqual(row['targets'], ['test-logic'])
+            self.assertEqual(row['part'], 'all')
+
     def test_plan_step_serializes_the_value_owners_result(self):
         with PlanFixture() as fixture:
             fixture.write('tests/ci/ci_plan.py', """from types import SimpleNamespace
@@ -871,6 +883,24 @@ class ReleaseFlowTest(unittest.TestCase):
         self.assertLess(body.index('uses: actions/cache/restore@'), body.index(restat))
         self.assertLess(body.index(restat), checks)
 
+
+    def test_compiler_backed_acceptance_proof_uses_existing_cache_execution_job(self):
+        workflow = CHECK.read_text()
+        cache = job(workflow, 'cache_execution')
+        proof = 'python3 -B -m unittest discover -s tests/ci -p native_acceptance_test.py -v'
+        self.assertIn(proof, cache)
+        self.assertLess(cache.index('uses: ./.github/actions/setup'), cache.index(proof))
+        self.assertNotIn('native_acceptance', job(workflow, 'policy'))
+        self.assertIn('timeout-minutes: 5', job(workflow, 'policy'))
+        self.assertIn('timeout-minutes: 20', cache)
+        discovered = unittest.defaultTestLoader.discover(str(ROOT / 'tests/ci'))
+        def ids(suite):
+            for test in suite:
+                if isinstance(test, unittest.TestSuite):
+                    yield from ids(test)
+                else:
+                    yield test.id()
+        self.assertFalse(any('native_acceptance' in name for name in ids(discovered)))
 
     def test_candidate_jobs_are_read_only_and_cache_proof_adds_macos_in_promotion(self):
         for path in (CHECK, UPGRADE):

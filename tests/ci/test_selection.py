@@ -16,7 +16,7 @@ from textwrap import dedent
 from unittest.mock import patch
 
 import build_files
-from select_tests import (BUILD_HUB, BUILD_MODULES, CACHE_POLICY, CHECK_COVERS, FIXTURES, LIVE_POSTGRES_TARGETS, LIVE_RULES,
+from select_tests import (ACCEPTANCE_INPUTS, BUILD_HUB, BUILD_MODULES, CACHE_POLICY, CHECK_COVERS, FIXTURES, LIVE_POSTGRES_TARGETS, LIVE_RULES,
                           POLICY_SELF_CHECKS, RENDERER_HARNESSES, RULES, SCREEN_TARGETS, SETUP_PARTS, TEST_CODE, UNIT_ROOTS, Graph, covers, execution_batches, matches, select,
                           setup_requirements, tree_graph, uses_live_mysql, live_mysql_suites, mysql_provisioning)
 from qualification import LONG_GATES, NATIVE, RESOURCES, SHARDS_BESIDE_LONG_GATE, qualification, shards
@@ -1718,12 +1718,12 @@ fi
     def test_batches_share_builds_but_isolate_timing_witnesses(self):
         targets = ["test", "dispatch-integration", "transport-h2-integration",
                    "test-full", "admission-debug-integration",
-                   "host-launch-integration", "check-full"]
+                   "host-launch-integration", "check-full", "upgrade-integration"]
         self.assertEqual(execution_batches(targets), [
             ["test", "dispatch-integration"],
             ["transport-h2-integration"],
             ["test-full"], ["admission-debug-integration"],
-            ["host-launch-integration"], ["check-full"],
+            ["host-launch-integration"], ["check-full"], ["upgrade-integration"],
         ])
         self.assertEqual(execution_batches([]), [])
 
@@ -1737,6 +1737,23 @@ fi
             self.assertFalse(select([path], "review", AVAILABLE)["typecheck_macos"], path)
         self.assertTrue(select(["tests/ci/quarantine.json", "src/TerminalText.zig"], "development",
                                AVAILABLE)["typecheck_macos"])
+
+    def test_acceptance_owner_edits_always_select_compiler_backed_regression(self):
+        mutations = {
+            "build.zig": ('    darwin.configureAcceptance(b, ci.directory);\n', ''),
+            "build/darwin.zig": ('if (artifacts != null and b.graph.host.result.os.tag == .macos)',
+                                 'if (artifacts != null)'),
+            "build/ci.zig": ('run.expectExitCode(0);', 'run.expectExitCode(1);'),
+            "tests/ci/native_acceptance_test.py": ('self.assertTrue(observed)', 'self.assertFalse(observed)'),
+        }
+        self.assertEqual(set(mutations), set(ACCEPTANCE_INPUTS))
+        for path, (before, after) in mutations.items():
+            with self.subTest(path=path):
+                self.assertTrue(Path(path).is_file())
+                self.assertTrue(select([path], "review", AVAILABLE,
+                                       contents={path: (before, after)})["cache_execution_checks"])
+                self.assertFalse(select([path], "development", AVAILABLE,
+                                        contents={path: (before, after)})["cache_execution_checks"])
 
     def test_cache_proof_tracks_cache_policy_not_every_runtime_edit(self):
         def cache(path, before=None, after=None):
@@ -1753,7 +1770,7 @@ fi
             self.assertFalse(cache(path), path)
 
         build = "    const run = b.addRunArtifact(tests);\n    run.has_side_effects = true;\n"
-        self.assertFalse(cache("build.zig", build, build + "    // A build comment.\n    const other = b.step(\"x\", \"y\");\n"))
+        self.assertTrue(cache("build.zig", build, build + "    // A build comment.\n    const other = b.step(\"x\", \"y\");\n"))
         self.assertTrue(cache("build.zig", build, build.replace("    run.has_side_effects = true;\n", "")))
         action = Path(".github/actions/setup/action.yml").read_text()
         fixtures = Path(".github/actions/setup/fixtures/action.yml").read_text()
