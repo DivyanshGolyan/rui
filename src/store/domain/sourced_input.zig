@@ -30,12 +30,20 @@ pub fn messageSql(comptime m: []const u8) []const u8 {
     return m ++ ".source_kind IN (1,2)";
 }
 
+pub fn actionIdSql(comptime message: []const u8) []const u8 {
+    return "coalesce(" ++ message ++ ".source_action_id,(SELECT v.action_id FROM action_value v WHERE v.admission_id=" ++ message ++ ".admission_id))";
+}
+
+pub fn actionConsistentSql(comptime message: []const u8) []const u8 {
+    return "(" ++ message ++ ".source_action_id IS NULL OR EXISTS(" ++
+        "SELECT 1 FROM action_operation source WHERE source.action_id=" ++ message ++ ".source_action_id AND source.session_ref=" ++ message ++
+        ".session_ref AND source.background_position IS NOT NULL AND source.resolution_code IS NOT NULL AND source.resolution_content_id=" ++ message ++ ".content_id)) AND ((" ++ message ++ ".source_kind<>4 AND NOT EXISTS(SELECT 1 FROM action_value v WHERE v.admission_id=" ++ message ++ ".admission_id)) OR (" ++ message ++ ".source_kind=4 AND EXISTS(SELECT 1 FROM action_value v JOIN action_operation source ON source.action_id=v.action_id WHERE v.admission_id=" ++ message ++ ".admission_id AND v.content_id=" ++ message ++ ".content_id AND source.session_ref=" ++ message ++ ".session_ref AND source.background_position IS NOT NULL)))";
+}
+
 pub fn consistentSql(comptime message: []const u8, comptime command: []const u8) []const u8 {
     return command ++ ".kind=2 AND " ++ command ++ ".accepted=1 AND " ++
         command ++ ".target=" ++ message ++ ".session_ref AND " ++
-        command ++ ".primary_content_id=" ++ message ++ ".content_id AND (" ++ message ++ ".source_action_id IS NULL OR EXISTS(" ++
-        "SELECT 1 FROM action_operation source WHERE source.action_id=" ++ message ++ ".source_action_id AND source.session_ref=" ++ message ++
-        ".session_ref AND source.background_position IS NOT NULL AND source.resolution_code IS NOT NULL AND source.resolution_content_id=" ++ message ++ ".content_id)) AND ((" ++ message ++ ".source_kind<>4 AND NOT EXISTS(SELECT 1 FROM action_value v WHERE v.admission_id=" ++ message ++ ".admission_id)) OR (" ++ message ++ ".source_kind=4 AND EXISTS(SELECT 1 FROM action_value v JOIN action_operation source ON source.action_id=v.action_id WHERE v.admission_id=" ++ message ++ ".admission_id AND v.content_id=" ++ message ++ ".content_id AND source.session_ref=" ++ message ++ ".session_ref AND source.background_position IS NOT NULL)))";
+        command ++ ".primary_content_id=" ++ message ++ ".content_id AND " ++ actionConsistentSql(message);
 }
 
 const admit_message = rsql.Write(.{

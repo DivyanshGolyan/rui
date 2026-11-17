@@ -25,6 +25,7 @@ const model_settlement_domain = @import("model_settlement.zig");
 const skills_domain = @import("skills.zig");
 const history_floor_domain = @import("history_floor.zig");
 const reads_domain = @import("reads.zig");
+const sourced_input = @import("sourced_input.zig");
 const rsql = @import("../rsql.zig");
 const tool_fulfillment = @import("tool_fulfillment.zig");
 const tool_set = @import("tool_set.zig");
@@ -1320,8 +1321,8 @@ fn entryAfter(a: *ReadAccess, view: *RequestPage, after_position: u64) !?*const 
 }
 
 const historical_entries = rsql.Read(.{
-    .sql = "SELECT e.session_position,CASE WHEN e.entry_kind=4 THEN 5 ELSE e.entry_kind END AS entry_kind,e.content_id," ++ historical_content_columns_sql ++ ",NULL AS model,NULL AS provider,NULL AS item_kind,NULL AS item_id_digest,(e.source_catalog_position IS NULL OR " ++ skills_domain.instructionConsistentSql("e") ++ ") AND (e.entry_kind<>1 OR EXISTS(SELECT 1 FROM message_admission m WHERE m.admission_id=e.source_admission_id AND m.session_ref=e.session_ref AND m.content_id=e.content_id AND ((m.source_kind<>4 AND NOT EXISTS(SELECT 1 FROM action_value v WHERE v.admission_id=m.admission_id)) OR (m.source_kind=4 AND EXISTS(SELECT 1 FROM action_value v JOIN action_operation source ON source.action_id=v.action_id WHERE v.admission_id=m.admission_id AND v.content_id=m.content_id AND source.session_ref=m.session_ref AND source.background_position IS NOT NULL))))) AS consistent," ++
-        "(SELECT m.sender_session_ref FROM message_admission m WHERE e.entry_kind=1 AND m.admission_id=e.source_admission_id) AS sender,(SELECT coalesce(m.source_action_id,(SELECT v.action_id FROM action_value v WHERE v.admission_id=m.admission_id)) FROM message_admission m WHERE e.entry_kind=1 AND m.admission_id=e.source_admission_id) AS source_action,e.session_ref AS source_session,NULL AS effort," ++
+    .sql = "SELECT e.session_position,CASE WHEN e.entry_kind=4 THEN 5 ELSE e.entry_kind END AS entry_kind,e.content_id," ++ historical_content_columns_sql ++ ",NULL AS model,NULL AS provider,NULL AS item_kind,NULL AS item_id_digest,(e.source_catalog_position IS NULL OR " ++ skills_domain.instructionConsistentSql("e") ++ ") AND (e.entry_kind<>1 OR EXISTS(SELECT 1 FROM message_admission m WHERE m.admission_id=e.source_admission_id AND m.session_ref=e.session_ref AND m.content_id=e.content_id AND " ++ sourced_input.actionConsistentSql("m") ++ ")) AS consistent," ++
+        "(SELECT m.sender_session_ref FROM message_admission m WHERE e.entry_kind=1 AND m.admission_id=e.source_admission_id) AS sender,(SELECT " ++ sourced_input.actionIdSql("m") ++ " FROM message_admission m WHERE e.entry_kind=1 AND m.admission_id=e.source_admission_id) AS source_action,e.session_ref AS source_session,NULL AS effort," ++
         "(SELECT v.ordinal FROM action_value v WHERE v.admission_id=e.source_admission_id) AS source_ordinal,NULL AS tool_set_id,NULL AS declares," ++ pageBytesSql("content", "bytes") ++ " " ++
         "FROM model_operation current JOIN conversation_entry e ON e.session_ref=current.session_ref " ++
         "LEFT JOIN content ON content.content_id=e.content_id " ++
