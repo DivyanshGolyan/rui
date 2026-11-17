@@ -1378,6 +1378,7 @@ pub const SessionListPage = struct {
                 permission_mode: JsonEnum(protocol.PermissionMode),
                 label: ?JsonString(protocol.max_label_bytes),
                 created_at: JsonString(20),
+                state_change_at: JsonString(20),
                 revision: JsonString(20),
                 end: JsonString(20),
                 first_message: ?JsonFirstMessage,
@@ -1408,6 +1409,7 @@ pub const SessionListPage = struct {
                 .permission_mode = wire.permission_mode.value,
                 .label = if (wire.label) |label| label.value else null,
                 .created_at = try ActivityPage.id(wire.created_at, false),
+                .state_change_at = try ActivityPage.id(wire.state_change_at, false),
                 .revision = try ActivityPage.id(wire.revision, false),
                 .end = try ActivityPage.id(wire.end, true),
                 .work = .{

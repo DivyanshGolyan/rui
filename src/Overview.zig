@@ -486,6 +486,11 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
             try app.vx.queryColor(app.tty.writer(), .bg);
         },
         .tick => {
+            if (self.state.pointer_over and (!self.root.listVisible() or self.root.input.layer != .main)) {
+                self.app_sessions.anchor = null;
+                try self.appNext(ctx, try self.event(.{ .list_presence = .{ .at_ms = self.realMs(), .pointer_over = false } }));
+                ctx.redraw = true;
+            }
             if (self.signInIsFirstRun()) return;
             try self.appNext(ctx, try self.event(.{ .list_settled = .{ .wide = self.root.size.width >= Root.split_at, .focused = self.root.input.listFocused() and self.root.input.layer == .main } }));
             while (self.retired.items.len != 0 and self.retired.items[0].frame < self.root.frames) {
@@ -541,8 +546,17 @@ fn appKey(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event, delivery:
         .under = delivery.under == .settings,
         .pasted = delivery.pasted,
         .wide = delivery.wide,
+        .at_ms = self.realMs(),
     } }));
     ctx.consumeAndRedraw();
+}
+
+fn appPresence(raw: *anyopaque, ctx: *vxfw.EventContext, over: bool) anyerror!void {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    if (!over) self.app_sessions.anchor = null;
+    if (self.state.pointer_over == over) return;
+    try self.appNext(ctx, try self.event(.{ .list_presence = .{ .at_ms = self.realMs(), .pointer_over = over } }));
+    ctx.redraw = true;
 }
 
 fn appClick(raw: *anyopaque, ctx: *vxfw.EventContext, click: view.Click) anyerror!void {
@@ -843,19 +857,30 @@ const SessionRows = struct {
     caps: view.Caps,
     frame: u64,
 
+    fn find(raw: *const anyopaque, target: view.Click) ?u32 {
+        const self: *const SessionRows = @ptrCast(@alignCast(raw));
+        return switch (target) {
+            .open => |reference| if (view.lineOfReference(self.state, reference)) |line| @intCast(line) else null,
+            else => null,
+        };
+    }
+
     fn count(raw: *const anyopaque, first: u32) u32 {
         const self: *const SessionRows = @ptrCast(@alignCast(raw));
         return @intCast(view.sessionsFrom(self.state, first));
     }
 
-    fn above(count_: u32, arena: std.mem.Allocator) std.mem.Allocator.Error!@import("widgets/List.zig").Line {
-        return try arena.dupe(vaxis.Segment, &.{.{ .text = try std.fmt.allocPrint(arena, "↑ {d} more", .{count_}) }});
-    }
-
-    fn below(count_: u32, arena: std.mem.Allocator) std.mem.Allocator.Error!@import("widgets/List.zig").Line {
-        const segments = try arena.alloc(vaxis.Segment, 1);
-        segments[0] = .{ .text = try std.fmt.allocPrint(arena, "↓ {d} more", .{count_}) };
-        return segments;
+    fn edge(raw: *const anyopaque, side: @import("widgets/List.zig").Edge, range: @import("widgets/List.zig").Range, counts: @import("widgets/List.zig").Counts, arena: std.mem.Allocator) std.mem.Allocator.Error!?@import("widgets/List.zig").Line {
+        const self: *const SessionRows = @ptrCast(@alignCast(raw));
+        const question_count = view.edgeAttention(self.state, if (side == .above) .above else .below, range.first, range.end);
+        const more_count = if (side == .above) counts.above else counts.below;
+        if (question_count == 0 and more_count == 0) return null;
+        const arrow = if (self.caps.unicode) if (side == .above) "↑" else "↓" else if (side == .above) "^" else "v";
+        const text = if (question_count != 0)
+            try std.fmt.allocPrint(arena, "{s} {d} needs you {s} Alt-?", .{ arrow, question_count, if (self.caps.unicode) "·" else "." })
+        else
+            try std.fmt.allocPrint(arena, "{s} {d} more", .{ arrow, more_count });
+        return try arena.dupe(vaxis.Segment, &.{.{ .text = text, .style = @import("widget_style.zig").of(self.caps, .{ .colour = if (question_count != 0) .attention else .quiet }) }});
     }
 
     fn row(raw: *const anyopaque, index: usize, arena: std.mem.Allocator) std.mem.Allocator.Error!GroupedList.Row {
@@ -955,9 +980,8 @@ fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: AppScreen.Overview.Part) s
     rows.* = .{ .state = &self.state, .width = size.width, .caps = self.caps, .frame = frame };
     self.app_sessions.selected = if (view.focusedLine(&self.state, self.root.input.listFocused() or self.root.session == null)) |line| @intCast(line) else null;
     self.app_sessions.selection_background = if (self.root.session != null and !self.root.input.listFocused()) .bar else .selection;
-    self.app_sessions.rows = .{ .userdata = rows, .count = @intCast(view.listLength(&self.state)), .rowFn = SessionRows.row, .countFromFn = SessionRows.count };
-    self.app_sessions.aboveFn = SessionRows.above;
-    self.app_sessions.belowFn = SessionRows.below;
+    self.app_sessions.rows = .{ .userdata = rows, .count = @intCast(view.listLength(&self.state)), .rowFn = SessionRows.row, .countFromFn = SessionRows.count, .findFn = SessionRows.find };
+    self.app_sessions.edges = .{ .userdata = rows, .lineFn = SessionRows.edge };
     self.app_settings_line.selected = self.root.input.area == .settings_row or (self.root.input.listFocused() and self.state.selected == .settings);
     self.app_settings_line.memory = self.state.memory;
     self.app_settings_line.run = self.state.upgrade.run;
@@ -975,6 +999,7 @@ fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: AppScreen.Overview.Part) s
     self.app_screen.header = header.widget();
     defer {
         self.app_sessions.rows = .none;
+        self.app_sessions.edges = null;
         self.app_sessions.tail = null;
         self.app_screen.header = null;
         self.app_screen.host = null;
@@ -1032,6 +1057,7 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
     self.app_new_session = .{ .state = &self.state, .caps = self.caps, .userdata = self, .on_click = appClick };
     self.app_settings_line = .{ .selected = false, .caps = self.caps, .userdata = self, .on_click = appClick };
     self.app_sessions.on_press = .{ .userdata = self, .pressed = appClick };
+    self.app_sessions.on_presence = .{ .userdata = self, .changed = appPresence };
     try self.state.init(init.gpa, .{ .cwd = options.workspace, .home = options.home, .login_at = options.login_at, .default = .of(options.provider, options.model) });
     errdefer self.state.deinit();
     return self;
@@ -6429,6 +6455,7 @@ const key_encodings = std.enums.EnumArray(keymap.Key, []const []const u8).init(.
     .ctrl_r = &.{ "\x12", "\x1b[114;5u", "\x1b[27;5;114~" },
     .ctrl_x = &.{ "\x18", "\x1b[120;5u", "\x1b[27;5;120~" },
     .alt_a = &.{ "\x1ba", "\x1b[97;3u", "\x1b[27;3;97~" },
+    .alt_question = &.{ "\x1b?", "\x1b[63;3u", "\x1b[27;3;63~" },
     .alt_up = &.{ "\x1b[1;3A", "\x1b[1;3:1A" },
     .alt_down = &.{ "\x1b[1;3B", "\x1b[1;3:1B" },
     .up = &.{ "\x1b[A", "\x1bOA", "\x1b[1;1A" },

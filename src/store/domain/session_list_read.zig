@@ -181,11 +181,25 @@ fn readChangedSessions(a: *ReadAccess, request: *const session_list.ListSessions
         .{ .last = .{ .delta = .changed, .since = next } });
 }
 
+const clock_columns =
+    "(SELECT COALESCE((SELECT e.recorded_at FROM conversation_entry e WHERE e.source_admission_id=t.first_admission_id AND e.entry_kind=1)," ++
+    "CASE WHEN m.turn_id IS NULL AND (SELECT o.purpose FROM model_operation o WHERE o.turn_id=t.turn_id ORDER BY o.operation_id DESC LIMIT 1)=1 THEN m.admitted_at END) " ++
+    "FROM turn t JOIN message_admission m ON m.admission_id=t.first_admission_id " ++
+    "WHERE t.turn_id=(SELECT turn_id FROM turn WHERE session_ref=session.session_ref ORDER BY turn_id DESC LIMIT 1)) AS clock_started_at," ++
+    "(SELECT max(o.resolved_at) FROM model_operation o JOIN turn t ON t.turn_id=o.turn_id " ++
+    "WHERE t.turn_id=(SELECT turn_id FROM turn WHERE session_ref=session.session_ref ORDER BY turn_id DESC LIMIT 1) " ++
+    "AND EXISTS (SELECT 1 FROM action_operation a WHERE a.parent_operation_id=o.operation_id AND a.approval_position IS NOT NULL)) AS clock_approval_entered_at," ++
+    "(SELECT max((SELECT max(COALESCE(a.decided_at,a.resolved_at)) FROM action_operation a " ++
+    "WHERE a.parent_operation_id=o.operation_id AND a.approval_position IS NOT NULL)) FROM model_operation o " ++
+    "WHERE o.turn_id=(SELECT turn_id FROM turn WHERE session_ref=session.session_ref ORDER BY turn_id DESC LIMIT 1) " ++
+    "AND NOT EXISTS (SELECT 1 FROM action_operation pending WHERE pending.parent_operation_id=o.operation_id " ++
+    "AND pending.approval_position IS NOT NULL AND pending.authorized=0 AND pending.resolution_code IS NULL)) AS clock_approval_left_at,";
+
 const settings_columns = "session.session_ref,session.parent_ref,session.creator_ref,session.workspace,session.provider,session.model," ++ tool_set.namesSql("session.tool_set_id") ++ " AS tools,session.permission_mode,session.label,session.created_at,session.revision,session.next_position," ++
     command_domain.archive_state_sql ++ " AS archive_state," ++
     "(SELECT pin_command.command_seq FROM session_pin pin JOIN core_command pin_command ON pin_command.command_key=pin.command_key WHERE pin.session_ref=session.session_ref) AS pin_order," ++
     "(" ++ report_domain.person_message_sql ++ ") AS from_person_at," ++
-    last_line_columns ++ ",";
+    last_line_columns ++ "," ++ clock_columns;
 
 const last_line_columns =
     "last_turn.outcome_position AS last_turn_position," ++
@@ -234,6 +248,9 @@ const ListRow = struct {
     last_answer: ?rsql.Blob(1024),
     last_approval_position: ?rsql.Positive,
     last_approval_text: ?Bounded(tool_presentation.max_description_bytes),
+    clock_started_at: ?rsql.Positive,
+    clock_approval_entered_at: ?rsql.Positive,
+    clock_approval_left_at: ?rsql.Positive,
     first_admission: ?rsql.Positive,
     first_position: ?rsql.Positive,
     first_admitted_at: ?rsql.Positive,
@@ -331,6 +348,20 @@ fn rowValues(rows: []const ShownRow, index: usize, now_ms: u64, row: *const List
     const work = try rows[index].work.work(row.created_at.get(), now_ms);
     const permission_mode = try configuration_domain.permissionMode(row.permission_mode);
     const first_message = try report_domain.firstMessage(row, rows[index].first);
+    const inputs = rows[index].work.inputs;
+    var clock = row.created_at.get();
+    if (inputs.latest) |latest| {
+        clock = @max(clock, (row.clock_started_at orelse return error.CorruptStore).get());
+        if (latest.terminal) |terminal| clock = @max(clock, terminal.at);
+        if (latest.stopped_at) |stopped| clock = @max(clock, stopped);
+        if (latest.terminal != null and work.state == .pending) clock = @max(clock, work.state.since());
+    } else if (inputs.oldest_pending) |pending| clock = @max(clock, pending.at);
+    if (inputs.excluded) |excluded| clock = @max(clock, excluded.stop_at);
+    if (work.state == .working and (inputs.latest == null or inputs.latest.?.terminal != null)) {
+        if (inputs.owed_since) |owed| clock = @max(clock, owed);
+    }
+    if (row.clock_approval_entered_at) |entered| clock = @max(clock, entered.get());
+    if (row.clock_approval_left_at) |left| clock = @max(clock, left.get());
     return .{
         .archive_state = row.archive_state,
         .pin_order = if (row.pin_order) |rank| rank.get() else null,
@@ -344,6 +375,7 @@ fn rowValues(rows: []const ShownRow, index: usize, now_ms: u64, row: *const List
         .permission_mode = permission_mode,
         .label = if (row.label) |*label| label.slice() else null,
         .created_at = row.created_at.get(),
+        .state_change_at = clock,
         .revision = row.revision.get(),
         .end = row.next_position.get() - 1,
         .first_message = first_message,

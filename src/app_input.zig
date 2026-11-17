@@ -82,6 +82,7 @@ pub const keys: keymap.Keymap(Move) = .init(.{
     .ctrl_r = null,
     .ctrl_x = null,
     .alt_a = null,
+    .alt_question = null,
     .alt_up = null,
     .alt_down = null,
     .up = null,
@@ -356,7 +357,7 @@ fn stepInner(state: *State, facts: Facts, input: Input) Effects {
     if (input == .mouse and (input.mouse == .click or input.mouse == .list_click or input.mouse == .chat_click) and state.pasting) return .{ .route = .swallow };
     if (state.layer == .sign_in) return .{ .route = .sign_in };
     if (input == .key and state.layer == .settings) return settingsKey(state, facts.settings, input.key);
-    if (state.layer == .main and !state.pasting and input == .key and !(facts.frame.modal and facts.session_open) and (input.key.named == .alt_up or input.key.named == .alt_down))
+    if (state.layer == .main and !state.pasting and input == .key and !(facts.frame.modal and facts.session_open) and (input.key.named == .alt_up or input.key.named == .alt_down or input.key.named == .alt_question))
         return .{ .route = .{ .overview = .{ .under = .main, .pasted = false, .wide = facts.wide } } };
     if (input == .key and !state.pasting and !facts.frame.modal) {
         const move = if (facts.accepts_tab and state.area == .main and state.field == .input and input.key.named == .tab) null else if (input.key.named) |name| keys.get(name) else null;
@@ -823,7 +824,7 @@ test "App input paste completion routes to the same owner for every focus and pa
 }
 
 test "Option session navigation routes main chords without taking paste or modal custody" {
-    for ([_]keymap.Key{ .alt_up, .alt_down }) |key| for ([_]bool{ false, true }) |wide| for ([_]bool{ false, true }) |open| for ([_]bool{ false, true }) |focused| for ([_]bool{ false, true }) |pasted| for ([_]Layer{ .main, .settings, .{ .sign_in = .{ .over = .main } } }) |layer| {
+    for ([_]keymap.Key{ .alt_up, .alt_down, .alt_question }) |key| for ([_]bool{ false, true }) |wide| for ([_]bool{ false, true }) |open| for ([_]bool{ false, true }) |focused| for ([_]bool{ false, true }) |pasted| for ([_]Layer{ .main, .settings, .{ .sign_in = .{ .over = .main } } }) |layer| {
         var state: State = .{ .layer = layer, .area = if (focused) .list else .main, .pasting = pasted };
         const effects = step(&state, .{ .wide = wide, .session_open = open }, .{ .key = .{ .named = key } });
         if (layer == .sign_in) {

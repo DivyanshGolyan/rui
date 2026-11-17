@@ -33,6 +33,7 @@ pub fn Reply(comptime Capture: type) type {
                 .permission_mode = values.permission_mode,
                 .label = values.label,
                 .created_at = values.created_at,
+                .state_change_at = values.state_change_at,
                 .revision = values.revision,
                 .end = values.end,
                 .first_message = if (values.first_message) |first| .fromCore(first) else null,

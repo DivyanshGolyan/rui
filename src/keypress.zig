@@ -19,6 +19,7 @@ const chords = std.enums.EnumArray(Key, []const Chord).init(.{
     .ctrl_r = &.{.{ .code = 'r', .mods = .{ .ctrl = true } }},
     .ctrl_x = &.{.{ .code = 'x', .mods = .{ .ctrl = true } }},
     .alt_a = &.{.{ .code = 'a', .mods = .{ .alt = true } }},
+    .alt_question = &.{ .{ .code = '?', .mods = .{ .alt = true } }, .{ .code = '/', .mods = .{ .alt = true, .shift = true } } },
     .alt_up = &.{.{ .code = vaxis.Key.up, .mods = .{ .alt = true } }},
     .alt_down = &.{.{ .code = vaxis.Key.down, .mods = .{ .alt = true } }},
     // Terminals in the alternate screen also deliver mouse wheel and
@@ -177,6 +178,20 @@ test "Option session navigation decodes exact Alt arrows without losing modifier
         try std.testing.expect(name != null);
         try std.testing.expectEqualStrings(case.name, @tagName(name.?));
         try std.testing.expect(events.next() == null);
+    }
+}
+
+test "Option question decodes legacy and extended terminal reports" {
+    const Events = @import("testing/app_events.zig").Events;
+    for ([_][]const u8{ "\x1b?", "\x1b[63;3u", "\x1b[27;3;63~", "\x1b[47;4u" }) |bytes| {
+        var events: Events = .init(bytes);
+        const event = events.next().?;
+        try std.testing.expect(event == .key_press);
+        try std.testing.expectEqual(Key.alt_question, named(event.key_press).?);
+        try std.testing.expect(events.next() == null);
+    }
+    for ([_]vaxis.Key.Modifiers{ .{ .alt = true, .ctrl = true }, .{ .alt = true, .super = true }, .{ .alt = true, .meta = true }, .{ .alt = true, .hyper = true } }) |mods| {
+        try std.testing.expect(named(.{ .codepoint = '?', .mods = mods }) == null);
     }
 }
 

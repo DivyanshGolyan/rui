@@ -1,0 +1,1175 @@
+{
+  "active_capacity": 4,
+  "sizes": [
+    "140x40",
+    "46x30"
+  ],
+  "states": [
+    {
+      "name": "tree-unicode",
+      "theme": "night",
+      "full_overview": true,
+      "cast": [
+        {
+          "label": "Tree root",
+          "workspace": "code/tree",
+          "mode": "bypass",
+          "tools": "start_agent,bash",
+          "messages": [
+            "creator root ready"
+          ]
+        },
+        {
+          "label": "Attached worker",
+          "workspace": "code/tree",
+          "mode": "bypass",
+          "creator": "Tree root",
+          "attached": true,
+          "tools": "start_agent,bash",
+          "messages": [
+            "creator witness ready"
+          ]
+        },
+        {
+          "label": "Detached lead",
+          "workspace": "code/tree",
+          "mode": "bypass",
+          "creator": "Tree root",
+          "attached": false,
+          "tools": "start_agent,bash",
+          "messages": [
+            "creator witness ready"
+          ]
+        },
+        {
+          "label": "Nested worker",
+          "workspace": "code/tree",
+          "mode": "bypass",
+          "creator": "Detached lead",
+          "attached": true,
+          "tools": "start_agent,bash",
+          "messages": [
+            "creator witness ready"
+          ]
+        },
+        {
+          "label": "Question leaf",
+          "workspace": "code/tree",
+          "mode": "ask",
+          "creator": "Tree root",
+          "attached": true,
+          "tools": "start_agent,bash",
+          "messages": [
+            "creator witness ready"
+          ]
+        },
+        {
+          "label": "Deep worker 1",
+          "workspace": "code/tree",
+          "mode": "bypass",
+          "creator": "Nested worker",
+          "attached": true,
+          "tools": "start_agent,bash",
+          "messages": [
+            "creator witness ready"
+          ]
+        },
+        {
+          "label": "Deep worker 2",
+          "workspace": "code/tree",
+          "mode": "bypass",
+          "creator": "Deep worker 1",
+          "attached": true,
+          "tools": "start_agent,bash",
+          "messages": [
+            "creator witness ready"
+          ]
+        },
+        {
+          "label": "Deep worker 3",
+          "workspace": "code/tree",
+          "mode": "bypass",
+          "creator": "Deep worker 2",
+          "attached": true,
+          "tools": "start_agent,bash",
+          "messages": [
+            "creator witness ready"
+          ]
+        },
+        {
+          "label": "Deep worker 4",
+          "workspace": "code/tree",
+          "mode": "bypass",
+          "creator": "Deep worker 3",
+          "attached": true,
+          "tools": "start_agent,bash",
+          "messages": [
+            "creator witness ready"
+          ]
+        },
+        {
+          "label": "Deep worker 5",
+          "workspace": "code/tree",
+          "mode": "bypass",
+          "creator": "Deep worker 4",
+          "attached": true,
+          "tools": "start_agent,bash",
+          "messages": [
+            "creator witness ready"
+          ]
+        },
+        {
+          "label": "Deep worker 6",
+          "workspace": "code/tree",
+          "mode": "bypass",
+          "creator": "Deep worker 5",
+          "attached": true,
+          "tools": "start_agent,bash",
+          "messages": [
+            "creator witness ready"
+          ]
+        }
+      ],
+      "env": {
+        "LC_ALL": "C.UTF-8",
+        "LANG": "C.UTF-8"
+      },
+      "open": "overview",
+      "steps": [
+        {
+          "wait": "Deep worker 6"
+        }
+      ],
+      "expect": [
+        "Tree root",
+        "Attached worker",
+        "Detached lead",
+        "Deep worker 6"
+      ],
+      "expect_regex": [
+        "(?m)^.*[│╰].*Attached worker"
+      ],
+      "comparison": {
+        "before": {
+          "expect": [
+            "Tree root",
+            "Attached worker",
+            "Detached lead"
+          ],
+          "expect_regex": []
+        }
+      },
+      "note": "Real attached, detached and deep creator births; overview at both sizes"
+    },
+    {
+      "name": "tree-ascii",
+      "theme": "night",
+      "full_overview": true,
+      "env": {
+        "LC_ALL": "C",
+        "LANG": "C"
+      },
+      "open": "overview",
+      "steps": [
+        {
+          "wait": "Deep worker 6"
+        }
+      ],
+      "expect": [
+        "Tree root",
+        "Attached worker",
+        "Deep worker 6"
+      ],
+      "absent": [
+        "│",
+        "╰"
+      ],
+      "comparison": {
+        "before": {
+          "expect": [
+            "Tree root",
+            "Attached worker",
+            "Deep worker 6"
+          ],
+          "absent": [
+            "│",
+            "╰"
+          ]
+        }
+      },
+      "note": "ASCII overview; depth is limited by the available title width"
+    },
+    {
+      "name": "hidden-question-unicode",
+      "theme": "night",
+      "full_overview": true,
+      "env": {
+        "LC_ALL": "C.UTF-8",
+        "LANG": "C.UTF-8"
+      },
+      "open": "overview",
+      "steps": [
+        {
+          "wait": "Tree root"
+        },
+        {
+          "select_row": "Tree root"
+        },
+        {
+          "keys": [
+            "Left"
+          ]
+        },
+        {
+          "send": {
+            "to": "Question leaf",
+            "text": "consent check",
+            "wait": false
+          }
+        }
+      ],
+      "expect": [
+        "Tree root"
+      ],
+      "absent": [
+        "Question leaf"
+      ],
+      "expect_regex": [
+        "(?m)^.*Tree root.*▸\\s*10\\s*·\\s*1\\s*\\?"
+      ],
+      "comparison": {
+        "before": {
+          "expect": [
+            "Question leaf"
+          ],
+          "absent": [],
+          "expect_regex": []
+        }
+      },
+      "note": "Person collapses root before a descendant requests approval"
+    },
+    {
+      "name": "hidden-question-ascii",
+      "theme": "night",
+      "full_overview": true,
+      "env": {
+        "LC_ALL": "C",
+        "LANG": "C"
+      },
+      "open": "overview",
+      "steps": [
+        {
+          "wait": "Tree root"
+        },
+        {
+          "select_row": "Tree root"
+        },
+        {
+          "keys": [
+            "Left"
+          ]
+        }
+      ],
+      "expect": [
+        "Tree root"
+      ],
+      "absent": [
+        "Question leaf",
+        "│",
+        "╰"
+      ],
+      "expect_regex": [
+        "(?m)^.*Tree root.*>\\s*10\\s*\\.\\s*1\\s*\\?"
+      ],
+      "comparison": {
+        "before": {
+          "expect": [
+            "Question leaf"
+          ],
+          "absent": [
+            "│",
+            "╰"
+          ],
+          "expect_regex": []
+        }
+      },
+      "note": "ASCII collapsed root with hidden approval"
+    },
+    {
+      "name": "held-arrival-unicode",
+      "theme": "night",
+      "full_overview": true,
+      "env": {
+        "LC_ALL": "C.UTF-8",
+        "LANG": "C.UTF-8"
+      },
+      "open": "overview",
+      "steps": [
+        {
+          "wait": "Tree root"
+        },
+        {
+          "mouse": {
+            "at": "Tree root",
+            "do": "move"
+          },
+          "repaint": false
+        },
+        {
+          "birth": {
+            "label": "Held arrival",
+            "mode": "bypass",
+            "creator": "Tree root",
+            "attached": true,
+            "tools": "start_agent,bash",
+            "messages": [
+              "creator witness ready"
+            ]
+          }
+        }
+      ],
+      "expect": [
+        "Tree root",
+        "Held arrival",
+        "order held"
+      ],
+      "comparison": {
+        "before": {
+          "expect": [
+            "Tree root",
+            "Held arrival"
+          ]
+        }
+      },
+      "note": "A real sibling is born while the pointer remains over the list"
+    },
+    {
+      "name": "release-unicode",
+      "theme": "night",
+      "full_overview": true,
+      "env": {
+        "LC_ALL": "C.UTF-8",
+        "LANG": "C.UTF-8"
+      },
+      "open": "overview",
+      "steps": [
+        {
+          "wait": "Tree root"
+        },
+        {
+          "mouse": {
+            "at": "Tree root",
+            "do": "move"
+          },
+          "repaint": false
+        },
+        {
+          "birth": {
+            "label": "Release arrival",
+            "mode": "bypass",
+            "creator": "Tree root",
+            "attached": true,
+            "tools": "start_agent,bash",
+            "messages": [
+              "creator witness ready"
+            ]
+          }
+        },
+        {
+          "mouse": {
+            "at": "+ New Session",
+            "do": "move"
+          },
+          "repaint": false
+        },
+        {
+          "gone": "order held"
+        }
+      ],
+      "expect": [
+        "Tree root",
+        "Release arrival"
+      ],
+      "absent": [
+        "order held"
+      ],
+      "record": true,
+      "note": "Pointer leaves; retained raw frames capture the release and any flash"
+    },
+    {
+      "name": "held-arrival-ascii",
+      "theme": "night",
+      "full_overview": true,
+      "env": {
+        "LC_ALL": "C",
+        "LANG": "C"
+      },
+      "open": "overview",
+      "steps": [
+        {
+          "wait": "Tree root"
+        },
+        {
+          "mouse": {
+            "at": "Tree root",
+            "do": "move"
+          },
+          "repaint": false
+        },
+        {
+          "birth": {
+            "label": "ASCII arrival",
+            "mode": "bypass",
+            "creator": "Tree root",
+            "attached": true,
+            "tools": "start_agent,bash",
+            "messages": [
+              "creator witness ready"
+            ]
+          }
+        }
+      ],
+      "expect": [
+        "Tree root",
+        "ASCII arrival",
+        ". order held"
+      ],
+      "comparison": {
+        "before": {
+          "expect": [
+            "Tree root",
+            "ASCII arrival"
+          ]
+        }
+      },
+      "note": "ASCII pointer hold and real sibling arrival"
+    },
+    {
+      "name": "sidebar-unicode",
+      "theme": "night",
+      "full_overview": false,
+      "env": {
+        "LC_ALL": "C.UTF-8",
+        "LANG": "C.UTF-8"
+      },
+      "open": "Tree root",
+      "steps": [],
+      "expect": [
+        "Tree root"
+      ],
+      "expect_viewport": {
+        "140x40": {
+          "expect": [
+            "Tree root",
+            "Attached worker",
+            "Detached lead"
+          ],
+          "expect_regex": [
+            "(?m)^.*[│╰].*Attached worker"
+          ]
+        },
+        "46x30": {
+          "expect": [
+            "Tree root"
+          ],
+          "absent": [
+            "Attached worker"
+          ]
+        }
+      },
+      "comparison": {
+        "before": {
+          "expect_viewport": {
+            "140x40": {
+              "expect": [
+                "Tree root",
+                "Attached worker"
+              ]
+            },
+            "46x30": {
+              "expect": [
+                "Tree root"
+              ],
+              "absent": [
+                "Attached worker"
+              ]
+            }
+          }
+        }
+      },
+      "note": "Wide sidebar and narrow conversation; no narrow simultaneous sidebar"
+    },
+    {
+      "name": "sidebar-ascii",
+      "theme": "night",
+      "full_overview": false,
+      "env": {
+        "LC_ALL": "C",
+        "LANG": "C"
+      },
+      "open": "Tree root",
+      "steps": [],
+      "expect": [
+        "Tree root"
+      ],
+      "expect_viewport": {
+        "140x40": {
+          "expect": [
+            "Tree root",
+            "Attached worker"
+          ],
+          "absent": [
+            "│",
+            "╰"
+          ]
+        },
+        "46x30": {
+          "expect": [
+            "Tree root"
+          ],
+          "absent": [
+            "Attached worker"
+          ]
+        }
+      },
+      "note": "ASCII wide sidebar and narrow conversation"
+    },
+    {
+      "name": "edge-below-unicode",
+      "theme": "night",
+      "full_overview": true,
+      "env": {
+        "LC_ALL": "C.UTF-8",
+        "LANG": "C.UTF-8"
+      },
+      "open": "overview",
+      "steps": [
+        {
+          "wait": "Tree root"
+        },
+        {
+          "mouse": {
+            "at": "Tree root",
+            "do": "move"
+          },
+          "repaint": false
+        },
+        {
+          "birth": {
+            "label": "Overflow 00",
+            "mode": "bypass",
+            "creator": "Tree root",
+            "attached": true,
+            "tools": "start_agent,bash",
+            "messages": [
+              "creator witness ready"
+            ]
+          }
+        },
+        {
+          "birth": {
+            "label": "Overflow 01",
+            "mode": "bypass",
+            "creator": "Tree root",
+            "attached": true,
+            "tools": "start_agent,bash",
+            "messages": [
+              "creator witness ready"
+            ]
+          }
+        },
+        {
+          "birth": {
+            "label": "Overflow 02",
+            "mode": "bypass",
+            "creator": "Tree root",
+            "attached": true,
+            "tools": "start_agent,bash",
+            "messages": [
+              "creator witness ready"
+            ]
+          }
+        },
+        {
+          "birth": {
+            "label": "Overflow 03",
+            "mode": "bypass",
+            "creator": "Tree root",
+            "attached": true,
+            "tools": "start_agent,bash",
+            "messages": [
+              "creator witness ready"
+            ]
+          }
+        },
+        {
+          "birth": {
+            "label": "Overflow 04",
+            "mode": "bypass",
+            "creator": "Tree root",
+            "attached": true,
+            "tools": "start_agent,bash",
+            "messages": [
+              "creator witness ready"
+            ]
+          }
+        },
+        {
+          "birth": {
+            "label": "Overflow 05",
+            "mode": "bypass",
+            "creator": "Tree root",
+            "attached": true,
+            "tools": "start_agent,bash",
+            "messages": [
+              "creator witness ready"
+            ]
+          }
+        },
+        {
+          "birth": {
+            "label": "Overflow 06",
+            "mode": "bypass",
+            "creator": "Tree root",
+            "attached": true,
+            "tools": "start_agent,bash",
+            "messages": [
+              "creator witness ready"
+            ]
+          }
+        },
+        {
+          "birth": {
+            "label": "Overflow 07",
+            "mode": "bypass",
+            "creator": "Tree root",
+            "attached": true,
+            "tools": "start_agent,bash",
+            "messages": [
+              "creator witness ready"
+            ]
+          }
+        },
+        {
+          "birth": {
+            "label": "Overflow 08",
+            "mode": "bypass",
+            "creator": "Tree root",
+            "attached": true,
+            "tools": "start_agent,bash",
+            "messages": [
+              "creator witness ready"
+            ]
+          }
+        },
+        {
+          "birth": {
+            "label": "Overflow 09",
+            "mode": "bypass",
+            "creator": "Tree root",
+            "attached": true,
+            "tools": "start_agent,bash",
+            "messages": [
+              "creator witness ready"
+            ]
+          }
+        },
+        {
+          "birth": {
+            "label": "Overflow 10",
+            "mode": "bypass",
+            "creator": "Tree root",
+            "attached": true,
+            "tools": "start_agent,bash",
+            "messages": [
+              "creator witness ready"
+            ]
+          }
+        },
+        {
+          "birth": {
+            "label": "Overflow 11",
+            "mode": "bypass",
+            "creator": "Tree root",
+            "attached": true,
+            "tools": "start_agent,bash",
+            "messages": [
+              "creator witness ready"
+            ]
+          }
+        },
+        {
+          "birth": {
+            "label": "Overflow 12",
+            "mode": "bypass",
+            "creator": "Tree root",
+            "attached": true,
+            "tools": "start_agent,bash",
+            "messages": [
+              "creator witness ready"
+            ]
+          }
+        },
+        {
+          "birth": {
+            "label": "Overflow 13",
+            "mode": "bypass",
+            "creator": "Tree root",
+            "attached": true,
+            "tools": "start_agent,bash",
+            "messages": [
+              "creator witness ready"
+            ]
+          }
+        },
+        {
+          "birth": {
+            "label": "Overflow 14",
+            "mode": "bypass",
+            "creator": "Tree root",
+            "attached": true,
+            "tools": "start_agent,bash",
+            "messages": [
+              "creator witness ready"
+            ]
+          }
+        },
+        {
+          "birth": {
+            "label": "Overflow 15",
+            "mode": "bypass",
+            "creator": "Tree root",
+            "attached": true,
+            "tools": "start_agent,bash",
+            "messages": [
+              "creator witness ready"
+            ]
+          }
+        },
+        {
+          "birth": {
+            "label": "Overflow 16",
+            "mode": "bypass",
+            "creator": "Tree root",
+            "attached": true,
+            "tools": "start_agent,bash",
+            "messages": [
+              "creator witness ready"
+            ]
+          }
+        },
+        {
+          "birth": {
+            "label": "Overflow 17",
+            "mode": "bypass",
+            "creator": "Tree root",
+            "attached": true,
+            "tools": "start_agent,bash",
+            "messages": [
+              "creator witness ready"
+            ]
+          }
+        },
+        {
+          "birth": {
+            "label": "Overflow 18",
+            "mode": "bypass",
+            "creator": "Tree root",
+            "attached": true,
+            "tools": "start_agent,bash",
+            "messages": [
+              "creator witness ready"
+            ]
+          }
+        },
+        {
+          "birth": {
+            "label": "Overflow 19",
+            "mode": "bypass",
+            "creator": "Tree root",
+            "attached": true,
+            "tools": "start_agent,bash",
+            "messages": [
+              "creator witness ready"
+            ]
+          }
+        },
+        {
+          "birth": {
+            "label": "Overflow 20",
+            "mode": "bypass",
+            "creator": "Tree root",
+            "attached": true,
+            "tools": "start_agent,bash",
+            "messages": [
+              "creator witness ready"
+            ]
+          }
+        },
+        {
+          "birth": {
+            "label": "Overflow 21",
+            "mode": "bypass",
+            "creator": "Tree root",
+            "attached": true,
+            "tools": "start_agent,bash",
+            "messages": [
+              "creator witness ready"
+            ]
+          }
+        },
+        {
+          "birth": {
+            "label": "Overflow 22",
+            "mode": "bypass",
+            "creator": "Tree root",
+            "attached": true,
+            "tools": "start_agent,bash",
+            "messages": [
+              "creator witness ready"
+            ]
+          }
+        },
+        {
+          "birth": {
+            "label": "Overflow 23",
+            "mode": "bypass",
+            "creator": "Tree root",
+            "attached": true,
+            "tools": "start_agent,bash",
+            "messages": [
+              "creator witness ready"
+            ]
+          }
+        },
+        {
+          "birth": {
+            "label": "Overflow 24",
+            "mode": "bypass",
+            "creator": "Tree root",
+            "attached": true,
+            "tools": "start_agent,bash",
+            "messages": [
+              "creator witness ready"
+            ]
+          }
+        },
+        {
+          "birth": {
+            "label": "Overflow 25",
+            "mode": "bypass",
+            "creator": "Tree root",
+            "attached": true,
+            "tools": "start_agent,bash",
+            "messages": [
+              "creator witness ready"
+            ]
+          }
+        },
+        {
+          "birth": {
+            "label": "Overflow 26",
+            "mode": "bypass",
+            "creator": "Tree root",
+            "attached": true,
+            "tools": "start_agent,bash",
+            "messages": [
+              "creator witness ready"
+            ]
+          }
+        },
+        {
+          "birth": {
+            "label": "Overflow 27",
+            "mode": "bypass",
+            "creator": "Tree root",
+            "attached": true,
+            "tools": "start_agent,bash",
+            "messages": [
+              "creator witness ready"
+            ]
+          }
+        },
+        {
+          "birth": {
+            "label": "Overflow 28",
+            "mode": "bypass",
+            "creator": "Tree root",
+            "attached": true,
+            "tools": "start_agent,bash",
+            "messages": [
+              "creator witness ready"
+            ]
+          }
+        },
+        {
+          "birth": {
+            "label": "Overflow 29",
+            "mode": "bypass",
+            "creator": "Tree root",
+            "attached": true,
+            "tools": "start_agent,bash",
+            "messages": [
+              "creator witness ready"
+            ]
+          }
+        },
+        {
+          "birth": {
+            "label": "Overflow 30",
+            "mode": "bypass",
+            "creator": "Tree root",
+            "attached": true,
+            "tools": "start_agent,bash",
+            "messages": [
+              "creator witness ready"
+            ]
+          }
+        },
+        {
+          "birth": {
+            "label": "Overflow 31",
+            "mode": "bypass",
+            "creator": "Tree root",
+            "attached": true,
+            "tools": "start_agent,bash",
+            "messages": [
+              "creator witness ready"
+            ]
+          }
+        },
+        {
+          "birth": {
+            "label": "Edge question",
+            "mode": "ask",
+            "creator": "Tree root",
+            "attached": true,
+            "tools": "start_agent,bash",
+            "messages": [
+              "creator witness ready"
+            ]
+          }
+        },
+        {
+          "send": {
+            "to": "Edge question",
+            "text": "consent check",
+            "wait": false
+          }
+        }
+      ],
+      "expect": [
+        "Sessions",
+        "↓",
+        "needs you",
+        "Alt-?"
+      ],
+      "comparison": {
+        "before": {
+          "expect": [
+            "Sessions"
+          ]
+        }
+      },
+      "record": true,
+      "note": "A question born below the viewport while pointer-held"
+    },
+    {
+      "name": "edge-above-unicode",
+      "theme": "night",
+      "full_overview": true,
+      "env": {
+        "LC_ALL": "C.UTF-8",
+        "LANG": "C.UTF-8"
+      },
+      "open": "overview",
+      "steps": [
+        {
+          "wait": "Sessions"
+        },
+        {
+          "keys": [
+            "End"
+          ]
+        }
+      ],
+      "expect": [
+        "Settings",
+        "↑",
+        "needs you",
+        "Alt-?"
+      ],
+      "comparison": {
+        "before": {
+          "expect": [
+            "Settings"
+          ]
+        }
+      },
+      "note": "Questions above the viewport remain reachable"
+    },
+    {
+      "name": "edge-open-unicode",
+      "theme": "night",
+      "full_overview": true,
+      "env": {
+        "LC_ALL": "C.UTF-8",
+        "LANG": "C.UTF-8"
+      },
+      "open": "overview",
+      "steps": [
+        {
+          "wait": "Sessions"
+        },
+        {
+          "keys": [
+            "End",
+            "M-?"
+          ]
+        }
+      ],
+      "expect": [
+        "Allow once"
+      ],
+      "expect_regex": [
+        "(?m)(Question leaf|Edge question)"
+      ],
+      "comparison": {
+        "before": {
+          "expect": [],
+          "expect_regex": []
+        }
+      },
+      "note": "Alt-? opens an actual attention Session"
+    },
+    {
+      "name": "edge-below-ascii",
+      "theme": "night",
+      "full_overview": true,
+      "env": {
+        "LC_ALL": "C",
+        "LANG": "C"
+      },
+      "open": "overview",
+      "steps": [
+        {
+          "wait": "Overflow"
+        },
+        {
+          "mouse": {
+            "at": "Overflow",
+            "do": "move"
+          },
+          "repaint": false
+        },
+        {
+          "birth": {
+            "label": "ASCII edge question",
+            "mode": "ask",
+            "creator": "Tree root",
+            "attached": true,
+            "tools": "start_agent,bash",
+            "messages": [
+              "creator witness ready"
+            ]
+          }
+        },
+        {
+          "send": {
+            "to": "ASCII edge question",
+            "text": "consent check",
+            "wait": false
+          }
+        }
+      ],
+      "expect": [
+        "Sessions",
+        "needs you",
+        "Alt-?"
+      ],
+      "expect_regex": [
+        "(?m)v\\s*\\d+ needs you\\s*\\.\\s*Alt-\\?"
+      ],
+      "comparison": {
+        "before": {
+          "expect": [
+            "Sessions"
+          ],
+          "expect_regex": []
+        }
+      },
+      "note": "ASCII downward attention pill from an actual hidden offscreen question"
+    },
+    {
+      "name": "edge-above-ascii",
+      "theme": "night",
+      "full_overview": true,
+      "env": {
+        "LC_ALL": "C",
+        "LANG": "C"
+      },
+      "open": "overview",
+      "steps": [
+        {
+          "wait": "Sessions"
+        },
+        {
+          "keys": [
+            "End"
+          ]
+        }
+      ],
+      "expect": [
+        "Settings",
+        "needs you",
+        "Alt-?"
+      ],
+      "expect_regex": [
+        "(?m)\\^\\s*\\d+ needs you\\s*\\.\\s*Alt-\\?"
+      ],
+      "comparison": {
+        "before": {
+          "expect": [
+            "Settings"
+          ],
+          "expect_regex": []
+        }
+      },
+      "note": "ASCII upward attention pill; exact glyph is pending implementation"
+    },
+    {
+      "name": "edge-open-ascii",
+      "theme": "night",
+      "full_overview": true,
+      "env": {
+        "LC_ALL": "C",
+        "LANG": "C"
+      },
+      "open": "overview",
+      "steps": [
+        {
+          "wait": "Sessions"
+        },
+        {
+          "keys": [
+            "End",
+            "M-?"
+          ]
+        }
+      ],
+      "expect": [
+        "Allow once"
+      ],
+      "expect_regex": [
+        "(?m)(Question leaf|Edge question|ASCII edge question)"
+      ],
+      "comparison": {
+        "before": {
+          "expect": [],
+          "expect_regex": []
+        }
+      },
+      "note": "ASCII Alt-? opens an actual attention Session"
+    }
+  ]
+}

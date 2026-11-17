@@ -386,6 +386,7 @@ fn benchmarkRows(rows: []overview_view.Listed, now_s: u64, shift: u64) void {
             .provider = .codex,
             .label = if (at % 3 == 0) null else "Find why the store tests fail on the second run",
             .state = state,
+            .state_change_at = since,
             .first = .{ .position = 1, .admission = at + 1, .sender = null },
             .from_person_at = if (at % 10 == 0) since else null,
         };

@@ -12,6 +12,7 @@ pub const Key = enum {
     ctrl_r,
     ctrl_x,
     alt_a,
+    alt_question,
     alt_up,
     alt_down,
     up,
@@ -147,6 +148,7 @@ pub const list = [_]Reference{
     .{ .key = "/", .meaning = "skills", .keys = &.{.slash} },
     .{ .key = "alt+↑↓", .meaning = "switch chat", .keys = &.{ .{ .key = .alt_up }, .{ .key = .alt_down } } },
     .{ .key = "alt+a", .meaning = "archive", .keys = &.{.{ .key = .alt_a }} },
+    .{ .key = "alt+?", .meaning = "next question", .keys = &.{.{ .key = .alt_question }} },
     .{ .key = "ctrl+c", .meaning = "leave", .keys = &.{.{ .key = .ctrl_c }}, .aliases = &.{.ctrl_d} },
 };
 

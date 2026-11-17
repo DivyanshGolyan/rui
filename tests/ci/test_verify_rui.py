@@ -266,6 +266,94 @@ class FramesTest(unittest.TestCase):
             ], "steps": [{"text": "/help"}, {"keys": ["Enter"]}, {"wait": "Keys", "timeout": 2}]},
         ]}
 
+    def test_creator_cast_and_viewport_assertions_validate_before_launch(self):
+        data = {"active_capacity": 4, "sizes": ["140x40", "46x30"], "states": [{
+            "name": "creator", "open": "overview", "full_overview": True,
+            "cast": [
+                {"label": "Root", "workspace": "code/rui", "mode": "bypass", "tools": "start_agent,bash", "messages": ["root"]},
+                {"label": "Child", "workspace": "code/rui", "mode": "ask", "creator": "Root", "attached": False, "messages": ["child"]},
+            ],
+            "steps": [{"select_row": "Root"}, {"keys": ["Left"]},
+                      {"birth": {"label": "New", "creator": "Root", "attached": True, "mode": "bypass", "messages": ["new"]}}],
+            "expect_viewport": {"140x40": {"expect": ["Root", "Child"]}, "46x30": {"expect": ["Root"]}},
+            "comparison": {"before": {"expect": ["Root"], "expect_viewport": {}}},
+        }]}
+        validate = self.helper["validate_scenario"]
+        normalized = validate(data)
+        self.assertEqual(normalized["active_capacity"], 4)
+        self.assertEqual(self.helper["frame_viewport_state"](normalized["states"][0], 46, 30)["expect"], ["Root"])
+        for change, message in (
+                (lambda d: d.update(active_capacity=0), "active_capacity"),
+                (lambda d: d["states"][0]["cast"][1].update(creator="Missing"), "earlier cast"),
+                (lambda d: d["states"][0]["cast"][1].update(sender="Root"), "exclusive"),
+                (lambda d: d["states"][0].update(expect_viewport={"wrong": {"expect": ["x"]}}), "viewport")):
+            invalid = copy.deepcopy(data)
+            change(invalid)
+            with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
+                validate(invalid)
+        self.assertEqual(validate(self.scenario()).get("active_capacity", 2), 2)
+
+    def test_full_overview_rejects_blank_wide_chat_and_selects_drawn_row(self):
+        is_overview = self.helper["is_full_overview"]
+        split = committed("+ New Session".ljust(40) + "│ chat\nSessions Archived\nSettings", columns=140)
+        self.assertFalse(is_overview(split))
+        full = committed("+ New Session".ljust(41) + " \nSessions Archived\n Root\nSettings", columns=140)
+        self.assertTrue(is_overview(full))
+        captured = []
+        capture = types.SimpleNamespace(style=lambda text: types.SimpleNamespace(bold=text == "Root"))
+        terminal = types.SimpleNamespace(frame=full, status=None, write=captured.append,
+                                         wait=lambda predicate, *_a, **_k: self.assertTrue(predicate(capture)))
+        self.helper["frame_steps"](None, terminal, [{"select_row": "Root"}])
+        keys = self.helper["KEYS"]
+        self.assertEqual(captured, [keys["Home"] + keys["Down"] * 2])
+        gap = committed("+ New Session\nSessions Archived\n\n Root\nSettings", columns=140)
+        terminal.frame = gap
+        self.helper["frame_steps"](None, terminal, [{"select_row": "Root"}])
+        self.assertEqual(captured[-1], keys["Home"] + keys["Down"] * 2)
+        terminal.frame = committed("+ New Session\nSessions Archived\n↑ 1 needs you\n Root\nSettings", columns=140)
+        with self.assertRaisesRegex(self.helper["FrameFailure"], "scrolled"):
+            self.helper["frame_steps"](None, terminal, [{"select_row": "Root"}])
+
+    def test_creator_birth_uses_public_tool_and_proves_both_relationships(self):
+        creator_birth = self.helper["creator_birth"]
+        for attached in (True, False):
+            for valid in (True, False):
+                with self.subTest(attached=attached, valid=valid), tempfile.TemporaryDirectory() as temp:
+                    root = Path(temp)
+                    calls, lists = [], []
+                    parent = {"reference": "parent", "creator": None, "parent": None}
+                    child = {"reference": "child1", "creator": "parent" if valid else "wrong", "parent": "parent" if attached else None}
+                    def command(*args, **kwargs):
+                        calls.append((args, kwargs))
+                        if args[:2] == ("session", "list"):
+                            lists.append(1)
+                            body = {"sessions": [parent] if len(lists) == 1 else [parent, child]}
+                        elif args[:2] == ("session", "inspect"):
+                            sid = args[args.index("--session") + 1]
+                            body = {"session": {"model": "fixture-model"}} if sid == "parent" else {"work": {"state": {"kind": "finished"}}}
+                        else:
+                            body = {}
+                        return types.SimpleNamespace(returncode=0, stdout=json.dumps(body), stderr="request: fixture\n")
+                    run = types.SimpleNamespace(store=root / "store", root=root, evidence=root / "evidence",
+                        meta={"sessions": {}}, sid=lambda _name: "parent", rui_cmd=command)
+                    entry = {"creator": "Root", "label": "Child", "attached": attached, "mode": "ask", "messages": ["task"]}
+                    imports = {"host_process": types.SimpleNamespace(wait_for=lambda observe, *_a, **_k: observe()),
+                               "product_defaults": types.SimpleNamespace(start_effort=lambda _model: "high",
+                                                                        compaction_trigger=lambda *_a: 123)}
+                    with patch.dict(creator_birth.__globals__, {"frame_request": lambda *_a: None}), \
+                            patch.dict(sys.modules, imports):
+                        if not valid:
+                            with self.assertRaisesRegex(self.helper["FrameFailure"], "provenance"):
+                                creator_birth(run, entry)
+                            continue
+                        creator_birth(run, entry)
+                    self.assertEqual(run.meta["sessions"]["Child"], "child1")
+                    send = next(kwargs["input"] for args, kwargs in calls if args[:2] == ("session", "send"))
+                    payload = json.loads(send.removeprefix("verify-rui creator birth "))
+                    self.assertEqual(payload["attached"], attached)
+                    self.assertEqual(payload["spec"]["permissionMode"], "ask")
+                    self.assertTrue((run.evidence / "creator-births.jsonl").is_file())
+
     def test_dim_expectations_validate_and_assert_saved_cells_not_text_alone(self):
         for value in (None, {}, [{"text": "", "dim": True}], [{"text": "Row", "dim": 1}],
                       [{"text": "Row", "dim": True, "min_columns": False}],

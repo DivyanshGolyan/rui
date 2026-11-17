@@ -200,7 +200,7 @@ fn edit(self: *Editor, key_name: Key) ?KeyOutcome {
         .ctrl_d => if (bytes.len == 0) null else self.act(.delete_next),
         .left => self.act(.left),
         .right => self.act(.right),
-        .escape, .ctrl_c, .ctrl_g, .ctrl_n, .ctrl_o, .ctrl_p, .ctrl_r, .ctrl_x, .alt_a, .alt_up, .alt_down, .tab, .shift_tab, .shift_up, .shift_down, .page_up, .page_down, .ctrl_end => null,
+        .escape, .ctrl_c, .ctrl_g, .ctrl_n, .ctrl_o, .ctrl_p, .ctrl_r, .ctrl_x, .alt_a, .alt_question, .alt_up, .alt_down, .tab, .shift_tab, .shift_up, .shift_down, .page_up, .page_down, .ctrl_end => null,
     };
 }
 

@@ -103,6 +103,7 @@ pub const Action = enum {
     stop,
     archive,
     open_session,
+    next_question,
 };
 
 pub const keys: keymap.Keymap(Action) = .init(.{
@@ -116,6 +117,7 @@ pub const keys: keymap.Keymap(Action) = .init(.{
     .ctrl_r = null,
     .ctrl_x = .stop,
     .alt_a = .archive,
+    .alt_question = .next_question,
     .alt_up = .previous_session,
     .alt_down = .next_session,
     .up = .previous,
@@ -145,6 +147,7 @@ pub const InputDelivery = struct {
     under: bool = false,
     pasted: bool = false,
     wide: bool = false,
+    at_ms: ?u64 = null,
 };
 
 pub const Delta = enum {
@@ -170,11 +173,13 @@ pub const First = struct {
 
 pub const Listed = struct {
     reference: Reference,
+    creator: ?Reference = null,
     read_version: Token = .{ .instance = @splat(0), .generation = 0 },
     operation: ?u64 = null,
     archive_state: ArchiveState = .active,
     pin_order: ?@import("session_pin.zig").PinOrder = null,
     created_at: u64 = 0,
+    state_change_at: u64,
     workspace: []const u8,
     provider: Provider,
     label: ?[]const u8 = null,
@@ -191,11 +196,13 @@ pub const Listed = struct {
     pub fn of(row: anytype) Listed {
         return .{
             .reference = referenceOf(row.reference.slice()),
+            .creator = if (row.creator) |*creator| referenceOf(creator.slice()) else null,
             .read_version = row.read_version,
             .operation = row.work.operation,
             .archive_state = row.archive_state,
             .pin_order = row.pin_order,
             .created_at = row.created_at,
+            .state_change_at = row.state_change_at,
             .workspace = row.workspace.slice(),
             .provider = row.provider,
             .label = if (row.label) |*text| text.slice() else null,
@@ -302,6 +309,7 @@ pub const CreateResult = union(enum) {
 pub const Event = union(enum) {
     input: InputDelivery,
     list_settled: struct { wide: bool, focused: bool },
+    list_presence: struct { at_ms: u64, pointer_over: bool },
 
     resized: Size,
     launch_start: struct { explicit_session: bool, restoring: bool },
@@ -608,12 +616,18 @@ pub const Line = union(enum) { unread, requested, unavailable, read: u32 };
 
 pub const Row = struct {
     reference: Reference,
+    creator: ?Reference = null,
     listed: bool = true,
     read_version: ?Token = null,
     operation: ?u64 = null,
     archive_state: ArchiveState = .active,
     pin_order: ?@import("session_pin.zig").PinOrder = null,
     created_at: u64 = 0,
+    state_change_at: u64 = 0,
+    clock_version: ?Token = null,
+    sibling_rank: u64 = std.math.maxInt(u64),
+    born_held: bool = false,
+    flash_until_ms: u64 = 0,
 
     workspace: u32,
     provider: ?Provider = null,
@@ -719,6 +733,17 @@ pub const State = struct {
     list_stale: bool = false,
 
     sort_keys: Vec(SortKey) = .{},
+    nodes: Vec(Node) = .{},
+    scratch: Vec(u32) = .{},
+    folded: Vec(Reference) = .{},
+    pin_end: usize = 0,
+    ordered_refs: Vec(Reference) = .{},
+    full_order: Vec(u32) = .{},
+    last_question: ?Reference = null,
+    next_rank: u64 = 0,
+    pointer_over: bool = false,
+    key_until_ms: u64 = 0,
+    releasing: bool = false,
 
     pub const Options = struct {
         cwd: []const u8,
@@ -761,7 +786,7 @@ pub const State = struct {
     pub fn deinit(self: *State) void {
         self.menu.deinit(self.gpa);
         for (self.workspaces.items) |bytes| self.gpa.free(bytes);
-        inline for (.{ &self.rows, &self.by_reference, &self.order, &self.workspaces, &self.workspace_order, &self.lines, &self.pending, &self.sort_keys, &self.seen, &self.arrivals }) |vec| vec.deinit(self.gpa);
+        inline for (.{ &self.rows, &self.by_reference, &self.order, &self.workspaces, &self.workspace_order, &self.lines, &self.pending, &self.sort_keys, &self.nodes, &self.scratch, &self.folded, &self.ordered_refs, &self.full_order, &self.seen, &self.arrivals }) |vec| vec.deinit(self.gpa);
     }
 
     pub fn find(self: *const State, ref: Reference) ?*const Row {
@@ -779,8 +804,10 @@ pub const State = struct {
 
     pub fn wakeAt(self: *const State) ?u64 {
         var at: ?u64 = if (self.listing) null else self.next_list_ms;
+        if (self.key_until_ms > self.now_ms) at = @min(at orelse self.key_until_ms, self.key_until_ms);
         for (self.rows.items) |*row| {
             if (!row.listed) continue;
+            if (row.flash_until_ms > self.now_ms) at = @min(at orelse row.flash_until_ms, row.flash_until_ms);
             const work = (&row.state);
             if (work.* == .retrying) at = @min(at orelse work.retrying.due_at_ms, work.retrying.due_at_ms);
         }
@@ -800,8 +827,8 @@ pub const State = struct {
 
     fn selectedRow(self: *const State) ?*const Row {
         if (self.selected != .session) return null;
-        const row = self.find(self.selected.session) orelse return null;
-        return if (visible(self, row)) row else null;
+        const index = lookup(self.by_reference.items, self.selected.session) orelse return null;
+        return if (index < self.nodes.items.len and self.nodes.items[index].included) &self.rows.items[index] else null;
     }
 
     pub fn hidesOverview(self: *const State) bool {
@@ -1088,6 +1115,24 @@ pub const StatusRecord = struct {
         return .{ .reference = self.reference, .delivered = if (self.status != null) .{ .version = self.version } else .none };
     }
 };
+const Node = struct {
+    included: bool = false,
+    logical_parent: ?u32 = null,
+    parent: ?u32 = null,
+    first_child: ?u32 = null,
+    next_sibling: ?u32 = null,
+    remaining: u32 = 0,
+    subtree_at: u64 = 0,
+    descendants: u32 = 0,
+    attention: u32 = 0,
+    depth: u32 = 0,
+    last_sibling: bool = true,
+    hidden: bool = false,
+    old_position: ?usize = null,
+    line: ?usize = null,
+    representative: ?u32 = null,
+};
+
 const SortKey = struct { pin_order: ?u64, key: u128, index: u32 };
 
 fn Vec(comptime T: type) type {
@@ -1155,8 +1200,20 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
     var effects: Effects = .{};
     switch (event) {
         .input => |input| {
+            if (!input.pasted and !input.under and input.key != .ignored) {
+                const was_held = holding(state);
+                state.now_ms = @max(state.now_ms, input.at_ms orelse state.now_ms);
+                if (was_held and !holding(state)) try releaseOrder(state);
+                state.key_until_ms = state.now_ms +| 3000;
+            }
             if (input.key != .ignored) state.launch = .done;
             try listInput(state, input, &effects);
+        },
+        .list_presence => |presence| {
+            const was_held = holding(state);
+            state.now_ms = @max(state.now_ms, presence.at_ms);
+            state.pointer_over = presence.pointer_over;
+            if (was_held and !holding(state)) try releaseOrder(state);
         },
         .list_settled => |frame| {
             const pending = state.browse_pending;
@@ -1426,14 +1483,18 @@ pub fn writeDeparture(state: *const State, _: ?ReasoningEffort, writer: *std.Io.
 }
 
 fn tick(state: *State, now_ms: u64, effects: *Effects) error{OutOfMemory}!void {
+    const was_held = holding(state);
     state.now_ms = now_ms;
+    const released = was_held and !holding(state);
+    if (released) try releaseOrder(state);
     var changed = false;
     for (state.rows.items) |*row| {
+        if (row.flash_until_ms != 0 and row.flash_until_ms <= now_ms) row.flash_until_ms = 0;
         const was = std.meta.activeTag(row.state);
         if (row.read_version) |version| settleRow(state, row, .{ .read_version = version, .work = row.work(), .last_line = row.last_line });
         changed = changed or was != std.meta.activeTag(row.state);
     }
-    if (changed) try arrange(state);
+    if (changed and !released) try arrange(state);
     if (!state.listing and now_ms >= state.next_list_ms) {
         state.listing = true;
         state.listing_archive = state.archive;
@@ -1479,11 +1540,13 @@ fn listPage(state: *State, page: Page, effects: *Effects) error{OutOfMemory}!voi
         const shown = listed.state.asOf(state.now_ms);
         state.pending.appendAssumeCapacity(.{
             .reference = listed.reference,
+            .creator = listed.creator,
             .read_version = listed.read_version,
             .operation = listed.operation,
             .archive_state = listed.archive_state,
             .pin_order = listed.pin_order,
             .created_at = listed.created_at,
+            .state_change_at = listed.state_change_at,
             .workspace = try state.intern(listed.workspace),
             .provider = listed.provider,
             .label = if (listed.label) |text| labelOf(text) else null,
@@ -1535,6 +1598,7 @@ fn commit(state: *State, answer: Answer) error{OutOfMemory}!void {
         for (state.pending.items) |incoming| if (lookup(state.by_reference.items, incoming.reference) == null) {
             var row = incoming;
             row.read_version = null;
+            row.born_held = holding(state);
             try state.rows.append(state.gpa, row);
         };
         if (before != state.rows.items.len) try reindex(state);
@@ -1544,9 +1608,14 @@ fn commit(state: *State, answer: Answer) error{OutOfMemory}!void {
         const row = &state.rows.items[at];
         const was = row.*;
         const same = if (incoming.first) |first| if (row.first) |known| first.admission == known.admission else false else false;
+        row.creator = incoming.creator;
         row.archive_state = incoming.archive_state;
         row.pin_order = incoming.pin_order;
         row.created_at = incoming.created_at;
+        if (row.clock_version == null or !std.mem.eql(u8, &row.clock_version.?.instance, &incoming.read_version.?.instance) or incoming.read_version.?.generation > row.clock_version.?.generation) {
+            row.state_change_at = incoming.state_change_at;
+            row.clock_version = incoming.read_version;
+        }
         row.workspace = incoming.workspace;
         row.provider = incoming.provider;
         row.label = incoming.label;
@@ -1651,22 +1720,68 @@ fn reindex(state: *State) error{OutOfMemory}!void {
 }
 
 fn visible(state: *const State, row: *const Row) bool {
-    return row.listed and (row.pin_order != null or row.first != null or if (state.conversing) |open| std.mem.eql(u8, &open, &row.reference) else false);
+    return row.listed and (row.creator != null or row.pin_order != null or row.first != null or if (state.conversing) |open| std.mem.eql(u8, &open, &row.reference) else false);
 }
 
 fn arrange(state: *State) error{OutOfMemory}!void {
     const rows = state.rows.items;
+    try state.nodes.ensure(state.gpa, rows.len);
+    try state.scratch.ensure(state.gpa, rows.len);
     try state.sort_keys.ensure(state.gpa, rows.len);
     try state.order.ensure(state.gpa, rows.len);
+    state.nodes.items.len = rows.len;
+    try state.ordered_refs.ensure(state.gpa, rows.len);
+    try state.full_order.ensure(state.gpa, rows.len);
+    const nodes = state.nodes.items;
+    for (rows, 0..) |*row, i| {
+        nodes[i] = .{ .included = visible(state, row), .subtree_at = row.state_change_at };
+        if (!row.listed) continue;
+        if (row.creator) |creator| if (lookup(state.by_reference.items, creator)) |parent| {
+            if (parent != i and rows[parent].listed) nodes[i].logical_parent = parent;
+        };
+    }
+    for (state.ordered_refs.items, 0..) |reference, old_position| {
+        if (lookup(state.by_reference.items, reference)) |index| nodes[index].old_position = old_position;
+    }
+    // An available creator of a visible agent must itself be visible.
+    for (nodes, 0..) |*node, i| if (node.included) {
+        var parent = nodes[i].logical_parent;
+        while (parent) |index| {
+            if (nodes[index].included) break;
+            nodes[index].included = true;
+            parent = nodes[index].logical_parent;
+        }
+    };
+    for (nodes) |node| if (node.included) if (node.logical_parent) |parent| {
+        if (nodes[parent].included) nodes[parent].remaining += 1;
+    };
+    state.scratch.items.len = 0;
+    for (nodes, 0..) |node, i| if (node.included and node.remaining == 0) state.scratch.appendAssumeCapacity(@intCast(i));
+    var cursor: usize = 0;
+    while (cursor < state.scratch.items.len) : (cursor += 1) {
+        const index = state.scratch.items[cursor];
+        if (nodes[index].logical_parent) |parent| if (nodes[parent].included) {
+            nodes[parent].subtree_at = @max(nodes[parent].subtree_at, nodes[index].subtree_at);
+            nodes[parent].remaining -= 1;
+            if (nodes[parent].remaining == 0) state.scratch.appendAssumeCapacity(parent);
+        };
+    }
+    // A malformed cycle has no creator root. Promote its members to roots.
+    for (nodes) |*node| if (node.remaining != 0) {
+        node.logical_parent = null;
+        node.remaining = 0;
+    };
     state.sort_keys.items.len = 0;
-    state.summary = .{};
     const latest = std.math.maxInt(u34);
-    for (rows, 0..) |*row, at| {
-        if (!visible(state, row)) continue;
-        const queued = shownKind(state, row) == .pending;
-        const since = @min(shownSince(state, row), latest);
-        const age: u128 = if (queued) since else latest - since;
-        state.sort_keys.appendAssumeCapacity(.{ .pin_order = row.pin_order, .key = @as(u128, @backingInt(orderClass(state, row))) << 82 | age << 48 | referenceKey(row.reference), .index = @intCast(at) });
+    for (rows, 0..) |*row, i| {
+        if (!nodes[i].included) continue;
+        nodes[i].parent = if (row.pin_order == null) nodes[i].logical_parent else null;
+        if (row.sibling_rank == std.math.maxInt(u64)) {
+            row.sibling_rank = state.next_rank;
+            state.next_rank += 1;
+        }
+        const rank: u128 = if (holding(state)) row.sibling_rank else latest - @min(nodes[i].subtree_at, latest);
+        state.sort_keys.appendAssumeCapacity(.{ .pin_order = row.pin_order, .key = rank << 48 | referenceKey(row.reference), .index = @intCast(i) });
     }
     std.mem.sortUnstable(SortKey, state.sort_keys.items, {}, struct {
         fn less(_: void, a: SortKey, b: SortKey) bool {
@@ -1675,14 +1790,118 @@ fn arrange(state: *State) error{OutOfMemory}!void {
             return a.key < b.key;
         }
     }.less);
+    if (!holding(state)) {
+        state.next_rank = 0;
+        for (state.sort_keys.items) |key| {
+            rows[key.index].sibling_rank = state.next_rank;
+            state.next_rank += 1;
+        }
+    }
+    for (state.sort_keys.items) |key| if (nodes[key.index].parent) |parent| {
+        nodes[key.index].next_sibling = nodes[parent].first_child;
+        nodes[parent].first_child = key.index;
+    };
+    state.order.items.len = 0;
+    for (0..2) |phase| {
+        state.scratch.items.len = 0;
+        var at = state.sort_keys.items.len;
+        while (at != 0) {
+            at -= 1;
+            const index = state.sort_keys.items[at].index;
+            if (nodes[index].parent == null and (rows[index].pin_order != null) == (phase == 0)) state.scratch.appendAssumeCapacity(index);
+        }
+        while (state.scratch.items.len != 0) {
+            state.scratch.items.len -= 1;
+            const index = state.scratch.items.ptr[state.scratch.items.len];
+            state.order.appendAssumeCapacity(index);
+            var child = nodes[index].first_child;
+            var last = true;
+            while (child) |next| {
+                nodes[next].depth = nodes[index].depth + 1;
+                nodes[next].last_sibling = last;
+                last = false;
+                state.scratch.appendAssumeCapacity(next);
+                child = nodes[next].next_sibling;
+            }
+        }
+        if (phase == 0) state.pin_end = state.order.items.len;
+    }
+    state.full_order.items.len = state.order.items.len;
+    @memcpy(state.full_order.items, state.order.items);
+    var at = state.order.items.len;
+    while (at != 0) {
+        at -= 1;
+        const index = state.order.items[at];
+        if (nodes[index].parent) |parent| {
+            nodes[parent].descendants += 1 + nodes[index].descendants;
+            nodes[parent].attention += @intFromBool(needsDecision(&rows[index].state)) + nodes[index].attention;
+        }
+    }
+    var kept: usize = 0;
+    var pin_kept: usize = 0;
+    for (state.order.items, 0..) |index, index_in_full| {
+        if (nodes[index].parent) |parent| {
+            nodes[index].hidden = nodes[parent].hidden or isFolded(state, rows[parent].reference);
+            if (nodes[index].hidden) nodes[index].representative = nodes[parent].representative orelse parent;
+        }
+        if (nodes[index].hidden) continue;
+        state.order.items[kept] = index;
+        kept += 1;
+        if (index_in_full < state.pin_end) pin_kept += 1;
+    }
+    state.order.items.len = kept;
+    state.pin_end = pin_kept;
+    state.ordered_refs.items.len = 0;
+    for (state.order.items, 0..) |index, position_| {
+        nodes[index].line = position_ + @intFromBool(state.pin_end != 0 and state.pin_end < state.order.items.len and position_ >= state.pin_end);
+        if (state.releasing and !rows[index].born_held) if (nodes[index].old_position) |old| {
+            if (old != position_) rows[index].flash_until_ms = state.now_ms +| 700;
+        };
+        if (state.releasing) rows[index].born_held = false;
+        state.ordered_refs.appendAssumeCapacity(rows[index].reference);
+    }
+    if (state.releasing) for (rows) |*row| {
+        row.born_held = false;
+    };
     state.summary.counts = counts(state);
-    state.order.items.len = state.sort_keys.items.len;
-    for (state.order.items, state.sort_keys.items) |*slot, key| slot.* = key.index;
+}
+
+fn holding(state: *const State) bool {
+    return state.pointer_over or state.now_ms < state.key_until_ms;
+}
+
+fn releaseOrder(state: *State) error{OutOfMemory}!void {
+    state.releasing = true;
+    defer state.releasing = false;
+    try arrange(state);
+}
+
+fn isFolded(state: *const State, reference: Reference) bool {
+    for (state.folded.items) |folded| if (std.mem.eql(u8, &folded, &reference)) return true;
+    return false;
+}
+
+fn foldSelected(state: *State, folded: bool) error{OutOfMemory}!void {
+    if (state.selected != .session) return;
+    const reference = state.selected.session;
+    const index = lookup(state.by_reference.items, reference) orelse return;
+    if (index >= state.nodes.items.len or state.nodes.items[index].first_child == null) return;
+    for (state.folded.items, 0..) |known, at| {
+        if (!std.mem.eql(u8, &known, &reference)) continue;
+        if (folded) return;
+        std.mem.copyForwards(Reference, state.folded.items[at .. state.folded.items.len - 1], state.folded.items[at + 1 ..]);
+        state.folded.items.len -= 1;
+        try arrange(state);
+        return;
+    }
+    if (!folded) return;
+    try state.folded.append(state.gpa, reference);
+    try arrange(state);
 }
 
 fn counts(state: *const State) Counts {
     var result: Counts = .{};
-    for (state.rows.items) |*row| if (visible(state, row)) switch (rules.get(shownKind(state, row)).mark) {
+    for (state.rows.items, 0..) |*row, index| if (index < state.nodes.items.len and state.nodes.items[index].included) switch (rules.get(shownKind(state, row)).mark) {
         .needs_you => result.needs_you += 1,
         .active => result.working += 1,
         .queued => result.queued += 1,
@@ -1828,13 +2047,13 @@ fn listInput(state: *State, delivery: InputDelivery, effects: *Effects) error{Ou
         },
         .left => if (state.selected == .archived) {
             state.selected = .sessions;
-        },
+        } else if (state.selected == .session) try foldSelected(state, true),
         .action => |action| switch (action) {
             .exit => unreachable,
             .open_session => {
                 state.browse_pending = false;
                 switch (state.selected) {
-                    .session => try activateList(state, .open_session, effects),
+                    .session => try foldSelected(state, false),
                     .sessions => state.selected = .archived,
                     .new_session, .archived, .settings => {},
                 }
@@ -1845,6 +2064,7 @@ fn listInput(state: *State, delivery: InputDelivery, effects: *Effects) error{Ou
             },
             .stop => stopKey(state, null, effects),
             .archive => archiveIntent(state, .selected_archive, effects),
+            .next_question => try nextQuestion(state, effects),
             .select_previous => select(state, .previous),
             .select_next => select(state, .next),
             .previous_session => try adjacentSession(state, .previous, effects),
@@ -1857,6 +2077,27 @@ fn listInput(state: *State, delivery: InputDelivery, effects: *Effects) error{Ou
     }
     if (input == .action and (input.action == .previous or input.action == .next)) {
         state.browse_pending = delivery.wide and (state.browse_pending or !std.meta.eql(before, state.selected));
+    }
+}
+
+fn nextQuestion(state: *State, effects: *Effects) error{OutOfMemory}!void {
+    const order = state.full_order.items;
+    if (order.len == 0) return;
+    const anchor = state.last_question orelse state.conversing;
+    var start: usize = 0;
+    if (anchor) |reference| for (order, 0..) |index, at| {
+        if (std.mem.eql(u8, &state.rows.items[index].reference, &reference)) {
+            start = (at + 1) % order.len;
+            break;
+        }
+    };
+    for (0..order.len) |offset| {
+        const row = &state.rows.items[order[(start + offset) % order.len]];
+        if (!row.listed or !needsDecision(&row.state)) continue;
+        state.selected = .{ .session = row.reference };
+        state.last_question = row.reference;
+        try enter(state, effects);
+        return;
     }
 }
 
@@ -2493,15 +2734,7 @@ pub const Item = union(enum) { new_session, views, gap, row: usize, empty };
 const new_session_name = "New Session";
 
 fn pinGap(state: *const State) ?usize {
-    const order = state.order.items;
-    if (order.len < 2 or state.rows.items[order[0]].pin_order == null or state.rows.items[order[order.len - 1]].pin_order != null) return null;
-    var low: usize = 1;
-    var high = order.len - 1;
-    while (low < high) {
-        const mid = low + (high - low) / 2;
-        if (state.rows.items[order[mid]].pin_order != null) low = mid + 1 else high = mid;
-    }
-    return low;
+    return if (state.pin_end != 0 and state.pin_end < state.order.items.len) state.pin_end else null;
 }
 
 pub fn listLength(state: *const State) usize {
@@ -2512,9 +2745,29 @@ fn listLine(state: *const State, at: usize) usize {
     return at + @intFromBool(if (pinGap(state)) |gap| at >= gap else false);
 }
 
+pub const Edge = enum { above, below };
+
+pub fn edgeAttention(state: *const State, edge: Edge, first: usize, end: usize) usize {
+    var result: usize = 0;
+    for (state.full_order.items) |index| {
+        if (!needsDecision(&state.rows.items[index].state)) continue;
+        const representative = state.nodes.items[index].representative orelse index;
+        const line = state.nodes.items[representative].line orelse continue;
+        if (switch (edge) {
+            .above => line < first,
+            .below => line >= end,
+        }) result += 1;
+    }
+    return result;
+}
+
 pub fn sessionsFrom(state: *const State, line: usize) usize {
     const before = line -| @intFromBool(if (pinGap(state)) |gap| line > gap else false);
     return state.order.items.len -| before;
+}
+
+pub fn lineOfReference(state: *const State, reference: Reference) ?usize {
+    return if (position(state, reference)) |at| listLine(state, at) else null;
 }
 
 pub fn selectedLine(state: *const State) ?usize {
@@ -2554,10 +2807,54 @@ pub fn listItem(state: *const State, line: usize) ?Item {
 
 pub fn rowSegments(arena: Allocator, state: *const State, at: usize, width: u16, caps: Caps, frame: u64) error{OutOfMemory}![]const Segment {
     var built: Spans = .of(arena, caps, width);
-    const row = &state.rows.items[state.order.items[at]];
+    const index = state.order.items[at];
+    const row = &state.rows.items[index];
+    const node = state.nodes.items[index];
     const quiet = rowQuiet(state, row);
     const rule = rules.get(shownKind(state, row));
+    const flash = row.flash_until_ms > state.now_ms;
+    const background: Background = if (flash) .hover else .ground;
     built.begin();
+    var age_buffer: [8]u8 = undefined;
+    const age = ageText(&age_buffer, (state.now_ms / 1000) -| shownSince(state, row));
+    const age_cells = @min(built.measure(age), width -| 3);
+    const folded = isFolded(state, row.reference) and node.descendants != 0;
+    const hidden = if (folded) try std.fmt.allocPrint(arena, " {s} {d}", .{ if (caps.unicode) "▸" else ">", node.descendants }) else "";
+    const attention_badge = if (folded and node.attention != 0) try std.fmt.allocPrint(arena, " {s} {d} ?", .{ if (caps.unicode) "·" else ".", node.attention }) else "";
+    const archived = if (row.archive_state == .archived and state.archive != .archived)
+        if (caps.unicode) " · archived" else " . archived"
+    else
+        "";
+    const suffix_cells = built.measure(hidden) + built.measure(attention_badge) + built.measure(archived);
+    const age_gap: usize = @intFromBool(age_cells != 0);
+    const tight = folded and @as(usize, width) < 1 + 2 + 24 + suffix_cells + age_gap + age_cells + 1;
+    const end: usize = @as(usize, width) -| @as(usize, @intFromBool(!tight));
+    const name_end = end -| age_cells -| age_gap;
+    const origin: usize = if (tight and name_end -| 2 -| suffix_cells < 25) 0 else 1;
+    const depth_budget = (name_end -| origin -| 2 -| suffix_cells -| 24) / 2;
+    const depth: usize = @min(node.depth, depth_budget);
+    if (depth != 0) {
+        const path = try arena.alloc(u32, depth);
+        var current: u32 = index;
+        var remaining = depth;
+        while (remaining != 0) {
+            remaining -= 1;
+            path[remaining] = current;
+            current = state.nodes.items[current].parent orelse break;
+        }
+        const guides = try arena.alloc(u8, depth * 4);
+        var used: usize = 0;
+        for (path, 0..) |member, level| {
+            const last = state.nodes.items[member].last_sibling;
+            const segment = if (!caps.unicode) "  " else if (level + 1 == depth)
+                if (last) "╰ " else "│ "
+            else if (last) "  " else "│ ";
+            @memcpy(guides[used..][0..segment.len], segment);
+            used += segment.len;
+        }
+        _ = try built.put(origin, guides[0..used], depth * 2, .{ .colour = .quiet, .background = background, .dim = quiet });
+    }
+    const mark_column = origin + depth * 2;
     const mark = marks.get(rule.mark);
     const glyph = if (markSpins(state, .{ .row = at }, caps)) spinner[frame % spinner.len] else if (caps.unicode) mark.unicode else mark.ascii;
     var words: [work_line.max_words_bytes]u8 = undefined;
@@ -2567,27 +2864,19 @@ pub fn rowSegments(arena: Allocator, state: *const State, at: usize, width: u16,
         .quiet => Colour.quiet,
         .attention => Colour.attention,
     } else rule.colour;
-    _ = try built.put(1, glyph, 1, .{ .colour = colour, .dim = quiet });
-    const named = title(state, row);
-    const name = switch (row.archive_state) {
-        .active, .archived => named.text,
-        .archiving => try std.fmt.allocPrint(arena, "[Archiving] {s}", .{named.text}),
-    };
-    var buffer: [8]u8 = undefined;
-    const age = ageText(&buffer, (state.now_ms / 1000) -| shownSince(state, row));
-    const end = width -| 1;
-    const age_cells = @min(built.measure(age), end -| 3);
-    const name_end = end -| age_cells -| @intFromBool(age_cells != 0);
+    _ = try built.put(mark_column, glyph, 1, .{ .colour = colour, .background = background, .dim = quiet });
+    const start_name = mark_column + 2;
+    const room = name_end -| start_name;
+    const name_room = room -| @min(room, suffix_cells);
     const selected = rowSelected(state, row);
-    const archived = if (row.archive_state == .archived and state.archive != .archived)
-        if (caps.unicode) " · archived" else " . archived"
-    else
-        "";
-    const name_room: usize = name_end -| 3;
-    const name_cells = try built.put(3, name, name_room -| built.measure(archived), .{ .colour = if (selected) .strong else .normal, .bold = selected, .dim = quiet });
-    _ = try built.put(3 + name_cells, archived, name_room -| name_cells, .{ .colour = .quiet, .dim = quiet });
-    _ = try built.put(end -| age_cells, age, age_cells, .{ .colour = .quiet, .dim = quiet });
-    return segmentsOf(arena, try built.finish(), width, .{ .dim = quiet });
+    const named = title(state, row).text;
+    const name = if (row.archive_state == .archiving) try std.fmt.allocPrint(arena, "[Archiving] {s}", .{named}) else named;
+    const used = try built.put(start_name, name, name_room, .{ .colour = if (selected) .strong else .normal, .background = background, .bold = selected, .dim = quiet });
+    const archived_cells = try built.put(start_name + used, archived, room -| used, .{ .colour = .quiet, .background = background, .dim = quiet });
+    const hidden_cells = try built.put(start_name + used + archived_cells, hidden, room -| used -| archived_cells, .{ .colour = .quiet, .background = background, .dim = quiet });
+    _ = try built.put(start_name + used + archived_cells + hidden_cells, attention_badge, room -| used -| archived_cells -| hidden_cells, .{ .colour = .attention, .background = background });
+    _ = try built.put(end -| age_cells, age, age_cells, .{ .colour = .quiet, .background = background, .dim = quiet });
+    return segmentsOf(arena, try built.finish(), width, .{ .background = background, .dim = quiet });
 }
 
 pub fn markSpins(state: *const State, item: Item, caps: Caps) bool {
@@ -2648,6 +2937,7 @@ pub fn listSegments(arena: Allocator, state: *const State, item: Item, width: u1
                 });
                 if (cells != 0) tab[3].* = .{ .start = @intCast(start), .end = @intCast(start + cells) };
             }
+            if (holding(state)) _ = try built.put(22, if (caps.unicode) "· order held" else ". order held", width -| 23, .{ .colour = .quiet });
             break :views try built.finish();
         },
         .gap => &.{},
@@ -2733,6 +3023,7 @@ fn bounded(comptime capacity: usize, text: []const u8) Bounded(capacity) {
 
 const TestSession = struct {
     read_version: Token = testToken(0),
+    creator: ?Reference = null,
     archive_state: ArchiveState = .active,
     pin_order: ?@import("session_pin.zig").PinOrder = null,
     label: ?[]const u8 = null,
@@ -2742,11 +3033,13 @@ const TestSession = struct {
     yours: bool = false,
     turn: ?u64 = null,
     first_action: ?u64 = null,
+    state_change_at: ?u64 = null,
 };
 
 fn session(ref: *const [6]u8, state: WorkState, options: TestSession) Listed {
     return .{
         .reference = ref.*,
+        .creator = options.creator,
         .read_version = options.read_version,
         .archive_state = options.archive_state,
         .pin_order = options.pin_order,
@@ -2754,6 +3047,7 @@ fn session(ref: *const [6]u8, state: WorkState, options: TestSession) Listed {
         .provider = options.provider,
         .label = options.label,
         .state = state,
+        .state_change_at = options.state_change_at orelse state.since(),
         .turn = options.turn,
         .first_action = options.first_action,
         .first = options.first,
@@ -3052,7 +3346,130 @@ fn expectOrder(state: *const State, expected: []const []const u8) !void {
     for (expected, state.order.items) |label, index| try std.testing.expectEqualStrings(label, state.rows.items[index].label.?.slice());
 }
 
-test "overview an Action wait leads regardless of sender" {
+test "creator tree uses descendant recency and creator edges" {
+    var state = try opened(&.{
+        session("a1b2c3", .{ .finished = ago(80) }, .{ .label = "A" }),
+        session("b4n8wd", .{ .finished = ago(20) }, .{ .label = "B" }),
+        session("c3d4e5", .{ .working = ago(1) }, .{ .label = "A child", .creator = "a1b2c3".* }),
+        session("d4e5f6", .{ .finished = ago(10) }, .{ .label = "B child", .creator = "b4n8wd".* }),
+    });
+    defer state.deinit();
+    try expectOrder(&state, &.{ "A", "A child", "B", "B child" });
+}
+
+test "creator tree folds only by left and expands by right" {
+    var state = try opened(&.{
+        session("a1b2c3", .{ .working = ago(10) }, .{ .label = "A" }),
+        session("b4n8wd", .{ .approval = ago(1) }, .{ .label = "Child", .creator = "a1b2c3".* }),
+    });
+    defer state.deinit();
+    state.selected = .{ .session = "a1b2c3".* };
+    _ = try step(&state, .{ .input = .{ .key = .left } });
+    try expectOrder(&state, &.{"A"});
+    _ = try press(&state, .open_session);
+    try expectOrder(&state, &.{ "A", "Child" });
+}
+
+test "creator tree holds sibling order under pointer and releases once" {
+    const a = session("a1b2c3", .{ .working = ago(20) }, .{ .label = "A" });
+    var b = session("b4n8wd", .{ .working = ago(30) }, .{ .label = "B" });
+    var state = try opened(&.{ a, b });
+    defer state.deinit();
+    _ = try step(&state, .{ .list_presence = .{ .at_ms = state.now_ms, .pointer_over = true } });
+    b.state = .{ .approval = ago(1) };
+    b.state_change_at = test_now_s - 1;
+    const c = session("c3d4e5", .{ .finished = ago(2) }, .{ .label = "C" });
+    _ = try refresh(&state, .changed, testToken(2), &.{ b, c });
+    try expectOrder(&state, &.{ "A", "B", "C" });
+    try std.testing.expect(holding(&state));
+    _ = try step(&state, .{ .list_presence = .{ .at_ms = state.now_ms, .pointer_over = false } });
+    try expectOrder(&state, &.{ "B", "C", "A" });
+    try std.testing.expect(state.find("a1b2c3".*).?.flash_until_ms > state.now_ms);
+    try std.testing.expectEqual(@as(u64, 0), state.find("c3d4e5".*).?.flash_until_ms);
+    const flash = state.find("a1b2c3".*).?.flash_until_ms;
+    _ = try step(&state, .{ .tick = flash });
+    try std.testing.expectEqual(@as(u64, 0), state.find("a1b2c3".*).?.flash_until_ms);
+}
+
+test "creator tree list key holds exactly three seconds" {
+    const a = session("a1b2c3", .{ .working = ago(20) }, .{ .label = "A" });
+    var b = session("b4n8wd", .{ .working = ago(30) }, .{ .label = "B" });
+    var state = try opened(&.{ a, b });
+    defer state.deinit();
+    const start = state.now_ms;
+    _ = try step(&state, .{ .input = .{ .key = .{ .action = .next }, .at_ms = start } });
+    b.state_change_at = test_now_s - 1;
+    _ = try refresh(&state, .changed, testToken(2), &.{b});
+    _ = try step(&state, .{ .tick = start + 2999 });
+    try expectOrder(&state, &.{ "A", "B" });
+    _ = try step(&state, .{ .tick = start + 3000 });
+    try expectOrder(&state, &.{ "B", "A" });
+}
+
+test "creator tree retains independent list clock across tool activity" {
+    const a = session("a1b2c3", .{ .working = ago(20) }, .{ .label = "A", .state_change_at = test_now_s - 20 });
+    var b = session("b4n8wd", .{ .working = ago(30) }, .{ .label = "B", .state_change_at = test_now_s - 30 });
+    var state = try opened(&.{ a, b });
+    defer state.deinit();
+    b.state = .{ .bash = .{ .since = test_now_s - 1, .call = 1, .description = null, .running = 1, .approvals = 0 } };
+    _ = try refresh(&state, .changed, testToken(2), &.{b});
+    try expectOrder(&state, &.{ "A", "B" });
+}
+
+test "creator tree folds attention without counting failures" {
+    var state = try opened(&.{
+        session("a1b2c3", .{ .working = ago(5) }, .{ .label = "Parent" }),
+        session("b4n8wd", .{ .approval = ago(1) }, .{ .label = "Question", .creator = "a1b2c3".* }),
+        session("c3d4e5", .{ .failed = .{ .since = test_now_s - 2, .code = .{}, .resets_at = null } }, .{ .label = "Failure", .creator = "a1b2c3".* }),
+    });
+    defer state.deinit();
+    state.selected = .{ .session = "a1b2c3".* };
+    _ = try step(&state, .{ .input = .{ .key = .left } });
+    const index = lookup(state.by_reference.items, "a1b2c3".*).?;
+    try std.testing.expectEqual(@as(u32, 2), state.nodes.items[index].descendants);
+    try std.testing.expectEqual(@as(u32, 1), state.nodes.items[index].attention);
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const text = try segmentText(arena.allocator(), try rowSegments(arena.allocator(), &state, 0, 46, .{}, 0));
+    try std.testing.expect(std.mem.indexOf(u8, text, "▸ 2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "· 1 ?") != null);
+}
+
+test "creator tree pins cut edges and missing creators stay visible" {
+    var state = try opened(&.{
+        session("a1b2c3", .{ .working = ago(10) }, .{ .label = "Parent" }),
+        session("b4n8wd", .{ .working = ago(5) }, .{ .label = "Pinned child", .creator = "a1b2c3".*, .pin_order = 7 }),
+        session("c3d4e5", .{ .working = ago(1) }, .{ .label = "Pin descendant", .creator = "b4n8wd".* }),
+        session("d4e5f6", .{ .working = ago(2) }, .{ .label = "Orphan", .creator = "h8q2mz".* }),
+    });
+    defer state.deinit();
+    try std.testing.expectEqual(@as(usize, 2), state.pin_end);
+    try expectOrder(&state, &.{ "Pinned child", "Pin descendant", "Parent", "Orphan" });
+}
+
+test "creator tree offscreen attention uses collapsed representative" {
+    var state = try opened(&.{
+        session("a1b2c3", .{ .working = ago(5) }, .{ .label = "Parent" }),
+        session("b4n8wd", .{ .approval = ago(1) }, .{ .label = "Question", .creator = "a1b2c3".* }),
+        session("c3d4e5", .{ .working = ago(20) }, .{ .label = "Other" }),
+    });
+    defer state.deinit();
+    state.selected = .{ .session = "a1b2c3".* };
+    _ = try step(&state, .{ .input = .{ .key = .left } });
+    try std.testing.expectEqual(@as(usize, 0), edgeAttention(&state, .below, 0, 1));
+    try std.testing.expectEqual(@as(usize, 1), edgeAttention(&state, .above, 1, 2));
+}
+
+test "creator tree roots sort by state change recency" {
+    var state = try opened(&.{
+        session("a1b2c3", .{ .approval = ago(60) }, .{ .label = "Older question" }),
+        session("b4n8wd", .{ .finished = ago(5) }, .{ .label = "Newer finished" }),
+    });
+    defer state.deinit();
+    try expectOrder(&state, &.{ "Newer finished", "Older question" });
+}
+
+test "overview orders Sessions by state change regardless of sender and state" {
     const beside_bash: WorkState = .{ .bash = .{ .since = test_now_s - 60, .call = 0, .description = bounded(session_work.max_description_bytes, "Run the logic tests"), .running = 1, .approvals = 1 } };
     const running_bash: WorkState = .{ .bash = .{ .since = test_now_s - 20, .call = 0, .description = bounded(session_work.max_description_bytes, "Run the store tests"), .running = 1, .approvals = 0 } };
     var state = try opened(&.{
@@ -3064,11 +3481,11 @@ test "overview an Action wait leads regardless of sender" {
         session("f1n1sh", .{ .finished = ago(60) }, .{ .label = "Theirs, finished" }),
     });
     defer state.deinit();
-    try expectOrder(&state, &.{ "Theirs, asking", "Mine, asking", "Theirs, asking beside Bash", "Theirs, running Bash", "Mine, thinking", "Theirs, finished" });
+    try expectOrder(&state, &.{ "Theirs, asking", "Mine, asking", "Theirs, running Bash", "Mine, thinking", "Theirs, asking beside Bash", "Theirs, finished" });
     try std.testing.expectEqualStrings("a5k1ng", &state.selected.session);
 }
 
-test "overview queued rows follow done and work, longest wait first" {
+test "overview orders queued and completed Sessions by newest state change" {
     const due: WorkState = .{ .retrying = .{ .since = test_now_s - 30, .due_at_ms = test_now_s * 1000 - 2_000, .cause = bounded(session_work.max_code_bytes, "provider_temporary_http_429"), .attempt = 2 } };
     const later: WorkState = .{ .retrying = .{ .since = test_now_s - 30, .due_at_ms = (test_now_s + 18) * 1000, .cause = bounded(session_work.max_code_bytes, "provider_temporary_http_429"), .attempt = 2 } };
     var state = try opened(&.{
@@ -3084,7 +3501,7 @@ test "overview queued rows follow done and work, longest wait first" {
         session("y0f005", .{ .finished = ago(5) }, .{ .label = "Mine, finished 5s", .yours = true }),
     });
     defer state.deinit();
-    try expectOrder(&state, &.{ "Retrying in 18s", "Working 40s", "Stopping 50s", "Mine, working 50s", "Mine, finished 5s", "Mine, queued 70s", "Queued 40s", "Queued 25s", "Queued 10s", "Retry due" });
+    try expectOrder(&state, &.{ "Mine, finished 5s", "Queued 10s", "Queued 25s", "Retry due", "Retrying in 18s", "Queued 40s", "Working 40s", "Stopping 50s", "Mine, working 50s", "Mine, queued 70s" });
 }
 
 test "the summary counts row marks: needs you, working, queued and failed" {
@@ -3869,11 +4286,10 @@ test "the selection stays on its Session when it moves from active to finished" 
     defer std.testing.allocator.free(text);
     try std.testing.expect(std.mem.indexOf(u8, text, "✓ List unused build steps") != null);
     _ = try press(&state, .next);
-    try expectSelected(&state, "h8q2mz");
+    try expectSelected(&state, "c3d4e5");
     _ = try press(&state, .next);
-    try expectSelected(&state, "t7v8w9");
-    _ = try press(&state, .next);
-    try expectSelected(&state, "m1n2p3");
+    try expectSelected(&state, "k7m2qx");
+    state.selected = .{ .session = "m1n2p3".* };
     _ = try refresh(&state, .changed, testToken(3), &.{session("m1n2p3", .{ .finished = ago(10 * 86400) }, .{ .label = "Explain provider output parsing" })});
     try expectSelected(&state, "m1n2p3");
     try std.testing.expectEqual(state.order.items.len, listLength(&state));
@@ -4139,8 +4555,8 @@ test "the overview lists once a second, one listing at a time" {
     try expectScreenLine(&state, 0, "  + New Session");
     var screen = try Frame.of(&state, 80, 24, .{}, 0);
     defer screen.deinit();
-    try expectScreenLine(&state, 2, " ? Review PR 412                                                             3m");
-    try std.testing.expectEqual(Colour.attention, screen.styleAt(2, 1).?.colour);
+    try expectScreenLine(&state, 2, " ◌ Trace Host shutdown order                                                 8s");
+    try std.testing.expectEqual(Colour.quiet, screen.styleAt(2, 1).?.colour);
     _ = try refresh(&state, .not_modified, testToken(1), &.{});
     try expectScreenLine(&state, 0, "  + New Session");
 }
@@ -4216,7 +4632,7 @@ test "an observed retry's own deadline updates row order counts and wake through
         _ = try step(&state, .{ .tick = (test_now_s + delay) * 1000 });
         try std.testing.expectEqual(Kind.pending, shownKind(&state, state.find(ref).?));
         try std.testing.expectEqual(@as(u32, 1), state.summary.counts.queued);
-        try std.testing.expectEqualStrings("bbbbbb", &state.rows.items[state.order.items[0]].reference);
+        try std.testing.expectEqualStrings(&ref, &state.rows.items[state.order.items[0]].reference);
         _ = try step(&state, .{ .conversation = null });
         try std.testing.expectEqual(Kind.pending, shownKind(&state, state.find(ref).?));
     }
@@ -4759,25 +5175,25 @@ test "overview order covers every Kind sender age queue and reference tie" {
     var state = try opened(&rows);
     defer state.deinit();
     const expected = [_][]const u8{
-        "k50000", "k50001",
-        "newwrk", "k20000",
-        "k20001", "k30000",
-        "k30001", "k40000",
-        "k40001", "k60000",
-        "k60001", "newend",
+        "newend", "newwrk",
         "k00000", "k00001",
+        "k10000", "k10001",
+        "k20000", "k20001",
+        "k30000", "k30001",
+        "k40000", "k40001",
+        "k50000", "k50001",
+        "k60000", "k60001",
         "k70000", "k70001",
         "k80000", "k80001",
         "k90000", "k90001",
-        "oldque", "k10000",
-        "k10001", "dueque",
+        "dueque", "oldque",
     };
     try std.testing.expectEqual(expected.len, state.order.items.len);
     for (expected, state.order.items) |ref, at| try std.testing.expectEqualStrings(ref, &state.rows.items[at].reference);
     var waiting = rows[8];
     waiting.state.bash.approvals = 1;
     _ = try refresh(&state, .changed, testToken(2), &.{waiting});
-    try std.testing.expectEqualStrings("k40000", &state.rows.items[state.order.items[0]].reference);
+    try std.testing.expectEqualStrings("newend", &state.rows.items[state.order.items[0]].reference);
 }
 
 test "overview refresh removes selection to next row else New Session and preserves ends" {
@@ -5701,7 +6117,7 @@ test "semantic list admission owns covered Settings paste creation and Upgrade p
                         try std.testing.expect(std.meta.eql(before_notice, state.notice));
                         try std.testing.expectEqual(Selection.new_session, state.selected);
                     },
-                    .previous_session, .next_session => {
+                    .previous_session, .next_session, .next_question => {
                         try std.testing.expect(std.meta.eql(before_notice, state.notice));
                         try std.testing.expectEqual(Selection.new_session, state.selected);
                     },
@@ -5721,7 +6137,7 @@ test "semantic list admission owns covered Settings paste creation and Upgrade p
 }
 
 test "Overview list activation resumes same or opens other chat at wide and narrow widths" {
-    for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |same| for ([_]Input{ .enter, .{ .action = .open_session } }) |key| {
+    for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |same| for ([_]Input{.enter}) |key| {
         var state = try opened(&mixed);
         defer state.deinit();
         _ = try step(&state, .{ .resized = .{ .width = width, .height = 30 } });
@@ -5801,7 +6217,7 @@ test "Overview browse settles only the last wide list move and never activates c
 }
 
 test "Overview browse explicit Enter and Right share activation and focus departure cancels settle" {
-    for ([_]bool{ false, true }) |wide| for ([_]Input{ .enter, .{ .action = .open_session } }) |key| for ([_]Selection{ .new_session, .settings, .{ .session = "b2c3d4".* }, .{ .session = "g7h8j9".* } }) |selection| {
+    for ([_]bool{ false, true }) |wide| for ([_]Input{.enter}) |key| for ([_]Selection{ .new_session, .settings, .{ .session = "b2c3d4".* }, .{ .session = "g7h8j9".* } }) |selection| {
         var state = try opened(&mixed);
         defer state.deinit();
         _ = try step(&state, .{ .conversation = "b2c3d4".* });
@@ -6353,4 +6769,25 @@ test "launch admission belongs to bare app startup" {
     _ = try step(&state, .{ .launch_start = .{ .explicit_session = false, .restoring = false } });
     _ = try step(&state, .{ .launch_size = .{ .size = .{ .width = 140, .height = 40 }, .wide = true } });
     try std.testing.expectEqual(.waiting, state.launch);
+}
+
+test "creator tree preserves title width beside collapsed badges and state age" {
+    const name = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    for ([_]u64{ 60, 18 * 3600, 24 * 3600 }) |age| for ([_]bool{ false, true }) |use_unicode| for ([_]u16{ 40, 46, 140 }) |width| {
+        var state = try opened(&.{
+            session("a1b2c3", .{ .working = ago(age) }, .{ .label = "Ancestor" }),
+            session("b4n8wd", .{ .working = ago(age) }, .{ .label = name, .creator = "a1b2c3".* }),
+            session("c3d4e5", .{ .approval = ago(1) }, .{ .label = "Question", .creator = "b4n8wd".* }),
+            session("d4e5f6", .{ .working = ago(2) }, .{ .label = "Other", .creator = "b4n8wd".* }),
+        });
+        defer state.deinit();
+        state.selected = .{ .session = "b4n8wd".* };
+        _ = try step(&state, .{ .input = .{ .key = .left } });
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const text = try segmentText(arena.allocator(), try rowSegments(arena.allocator(), &state, 1, width, .{ .unicode = use_unicode }, 0));
+        try std.testing.expect(std.mem.indexOf(u8, text, name[0..23]) != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, if (use_unicode) "▸ 2" else "> 2") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, if (use_unicode) "· 1 ?" else ". 1 ?") != null);
+    };
 }

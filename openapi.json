@@ -12998,6 +12998,9 @@
           "created_at": {
             "$ref": "#/components/schemas/Decimal"
           },
+          "state_change_at": {
+            "$ref": "#/components/schemas/Decimal"
+          },
           "revision": {
             "$ref": "#/components/schemas/Decimal"
           },
@@ -13045,6 +13048,7 @@
           "creator",
           "label",
           "created_at",
+          "state_change_at",
           "revision",
           "end",
           "first_message",

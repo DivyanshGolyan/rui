@@ -290,6 +290,41 @@ test "a list row whose first Message is missing is CorruptStore" {
     try std.testing.expectError(error.CorruptStore, testingSessionList(&storage, &tmp, .{}, &used, 5));
 }
 
+test "a list row rejects a latest Turn missing its execution entry" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSession(&storage, "clock-missing-config");
+    const answer = [_]TestingAnswerPart{.{ .encoded = "done", .decoded = "done" }};
+    try answerTestTurn(&storage, &tmp, session.slice(), "clock-missing-first", &answer);
+    try answerTestTurn(&storage, &tmp, session.slice(), "clock-missing-latest", &answer);
+    try store_testing.sqlite_only.exec(&storage, "DELETE FROM conversation_entry WHERE source_admission_id=(SELECT first_admission_id FROM turn WHERE session_ref=?1 ORDER BY turn_id DESC LIMIT 1)", .{session.slice()});
+    var used = std.atomic.Value(u64).init(0);
+    try std.testing.expectError(error.CorruptStore, testingSessionList(&storage, &tmp, .{}, &used, 5));
+}
+
+test "list clock includes queued input after a finished Turn" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSession(&storage, "clock-queue-config");
+    const answer = [_]TestingAnswerPart{.{ .encoded = "done", .decoded = "done" }};
+    try answerTestTurn(&storage, &tmp, session.slice(), "clock-queue-done", &answer);
+    try submitTestMessage(&storage, &tmp, "clock-queue-input", "clock-queue-key", session.slice(), "next");
+    try store_testing.sqlite_only.exec(&storage, "UPDATE session SET created_at=100 WHERE session_ref=?1", .{session.slice()});
+    try store_testing.sqlite_only.exec(&storage, "UPDATE conversation_entry SET recorded_at=150 WHERE session_ref=?1 AND entry_kind=1", .{session.slice()});
+    try store_testing.sqlite_only.exec(&storage, "UPDATE turn SET outcome_at=200 WHERE session_ref=?1", .{session.slice()});
+    try store_testing.sqlite_only.exec(&storage, "UPDATE message_admission SET admitted_at=300 WHERE command_key='clock-queue-key'", .{});
+    var listed = try testingListRow(&storage, &tmp, session.slice());
+    defer listed.deinit();
+    try std.testing.expectEqualStrings("pending", listed.get(&.{ "work", "state", "kind" }).string);
+    try std.testing.expectEqual(@as(u64, 300), try listed.number(&.{"state_change_at"}));
+}
+
 test "a list page of mixed work takes its deepest row's rounds, and a pass per row a statement repeats for" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

@@ -50,6 +50,7 @@ pub const Row = struct {
     permission_mode: cli_value.PermissionMode,
     label: ?[]const u8,
     created_at: u64,
+    state_change_at: u64,
     revision: u64,
     end: u64,
     first_message: ?FirstMessage,

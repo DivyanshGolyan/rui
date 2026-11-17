@@ -33,6 +33,7 @@ pub const keys: keymap.Keymap(Action) = .init(.{
     .ctrl_r = .recover,
     .ctrl_x = .stop,
     .alt_a = .archive,
+    .alt_question = null,
     .alt_up = null,
     .alt_down = null,
     .up = .previous,
