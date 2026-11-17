@@ -588,8 +588,8 @@ fn listRoundsForTesting(case: *store_testing.Case, count: usize) !u32 {
 test "a list page's rows share their rounds, so eight rows take as many as one" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
-            try std.testing.expectEqual(@as(u32, 8), try listRoundsForTesting(case, 1));
-            try std.testing.expectEqual(@as(u32, 8), try listRoundsForTesting(case, protocol.session_list_page_size));
+            try std.testing.expectEqual(@as(u32, 9), try listRoundsForTesting(case, 1));
+            try std.testing.expectEqual(@as(u32, 9), try listRoundsForTesting(case, protocol.session_list_page_size));
         }
     }.run);
 }
@@ -729,6 +729,144 @@ test "a list row reads the same steps however long its Session's history, in rou
             defer listed.deinit();
             try std.testing.expectEqualStrings("finished", listed.get(&.{ "work", "state", "kind" }).string);
             return taken;
+        }
+    }.run);
+}
+
+test "Session list rolls up descendants beyond the page through real agent births" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            var config = try completeConfiguration("rollup-root", "", workspace, "model-a");
+            config.configuration.tools = try .of(&.{ "bash", "start_agent" });
+            const root = (try storage.configure(&config, .{})).accepted.session;
+            try submitTestMessage(&storage, &tmp, "rollup-message", "rollup-key", root.slice(), "start children");
+            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer arena.deinit();
+            var calls: [10]TestingCall = undefined;
+            for (&calls, 0..) |*call, index| {
+                const id = try std.fmt.allocPrint(arena.allocator(), "rollup-child-{d}", .{index});
+                call.* = .{ .item_id = id, .name = "start_agent", .encoded_call_id = id, .decoded_call_id = id, .encoded_arguments = "{}", .decoded_arguments = "{}" };
+            }
+            try settleCallsForTesting(&storage, &tmp, model, "rollup-calls", &calls);
+            const Capture = struct {
+                child: protocol.Bounded(protocol.session_id_bytes) = .{},
+                fn call(context: *anyopaque, admission: Store.MessageAdmission) void {
+                    const self: *@This() = @ptrCast(@alignCast(context));
+                    self.child.set(admission.session) catch unreachable;
+                }
+            };
+            var first: Capture = .{};
+            for (0..calls.len) |index| {
+                const action = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
+                var spec = try shared_fixtures.testingAgentSpec(&.{ "bash", "start_agent" }, "ask");
+                var capture: Capture = .{};
+                try std.testing.expect(try storage.startAgent(action.binding, root.slice(), "child task", index == 0, &spec, .{ .context = &capture, .call = Capture.call }, .{}) == .started);
+                if (index == 0) first = capture;
+            }
+            const child_model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM turn WHERE turn_id=?1 AND session_ref=?2", .{ child_model.turn_id, first.child.slice() }));
+            try settleCallsForTesting(&storage, &tmp, child_model, "rollup-nested-call", &.{.{
+                .item_id = "rollup-nested",
+                .name = "start_agent",
+                .encoded_call_id = "rollup-nested",
+                .decoded_call_id = "rollup-nested",
+                .encoded_arguments = "{}",
+                .decoded_arguments = "{}",
+            }});
+            const nested_action = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
+            var nested_spec = try shared_fixtures.testingAgentSpec(&.{"bash"}, "ask");
+            var nested: Capture = .{};
+            try std.testing.expect(try storage.startAgent(nested_action.binding, first.child.slice(), "nested task", false, &nested_spec, .{ .context = &nested, .call = Capture.call }, .{}) == .started);
+            var reached_nested = false;
+            var before_question: protocol.SinceToken = undefined;
+            for (0..20) |_| {
+                const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                const is_nested = try store_testing.queryU64(&storage, "SELECT count(*) FROM turn WHERE turn_id=?1 AND session_ref=?2", .{ next.turn_id, nested.child.slice() });
+                if (is_nested == 1) {
+                    before_question = (try TestingListing.read(&storage, &tmp, .{})).since;
+                    try settleCallsForTesting(&storage, &tmp, next, "rollup-question", &.{.{
+                        .item_id = "rollup-bash",
+                        .name = "bash",
+                        .encoded_call_id = "rollup-bash",
+                        .decoded_call_id = "rollup-bash",
+                        .encoded_arguments = "{\\\"description\\\":\\\"Review\\\",\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}",
+                        .decoded_arguments = "{\"description\":\"Review\",\"cmd\":\"true\",\"timeout_ms\":null}",
+                    }});
+                    reached_nested = true;
+                    break;
+                }
+                try store_testing.settleItemsForTesting(&storage, &tmp, next, &.{"{\"type\":\"message\",\"id\":\"done\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}"}, "done");
+            }
+            try std.testing.expect(reached_nested);
+            var affected = [_]change_ring.Id{
+                root.slice()[0..change_ring.id_bytes].*,
+                first.child.slice()[0..change_ring.id_bytes].*,
+                nested.child.slice()[0..change_ring.id_bytes].*,
+            };
+            std.mem.sort(change_ring.Id, &affected, {}, testingIdLess);
+            const delta = try TestingListing.read(&storage, &tmp, .{ .since = before_question });
+            try std.testing.expectEqual(protocol.ListDelta.changed, delta.delta);
+            try delta.expectReferences(&affected);
+            try store_testing.exec(&storage, "UPDATE session SET created_at=100 WHERE created_at>0", .{});
+            try store_testing.exec(&storage, "UPDATE message_admission SET admitted_at=110 WHERE admitted_at>0", .{});
+            try store_testing.exec(&storage, "UPDATE conversation_entry SET recorded_at=CASE WHEN session_ref=?1 THEN 300 WHEN session_ref=?2 THEN 200 ELSE 150 END WHERE recorded_at>0", .{ nested.child.slice(), first.child.slice() });
+            try store_testing.exec(&storage, "UPDATE turn SET outcome_at=CASE WHEN session_ref=?1 THEN 150 WHEN session_ref=?2 THEN 200 ELSE 180 END WHERE outcome_at IS NOT NULL", .{ root.slice(), first.child.slice() });
+            try store_testing.exec(&storage, "UPDATE model_operation SET resolved_at=CASE WHEN session_ref=?1 THEN 400 ELSE 150 END WHERE resolved_at IS NOT NULL", .{nested.child.slice()});
+            var root_row = try testingListRow(&storage, &tmp, root.slice());
+            defer root_row.deinit();
+            try std.testing.expectEqual(@as(u64, 11), try root_row.number(&.{"descendant_count"}));
+            try std.testing.expectEqual(@as(u64, 1), try root_row.number(&.{"descendant_needs_you_count"}));
+            try std.testing.expect((try root_row.number(&.{"subtree_state_change_at"})) >= (try root_row.number(&.{"state_change_at"})));
+            try std.testing.expectEqual(@as(u64, 150), try root_row.number(&.{"state_change_at"}));
+            try std.testing.expectEqual(@as(u64, 400), try root_row.number(&.{"subtree_state_change_at"}));
+            var child_row = try testingListRow(&storage, &tmp, first.child.slice());
+            defer child_row.deinit();
+            try std.testing.expectEqual(@as(u64, 200), try child_row.number(&.{"state_change_at"}));
+            try std.testing.expectEqual(@as(u64, 400), try child_row.number(&.{"subtree_state_change_at"}));
+            try std.testing.expectEqual(@as(u64, 1), try child_row.number(&.{"descendant_count"}));
+            try std.testing.expectEqual(@as(u64, 1), try child_row.number(&.{"descendant_needs_you_count"}));
+            const first_page = try TestingListing.read(&storage, &tmp, .{});
+            var used = std.atomic.Value(u64).init(0);
+            const later_bytes = try testingSessionList(&storage, &tmp, first_page.next.?, &used, 78);
+            defer std.testing.allocator.free(later_bytes);
+            var later_page = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, later_bytes, .{});
+            defer later_page.deinit();
+            var leaf_found = false;
+            for (later_page.value.object.get("sessions").?.array.items) |row| {
+                if (!std.mem.eql(u8, row.object.get("reference").?.string, nested.child.slice())) continue;
+                try std.testing.expectEqualStrings("400", row.object.get("state_change_at").?.string);
+                try std.testing.expectEqualStrings("400", row.object.get("subtree_state_change_at").?.string);
+                leaf_found = true;
+            }
+            try std.testing.expect(leaf_found);
+            var samples: [5]u64 = undefined;
+            for (&samples) |*sample| {
+                var counter: @import("../sqlite_tests.zig").TestingSteps = .{};
+                const before = if (case.engine == .mysql) try @import("../mysql_testing.zig").handlerReads(&storage) else 0;
+                if (case.engine == .sqlite) counter.begin(storage.sqliteDatabase());
+                var measured = testingListRow(&storage, &tmp, root.slice()) catch |err| {
+                    if (case.engine == .sqlite) counter.end(storage.sqliteDatabase());
+                    return err;
+                };
+                if (case.engine == .sqlite) counter.end(storage.sqliteDatabase());
+                defer measured.deinit();
+                sample.* = if (case.engine == .mysql) (try @import("../mysql_testing.zig").handlerReads(&storage)) - before else counter.steps;
+                try std.testing.expectEqual(@as(u64, 150), try measured.number(&.{"state_change_at"}));
+                try std.testing.expectEqual(@as(u64, 400), try measured.number(&.{"subtree_state_change_at"}));
+                try std.testing.expectEqual(@as(u64, 11), try measured.number(&.{"descendant_count"}));
+                try std.testing.expectEqual(@as(u64, 1), try measured.number(&.{"descendant_needs_you_count"}));
+                try std.testing.expect(sample.* > 0);
+            }
+            std.mem.sort(u64, &samples, {}, std.sort.asc(u64));
+            std.debug.print("list rollup three-level, eleven descendants ({s}, five warmed pages): min={d} median={d} max={d} {s}\n", .{ @tagName(case.engine), samples[0], samples[2], samples[4], if (case.engine == .sqlite) "SQLite VM steps" else "MySQL handler reads" });
         }
     }.run);
 }

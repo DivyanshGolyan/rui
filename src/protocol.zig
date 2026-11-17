@@ -484,6 +484,10 @@ pub const SessionRow = struct {
     creator: ?Bounded(session_id_bytes) = null,
     label: ?Bounded(max_label_bytes) = null,
     created_at: u64 = 0,
+    state_change_at: u64 = 0,
+    subtree_state_change_at: u64 = 0,
+    descendant_count: u64 = 0,
+    descendant_needs_you_count: u64 = 0,
     revision: u64 = 0,
     end: u64 = 0,
     first_message: ?FirstMessage = null,
@@ -492,10 +496,11 @@ pub const SessionRow = struct {
     peers: PeerFacts = .{},
 
     pub const json_shape = .{
-        "{\"read_version\":\"",  Hole{ .text = change_ring.Token.max_bytes }, "\",\"archive_state\":\"", Hole{ .tag = SessionArchiveState },         "\",\"pin_order\":",  Hole.optional_id,                          ",\"reference\":",         Hole{ .string = max_session_bytes }, ",\"workspace\":", Hole{ .string = max_workspace_bytes },
-        ",\"provider\":\"",      Hole{ .tag = Provider },                     "\",\"model\":",           Hole{ .string = max_model_bytes },          ",\"tools\":",        Hole{ .text = max_tool_names_json_bytes }, ",\"permission_mode\":\"", Hole{ .tag = PermissionMode },       "\",\"parent\":",  Hole{ .optional_string = session_id_bytes },
-        ",\"creator\":",         Hole{ .optional_string = session_id_bytes }, ",\"label\":",             Hole{ .optional_string = max_label_bytes }, ",\"created_at\":\"", Hole.decimal,                              "\",\"revision\":\"",      Hole.decimal,                        "\",\"end\":\"",   Hole.decimal,
-        "\",\"first_message\":", Hole{ .optional_json = FirstMessage },       ",\"last_line\":",         Hole{ .optional_json = LastLine.Fields },   ",\"work\":",         Hole{ .json = SessionWork },               ",\"peers\":",             Hole{ .json = PeerFacts },           "}",
+        "{\"read_version\":\"",       Hole{ .text = change_ring.Token.max_bytes }, "\",\"archive_state\":\"",              Hole{ .tag = SessionArchiveState },         "\",\"pin_order\":",  Hole.optional_id,                          ",\"reference\":",           Hole{ .string = max_session_bytes }, ",\"workspace\":",                   Hole{ .string = max_workspace_bytes },
+        ",\"provider\":\"",           Hole{ .tag = Provider },                     "\",\"model\":",                        Hole{ .string = max_model_bytes },          ",\"tools\":",        Hole{ .text = max_tool_names_json_bytes }, ",\"permission_mode\":\"",   Hole{ .tag = PermissionMode },       "\",\"parent\":",                    Hole{ .optional_string = session_id_bytes },
+        ",\"creator\":",              Hole{ .optional_string = session_id_bytes }, ",\"label\":",                          Hole{ .optional_string = max_label_bytes }, ",\"created_at\":\"", Hole.decimal,                              "\",\"state_change_at\":\"", Hole.decimal,                        "\",\"subtree_state_change_at\":\"", Hole.decimal,
+        "\",\"descendant_count\":\"", Hole.decimal,                                "\",\"descendant_needs_you_count\":\"", Hole.decimal,                               "\",\"revision\":\"", Hole.decimal,                              "\",\"end\":\"",             Hole.decimal,                        "\",\"first_message\":",             Hole{ .optional_json = FirstMessage },
+        ",\"last_line\":",            Hole{ .optional_json = LastLine.Fields },    ",\"work\":",                           Hole{ .json = SessionWork },                ",\"peers\":",        Hole{ .json = PeerFacts },                 "}",
     };
     pub const max_json_bytes = shapeBytes(json_shape);
     pub const budget_bytes = 36 * 1024;
@@ -517,6 +522,10 @@ pub const SessionRow = struct {
         creator: ?[]const u8 = null,
         label: ?[]const u8,
         created_at: u64,
+        state_change_at: u64,
+        subtree_state_change_at: u64,
+        descendant_count: u64,
+        descendant_needs_you_count: u64,
         revision: u64,
         end: u64,
         first_message: ?FirstMessage,
@@ -529,9 +538,10 @@ pub const SessionRow = struct {
         pub fn writeJson(f: *const Fields, out: *std.Io.Writer) !void {
             var token_buffer: [change_ring.Token.max_bytes]u8 = undefined;
             try writeShape(out, json_shape, .{
-                f.read_version.format(&token_buffer), f.archive_state,   f.pin_order, f.reference, f.workspace, f.provider,   f.model,
-                f.tools,                              f.permission_mode, f.parent,    f.creator,   f.label,     f.created_at, f.revision,
-                f.end,                                f.first_message,   f.last_line, f.work,      f.peers,
+                f.read_version.format(&token_buffer), f.archive_state,    f.pin_order,                  f.reference, f.workspace, f.provider,      f.model,
+                f.tools,                              f.permission_mode,  f.parent,                     f.creator,   f.label,     f.created_at,    f.state_change_at,
+                f.subtree_state_change_at,            f.descendant_count, f.descendant_needs_you_count, f.revision,  f.end,       f.first_message, f.last_line,
+                f.work,                               f.peers,
             });
         }
     };
@@ -562,6 +572,10 @@ pub const SessionRow = struct {
             .creator = if (self.creator) |*creator| creator.slice() else null,
             .label = if (self.label) |*label| label.slice() else null,
             .created_at = self.created_at,
+            .state_change_at = self.state_change_at,
+            .subtree_state_change_at = self.subtree_state_change_at,
+            .descendant_count = self.descendant_count,
+            .descendant_needs_you_count = self.descendant_needs_you_count,
             .revision = self.revision,
             .end = self.end,
             .first_message = self.first_message,
@@ -2794,7 +2808,11 @@ test "SessionRow borrowed fields preserve offered tool names" {
         .permission_mode = .ask,
         .parent = null,
         .label = null,
-        .created_at = 0,
+        .created_at = 1,
+        .state_change_at = 1,
+        .subtree_state_change_at = 1,
+        .descendant_count = 0,
+        .descendant_needs_you_count = 0,
         .revision = 0,
         .end = 0,
         .first_message = null,

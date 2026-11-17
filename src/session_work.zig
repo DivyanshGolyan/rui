@@ -45,6 +45,14 @@ pub const WorkState = union(Kind) {
         };
     }
 
+    pub fn needsDecision(self: WorkState) bool {
+        return switch (self) {
+            .approval => true,
+            .bash => |bash| bash.approvals != 0,
+            else => false,
+        };
+    }
+
     pub fn holdsQueue(self: WorkState) bool {
         const progress_ = self.progress() orelse return false;
         return progress_ != .runnable;
@@ -531,4 +539,22 @@ test "Session approval target belongs to Session inputs through continuation ter
     try std.testing.expectEqual(@as(?u64, null), selected_stop.first_action);
     try std.testing.expect(selected_stop.state == .stopping);
     try std.testing.expectError(error.CorruptStore, derive(.{ .created_at = 1, .now_ms = 0, .first_action = 41 }));
+}
+
+test "only pending approvals need a decision" {
+    const since: WorkState.Since = .{ .since = 1 };
+    const cases = [_]struct { state: WorkState, expected: bool }{
+        .{ .state = .{ .idle = since }, .expected = false },
+        .{ .state = .{ .pending = since }, .expected = false },
+        .{ .state = .{ .working = since }, .expected = false },
+        .{ .state = .{ .retrying = .{ .since = 1, .due_at_ms = 2000, .cause = .{}, .attempt = 1 } }, .expected = false },
+        .{ .state = .{ .bash = .{ .since = 1, .call = null, .description = null, .running = 1, .approvals = 0 } }, .expected = false },
+        .{ .state = .{ .bash = .{ .since = 1, .call = null, .description = null, .running = 1, .approvals = 1 } }, .expected = true },
+        .{ .state = .{ .approval = since }, .expected = true },
+        .{ .state = .{ .stopping = since }, .expected = false },
+        .{ .state = .{ .finished = since }, .expected = false },
+        .{ .state = .{ .failed = .{ .since = 1, .code = .{}, .resets_at = null } }, .expected = false },
+        .{ .state = .{ .stopped = .{ .since = 1, .cause = .stop } }, .expected = false },
+    };
+    for (cases) |case| try std.testing.expectEqual(case.expected, case.state.needsDecision());
 }

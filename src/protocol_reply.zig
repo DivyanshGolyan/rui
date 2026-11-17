@@ -1378,6 +1378,10 @@ pub const SessionListPage = struct {
                 permission_mode: JsonEnum(protocol.PermissionMode),
                 label: ?JsonString(protocol.max_label_bytes),
                 created_at: JsonString(20),
+                state_change_at: JsonString(20),
+                subtree_state_change_at: JsonString(20),
+                descendant_count: JsonString(20),
+                descendant_needs_you_count: JsonString(20),
                 revision: JsonString(20),
                 end: JsonString(20),
                 first_message: ?JsonFirstMessage,
@@ -1408,6 +1412,10 @@ pub const SessionListPage = struct {
                 .permission_mode = wire.permission_mode.value,
                 .label = if (wire.label) |label| label.value else null,
                 .created_at = try ActivityPage.id(wire.created_at, false),
+                .state_change_at = try ActivityPage.id(wire.state_change_at, false),
+                .subtree_state_change_at = try ActivityPage.id(wire.subtree_state_change_at, false),
+                .descendant_count = try ActivityPage.id(wire.descendant_count, true),
+                .descendant_needs_you_count = try ActivityPage.id(wire.descendant_needs_you_count, true),
                 .revision = try ActivityPage.id(wire.revision, false),
                 .end = try ActivityPage.id(wire.end, true),
                 .work = .{
@@ -1418,6 +1426,7 @@ pub const SessionListPage = struct {
                 },
                 .peers = .{ .from_person_at = if (wire.peers.from_person_at) |at| try ActivityPage.id(at, false) else null },
             };
+            if (row.state_change_at < row.created_at or row.subtree_state_change_at < row.state_change_at or row.descendant_needs_you_count > row.descendant_count) return error.InvalidCharacter;
             if (wire.first_message) |first| row.first_message = first.value;
             if (wire.last_line) |last| {
                 row.last_line = .{ .position = try ActivityPage.id(last.position, false), .text = if (last.text) |text| text.value else null };
@@ -2698,9 +2707,9 @@ test "canonical failure classifier bounds deep wide and escaped maximum replies"
 
 const testing_list_facts = "],\"delta\":\"full\",\"since\":\"abababababababababababababababab.42\",\"next\":";
 const testing_row_facts = ",\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"pin_order\":null" ++ testing_row_details;
-const testing_row_details = ",\"parent\":null,\"creator\":null,\"label\":null,\"created_at\":\"1\",\"revision\":\"1\",\"end\":\"0\",\"first_message\":null,\"last_line\":null," ++
+const testing_row_details = ",\"parent\":null,\"creator\":null,\"label\":null,\"created_at\":\"1\",\"state_change_at\":\"1\",\"subtree_state_change_at\":\"1\",\"descendant_count\":\"0\",\"descendant_needs_you_count\":\"0\",\"revision\":\"1\",\"end\":\"0\",\"first_message\":null,\"last_line\":null," ++
     "\"work\":{\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null},\"peers\":{\"from_person_at\":null}";
-const testing_started_row_facts = ",\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"pin_order\":null,\"parent\":null,\"creator\":null,\"label\":\"Review PR 412\",\"created_at\":\"1792925000\",\"revision\":\"1\",\"end\":\"9\"," ++
+const testing_started_row_facts = ",\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"pin_order\":null,\"parent\":null,\"creator\":null,\"label\":\"Review PR 412\",\"created_at\":\"1792925000\",\"state_change_at\":\"1792925300\",\"subtree_state_change_at\":\"1792925400\",\"descendant_count\":\"2\",\"descendant_needs_you_count\":\"1\",\"revision\":\"1\",\"end\":\"9\"," ++
     "\"first_message\":{\"position\":\"1\",\"admission\":\"4\",\"admitted_at\":\"1792925001\",\"sender\":null,\"content\":{\"bytes\":\"5\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"}}," ++
     "\"last_line\":null,\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"1792925300\"},\"turn\":\"2\",\"operation\":\"6\",\"first_action\":null},\"peers\":{\"from_person_at\":\"1792925001\"}";
 
@@ -2711,7 +2720,7 @@ test "Session list facts own complete rows and render semantic output after scra
     const file = try tmp.dir.createFile(io, "page", .{ .read = true });
     defer file.close(io);
     const digest = @as([64]u8, @splat('a'));
-    const facts = "\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"pin_order\":null,\"parent\":\"p33rs1\",\"creator\":\"cr3at0\",\"label\":\"Review \\u0050R\",\"created_at\":\"1792925000\",\"revision\":\"3\",\"end\":\"9\"," ++
+    const facts = "\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"pin_order\":null,\"parent\":\"p33rs1\",\"creator\":\"cr3at0\",\"label\":\"Review \\u0050R\",\"created_at\":\"1792925000\",\"state_change_at\":\"1792925300\",\"subtree_state_change_at\":\"1792925400\",\"descendant_count\":\"2\",\"descendant_needs_you_count\":\"1\",\"revision\":\"3\",\"end\":\"9\"," ++
         "\"first_message\":{\"position\":\"1\",\"admission\":\"4\",\"admitted_at\":\"1792925001\",\"sender\":{\"session\":\"p33rs1\"},\"content\":{\"bytes\":\"5\",\"sha256\":\"" ++ digest ++ "\"}}," ++
         "\"last_line\":{\"position\":\"8\",\"text\":\"Saved preview\"},\"work\":{\"state\":{\"kind\":\"bash\",\"since\":\"1792925300\",\"call\":\"0\",\"description\":\"Run the tests\",\"running\":\"1\",\"approvals\":\"0\"},\"turn\":\"2\",\"operation\":\"6\",\"first_action\":null}," ++
         "\"peers\":{\"from_person_at\":\"1792925200\"}";
@@ -2729,6 +2738,10 @@ test "Session list facts own complete rows and render semantic output after scra
     try std.testing.expectEqualStrings("/w\nµ", row.workspace.slice());
     try std.testing.expectEqualStrings("Review PR", row.label.?.slice());
     try std.testing.expectEqual(@as(u64, 1792925000), row.created_at);
+    try std.testing.expectEqual(@as(u64, 1792925300), row.state_change_at);
+    try std.testing.expectEqual(@as(u64, 1792925400), row.subtree_state_change_at);
+    try std.testing.expectEqual(@as(u64, 2), row.descendant_count);
+    try std.testing.expectEqual(@as(u64, 1), row.descendant_needs_you_count);
     try std.testing.expectEqual(@as(u64, 9), row.end);
     try std.testing.expectEqual(@as(u64, 8), row.last_line.?.position);
     try std.testing.expectEqualStrings("Saved preview", row.last_line.?.text.?.slice());
@@ -2902,6 +2915,14 @@ test "Session list facts reject malformed metadata and consequential ambiguity" 
         .{ "\"label\":\"Review PR 412\"", "\"label\":\"two\\nlines\"" },
         .{ "\"label\":\"Review PR 412\"", "\"label\":\" \"" },
         .{ "\"created_at\":\"1792925000\"", "\"created_at\":\"0\"" },
+        .{ ",\"state_change_at\":\"1792925300\"", "" },
+        .{ ",\"subtree_state_change_at\":\"1792925400\"", "" },
+        .{ ",\"descendant_count\":\"2\"", "" },
+        .{ ",\"descendant_needs_you_count\":\"1\"", "" },
+        .{ "\"descendant_count\":\"2\"", "\"descendant_count\":\"-1\"" },
+        .{ "\"state_change_at\":\"1792925300\"", "\"state_change_at\":\"1792924999\"" },
+        .{ "\"subtree_state_change_at\":\"1792925400\"", "\"subtree_state_change_at\":\"1792925299\"" },
+        .{ "\"descendant_needs_you_count\":\"1\"", "\"descendant_needs_you_count\":\"3\"" },
         .{ "\"revision\":\"1\"", "\"revision\":\"0\"" },
         .{ "\"end\":\"9\"", "\"end\":\"9\",\"end\":\"9\"" },
         .{ ",\"last_line\":null", "" },
@@ -3085,7 +3106,7 @@ test "Session list facts attain eight maximum escaped rows and bind the continua
     const writer = &output.interface;
     try writer.writeAll("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[");
     const largest = std.math.maxInt(i64);
-    var maximal: protocol.SessionRow = .{ .read_version = .{ .instance = @splat(0xab), .generation = std.math.maxInt(u64) }, .archive_state = .archiving, .provider = .codex, .tools = try .of(&.{"bash"}), .permission_mode = .bypass, .label = .{}, .created_at = largest, .revision = largest, .end = largest };
+    var maximal: protocol.SessionRow = .{ .read_version = .{ .instance = @splat(0xab), .generation = std.math.maxInt(u64) }, .archive_state = .archiving, .provider = .codex, .tools = try .of(&.{"bash"}), .permission_mode = .bypass, .label = .{}, .created_at = largest, .state_change_at = largest, .subtree_state_change_at = largest, .descendant_count = largest, .descendant_needs_you_count = largest, .revision = largest, .end = largest };
     maximal.creator = .{};
     try maximal.creator.?.set("zzzzzz");
     maximal.parent = .{};

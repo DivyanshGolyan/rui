@@ -1,5 +1,6 @@
 const std = @import("std");
 const session_settings = @import("../session_settings.zig");
+const session_id = @import("../session_id.zig");
 const store_path = @import("../store_path.zig");
 const validStoreId = @import("../store_id.zig").valid;
 const tool_name = @import("../tool_name.zig");
@@ -1950,10 +1951,19 @@ pub fn objects(comptime dialect: rsql.Dialect) []const Object {
     };
 }
 
+pub const mysql_recursive_limit: u64 = blk: {
+    var ids: u64 = 1;
+    for (0..session_id.bytes) |_| ids = std.math.mul(u64, ids, session_id.alphabet.len) catch @compileError("Session ID domain exceeds MySQL recursion capacity");
+    const limit = std.math.add(u64, ids, 1) catch @compileError("Session ID domain exceeds MySQL recursion capacity");
+    if (limit > std.math.maxInt(u32)) @compileError("Session ID domain exceeds MySQL recursion capacity");
+    break :blk limit;
+};
+
 pub const mysql_session = [_][:0]const u8{
     "SET NAMES utf8mb4 COLLATE utf8mb4_0900_bin",
     "SET SESSION sql_mode='ONLY_FULL_GROUP_BY,STRICT_ALL_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION,NO_BACKSLASH_ESCAPES'",
     std.fmt.comptimePrint("SET SESSION group_concat_max_len={d}", .{tool_name.max_offered_names_bytes}),
+    std.fmt.comptimePrint("SET SESSION cte_max_recursion_depth={d}", .{mysql_recursive_limit}),
     "SET SESSION autocommit=1",
 };
 

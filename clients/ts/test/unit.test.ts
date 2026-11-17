@@ -645,12 +645,12 @@ test("session summaries preserve independent creator and parent references and n
 	for (const parent of [null, "p33rs1"]) for (const creator of [null, "cr3at0"]) {
 		const link: Link = {
 			exchange: async () => Buffer.from(JSON.stringify({
-				sessions: [{ reference: "k7m2qx", label: "child", work: { state: { kind: "pending" } }, archive_state: "archiving", parent, creator }],
+				sessions: [{ reference: "k7m2qx", label: "child", work: { state: { kind: "pending" } }, archive_state: "archiving", parent, creator, state_change_at: "9007199254740993", subtree_state_change_at: "9007199254740994", descendant_count: "9007199254740995", descendant_needs_you_count: "9007199254740994" }],
 				next: null,
 			})),
 		};
 		assert.deepEqual(await new Sessions(link).list(), [
-			{ id: "k7m2qx", label: "child", state: "pending", archiveState: "archiving", parent, creator },
+			{ id: "k7m2qx", label: "child", state: "pending", archiveState: "archiving", parent, creator, stateChangeAt: "9007199254740993", subtreeStateChangeAt: "9007199254740994", descendantCount: "9007199254740995", descendantNeedsYouCount: "9007199254740994" },
 		]);
 	}
 });

@@ -84,6 +84,22 @@ test "a Workspace's changed page reads only its own Sessions, however many other
             return counter.steps;
         }
     };
+    // Keep the workspace index boundary present in both measurements. Otherwise
+    // adding the first larger digest can change the final index-iteration step.
+    var boundary_index: usize = 0;
+    while (true) : (boundary_index += 1) {
+        var name: [48]u8 = undefined;
+        const path = try std.fmt.bufPrint(&name, "workspace-boundary-{d}", .{boundary_index});
+        var boundary = try tmp.dir.createDirPathOpen(std.testing.io, path, .{});
+        var boundary_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+        const boundary_path = boundary_buffer[0..try boundary.realPath(std.testing.io, &boundary_buffer)];
+        boundary.close(std.testing.io);
+        const boundary_digest = store_core.workspaceDigest(boundary_path);
+        const watched_digest = store_core.workspaceDigest(workspace);
+        if (std.mem.order(u8, &boundary_digest, &watched_digest) != .gt) continue;
+        _ = try Page.configure(&storage, "scoped-boundary", "", boundary_path);
+        break;
+    }
     const watched = try Page.configure(&storage, "scoped-watched", "", workspace);
     var request: protocol.ListSessions = .{ .workspace = .{}, .since = .{ .instance = storage.instance, .generation = storage.commit_generation.load(.acquire) } };
     try request.workspace.?.set(workspace);
@@ -250,7 +266,7 @@ test "a list row whose queue read fails answers main's MessageAdmissionReadFaile
 }
 
 test "a list row whose settings read fails answers SessionReadFailed" {
-    try expectListStepFailure(listStatementForTesting(error.SessionReadFailed, "JOIN message_admission m"), error.SessionReadFailed, .queued);
+    try expectListStepFailure(listStatementForTesting(error.SessionReadFailed, "JOIN message_admission m ON m.admission_id=?3 AND m.session_ref=session.session_ref"), error.SessionReadFailed, .queued);
 }
 
 test "a list row that fails to render reports its error before a later row's failed step" {
@@ -267,7 +283,7 @@ test "a list row that fails to render reports its error before a later row's fai
     try sqlite.exec(storage.sqliteDatabase(), try std.fmt.bufPrintSentinel(&update, "UPDATE session SET label='two'||char(10)||'lines' WHERE session_ref='{s}'", .{first.slice()}, 0));
     try sqlite.exec(storage.sqliteDatabase(), "PRAGMA ignore_check_constraints=OFF");
     var used = std.atomic.Value(u64).init(0);
-    var fault: TestingStatementFault = .{ .sql = listStatementForTesting(error.SessionReadFailed, "JOIN message_admission m") };
+    var fault: TestingStatementFault = .{ .sql = listStatementForTesting(error.SessionReadFailed, "JOIN message_admission m ON m.admission_id=?3 AND m.session_ref=session.session_ref") };
     fault.arm(storage.sqliteDatabase());
     defer fault.disarm(storage.sqliteDatabase());
     try std.testing.expectError(error.CorruptStore, testingSessionList(&storage, &tmp, .{}, &used, 5));
@@ -288,6 +304,73 @@ test "a list row whose first Message is missing is CorruptStore" {
     try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=ON");
     var used = std.atomic.Value(u64).init(0);
     try std.testing.expectError(error.CorruptStore, testingSessionList(&storage, &tmp, .{}, &used, 5));
+}
+
+test "a list row rejects a latest Turn missing its execution entry" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSession(&storage, "clock-missing-config");
+    const answer = [_]TestingAnswerPart{.{ .encoded = "done", .decoded = "done" }};
+    try answerTestTurn(&storage, &tmp, session.slice(), "clock-missing-first", &answer);
+    try answerTestTurn(&storage, &tmp, session.slice(), "clock-missing-latest", &answer);
+    try store_testing.sqlite_only.exec(&storage, "DELETE FROM conversation_entry WHERE source_admission_id=(SELECT first_admission_id FROM turn WHERE session_ref=?1 ORDER BY turn_id DESC LIMIT 1)", .{session.slice()});
+    var used = std.atomic.Value(u64).init(0);
+    try std.testing.expectError(error.CorruptStore, testingSessionList(&storage, &tmp, .{}, &used, 5));
+}
+
+test "list clock includes queued input after a finished Turn" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSession(&storage, "clock-queue-config");
+    const answer = [_]TestingAnswerPart{.{ .encoded = "done", .decoded = "done" }};
+    try answerTestTurn(&storage, &tmp, session.slice(), "clock-queue-done", &answer);
+    try submitTestMessage(&storage, &tmp, "clock-queue-input", "clock-queue-key", session.slice(), "next");
+    try store_testing.sqlite_only.exec(&storage, "UPDATE session SET created_at=100 WHERE session_ref=?1", .{session.slice()});
+    try store_testing.sqlite_only.exec(&storage, "UPDATE conversation_entry SET recorded_at=150 WHERE session_ref=?1 AND entry_kind=1", .{session.slice()});
+    try store_testing.sqlite_only.exec(&storage, "UPDATE turn SET outcome_at=200 WHERE session_ref=?1", .{session.slice()});
+    try store_testing.sqlite_only.exec(&storage, "UPDATE message_admission SET admitted_at=300 WHERE command_key='clock-queue-key'", .{});
+    var listed = try testingListRow(&storage, &tmp, session.slice());
+    defer listed.deinit();
+    try std.testing.expectEqualStrings("pending", listed.get(&.{ "work", "state", "kind" }).string);
+    try std.testing.expectEqual(@as(u64, 300), try listed.number(&.{"state_change_at"}));
+}
+
+test "list clock records the last permission at a distinct durable time" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try tests.configureTestSessionAsk(&storage, "clock-controlled-config");
+    try submitTestMessage(&storage, &tmp, "clock-controlled-input", "clock-controlled-message", session.slice(), "propose");
+    const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try tests.settleTwoActionsForTesting(&storage, &tmp, model, "clock-controlled-tools");
+    try store_testing.sqlite_only.exec(&storage, "UPDATE session SET created_at=100 WHERE session_ref=?1", .{session.slice()});
+    try store_testing.sqlite_only.exec(&storage, "UPDATE conversation_entry SET recorded_at=150 WHERE session_ref=?1 AND entry_kind=1", .{session.slice()});
+    try store_testing.sqlite_only.exec(&storage, "UPDATE model_operation SET resolved_at=200 WHERE session_ref=?1 AND resolved_at IS NOT NULL", .{session.slice()});
+    const first = try store_testing.queryU64(&storage, "SELECT min(action_id) FROM action_operation", .{});
+    const second = try store_testing.queryU64(&storage, "SELECT max(action_id) FROM action_operation", .{});
+    var allow: protocol.PermissionDecisionCommand = .{ .action_id = first, .decision = .allow_once };
+    try allow.key.set("clock-controlled-first");
+    try allow.session.set(session.slice());
+    try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
+    try store_testing.sqlite_only.exec(&storage, "UPDATE action_operation SET decided_at=300 WHERE action_id=?1", .{first});
+    var partial = try testingListRow(&storage, &tmp, session.slice());
+    defer partial.deinit();
+    try std.testing.expectEqual(@as(u64, 200), try partial.number(&.{"state_change_at"}));
+    allow.action_id = second;
+    try allow.key.set("clock-controlled-second");
+    try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
+    try store_testing.sqlite_only.exec(&storage, "UPDATE action_operation SET decided_at=400 WHERE action_id=?1", .{second});
+    var completed = try testingListRow(&storage, &tmp, session.slice());
+    defer completed.deinit();
+    try std.testing.expectEqual(@as(u64, 400), try completed.number(&.{"state_change_at"}));
 }
 
 test "a list page of mixed work takes its deepest row's rounds, and a pass per row a statement repeats for" {
@@ -323,6 +406,6 @@ test "a list page of mixed work takes its deepest row's rounds, and a pass per r
             std.debug.print("{s}\n", .{bytes[0..read]});
             return err;
         };
-    try std.testing.expectEqual(8, rounds);
-    try std.testing.expectEqual(1 + 8 + 6 + 6 + 4 + 2 + 2 + 6, a.passes);
+    try std.testing.expectEqual(9, rounds);
+    try std.testing.expectEqual(1 + 1 + 8 + 6 + 6 + 4 + 2 + 2 + 6, a.passes);
 }
