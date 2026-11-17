@@ -1,8 +1,16 @@
 """Pure Python filesystem/parser tests: never launch a compiler or native mock."""
+from contextlib import chdir, redirect_stdout
+import hashlib
+import io
+import json
 import os
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
+
+import cache_snapshot as snapshot
 
 import cache_snapshot_proof as proof
 
@@ -158,6 +166,64 @@ class CheckpointTests(unittest.TestCase):
             with self.assertRaises(proof.ProofError):
                 fixture.checkpoint.quarantine_candidates({"skipped": "unknown cache", "removable": []})
 
+    def test_cleanup_attempts_h_and_other_roots_after_independent_failures(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            fixture = Fixture(Path(scratch))
+            checkpoint = fixture.checkpoint
+            checkpoint.quarantine_candidates(fixture.report)
+            failed_new = fixture.local / "o" / "failed-new"
+            other_new = fixture.local / "o" / "other-new"
+            failed_new.mkdir()
+            other_new.mkdir()
+            for root in checkpoint.roots:
+                (root / "h" / "manifest").write_bytes(b"changed h")
+                (root / "o" / ("b" * 32) / "object.o").write_bytes(b"changed object")
+            original_remove, original_copy = proof.remove, proof.copy
+            failed_saved = checkpoint.destination / "0" / "mutable" / fixture.mutable.name
+
+            def remove(path):
+                if path == failed_new:
+                    raise OSError("injected new-dir removal failure")
+                return original_remove(path)
+
+            def copy(path, destination):
+                if path == failed_saved:
+                    raise OSError("injected generated-input copy failure")
+                return original_copy(path, destination)
+
+            with patch.object(proof, "remove", side_effect=remove), patch.object(proof, "copy", side_effect=copy):
+                with self.assertRaises(proof.ProofError) as error:
+                    checkpoint.restore()
+            self.assertIn("new-dir removal failure", str(error.exception))
+            self.assertIn("generated-input copy failure", str(error.exception))
+            self.assertTrue(fixture.candidate.exists())
+            self.assertFalse(other_new.exists())
+            for root in checkpoint.roots:
+                self.assertEqual((root / "h" / "manifest").read_bytes(), b"original manifest")
+                self.assertEqual((root / "o" / ("b" * 32) / "object.o").read_bytes(), b"preserved large output")
+            checkpoint.restore()
+
+    def test_unsafe_local_root_still_allows_global_cleanup(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            fixture = Fixture(Path(scratch))
+            root = fixture.local
+            moved = root.with_name("detached-local")
+            root.rename(moved)
+            foreign = Path(scratch) / "foreign"
+            foreign.mkdir()
+            (foreign / "keep").write_bytes(b"foreign")
+            root.symlink_to(foreign, target_is_directory=True)
+            (fixture.global_cache / "h" / "manifest").write_bytes(b"changed")
+            try:
+                with self.assertRaisesRegex(proof.ProofError, "cache namespace changed"):
+                    fixture.checkpoint.restore()
+                self.assertEqual((foreign / "keep").read_bytes(), b"foreign")
+                self.assertEqual((fixture.global_cache / "h" / "manifest").read_bytes(), b"original manifest")
+            finally:
+                root.unlink()
+                moved.rename(root)
+            fixture.checkpoint.restore()
+
     def test_failure_restores_source_and_quarantined_outputs(self):
         with tempfile.TemporaryDirectory() as scratch:
             fixture = Fixture(Path(scratch))
@@ -241,6 +307,154 @@ class ParserTests(unittest.TestCase):
             owner = build_artifact.compile_command(["check-full", "test-logic"], "rest", jobs=1, pr_mode=profile == "pr")
             self.assertEqual(actual[:len(owner)], owner)
             self.assertEqual(actual[len(owner):], ["--prefix", "/proof/prefix", "--summary", "all", "--verbose-cc", "--verbose-link"])
+
+
+class RunOwnerTests(unittest.TestCase):
+    def run_fixture(self, base, *, fail_unlink=False, archives=False):
+        fixture = Fixture(base)
+        workspace = base / "workspace"
+        (workspace / "src").mkdir(parents=True)
+        fixture.source.rename(workspace / "src" / "cli.zig")
+        fixture.source = workspace / "src" / "cli.zig"
+        original_source = fixture.source.read_bytes()
+        original_mtime = fixture.source.stat().st_mtime_ns
+        # Enough real ELF structure for the real invalidation owner's eligibility check.
+        executable = fixture.candidate / "rui-release-safe-check"
+        executable.write_bytes(snapshot.ELF.pack(
+            b"\x7fELF\x02\x01\x01" + b"\0" * 9, 2, 62, 1, 0x400078,
+            64, 0, 0, 64, 56, 1, 0, 0, 0) + b"\0" * 56)
+        executable.chmod(0o755)
+        owners = [fixture.local / "h" / (letter * 32) for letter in ("e", "f")]
+        for owner in owners:
+            owner.write_bytes(b"old CLI manifest " + owner.name.encode())
+        report = {"removable": [{"path": str(fixture.candidate), "bytes": executable.stat().st_size,
+                                "manifests": [{"path": str(owner), "sha256": hashlib.sha256(owner.read_bytes()).hexdigest()}
+                                              for owner in owners]}]}
+        baseline_h = {root: {p.name: p.read_bytes() for p in (root / "h").iterdir()}
+                      for root in (fixture.local, fixture.global_cache)}
+        runner_temp = base / "runner"
+        runner_temp.mkdir()
+        (runner_temp / "zig-cache-restat").write_bytes(b"not executed")
+        args = SimpleNamespace(local=fixture.local, global_cache=fixture.global_cache,
+                               zig_lib=base / "zig-lib", targets=["check-full", "test-logic"], part="rest",
+                               jobs=1, profiles=["llvm", "pr"], checkpoint_budget_gb=1, disk_reserve_gb=0,
+                               protect_prefix=[base / "llvm" / "bin"], measure_archives=archives)
+        events, builds, source_pairs, measurements = [], [], {}, []
+        original_invalidate = snapshot.invalidate_manifest_owners
+        original_quarantine = proof.Checkpoint.quarantine_candidates
+        original_unlink = Path.unlink
+
+        def audit(local, global_cache, *, prefixes):
+            self.assertEqual(prefixes, args.protect_prefix)
+            self.assertEqual((local, global_cache), (fixture.local, fixture.global_cache))
+            return report
+
+        def invalidate(report, local):
+            self.assertEqual({p.name: p.read_bytes() for p in (local / "h").iterdir()}, baseline_h[local])
+            events.append("invalidate")
+            return original_invalidate(report, local)
+
+        def quarantine(checkpoint, report):
+            self.assertEqual(events[-1], "invalidate")
+            self.assertTrue(all(not owner.exists() for owner in owners))
+            events.append("quarantine")
+            return original_quarantine(checkpoint, report)
+
+        def unlink(path, *args, **kwargs):
+            if fail_unlink and path == owners[1]:
+                self.assertFalse(owners[0].exists())
+                raise OSError("injected failure after one owner unlink")
+            return original_unlink(path, *args, **kwargs)
+
+        def stage(argv, destination, **kwargs):
+            destination.mkdir(parents=True, exist_ok=False)
+            candidate = destination.parent.name == "candidate"
+            if destination.name == "restat" or destination.name == "final-restat":
+                for root, expected in baseline_h.items():
+                    if candidate and root == fixture.local:
+                        expected = {name: value for name, value in expected.items() if name not in {p.name for p in owners}}
+                    self.assertEqual({p.name: p.read_bytes() for p in (root / "h").iterdir()}, expected)
+                return "restat diagnostic"
+            self.assertEqual(destination.name, "build")
+            if candidate:
+                self.assertEqual(events[-1], "quarantine")
+            events.append("build-candidate" if candidate else "build-control")
+            builds.append(argv)
+            key = tuple(destination.parts[-4:-2])
+            value = (fixture.source.read_bytes(), fixture.source.stat().st_mtime_ns)
+            self.assertEqual(source_pairs.setdefault(key, value), value)
+            for root in baseline_h:
+                (root / "h" / "manifest").write_bytes(b"prior arm warmed h")
+                new = root / "o" / f"new-{len(builds)}"
+                new.mkdir()
+                (new / "compiled").write_bytes(b"prior arm output")
+            return WARM.replace("ReleaseSafe native cached", "ReleaseSafe native success") if "-Dpr-ci=true" in argv else WARM
+
+        def measure(roots, destination, **kwargs):
+            measurements.append((tuple(roots), destination.name))
+            if destination.name == "before":
+                self.assertTrue(fixture.candidate.exists())
+                self.assertTrue(all(owner.exists() for owner in owners))
+            else:
+                self.assertFalse(fixture.candidate.exists())
+                self.assertTrue(all(not owner.exists() for owner in owners))
+            return dict(compressed_bytes=100 if destination.name == "before" else 50, elapsed_seconds=1)
+
+        with chdir(workspace), patch.dict(os.environ, RUNNER_TEMP=str(runner_temp)), \
+                patch.object(snapshot, "audit", side_effect=audit), \
+                patch.object(snapshot, "invalidate_manifest_owners", side_effect=invalidate), \
+                patch.object(proof.Checkpoint, "quarantine_candidates", new=quarantine), \
+                patch.object(Path, "unlink", new=unlink), patch.object(proof, "stage", side_effect=stage), \
+                patch.object(proof, "measure_archive", side_effect=measure), redirect_stdout(io.StringIO()):
+            status = proof.run(args)
+        summary = json.loads((runner_temp / "rui-cache-profile" / "proof" / "summary.json").read_text())
+        self.assertEqual(fixture.source.read_bytes(), original_source)
+        self.assertEqual(fixture.source.stat().st_mtime_ns, original_mtime)
+        self.assertTrue(fixture.candidate.exists())
+        for root, expected in baseline_h.items():
+            self.assertEqual({p.name: p.read_bytes() for p in (root / "h").iterdir()}, expected)
+            self.assertFalse(any(p.name.startswith("new-") for p in (root / "o").iterdir()))
+        return status, summary, events, builds, measurements
+
+    def test_all_pairs_start_at_main_checkpoint_and_invalidate_before_quarantine(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            status, summary, events, builds, _ = self.run_fixture(Path(scratch))
+            self.assertEqual(status, 0, summary["errors"])
+            self.assertTrue(summary["parity"])
+            self.assertEqual(len(builds), 8)  # No PR priming build.
+            self.assertEqual([(p["profile"], p["scenario"]) for p in summary["pairs"]],
+                             [("llvm", "unchanged"), ("llvm", "edit"), ("pr", "unchanged"), ("pr", "edit")])
+            self.assertEqual(events, ["build-control", "invalidate", "quarantine", "build-candidate"] * 4)
+
+    def test_partial_owner_invalidation_failure_prevents_candidate_build_and_restores(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            status, summary, events, builds, _ = self.run_fixture(Path(scratch), fail_unlink=True)
+            self.assertEqual(status, 1)
+            self.assertFalse(summary["parity"])
+            self.assertEqual(len(builds), 1)
+            self.assertEqual(events, ["build-control", "invalidate"])
+            self.assertIn("failure after one owner unlink", "".join(summary["errors"]))
+
+    def test_archive_pair_is_separate_and_restores_main_checkpoint_before_builds(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            status, summary, events, builds, measurements = self.run_fixture(Path(scratch), archives=True)
+            self.assertEqual(status, 0, summary["errors"])
+            self.assertEqual(len(builds), 8)
+            self.assertEqual([item[1] for item in measurements], ["before", "candidate"])
+            self.assertEqual(measurements[0][0], measurements[1][0])
+            self.assertEqual(len(measurements[0][0]), 4)
+            self.assertEqual(summary["archives"]["before"]["compressed_bytes"], 100)
+            self.assertEqual(summary["archives"]["candidate"]["compressed_bytes"], 50)
+            self.assertEqual(events[:2], ["invalidate", "quarantine"])
+
+    def test_archive_command_matches_publication_settings(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            base = Path(scratch)
+            roots = [base / name for name in (".zig-cache", "global", "zig-pkg", "screen/zig-pkg")]
+            listing = base / "files.txt"
+            self.assertEqual(proof.archive_command(roots, listing),
+                             ["tar", "--posix", "-c", "-f", "-", "-P", "--use-compress-program", "zstdmt", "--files-from", str(listing)])
+            self.assertEqual(listing.read_text().splitlines(), list(map(str, roots)))
 
 
 if __name__ == "__main__":

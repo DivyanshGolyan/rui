@@ -194,40 +194,71 @@ class Checkpoint:
             self.moved[path.name] = destination
 
     def restore(self):
-        # Never follow a substituted output namespace during cleanup.
-        self.check_paths()
-        # Preserve evidence of unknown writes while still attempting all reversible cleanup.
+        # Each root, namespace and saved directory gets its own cleanup attempt.
         failures = []
-        try:
-            self.validate()
-        except (ProofError, OSError) as error:
-            failures.append(str(error))
-        for name, saved in list(self.moved.items()):
+
+        def attempt(label, action):
             try:
+                action()
+                return True
+            except Exception as error:
+                failures.append(f"{label}: {type(error).__name__}: {error}")
+                return False
+
+        def check(root, outputs=False):
+            if root.resolve() != root or not root.is_dir():
+                raise ProofError(f"cache namespace changed: {root}")
+            if outputs and ((root / "o").is_symlink() or not (root / "o").is_dir()):
+                raise ProofError(f"cache namespace changed: {root / 'o'}")
+
+        def restore_copy(saved, target):
+            if target.is_symlink():
+                raise ProofError(f"refusing to copy through symlink: {target}")
+            copy(saved, target)
+
+        safe = [attempt(str(root), lambda root=root: check(root)) for root in self.roots]
+        outputs = [safe[index] and attempt(str(root / "o"), lambda root=root: check(root, True))
+                   for index, root in enumerate(self.roots)]
+        for index, root in enumerate(self.roots):
+            if not outputs[index]:
+                continue
+            for name, expected in self.frozen[index].items():
+                path = self.moved.get(name, root / "o" / name) if index == 0 else root / "o" / name
+                def validate(path=path, expected=expected):
+                    if path.is_symlink() or not path.is_dir() or metadata(path) != expected:
+                        raise ProofError(f"existing output changed; fairness unproved (bytes were not backed up): {path}")
+                attempt(str(path), validate)
+        if outputs[0]:
+            for name, saved in list(self.moved.items()):
                 target = self.roots[0] / "o" / name
                 if target.exists() or target.is_symlink():
-                    remove(target)  # A recreated digest from the candidate arm.
-                saved.rename(target)
-                del self.moved[name]
-            except OSError as error:
-                failures.append(str(error))
+                    attempt(str(target), lambda target=target: remove(target))
+                if attempt(str(saved), lambda saved=saved, target=target: saved.rename(target)):
+                    del self.moved[name]
         for index, root in enumerate(self.roots):
-            try:
-                for path in (root / "o").iterdir():
+            if outputs[index]:
+                entries = []
+                attempt(str(root / "o"), lambda: entries.extend((root / "o").iterdir()))
+                for path in entries:
                     if path.name not in self.initial[index]:
-                        remove(path)
-                for name in self.mutable[index]:
+                        attempt(str(path), lambda path=path: remove(path))
+                for name in sorted(self.mutable[index]):
                     target = root / "o" / name
                     if target.exists() or target.is_symlink():
-                        remove(target)
-                    copy(self.destination / str(index) / "mutable" / name, target)
-                for path in root.iterdir():
+                        attempt(str(target), lambda target=target: remove(target))
+                    saved = self.destination / str(index) / "mutable" / name
+                    attempt(str(saved), lambda saved=saved, target=target: restore_copy(saved, target))
+            if safe[index]:
+                entries = []
+                attempt(str(root), lambda: entries.extend(root.iterdir()))
+                for path in entries:
                     if path.name != "o":
-                        remove(path)
-                for path in (self.destination / str(index) / "non-o").iterdir():
-                    copy(path, root / path.name)
-            except (OSError, ProofError) as error:
-                failures.append(str(error))
+                        attempt(str(path), lambda path=path: remove(path))
+                saved_entries = []
+                saved_root = self.destination / str(index) / "non-o"
+                attempt(str(saved_root), lambda: saved_entries.extend(saved_root.iterdir()))
+                for path in saved_entries:
+                    attempt(str(path), lambda path=path: restore_copy(path, root / path.name))
         if failures:
             raise ProofError("checkpoint cleanup: " + "; ".join(failures))
 
@@ -349,6 +380,46 @@ def stage(argv, destination, *, workspace, env):
     return (destination / "output.log").read_text(errors="replace")
 
 
+def archive_command(roots, listing):
+    paths = [Path(root).absolute() for root in roots]
+    if any("\n" in str(path) or "\r" in str(path) for path in paths):
+        raise ProofError("archive paths cannot contain newlines")
+    listing.write_text("".join(str(path) + "\n" for path in paths))
+    return ["tar", "--posix", "-c", "-f", "-", "-P", "--use-compress-program", "zstdmt",
+            "--files-from", str(listing)]
+
+
+def measure_archive(roots, destination, *, workspace, env):
+    """Count streamed compressed bytes; retain only stderr and timing metadata."""
+    destination.mkdir(parents=True, exist_ok=False)
+    argv = archive_command(roots, destination / "files.txt")
+    record = dict(command=argv, roots=list(map(str, roots)), started_ns=time.time_ns(),
+                  compressed_bytes=0)
+    started = time.monotonic()
+    process = None
+    try:
+        with (destination / "stderr.log").open("wb") as errors:
+            process = subprocess.Popen(argv, cwd=workspace, env=env, stdout=subprocess.PIPE, stderr=errors)
+            try:
+                with process.stdout:
+                    while chunk := process.stdout.read(1024 * 1024):
+                        record["compressed_bytes"] += len(chunk)
+                record["returncode"] = process.wait()
+            except BaseException:
+                process.kill()
+                process.wait()
+                raise
+        if record["returncode"]:
+            raise ProofError(f"archive measurement failed ({record['returncode']}): {destination}")
+        return record
+    except BaseException as error:
+        record["error"] = str(error)
+        raise
+    finally:
+        record["elapsed_seconds"] = time.monotonic() - started
+        (destination / "status.json").write_text(json.dumps(record, indent=2))
+
+
 def run(args):
     import cache_snapshot  # The parent's audit helper, deliberately not duplicated here.
 
@@ -365,7 +436,7 @@ def run(args):
     env = dict(os.environ, ZIG_LOCAL_CACHE_DIR=str(local), ZIG_GLOBAL_CACHE_DIR=str(global_cache),
                NO_COLOR="1", TERM="dumb")
     result = dict(diagnostic_only=True, parity=False, pairs=[], targets=args.targets, part=args.part,
-                  profiles=args.profiles, roots=[str(local), str(global_cache)], errors=[])
+                  profiles=args.profiles, checkpoint_profile="main-llvm", roots=[str(local), str(global_cache)], errors=[])
     checkpoint = None
     source = Source(workspace / "src" / "cli.zig")
     prefix = output / "prefix"
@@ -376,18 +447,30 @@ def run(args):
                             edited_sha256=hashlib.sha256(source.original + source.COMMENT).hexdigest())
     try:
         with source.preserved():
-            stage(command(args.targets, args.part, "pr", prefix, args.jobs),
-                  output / "prime-pr", workspace=workspace, env=env)
             checkpoint = Checkpoint([local, global_cache], output / "checkpoint",
                                     budget_bytes=args.checkpoint_budget_gb * 1024**3,
                                     reserve_bytes=args.disk_reserve_gb * 1024**3)
-            audit = cache_snapshot.audit(local, global_cache, prefixes=[*args.protect_prefix, prefix / "bin"])
+            audit = cache_snapshot.audit(local, global_cache, prefixes=args.protect_prefix)
             (output / "audit.json").write_text(json.dumps(audit, indent=2))
             if not audit.get("removable") or audit.get("skipped"):
                 raise ProofError("audit found no eligible outputs; candidate experiment unavailable")
+            if args.measure_archives:
+                roots = [local, global_cache, workspace / "zig-pkg", workspace / "screen-emulator" / "zig-pkg"]
+                result["archives"] = {}
+                try:
+                    checkpoint.restore()
+                    result["archives"]["before"] = measure_archive(
+                        roots, output / "archives" / "before", workspace=workspace, env=env)
+                    cache_snapshot.invalidate_manifest_owners(audit, local)
+                    checkpoint.quarantine_candidates(audit)
+                    result["archives"]["candidate"] = measure_archive(
+                        roots, output / "archives" / "candidate", workspace=workspace, env=env)
+                    checkpoint.validate()
+                finally:
+                    checkpoint.restore()
             for profile in args.profiles:
                 for edited in (False, True):
-                    scenario = "edit" if edited else "warm"
+                    scenario = "edit" if edited else "unchanged"
                     # Apply once per pair: the two arms see identical source bytes and mtime.
                     source.apply(edited)
                     pair = dict(profile=profile, scenario=scenario, arms={})
@@ -396,6 +479,7 @@ def run(args):
                         checkpoint.restore()
                         directory = output / profile / scenario / arm
                         if arm == "candidate":
+                            cache_snapshot.invalidate_manifest_owners(audit, local)
                             checkpoint.quarantine_candidates(audit)
                         stage(restat_command, directory / "restat", workspace=workspace, env=env)
                         if prefix.exists():
@@ -434,6 +518,8 @@ def main():
     parser.add_argument("--profiles", nargs="+", choices=("llvm", "pr"), default=["llvm", "pr"])
     parser.add_argument("--checkpoint-budget-gb", type=int, default=4)
     parser.add_argument("--disk-reserve-gb", type=int, default=8)
+    parser.add_argument("--measure-archives", action="store_true",
+                        help="stream one main-state before/after tar+zstd measurement")
     parser.add_argument("--jobs", type=int, help="use 1 locally; hosted Linux owner defaults to 8")
     parser.add_argument("--local", type=Path, default=Path(".zig-cache"))
     parser.add_argument("--global-cache", type=Path, default=Path(os.environ.get("ZIG_GLOBAL_CACHE_DIR", Path.home() / ".cache/zig")))
