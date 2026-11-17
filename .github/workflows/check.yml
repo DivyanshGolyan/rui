@@ -390,7 +390,10 @@ jobs:
         env:
           TARGETS: ${{ needs.plan.outputs.native_targets }}
           PART: ${{ needs.plan.outputs.macos_split == 'true' && 'rest' || 'all' }}
-        run: python3 -B tests/ci/build_artifact.py build "$TARGETS" --part "$PART"
+        run: |
+          sysctl hw.ncpu hw.memsize vm.swapusage
+          /usr/bin/time -l python3 -B tests/ci/build_artifact.py build "$TARGETS" --part "$PART"
+          sysctl vm.swapusage
       - name: Save reusable caches even after failure
         if: ${{ always() }}
         uses: ./.github/actions/setup/caches
