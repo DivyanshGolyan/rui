@@ -622,7 +622,7 @@ test "work loses whether a model operation is current" {
 
 test "actions derive from work inputs" {
     const pending = Inputs.Pending{ .at = 600, .position = 60 };
-    for (0..8) |mask| {
+    for (0..16) |mask| {
         const queued: ?Inputs.Pending = if (mask & 1 != 0) pending else null;
         const owed: ?u64 = if (mask & 2 != 0) 600 else null;
         const decision: ?u64 = if (mask & 4 != 0) 41 else null;
@@ -635,12 +635,16 @@ test "actions derive from work inputs" {
             endedTurn(.failed, "failed"),
             endedTurn(.cancelled, "cancelled"),
         };
-        for (turns, 0..) |turn, index| {
+        for (turns, 0..) |initial, index| {
+            var turn = initial;
+            if (mask & 8 != 0) if (turn) |*t| {
+                t.stopped_at = 450;
+            };
             // first_action requires a latest Turn, even when it refers to an older Action.
             if (turn == null and decision != null) continue;
             const work = try derive(.{ .now_ms = 0, .created_at = 1, .latest = turn, .oldest_pending = queued, .owed_since = owed, .first_action = decision });
-            try std.testing.expectEqual((index >= 1 and index <= 3) or queued != null or owed != null, work.actions.stop);
-            try std.testing.expectEqual(index == 1, work.actions.interrupt != null);
+            try std.testing.expectEqual((index >= 1 and index <= 3 and mask & 8 == 0) or queued != null or owed != null, work.actions.stop);
+            try std.testing.expectEqual(index == 1 and mask & 8 == 0, work.actions.interrupt != null);
             if (work.actions.interrupt) |target| {
                 try std.testing.expectEqual(@as(u64, 7), target.turn);
                 try std.testing.expectEqual(@as(u64, 19), target.operation);
@@ -651,10 +655,11 @@ test "actions derive from work inputs" {
 }
 
 test "actions cover proposal and stopping combinations" {
-    for (0..8) |mask| {
+    for (0..16) |mask| {
         const queued: ?Inputs.Pending = if (mask & 1 != 0) .{ .at = 600, .position = 60 } else null;
         const decision: ?u64 = if (mask & 2 != 0) 41 else null;
         const stopped = mask & 4 != 0;
+        const owed: ?u64 = if (mask & 8 != 0) 600 else null;
         const action_sets = [_]Inputs.Actions{
             .{},
             .{ .total = 1, .unresolved = 1, .awaiting = 1, .first_awaiting = 41 },
@@ -664,8 +669,8 @@ test "actions cover proposal and stopping combinations" {
         for (action_sets) |set| {
             var turn = activeTurn(proposals(340), set);
             if (stopped) turn.stopped_at = 500;
-            const work = try derive(.{ .created_at = 1, .now_ms = 0, .latest = turn, .oldest_pending = queued, .first_action = decision });
-            try std.testing.expectEqual(!stopped or queued != null, work.actions.stop);
+            const work = try derive(.{ .created_at = 1, .now_ms = 0, .latest = turn, .oldest_pending = queued, .owed_since = owed, .first_action = decision });
+            try std.testing.expectEqual(!stopped or queued != null or owed != null, work.actions.stop);
             try std.testing.expect(work.actions.interrupt == null);
             try std.testing.expectEqual(decision, work.actions.decide);
         }
