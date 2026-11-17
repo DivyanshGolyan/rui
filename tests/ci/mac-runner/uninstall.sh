@@ -38,7 +38,7 @@ record_path, local_path = Path(record_path), Path(local_path)
 def read_json(path):
     try:
         if not path.is_symlink() and path.is_file():
-            return json.loads(path.read_text())
+            return json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         pass
     return None
