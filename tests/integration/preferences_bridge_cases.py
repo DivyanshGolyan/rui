@@ -2,6 +2,7 @@
 import json
 import os
 import pathlib
+import select
 import ssl
 import subprocess
 import threading
@@ -61,11 +62,18 @@ def preferences_bridge(binary, root, store_settings, env):
             sock = runtime / "rui.sock"
 
             def launch(*args):
+                assert not sock.exists(), "previous Host retained the interface socket"
                 host = subprocess.Popen([str(binary), "host", "serve", "--settings", "-", *args], env=clean,
                                         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 host.stdin.write(settings_fixture.frame(document))
                 host.stdin.flush()
+                host_process.wait_for(lambda: bool(select.select([host.stdout], [], [], 0)[0]),
+                                      "new Host readiness line", timeout=20)
+                line = host.stdout.readline().decode()
+                assert line.startswith("ready instance="), (line, host.poll())
+                instance = line.split()[1].split("=", 1)[1]
                 settings_fixture.wait_for_host(sock, "", host)
+                assert settings_fixture.host_info(sock, "")["instance"] == instance, line
                 return host
 
             def close(host):
@@ -92,6 +100,7 @@ def preferences_bridge(binary, root, store_settings, env):
                                    input=json.dumps({"binary": str(binary), "settings": document, "workspace": str(workspace)}),
                                    capture_output=True, text=True, timeout=60)
             assert typed.returncode == 0, typed
+            assert not sock.exists(), "TypeScript Host retained the interface socket after close"
             reports = json.loads(typed.stdout)
             assert [(r["session"]["model"], r["session"]["reasoning_effort"], r["session"]["permission_mode"])
                     for r in reports] == [("gpt-5.5", "max", "bypass"), ("gpt-6.1-sol", "low", "bypass"),
