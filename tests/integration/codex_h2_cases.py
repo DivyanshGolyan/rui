@@ -214,10 +214,9 @@ def openai_base_url_run(*, catalog_available=False):
     try:
         catalog_url = f"https://localhost:{endpoint.server_address[1]}/api.json" if catalog_available else "https://127.0.0.1:1/api.json"
         host, ready = start_ready_process([fixture.RUI, "host", "serve", "--store", store, "--set", 'providers={"openai":{}}', "--set", 'execution.activeCapacity=1',
-            "--test-models-dev-url", catalog_url], env={
+            "--set", f"providers.openai.endpoint=https://localhost:{endpoint.server_address[1]}/custom/v1/responses", "--test-models-dev-url", catalog_url], env={
             **os.environ, "RUI_OPENAI_KEY_FILE": str(key_file), **os_semantics.system_trust(root / "cert.pem"),
-            "RUI_OPENAI_BASE_URL": f"https://localhost:{endpoint.server_address[1]}/custom/v1/",
-        })
+                    })
         def model_list():
             return h2_fixture.closed_host_request(ready["socket"], store, "model_list")["providers"]
         assert model_list()[0]["source"] == "pending", model_list()
@@ -273,10 +272,9 @@ def openai_base_url_run(*, catalog_available=False):
         fixture.stop_host(host)
         host = None
         endpoint.models = b'{"error":"model list unavailable"}'
-        host, ready = start_ready_process([fixture.RUI, "host", "serve", "--store", store, "--set", 'providers={"openai":{}}', "--set", 'execution.activeCapacity=1'], env={
+        host, ready = start_ready_process([fixture.RUI, "host", "serve", "--store", store, "--set", 'providers={"openai":{}}', "--set", 'execution.activeCapacity=1', "--set", f"providers.openai.endpoint=https://localhost:{endpoint.server_address[1]}/custom/v1/responses"], env={
             **os.environ, "RUI_OPENAI_KEY_FILE": str(key_file), **os_semantics.system_trust(root / "cert.pem"),
-            "RUI_OPENAI_BASE_URL": f"https://localhost:{endpoint.server_address[1]}/custom/v1/",
-        })
+                    })
         fallback = fixture.wait_for(
             lambda: (value if (value := model_list())[0]["source"] != "pending" else None),
             "the OpenAI catalog fallback", timeout=20)
@@ -346,9 +344,9 @@ def saved_catalog_run():
     complete = False
     env = {**os.environ, "RUI_OPENAI_KEY_FILE": str(key_file),
            **os_semantics.system_trust(root / "cert.pem"),
-           "RUI_OPENAI_BASE_URL": f"https://localhost:{endpoint.server_address[1]}/v1/"}
+           }
     arguments = [fixture.RUI, "host", "serve", "--store", store, "--set", 'providers={"openai":{}}',
-                 "--set", 'execution.activeCapacity=1', "--test-models-dev-url",
+                 "--set", 'execution.activeCapacity=1', "--set", f"providers.openai.endpoint=https://localhost:{endpoint.server_address[1]}/v1/responses", "--test-models-dev-url",
                  f"https://localhost:{endpoint.server_address[1]}/api.json"]
 
     def listed():

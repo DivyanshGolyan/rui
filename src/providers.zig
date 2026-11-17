@@ -86,15 +86,6 @@ pub fn endpoint(provider: Provider) []const u8 {
     return provider.facts().endpoint;
 }
 
-pub const openai_base_url_variable = "RUI_OPENAI_BASE_URL";
-
-pub fn openAiEndpoint(environ: *const std.process.Environ.Map, allocator: std.mem.Allocator) ![]const u8 {
-    const base = environ.get(openai_base_url_variable) orelse return endpoint(.openai);
-    return endpointUnder(allocator, base);
-}
-
-pub const endpointUnder = @import("endpoint_value.zig").endpointUnder;
-
 pub fn responsesBase(responses: []const u8) ?[]const u8 {
     return std.mem.cutSuffix(u8, responses, "/responses");
 }
