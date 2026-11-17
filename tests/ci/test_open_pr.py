@@ -94,6 +94,7 @@ class OpenPrTest(unittest.TestCase):
                      patch.object(open_pr, "git", side_effect=["fix-x", "a" * 40, "a" * 40, ""]), \
                      patch.object(open_pr, "origin_repo", return_value="example/rui"), \
                      patch.object(open_pr, "branch_changes", return_value=(paths, removed)) as changes, \
+                     patch.object(open_pr, "screens_required", return_value=False), \
                      patch.object(open_pr, "overlaps", side_effect=change_body_after_validation) as overlaps, \
                      patch.object(open_pr, "gh", return_value='{"number": 9, "html_url": "url"}') as gh, \
                      patch.object(open_pr, "github") as github, \
@@ -113,19 +114,20 @@ class OpenPrTest(unittest.TestCase):
                     gh.assert_not_called()
                     github.assert_not_called()
 
-    def test_ui_without_screens_opens(self):
+    def test_ui_without_screens_opens_and_prints_reminder(self):
         stdout = io.StringIO()
         with patch("sys.argv", ["open_pr.py", "open", "--title", "Title", "--body-file", "body.md"]), \
              patch.object(open_pr, "git", side_effect=["fix-x", "a" * 40, "a" * 40, ""]), \
              patch.object(open_pr, "origin_repo", return_value="example/rui"), \
              patch.object(open_pr.Path, "read_text", return_value=GOAL + "## Shape"), \
              patch.object(open_pr, "branch_changes", return_value=({"src/overview_view.zig"}, {})), \
+             patch.object(open_pr, "screens_required", return_value=True), \
              patch.object(open_pr, "overlaps", return_value=[]), patch.object(open_pr, "report"), \
              patch.object(open_pr, "gh", return_value='{"number": 9, "html_url": "url"}') as gh, \
              patch.object(open_pr, "github"), redirect_stdout(stdout):
             self.assertEqual(open_pr.main(), 0)
         gh.assert_called_once()
-        self.assertNotIn("UI PR:", stdout.getvalue())
+        self.assertIn("UI PR: publish frames with verify-rui publish DIR --pr N; admission stays red until then.", stdout.getvalue())
 
     def test_open_reports_unreadable_body_without_github(self):
         for error in (FileNotFoundError("missing body"), PermissionError("unreadable body"),

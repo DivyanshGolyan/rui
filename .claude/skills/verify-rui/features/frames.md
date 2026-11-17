@@ -12,7 +12,7 @@ Make a baseline with `shots`, then pass its output directory as `--baseline` whe
 
 Full captures include upgrade states and require a dedicated non-root account with `VERIFY_RUI_UPGRADE_FIXTURE_USER` set to its login. The fixture currently includes wall-clock message times, Session ordering and live memory figures, so repeated fingerprints can differ without a product change; inspect the frames before attributing a difference to the build.
 
-`--shard i/n` assigns states by index modulo n (i is 1-based). Combine shard outputs with `$V shots-merge OUT1 OUT2 ... --out OUT [--baseline DIR]` and review the merged comparison and failures. Use `frames` below for selected states, sizes or recordings.
+`--shard i/n` assigns states by index modulo n (i is 1-based). Combine shard outputs with `$V shots-merge OUT1 OUT2 ... --out OUT [--baseline DIR]` and review the merged comparison and failures. Use `frames` below for selected states, sizes or recordings, and `publish` to attach selected evidence to a PR.
 
 ## Scenario
 
@@ -63,3 +63,9 @@ A pair is `same` only when committed cell contents, styles, dimensions and termi
 Both HEAD and BASE load their own pinned `frames.json` through one revision reader, independent of newer or dirty working-tree recipes. A state introduced after HEAD is unknown. An explicit `--scenario FILE` intentionally supplies one recipe for both builds. Both use the selected HEAD state names and viewports.
 A state absent from BASE is marked `new` in `pairs.json`, with only an after capture; existing BASE states must pass their own steps and assertions.
 Both sides retain their capture status and failures still fail the command after preserving the paired evidence.
+
+`$V publish DIR --pr N [--states NAME,...] [--all] [--ssh HOST]` attaches the manifests' PNGs and GIFs to the PR's `## Screens`, excluding same pairs unless `--all` is given.
+It refuses failed or missing captures and unknown states. Each image has state/size/side alt text on its own line; recordings are labelled as such. Admission requires that visible line to start with `![`, `<img` or `<video` after whitespace and contain a user-attachments URL, outside code fences and HTML comments.
+The upload machine needs gh 2.104.0+ with `--attach`, a classic PAT or gh OAuth token and repository push access. Readback verifies user-attachments embeds after each batch of at most 50 files; partial failures retain their actual PR updates and fail clearly.
+Cloud threads use `--ssh rui-box` after `rui-box-up.sh` setup: only selected files and the shared worker are staged remotely, and the fresh directory is removed after upload/readback. The local mode runs the same worker directly.
+Screens gate `admission` for merge; the build and tests run without them. After attachment, rerun only the failed `admission` job; see [Prove a UI PR](../SKILL.md#prove-a-ui-pr). All later body writes must also go through the box, since the container gateway would defang the embedded images.
