@@ -1274,19 +1274,19 @@ pub fn captureSessionPin(io: std.Io, input: SessionPinInput, target: CaptureTarg
 }
 
 pub fn captureSessionGroup(io: std.Io, input: SessionGroupInput, target: CaptureTarget) !CapturedRecord {
-    const paths = try platform.resolveClientPaths(io, input.store);
+    const paths = try resolveClientPaths(io, input.store);
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     var key_buffer: [36]u8 = undefined;
     const location = try target.resolve(io, &path_buffer, &key_buffer);
     try protocol_reply.validateIdentityInputs(location.key, input.session);
     try input.action.validate();
     return switch (input.action) {
-        .assign => |name| runCapture(io, paths.store.slice(), &location, input.session, .session_group, null, Capture.writeRequest, .{ protocol.session_group_request.assign, .{ paths.store.slice(), location.key, input.session, name.slice() } }),
-        .rename_current => |name| runCapture(io, paths.store.slice(), &location, input.session, .session_group, null, Capture.writeRequest, .{ protocol.session_group_request.rename_current, .{ paths.store.slice(), location.key, input.session, name.slice() } }),
-        .leave => runCapture(io, paths.store.slice(), &location, input.session, .session_group, null, Capture.writeRequest, .{ protocol.session_group_request.leave, .{ paths.store.slice(), location.key, input.session } }),
-        .automatic => runCapture(io, paths.store.slice(), &location, input.session, .session_group, null, Capture.writeRequest, .{ protocol.session_group_request.automatic, .{ paths.store.slice(), location.key, input.session } }),
-        .rename => |value| runCapture(io, paths.store.slice(), &location, input.session, .session_group, null, Capture.writeRequest, .{ protocol.session_group_request.rename, .{ paths.store.slice(), location.key, input.session, value.group, value.name.slice() } }),
-        .collapse => |value| runCapture(io, paths.store.slice(), &location, input.session, .session_group, null, Capture.writeRequest, .{ protocol.session_group_request.collapse, .{ paths.store.slice(), location.key, input.session, value.group, value.collapsed } }),
+        .assign => |name| runCapture(io, &paths, &location, input.session, .session_group, null, Capture.writeRequest, .{ protocol.session_group_request.assign, .{ paths.store_identity.slice(), location.key, input.session, name.slice() } }),
+        .rename_current => |name| runCapture(io, &paths, &location, input.session, .session_group, null, Capture.writeRequest, .{ protocol.session_group_request.rename_current, .{ paths.store_identity.slice(), location.key, input.session, name.slice() } }),
+        .leave => runCapture(io, &paths, &location, input.session, .session_group, null, Capture.writeRequest, .{ protocol.session_group_request.leave, .{ paths.store_identity.slice(), location.key, input.session } }),
+        .automatic => runCapture(io, &paths, &location, input.session, .session_group, null, Capture.writeRequest, .{ protocol.session_group_request.automatic, .{ paths.store_identity.slice(), location.key, input.session } }),
+        .rename => |value| runCapture(io, &paths, &location, input.session, .session_group, null, Capture.writeRequest, .{ protocol.session_group_request.rename, .{ paths.store_identity.slice(), location.key, input.session, value.group, value.name.slice() } }),
+        .collapse => |value| runCapture(io, &paths, &location, input.session, .session_group, null, Capture.writeRequest, .{ protocol.session_group_request.collapse, .{ paths.store_identity.slice(), location.key, input.session, value.group, value.collapsed } }),
     };
 }
 
@@ -5652,6 +5652,40 @@ test "group captures preserve every action through original-byte recovery" {
     try std.testing.expectError(error.InvalidGroupId, captureSessionGroup(io, .{ .store = root, .session = "k7m2qx", .action = .{ .collapse = .{ .group = 0, .collapsed = true } } }, .{ .generated = root }));
 }
 
+test "group captures retain saved endpoint placement and relocated Store identity" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(io, .fromMode(0o700));
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    var host = try tmp.dir.createDirPathOpen(io, "host", .{ .permissions = .fromMode(0o700) });
+    defer host.close(io);
+    const directory = try std.fs.path.join(gpa, &.{ root, "host" });
+    defer gpa.free(directory);
+    const data = try std.fs.path.join(gpa, &.{ root, "data" });
+    defer gpa.free(data);
+    const document = try std.fmt.allocPrint(gpa, "{{\"store\":{{\"sqlite\":{{\"dir\":{f}}}}}}}", .{std.json.fmt(data, .{})});
+    defer gpa.free(document);
+    try host.writeFile(io, .{ .sub_path = "host.json", .data = document, .flags = .{ .permissions = .fromMode(0o600) } });
+    const Group = @import("session_group.zig");
+    const name = try Group.Name.from("Work");
+    for ([_]Group.Action{ .{ .assign = name }, .{ .rename_current = name }, .leave, .automatic, .{ .rename = .{ .group = 7, .name = name } }, .{ .collapse = .{ .group = 7, .collapsed = true } } }) |action| {
+        var captured = try captureSessionGroup(io, .{ .store = directory, .session = "k7m2qx", .action = action }, .{ .generated = root });
+        const key = captured.saved.key;
+        try std.testing.expectEqualStrings(data, captured.saved.store.slice());
+        try std.testing.expectEqualStrings(directory, captured.paths.?.selector());
+        captured.close(io);
+        var recovered = try openCaptured(io, .{ .generated = .{ .directory = root, .handle = key.slice() } });
+        defer recovered.close(io);
+        const paths = try recovered.resolvePaths(io);
+        try std.testing.expectEqualStrings(directory, paths.selector());
+        try std.testing.expectEqualStrings(data, paths.store_identity.slice());
+        try std.testing.expect(recovered.target == .session_group);
+    }
+}
+
 test "group recovery rejects malformed action fields before retransmission" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
@@ -5679,12 +5713,12 @@ test "group recovery rejects malformed action fields before retransmission" {
     }
 }
 
-test "capture routing round trips six placements without conflating selector and wire identity" {
+test "capture routing and group captures round trip six placements without conflating selector and wire identity" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
     const Peer = struct {
-        fn serve(listener: *std.Io.net.Server, expected_store: []const u8) anyerror!void {
-            for (0..4) |index| {
+        fn serve(listener: *std.Io.net.Server, expected_store: []const u8, exchanges: usize) anyerror!void {
+            for (0..exchanges) |index| {
                 const connection = try listener.accept(std.testing.io);
                 defer connection.close(std.testing.io);
                 const deadline = std.Io.Clock.Timestamp.now(std.testing.io, .awake).raw.nanoseconds + 5 * std.time.ns_per_s;
@@ -5705,7 +5739,7 @@ test "capture routing round trips six placements without conflating selector and
                 }
                 try std.testing.expectEqualStrings(expected, request[0..body_used]);
                 var body: protocol.ResponseBuffer = .{};
-                const info: @import("host_reply.zig").HostInfo = .{ .store = if (index == 3) "fedcba9876543210fedcba9876543210" else expected_store, .instance = @splat(1), .active_capacity = 2, .intake_capacity = 100, .descriptor_soft_limit = 1024, .started_at = 1, .custody_occupied = 0, .paused = false, .routes = protocol.routesAll(.unserved), .doublewrite = null };
+                const info: @import("host_reply.zig").HostInfo = .{ .store = if (index == exchanges - 1) "fedcba9876543210fedcba9876543210" else expected_store, .instance = @splat(1), .active_capacity = 2, .intake_capacity = 100, .descriptor_soft_limit = 1024, .started_at = 1, .custody_occupied = 0, .paused = false, .routes = protocol.routesAll(.unserved), .doublewrite = null };
                 try body.render(@import("host_reply.zig").renderHostInfo, .{info});
                 var head_buffer: [512]u8 = undefined;
                 const head = try std.fmt.bufPrint(&head_buffer, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\nConnection: close\r\n\r\n", .{body.len});
@@ -5714,7 +5748,7 @@ test "capture routing round trips six placements without conflating selector and
             }
         }
     };
-    for ([_]enum { sqlite_default, sqlite_moved, mysql }{ .sqlite_default, .sqlite_moved, .mysql }) |kind| for ([_]bool{ false, true }) |explicit_interface| {
+    for ([_]enum { sqlite_default, sqlite_moved, mysql }{ .sqlite_default, .sqlite_moved, .mysql }) |kind| for ([_]bool{ false, true }) |explicit_interface| for ([_]bool{ false, true }) |group_capture| {
         var tmp = try @import("socket_fixture.zig").Directory.init();
         defer tmp.cleanup();
         const root = tmp.root[0..tmp.root_len];
@@ -5757,7 +5791,7 @@ test "capture routing round trips six placements without conflating selector and
             var runtime_dir = try std.Io.Dir.cwd().createDirPathOpen(io, std.fs.path.dirname(paths.socket.slice()).?, .{ .permissions = .fromMode(0o700) });
             runtime_dir.close(io);
             listener = try (try std.Io.net.UnixAddress.init(paths.socket.slice())).listen(io, .{});
-            future = try io.concurrent(Peer.serve, .{ &listener.?, paths.store_identity.slice() });
+            future = try io.concurrent(Peer.serve, .{ &listener.?, paths.store_identity.slice(), @as(usize, if (group_capture) 5 else 4) });
         }
         defer if (kind == .mysql) std.Io.Dir.cwd().deleteTree(io, std.fs.path.dirname(paths.socket.slice()).?) catch @panic("routing test runtime cleanup failed");
         defer if (listener) |*server| server.deinit(io);
@@ -5767,9 +5801,13 @@ test "capture routing round trips six placements without conflating selector and
         var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
         var key_buffer: [36]u8 = undefined;
         const location = try (CaptureTarget{ .generated = root }).resolve(io, &path_buffer, &key_buffer);
-        var original = try writeSessionStopCapture(io, &paths, .{ .store = directory, .session = "k7m2qx" }, location);
+        var original = if (group_capture)
+            try captureSessionGroup(io, .{ .store = directory, .session = "k7m2qx", .action = .leave }, .{ .generated = root })
+        else
+            try writeSessionStopCapture(io, &paths, .{ .store = directory, .session = "k7m2qx" }, location);
         const saved = original.saved;
-        const before = try tmp.dir.readFileAlloc(io, std.fs.path.basename(location.record), gpa, .limited(2048));
+        const record_path = try requestPath(root, saved.key.slice(), &path_buffer);
+        const before = try tmp.dir.readFileAlloc(io, std.fs.path.basename(record_path), gpa, .limited(2048));
         defer gpa.free(before);
         original.close(io);
         var recovered = try openCaptured(io, .{ .generated = .{ .directory = root, .handle = saved.key.slice() } });
@@ -5784,7 +5822,7 @@ test "capture routing round trips six placements without conflating selector and
         const inspection = try inspectCapturedRequest(io, root, saved.key.slice());
         try std.testing.expectEqualStrings(directory, inspection.paths.selector());
         try std.testing.expectEqualStrings(saved.store.slice(), inspection.identity.store.slice());
-        var explicit = try openCaptured(io, .{ .explicit = .{ .store = directory, .record = location.record, .kind = .session_stop } });
+        var explicit = try openCaptured(io, .{ .explicit = .{ .store = directory, .record = record_path, .kind = if (group_capture) .session_group else .session_stop } });
         defer explicit.close(io);
         const explicit_paths = try explicit.resolvePaths(io);
         try std.testing.expectEqualStrings(rediscovered.socket.slice(), explicit_paths.socket.slice());
