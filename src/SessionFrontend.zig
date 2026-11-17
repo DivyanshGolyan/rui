@@ -4529,7 +4529,7 @@ fn captureInfo(held: *HeldFrontend, label: []const u8) !void {
     const self = &held.self;
     const session = &self.inspection.sessions[if (self.inspection.status) |shown| ~shown else 0];
     status_page.sample(session);
-    session.tools.remove(.web_search);
+    session.tools = try @import("command_input.zig").ToolsField.of(&.{"bash"});
     try session.model.set("gpt-5.5");
     try session.label.set(label);
     self.job.status_taken = session;
@@ -8815,7 +8815,7 @@ test "chat info Configure and Copy admission either owns work or refuses before 
             return null;
         }
     };
-    const edits: []const ChatInfo.Edit = &.{ .{ .effort = .low }, .{ .permission = .ask }, .{ .tools = .{} }, .{ .model = "gpt-6-luna" }, .{ .label = "Renamed" } };
+    const edits: []const ChatInfo.Edit = &.{ .{ .effort = .low }, .{ .permission = .ask }, .{ .tools = .{ .allowed = try .of(&.{ "bash", "none" }), .loaded = try .of(&.{"none"}) } }, .{ .model = "gpt-6-luna" }, .{ .label = "Renamed" } };
     for (std.enums.values(Hold)) |hold| for (0..edits.len + 1) |effect| {
         const held = try HeldFrontend.create();
         defer held.destroy();

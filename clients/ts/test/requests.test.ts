@@ -69,9 +69,37 @@ test("status requests the Current profile and maps reported facts and parent los
 		};
 		assert.deepEqual(await new Session(link, 'session"\n').status(), {
 			archiveState, state: "idle", since: "9007199254740993", turn: null, operation: null, pendingMessages: "9007199254740993",
-			parent, label: "Review", model: "model-a", effort: "high", tools: ["bash"], permissionMode: "ask", latestOutcome,
+			parent, label: "Review", model: "model-a", effort: "high", tools: ["bash"], loadedTools: ["bash"], permissionMode: "ask", latestOutcome,
 		});
 	}
+});
+
+test("status preserves configured and loaded tool intent from each Current report", async () => {
+	const configurations = [
+		{ tools: ["bash", "find_tools", "lookup", "none"], loaded_tools: ["find_tools", "none"] },
+		{ tools: ["bash", "find_tools", "lookup", "none"], loaded_tools: ["find_tools", "lookup", "none"] },
+		{ tools: ["bash", "find_tools"], loaded_tools: ["find_tools"] },
+		{ tools: ["bash"], loaded_tools: ["bash"] },
+		{ tools: [], loaded_tools: [] },
+	];
+	let reads = 0;
+	const session = new Session({
+		async exchange(path) {
+			assert.equal(path, "/v1/inspect-session");
+			const configuration = configurations[reads++];
+			assert.ok(configuration);
+			const current = report(idleWork);
+			Object.assign(current.session, configuration);
+			return Buffer.from(JSON.stringify(current));
+		},
+	}, "abc123");
+	for (const configuration of configurations) {
+		const status = await session.status();
+		const loadedTools: string[] = status.loadedTools;
+		assert.deepEqual(loadedTools, configuration.loaded_tools);
+		assert.deepEqual(status.tools, configuration.tools);
+	}
+	assert.equal(reads, configurations.length);
 });
 
 test("status reports a missing Session as a request error", async () => {
