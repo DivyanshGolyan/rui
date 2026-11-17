@@ -122,6 +122,37 @@ pub const Work = struct {
     first_action: ?u64 = null,
 };
 
+pub const Attention = struct {
+    kind: enum { approval, failed, finished },
+    turn: u64,
+    step: u64,
+};
+
+/// Matches the client classification at base 3e389620a3a6b83e314e02657c9e6a95e67488e8.
+pub fn attention(work: Work) ?Attention {
+    const turn = work.turn orelse 0;
+    return switch (work.state) {
+        .approval => .{ .kind = .approval, .turn = turn, .step = work.first_action orelse 0 },
+        .bash => |bash| if (bash.approvals != 0) .{ .kind = .approval, .turn = turn, .step = work.first_action orelse 0 } else null,
+        .failed => .{ .kind = .failed, .turn = turn, .step = std.math.maxInt(u64) },
+        .finished => .{ .kind = .finished, .turn = turn, .step = std.math.maxInt(u64) },
+        else => null,
+    };
+}
+
+pub const Group = enum { needs_you, working, queued, done };
+
+/// Classifies the state as derived at the Host's observation time.
+pub fn group(work: Work) Group {
+    return switch (work.state) {
+        .approval => .needs_you,
+        .bash => |bash| if (bash.approvals != 0) .needs_you else .working,
+        .working, .retrying, .stopping => .working,
+        .pending => .queued,
+        .idle, .finished, .failed, .stopped => .done,
+    };
+}
+
 pub fn derive(inputs: Inputs) error{CorruptStore}!Work {
     var work = try deriveOwn(inputs);
     if (work.state.progress() == null) {
@@ -417,12 +448,12 @@ test "a quota failure carries its saved reset time and nothing else does" {
 
 test "inputs no writer produces are corrupt" {
     const unresolved: Inputs.Op = .{ .in_flight = .{ .attempt_at = 300 } };
-    const group: Inputs.Actions = .{ .total = 1, .unresolved = 1, .awaiting = 1, .first_awaiting = 41 };
+    const action_group: Inputs.Actions = .{ .total = 1, .unresolved = 1, .awaiting = 1, .first_awaiting = 41 };
     var ended_with_group = endedTurn(.cancelled, "cancelled");
     ended_with_group.actions = .{ .total = 1, .latest_resolution_at = 1 };
     for ([_]Inputs.Turn{
-        activeTurn(unresolved, group),
-        activeTurn(.{ .resolved = .{ .resolution = .answer, .at = 330 } }, group),
+        activeTurn(unresolved, action_group),
+        activeTurn(.{ .resolved = .{ .resolution = .answer, .at = 330 } }, action_group),
         ended_with_group,
         activeTurn(.{ .resolved = .{ .resolution = null, .at = 330 } }, .{}),
         activeTurn(proposals(340), .{ .total = 1, .unresolved = 2 }),
@@ -531,4 +562,40 @@ test "Session approval target belongs to Session inputs through continuation ter
     try std.testing.expectEqual(@as(?u64, null), selected_stop.first_action);
     try std.testing.expect(selected_stop.state == .stopping);
     try std.testing.expectError(error.CorruptStore, derive(.{ .created_at = 1, .now_ms = 0, .first_action = 41 }));
+}
+
+test "attention and group match base client classification across work states" {
+    // Expectations transcribed from attention.Attention.of and overview_view.orderClass
+    // at 3e389620a3a6b83e314e02657c9e6a95e67488e8, with no viewer open stop.
+    const Case = struct { state: WorkState, attention_kind: ?@FieldType(Attention, "kind"), group: Group };
+    const cases = [_]Case{
+        .{ .state = .{ .idle = .{ .since = 1 } }, .attention_kind = null, .group = .done },
+        .{ .state = .{ .pending = .{ .since = 1 } }, .attention_kind = null, .group = .queued },
+        .{ .state = .{ .working = .{ .since = 1 } }, .attention_kind = null, .group = .working },
+        .{ .state = .{ .retrying = .{ .since = 1, .due_at_ms = 9999, .cause = try bounded(max_code_bytes, "retry"), .attempt = 1 } }, .attention_kind = null, .group = .working },
+        .{ .state = .{ .bash = .{ .since = 1, .call = 1, .description = null, .running = 1, .approvals = 0 } }, .attention_kind = null, .group = .working },
+        .{ .state = .{ .bash = .{ .since = 1, .call = 1, .description = null, .running = 1, .approvals = 1 } }, .attention_kind = .approval, .group = .needs_you },
+        .{ .state = .{ .approval = .{ .since = 1 } }, .attention_kind = .approval, .group = .needs_you },
+        .{ .state = .{ .stopping = .{ .since = 1 } }, .attention_kind = null, .group = .working },
+        .{ .state = .{ .finished = .{ .since = 1 } }, .attention_kind = .finished, .group = .done },
+        .{ .state = .{ .failed = .{ .since = 1, .code = try bounded(max_code_bytes, "failed"), .resets_at = null } }, .attention_kind = .failed, .group = .done },
+        .{ .state = .{ .stopped = .{ .since = 1, .cause = .stop } }, .attention_kind = null, .group = .done },
+    };
+    for (cases) |case| for (0..8) |mask| {
+        const work: Work = .{ .state = case.state, .turn = if (mask & 1 != 0) 7 else null, .operation = if (mask & 2 != 0) 19 else null, .first_action = if (mask & 4 != 0) 41 else null };
+        try std.testing.expectEqual(case.group, group(work));
+        const got = attention(work);
+        if (case.attention_kind) |kind| {
+            try std.testing.expect(got != null);
+            try std.testing.expectEqual(kind, got.?.kind);
+            try std.testing.expectEqual(work.turn orelse 0, got.?.turn);
+            try std.testing.expectEqual(if (kind == .approval) work.first_action orelse 0 else std.math.maxInt(u64), got.?.step);
+        } else try std.testing.expect(got == null);
+    };
+}
+
+test "work loses whether a model operation is current" {
+    const in_flight = try derive(.{ .now_ms = 0, .created_at = 1, .latest = activeTurn(.{ .in_flight = .{ .attempt_at = 500 } }, .{}) });
+    const owed = try derive(.{ .now_ms = 0, .created_at = 1, .latest = endedTurn(.completed, "completed"), .owed_since = 500 });
+    try std.testing.expectEqualDeep(in_flight, owed);
 }
