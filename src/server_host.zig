@@ -225,15 +225,8 @@ pub const Tuning = struct {
     /// A directory already admitted together with private frozen placement.
     admitted_directory: ?[]const u8 = null,
     home: ?[]const u8 = null,
-    catalog_url: ?[]const u8 = null,
     limits: Limits = .{},
     hooks: Hooks = .{},
-
-    pub fn withSettings(self: Tuning, settings: *const @import("host_settings.zig").Settings) Tuning {
-        var tuned = self;
-        tuned.catalog_url = if (settings.models.catalog_url) |*url| url.slice() else null;
-        return tuned;
-    }
 
     pub fn fromOptions(parsed: *const cli_grammar.Parsed) !Tuning {
         var tuning: Tuning = .{};
@@ -316,7 +309,7 @@ test "the hidden serve options narrow a Host" {
     const plain = try tuningFor(&.{});
     try std.testing.expectEqual(scratch_limit_bytes, plain.limits.bash_scratch_limit_bytes);
     try std.testing.expectEqual(@as(?usize, null), plain.limits.retention_entry_capacity);
-    try std.testing.expect(!plain.hooks.phase_trace and plain.catalog_url == null and plain.hooks.control_gate == null);
+    try std.testing.expect(!plain.hooks.phase_trace and plain.hooks.control_gate == null);
 
     try std.testing.expectEqual(@as(?usize, 2), (try tuningFor(&.{ "--test-retention-entry-capacity", "2" })).limits.retention_entry_capacity);
     try std.testing.expectError(error.InvalidOptionValue, tuningFor(&.{ "--test-retention-entry-capacity", "1" }));

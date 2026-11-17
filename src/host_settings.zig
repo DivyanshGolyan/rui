@@ -1815,8 +1815,12 @@ test "Host settings every derived provider credential respects resolution redact
             try assign(settings, gpa, "providers." ++ name ++ ".credentialFile", "/tmp/sign-in.json", checkSample, &failure);
             _ = try seal(settings, &failure);
         }
-        try assign(settings, gpa, "providers." ++ name ++ ".endpoint", "http://127.0.0.1:3000/responses", checkSample, &failure);
-        try std.testing.expectError(error.SettingsInvalid, seal(settings, &failure));
+        try assign(settings, gpa, "providers." ++ name ++ ".endpoint", "https://other.example/responses", checkSample, &failure);
+        if (comptime provider.facts().credential == .api_key) {
+            _ = try seal(settings, &failure); // HTTPS API-key endpoints remain configurable.
+        } else {
+            try std.testing.expectError(error.SettingsInvalid, seal(settings, &failure));
+        }
         entry.unauthenticated.value = true;
         _ = try seal(settings, &failure);
         try assign(settings, gpa, "providers." ++ name, "null", checkSample, &failure);
@@ -2611,13 +2615,14 @@ test "Host provider credential policy derives fixture mode from the endpoint" {
     defer gpa.destroy(settings);
     const Mode = enum { own, fixture, remote };
     inline for (std.enums.values(provider_name.Provider)) |provider| {
+        const name = @tagName(provider);
         for (std.enums.values(Mode)) |mode| for ([_]bool{ false, true }) |unauthenticated| {
             settings.* = .{};
             defer settings.deinit();
             var failure: start_report.Failure = undefined;
             try apply(settings, gpa, "{\"providers\":{}}", .file, checkSample, &failure);
             try assign(settings, gpa, "providers." ++ @tagName(provider), "{}", checkSample, &failure);
-            const entry = &@field(settings.providers.entries, @tagName(provider)).?;
+            const entry = &@field(settings.providers.entries, name).?;
             entry.unauthenticated.value = unauthenticated;
             if (mode != .own) {
                 entry.endpoint = .{};
