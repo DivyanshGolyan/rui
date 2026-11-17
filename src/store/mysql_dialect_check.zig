@@ -1104,7 +1104,7 @@ test "schema 75 MySQL pin migration handles fresh and historically upgraded kind
             try load(migrated_database_sql, "DROP TABLE core_command", true);
             for (comptime schema.objects(.mysql)) |object| {
                 if (!std.mem.eql(u8, object.name, "core_command") and !std.mem.eql(u8, object.name, "core_command_target_order")) continue;
-                const text = try std.mem.replaceOwned(u8, std.testing.allocator, object.sql, "kind BETWEEN 1 AND 8", "kind BETWEEN 1 AND 6");
+                const text = try std.mem.replaceOwned(u8, std.testing.allocator, object.sql, "kind BETWEEN 1 AND 9", "kind BETWEEN 1 AND 6");
                 defer std.testing.allocator.free(text);
                 try load(migrated_database_sql, text, false);
             }

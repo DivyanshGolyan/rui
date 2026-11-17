@@ -1393,12 +1393,23 @@ pub const Store = struct {
     }
 
     pub fn stopAction(self: *Store, source: ActionAttemptBinding, target: u64, faults: Faults) !@import("domain/action_stop.zig").Outcome {
-        return self.queue().write(stopActionHeld, .{ self, source, target, faults });
+        const result = try self.queue().write(stopActionHeld, .{ self, @as(@import("domain/action_stop.zig").Source, .{ .model = .{ .binding = source, .target = target } }), faults });
+        return result.model;
     }
 
-    fn stopActionHeld(self: *Store, source: ActionAttemptBinding, target: u64, faults: Faults) !@import("domain/action_stop.zig").Outcome {
-        const result = try transition.apply(self, @import("domain/action_stop.zig").Stop, .{ .source = source, .target = target }, faults);
-        if (result == .selected or result == .pending) _ = @as(*OutOfLine, @fieldParentPtr("ring", self.changes)).control_generation.fetchAdd(1, .release);
+    pub fn requestActionStop(self: *Store, request: *const @import("../command_input.zig").ActionStopCommand, faults: Faults) @import("domain/action_stop.zig").Reply {
+        const result = self.queue().write(stopActionHeld, .{ self, @as(@import("domain/action_stop.zig").Source, .{ .command = request }), faults }) catch return .infrastructure_failure;
+        return result.command;
+    }
+
+    fn stopActionHeld(self: *Store, source: @import("domain/action_stop.zig").Source, faults: Faults) !@import("domain/action_stop.zig").Stop.Result {
+        const Stop = @import("domain/action_stop.zig").Stop;
+        const result = try transition.apply(self, Stop, .{ .source = source, .scratch = self.reportScratch(Stop.Scratch) }, faults);
+        const selected = switch (result) {
+            .model => |outcome| outcome == .selected or outcome == .pending,
+            .command => |reply| reply == .accepted,
+        };
+        if (selected) _ = @as(*OutOfLine, @fieldParentPtr("ring", self.changes)).control_generation.fetchAdd(1, .release);
         return result;
     }
 
