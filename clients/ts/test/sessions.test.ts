@@ -1,19 +1,23 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, realpathSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { Rui, RuiRequestError, type AgentSpec } from "../src/index.ts";
+import { Rui, RuiRequestError, type AgentSpec, type HostSettings } from "../src/index.ts";
+import { WIRE_VERSION } from "../src/transport.ts";
+import type { components } from "../src/wire.ts";
 
 const binary = process.env.RUI_BINARY;
 const skip = binary ? false : "set RUI_BINARY to a built rui";
 
-async function connect(): Promise<Rui> {
-	const root = realpathSync(mkdtempSync(join(tmpdir(), "rui-ts-")));
+async function connect(settings: Partial<HostSettings> = {}): Promise<Rui> {
+	const store = settings.store ?? { sqlite: { dir: join(realpathSync(mkdtempSync(join(tmpdir(), "rui-ts-"))), "store") } };
 	return Rui.connect({
-		store: { sqlite: { dir: join(root, "store") } },
+		store,
 		providers: { openai: { endpoint: "https://api.openai.com/v1/responses", key: "sk-ts-client-test" } },
+		...settings,
 	}, { binary: binary ?? "rui" });
 }
 
@@ -85,7 +89,7 @@ test("status reflects an idle Session and paused queued work", { skip }, async (
 		const idle = await session.status();
 		assert.deepEqual(idle, {
 			archiveState: "active", state: "idle", since: idle.since, turn: null, operation: null, pendingMessages: "0",
-			parent: null, label: "first", model: spec.model, effort: "low", tools: ["bash"], permissionMode: "ask", latestOutcome: null,
+			parent: null, label: "first", model: spec.model, effort: "low", tools: ["bash"], loadedTools: ["bash"], permissionMode: "ask", latestOutcome: null,
 		});
 		assert.match(idle.since, /^[1-9][0-9]*$/);
 		await session.send("queued", { idempotencyKey: "status:message" });
@@ -97,6 +101,50 @@ test("status reflects an idle Session and paused queued work", { skip }, async (
 		assert.match(queued.since, /^[1-9][0-9]*$/);
 		await session.interrupt();
 		assert.equal((await session.status()).pendingMessages, "1");
+	} finally {
+		await rui.close();
+	}
+});
+
+test("status agrees with native and CLI inspection for configured and loaded tool intent", { skip }, async (t) => {
+	assert.ok(binary);
+	const root = realpathSync(mkdtempSync(join(tmpdir(), "rui-ts-tool-intent-")));
+	t.after(() => rmSync(root, { recursive: true, force: true }));
+	const storeDirectory = join(root, "store");
+	const interfaceSettings = { dir: join(root, "interface") };
+	mkdirSync(storeDirectory, { mode: 0o700 });
+	// CLI readers resolve the saved interface placement; the child Host uses it too.
+	writeFileSync(join(storeDirectory, "host.json"), JSON.stringify({ interface: interfaceSettings }), { mode: 0o600 });
+	const rui = await connect({ store: { sqlite: { dir: storeDirectory } }, interface: interfaceSettings, execution: { paused: true } });
+	try {
+		const configurations = [
+			{ tools: ["bash", "find_tools"], loadedTools: ["find_tools"] },
+			{ tools: ["bash"], loadedTools: ["bash"] },
+			{ tools: [], loadedTools: [] },
+		];
+		const session = await rui.sessions.create({ ...spec, ...configurations[0] }, { idempotencyKey: "chat:tool-intent" });
+		const store = rui.hostInfo?.store;
+		assert.ok(store);
+		for (const [index, configuration] of configurations.entries()) {
+			if (index > 0) await session.update(configuration);
+			const status = await session.status();
+			const native = JSON.parse((await rui.exchange("/v1/inspect-session", (canonicalStore) => JSON.stringify({
+				version: WIRE_VERSION, kind: "inspect_session", store: canonicalStore, session: session.id,
+			}))).toString("utf8")) as components["schemas"]["InspectSessionReply"];
+			assert.equal(native.profile, "current");
+			assert.ok(native.session);
+			assert.deepEqual(status.tools, configuration.tools);
+			assert.deepEqual(status.loadedTools, configuration.loadedTools);
+			assert.deepEqual(native.session.tools, configuration.tools);
+			assert.deepEqual(native.session.loaded_tools, configuration.loadedTools);
+			for (const profile of ["current", "full"]) {
+				const cli = JSON.parse(execFileSync(binary, [
+					"session", "inspect", "--store", store, "--session", session.id, "--profile", profile,
+				], { encoding: "utf8", env: { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: process.env.TMPDIR } })) as components["schemas"]["InspectSessionReply"];
+				assert.equal(cli.profile, profile);
+				assert.deepEqual(cli.session, native.session);
+			}
+		}
 	} finally {
 		await rui.close();
 	}

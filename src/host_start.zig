@@ -1414,6 +1414,12 @@ pub fn launchFailure(result: *HostLaunchResult, kind: HostLaunchResult.Cause.Kin
     if (store) |canonical| result.outcome.failed.store.set(canonical) catch unreachable;
 }
 
+fn launchRefusal(result: *HostLaunchResult, failure: start_report.Failure, selector: []const u8) void {
+    launchFailure(result, if (failure.code == .store_schema_behind) .store_format else if (failure.code == .store_fenced) .store_identity else .child_refused, if (failure.code == .store_fenced) error.StoreIdentityMismatch else error.HostStartupFailed, selector);
+    result.outcome.failed.refusal = failure;
+    result.outcome.failed.cause.refusal_code = failure.code;
+}
+
 pub fn launchReady(result: *HostLaunchResult, ready: @import("protocol_reply.zig").HostInfoFacts, paths: *const platform.Paths, adopted: bool) void {
     result.outcome = .{ .ready = .{ .facts = ready, .selector = .{ .len = 0 }, .diagnostics_directory = .{ .len = 0 }, .adopted = adopted } };
     result.outcome.ready.selector.set(paths.selector()) catch unreachable;
@@ -1806,21 +1812,21 @@ pub noinline fn spawn(init: std.process.Init, typed: Spawn, ops: Ops, progress: 
         result.wait.?.observe(result.startup(), now);
         const until: i128 = result.wait.?.until(now);
         if (progress) |hook| hook.report(hook.context, result.startup());
-        if ((refusal != null and refusal.?.code != .store_locked) or startup_closed or result.startup_len == HostLaunchResult.max_startup_bytes or report_len == report_bytes.len) {
-            if (ops.observe(ops.context, io, &paths, until) != .ready) {
-                if (refusal) |failure| {
-                    launchFailure(result, if (failure.code == .store_schema_behind) .store_format else if (failure.code == .store_fenced) .store_identity else .child_refused, if (failure.code == .store_fenced) error.StoreIdentityMismatch else error.HostStartupFailed, paths.selector());
-                    result.outcome.failed.refusal = failure;
-                    result.outcome.failed.cause.refusal_code = failure.code;
-                    return;
-                }
+        const observed = ops.observe(ops.context, io, &paths, until);
+        const contended = refusal != null and refusal.?.code == .store_locked;
+        const full = result.startup_len == HostLaunchResult.max_startup_bytes or report_len == report_bytes.len;
+        // A losing child can exit before the winner is ready. EOF ends that
+        // child, not the caller's existing opportunity to adopt a ready owner.
+        if ((!contended and (refusal != null or startup_closed)) or full) {
+            if (observed != .ready) {
+                if (refusal) |failure| return launchRefusal(result, failure, paths.selector());
                 if (result.startup_len == HostLaunchResult.max_startup_bytes or report_len == report_bytes.len) return launchFailure(result, .startup_full, error.HostReadinessUnconfirmed, paths.selector());
                 if (std.mem.endsWith(u8, result.startup(), "[store_identity_mismatch]\n")) return launchFailure(result, .store_identity, error.StoreIdentityMismatch, paths.selector());
                 if (std.mem.endsWith(u8, result.startup(), "[store_format_unsupported]\n")) return launchFailure(result, .store_format, error.HostStartupFailed, paths.selector());
                 return launchFailure(result, if (result.startup_len == 0) .child_closed else .child_refused, error.HostStartupFailed, paths.selector());
             }
         }
-        switch (ops.observe(ops.context, io, &paths, until)) {
+        switch (observed) {
             .ready => |ready| {
                 const final_count = ops.read(ops.context, startup_read, result.startup_bytes[result.startup_len..]);
                 if (final_count > 0) result.startup_len += @intCast(final_count);
@@ -1834,12 +1840,20 @@ pub noinline fn spawn(init: std.process.Init, typed: Spawn, ops: Ops, progress: 
             },
             .incompatible => return launchFailure(result, .incompatible, error.IncompatibleHost, paths.selector()),
             .access_failure => return launchFailure(result, .store_access, error.StoreAccessFailed, paths.selector()),
-            .unavailable, .owned_unavailable => {},
+            .unavailable, .owned_unavailable => {
+                if (contended and startup_closed) {
+                    // Reuse the acknowledged interposition owner: a fixture
+                    // can hold the former premature-refusal transition.
+                    const remaining = @max(0, until - ops.now(ops.context, io));
+                    @import("upgrade_process.zig").waitForTestGate(gpa, io, init.environ_map.get("RUI_TEST_HOST_STORE_LOCKED_GATE"), null, .fromNanoseconds(@intCast(remaining))) catch |err| return launchFailure(result, .interrupted, err, paths.selector());
+                }
+            },
         }
         const remaining = until - ops.now(ops.context, io);
         if (delivery.input >= 0 and moved.progressed) continue;
         if (remaining > 0) ops.pause(ops.context, io, @intCast(@min(remaining, (if (delivery.input >= 0) @as(i128, 1) else 100) * std.time.ns_per_ms))) catch |err| return launchFailure(result, .interrupted, err, paths.selector());
     }
+    if (refusal) |failure| return launchRefusal(result, failure, paths.selector());
     return launchFailure(result, .readiness_timeout, error.HostReadinessUnconfirmed, paths.selector());
 }
 

@@ -357,8 +357,7 @@ pub const Click = union(enum) {
 
 pub fn clickOf(state: *const State, item: Item) ?Click {
     return switch (item) {
-        .empty, .views, .gap => null,
-        .new_session => .new_session,
+        .empty, .gap => null,
         .row => |at| .{ .open = state.rows.items[state.order.items[at]].reference },
     };
 }
@@ -369,7 +368,7 @@ pub fn pinClickOf(state: *const State, item: Item) ?Click {
             const row = state.rows.items[state.order.items[at]];
             break :blk .{ .pin = .{ .reference = row.reference, .pinned = row.pin_order == null } };
         },
-        .empty, .views, .gap, .new_session => null,
+        .empty, .gap => null,
     };
 }
 
@@ -2563,7 +2562,7 @@ pub fn grouped(buffer: *[32]u8, count: u64) []const u8 {
     return buffer[0..used];
 }
 
-pub const Item = union(enum) { new_session, views, gap, row: usize, empty };
+pub const Item = union(enum) { gap, row: usize, empty };
 
 pub fn itemHasAge(state: *const State, item: Item) bool {
     return switch (item) {
@@ -2730,22 +2729,33 @@ pub fn headerSegments(arena: Allocator, state: *const State, width: u16, caps: C
 pub const ListRow = struct {
     segments: []const Segment,
     heading: bool,
-    selected: bool,
+};
+
+pub const Columns = struct { start: u16, end: u16 };
+pub const Control = enum { new_session, views };
+pub const ControlRow = struct {
+    segments: []const Segment,
     sessions: ?Columns = null,
     archived: ?Columns = null,
 };
 
-pub const Columns = struct { start: u16, end: u16 };
-
 pub fn listSegments(arena: Allocator, state: *const State, item: Item, width: u16, caps: Caps, frame: u64) error{OutOfMemory}!ListRow {
-    if (item == .row) {
-        const row = &state.rows.items[state.order.items[item.row]];
-        return .{ .segments = try rowSegments(arena, state, item.row, width, caps, frame), .heading = false, .selected = rowSelected(state, row) };
-    }
+    if (item == .row) return .{ .segments = try rowSegments(arena, state, item.row, width, caps, frame), .heading = false };
     var built: Spans = .of(arena, caps, width);
-    var result: ListRow = .{ .segments = &.{}, .heading = item == .empty, .selected = item == .new_session and state.selected == .new_session };
     built.begin();
     const spans = switch (item) {
+        .gap => &.{},
+        .empty => try emptyLine(&built, state),
+        .row => unreachable,
+    };
+    return .{ .segments = try segmentsOf(arena, spans, width, .{}), .heading = item == .empty };
+}
+
+pub fn controlSegments(arena: Allocator, state: *const State, control: Control, width: u16, caps: Caps) error{OutOfMemory}!ControlRow {
+    var built: Spans = .of(arena, caps, width);
+    var result: ControlRow = .{ .segments = &.{} };
+    built.begin();
+    const spans = switch (control) {
         .new_session => new: {
             _ = try built.put(mark_column, "+", 1, .{});
             _ = try built.put(text_column, new_session_name, width -| (text_column + 1), .{});
@@ -2753,7 +2763,7 @@ pub fn listSegments(arena: Allocator, state: *const State, item: Item, width: u1
         },
         .views => views: {
             inline for (.{ .{ "Sessions", Selection.sessions, ArchiveFilter.active, &result.sessions }, .{ "Archived", Selection.archived, ArchiveFilter.archived, &result.archived } }, 0..) |tab, index| {
-                const start = 2 + index * 10;
+                const start = text_column + index * 10;
                 const active = state.archive == tab[2];
                 const focused = state.selected == tab[1];
                 const cells = try built.put(start, tab[0], width -| 1 -| start, .{
@@ -2764,9 +2774,6 @@ pub fn listSegments(arena: Allocator, state: *const State, item: Item, width: u1
             }
             break :views try built.finish();
         },
-        .gap => &.{},
-        .empty => try emptyLine(&built, state),
-        .row => unreachable,
     };
     result.segments = try segmentsOf(arena, spans, width, .{});
     return result;
@@ -3030,9 +3037,9 @@ const Frame = struct {
             count += 1;
         }
         const first = count;
-        lines[count] = (try listSegments(gpa, state, .new_session, width, caps, frame)).segments;
+        lines[count] = (try controlSegments(gpa, state, .new_session, width, caps)).segments;
         count += 1;
-        lines[count] = (try listSegments(gpa, state, .views, width, caps, frame)).segments;
+        lines[count] = (try controlSegments(gpa, state, .views, width, caps)).segments;
         count += 1;
         var list_at: usize = 0;
         while (listItem(state, list_at)) |item| : (list_at += 1) {
@@ -3158,7 +3165,7 @@ test "every work state follows the rules table, in Unicode and ASCII" {
             defer std.testing.allocator.free(text);
             var lines = std.mem.splitScalar(u8, text, '\n');
             try std.testing.expectEqualStrings(" + New Session", lines.next().?);
-            try std.testing.expectEqualStrings("  Sessions  Archived", lines.next().?);
+            try std.testing.expectEqualStrings("   Sessions  Archived", lines.next().?);
             try std.testing.expectEqualStrings(expected, lines.next().?);
         }
         state.selected = .new_session;
@@ -5017,7 +5024,6 @@ test "overview quiet rows: a chat never written in recedes unless it needs you, 
         defer arena.deinit();
         const first = try listSegments(arena.allocator(), &state, .{ .row = 0 }, width, caps, 0);
         const name = try styleOf(first.segments, "Quiet row");
-        try std.testing.expectEqual(selected, first.selected);
         try std.testing.expectEqual(selected, name.bold);
         try std.testing.expectEqual(if (selected) Colour.strong else Colour.normal, name.colour);
         for (first.segments) |segment| try std.testing.expectEqual(quiet, segment.style.dim);
@@ -5747,7 +5753,6 @@ test "empty chat name and selection agree across listing arrival orders and firs
                 var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
                 defer arena.deinit();
                 const built = try listSegments(arena.allocator(), &state, .{ .row = 0 }, width, .{}, 0);
-                try std.testing.expect(built.selected);
                 var name_found = false;
                 for (built.segments) |segment| {
                     try std.testing.expect(std.mem.indexOf(u8, segment.text, &empty.reference) == null);
@@ -6219,7 +6224,7 @@ test "Session pin captured intent changes no selection or conversation and await
     _ = try step(&state, .{ .pin = .{ .request = captured.pin, .outcome = .{ .unconfirmed = "pin-handle" } } });
     try std.testing.expectEqual(IntentAdmission.refused, (try step(&state, .{ .conversed = .{ .reference = target, .work = .idle, .input = .{ .pin = false } } })).intent_admission);
     try std.testing.expect(state.find(target).?.pin_order == null);
-    for ([_]Item{ .new_session, .gap, .empty }) |item| try std.testing.expect(pinClickOf(&state, item) == null);
+    for ([_]Item{ .gap, .empty }) |item| try std.testing.expect(pinClickOf(&state, item) == null);
     state.selected = selected;
 }
 
@@ -6331,7 +6336,6 @@ test "session list has exactly one noninteractive gap only between both pin grou
                     seen += 1;
                 },
                 .empty => try std.testing.expectEqual(@as(usize, 0), n),
-                else => return error.UnexpectedListItem,
             }
             const sessions_before = @min(n, line -| @intFromBool(both and line > pins));
             try std.testing.expectEqual(n - sessions_before, sessionsFrom(&state, line));
@@ -6395,7 +6399,7 @@ test "list marks and ages domain covers every state age band width and list surf
         }
         try std.testing.expect(std.mem.indexOf(u8, text, "✓") == null);
         try std.testing.expectEqual(@as(usize, width), measured(caps, unicode_glyphs, text));
-        const action = try segmentText(arena.allocator(), (try listSegments(arena.allocator(), &state, .new_session, width, caps, 2)).segments);
+        const action = try segmentText(arena.allocator(), (try controlSegments(arena.allocator(), &state, .new_session, width, caps)).segments);
         try std.testing.expect(std.mem.startsWith(u8, action, " + New Session"));
         try std.testing.expectEqual(@as(usize, text_column), std.mem.indexOf(u8, action, "New Session").?);
     };

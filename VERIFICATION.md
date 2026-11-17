@@ -18,6 +18,10 @@ Git history keeps earlier test specifications and dated results.
 
 The [Session UI contract](docs/contracts/session-ui.md#required-evidence) requires owner-domain tests for memory fitting, update-button states and drawn-target admission, and chat-only footer feedback, including narrow widths. Reverting mutations must fail the relevant assertions. Capture current, available, updating and failed sidebar states and the chat after an update in day and night at 140×40 and 46×30 using verify-rui, before and after. Frames are renderer evidence, not physical-input evidence.
 
+## List tint padding
+
+`GroupedList row inset is stable for selection hover and plain rows` checks shared row bounds at zero, narrow and wide widths in direct, indexed and no colour. Run the touched list, overview, panel, model-choice and palette owners, and remove the inset as a negative control. Capture before and after list and panel frames in day and night at 140×40 and 46×30 through verify-rui; these are renderer evidence, not physical-terminal evidence.
+
 ## Contract index
 
 ARCHITECTURE owns behavior; tests own cases.
@@ -37,7 +41,7 @@ The subsystem references keep accepted behavior and required evidence together. 
 - [Store transactions and representation](docs/contracts/store.md#required-evidence).
 - [Session stops and outcomes](docs/contracts/sessions.md#required-evidence).
 - [CLI operations and configuration](docs/contracts/cli.md#required-evidence).
-- [Session UI and terminal lifetime](docs/contracts/session-ui.md#required-evidence), including shared full-list/sidebar row marks, state-age boundaries, alignment, 100 ms spinner frames and the earliest visible row-age/quota-countdown deadline, including header-only countdowns and minute-scale quota wording. Native empty-chat Escape and spinner repaint tests preserve all four row states at narrow width; frame resize tests reject old-viewport spinner commits until the resize reset and repaint commit.
+- [Session UI and terminal lifetime](docs/contracts/session-ui.md#required-evidence), including shared full-list/sidebar row marks, state-age boundaries, alignment, 100 ms spinner frames and the earliest visible row-age/quota-countdown deadline, including header-only countdowns and minute-scale quota wording. Native empty-chat Escape and spinner repaint tests preserve all four row states at narrow width; frame resize tests reject old-viewport spinner commits until the resize reset and repaint commit. Input and User-message appearance evidence includes both widths and themes, preserved input/rule positions, the shared timestamp domain and indexed before/after frames; see the owning evidence table.
 - [Reports, Activity, and local protocol](docs/contracts/inspection.md#required-evidence).
 - [Host ownership and lifetime](docs/contracts/host.md#required-evidence), including frozen detached consumption, later-source upgrade admission and private-target capability refusal.
 - [Resources and selection progress](docs/contracts/resources.md#required-evidence).

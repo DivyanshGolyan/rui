@@ -562,6 +562,11 @@ CHECK_COVERS = {
 TYPECHECK_INPUTS = ("*.zig", "*.zon", "*.c", "*.h", "src/*.patch", "src/*.sh", ".github/actions/setup/action.yml")
 
 
+CLIENT_LOCALITY_INPUTS = ("src/*.zig", "clients/ts/src/*", "tests/ci/client_locality.py",
+                          "tests/ci/test_client_locality.py", "tests/ci/caller_errors.py", "tests/ci/host_settings_locality.py",
+                          "tests/ci/select_tests.py", "tests/ci/import_architecture.py", STACK_FRAMES_GATE)
+
+
 POLICY_SELF_CHECKS = (
     ("test_selection.FullCheckPartitionTest",
      ("tests/ci/*", "build.zig", "tests/integration/check.sh", "tests/integration/host_process.py",
@@ -569,6 +574,7 @@ POLICY_SELF_CHECKS = (
     ("test_admission", ("tests/ci/*", ".github/*", "build.zig")),
     ("test_release_publication", ("tests/ci/*",)),
     ("test_build_artifact", ("tests/ci/*",)),
+    ("test_client_locality", CLIENT_LOCALITY_INPUTS),
     # TLC runs only when a model, its runner or its CI wrapper changes.
     ("test_formal_models", ("tests/formal/*", "tests/ci/test_formal_models.py")),
 )
