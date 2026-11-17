@@ -973,7 +973,7 @@ fn hostCommand(alloc: std.mem.Allocator, operation: []const u8, store: []const u
     return writer.written();
 }
 fn appendWrapped(rows: *std.ArrayList(Row), ctx: vxfw.DrawContext, label: []const u8, text: []const u8, control: core.Control, action: core.Action, width: u16) !void {
-    const value_width = width -| Panel.value_column;
+    const value_width = Panel.valueWidth(width);
     const first = if (value_width > 0) line.fit(ctx, text, value_width).text else "";
     try append(rows, ctx.arena, label, first, control, action);
     var at = first.len;
@@ -1042,7 +1042,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         .api => {
             if (self.form) |mapped| {
                 const form = mapped.value;
-                const field_width = width -| Panel.value_column -| 1;
+                const field_width = Panel.valueWidth(width) -| 1;
                 try append(&rows, a, "Scope", "Selected Host. New Sessions here only.", null, null);
                 try appendEditor(&rows, ctx, if (form.endpointEdit() == .unchanged and !std.mem.endsWith(u8, form.original.endpoint.slice(), "/responses")) "Endpoint (kept)" else "Base URL", &form.base, .base, field_width, "HTTPS base URL");
                 try appendEditor(&rows, ctx, "API key", &form.key, .key, field_width, if (form.original.reusable()) "Existing source (type to replace)" else "Paste your API key");
@@ -1054,7 +1054,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         },
         .browser => {
             try append(&rows, a, "Sign-in URL", if (browser_link.len != 0) browser_link else "Connecting to ChatGPT...", .link, if (browser_link.len != 0) .{ .open = browser_link } else null);
-            const mask = try a.alloc(u8, @min(browser_typed, width -| Panel.value_column -| 1));
+            const mask = try a.alloc(u8, @min(browser_typed, Panel.valueWidth(width) -| 1));
             @memset(mask, '*');
             try append(&rows, a, "Paste callback", if (browser_typed != 0) mask else if (browser_stray) "Not the sign-in address. Paste again." else if (browser_checking) "Checking address..." else "Paste final browser address, then Enter", .callback, .callback);
             try button(&buttons, a, "Open browser", .open_page, if (browser_link.len != 0) .{ .open = browser_link } else null);
@@ -1156,7 +1156,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     if (footer_surface) |surface| parts[parts.len - 1] = .{ .origin = .{ .row = @intCast(panel_surface.size.height), .col = 3 }, .surface = surface };
     child.children = parts;
     self.scroll = panel.scroll;
-    if (code_field) |index| if (panel.fieldRow(index) != null and code.len != 0 and ctx.stringWidth(code.slice()) <= width -| Panel.value_column) {
+    if (code_field) |index| if (panel.fieldRow(index) != null and code.len != 0 and ctx.stringWidth(code.slice()) <= Panel.valueWidth(width)) {
         self.drawn.copy = code;
     };
     var hits: std.ArrayList(Hit) = .empty;
@@ -1165,14 +1165,14 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         const field = target_.index < rows.items.len;
         const action_ = if (field) rows.items[target_.index].action else buttons.items[target_.index - rows.items.len].action;
         if (field) if (rows.items[target_.index].caret) |caret| {
-            if (target_.index == selected and width > Panel.value_column) child.cursor = .{ .row = target_.row, .col = @min(width - 1, Panel.value_column + caret) };
+            if (target_.index == selected and Panel.valueWidth(width) > 0) child.cursor = .{ .row = target_.row, .col = @min(Panel.valueEnd(width) - 1, Panel.value_column + caret) };
         };
         if (action_) |action| {
             if (action == .copy and self.drawn.copy == null) continue;
             if (target_.index == selected) focused_visible = true;
             if (action == .open and field) {
                 const linked = @import("ConversationViewport.zig").linkedSegment(rows.items[target_.index].value, self.style, action.open);
-                for (@min(Panel.value_column, width)..width) |col| child.buffer[@as(usize, target_.row) * width + col].link = linked.link;
+                for (@min(Panel.value_column, Panel.valueEnd(width))..Panel.valueEnd(width)) |col| child.buffer[@as(usize, target_.row) * width + col].link = linked.link;
             }
             try hits.append(a, .{ .row = @intCast(origin.row + target_.row), .start = @intCast(origin.col + target_.start), .end = @intCast(origin.col + target_.end), .action = action });
         }
@@ -1756,6 +1756,12 @@ test "Sign-in exact drawn device code copies only explicitly and never after cli
         const frame = try testingDraw(&page, ctx.alloc, width, height);
         if (page.drawn.copy != null) try std.testing.expect(std.mem.indexOf(u8, try testingText(frame, ctx.alloc), "ABCD-1234") != null);
     };
+    for ([_]u16{ 27, 28, 29, 30, 31 }) |width| {
+        page.state.focus = .copy_code;
+        const frame = try testingDraw(&page, ctx.alloc, width, 30);
+        try std.testing.expectEqual(width >= 30, page.drawn.copy != null);
+        if (page.drawn.copy != null) try std.testing.expect(std.mem.indexOf(u8, try testingText(frame, ctx.alloc), "ABCD-1234") != null);
+    }
     _ = try testingDraw(&page, ctx.alloc, 90, 28);
     const old = page.drawn.copy.?;
     page.state.attempt += 1;

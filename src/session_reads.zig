@@ -2323,6 +2323,22 @@ test "quote body extraction clears provenance at bounded capture notices and spl
     }
 }
 
+test "chat info worker owns semantic tool edits across source reuse" {
+    const job = try std.testing.allocator.create(Job);
+    defer std.testing.allocator.destroy(job);
+    var edit: ChatInfo.Edit = .{ .tools = .{
+        .allowed = try .of(&.{ "bash", "none" }),
+        .loaded = try .of(&.{"none"}),
+    } };
+    try job.setInfoEdit(edit);
+    @memset(edit.tools.allowed.names.bytes[0..edit.tools.allowed.names.len], 'x');
+    @memset(edit.tools.loaded.names.bytes[0..edit.tools.loaded.names.len], 'y');
+    edit.tools.allowed.names.len = 0;
+    edit.tools.loaded.names.len = 0;
+    try std.testing.expectEqualStrings("bash none", job.info_edit.?.tools.allowed.names.slice());
+    try std.testing.expectEqualStrings("none", job.info_edit.?.tools.loaded.names.slice());
+}
+
 test "session_reads native queued personal bands preserve peer and background Action presentation" {
     var peer: protocol.NamedPeer = .{ .session = .{} };
     try peer.session.set("9f8e7d");

@@ -255,7 +255,7 @@ def assert_navigation_history(screen, first, browsing, feed_rows):
 
 
 def chat_info_ready(tty, folder):
-    fields = ("Effort", "Permissions", "Tools", "Folder", "Model")
+    fields = ("Effort", "Permissions", "Allowed tools", "Folder", "Model")
     actions = ("Rename", "Archive", "Copy last answer")
     def ready():
         lines = tty.screen.completed.split("\n")

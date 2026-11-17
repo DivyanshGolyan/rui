@@ -86,7 +86,7 @@ def json_strings(value):
 
 def permission_row(frame, mode):
     value = "run without asking" if mode == "bypass" else "ask first"
-    return f"Permissions {value} Tools" in " ".join(frame.split())
+    return f"Permissions {value} Allowed tools" in " ".join(frame.split())
 
 
 def home_path(home, path):
@@ -1363,8 +1363,8 @@ def renderer_cases():
         master, writer = os.pipe()
         try:
             tty = Terminal(master, None, None)
-            os.write(writer, terminal_frame([" + New Session │", "  edited 2      │ edited 1", "                │ ⠹ Waiting"])
-                + terminal_frame([" + New Session │", "  edited 2      │ edited 2", "                │ ›"]))
+            os.write(writer, terminal_frame(["   + New Session │", "    edited 2      │ edited 1", "                  │ ⠹ Waiting"])
+                + terminal_frame(["   + New Session │", "    edited 2      │ edited 2", "                  │ ›"]))
             observed = tty.wait("edited 2", after=0)
             assert "\nedited 2" in conversation_text(observed), observed
         finally:
@@ -1827,9 +1827,14 @@ def main(selected="all"):
     import fresh_tool_profile_cases
     import session_chrome_cases
     import terminal_restoration_cases
+    import tool_intent_cases
     from terminal_process_test import prove_terminal_process
     split_callers = selected == "callers"
-    assert selected in ("all", "callers", "caller-core", "renderer", "compiled-models", "terminal-waits", "help", "copy", "provider-lines", "session-chrome", "tool-profiles"), selected
+    assert selected in ("all", "callers", "caller-core", "renderer", "compiled-models", "terminal-waits", "help", "copy", "provider-lines", "session-chrome", "tool-intent", "tool-profiles"), selected
+    if selected in ("all", "callers", "caller-core", "tool-intent"):
+        tool_intent_cases.main()
+    if selected == "tool-intent":
+        return
     if selected in ("all", "callers", "caller-core", "tool-profiles"):
         fresh_tool_profile_cases.main()
     if selected == "tool-profiles":
@@ -2478,7 +2483,7 @@ def main(selected="all"):
         try:
             greeting = read_terminal(master, "› ")
             assert all(noise not in greeting for noise in ("Session:", "Workspace:", "Provider:", "Model:", "Permission:", "Store:", queued)), greeting
-            assert "\n› first input" in conversation_text(greeting) and "\nfirst answer" in conversation_text(greeting), greeting
+            assert "\n  › first input" in conversation_text(greeting) and "\nfirst answer" in conversation_text(greeting), greeting
             binding = chat_info_frame(master)
             bound_session = fixture.command("session", "inspect", "--store", store, "--session", session)["session"]
             assert bound_session["workspace"] == str(workspace.resolve()) and bound_session["provider"] == "codex", bound_session
@@ -2984,7 +2989,7 @@ def main(selected="all"):
                     observed = terminal_step(master, typed, f"edited {index}")
                 assert f"edited {index}" in conversation_text(observed), observed
                 if index == 2:
-                    assert "\n› line1\n  line2" in "\n".join(map(untimed, conversation_text(observed).split("\n"))), observed
+                    assert "\n  › line1\n    line2" in "\n".join(map(untimed, conversation_text(observed).split("\n"))), observed
                     assert "\nedited 2" in conversation_text(observed), observed
                 await_screen(master, "", composer=True)
                 body = json.loads(endpoint.requests[-1])
@@ -3011,7 +3016,7 @@ def main(selected="all"):
                 os.write(master, b"\x7f")
                 time.sleep(0.025)
             observed = terminal_step(master, "Z", "paced edited")
-            assert "\n› Z" in conversation_text(observed), observed
+            assert "\n  › Z" in conversation_text(observed), observed
             body = json.loads(endpoint.requests[-1])
             actual = next(item["content"][0]["text"] for item in reversed(body["input"])
                 if item.get("role") == "user")

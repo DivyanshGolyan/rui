@@ -4,6 +4,9 @@ import re
 
 from docs_only import ChangeKind
 from qualification import shards, split_build
+
+
+_UNSET = object()
 from select_tests import live_mysql_suites, normalize
 
 
@@ -14,7 +17,7 @@ class Plan:
 
 
 def plan(selection: dict, *, event_name: str, draft: bool, promotion: bool,
-         change_kind: ChangeKind, compile_only: bool = False, native_targets=None) -> Plan:
+         change_kind: ChangeKind, compile_only: bool = False, native_targets=_UNSET) -> Plan:
     if promotion and compile_only:
         raise ValueError('A promotion runs its suites; a compile-only build runs none')
     p = dict(selection)
@@ -58,7 +61,7 @@ def plan(selection: dict, *, event_name: str, draft: bool, promotion: bool,
         p['retry'] = False
     else:
         p['native_targets'] = []
-    if native_targets is not None:
+    if native_targets is not _UNSET:
         if event_name != 'workflow_dispatch' or promotion or compile_only:
             raise ValueError('Native diagnostic targets require a manual acceptance run')
         if (not isinstance(native_targets, list) or not native_targets

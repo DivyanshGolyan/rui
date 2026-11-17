@@ -4,10 +4,11 @@ const vxfw = vaxis.vxfw;
 const Self = @This();
 const overview_view = @import("overview_view.zig");
 const widget_style = @import("widget_style.zig");
-const List = @import("widgets/List.zig");
+const List = @import("widgets/List.zig").List(overview_view.Target);
+const RowInset = @import("widgets/RowInset.zig");
 
 pub const Segment = overview_view.Segment;
-pub const Target = overview_view.Click;
+pub const Target = overview_view.Target;
 pub const Region = struct { start: u16, end: u16, target: Target, selected: bool = false };
 pub const Row = struct {
     segments: []const Segment,
@@ -51,47 +52,28 @@ aboveFn: ?*const fn (u32, std.mem.Allocator) std.mem.Allocator.Error!List.Line =
 belowFn: ?*const fn (u32, std.mem.Allocator) std.mem.Allocator.Error!List.Line = null,
 list: *vxfw.ListView = undefined,
 shown: List.Range = .{},
-shown_at: []const Span = &.{},
+shown_at: []const List.Span = &.{},
 
 pub const Tail = struct { widget: vxfw.Widget, rows: u16 };
 
-const Span = struct { row: i17, height: u16, target: ?Target };
-const Captured = struct { id: u32, target: Target };
-
 const Frame = struct {
-    owner: *Self,
-    targets: std.ArrayList(Captured) = .empty,
-
     fn count(raw: *const anyopaque, first: u32) u32 {
-        const self: *const Frame = @ptrCast(@alignCast(raw));
-        return self.owner.rows.countFromFn.?(self.owner.rows.userdata, first);
+        const owner: *const Self = @ptrCast(@alignCast(raw));
+        return owner.rows.countFromFn.?(owner.rows.userdata, first);
     }
 
     fn row(raw: *const anyopaque, index: usize, arena: std.mem.Allocator) std.mem.Allocator.Error!List.Row {
-        const self: *Frame = @ptrCast(@alignCast(@constCast(raw)));
-        const owner = self.owner;
+        const owner: *const Self = @ptrCast(@alignCast(raw));
         const built = try owner.rows.rowFn(owner.rows.userdata, index, arena);
         const selected = owner.selected != null and owner.selected.? == index;
         std.debug.assert(!(selected and built.heading));
         const segments = try widget_style.segments(arena, owner.caps, built.segments, if (selected) owner.selection_background else null);
-        const target_id: ?u32 = if (built.target) |target| blk: {
-            const id: u32 = @intCast(self.targets.items.len);
-            try self.targets.append(arena, .{ .id = id, .target = target });
-            break :blk id;
-        } else null;
-        const alternate_id: ?u32 = if (built.alternate_target) |target| blk: {
-            const id: u32 = @intCast(self.targets.items.len);
-            try self.targets.append(arena, .{ .id = id, .target = target });
-            break :blk id;
-        } else null;
         const regions = try arena.alloc(List.Region, built.regions.len);
         for (built.regions, regions) |region, *dest| {
-            const id: u32 = @intCast(self.targets.items.len);
-            try self.targets.append(arena, .{ .id = id, .target = region.target });
-            dest.* = .{ .start = region.start, .end = region.end, .target = id, .selected = region.selected };
+            dest.* = .{ .start = region.start +| RowInset.left, .end = region.end +| RowInset.left, .tint_start = region.start, .tint_end = region.end +| RowInset.left +| RowInset.right, .target = region.target, .selected = region.selected };
         }
         const lines = try arena.dupe(List.Line, &.{segments});
-        return .{ .lines = lines, .target = target_id, .alternate_target = alternate_id, .regions = regions };
+        return .{ .lines = lines, .target = built.target, .alternate_target = built.alternate_target, .regions = regions };
     }
 };
 
@@ -100,10 +82,10 @@ pub fn widget(self: *Self) vxfw.Widget {
     return .{ .userdata = self, .eventHandler = event, .drawFn = draw };
 }
 
-fn reportPress(raw: *anyopaque, ctx: *vxfw.EventContext, id: u32) anyerror!void {
-    const frame: *Frame = @ptrCast(@alignCast(raw));
-    const press = frame.owner.on_press orelse return;
-    for (frame.targets.items) |target| if (target.id == id) return press.pressed(press.userdata, ctx, target.target);
+fn reportPress(raw: *anyopaque, ctx: *vxfw.EventContext, target: Target) anyerror!void {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    const press = self.on_press orelse return;
+    return press.pressed(press.userdata, ctx, target);
 }
 
 fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
@@ -113,15 +95,14 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
 
 fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const self: *Self = @ptrCast(@alignCast(raw));
-    const frame = try ctx.arena.create(Frame);
-    frame.* = .{ .owner = self };
-    self.inner.rows = .{ .userdata = frame, .count = self.rows.count, .rowFn = Frame.row, .countFromFn = if (self.rows.countFromFn != null) Frame.count else null };
+    self.inner.inset_rows = true;
+    self.inner.rows = .{ .userdata = self, .count = self.rows.count, .rowFn = Frame.row, .countFromFn = if (self.rows.countFromFn != null) Frame.count else null };
     self.inner.aboveFn = self.aboveFn;
     self.inner.belowFn = self.belowFn;
     self.inner.indicator_align = .center;
     self.inner.indicator_style = widget_style.of(self.caps, .{ .colour = .quiet });
     self.inner.selected = self.selected;
-    self.inner.on_press = if (self.on_press != null) .{ .userdata = frame, .pressed = reportPress } else null;
+    self.inner.on_press = if (self.on_press != null) .{ .userdata = self, .pressed = reportPress } else null;
     self.inner.base_style = widget_style.of(self.caps, .{});
     self.inner.selection_style = widget_style.of(self.caps, .{ .background = self.selection_background });
     self.inner.hover_style = widget_style.of(self.caps, .{ .background = .hover });
@@ -138,14 +119,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     }
     surface.widget = self.widget();
     self.shown = self.inner.shown;
-    const spans = try ctx.arena.alloc(Span, self.inner.shown_at.len);
-    for (self.inner.shown_at, spans) |span, *dest| {
-        const target = if (span.target) |id| for (frame.targets.items) |item| {
-            if (item.id == id) break item.target;
-        } else null else null;
-        dest.* = .{ .row = span.row, .height = span.height, .target = target };
-    }
-    self.shown_at = spans;
+    self.shown_at = self.inner.shown_at;
     return surface;
 }
 
@@ -161,10 +135,10 @@ test "GroupedList selection preserves each segment foreground" {
     const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 12, .height = 2 }, .cell_size = .{} };
     const surface = try list.widget().draw(ctx);
     const cells = surface.children[0].surface;
-    try std.testing.expectEqual(vaxis.Color{ .rgb = .{ 0xf0, 0x8b, 0x74 } }, cells.readCell(0, 0).style.fg);
-    try std.testing.expect(cells.readCell(0, 0).style.bold);
-    try std.testing.expect(!cells.readCell(2, 0).style.bold);
-    try std.testing.expect(!std.meta.eql(cells.readCell(0, 0).style.fg, cells.readCell(2, 0).style.fg));
+    try std.testing.expectEqual(vaxis.Color{ .rgb = .{ 0xf0, 0x8b, 0x74 } }, cells.readCell(2, 0).style.fg);
+    try std.testing.expect(cells.readCell(2, 0).style.bold);
+    try std.testing.expect(!cells.readCell(4, 0).style.bold);
+    try std.testing.expect(!std.meta.eql(cells.readCell(2, 0).style.fg, cells.readCell(4, 0).style.fg));
     for ([_]u16{ 0, 2, 11 }) |column| {
         try std.testing.expectEqual(widget_style.of(list.caps, .{ .background = .selection }).bg, cells.readCell(column, 0).style.bg);
     }
@@ -203,7 +177,7 @@ test "GroupedList quiet rows normalize whole lines before selection and hover in
         state.selected = if (selected) .{ .session = listed.reference } else .new_session;
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
-        const first = try view.listSegments(arena.allocator(), &state, .{ .row = 0 }, width, caps, 0);
+        const first = (try view.Lines.at(arena.allocator(), &state, 0, width, caps, 0)).?;
         const rows: []const Row = &.{.{
             .segments = first.segments,
             .target = .{ .open = listed.reference },
@@ -227,7 +201,7 @@ test "GroupedList quiet rows normalize whole lines before selection and hover in
             try std.testing.expectEqual(highlight.ul_style, cell.style.ul_style);
             if (depth == .none) try std.testing.expectEqual(vaxis.Color.default, cell.style.fg);
         }
-        try std.testing.expectEqual(selected, surface.children[0].surface.readCell(3, 0).style.bold);
+        try std.testing.expectEqual(selected, surface.children[0].surface.readCell(5, 0).style.bold);
     };
 }
 
@@ -365,7 +339,7 @@ test "GroupedList selects and presses a row with a pinned tail" {
     const row = surface.children[0].surface.children[0].surface;
     try std.testing.expectEqual(@as(u16, 1), row.size.height);
     for ([_]u16{ 0, 10, 39 }) |x| try std.testing.expectEqual(widget_style.of(.{}, .{ .background = .selection }).bg, row.readCell(x, 0).style.bg);
-    try std.testing.expect(row.readCell(0, 0).style.bold);
+    try std.testing.expect(row.readCell(2, 0).style.bold);
     var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
     try list.widget().handleEvent(&events, leftPress(3, 0));
     try std.testing.expectEqual(@as(usize, 1), presses.count);
@@ -457,5 +431,40 @@ test "Session pin gestures retain the drawn target and desired value without nor
     for (events.cmds.items) |cmd| switch (cmd) {
         .set_mouse_shape => {},
         else => return error.TestUnexpectedCommand,
+    };
+}
+
+test "GroupedList row inset is stable for selection hover and plain rows" {
+    const segments: []const Segment = &.{.{ .text = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ", .style = .{} }};
+    const row: Row = .{ .segments = segments, .target = .new_session };
+    const rows: []const Row = &.{ row, row, row };
+    for ([_]overview_view.Caps.Depth{ .direct, .indexed, .none }) |depth| for ([_]u16{ 0, 1, 2, 3, 4, 5, 8, 9, 20, 40, 46, 140 }) |width| {
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var presses: Pressed = .{};
+        var list: Self = .{ .rows = .of(&rows), .selected = 0, .caps = .{ .depth = depth }, .on_press = presses.press() };
+        const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 3 }, .cell_size = .{} };
+        _ = try list.widget().draw(ctx);
+        var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        if (width > 0) try list.widget().handleEvent(&events, .{ .mouse = .{ .col = 0, .row = 1, .button = .none, .type = .motion, .mods = .{} } });
+        const surface = try list.widget().draw(ctx);
+        if (width == 0) {
+            try std.testing.expectEqual(@as(usize, 0), surface.children.len);
+            continue;
+        }
+        const reference = surface.children[0].surface;
+        if (width >= 5) try std.testing.expect(!std.mem.eql(u8, " ", reference.readCell(2, 0).char.grapheme));
+        for (0..3) |y| {
+            const line = surface.children[y].surface;
+            for (0..width) |x| {
+                const actual = line.readCell(@intCast(x), 0).char.grapheme;
+                try std.testing.expectEqualStrings(reference.readCell(@intCast(x), 0).char.grapheme, actual);
+                if (x < 2 or x >= width -| 2) try std.testing.expectEqualStrings(" ", actual);
+                const ground: overview_view.Background = if (y == 0) .selection else if (y == 1) .hover else .ground;
+                const style = widget_style.of(list.caps, .{ .background = ground });
+                try std.testing.expectEqual(style.bg, line.readCell(@intCast(x), 0).style.bg);
+                try std.testing.expectEqual(style.reverse, line.readCell(@intCast(x), 0).style.reverse);
+            }
+        }
     };
 }

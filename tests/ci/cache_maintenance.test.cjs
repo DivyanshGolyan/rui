@@ -127,7 +127,7 @@ function buildKeyPolicy() {
 test('build restores keep each part apart and seed parts without snapshots from baseline', () => {
   const root = `${__dirname}/../..`;
   const {keys: nameKeys, order} = buildKeyPolicy();
-  assert.deepEqual(order, ['prefix-deps', 'prefix-part', 'prefix-legacy-deps', 'prefix-legacy-part', 'prefix-seed']);
+  assert.deepEqual(order, ['prefix-deps', 'prefix-part', 'prefix-previous-deps', 'prefix-previous-part', 'prefix-legacy-deps', 'prefix-legacy-part', 'prefix-seed']);
   const workflows = `${root}/.github/workflows`;
   const parts = new Set(['all']);
   for (const file of readdirSync(workflows).filter(file => file.endsWith('.yml'))) {
@@ -188,10 +188,12 @@ test('only Linux X64 compiled migrates with ordered legacy fallbacks and unchang
   assert.match(step, /SOURCES: \$\{\{ hashFiles\('build.zig', 'build\/\*\*', 'src\/\*\*', 'tests\/integration\/\*\*'\) \}\}/);
   const v2 = `rui-build-v2-Linux-X64-0.17.1-${'a'.repeat(64)}-`;
   const v3 = v2.replace('-v2-', '-v3-');
+  const v4 = v2.replace('-v2-', '-v4-');
   const named = keys('compiled', deps, sources);
-  assert.equal(named.key, `${v3}compiled.${deps}-${sources}`);
+  assert.equal(named.key, `${v4}compiled.${deps}-${sources}`);
   const prefixes = order.map(field => named[field]);
   assert.deepEqual(prefixes, [
+    `${v4}compiled.${deps}-`, `${v4}compiled.`,
     `${v3}compiled.${deps}-`, `${v3}compiled.`,
     `${v2}compiled.${deps}-`, `${v2}compiled.`, `${v2}baseline.${deps}-`,
   ]);
@@ -204,6 +206,8 @@ test('only Linux X64 compiled migrates with ordered legacy fallbacks and unchang
     return {key: null, exact: false};
   };
   const ordered = [
+    `${v4}compiled.${deps}-${'e'.repeat(64)}`,
+    `${v4}compiled.${otherDeps}-${sources}`,
     `${v3}compiled.${deps}-${'e'.repeat(64)}`,
     `${v3}compiled.${otherDeps}-${sources}`,
     `${v2}compiled.${deps}-${sources}`,
@@ -214,7 +218,10 @@ test('only Linux X64 compiled migrates with ordered legacy fallbacks and unchang
     assert.deepEqual(restore(ordered.slice(i)), {key: ordered[i], exact: false}, `restore priority ${i}`);
   }
   assert.deepEqual(restore([...ordered, named.key]), {key: named.key, exact: true});
-  assert.notEqual(ordered[2], named.key, 'immutable legacy exact snapshot cannot mask migration');
+  for (const version of [v2, v3]) {
+    assert.deepEqual(restore([`${version}compiled.${deps}-${sources}`]), {key: `${version}compiled.${deps}-${sources}`, exact: false});
+    assert.notEqual(`${version}compiled.${deps}-${sources}`, named.key, 'immutable legacy exact snapshot cannot mask migration');
+  }
   const partial = saveKey({kind: 'build', key: named.key, setupOutcome: 'success', workOutcome: 'failure', runId: '1', runAttempt: '1'});
   assert.deepEqual(restore([partial]), {key: partial, exact: false});
   assert.equal(saveKey({kind: 'build', key: named.key, setupOutcome: 'success', workOutcome: 'success'}), named.key);
@@ -224,6 +231,8 @@ test('only Linux X64 compiled migrates with ordered legacy fallbacks and unchang
       const ordinary = keys(part, deps, sources, platform);
       const prefix = `rui-build-v2-${platform}-0.17.1-${'a'.repeat(64)}-`;
       assert.equal(ordinary.key, `${prefix}${part}.${deps}-${sources}`);
+      assert.equal(ordinary['prefix-previous-deps'], '');
+      assert.equal(ordinary['prefix-previous-part'], '');
       assert.equal(ordinary['prefix-legacy-deps'], '');
       assert.equal(ordinary['prefix-legacy-part'], '');
       const restoreKeys = order.map(field => ordinary[field]).filter(Boolean);
@@ -232,16 +241,17 @@ test('only Linux X64 compiled migrates with ordered legacy fallbacks and unchang
   }
 });
 
-function compiledSnapshot(id, version = 3, partial = false) {
+function compiledSnapshot(id, version = 4, partial = false) {
   const entry = cache(id, 'refs/heads/main', 'Linux-X64', 'compiled');
   entry.key = `rui-build-v${version}-Linux-X64-0.17.1-${'a'.repeat(64)}-compiled.${'b'.repeat(64)}-${id.toString(16).padStart(64, '0')}`;
   if (partial) entry.key += '-partial-123-1';
   return entry;
 }
 
-test('complete v3 retires every v2 layout and partial despite a later concurrent legacy save', async () => {
+test('complete v4 retires every v2/v3 layout and partial despite a later concurrent legacy save', async () => {
   const entries = [
-    compiledSnapshot(1), compiledSnapshot(2, 3, true),
+    compiledSnapshot(1), compiledSnapshot(2, 4, true),
+    compiledSnapshot(10, 3), compiledSnapshot(11, 3, true),
     compiledSnapshot(3, 2), compiledSnapshot(4, 2, true),
     cache(5, 'refs/heads/main', 'Linux-X64', 'compiled'),
     {...cache(6, 'refs/heads/main', 'Linux-X64', 'compiled'), key: `${cache(6, 'refs/heads/main', 'Linux-X64', 'compiled').key}-partial-1-1`},
@@ -252,17 +262,17 @@ test('complete v3 retires every v2 layout and partial despite a later concurrent
   const first = await run(entries);
   assert.ifError(first.error);
   assert.deepEqual(first.ids, [1, 2, 7, 8, 9]);
-  const later = await run([...entries.filter(entry => first.ids.includes(entry.id)), compiledSnapshot(20, 2), compiledSnapshot(21, 2, true)]);
+  const later = await run([...entries.filter(entry => first.ids.includes(entry.id)), compiledSnapshot(20, 2), compiledSnapshot(21, 2, true), compiledSnapshot(22, 3), compiledSnapshot(23, 3, true)]);
   assert.ifError(later.error);
-  assert.deepEqual(later.ids, first.ids, 'newer legacy writers cannot evict the only complete v3');
+  assert.deepEqual(later.ids, first.ids, 'newer legacy writers cannot evict the only complete v4');
 });
 
-test('partial v3 preserves legacy fallback until completion, then retains its own newest partial independently', async () => {
-  const entries = [compiledSnapshot(1, 2), compiledSnapshot(2, 2, true), compiledSnapshot(3, 3, true)];
+test('partial v4 preserves legacy fallbacks until completion, then retains its own newest partial independently', async () => {
+  const entries = [compiledSnapshot(1, 2), compiledSnapshot(2, 2, true), compiledSnapshot(3, 4, true), compiledSnapshot(7, 3), compiledSnapshot(8, 3, true)];
   const partialOnly = await run(entries);
   assert.ifError(partialOnly.error);
-  assert.deepEqual(partialOnly.ids, [1, 2, 3], 'unfinished v3 cannot retire complete or partial v2 fallbacks');
-  const completed = await run([...entries, compiledSnapshot(4), compiledSnapshot(5, 3, true), compiledSnapshot(6)]);
+  assert.deepEqual(partialOnly.ids, [1, 2, 3, 7, 8], 'unfinished v4 cannot retire complete or partial v2/v3 fallbacks');
+  const completed = await run([...entries, compiledSnapshot(4), compiledSnapshot(5, 4, true), compiledSnapshot(6)]);
   assert.ifError(completed.error);
   assert.deepEqual(completed.ids, [5, 6]);
   for (const ref of ['refs/pull/12/merge', 'refs/heads/feature']) {
@@ -272,7 +282,34 @@ test('partial v3 preserves legacy fallback until completion, then retains its ow
   }
 });
 
-test('malformed v3 lookalikes neither trigger migration nor participate in pruning', async () => {
+test('compiled retention covers complete and partial states across v2/v3/v4 and timestamp orders', async () => {
+  // Each bit independently enables a complete or partial generation. Every
+  // enabled group has two snapshots so the oracle also checks newest wins.
+  for (let state = 0; state < 64; state++) {
+    for (const versions of [[2, 3, 4], [4, 3, 2]]) {
+      const entries = [], newest = [];
+      let id = 0;
+      for (const version of versions) {
+        for (const partial of [false, true]) {
+          const bit = (version - 2) * 2 + Number(partial);
+          if (!(state & (1 << bit))) continue;
+          entries.push(compiledSnapshot(++id, version, partial));
+          const latest = compiledSnapshot(++id, version, partial);
+          entries.push(latest);
+          newest.push({entry: latest, version});
+        }
+      }
+      const hasCompleteV4 = Boolean(state & (1 << 4));
+      const expected = newest.filter(({version}) => !hasCompleteV4 || version === 4)
+        .map(({entry}) => entry.id).sort((a, b) => a - b);
+      const result = await run(entries);
+      assert.ifError(result.error);
+      assert.deepEqual(result.ids, expected, `state=${state}, timestamp order=${versions}`);
+    }
+  }
+});
+
+test('malformed v4 lookalikes neither trigger migration nor participate in pruning', async () => {
   const valid = compiledSnapshot(10).key;
   const lookalikes = [
     valid + '-extra', valid.replace('-compiled.', '-compiled-unit.'),
