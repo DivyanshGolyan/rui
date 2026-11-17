@@ -88,11 +88,11 @@ FIXTURES = {
     "mysql-wire-integration": ((I + "mysql_wire_integration.py",), (), ()),
     "skills-integration": ((I + "skills_integration.py",), (), ("src/session_skills.zig",)),
     "settings-integration": ((I + "settings_integration.py", I + "settings_mysql_integration.py",
-                                  I + "settings_fixture.py", I + "store_rounds_cases.py"),
+                                  I + "settings_fixture.py", I + "store_rounds_cases.py", I + "attached_creation_cases.py"),
                                  (I + "mysql_launch_admin.zig",),
                                  ("src/host_settings.zig", "src/host_start.zig", "src/server_mcp_settings.zig", "src/mysql_url.zig", "src/mcp/Running.zig", "src/mcp/servers.zig")),
     "ts-client": ((I + "host_process.py", "clients/ts/test/settings-host.test.ts"), (), ("src/host_settings.zig",)),
-    "request-wait-integration": ((I + "request_wait_integration.py",), (),
+    "request-wait-integration": ((I + "request_wait_integration.py", I + "attached_creation_cases.py"), (),
                                  (CALLER, "src/request_wait.zig", "src/server_host.zig", "src/cli_args.zig", "src/serve_grammar.zig",
                                   "src/caller_error.zig", "src/caller_exit.zig")),
     "current-facts-integration": ((I + "current_facts_integration.py",), (), ()),
@@ -467,7 +467,7 @@ RULES = (
     (("tests/integration/canonical_failure_integration.py", "build.zig"),
      ("canonical-failure-integration",), ("canonical-failure-integration",), "Canonical failure caller oracle"),
     (("build.zig", "build.zig.zon", "install.sh", "src/fetch_dependencies.sh", "src/build_*", "src/*.patch", ".agents/setup",
-      ".github/actions/setup/action.yml", "screen-emulator/*"),
+      ".github/actions/setup/action.yml", "screen-emulator/*", "tests/ci/build_artifact.py"),
      ("check-full", "admission-debug-integration", "test-full"),
      ("check-full", "admission-debug-integration", "test-full"),
      "Build, dependency or bootstrap inputs"),
@@ -483,7 +483,7 @@ LIVE_MYSQL_DIALECT_TARGETS = frozenset({"test", "test-store", "check", "check-fu
 LIVE_POSTGRES_TARGETS = frozenset({"test-pg", "check", "check-full"})
 
 LIVE_RULES = (
-    (("src/host_settings.zig", "src/host_start.zig", "src/server_mcp_settings.zig", "src/mysql_url.zig", "tests/integration/settings*", "tests/integration/mysql_launch_admin.zig"),
+    (("src/host_settings.zig", "src/host_start.zig", "src/server_mcp_settings.zig", "src/mysql_url.zig", "tests/integration/settings*", "tests/integration/mysql_launch_admin.zig", "tests/integration/attached_creation_cases.py"),
      ("test", "settings-integration"), ("settings-integration",),
      "The settings-document Host opens a live MySQL Store on Linux; macOS skips the live server",
      frozenset({"settings-integration", "check", "check-full"})),

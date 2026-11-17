@@ -165,11 +165,25 @@ class PrepushTest(unittest.TestCase):
     def test_the_unfiltered_unit_compile_is_ci_unit_producer_command(self):
         import build_artifact
         with patch.dict(os.environ, {"RUNNER_TEMP": str(self.root), "GITHUB_EVENT_NAME": "push"}), \
+                patch.object(build_artifact, "compile_command", wraps=build_artifact.compile_command) as command, \
                 patch.object(build_artifact.subprocess, "run") as run:
             build_artifact.build(["test"], "unit")
-        ci = run.call_args.args[0]
-        self.assertEqual(prepush.UNIT_COMPILE[:-2], ci[:ci.index("--prefix")])
-        self.assertNotIn("-Dtest-filter", " ".join(prepush.UNIT_COMPILE))
+            command.assert_called_once_with(["test"], "unit", pr_mode=False)
+            ci = run.call_args.args[0]
+            command.reset_mock()
+            local = prepush.unit_compile()
+            command.assert_called_once_with(["test"], "unit", jobs=1)
+        # The graph and backend are shared; local feedback has an explicit
+        # one-job resource budget while hosted producers use their own limit.
+        without_jobs = lambda args: [arg for arg in args if not arg.startswith("-j")]
+        self.assertEqual(without_jobs(local[:-2]), without_jobs(ci[:ci.index("--prefix")]))
+        self.assertEqual([arg for arg in local if arg.startswith("-j")], ["-j1"])
+        self.assertNotIn("-Dtest-filter", " ".join(local))
+
+    def test_local_unit_compile_keeps_llvm_even_in_a_pr_environment(self):
+        with patch.dict(os.environ, GITHUB_EVENT_NAME="pull_request"):
+            self.assertNotIn("-Dpr-ci=true", prepush.unit_compile())
+
 
     def test_full_adds_the_unit_compile_stack_frames_and_live_mysql_only_with_a_server(self):
         paths = ["src/store/rsql.zig"]
@@ -179,7 +193,7 @@ class PrepushTest(unittest.TestCase):
         for full in (without, with_server):
             self.assertEqual(set(full) - set(default), {"development selection", "macOS type check", "unfiltered unit compile", "stack frames", "live MySQL"})
             self.assertEqual({name: full[name] for name in default}, default)
-            self.assertEqual(full["unfiltered unit compile"], prepush.UNIT_COMPILE)
+            self.assertEqual(full["unfiltered unit compile"], prepush.unit_compile())
             self.assertEqual(full["stack frames"], ["zig", "build", "-j1", "stack-frames", "-Dcpu=baseline", "--summary", "line"])
         self.assertEqual(with_server["live MySQL"], ["env", "RUI_TEST_REQUIRE_ENGINES=mysql", "zig", "build", "test-store", "--summary", "line"])
         self.assertIsInstance(without["live MySQL"], prepush.Skipped)
