@@ -2868,6 +2868,7 @@ export interface components {
             since?: string | null;
         };
         PageWork: {
+            creator: string | null;
             read_version: string;
             state: components["schemas"]["WorkStateJson"];
             turn: components["schemas"]["Decimal"] | null;
@@ -3149,6 +3150,7 @@ export interface components {
             /** @enum {string} */
             permission_mode: "ask" | "bypass";
             parent: string | null;
+            creator: string | null;
             label: string | null;
             created_at: components["schemas"]["Decimal"];
             revision: components["schemas"]["Decimal"];
