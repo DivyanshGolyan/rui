@@ -90,8 +90,11 @@ not expected to remain in the overview.
 ]
 ```
 
-The `recovery` scenario loses the first real Message reply. It checks a replay
-of exactly the original key and wire bytes, a separately edited next draft
+The `recovery` scenario loses the first real Message reply. It waits for the
+optimistic original Message with its attached `Not confirmed · ctrl+r retries original`
+note, then checks that recovery clears the note without adding a success status
+or duplicate Message band. It checks a replay of exactly the original key and
+wire bytes (also retained unchanged in the saved record), a separately edited next draft
 `next cafXé!` with caret column 11, and then `next cafXYé!` after `Y` and Enter.
 The original is `original éZ`. Provider requests must show exactly these two
 Messages, with no duplicate provider execution. Encoded recovery probes can

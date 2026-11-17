@@ -7,6 +7,7 @@ import threading
 
 import model_fixture as fixture
 from overview_fixture import world
+from human_cli_fixture import conversation_text, composer_line, chat_footer_row
 
 
 def answer(name):
@@ -105,8 +106,16 @@ def unconfirmed_status():
                 screen.keys(b"lost")
                 screen.contains("lost")
                 screen.keys(b"\r")
-                screen.wait(lambda f: "! Not confirmed" in f and "ctrl+r retries original" in f,
-                            "unconfirmed state below footer and retry key in footer", timeout=30)
+                note = "Not confirmed · ctrl+r retries original"
+                frame = screen.wait(lambda f: note in conversation_text(f)
+                    and conversation_text(f).count("› lost") == 1,
+                    "unconfirmed note attached to the original sent Message", timeout=30)
+                transcript = conversation_text(frame)
+                assert transcript.count(note) == 1 and transcript.index("› lost") < transcript.index(note), frame
+                assert "! Not confirmed" not in frame and "Sending" not in frame, frame
+                footer = chat_footer_row(frame)
+                assert note not in "\n".join(composer_line(frame, index)
+                    for index in range(footer, len(frame.split("\n")))), frame
             finally:
                 os.kill(w.host.pid, signal.SIGCONT)
             saved = requests(w) - before

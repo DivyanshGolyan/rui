@@ -52,6 +52,7 @@ pub fn of(caps: view.Caps, role: view.Style) vaxis.Style {
     const background: theme.Background = switch (role.background) {
         .ground => .ground,
         .bar, .input_surface => .selvedge,
+        .user_message => .user_message,
         .selection => .selection,
         .hover => .hover,
         .band => .alert,
