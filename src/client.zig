@@ -109,7 +109,8 @@ pub const Requests = struct {
         self.check() catch |err| return .fail(null, err);
         const carried: ?Environment = if (captured.target == .message) environment else null;
         if (carried) |value| if (value.bytes() > protocol.max_environment_bytes) return .fail(null, error.EnvironmentTooLarge);
-        const paths = platform.resolveClientPaths(self.io, captured.saved.store.slice()) catch |err| return .fail(.store, err);
+        const paths = captured.resolvePaths(self.io) catch |err| return .fail(.store, err);
+        captured.paths = paths; // retain the invocation's route for failure reporting
         const reply = switch (sendSource(self, &paths, std.meta.activeTag(captured.target).route(), self.mutation_timing, captured.length, &captured.file, null, null, carried, reply_buffer, null)) {
             .done => |reply| reply,
             .failed => |failure| return .fail(failure.step, failure.err),
@@ -126,16 +127,22 @@ pub const Requests = struct {
     }
 
     fn observeCommandUntil(self: Requests, store_path: []const u8, key: []const u8, since: ?protocol_reply.SessionToken, reply_buffer: *ObservationBuffer, until: ?i128) !protocol_reply.ObservationReply {
+        try self.check();
+        if (key.len > protocol.max_key_bytes or !std.unicode.utf8ValidateSlice(key)) return error.InvalidKey;
+        const paths = try resolveClientPaths(self.io, store_path);
+        return self.observeCommandAt(&paths, key, since, reply_buffer, until);
+    }
+
+    pub fn observeCommandAt(self: Requests, paths: *const platform.Paths, key: []const u8, since: ?protocol_reply.SessionToken, reply_buffer: *ObservationBuffer, until: ?i128) !protocol_reply.ObservationReply {
         reply_buffer.len = 0;
         try self.check();
         if (key.len > protocol.max_key_bytes or !std.unicode.utf8ValidateSlice(key)) return error.InvalidKey;
-        const paths = try platform.resolveClientPaths(self.io, store_path);
         var body: protocol.RequestBuffer = .{};
         var token_buffer: [protocol_reply.SessionToken.max_bytes]u8 = undefined;
-        try body.appendShape(protocol.observe_command_request.head, .{ paths.store.slice(), key });
+        try body.appendShape(protocol.observe_command_request.head, .{ paths.store_identity.slice(), key });
         if (since) |token| try body.appendShape(protocol.observe_command_request.since, .{@as(?[]const u8, token.format(&token_buffer))});
         try body.appendShape(protocol.observe_command_request.tail, .{});
-        const reply = try sendSource(self, &paths, "/v1/observe-command", .{}, body.len, null, body.slice(), null, null, reply_buffer, until).get();
+        const reply = try sendSource(self, paths, "/v1/observe-command", .{}, body.len, null, body.slice(), null, null, reply_buffer, until).get();
         return protocol_reply.ObservationReply.parse(reply, key, since);
     }
 
@@ -161,11 +168,11 @@ pub const Requests = struct {
         reply_buffer.len = 0;
         try self.check();
         try protocol_reply.validateIdentityInputs("", session);
-        const paths = try platform.resolveClientPaths(self.io, store_path);
+        const paths = try resolveClientPaths(self.io, store_path);
         var body: protocol.RequestBuffer = .{};
         switch (profile) {
-            .current => try body.appendShape(protocol.inspect_session_request.head ++ protocol.inspect_session_request.tail, .{ paths.store.slice(), session }),
-            .full => try body.appendShape((protocol.inspect_session_request.head ++ protocol.inspect_session_request.profile ++ protocol.inspect_session_request.tail), .{ paths.store.slice(), session }),
+            .current => try body.appendShape(protocol.inspect_session_request.head ++ protocol.inspect_session_request.tail, .{ paths.store_identity.slice(), session }),
+            .full => try body.appendShape((protocol.inspect_session_request.head ++ protocol.inspect_session_request.profile ++ protocol.inspect_session_request.tail), .{ paths.store_identity.slice(), session }),
         }
         const fd = try openRead(self, &paths, "/v1/inspect-session", body.slice());
         defer closeSocket(self.io, fd);
@@ -176,9 +183,9 @@ pub const Requests = struct {
         try self.check();
         try protocol_reply.validateIdentityInputs("", session);
         if (selection.operation == 0 or selection.operation > std.math.maxInt(i64) or selection.attempt == 0 or selection.attempt > std.math.maxInt(i64)) return error.InvalidTarget;
-        const paths = try platform.resolveClientPaths(self.io, store_path);
+        const paths = try resolveClientPaths(self.io, store_path);
         var body: protocol.RequestBuffer = .{};
-        try body.appendShape((protocol.inspect_session_request.head ++ protocol.inspect_session_request.failed_response ++ protocol.inspect_session_request.tail), .{ paths.store.slice(), session, selection.part, selection.operation, selection.attempt });
+        try body.appendShape((protocol.inspect_session_request.head ++ protocol.inspect_session_request.failed_response ++ protocol.inspect_session_request.tail), .{ paths.store_identity.slice(), session, selection.part, selection.operation, selection.attempt });
         const fd = try openRead(self, &paths, "/v1/inspect-session", body.slice());
         defer closeSocket(self.io, fd);
         const head = try readResponseHeadUntil(self, fd, .{}, null);
@@ -203,9 +210,9 @@ pub const Requests = struct {
                 !std.unicode.utf8ValidateSlice(value)) return error.InvalidWorkspace;
         }
         try cursor.validate();
-        const paths = try platform.resolveClientPaths(self.io, store_path);
+        const paths = try resolveClientPaths(self.io, store_path);
         var body: protocol.RequestBuffer = .{};
-        try appendListSessions(&body, paths.store.slice(), workspace, archive, cursor);
+        try appendListSessions(&body, paths.store_identity.slice(), workspace, archive, cursor);
         const fd = try openRead(self, &paths, "/v1/list-sessions", body.slice());
         defer closeSocket(self.io, fd);
         return readReportResponse(self, fd, sink, reply_buffer);
@@ -215,9 +222,9 @@ pub const Requests = struct {
         reply_buffer.len = 0;
         try self.check();
         if (!protocol.validSessionId(session) or action_id == 0 or action_id > std.math.maxInt(i64) or offset > protocol.max_sqlite_content_bytes) return error.InvalidTarget;
-        const paths = try platform.resolveClientPaths(self.io, store_path);
+        const paths = try resolveClientPaths(self.io, store_path);
         var body: protocol.RequestBuffer = .{};
-        try body.appendShape(protocol.read_action_request.all, .{ paths.store.slice(), session, action_id, offset });
+        try body.appendShape(protocol.read_action_request.all, .{ paths.store_identity.slice(), session, action_id, offset });
         const fd = try openRead(self, &paths, "/v1/read-action", body.slice());
         defer closeSocket(self.io, fd);
         return readReportResponse(self, fd, sink, reply_buffer);
@@ -235,9 +242,9 @@ pub const Requests = struct {
         try self.check();
         try protocol_reply.validateIdentityInputs("", session);
         try cursor.validate();
-        const paths = try platform.resolveClientPaths(self.io, store_path);
+        const paths = try resolveClientPaths(self.io, store_path);
         var body: protocol.RequestBuffer = .{};
-        try body.appendShape(protocol.conversation_page_request, .{ paths.store.slice(), session, cursor.end, cursor.before_position, cursor.before_ordinal });
+        try body.appendShape(protocol.conversation_page_request, .{ paths.store_identity.slice(), session, cursor.end, cursor.before_position, cursor.before_ordinal });
         const fd = try openRead(self, &paths, "/v1/conversation-page", body.slice());
         defer closeSocket(self.io, fd);
         const Sink = struct {
@@ -258,9 +265,9 @@ pub const Requests = struct {
         try self.check();
         try protocol_reply.validateIdentityInputs("", session);
         if (position == 0 or position > std.math.maxInt(i64) or ordinal > std.math.maxInt(i64)) return error.InvalidTarget;
-        const paths = try platform.resolveClientPaths(self.io, store_path);
+        const paths = try resolveClientPaths(self.io, store_path);
         var body: protocol.RequestBuffer = .{};
-        try body.appendShape(protocol.conversation_content_request.all, .{ paths.store.slice(), session, position, ordinal });
+        try body.appendShape(protocol.conversation_content_request.all, .{ paths.store_identity.slice(), session, position, ordinal });
         const fd = try openRead(self, &paths, "/v1/conversation-content", body.slice());
         defer closeSocket(self.io, fd);
         return readPublicContentResponse(self, fd, expected, sink);
@@ -270,9 +277,9 @@ pub const Requests = struct {
         try self.check();
         try protocol_reply.validateIdentityInputs("", session);
         try cursor.validate();
-        const paths = try platform.resolveClientPaths(self.io, store_path);
+        const paths = try resolveClientPaths(self.io, store_path);
         var body: protocol.RequestBuffer = .{};
-        try body.appendShape((protocol.activity_page_request.head ++ protocol.activity_page_request.tail), .{ paths.store.slice(), session, cursor.end, cursor.position, cursor.ordinal, cursor.direction, cursor.kinds, cursor.limit });
+        try body.appendShape((protocol.activity_page_request.head ++ protocol.activity_page_request.tail), .{ paths.store_identity.slice(), session, cursor.end, cursor.position, cursor.ordinal, cursor.direction, cursor.kinds, cursor.limit });
         const fd = try openRead(self, &paths, "/v1/activity-page", body.slice());
         defer closeSocket(self.io, fd);
         const Sink = struct {
@@ -291,9 +298,9 @@ pub const Requests = struct {
 
     pub fn modelList(self: Requests, store_path: []const u8, gpa: std.mem.Allocator) ![]u8 {
         try self.check();
-        const paths = try platform.resolveClientPaths(self.io, store_path);
+        const paths = try resolveClientPaths(self.io, store_path);
         var body: protocol.RequestBuffer = .{};
-        try body.appendShape(protocol.model_list_request, .{paths.store.slice()});
+        try body.appendShape(protocol.model_list_request, .{paths.store_identity.slice()});
         const fd = try openRead(self, &paths, "/v1/model-list", body.slice());
         defer closeSocket(self.io, fd);
         return readModelListResponse(self, fd, gpa);
@@ -306,16 +313,16 @@ pub const Requests = struct {
             .session => |session| try protocol_reply.validateIdentityInputs("", session),
             .workspace => |workspace| if (workspace.len == 0 or workspace.len > protocol.max_workspace_bytes or !std.unicode.utf8ValidateSlice(workspace)) return error.InvalidWorkspace,
         }
-        const paths = try platform.resolveClientPaths(self.io, store_path);
+        const paths = try resolveClientPaths(self.io, store_path);
         const body = try gpa.create(protocol.RequestBuffer);
         defer gpa.destroy(body);
         body.len = 0;
         switch (scope) {
             .session => |session| {
-                try body.appendShape(protocol.skill_suggestions_session_request, .{ paths.store.slice(), session, prefix });
+                try body.appendShape(protocol.skill_suggestions_session_request, .{ paths.store_identity.slice(), session, prefix });
             },
             .workspace => |workspace| {
-                try body.appendShape(protocol.skill_suggestions_workspace_request, .{ paths.store.slice(), workspace, prefix });
+                try body.appendShape(protocol.skill_suggestions_workspace_request, .{ paths.store_identity.slice(), workspace, prefix });
             },
         }
         const fd = try openRead(self, &paths, "/v1/skill-suggestions", body.slice());
@@ -345,9 +352,9 @@ pub const Requests = struct {
         try self.check();
         try protocol_reply.validateIdentityInputs("", session);
         if (position == 0 or position > std.math.maxInt(i64) or ordinal > std.math.maxInt(i64)) return error.InvalidTarget;
-        const paths = try platform.resolveClientPaths(self.io, store_path);
+        const paths = try resolveClientPaths(self.io, store_path);
         var body: protocol.RequestBuffer = .{};
-        try body.appendShape(protocol.activity_content_request, .{ paths.store.slice(), session, position, ordinal });
+        try body.appendShape(protocol.activity_content_request, .{ paths.store_identity.slice(), session, position, ordinal });
         const fd = try openRead(self, &paths, "/v1/activity-content", body.slice());
         defer closeSocket(self.io, fd);
         return readPublicContentResponse(self, fd, expected, sink);
@@ -357,9 +364,9 @@ pub const Requests = struct {
         try self.check();
         try protocol_reply.validateIdentityInputs("", session);
         if (position == 0 or position > std.math.maxInt(i64)) return error.InvalidTarget;
-        const paths = try platform.resolveClientPaths(self.io, store_path);
+        const paths = try resolveClientPaths(self.io, store_path);
         var body: protocol.RequestBuffer = .{};
-        try body.appendShape(protocol.activity_content_request, .{ paths.store.slice(), session, position, 0 });
+        try body.appendShape(protocol.activity_content_request, .{ paths.store_identity.slice(), session, position, 0 });
         const fd = try openRead(self, &paths, "/v1/activity-content", body.slice());
         defer closeSocket(self.io, fd);
         return readFirstLine(self, fd, buffer);
@@ -497,9 +504,9 @@ pub const HostStopResult = enum { acknowledged, instance_changed, unavailable };
 
 pub fn stopHost(io: std.Io, input: HostStopInput, reply_buffer: *ReplyBuffer) !HostStopResult {
     reply_buffer.len = 0;
-    const paths = try platform.resolveClientPaths(io, input.store);
+    const paths = try resolveClientPaths(io, input.store);
     var body: protocol.RequestBuffer = .{};
-    try body.appendShape(protocol.host_stop_request, .{paths.store.slice()});
+    try body.appendShape(protocol.host_stop_request, .{paths.store_identity.slice()});
     const reply = sendSource(.{ .io = io, .drop_reply = input.drop_reply }, &paths, "/v1/control/host-stop", ResponseTiming.mutation, body.len, null, body.slice(), &input.instance, null, reply_buffer, null).get();
     const result = reply catch |err| return if (err == error.FileNotFound or err == error.ConnectionRefused)
         .unavailable
@@ -523,7 +530,19 @@ pub fn hostStatus(io: std.Io, store_path: []const u8) protocol_reply.HostStatus 
     return hostStatusUntil(io, store_path, null);
 }
 
+/// Platform derives placement; only this wire client resolves MySQL identity.
+/// Legacy opaque-id/runtime selections and saved-directory selections converge
+/// on the same Paths value before any mutation is encoded.
+pub fn resolveClientPaths(io: std.Io, supplied: []const u8) !platform.Paths {
+    var paths = try platform.resolveClientPaths(io, supplied);
+    if (paths.kind == .mysql and !@import("store_id.zig").valid(paths.store_identity.slice())) try resolveMysqlIdentity(io, &paths);
+    return paths;
+}
+
+/// Startup callers can bound the entire readiness loop, including each probe.
 pub fn hostStatusUntil(io: std.Io, store_path: []const u8, deadline: ?i128) protocol_reply.HostStatus {
+    // Observation discovers identity in its one bounded Host-info exchange.
+    // Mutation resolution would do an eager, separately timed exchange here.
     const paths = platform.resolveClientPaths(io, store_path) catch |err| return switch (err) {
         error.FileNotFound => .unavailable,
         else => .access_failure,
@@ -550,6 +569,17 @@ pub fn observeHostProcess(io: std.Io, store_path: []const u8, deadline: ?i128) !
     return .{ .ready = observed.facts, .pid = observed.pid };
 }
 
+pub fn observeHostProcessAt(io: std.Io, paths: *const platform.Paths, deadline: ?i128) !ObservedHost {
+    var identified = paths.*;
+    if (identified.kind == .mysql and !@import("store_id.zig").valid(identified.store_identity.slice())) try resolveMysqlIdentity(io, &identified);
+    return switch (try readHostControlAt(io, &identified, .current, deadline, .strict)) {
+        .compatible => |observed| .{ .ready = observed.facts, .pid = observed.pid },
+        .incompatible => error.WrongWireVersion,
+    };
+}
+
+/// A wire mismatch is not readiness. Only Upgrade's pinned-process owner may
+/// use its same-connection peer PID to replace an obsolete terminal client.
 pub const HostProcessReading = union(enum) {
     ready: ObservedHost,
     incompatible: c_int,
@@ -573,14 +603,31 @@ pub const HostControlObservation = struct {
     profile: protocol_reply.HostInfoProfile,
     facts: protocol_reply.HostInfoFacts,
     pid: c_int,
+    /// Local discovery routing, never wire Store identity. Most direct readers
+    /// already hold DIR; socket discovery must retain it for restart-all.
+    host_directory: @import("host_settings.zig").OsBytes(protocol.max_store_bytes) = .{},
+
+    pub fn directory(self: *const HostControlObservation) []const u8 {
+        return if (self.host_directory.len != 0) self.host_directory.slice() else self.facts.store.slice();
+    }
 };
 
 pub fn observeHostForUpgrade(io: std.Io, store_path: []const u8, deadline: ?i128) !HostControlObservation {
+    const paths = try resolveClientPaths(io, store_path);
+    return observeHostForUpgradeAt(io, &paths, deadline);
+}
+
+fn observeHostForUpgradeAt(io: std.Io, paths: *const platform.Paths, deadline: ?i128) !HostControlObservation {
+    // Every known profile shares one absolute discovery budget, including connection.
     const until = hostObservationDeadline(io, deadline);
     for (std.enums.values(protocol_reply.HostInfoProfile)) |profile| {
-        return observeHostForUpgradeProfile(io, store_path, profile, until) catch |err| switch (err) {
+        const reading = readHostControlAt(io, paths, profile, until, .strict) catch |err| switch (err) {
             error.WrongWireVersion => continue,
             else => return err,
+        };
+        return switch (reading) {
+            .compatible => |observed| observed,
+            .incompatible => error.WrongWireVersion,
         };
     }
     return error.WrongWireVersion;
@@ -625,10 +672,11 @@ pub fn observeHostForUpgradeAtSocket(allocator: std.mem.Allocator, io: std.Io, s
     const parsed = serve_grammar.definition.parseSyntax(arguments, arena.allocator(), &problem) catch return error.HostServeArgumentsUnreadable;
     const supplied = parsed.get("store") orelse return error.HostServeStoreMissing;
     if (!std.fs.path.isAbsolute(supplied)) return error.HostServeStoreRelative;
-    const paths = try platform.resolveClientPaths(io, supplied);
+    const paths = try resolveClientPaths(io, supplied);
     if (!std.mem.eql(u8, paths.socket.slice(), socket_path)) return error.HostSocketStoreMismatch;
-    const observed = try observeHostForUpgrade(io, paths.store.slice(), until);
+    var observed = try observeHostForUpgradeAt(io, &paths, until);
     if (observed.pid != pid) return error.HostPeerPidMismatch;
+    try observed.host_directory.set(supplied);
     return observed;
 }
 
@@ -650,14 +698,18 @@ const HostControlReading = union(enum) { compatible: HostControlObservation, inc
 const HostObservationMode = enum { strict, upgrade };
 
 fn readHostControlProfile(io: std.Io, store_path: []const u8, profile: protocol_reply.HostInfoProfile, deadline: ?i128, mode: HostObservationMode) !HostControlReading {
+    const paths = try resolveClientPaths(io, store_path);
+    return readHostControlAt(io, &paths, profile, deadline, mode);
+}
+
+fn readHostControlAt(io: std.Io, paths: *const platform.Paths, profile: protocol_reply.HostInfoProfile, deadline: ?i128, mode: HostObservationMode) !HostControlReading {
     const until = hostObservationDeadline(io, deadline);
-    const paths = try platform.resolveClientPaths(io, store_path);
     const requests: Requests = .{ .io = io };
     const address = try std.Io.net.UnixAddress.init(paths.socket.slice());
     const fd = try connectRequest(requests, address, until);
     defer closeSocket(io, fd);
     const pid = try @import("host_identity.zig").peer(fd);
-    try uploadHostInfoRequest(requests, fd, paths.store.slice(), profile, until);
+    try uploadHostInfoRequest(requests, fd, paths.store_identity.slice(), profile, until);
     var reply_buffer: ReplyBuffer = .{};
     const envelope = try readResponseEnvelopeForProfileUntil(requests, fd, .{}, until, profile);
     if (!envelope.wire_matches and mode == .strict) return error.WrongWireVersion;
@@ -666,13 +718,14 @@ fn readHostControlProfile(io: std.Io, store_path: []const u8, profile: protocol_
     if (!envelope.wire_matches and head.status != 200 and head.status != 400) return error.InvalidHostInfo;
     const reply = try readCommandBodyUntil(requests, fd, head, &reply_buffer, .{}, until);
     if (!envelope.wire_matches) {
-        if (!hostProtocolMismatch(envelope, reply.body, paths.store.slice())) return error.InvalidHostInfo;
+        if (!hostProtocolMismatch(envelope, reply.body, paths.store_identity.slice())) return error.InvalidHostInfo;
         return .{ .incompatible = pid };
     }
     if (reply.status != 200) return error.InvalidHostInfo;
     return .{ .compatible = .{
         .profile = profile,
-        .facts = try protocol_reply.parseHostInfoForProfile(reply.body, paths.store.slice(), profile),
+        .host_directory = paths.host_directory,
+        .facts = try protocol_reply.parseHostInfoForProfile(reply.body, paths.store_identity.slice(), profile),
         .pid = pid,
     } };
 }
@@ -957,7 +1010,7 @@ test "upgrade Host observation uses exact read-only profiles on each authenticat
                     listener.deinit(io);
                     std.Io.Dir.cwd().deleteFile(io, paths.socket.slice()) catch @panic("unable to remove fixture socket");
                 }
-                var peer: Peer = .{ .listener = &listener, .store = paths.store.slice(), .mode = mode };
+                var peer: Peer = .{ .listener = &listener, .store = paths.store_identity.slice(), .mode = mode };
                 Clock.nanoseconds.store(0, .release);
                 Clock.observation_finished.reset();
                 phase.* = .peer_spawn;
@@ -1019,7 +1072,7 @@ test "upgrade Host observation uses exact read-only profiles on each authenticat
                         };
                         try std.testing.expectEqual(expected_profile, observed.profile);
                         try std.testing.expectEqual(std.c.getpid(), observed.pid);
-                        try std.testing.expect(observed.facts.store.eql(paths.store.slice()));
+                        try std.testing.expect(observed.facts.store.eql(paths.store_identity.slice()));
                         try std.testing.expectEqual(@as(usize, 17), observed.facts.active_capacity);
                         try std.testing.expectEqual(@as(usize, 10), observed.facts.intake_capacity);
                         try std.testing.expectEqual(@as(?usize, 256), observed.facts.descriptor_limit);
@@ -1063,11 +1116,16 @@ pub fn hostLockState(io: std.Io, store_path: []const u8) HostLockState {
     const selected = platform.resolveClientSelection(store_path);
     if (selected == .mysql) return .failure;
     const paths = selected.paths(io) catch |err| return if (err == error.FileNotFound) .free else .failure;
-    return lockState(io, &paths);
+    return hostLockStateAt(io, &paths);
+}
+
+pub fn hostLockStateAt(io: std.Io, paths: *const platform.Paths) HostLockState {
+    if (paths.kind == .mysql) return .failure;
+    return lockState(io, paths);
 }
 
 fn lockState(io: std.Io, paths: *const platform.Paths) HostLockState {
-    var store_dir = std.Io.Dir.cwd().openDir(io, paths.store.slice(), .{}) catch return .failure;
+    var store_dir = std.Io.Dir.cwd().openDir(io, paths.store_identity.slice(), .{}) catch |err| return if (err == error.FileNotFound) .free else .failure;
     defer store_dir.close(io);
     const fd = std.posix.openat(store_dir.handle, "host.lock", .{
         .ACCMODE = .RDONLY,
@@ -1149,7 +1207,8 @@ test "SQLite Host lock evidence preserves free held and failed probes" {
 
 fn readHostInfo(io: std.Io, paths: *const platform.Paths, deadline: ?i128) protocol_reply.HostStatus {
     var body: protocol.RequestBuffer = .{};
-    body.appendShape(protocol.host_info_request, .{paths.store.slice()}) catch unreachable;
+    const unknown = paths.kind == .mysql and !@import("store_id.zig").valid(paths.store_identity.slice());
+    body.appendShape(protocol.host_info_request, .{if (unknown) "" else paths.store_identity.slice()}) catch unreachable;
     var reply_buffer: ReplyBuffer = .{};
     const until = hostObservationDeadline(io, deadline);
     const reply = sendSource(.{ .io = io }, paths, "/v1/host-info", .{}, body.len, null, body.slice(), null, null, &reply_buffer, until).get() catch |err| return switch (err) {
@@ -1159,11 +1218,30 @@ fn readHostInfo(io: std.Io, paths: *const platform.Paths, deadline: ?i128) proto
     };
     if (reply.status == 503) return if (protocol_reply.validHostUnavailable(reply.body)) .owned_unavailable else .incompatible;
     if (reply.status != 200) return .incompatible;
-    return protocol_reply.parseHostInfo(reply.body, paths.store.slice()) catch .incompatible;
+    if (paths.kind == .mysql and !@import("store_id.zig").valid(paths.store_identity.slice())) {
+        // Empty-Store host-info already exists for MySQL discovery. Learn only
+        // a shaped identity and validate the entire existing response grammar.
+        var memory: [protocol.max_host_info_response_bytes * 2]u8 = undefined;
+        var fixed: std.heap.FixedBufferAllocator = .init(&memory);
+        const hint = std.json.parseFromSliceLeaky(struct { store: []const u8 }, fixed.allocator(), reply.body, .{ .ignore_unknown_fields = true }) catch return .incompatible;
+        if (!@import("store_id.zig").valid(hint.store)) return .incompatible;
+        return protocol_reply.parseHostInfo(reply.body, hint.store) catch .incompatible;
+    }
+    return protocol_reply.parseHostInfo(reply.body, paths.store_identity.slice()) catch .incompatible;
+}
+
+/// Resolve an opaque identity through the existing private socket, never a login.
+pub fn resolveMysqlIdentity(io: std.Io, paths: *platform.Paths) !void {
+    switch (hostStatusAt(io, paths, null)) {
+        .ready => |ready| paths.store_identity = ready.store,
+        .unavailable, .owned_unavailable => return error.FileNotFound,
+        .incompatible => return error.WrongWireVersion,
+        .access_failure => return error.AccessDenied,
+    }
 }
 
 pub fn captureSessionStop(io: std.Io, input: SessionStopInput, target: CaptureTarget) !CapturedRecord {
-    const paths = try platform.resolveClientPaths(io, input.store);
+    const paths = try resolveClientPaths(io, input.store);
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     var key_buffer: [36]u8 = undefined;
     const location = try target.resolve(io, &path_buffer, &key_buffer);
@@ -1172,25 +1250,25 @@ pub fn captureSessionStop(io: std.Io, input: SessionStopInput, target: CaptureTa
 }
 
 pub fn captureSessionArchive(io: std.Io, input: SessionArchiveInput, target: CaptureTarget) !CapturedRecord {
-    const paths = try platform.resolveClientPaths(io, input.store);
+    const paths = try resolveClientPaths(io, input.store);
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     var key_buffer: [36]u8 = undefined;
     const location = try target.resolve(io, &path_buffer, &key_buffer);
     try protocol_reply.validateIdentityInputs(location.key, input.session);
-    return runCapture(io, paths.store.slice(), &location, input.session, .session_archive, null, Capture.writeRequest, .{ protocol.session_archive_request.all, .{ paths.store.slice(), location.key, input.session, input.archived } });
+    return runCapture(io, &paths, &location, input.session, .session_archive, null, Capture.writeRequest, .{ protocol.session_archive_request.all, .{ paths.store_identity.slice(), location.key, input.session, input.archived } });
 }
 
 pub fn captureSessionPin(io: std.Io, input: SessionPinInput, target: CaptureTarget) !CapturedRecord {
-    const paths = try platform.resolveClientPaths(io, input.store);
+    const paths = try resolveClientPaths(io, input.store);
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     var key_buffer: [36]u8 = undefined;
     const location = try target.resolve(io, &path_buffer, &key_buffer);
     try protocol_reply.validateIdentityInputs(location.key, input.session);
-    return runCapture(io, paths.store.slice(), &location, input.session, .session_pin, null, Capture.writeRequest, .{ protocol.session_pin_request.all, .{ paths.store.slice(), location.key, input.session, input.pinned } });
+    return runCapture(io, &paths, &location, input.session, .session_pin, null, Capture.writeRequest, .{ protocol.session_pin_request.all, .{ paths.store_identity.slice(), location.key, input.session, input.pinned } });
 }
 
 pub fn captureModelInterruption(io: std.Io, input: ModelInterruptionInput, target: CaptureTarget) !CapturedRecord {
-    const paths = try platform.resolveClientPaths(io, input.store);
+    const paths = try resolveClientPaths(io, input.store);
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     var key_buffer: [36]u8 = undefined;
     const location = try target.resolve(io, &path_buffer, &key_buffer);
@@ -1228,6 +1306,14 @@ pub fn waitCommand(
 ) !WaitResult {
     const policy = @import("request_wait.zig");
     if (timeout_seconds == 0 or timeout_seconds > policy.max_timeout_seconds) return error.InvalidArguments;
+    if (cancellation.stopped.load(.acquire)) return .{ .observed = .{ .disposition = .later, .observation = null } };
+    const paths = try resolveClientPaths(io, store_path);
+    return waitCommandAt(io, &paths, key, timeout_seconds, cancellation);
+}
+
+pub fn waitCommandAt(io: std.Io, paths: *const platform.Paths, key: []const u8, timeout_seconds: u32, cancellation: *const Cancellation) !WaitResult {
+    const policy = @import("request_wait.zig");
+    if (timeout_seconds == 0 or timeout_seconds > policy.max_timeout_seconds) return error.InvalidArguments;
     const requests: Requests = .{ .io = io, .cancellation = cancellation };
     const until = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + @as(i128, timeout_seconds) * std.time.ns_per_s;
     var buffer: ObservationBuffer = .{};
@@ -1238,7 +1324,7 @@ pub fn waitCommand(
         if (cancellation.stopped.load(.acquire) or std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds >= until) {
             return .{ .observed = .{ .disposition = .later, .observation = latest } };
         }
-        const reply = requests.observeCommandUntil(store_path, key, since, &buffer, until) catch |err| {
+        const reply = requests.observeCommandAt(paths, key, since, &buffer, until) catch |err| {
             if (err == error.Cancelled or
                 ((err == error.TransferInactive or err == error.ResponseInactive) and
                     std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds >= until))
@@ -1312,14 +1398,20 @@ fn readResultWithSink(
     sink: anytype,
     reply_buffer: *ReplyBuffer,
 ) !protocol_reply.ResultReadReply {
+    try requests.check();
+    if (key.len > protocol.max_key_bytes or !std.unicode.utf8ValidateSlice(key)) return error.InvalidKey;
+    const paths = try resolveClientPaths(requests.io, store_path);
+    return readResultAt(requests, &paths, key, sink, reply_buffer);
+}
+
+pub fn readResultAt(requests: Requests, paths: *const platform.Paths, key: []const u8, sink: anytype, reply_buffer: *ReplyBuffer) !protocol_reply.ResultReadReply {
     const io = requests.io;
     reply_buffer.len = 0;
     try requests.check();
     if (key.len > protocol.max_key_bytes or !std.unicode.utf8ValidateSlice(key)) return error.InvalidKey;
-    const paths = try platform.resolveClientPaths(io, store_path);
     var body: protocol.RequestBuffer = .{};
-    try body.appendShape(protocol.read_result_request, .{ paths.store.slice(), key });
-    const fd = try openRead(requests, &paths, "/v1/read-result", body.slice());
+    try body.appendShape(protocol.read_result_request, .{ paths.store_identity.slice(), key });
+    const fd = try openRead(requests, paths, "/v1/read-result", body.slice());
     defer closeSocket(io, fd);
     return switch (try readResultResponseSink(requests, fd, sink, reply_buffer)) {
         .answer => |answer| .{ .answer = .{ .bytes = answer.bytes } },
@@ -1412,9 +1504,9 @@ fn readActionContent(
     reply_buffer.len = 0;
     try requests.check();
     if (!protocol.validSessionId(session) or action_id == 0) return error.InvalidTarget;
-    const paths = try platform.resolveClientPaths(io, store_path);
+    const paths = try resolveClientPaths(io, store_path);
     var body: protocol.RequestBuffer = .{};
-    try body.appendShape(shape, .{ paths.store.slice(), session, action_id });
+    try body.appendShape(shape, .{ paths.store_identity.slice(), session, action_id });
     const fd = try openRead(requests, &paths, route, body.slice());
     defer closeSocket(io, fd);
     return readResultResponseSink(requests, fd, destination, reply_buffer);
@@ -1446,7 +1538,7 @@ pub const CaptureTarget = union(enum) {
 
     pub fn resolve(self: CaptureTarget, io: std.Io, path: []u8, key: *[36]u8) !Location {
         return switch (self) {
-            .explicit => |value| .{ .record = value.record, .key = value.key, .replay = .{ .explicit = value.record } },
+            .explicit => |value| .{ .record = value.record, .key = value.key, .replay = .{ .explicit = .{ .record = value.record } } },
             .reserved => |location| location,
             .generated => |directory| blk: {
                 var bytes: [16]u8 = undefined;
@@ -1468,7 +1560,68 @@ pub const CaptureTarget = union(enum) {
 
 pub const Replay = union(enum) {
     generated,
-    explicit: []const u8,
+    explicit: struct {
+        record: []const u8,
+        host_directory: @import("host_settings.zig").OsBytes(protocol.max_store_bytes) = .{},
+    },
+};
+
+// Local routing is deliberately outside the immutable wire request. Both
+// generated and explicit captures publish this private companion first.
+const CaptureRouting = struct {
+    const Path = @import("host_settings.zig").OsBytes(protocol.max_store_bytes);
+    const Runtime = @import("host_settings.zig").OsBytes(@import("host_settings.zig").max_runtime_dir_bytes);
+    const format = 1;
+    host_directory: Path = .{},
+    runtime_hint: Runtime = .{},
+
+    fn fromPaths(paths: *const platform.Paths) !CaptureRouting {
+        var result: CaptureRouting = .{ .host_directory = paths.host_directory };
+        if (result.host_directory.len == 0) {
+            if (paths.runtimeHint()) |runtime| try result.runtime_hint.set(runtime);
+        }
+        return result;
+    }
+
+    fn resolve(self: *const CaptureRouting, io: std.Io, store_identity: []const u8) !platform.Paths {
+        if (self.host_directory.len != 0) return resolveClientPaths(io, self.host_directory.slice());
+        if (self.runtime_hint.len != 0) return platform.mysqlClientPaths(io, store_identity, self.runtime_hint.slice());
+        return error.InvalidRequestRecord;
+    }
+
+    fn matchesPlacement(self: *const CaptureRouting, paths: *const platform.Paths) bool {
+        if (self.host_directory.len != 0) return std.mem.eql(u8, self.host_directory.slice(), paths.host_directory.slice());
+        return paths.kind == .mysql and paths.host_directory.len == 0 and std.mem.eql(u8, self.runtime_hint.slice(), paths.runtimeHint().?);
+    }
+
+    fn name(record_name: []const u8, buffer: []u8) ![]const u8 {
+        return std.fmt.bufPrint(buffer, "{s}.routing", .{record_name});
+    }
+
+    fn read(io: std.Io, record_path: []const u8) !?CaptureRouting {
+        var parent = std.Io.Dir.cwd().openDir(io, std.fs.path.dirname(record_path) orelse ".", .{ .iterate = true }) catch return error.InvalidRequestRecord;
+        defer parent.close(io);
+        var name_buffer: [std.Io.Dir.max_name_bytes]u8 = undefined;
+        const route_name = try name(std.fs.path.basename(record_path), &name_buffer);
+        var bytes: [6 * (Path.max_bytes + Runtime.max_bytes) + 128]u8 = undefined;
+        defer std.crypto.secureZero(u8, &bytes);
+        const text = @import("private_file.zig").readAt(io, parent, route_name, &bytes) catch |err| switch (err) {
+            error.FileNotFound => return null, // old raw-request records
+            else => return error.InvalidRequestRecord,
+        };
+        @import("private_file.zig").validateDirectory(io, parent) catch return error.InvalidRequestRecord;
+        const Fields = struct { format: u8, host_directory: []const u8, runtime_hint: []const u8 };
+        var storage: [2048]u8 = undefined;
+        defer std.crypto.secureZero(u8, &storage);
+        var fixed = std.heap.FixedBufferAllocator.init(&storage);
+        const value = std.json.parseFromSliceLeaky(Fields, fixed.allocator(), text, .{}) catch return error.InvalidRequestRecord;
+        if (value.format != format or (value.host_directory.len == 0) == (value.runtime_hint.len == 0)) return error.InvalidRequestRecord;
+        if (!std.fs.path.isAbsolute(if (value.host_directory.len != 0) value.host_directory else value.runtime_hint)) return error.InvalidRequestRecord;
+        var result: CaptureRouting = .{};
+        result.host_directory.set(value.host_directory) catch return error.InvalidRequestRecord;
+        result.runtime_hint.set(value.runtime_hint) catch return error.InvalidRequestRecord;
+        return result;
+    }
 };
 
 pub const CapturedRecord = struct {
@@ -1477,6 +1630,18 @@ pub const CapturedRecord = struct {
     saved: protocol_reply.MutationIdentity,
     target: protocol_reply.MutationTarget,
     replay: Replay,
+    paths: ?platform.Paths = null,
+    routing: ?CaptureRouting = null,
+
+    pub fn resolvePaths(self: *const CapturedRecord, io: std.Io) !platform.Paths {
+        return resolveCapturedPaths(io, self.saved.store.slice(), self.paths, self.routing);
+    }
+
+    pub fn selector(self: *const CapturedRecord) []const u8 {
+        if (self.paths) |*paths| return paths.selector();
+        if (self.routing) |*route| if (route.host_directory.len != 0) return route.host_directory.slice();
+        return self.saved.store.slice();
+    }
 
     pub fn identity(self: *const CapturedRecord) *const protocol_reply.MutationIdentity {
         return &self.saved;
@@ -1487,6 +1652,27 @@ pub const CapturedRecord = struct {
         self.* = undefined;
     }
 };
+
+// Both retransmission and bounded read-only inspection use this route owner.
+// Identity is a binding assertion, never a substitute for a present selector.
+fn resolveCapturedPaths(io: std.Io, store_identity: []const u8, retained: ?platform.Paths, routing: ?CaptureRouting) !platform.Paths {
+    const paths = retained orelse if (routing) |route|
+        try route.resolve(io, store_identity)
+    else
+        try resolveClientPaths(io, store_identity);
+    if (!paths.store_identity.eql(store_identity)) return error.RequestBindingMismatch;
+    return paths;
+}
+
+pub fn inspectCapturedRequest(io: std.Io, directory: []const u8, handle: []const u8) !struct { identity: protocol_reply.MutationIdentity, paths: platform.Paths } {
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try requestPath(directory, handle, &path_buffer);
+    var file = try std.Io.Dir.cwd().openFile(io, path, .{});
+    defer file.close(io);
+    const identity = try readCapturedIdentity(io, &file, handle);
+    const routing = try CaptureRouting.read(io, path);
+    return .{ .identity = identity, .paths = try resolveCapturedPaths(io, identity.store.slice(), null, routing) };
+}
 
 pub fn validRequestHandle(handle: []const u8) bool {
     if (handle.len != 36) return false;
@@ -1518,8 +1704,6 @@ pub fn openCaptured(io: std.Io, saved: SavedRecord) !CapturedRecord {
             break :blk try requestPath(generated.directory, generated.handle, &path_buffer);
         },
         .explicit => |explicit| blk: {
-            paths = try platform.resolveClientPaths(io, explicit.store);
-            expected.store = paths.store.slice();
             expected.kind = explicit.kind;
             break :blk explicit.record;
         },
@@ -1527,15 +1711,24 @@ pub fn openCaptured(io: std.Io, saved: SavedRecord) !CapturedRecord {
     var file = try std.Io.Dir.cwd().openFile(io, path, .{});
     errdefer file.close(io);
     const binding = try readCapturedBinding(io, &file);
+    const routing = try CaptureRouting.read(io, path);
+    if (saved == .explicit) {
+        const supplied = saved.explicit.store;
+        paths = if (routing != null and routing.?.runtime_hint.len != 0 and @import("store_id.zig").valid(supplied))
+            try platform.mysqlClientPaths(io, supplied, routing.?.runtime_hint.slice())
+        else
+            try resolveClientPaths(io, supplied);
+        expected.store = paths.store_identity.slice();
+    }
     if (!expected.matches(&binding.saved, binding.target)) return switch (saved) {
         .generated => error.InvalidRequestRecord,
         .explicit => error.RequestBindingMismatch,
     };
     const replay: Replay = switch (saved) {
         .generated => .generated,
-        .explicit => |explicit| .{ .explicit = explicit.record },
+        .explicit => |explicit| .{ .explicit = .{ .record = explicit.record, .host_directory = if (routing) |route| route.host_directory else paths.host_directory } },
     };
-    return .{ .file = file, .length = try file.length(io), .saved = binding.saved, .target = binding.target, .replay = replay };
+    return .{ .file = file, .length = try file.length(io), .saved = binding.saved, .target = binding.target, .replay = replay, .paths = if (saved == .explicit and (routing == null or routing.?.matchesPlacement(&paths))) paths else null, .routing = routing };
 }
 
 pub fn inspectCaptured(io: std.Io, directory: []const u8, handle: []const u8) !protocol_reply.MutationIdentity {
@@ -1693,16 +1886,17 @@ fn readCapturedIdentity(io: std.Io, file: *std.Io.File, handle: []const u8) !pro
 
 const ErrorOf = @import("error_set.zig").Of;
 
-pub const CaptureError = ErrorOf(platform.resolveClientPaths) || ErrorOf(writeConfigureCapture) || ErrorOf(writeMessageCapture);
+pub const CaptureError = ErrorOf(resolveClientPaths) || ErrorOf(writeConfigureCapture) || ErrorOf(writeMessageCapture);
 
 pub fn captureConfigure(io: std.Io, input: ConfigureInput, target: CaptureTarget) Stepped(CaptureError, CapturedRecord) {
     return stepCapture(io, input, target, writeConfigureCapture);
 }
 
 fn stepCapture(io: std.Io, input: anytype, target: CaptureTarget, comptime write: anytype) Stepped(CaptureError, CapturedRecord) {
-    const paths = platform.resolveClientPaths(io, input.store) catch |err| return .fail(.store, err);
+    const paths = resolveClientPaths(io, input.store) catch |err| return .fail(.store, err);
     var input_failure: ?Step = null;
-    const record = write(io, &paths, input, target, &input_failure) catch |err| return .fail(input_failure orelse .capture, err);
+    var record = write(io, &paths, input, target, &input_failure) catch |err| return .fail(input_failure orelse .capture, err);
+    record.paths = paths;
     return .{ .done = record };
 }
 
@@ -1716,7 +1910,7 @@ fn writeConfigureCapture(io: std.Io, paths: *const platform.Paths, input: Config
     };
     if (location.key.len > protocol.max_key_bytes or !std.unicode.utf8ValidateSlice(location.key)) return error.InvalidKey;
     if (input.session == .named and !protocol.validSessionId(session)) return error.InvalidSession;
-    return runCapture(io, paths.store.slice(), &location, session, .configure, input_failure, writeConfigureRequest, .{ paths.store.slice(), location.key, session, input });
+    return runCapture(io, paths, &location, session, .configure, input_failure, writeConfigureRequest, .{ paths.store_identity.slice(), location.key, session, input });
 }
 
 fn writeConfigureRequest(capture: *Capture, store: []const u8, key: []const u8, session: []const u8, input: ConfigureInput) !void {
@@ -1729,7 +1923,7 @@ fn writeConfigureRequest(capture: *Capture, store: []const u8, key: []const u8, 
 
 fn runCapture(
     io: std.Io,
-    store: []const u8,
+    paths: *const platform.Paths,
     location: *const CaptureTarget.Location,
     session: []const u8,
     kind: protocol.CommandKind,
@@ -1742,7 +1936,11 @@ fn runCapture(
     capture.input_failure = input_failure;
     errdefer capture.abort();
     try @call(.auto, write, .{&capture} ++ args);
-    return finishCapture(io, &capture, location, store, session, kind);
+    try capture.writeRouting(paths);
+    var record = try finishCapture(io, &capture, location, paths.store_identity.slice(), session, kind);
+    record.paths = paths.*;
+    if (record.replay == .explicit) record.replay.explicit.host_directory = paths.host_directory;
+    return record;
 }
 
 pub fn validatePeer(store: []const u8, session: []const u8, handle: ?[]const u8) !void {
@@ -1767,7 +1965,7 @@ fn writeMessageCapture(io: std.Io, paths: *const platform.Paths, input: MessageI
     if (input.configuration != null) {
         if (input.session.len != 0 or location.key.len > protocol.max_key_bytes or !std.unicode.utf8ValidateSlice(location.key)) return error.InvalidSession;
     } else try protocol_reply.validateIdentityInputs(location.key, input.session);
-    return runCapture(io, paths.store.slice(), &location, input.session, .message, input_failure, writeMessageRequest, .{ paths.store.slice(), location.key, input });
+    return runCapture(io, paths, &location, input.session, .message, input_failure, writeMessageRequest, .{ paths.store_identity.slice(), location.key, input });
 }
 
 fn writeMessageRequest(capture: *Capture, store: []const u8, key: []const u8, input: MessageInput) !void {
@@ -1794,7 +1992,7 @@ fn writeMessageRequest(capture: *Capture, store: []const u8, key: []const u8, in
 }
 
 fn writeSessionStopCapture(io: std.Io, paths: *const platform.Paths, input: SessionStopInput, location: CaptureTarget.Location) !CapturedRecord {
-    return runCapture(io, paths.store.slice(), &location, input.session, .session_stop, null, Capture.writeRequest, .{ protocol.session_stop_request, .{ paths.store.slice(), location.key, input.session } });
+    return runCapture(io, paths, &location, input.session, .session_stop, null, Capture.writeRequest, .{ protocol.session_stop_request, .{ paths.store_identity.slice(), location.key, input.session } });
 }
 
 fn writeModelInterruptionCapture(
@@ -1803,27 +2001,27 @@ fn writeModelInterruptionCapture(
     input: ModelInterruptionInput,
     location: CaptureTarget.Location,
 ) !CapturedRecord {
-    return runCapture(io, paths.store.slice(), &location, input.session, .model_interruption, null, Capture.writeRequest, .{ protocol.model_interruption_request, .{ paths.store.slice(), location.key, input.session, input.turn_id, input.operation_id } });
+    return runCapture(io, paths, &location, input.session, .model_interruption, null, Capture.writeRequest, .{ protocol.model_interruption_request, .{ paths.store_identity.slice(), location.key, input.session, input.turn_id, input.operation_id } });
 }
 
 pub fn capturePermissionDecision(io: std.Io, input: PermissionDecisionInput, target: CaptureTarget) !CapturedRecord {
-    const paths = try platform.resolveClientPaths(io, input.store);
+    const paths = try resolveClientPaths(io, input.store);
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     var key_buffer: [36]u8 = undefined;
     const location = try target.resolve(io, &path_buffer, &key_buffer);
     try protocol_reply.validateIdentityInputs(location.key, input.session);
     if (input.action_id == 0) return error.InvalidTarget;
-    return runCapture(io, paths.store.slice(), &location, input.session, .permission_decision, null, Capture.writePermissionDecision, .{ paths.store.slice(), location.key, input });
+    return runCapture(io, &paths, &location, input.session, .permission_decision, null, Capture.writePermissionDecision, .{ paths.store_identity.slice(), location.key, input });
 }
 
 pub fn captureActionBackground(io: std.Io, input: ActionBackgroundInput, target: CaptureTarget) !CapturedRecord {
-    const paths = try platform.resolveClientPaths(io, input.store);
+    const paths = try resolveClientPaths(io, input.store);
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     var key_buffer: [36]u8 = undefined;
     const location = try target.resolve(io, &path_buffer, &key_buffer);
     try protocol_reply.validateIdentityInputs(location.key, input.session);
     if (input.action_id == 0 or input.action_id > std.math.maxInt(i64)) return error.InvalidTarget;
-    return runCapture(io, paths.store.slice(), &location, input.session, .action_background, null, Capture.writeRequest, .{ protocol.action_background_request, .{ paths.store.slice(), location.key, input.session, input.action_id } });
+    return runCapture(io, &paths, &location, input.session, .action_background, null, Capture.writeRequest, .{ protocol.action_background_request, .{ paths.store_identity.slice(), location.key, input.session, input.action_id } });
 }
 
 fn finishCapture(io: std.Io, capture: *Capture, location: *const CaptureTarget.Location, store: []const u8, session: []const u8, kind: protocol.CommandKind) !CapturedRecord {
@@ -1848,11 +2046,12 @@ const Capture = struct {
     active: bool = true,
     file_open: bool = true,
     published: bool = false,
+    routing_published: bool = false,
 
     fn open(io: std.Io, record_path: []const u8, buffer: []u8) !Capture {
         const parent_path = std.fs.path.dirname(record_path) orelse ".";
         const final_name = std.fs.path.basename(record_path);
-        if (final_name.len == 0) return error.InvalidRecordPath;
+        if (final_name.len == 0 or final_name.len + ".routing.tmp".len + 1 > std.Io.Dir.max_name_bytes) return error.InvalidRecordPath;
         var parent = try std.Io.Dir.cwd().createDirPathOpen(io, parent_path, .{
             // Linux opens non-iterable directories with O_PATH, which cannot
             // be fsynced after publishing the record.
@@ -1902,9 +2101,47 @@ const Capture = struct {
         if (!self.published) self.parent.deleteFile(self.io, self.temporary_name.slice()) catch |err| {
             @import("stderr.zig").diagnostic("rui: retained caller capture after cleanup failure: {s}\n", .{@errorName(err)});
         };
+        if (!self.published and self.routing_published) {
+            var name_buffer: [std.Io.Dir.max_name_bytes]u8 = undefined;
+            const name = CaptureRouting.name(self.final_name.slice(), &name_buffer) catch unreachable;
+            self.parent.deleteFile(self.io, name) catch |err| {
+                @import("stderr.zig").diagnostic("rui: retained caller routing after cleanup failure: {s}\n", .{@errorName(err)});
+            };
+        }
         self.lock_file.close(self.io);
         self.parent.close(self.io);
         self.active = false;
+    }
+
+    fn writeRouting(self: *Capture, paths: *const platform.Paths) !void {
+        const route = try CaptureRouting.fromPaths(paths);
+        var name_buffer: [std.Io.Dir.max_name_bytes]u8 = undefined;
+        const name = try CaptureRouting.name(self.final_name.slice(), &name_buffer);
+        var temporary_buffer: [std.Io.Dir.max_name_bytes]u8 = undefined;
+        const temporary = try std.fmt.bufPrint(&temporary_buffer, ".{s}.routing.tmp", .{self.final_name.slice()});
+        // The existing request lock is held and its final request is absent.
+        // Only an orphan from an interrupted capture can be replaced here.
+        for ([_][]const u8{ temporary, name }) |orphan| self.parent.deleteFile(self.io, orphan) catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => return err,
+        };
+        const file = try self.parent.createFile(self.io, temporary, .{ .exclusive = true, .permissions = .fromMode(0o600) });
+        defer self.parent.deleteFile(self.io, temporary) catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => @import("stderr.zig").diagnostic("rui: retained caller routing temporary after cleanup failure: {s}\n", .{@errorName(err)}),
+        };
+        {
+            defer file.close(self.io);
+            var buffer: [1024]u8 = undefined;
+            var writer = file.writerStreaming(self.io, &buffer);
+            try std.json.Stringify.value(.{ .format = CaptureRouting.format, .host_directory = route.host_directory.slice(), .runtime_hint = route.runtime_hint.slice() }, .{}, &writer.interface);
+            try writer.flush();
+            try file.sync(self.io);
+        }
+        try self.parent.renamePreserve(temporary, self.parent, name, self.io);
+        self.routing_published = true;
+        // Routing must be durable before the request marker can become visible.
+        try self.syncParent();
     }
 
     fn commit(self: *Capture) !void {
@@ -1919,10 +2156,17 @@ const Capture = struct {
             self.io,
         );
         self.published = true;
-        if (std.c.fsync(self.parent.handle) != 0) return error.RecordDirectorySyncFailed;
+        try self.syncParent();
         self.lock_file.close(self.io);
         self.parent.close(self.io);
         self.active = false;
+    }
+
+    fn syncParent(self: *const Capture) !void {
+        // Borrow the directory descriptor; File.sync is the same fsync syscall
+        // through the invocation's I/O owner, without taking descriptor custody.
+        const parent_file: std.Io.File = .{ .handle = self.parent.handle, .flags = .{ .nonblocking = false } };
+        parent_file.sync(self.io) catch return error.RecordDirectorySyncFailed;
     }
 
     fn write(self: *Capture, bytes: []const u8) !void {
@@ -2134,7 +2378,7 @@ fn openRead(requests: Requests, paths: *const platform.Paths, comptime route: []
 }
 
 pub const SendError = ErrorOf(std.Io.net.UnixAddress.init) || ErrorOf(connectRequest) || ErrorOf(uploadRequest) || ErrorOf(readCommandResponse);
-pub const MutationSendError = SendError || ErrorOf(platform.resolveClientPaths) || error{ Cancelled, EnvironmentTooLarge };
+pub const MutationSendError = SendError || ErrorOf(CapturedRecord.resolvePaths) || error{ Cancelled, EnvironmentTooLarge, RequestBindingMismatch };
 
 pub const Environment = struct {
     map: *const std.process.Environ.Map,
@@ -3282,7 +3526,7 @@ test "retry and generated recovery select captured mutations by kind" {
     try tmp.dir.setPermissions(io, .fromMode(0o700));
     var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
-    const paths = try platform.resolveClientPaths(io, root);
+    const paths = try resolveClientPaths(io, root);
     const stop_key = "00000000-0000-4000-8000-000000000001";
     var stop_path: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const stop_record = try requestPath(root, stop_key, &stop_path);
@@ -3664,6 +3908,7 @@ test "capture publication transfers original inode across pathname replacement" 
     const Replacement = struct {
         fn rename(userdata: ?*anyopaque, old_dir: std.Io.Dir, old_path: []const u8, new_dir: std.Io.Dir, new_path: []const u8) std.Io.Dir.RenamePreserveError!void {
             try std.testing.io.vtable.dirRenamePreserve(userdata, old_dir, old_path, new_dir, new_path);
+            if (!std.mem.eql(u8, new_path, "record")) return;
             new_dir.rename(new_path, new_dir, "displaced-original", std.testing.io) catch return error.Unexpected;
             const file = new_dir.createFile(std.testing.io, new_path, .{}) catch return error.Unexpected;
             defer file.close(std.testing.io);
@@ -3706,7 +3951,8 @@ test "capture closes pinned reader when publication or handoff fails" {
             };
             std.testing.io.vtable.fileClose(userdata, files);
         }
-        fn sync(_: ?*anyopaque, _: std.Io.File) std.Io.File.SyncError!void {
+        fn sync(userdata: ?*anyopaque, file: std.Io.File) std.Io.File.SyncError!void {
+            if (reader == -1) return std.testing.io.vtable.fileSync(userdata, file);
             return error.NoSpaceLeft;
         }
         fn length(_: ?*anyopaque, _: std.Io.File) std.Io.File.LengthError!u64 {
@@ -3728,6 +3974,7 @@ test "capture closes pinned reader when publication or handoff fails" {
         if (published) vtable.fileLength = Failure.length else vtable.fileSync = Failure.sync;
         const failing_io: std.Io = .{ .userdata = io.userdata, .vtable = &vtable };
         Failure.closed = 0;
+        Failure.reader = -1;
         try std.testing.expectError(if (published) error.AccessDenied else error.NoSpaceLeft, captureMessage(failing_io, .{ .store = root, .session = "k7m2qx", .text_path = "", .text = "original" }, .{ .explicit = .{ .record = path, .key = "original-key" } }).get());
         try std.testing.expectEqual(@as(usize, 1), Failure.closed);
         try std.testing.expect(std.c.fcntl(Failure.reader, std.c.F.GETFD) < 0);
@@ -3742,13 +3989,24 @@ test "capture recovery closes rejected records and retains only its reader lifet
     const Probe = struct {
         var opened: usize = 0;
         var closed: usize = 0;
+        var readers: [16]std.posix.fd_t = @splat(-1);
         fn open(userdata: ?*anyopaque, dir: std.Io.Dir, path: []const u8, options: std.Io.Dir.OpenFileOptions) std.Io.File.OpenError!std.Io.File {
             const file = try std.testing.io.vtable.dirOpenFile(userdata, dir, path, options);
+            const slot = for (&readers) |*entry| {
+                if (entry.* == -1) break entry;
+            } else return error.Unexpected;
+            slot.* = file.handle;
             opened += 1;
             return file;
         }
         fn close(userdata: ?*anyopaque, files: []const std.Io.File) void {
-            closed += files.len;
+            for (files) |file| for (&readers) |*entry| {
+                if (entry.* == file.handle) {
+                    closed += 1;
+                    entry.* = -1;
+                    break;
+                }
+            };
             std.testing.io.vtable.fileClose(userdata, files);
         }
     };
@@ -4148,7 +4406,7 @@ test "control captures attain escaped key and canonical Session request bounds" 
     const session = "k7m2qx";
     const session_encoding_slack = 6 * protocol.max_session_bytes - session.len;
     var paths: platform.Paths = .{};
-    try paths.store.set(&escaped_store);
+    try paths.store_identity.set(&escaped_store);
 
     var stop_path_buffer: [protocol.max_store_bytes + "/records/stop-record".len]u8 = undefined;
     const stop_path = try std.fmt.bufPrint(
@@ -4159,7 +4417,7 @@ test "control captures attain escaped key and canonical Session request bounds" 
     var stop_capture = try writeSessionStopCapture(std.testing.io, &paths, .{
         .store = "unused",
         .session = session,
-    }, .{ .record = stop_path, .key = &escaped_key, .replay = .{ .explicit = stop_path } });
+    }, .{ .record = stop_path, .key = &escaped_key, .replay = .{ .explicit = .{ .record = stop_path } } });
     defer stop_capture.close(std.testing.io);
     const stop_file = try std.Io.Dir.cwd().openFile(std.testing.io, stop_path, .{});
     defer stop_file.close(std.testing.io);
@@ -4179,7 +4437,7 @@ test "control captures attain escaped key and canonical Session request bounds" 
         .session = session,
         .turn_id = std.math.maxInt(u64),
         .operation_id = std.math.maxInt(u64),
-    }, .{ .record = interruption_path, .key = &escaped_key, .replay = .{ .explicit = interruption_path } });
+    }, .{ .record = interruption_path, .key = &escaped_key, .replay = .{ .explicit = .{ .record = interruption_path } } });
     defer interruption_capture.close(std.testing.io);
     const interruption_file = try std.Io.Dir.cwd().openFile(std.testing.io, interruption_path, .{});
     defer interruption_file.close(std.testing.io);
@@ -4197,7 +4455,7 @@ test "control captures attain escaped key and canonical Session request bounds" 
     var permission_buffer: [protocol.content_window_bytes]u8 = undefined;
     var permission_capture = try Capture.open(std.testing.io, permission_path, &permission_buffer);
     defer permission_capture.abort();
-    try permission_capture.writePermissionDecision(paths.store.slice(), &escaped_key, .{
+    try permission_capture.writePermissionDecision(paths.store_identity.slice(), &escaped_key, .{
         .store = "unused",
         .session = session,
         .action_id = std.math.maxInt(u64),
@@ -5323,4 +5581,351 @@ test "pin captures preserve pin and unpin intent through generated and explicit 
         try std.testing.expectEqual(protocol.CommandKind.session_pin, (try inspectCaptured(io, root, identity.key.slice())).kind);
         try std.testing.expectError(error.RequestBindingMismatch, openCaptured(io, .{ .explicit = .{ .store = root, .record = path, .kind = .session_stop } }));
     }
+}
+
+test "capture routing round trips six placements without conflating selector and wire identity" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    const Peer = struct {
+        fn serve(listener: *std.Io.net.Server, expected_store: []const u8) anyerror!void {
+            for (0..4) |index| {
+                const connection = try listener.accept(std.testing.io);
+                defer connection.close(std.testing.io);
+                const deadline = std.Io.Clock.Timestamp.now(std.testing.io, .awake).raw.nanoseconds + 5 * std.time.ns_per_s;
+                var request: [2048]u8 = undefined;
+                var used: usize = 0;
+                while (used < request.len) {
+                    const count = try readRequest(.{ .io = std.testing.io }, connection.socket.handle, request[used .. used + 1], deadline);
+                    if (count == 0) return error.TestUnexpectedResult;
+                    used += count;
+                    if (std.mem.endsWith(u8, request[0..used], "\r\n\r\n")) break;
+                } else return error.TestUnexpectedResult;
+                const expected = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"host_info\",\"store\":\"\"}";
+                var body_used: usize = 0;
+                while (body_used < expected.len) {
+                    const count = try readRequest(.{ .io = std.testing.io }, connection.socket.handle, request[body_used..expected.len], deadline);
+                    if (count == 0) return error.TestUnexpectedResult;
+                    body_used += count;
+                }
+                try std.testing.expectEqualStrings(expected, request[0..body_used]);
+                var body: protocol.ResponseBuffer = .{};
+                const info: @import("host_reply.zig").HostInfo = .{ .store = if (index == 3) "fedcba9876543210fedcba9876543210" else expected_store, .instance = @splat(1), .active_capacity = 2, .intake_capacity = 100, .descriptor_soft_limit = 1024, .started_at = 1, .custody_occupied = 0, .paused = false, .routes = protocol.routesAll(.unserved), .doublewrite = null };
+                try body.render(@import("host_reply.zig").renderHostInfo, .{info});
+                var head_buffer: [512]u8 = undefined;
+                const head = try std.fmt.bufPrint(&head_buffer, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\nConnection: close\r\n\r\n", .{body.len});
+                try writeAllRequest(.{ .io = std.testing.io }, connection.socket.handle, head, deadline);
+                try writeAllRequest(.{ .io = std.testing.io }, connection.socket.handle, body.slice(), deadline);
+            }
+        }
+    };
+    for ([_]enum { sqlite_default, sqlite_moved, mysql }{ .sqlite_default, .sqlite_moved, .mysql }) |kind| for ([_]bool{ false, true }) |explicit_interface| {
+        var tmp = try @import("socket_fixture.zig").Directory.init();
+        defer tmp.cleanup();
+        const root = tmp.root[0..tmp.root_len];
+        var host = try tmp.dir.createDirPathOpen(io, "host", .{ .permissions = .fromMode(0o700) });
+        defer host.close(io);
+        const directory = try std.fs.path.join(gpa, &.{ root, "host" });
+        defer gpa.free(directory);
+        const data = try std.fs.path.join(gpa, &.{ root, "data" });
+        defer gpa.free(data);
+        if (kind == .sqlite_moved) {
+            var data_dir = try tmp.dir.createDirPathOpen(io, "data", .{ .permissions = .fromMode(0o700) });
+            data_dir.close(io);
+        }
+        const runtime = try std.fs.path.join(gpa, &.{ root, "iface" });
+        defer gpa.free(runtime);
+        var document: std.Io.Writer.Allocating = .init(gpa);
+        defer document.deinit();
+        try document.writer.writeAll("{");
+        switch (kind) {
+            .sqlite_default => {},
+            .sqlite_moved => {
+                try document.writer.writeAll("\"store\":{\"sqlite\":{\"dir\":");
+                try std.json.Stringify.value(data, .{}, &document.writer);
+                try document.writer.writeAll("}},");
+            },
+            .mysql => try document.writer.writeAll("\"store\":{\"mysql\":{\"url\":{\"env\":\"RUI_ABSENT_CAPTURE_TEST_URL\"}}},"),
+        }
+        if (explicit_interface) {
+            try document.writer.writeAll("\"interface\":{\"dir\":");
+            try std.json.Stringify.value(runtime, .{}, &document.writer);
+            try document.writer.writeAll("},");
+        }
+        try document.writer.writeAll("\"providers\":{}}");
+        try host.writeFile(io, .{ .sub_path = "host.json", .data = document.written(), .flags = .{ .permissions = .fromMode(0o600) } });
+        var paths = try platform.resolveClientPaths(io, directory);
+        if (kind == .mysql) try paths.store_identity.set("0123456789abcdef0123456789abcdef");
+        var listener: ?std.Io.net.Server = null;
+        var future: ?std.Io.Future(anyerror!void) = null;
+        if (kind == .mysql) {
+            var runtime_dir = try std.Io.Dir.cwd().createDirPathOpen(io, std.fs.path.dirname(paths.socket.slice()).?, .{ .permissions = .fromMode(0o700) });
+            runtime_dir.close(io);
+            listener = try (try std.Io.net.UnixAddress.init(paths.socket.slice())).listen(io, .{});
+            future = try io.concurrent(Peer.serve, .{ &listener.?, paths.store_identity.slice() });
+        }
+        defer if (kind == .mysql) std.Io.Dir.cwd().deleteTree(io, std.fs.path.dirname(paths.socket.slice()).?) catch @panic("routing test runtime cleanup failed");
+        defer if (listener) |*server| server.deinit(io);
+        defer if (future) |*pending| {
+            _ = pending.cancel(io) catch {};
+        };
+        var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        var key_buffer: [36]u8 = undefined;
+        const location = try (CaptureTarget{ .generated = root }).resolve(io, &path_buffer, &key_buffer);
+        var original = try writeSessionStopCapture(io, &paths, .{ .store = directory, .session = "k7m2qx" }, location);
+        const saved = original.saved;
+        const before = try tmp.dir.readFileAlloc(io, std.fs.path.basename(location.record), gpa, .limited(2048));
+        defer gpa.free(before);
+        original.close(io);
+        var recovered = try openCaptured(io, .{ .generated = .{ .directory = root, .handle = saved.key.slice() } });
+        defer recovered.close(io);
+        try std.testing.expect(recovered.paths == null);
+        try std.testing.expect(recovered.routing != null);
+        try std.testing.expectEqualStrings(directory, recovered.routing.?.host_directory.slice());
+        const rediscovered = try recovered.resolvePaths(io);
+        try std.testing.expectEqualStrings(directory, rediscovered.selector());
+        try std.testing.expectEqualStrings(paths.socket.slice(), rediscovered.socket.slice());
+        try std.testing.expectEqualStrings(saved.store.slice(), rediscovered.store_identity.slice());
+        const inspection = try inspectCapturedRequest(io, root, saved.key.slice());
+        try std.testing.expectEqualStrings(directory, inspection.paths.selector());
+        try std.testing.expectEqualStrings(saved.store.slice(), inspection.identity.store.slice());
+        var explicit = try openCaptured(io, .{ .explicit = .{ .store = directory, .record = location.record, .kind = .session_stop } });
+        defer explicit.close(io);
+        const explicit_paths = try explicit.resolvePaths(io);
+        try std.testing.expectEqualStrings(rediscovered.socket.slice(), explicit_paths.socket.slice());
+        var after: [2048]u8 = undefined;
+        const count = try recovered.file.readPositionalAll(io, &after, 0);
+        try std.testing.expectEqualStrings(before, after[0..count]);
+        if (future) |*pending| {
+            try std.testing.expectError(error.RequestBindingMismatch, recovered.resolvePaths(io));
+            try pending.await(io);
+            future = null;
+        }
+        // An operator edit that points DIR to another SQLite database must not
+        // redirect the immutable request, even though placement can be resolved.
+        if (kind != .mysql) {
+            const changed = try std.fmt.allocPrint(gpa, "{{\"store\":{{\"sqlite\":{{\"dir\":\"{s}/different\"}}}}}}", .{root});
+            defer gpa.free(changed);
+            try host.writeFile(io, .{ .sub_path = "host.json", .data = changed, .flags = .{ .permissions = .fromMode(0o600) } });
+            try std.testing.expectError(error.RequestBindingMismatch, recovered.resolvePaths(io));
+        }
+    };
+}
+
+test "capture routing metadata rejects invalid private sources and keeps legacy raw records" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = try @import("socket_fixture.zig").Directory.init();
+    defer tmp.cleanup();
+    const root = tmp.root[0..tmp.root_len];
+    var captured = try captureSessionStop(io, .{ .store = root, .session = "k7m2qx" }, .{ .generated = root });
+    const key = captured.saved.key;
+    captured.close(io);
+    const name = try std.fmt.allocPrint(gpa, "{s}.json.routing", .{key.slice()});
+    defer gpa.free(name);
+    for ([_][]const u8{
+        "{",                                                                         "{}",                                                                   "{\"format\":2,\"host_directory\":\"/host\",\"runtime_hint\":\"\"}",
+        "{\"format\":1,\"host_directory\":\"/host\",\"runtime_hint\":\"/runtime\"}", "{\"format\":1,\"host_directory\":\"relative\",\"runtime_hint\":\"\"}", "{\"format\":1,\"host_directory\":\"\",\"runtime_hint\":\"\"}",
+        "{\"format\":1,\"host_directory\":\"/host\\u0000\",\"runtime_hint\":\"\"}",
+    }) |text| {
+        try tmp.dir.writeFile(io, .{ .sub_path = name, .data = text, .flags = .{ .permissions = .fromMode(0o600) } });
+        try std.testing.expectError(error.InvalidRequestRecord, openCaptured(io, .{ .generated = .{ .directory = root, .handle = key.slice() } }));
+    }
+    try tmp.dir.setFilePermissions(io, name, .fromMode(0o644), .{});
+    try std.testing.expectError(error.InvalidRequestRecord, openCaptured(io, .{ .generated = .{ .directory = root, .handle = key.slice() } }));
+    try tmp.dir.deleteFile(io, name);
+    try tmp.dir.symLink(io, "missing-route", name, .{});
+    if (openCaptured(io, .{ .generated = .{ .directory = root, .handle = key.slice() } })) |value| {
+        var unexpected = value;
+        unexpected.close(io);
+        return error.TestUnexpectedResult;
+    } else |_| {}
+    try tmp.dir.deleteFile(io, name);
+    var legacy = try openCaptured(io, .{ .generated = .{ .directory = root, .handle = key.slice() } });
+    defer legacy.close(io);
+    try std.testing.expect(legacy.routing == null);
+    const paths = try legacy.resolvePaths(io);
+    try std.testing.expectEqualStrings(root, paths.store_identity.slice());
+}
+
+test "capture routing publication faults preserve request custody and never replace an existing pair" {
+    const Fault = struct {
+        const Stage = enum { route_create, route_write, route_sync, route_rename, route_directory_sync, request_sync, request_rename, request_directory_sync };
+        var stage: Stage = undefined;
+        var route_file: std.posix.fd_t = -1;
+        var body_file: std.posix.fd_t = -1;
+        var directory_syncs: usize = 0;
+        var fired = false;
+        fn create(userdata: ?*anyopaque, dir: std.Io.Dir, path: []const u8, options: std.Io.Dir.CreateFileOptions) std.Io.File.OpenError!std.Io.File {
+            const route = std.mem.endsWith(u8, path, ".routing.tmp");
+            if (route and stage == .route_create) {
+                fired = true;
+                return error.NoSpaceLeft;
+            }
+            const file = try std.testing.io.vtable.dirCreateFile(userdata, dir, path, options);
+            if (route) route_file = file.handle;
+            if (std.mem.endsWith(u8, path, ".capture.tmp")) body_file = file.handle;
+            return file;
+        }
+        fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
+            if (operation == .file_write_streaming and operation.file_write_streaming.file.handle == route_file and stage == .route_write) {
+                fired = true;
+                return .{ .file_write_streaming = error.NoSpaceLeft };
+            }
+            return std.testing.io.vtable.operate(userdata, operation);
+        }
+        fn sync(userdata: ?*anyopaque, file: std.Io.File) std.Io.File.SyncError!void {
+            const directory = (file.stat(std.testing.io) catch return error.InputOutput).kind == .directory;
+            if (directory) directory_syncs += 1;
+            if ((stage == .route_sync and !directory and file.handle == route_file) or
+                (stage == .request_sync and !directory and file.handle == body_file) or
+                (stage == .route_directory_sync and directory and directory_syncs == 1) or
+                (stage == .request_directory_sync and directory and directory_syncs == 2))
+            {
+                fired = true;
+                return error.NoSpaceLeft;
+            }
+            return std.testing.io.vtable.fileSync(userdata, file);
+        }
+        fn rename(userdata: ?*anyopaque, old_dir: std.Io.Dir, old_path: []const u8, new_dir: std.Io.Dir, new_path: []const u8) std.Io.Dir.RenamePreserveError!void {
+            if ((stage == .route_rename and std.mem.endsWith(u8, new_path, ".routing")) or
+                (stage == .request_rename and std.mem.eql(u8, new_path, "request.json")))
+            {
+                fired = true;
+                return error.NoSpaceLeft;
+            }
+            return std.testing.io.vtable.dirRenamePreserve(userdata, old_dir, old_path, new_dir, new_path);
+        }
+    };
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    for (std.enums.values(Fault.Stage)) |stage| {
+        var tmp = try @import("socket_fixture.zig").Directory.init();
+        defer tmp.cleanup();
+        const root = tmp.root[0..tmp.root_len];
+        const path = try std.fs.path.join(gpa, &.{ root, "request.json" });
+        defer gpa.free(path);
+        var vtable = io.vtable.*;
+        vtable.dirCreateFile = Fault.create;
+        vtable.operate = Fault.operate;
+        vtable.fileSync = Fault.sync;
+        vtable.dirRenamePreserve = Fault.rename;
+        const failing: std.Io = .{ .userdata = io.userdata, .vtable = &vtable };
+        Fault.stage = stage;
+        Fault.fired = false;
+        Fault.route_file = -1;
+        Fault.body_file = -1;
+        Fault.directory_syncs = 0;
+        try std.testing.expectError(if (stage == .route_directory_sync or stage == .request_directory_sync) error.RecordDirectorySyncFailed else error.NoSpaceLeft, captureSessionStop(failing, .{ .store = root, .session = "k7m2qx" }, .{ .explicit = .{ .record = path, .key = "stable" } }));
+        try std.testing.expect(Fault.fired);
+        if (stage == .request_directory_sync) {
+            var recovered = try openCaptured(io, .{ .explicit = .{ .store = root, .record = path, .kind = .session_stop } });
+            defer recovered.close(io);
+            try std.testing.expect(recovered.routing != null);
+            try std.testing.expectEqualStrings(root, (try recovered.resolvePaths(io)).selector());
+        } else {
+            try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "request.json", .{}));
+            try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "request.json.routing", .{}));
+            // A crashed pre-request publisher can leave an orphan companion.
+            try tmp.dir.writeFile(io, .{ .sub_path = "request.json.routing", .data = "orphan", .flags = .{ .permissions = .fromMode(0o600) } });
+            var retried = try captureSessionStop(io, .{ .store = root, .session = "k7m2qx" }, .{ .explicit = .{ .record = path, .key = "stable" } });
+            retried.close(io);
+        }
+        const before = try tmp.dir.readFileAlloc(io, "request.json.routing", gpa, .limited(4096));
+        defer gpa.free(before);
+        try std.testing.expectError(error.RecordAlreadyExists, captureSessionStop(io, .{ .store = root, .session = "09azvw" }, .{ .explicit = .{ .record = path, .key = "different" } }));
+        const after = try tmp.dir.readFileAlloc(io, "request.json.routing", gpa, .limited(4096));
+        defer gpa.free(after);
+        try std.testing.expectEqualStrings(before, after);
+    }
+}
+
+test "capture routing retains OS bytes and legacy opaque runtime without storing a socket" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = try @import("socket_fixture.zig").Directory.init();
+    defer tmp.cleanup();
+    const root = tmp.root[0..tmp.root_len];
+    const directory = try std.fs.path.join(gpa, &.{ root, "host-\xff" });
+    defer gpa.free(directory);
+    // This tests the local codec, not SQLite's UTF-8 wire identity rule.
+    var initial = try platform.resolveClientPaths(io, root);
+    try initial.host_directory.set(directory);
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var key_buffer: [36]u8 = undefined;
+    const location = try (CaptureTarget{ .generated = root }).resolve(io, &path_buffer, &key_buffer);
+    var captured = try writeSessionStopCapture(io, &initial, .{ .store = root, .session = "k7m2qx" }, location);
+    const key = captured.saved.key;
+    captured.close(io);
+    var recovered = try openCaptured(io, .{ .generated = .{ .directory = root, .handle = key.slice() } });
+    defer recovered.close(io);
+    try std.testing.expectEqualStrings(directory, recovered.routing.?.host_directory.slice());
+    const legacy = try platform.mysqlClientPaths(io, "0123456789abcdef0123456789abcdef", root);
+    const route = try CaptureRouting.fromPaths(&legacy);
+    try std.testing.expectEqual(@as(usize, 0), route.host_directory.len);
+    try std.testing.expectEqualStrings(root, route.runtime_hint.slice());
+    const restored = try route.resolve(io, legacy.store_identity.slice());
+    try std.testing.expectEqualStrings(legacy.socket.slice(), restored.socket.slice());
+    try std.testing.expectEqualStrings(legacy.store_identity.slice(), restored.store_identity.slice());
+    try std.testing.expectError(error.InvalidStorePath, route.resolve(io, "/not-an-opaque-identity"));
+    const legacy_location = try (CaptureTarget{ .generated = root }).resolve(io, &path_buffer, &key_buffer);
+    var saved_legacy = try writeSessionStopCapture(io, &legacy, .{ .store = legacy.store_identity.slice(), .session = "k7m2qx" }, legacy_location);
+    const legacy_key = saved_legacy.saved.key;
+    saved_legacy.close(io);
+    var generated = try openCaptured(io, .{ .generated = .{ .directory = root, .handle = legacy_key.slice() } });
+    defer generated.close(io);
+    try std.testing.expectEqualStrings(root, generated.routing.?.runtime_hint.slice());
+    try std.testing.expectEqualStrings(legacy.socket.slice(), (try generated.resolvePaths(io)).socket.slice());
+    var explicit = try openCaptured(io, .{ .explicit = .{ .store = legacy.store_identity.slice(), .record = legacy_location.record, .kind = .session_stop } });
+    defer explicit.close(io);
+    try std.testing.expectEqualStrings(legacy.socket.slice(), (try explicit.resolvePaths(io)).socket.slice());
+}
+
+test "capture routing writer and readers share private parent aliases" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = try @import("socket_fixture.zig").Directory.init();
+    defer tmp.cleanup();
+    const root = tmp.root[0..tmp.root_len];
+    var actual = try tmp.dir.createDirPathOpen(io, "actual", .{ .permissions = .fromMode(0o700) });
+    actual.close(io);
+    try tmp.dir.symLink(io, "actual", "alias", .{ .is_directory = true });
+    const alias = try std.fs.path.join(gpa, &.{ root, "alias" });
+    defer gpa.free(alias);
+    for ([_]bool{ false, true }) |explicit| {
+        const path = try std.fs.path.join(gpa, &.{ alias, "explicit.json" });
+        defer gpa.free(path);
+        const target: CaptureTarget = if (explicit) .{ .explicit = .{ .record = path, .key = "explicit-key" } } else .{ .generated = alias };
+        var captured = try captureSessionStop(io, .{ .store = root, .session = "k7m2qx" }, target);
+        const saved = captured.saved;
+        captured.close(io);
+        var recovered = try openCaptured(io, if (explicit) .{ .explicit = .{ .store = root, .record = path, .kind = .session_stop } } else .{ .generated = .{ .directory = alias, .handle = saved.key.slice() } });
+        defer recovered.close(io);
+        try std.testing.expectEqualStrings(root, (try recovered.resolvePaths(io)).selector());
+        if (!explicit) {
+            const inspected = try inspectCapturedRequest(io, alias, saved.key.slice());
+            try std.testing.expectEqualStrings(root, inspected.paths.selector());
+        }
+    }
+}
+
+test "read-only capture routing does not eagerly validate a replay body" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = try @import("socket_fixture.zig").Directory.init();
+    defer tmp.cleanup();
+    const root = tmp.root[0..tmp.root_len];
+    var captured = try captureConfigure(io, .{ .store = root, .session = .{ .named = "k7m2qx" } }, .{ .generated = root }).get();
+    const key = captured.saved.key;
+    captured.close(io);
+    const filename = try std.fmt.allocPrint(gpa, "{s}.json", .{key.slice()});
+    defer gpa.free(filename);
+    const file = try tmp.dir.openFile(io, filename, .{ .mode = .write_only });
+    {
+        defer file.close(io);
+        try file.writePositionalAll(io, "not another immutable request", try file.length(io));
+    }
+    try std.testing.expectError(error.InvalidRequestRecord, openCaptured(io, .{ .generated = .{ .directory = root, .handle = key.slice() } }));
+    const observed = try inspectCapturedRequest(io, root, key.slice());
+    try std.testing.expectEqualStrings(root, observed.paths.selector());
+    try std.testing.expectEqualStrings(key.slice(), observed.identity.key.slice());
 }

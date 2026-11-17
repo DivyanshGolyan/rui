@@ -165,6 +165,7 @@ pub fn build(b: *std.Build) void {
         .optimize = .ReleaseSafe,
     });
     product.configurePosix(b, read_client);
+    read_client.addImport("url", product.addUrl(b));
     session_list_client.root_module.addImport("rui_client", read_client);
     const session_list_integration = b.addSystemCommand(&.{"python3"});
     session_list_integration.addFileArg(b.path("tests/integration/session_list_integration.py"));
@@ -250,6 +251,7 @@ pub fn build(b: *std.Build) void {
         .optimize = .ReleaseSafe,
     });
     product.configurePosix(b, preferences_module);
+    preferences_module.addImport("url", product.addUrl(b));
     preference_policy_actor.root_module.addImport("preferences", preferences_module);
     const preference_policy_integration = b.addSystemCommand(&.{"python3"});
     preference_policy_integration.addFileArg(b.path("tests/integration/preference_policy_integration.py"));
@@ -345,7 +347,7 @@ pub fn build(b: *std.Build) void {
 
     const ts_client = b.addSystemCommand(&.{"python3"});
     ts_client.addFileArg(b.path("tests/integration/host_process.py"));
-    ts_client.addArgs(&.{ "exec", "env" });
+    ts_client.addArgs(&.{ "exec-mysql", "env" });
     ts_client.addPrefixedFileArg("RUI_BINARY=", ci.path(release_safe));
     ts_client.addPrefixedFileArg("RUI_TEST_MYSQL_ADMIN=", ci.path(mysql_launch_admin));
     ts_client.addArgs(&.{ "node", "--experimental-strip-types", "--test", "--test-concurrency=1", "test/*.test.ts" });

@@ -635,7 +635,7 @@ const success_facts = rsql.Read(.{
         "FROM model_operation o LEFT JOIN session_revision r ON r.session_ref=o.session_ref AND r.revision=o.settings_revision " ++
         "JOIN session s ON s.session_ref=o.session_ref WHERE o.operation_id=?1",
     .Args = struct { operation_id: u64 },
-    .Row = struct { frozen_revision: ?rsql.Positive = null, tool_names: *Bounded(tool_set.max_names_bytes), invalid_owner: bool = false, permission_mode: bool = false, revision: rsql.Positive = undefined, entry_base: u64 = 0 },
+    .Row = struct { frozen_revision: ?rsql.Positive = null, tool_names: *Bounded(tool_set.max_offered_names_bytes), invalid_owner: bool = false, permission_mode: bool = false, revision: rsql.Positive = undefined, entry_base: u64 = 0 },
     .cardinality = .optional,
 });
 
@@ -926,7 +926,7 @@ const HistoryVisitor = struct {
 };
 
 pub const Batch = struct {
-    offered_names: Bounded(tool_set.max_names_bytes),
+    offered_names: Bounded(tool_set.max_offered_names_bytes),
     withdrawn: [batch_identities]bool,
     history_visitor: HistoryVisitor,
     history_needed: bool,

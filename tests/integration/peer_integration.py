@@ -109,14 +109,14 @@ class PeerModel(TestHTTPServer):
                       "cat > b-report.txt; " +
                       send + "< b-report.txt > b-reply.json 2> b-reply.err")
             return bash_call("b-reply", (
-                'printf "%s\\n" "$HOME"/.config/rui/requests/* > b-captures-before; '
+                'printf "%s\\n" "$HOME"/.config/rui/requests/*.json > b-captures-before; '
                 f'printf %s "self report explicit" | rui session send --store "$RUI_STORE/." --to {address} '
                 f"--record {shlex.quote(str(self.workspace.parent / 'b-self.json'))} --key self-send > b-self.out 2> b-self.err; "
                 "echo $? > b-self.status; "
                 f"printf %s 'self report generated' | rui session send --to {address} "
                 "> b-self-generated.out 2> b-self-generated.err; "
                 "echo $? > b-self-generated.status; "
-                'printf "%s\\n" "$HOME"/.config/rui/requests/* > b-captures-after.part && mv b-captures-after.part b-captures-after; '
+                'printf "%s\\n" "$HOME"/.config/rui/requests/*.json > b-captures-after.part && mv b-captures-after.part b-captures-after; '
                 "i=0; while [ ! -e b-release ] && [ $i -lt 400 ]; do sleep 0.05; i=$((i+1)); done; [ -e b-release ] || exit 124; "
                 + report
             ), stdin=REPORT)
@@ -309,6 +309,7 @@ def main(report_source):
         after = set((workspace / "b-captures-after").read_text().splitlines())
         assert len(after - before) == 1, (before, after)
         generated_self_record = pathlib.Path(next(iter(after - before)))
+        assert pathlib.Path(str(generated_self_record) + ".routing").is_file(), generated_self_record
         assert json.loads(generated_self_record.read_text())["sender"] == own_sender
         wait_for(lambda: run(installed, "session", "inspect", "--store", store, "--session", session_a, home=home)["work"]["state"]["kind"] == "finished", "A's first Turn while B is held", timeout=20)
         assert endpoint.a_continued.is_set() and not (workspace / "b-reply.json").exists()

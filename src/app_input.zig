@@ -356,6 +356,8 @@ fn stepInner(state: *State, facts: Facts, input: Input) Effects {
     if (input == .mouse and (input.mouse == .click or input.mouse == .list_click or input.mouse == .chat_click) and state.pasting) return .{ .route = .swallow };
     if (state.layer == .sign_in) return .{ .route = .sign_in };
     if (input == .key and state.layer == .settings) return settingsKey(state, facts.settings, input.key);
+    if (state.layer == .main and !state.pasting and input == .key and !(facts.frame.modal and facts.session_open) and (input.key.named == .alt_up or input.key.named == .alt_down))
+        return .{ .route = .{ .overview = .{ .under = .main, .pasted = false, .wide = facts.wide } } };
     if (input == .key and !state.pasting and !facts.frame.modal) {
         const move = if (facts.accepts_tab and state.area == .main and state.field == .input and input.key.named == .tab) null else if (input.key.named) |name| keys.get(name) else null;
         if (move) |direction| if (tabNext(facts.frame.slice(), currentFocus(state.*), direction == .previous)) |target| {
@@ -403,10 +405,6 @@ fn stepInner(state: *State, facts: Facts, input: Input) Effects {
     if (state.layer != .main or input == .mouse) return .{};
     const delivery: Effects.Delivery = .{ .under = .main, .pasted = state.pasting };
     if (facts.frame.modal and facts.session_open) return .{ .route = .{ .session = delivery } };
-    // Chat switching belongs to the list's opening owner even while the
-    // composer has keys. Paste and covering pages retain their own custody.
-    if (!state.pasting and input == .key and (input.key.named == .alt_up or input.key.named == .alt_down))
-        return .{ .route = .{ .overview = .{ .under = .main, .pasted = false, .wide = facts.wide } } };
     if (state.listFocused()) return .{ .route = .{ .overview = .{ .under = .main, .pasted = state.pasting, .wide = facts.wide } } };
     return .{ .route = if (facts.session_open) .{ .session = delivery } else .{ .overview = .{ .under = .main, .pasted = state.pasting, .wide = facts.wide } } };
 }

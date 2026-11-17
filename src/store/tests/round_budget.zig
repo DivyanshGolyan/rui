@@ -66,6 +66,7 @@ test "every function that enters the Store has a round budget" {
         @embedFile("../engine/mysql_refusal.zig"),
         @embedFile("../domain/action.zig"),
         @embedFile("../domain/action_control.zig"),
+        @embedFile("../domain/action_stop.zig"),
         @embedFile("../domain/action_read.zig"),
         @embedFile("../domain/forward.zig"),
         @embedFile("../domain/command.zig"),
@@ -213,6 +214,10 @@ test "each Store entry point takes its round budget on its common path" {
             try mcpTurn(case, &meter);
             try findTurn(&storage, &tmp, &meter);
             try skillTurn(case, &meter);
+            stopTurn(case, &meter) catch |err| {
+                std.debug.print("stop budget setup failed: {s}\n", .{@errorName(err)});
+                return err;
+            };
             var failed = false;
             for (std.enums.values(EntryPoint)) |point| {
                 const measured = meter.measured.get(point) orelse {
@@ -527,6 +532,37 @@ test "each Store entry point takes its round budget on its common path" {
             meter.start();
             try std.testing.expect(try storage.deliverSessionForward(forward, .{}));
             meter.stop(.deliverSessionForward);
+        }
+
+        fn stopTurn(case: *store_testing.Case, meter: *RoundMeter) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const previous_storage = meter.storage;
+            meter.storage = &storage;
+            defer meter.storage = previous_storage;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            var configure = try completeConfiguration("budget-action-stop", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
+            configure.configuration.tools = try .of(&.{ "bash", "read_action", "stop_action" });
+            configure.configuration.permission_mode.state = .value;
+            try configure.configuration.permission_mode.value.set("bypass");
+            const session = (try storage.configure(&configure, .{})).accepted.session;
+            try submitTestMessage(&storage, &tmp, "budget-stop-input", "budget-stop-input", session.slice(), "run");
+            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            const calls = [_]TestingCall{
+                .{ .item_id = "target-item", .name = "bash", .encoded_call_id = "target-call", .decoded_call_id = "target-call", .encoded_arguments = "{\\\"cmd\\\":\\\"true\\\",\\\"description\\\":\\\"Budget target\\\"}", .decoded_arguments = "{\"cmd\":\"true\",\"description\":\"Budget target\"}" },
+                .{ .item_id = "stop-item", .name = "stop_action", .encoded_call_id = "stop-call", .decoded_call_id = "stop-call", .encoded_arguments = "{\\\"action\\\":\\\"1\\\"}", .decoded_arguments = "{\"action\":\"1\"}" },
+            };
+            try settleCallsForTesting(&storage, &tmp, model, "budget-stop-calls", &calls);
+            const target = try store_testing.queryU64(&storage, "SELECT min(action_id) FROM action_operation WHERE parent_operation_id=?1", .{model.operation_id});
+            const source = (try storage.nextCoreWork(.fromFree(2, true))).?.action;
+            try std.testing.expectEqual(action_domain.CoreTool.stop_action, source.tool);
+            meter.start();
+            const stopped = try storage.stopAction(source.binding, target, .{});
+            try std.testing.expectEqual(std.meta.Tag(@TypeOf(stopped)).selected, std.meta.activeTag(stopped));
+            meter.stop(.stopAction);
         }
 
         fn toolTurn(storage: *Store, tmp: *std.testing.TmpDir, meter: *RoundMeter) !void {

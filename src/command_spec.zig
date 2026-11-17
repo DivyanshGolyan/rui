@@ -17,46 +17,19 @@ pub const CommandKind = enum {
     }
 };
 
-/// Fields owned by a command kind, apart from the common observation envelope.
-pub const ObservationField = enum {
-    revision,
-    created,
-    input,
-    state,
-    queue,
-    binding,
-    result,
-    work,
-    recovery,
-    selection,
-    archived,
-    pinned,
-    completion,
-    interruption_target,
-    permission_target,
-    action_target,
-    action_selection,
-};
-
-pub const ObservationFields = struct {
-    always: []const ObservationField = &.{},
-    accepted: []const ObservationField = &.{},
-    /// Message fields whose presence also depends on its processing state.
-    conditional: []const ObservationField = &.{},
-
-    pub fn contains(fields: []const ObservationField, field: ObservationField) bool {
-        return std.mem.indexOfScalar(ObservationField, fields, field) != null;
-    }
-};
-
 pub const Spec = struct {
     route: []const u8,
     reply_type: []const u8,
     summary: []const u8,
+    subject_type: ?[]const u8 = null,
+    fence_message: []const u8,
     Request: type,
     Observation: type,
-    observation_fields: ObservationFields = .{},
     is_control: bool = true,
+
+    pub fn Subject(comptime self: Spec, comptime Subjects: type) type {
+        return if (self.subject_type) |name| @field(Subjects, name) else []const u8;
+    }
 
     pub fn Reply(comptime self: Spec, comptime Wire: type) type {
         const name = self.reply_type;
@@ -69,6 +42,18 @@ pub const Spec = struct {
             .{ r.accepted, r.accepted_skills, r.rejected }
         else
             .{ r.accepted, r.rejected });
+    }
+
+    pub fn observationDecoderShapes(comptime self: Spec, comptime Wire: type) type {
+        @setEvalBranchQuota(2_000_000);
+        const o = Wire.command_observation_reply;
+        const head = o.head(kindFor(self));
+        const accepted_head = .{ head[0], head[1], head[2], head[3], head[4] ++ "accepted" ++ head[6], head[7] };
+        const rejected_head = .{ head[0], head[1], head[2], head[3], head[4] ++ "rejected" ++ head[6], head[7] };
+        return Shapes(
+            observationPayloadShapes(self.Observation.accepted(Wire).values, 0, accepted_head, o.tail, Wire).values ++
+                observationPayloadShapes(self.Observation.rejected(Wire).values, 0, rejected_head, o.code ++ o.tail, Wire).values,
+        );
     }
 };
 
@@ -100,10 +85,18 @@ fn Request(comptime name: []const u8, comptime member: ?[]const u8) type {
     };
 }
 
-fn Observation(comptime name: []const u8) type {
+fn Observation(comptime name: []const u8, comptime retained_on_rejection: bool) type {
     return struct {
         pub fn shapes(comptime Wire: type) type {
             return Shapes(.{ .{}, @field(Wire.command_observation_reply, name) });
+        }
+
+        pub fn accepted(comptime Wire: type) type {
+            return Shapes(.{@field(Wire.command_observation_reply, name)});
+        }
+
+        pub fn rejected(comptime Wire: type) type {
+            return Shapes(.{if (retained_on_rejection) @field(Wire.command_observation_reply, name) else .{}});
         }
     };
 }
@@ -112,6 +105,15 @@ const MessageObservation = struct {
     pub fn shapes(comptime Wire: type) type {
         return Shapes(Wire.command_observation_reply.message_variants);
     }
+
+    pub fn accepted(comptime Wire: type) type {
+        return shapeSuffix(shapes(Wire).values, 2);
+    }
+
+    pub fn rejected(comptime Wire: type) type {
+        const values = shapes(Wire).values;
+        return Shapes(.{ values[0], values[1] });
+    }
 };
 
 const ActionObservation = struct {
@@ -119,7 +121,56 @@ const ActionObservation = struct {
         const o = Wire.command_observation_reply;
         return Shapes(.{ o.action_target, o.action_target ++ o.action_selection });
     }
+
+    pub fn accepted(comptime Wire: type) type {
+        return Shapes(.{shapes(Wire).values[1]});
+    }
+
+    pub fn rejected(comptime Wire: type) type {
+        return Shapes(.{shapes(Wire).values[0]});
+    }
 };
+
+fn kindFor(comptime facts: Spec) CommandKind {
+    inline for (std.meta.tags(CommandKind)) |kind| {
+        if (std.mem.eql(u8, facts.route, spec(kind).route)) return kind;
+    }
+    unreachable;
+}
+
+// Permission observations use the same consequential WorkState validation as
+// every other message state, while the wire writer keeps its compact literal.
+fn decoderObservationPayload(comptime payload: anytype, comptime index: usize, comptime Wire: type) type {
+    if (index == payload.len) return Shape(.{});
+    if (@TypeOf(payload[index]) != Wire.Hole and @TypeOf(payload[index]) != std.meta.Tag(Wire.Hole) and
+        std.mem.eql(u8, payload[index], Wire.command_observation_reply.permission_work[0]))
+    {
+        return Shape(Wire.command_observation_reply.work ++ decoderObservationPayload(payload, index + Wire.command_observation_reply.permission_work.len, Wire).shape);
+    }
+    return Shape(.{payload[index]} ++ decoderObservationPayload(payload, index + 1, Wire).shape);
+}
+
+fn shapeSuffix(comptime values: anytype, comptime index: usize) type {
+    if (index == values.len) return Shapes(.{});
+    return Shapes(.{values[index]} ++ shapeSuffix(values, index + 1).values);
+}
+
+fn observationPayloadShapes(comptime payloads: anytype, comptime index: usize, comptime prefix: anytype, comptime suffix: anytype, comptime Wire: type) type {
+    if (index == payloads.len) return Shapes(.{});
+    return Shapes(.{prefix ++ decoderObservationPayload(payloads[index], 0, Wire).shape ++ suffix} ++
+        observationPayloadShapes(payloads, index + 1, prefix, suffix, Wire).values);
+}
+
+fn observationDecoderKinds(comptime Wire: type, comptime index: usize) type {
+    const kinds = std.meta.tags(CommandKind);
+    if (index == kinds.len) return Shapes(.{});
+    return Shapes(spec(kinds[index]).observationDecoderShapes(Wire).values ++ observationDecoderKinds(Wire, index + 1).values);
+}
+
+pub fn observationDecoderShapes(comptime Wire: type) type {
+    @setEvalBranchQuota(2_000_000);
+    return Shapes(.{ Wire.command_observation_reply.absent, Wire.command_observation_reply.not_modified } ++ observationDecoderKinds(Wire, 0).values);
+}
 
 const ConfigureRequest = struct {
     // Content is streamed and does not have a fixed request bound.
@@ -172,73 +223,73 @@ const ArchiveRequest = struct {
 pub fn spec(comptime kind: CommandKind) Spec {
     return switch (kind) {
         .configure => .{
+            .fence_message = "configuration save",
             .route = "/v1/configure",
             .reply_type = "configuration_reply",
             .summary = "Creates or reconfigures a Session. Retried by its key.",
             .Request = ConfigureRequest,
-            .Observation = Observation("revision"),
-            .observation_fields = .{ .accepted = &.{ .revision, .created } },
+            .Observation = Observation("revision", false),
             .is_control = false,
         },
         .message => .{
+            .fence_message = "message save",
             .route = "/v1/message",
             .reply_type = "message_reply",
             .summary = "Sends a Message to a Session, or creates the Session when `session` is empty. Retried by its key. Each `/name` word in the text that names a skill in the recipient's catalog appends that skill to what the model reads; the text is saved as written. Only an empty `session` carries (and requires) `configuration`; `require_model` is allowed only with it. The body starts with the client environment, `X-Rui-Environment-Bytes` long, before the JSON.",
             .Request = MessageRequest,
             .Observation = MessageObservation,
-            .observation_fields = .{
-                .always = &.{.state},
-                .conditional = &.{ .input, .queue, .binding, .result, .work, .recovery },
-            },
             .is_control = false,
         },
         .session_stop => .{
+            .fence_message = "Session stop save",
             .route = "/v1/control/session-stop",
             .reply_type = "session_stop_reply",
             .summary = "Stops a Session's current and queued work. Retried by its key.",
             .Request = Request("session_stop_request", null),
-            .Observation = Observation("session_stop"),
-            .observation_fields = .{ .accepted = &.{ .selection, .completion } },
+            .Observation = Observation("session_stop", false),
         },
         .session_archive => .{
+            .fence_message = "Session archive save",
             .route = "/v1/control/session-archive",
             .reply_type = "session_archive_reply",
             .summary = "Archives or restores a Session. Archiving stops current and queued work. Retried by its key.",
             .Request = ArchiveRequest,
-            .Observation = Observation("session_archive"),
-            .observation_fields = .{ .accepted = &.{ .archived, .completion } },
+            .Observation = Observation("session_archive", false),
         },
         .session_pin => .{
+            .fence_message = "Session pin save",
             .route = "/v1/control/session-pin",
             .reply_type = "session_pin_reply",
             .summary = "Pins or unpins a Session without changing its work. Retried by its key.",
             .Request = Request("session_pin_request", "all"),
-            .Observation = Observation("session_pin"),
-            .observation_fields = .{ .accepted = &.{.pinned} },
+            .Observation = Observation("session_pin", false),
         },
         .model_interruption => .{
+            .subject_type = "model_interruption",
+            .fence_message = "model interruption save",
             .route = "/v1/control/model-interruption",
             .reply_type = "model_interruption_reply",
             .summary = "Interrupts one model Operation. Retried by its key.",
             .Request = Request("model_interruption_request", null),
-            .Observation = Observation("model_interruption"),
-            .observation_fields = .{ .always = &.{.interruption_target} },
+            .Observation = Observation("model_interruption", true),
         },
         .permission_decision => .{
+            .subject_type = "permission_decision",
+            .fence_message = "permission decision save",
             .route = "/v1/control/permission-decision",
             .reply_type = "permission_decision_reply",
             .summary = "Allows or denies one Action that waits for permission. Retried by its key.",
             .Request = Request("permission_decision_request", null),
-            .Observation = Observation("permission_decision"),
-            .observation_fields = .{ .always = &.{.permission_target} },
+            .Observation = Observation("permission_decision", true),
         },
         .action_background => .{
+            .subject_type = "action_background",
+            .fence_message = "Action background save",
             .route = "/v1/control/action-background",
             .reply_type = "action_background_reply",
             .summary = "Promotes the same Action to Session-owned background work and returns its immutable call receipt selection. Completion is read explicitly with read-action; no final input or model wake is delivered. Retried by its key.",
             .Request = Request("action_background_request", null),
             .Observation = ActionObservation,
-            .observation_fields = .{ .always = &.{.action_target}, .accepted = &.{.action_selection} },
         },
     };
 }
@@ -246,23 +297,59 @@ pub fn spec(comptime kind: CommandKind) Spec {
 test "command_spec covers every kind and preserves routes and request limits" {
     const protocol = @import("protocol.zig");
     const expected = .{
-        .{ "/v1/configure", "configuration_reply", @as(?usize, null) },
-        .{ "/v1/message", "message_reply", @as(?usize, null) },
-        .{ "/v1/control/session-stop", "session_stop_reply", protocol.shapeBytes(protocol.session_stop_request) },
-        .{ "/v1/control/session-archive", "session_archive_reply", protocol.shapeBytes(protocol.session_archive_request.all) },
-        .{ "/v1/control/model-interruption", "model_interruption_reply", protocol.shapeBytes(protocol.model_interruption_request) },
-        .{ "/v1/control/permission-decision", "permission_decision_reply", protocol.shapeBytes(protocol.permission_decision_request) },
-        .{ "/v1/control/session-pin", "session_pin_reply", protocol.shapeBytes(protocol.session_pin_request.all) },
-        .{ "/v1/control/action-background", "action_background_reply", protocol.shapeBytes(protocol.action_background_request) },
+        .{ "/v1/configure", "configuration_reply", @as(?usize, null), "configuration save" },
+        .{ "/v1/message", "message_reply", @as(?usize, null), "message save" },
+        .{ "/v1/control/session-stop", "session_stop_reply", protocol.shapeBytes(protocol.session_stop_request), "Session stop save" },
+        .{ "/v1/control/session-archive", "session_archive_reply", protocol.shapeBytes(protocol.session_archive_request.all), "Session archive save" },
+        .{ "/v1/control/model-interruption", "model_interruption_reply", protocol.shapeBytes(protocol.model_interruption_request), "model interruption save" },
+        .{ "/v1/control/permission-decision", "permission_decision_reply", protocol.shapeBytes(protocol.permission_decision_request), "permission decision save" },
+        .{ "/v1/control/session-pin", "session_pin_reply", protocol.shapeBytes(protocol.session_pin_request.all), "Session pin save" },
+        .{ "/v1/control/action-background", "action_background_reply", protocol.shapeBytes(protocol.action_background_request), "Action background save" },
     };
     inline for (comptime std.meta.tags(CommandKind), expected, 0..) |kind, original, index| {
         const facts = comptime spec(kind);
         try std.testing.expectEqualStrings(original[0], facts.route);
         try std.testing.expectEqualStrings(original[1], facts.reply_type);
         try std.testing.expectEqual(@as(?usize, original[2]), facts.Request.maxBytes(protocol));
+        try std.testing.expectEqualStrings(original[3], facts.fence_message);
         try std.testing.expectEqual(index >= 2, facts.is_control);
         _ = facts.Reply(protocol).max_bytes;
         _ = facts.Observation.shapes(protocol).values;
         try std.testing.expect(facts.summary.len != 0);
     }
+}
+
+test "command_spec resolves every subject from injected types" {
+    const Subjects = struct {
+        pub const model_interruption = struct { turn: u64 };
+        pub const permission_decision = struct { decision: bool };
+        pub const action_background = struct { action: u64 };
+    };
+    const expected = .{
+        []const u8,
+        []const u8,
+        []const u8,
+        []const u8,
+        Subjects.model_interruption,
+        Subjects.permission_decision,
+        []const u8,
+        Subjects.action_background,
+    };
+    inline for (comptime std.meta.tags(CommandKind), expected) |kind, Expected| {
+        try std.testing.expect(spec(kind).Subject(Subjects) == Expected);
+    }
+}
+
+fn mutationDecoderKinds(comptime Wire: type, comptime index: usize) type {
+    const kinds = std.meta.tags(CommandKind);
+    if (index == kinds.len) return Shapes(.{});
+    const r = spec(kinds[index]).Reply(Wire);
+    return Shapes((if (@hasDecl(r, "accepted_skills"))
+        .{ r.accepted, r.accepted_skills, r.rejected, r.conflict }
+    else
+        .{ r.accepted, r.rejected, r.conflict }) ++ mutationDecoderKinds(Wire, index + 1).values);
+}
+
+pub fn mutationDecoderShapes(comptime Wire: type) type {
+    return Shapes(.{Wire.error_reply} ++ mutationDecoderKinds(Wire, 0).values);
 }

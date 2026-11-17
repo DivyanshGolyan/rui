@@ -139,9 +139,9 @@ class TerminalProcessTest(unittest.TestCase):
         with patch("human_cli_fixture.keyed_frame") as keyed:
             overview_frame(17, lambda screen: "Settings" in screen)
         predicate = keyed.call_args.args[2]
-        listed = "  + New Session\n  Settings\nenter open"
+        listed = "  + New Session\n  Settings"
         self.assertTrue(predicate(listed, 0, 0))
-        self.assertFalse(predicate(listed.replace("enter open", ""), 0, 0))
+        self.assertFalse(predicate(listed.replace("Settings", ""), 0, 0))
         self.assertFalse(predicate(listed + "\n › Type a task", 3, 3))
         self.assertFalse(predicate(" › Type a task\ngpt-6-luna", 3, 0))
 
@@ -158,9 +158,8 @@ class TerminalProcessTest(unittest.TestCase):
                     overview_frame(17, accept, ready=False)
                 relaxed = keyed.call_args.args[2]
                 frame = "  + New Session\n  Settings\n" + notice
-                self.assertFalse(strict(frame, 0, 0))
+                self.assertTrue(strict(frame, 0, 0))
                 self.assertTrue(relaxed(frame, 0, 0))
-                self.assertTrue(strict(frame + "\nenter open", 0, 0))
                 for marker in ("+ New Session", "Settings", notice):
                     self.assertFalse(relaxed(frame.replace(marker, "missing"), 0, 0))
                 for editor in ("Type a task", " › draft", " > draft", "sidebar │ › draft"):
