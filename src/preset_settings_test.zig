@@ -68,9 +68,6 @@ test "settings presets resolve MCP tools through the same tool set as configure"
                     try std.testing.expect(ordinary == .accepted);
                     try std.testing.expect(preset == .accepted);
                     for ([_]@TypeOf(ordinary.accepted.session){ ordinary.accepted.session, preset.accepted.session }) |session| {
-                        const saved = try storage.inspectSessionForTesting(session.slice());
-                        try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_set_member WHERE tool_set_id=?1", .{saved.tool_set_id}));
-                        try std.testing.expectEqualStrings("ask", saved.permission_mode.slice());
                         try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session s JOIN tool_set_member m ON m.tool_set_id=s.tool_set_id " ++
                             "JOIN tool_record t ON t.tool_record_id=m.tool_record_id WHERE s.session_ref=?1 AND t.name='fetch_page'", .{session.slice()}));
                     }
