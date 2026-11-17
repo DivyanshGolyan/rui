@@ -102,13 +102,36 @@ pub const Result = struct {
     }
 };
 
-pub fn check(init: std.process.Init, allocator: std.mem.Allocator, store: []const u8, cancellation: ?*client.Cancellation, diagnostic: *Download) !Check {
+pub fn discoverRelease(init: std.process.Init, allocator: std.mem.Allocator, cancellation: ?*client.Cancellation, diagnostic: *Download) !release.ReleaseCandidate {
+    try process.check(cancellation);
     const home = init.environ_map.get("HOME") orelse return error.HomeUnavailable;
+    var selected = try Installation.inspectCancellable(allocator, init.io, home, cancellation);
+    defer selected.deinit(allocator);
+    return fetchRelease(init, allocator, cancellation, diagnostic);
+}
+
+fn fetchRelease(init: std.process.Init, allocator: std.mem.Allocator, cancellation: ?*client.Cancellation, diagnostic: *Download) !release.ReleaseCandidate {
+    try process.check(cancellation);
     const endpoint = if (init.environ_map.get("RUI_TEST_UPGRADE_RELEASES_URL")) |base| try std.fmt.allocPrint(allocator, "{s}/latest", .{base}) else null;
     defer if (endpoint) |url| allocator.free(url);
+    return release.discover(allocator, init.io, endpoint orelse release.default_endpoint, cancellation, diagnostic);
+}
+
+pub fn check(init: std.process.Init, allocator: std.mem.Allocator, store: []const u8, cancellation: ?*client.Cancellation, diagnostic: *Download) !Check {
+    var discovered: ?release.ReleaseCandidate = null;
+    return checkDiscovered(init, allocator, store, cancellation, diagnostic, &discovered);
+}
+
+pub fn checkDiscovered(init: std.process.Init, allocator: std.mem.Allocator, store: []const u8, cancellation: ?*client.Cancellation, diagnostic: *Download, discovered: *?release.ReleaseCandidate) !Check {
+    try process.check(cancellation);
+    const home = init.environ_map.get("HOME") orelse return error.HomeUnavailable;
     var selected = try Installation.inspectCancellable(allocator, init.io, home, cancellation);
     errdefer selected.deinit(allocator);
-    var candidate = try release.discover(allocator, init.io, endpoint orelse release.default_endpoint, cancellation, diagnostic);
+    try process.check(cancellation);
+    var candidate = if (discovered.*) |candidate| take: {
+        discovered.* = null;
+        break :take candidate;
+    } else try fetchRelease(init, allocator, cancellation, diagnostic);
     errdefer candidate.deinit(allocator);
     var hosts = try restart_all.discover(init, allocator, home, cancellation);
     errdefer hosts.deinit(allocator);
@@ -342,6 +365,43 @@ test "upgrade restart results retain unknown failures and other Store guidance w
     var out = std.Io.Writer.fixed(&bytes);
     try result.hosts.write(&out);
     try std.testing.expectEqualStrings("No running Hosts.\n", out.buffered());
+}
+
+test "adopted candidate stays owned until fresh check preconditions permit consumption" {
+    const allocator = std.testing.allocator;
+    var environ: std.process.Environ.Map = .init(allocator);
+    defer environ.deinit();
+    var init: std.process.Init = undefined;
+    init.io = std.testing.io;
+    init.gpa = allocator;
+    init.environ_map = &environ;
+    try environ.put("RUI_TEST_UPGRADE_RELEASES_URL", "not-a-fixture");
+    var candidate: ?release.ReleaseCandidate = try release.fromEffectiveUrl(allocator, "https://fixture/releases/tag/v0.999.2", "https://fixture", "https://fixture", "linux-x86_64");
+    defer if (candidate) |*owned| owned.deinit(allocator);
+    const identity = candidate.?.archive_url.ptr;
+    var download: Download = .{ .family = .ipv4 };
+    defer download.deinit(allocator);
+    var cancellation: client.Cancellation = .{};
+    cancellation.requestStop();
+    try std.testing.expectError(error.Cancelled, discoverRelease(init, allocator, &cancellation, &download));
+    try std.testing.expectError(error.HomeUnavailable, discoverRelease(init, allocator, null, &download));
+    try std.testing.expectError(error.Cancelled, checkDiscovered(init, allocator, "/fixture", &cancellation, &download, &candidate));
+    try std.testing.expectEqual(identity, candidate.?.archive_url.ptr);
+    try std.testing.expectError(error.HomeUnavailable, checkDiscovered(init, allocator, "/fixture", null, &download, &candidate));
+    try std.testing.expectEqual(identity, candidate.?.archive_url.ptr);
+    try std.testing.expectEqual(.ipv4, download.family);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const home = home_buffer[0..try tmp.dir.realPath(std.testing.io, &home_buffer)];
+    try environ.put("HOME", home);
+    try std.testing.expectError(error.InvalidReleaseEndpoint, discoverRelease(init, allocator, null, &download));
+    try std.testing.expectEqual(identity, candidate.?.archive_url.ptr);
+    try environ.put("HOME", "relative");
+    try std.testing.expectError(error.InvalidInstallationHome, discoverRelease(init, allocator, null, &download));
+    try std.testing.expectError(error.InvalidInstallationHome, checkDiscovered(init, allocator, home, null, &download, &candidate));
+    try std.testing.expectEqual(identity, candidate.?.archive_url.ptr);
+    try std.testing.expectEqual(.ipv4, download.family);
 }
 
 test "upgrade selected activation routes by Host directory not SQLite data or MySQL identity" {

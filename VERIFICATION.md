@@ -14,6 +14,10 @@ Git history keeps earlier test specifications and dated results.
 - For candidate admission, landing cadence, promotion, or release publication, read [Landing and release evidence](docs/verification/release.md).
 - For native platforms, resource campaigns, or release demonstrations, read [Native qualification and demonstrations](docs/verification/qualification.md).
 
+## Sidebar and upgrade feedback
+
+The [Session UI contract](docs/contracts/session-ui.md#required-evidence) requires owner-domain tests for memory fitting, update-button states and drawn-target admission, and chat-only footer feedback, including narrow widths. Reverting mutations must fail the relevant assertions. Capture current, available, updating and failed sidebar states and the chat after an update in day and night at 140×40 and 46×30 using verify-rui, before and after. Frames are renderer evidence, not physical-input evidence.
+
 ## Contract index
 
 ARCHITECTURE owns behavior; tests own cases.
@@ -38,3 +42,11 @@ The subsystem references keep accepted behavior and required evidence together. 
 - [Host ownership and lifetime](docs/contracts/host.md#required-evidence), including frozen detached consumption, later-source upgrade admission and private-target capability refusal.
 - [Resources and selection progress](docs/contracts/resources.md#required-evidence).
 - [Diagnostic records and stderr](docs/contracts/diagnostics.md#required-evidence).
+
+Upgrade discovery handoff verification runs the `UpgradeJob` discovery-handoff domain and the adopted-candidate precondition domain, including in-flight success/failure, cancellation, retained candidate custody and recovered transport. `upgrade-integration` keeps the exact `terminal_download_recovery` curl-attempt sequence: normal lookup failure, IPv4 lookup and checksums, then the archive over the same IPv4 owner, without a second discovery.
+
+Sidebar fix-round verification covers the retained divider, owner-supplied compact failure reason and whole-label fallback at narrow widths, and transient paused/publication lines ending with the attempt. Day and night failure recipes wait for the same settled overview state without relying on the removed open hint; the Settings Version row retains the complete diagnostic.
+
+Receipt-version control verification crosses discovered candidate versions below, equal to and above the selected receipt version with installed and unchanged publication outcomes and each Host outcome. Superseded endings retain the receipt version, not the old running client version, and update offers compare against that selected version.
+
+The upgrade-integration selected-version FIFO case pins selected-installation inspection before any release HTTP request, including startup availability discovery, and requires Escape to reap that exact probe child without reaching discovery. The recovered-download case still requires one metadata/checksum discovery and IPv4 archive download through the same Download owner.
