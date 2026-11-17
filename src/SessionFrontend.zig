@@ -2460,26 +2460,13 @@ fn perform(self: *Self, action: ConversationAction) !void {
                 self.dirty = true;
                 return;
             }
-            if (action == .close) {
-                const draft = slash_commands.draftOf(self.input.composition().bytes);
-                const drawn_command = switch (draft) {
-                    .word, .command => if (self.menu.drawn_pick) |pick|
-                        pick.revision == self.input.revision and self.menu.shown != null and self.menu.shown.?.seen == .drawn
-                    else
-                        false,
-                    .message => false,
-                };
-                const current = self.menu.current(self.menuSource());
-                const shown = current orelse if (drawn_command) (if (self.menu.shown) |*list| list else null) else null;
-                if (shown) |list| {
-                    list.close();
-                    switch (draft) {
-                        .word, .command => self.input.clear(),
-                        .message => {},
-                    }
-                    self.dirty = true;
-                    return;
+            if (action == .close and self.menu.closeIfDrawn(self.menuSource())) {
+                switch (slash_commands.draftOf(self.input.composition().bytes)) {
+                    .word, .command => self.input.clear(),
+                    .message => {},
                 }
+                self.dirty = true;
+                return;
             }
             self.dropMessageRequest();
             screen.moveRow(.selector);
@@ -9357,6 +9344,7 @@ test "App Session Escape closes drawn command list before leaving chat" {
                 _ = held.self.dropSkills();
                 const ask = held.self.skills.ask(draft[1..]).?;
                 try std.testing.expect(held.self.skills.answer(ask.read, .{}, draft[1..]) == null);
+                try std.testing.expect(held.self.menu.current(held.self.menuSource()) == null);
             }
             try held.keys("\x1b");
             try std.testing.expectEqual(@as(?Outcome, null), held.left);
