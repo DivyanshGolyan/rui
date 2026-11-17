@@ -668,7 +668,7 @@ fn appUpgrade(self: *Self, ctx: *vxfw.EventContext) !void {
     const job = &self.upgrade_job;
     if (job.discovering()) {
         const cancelled = self.state.upgrade.run.? == .cancelling;
-        if (!try job.retireDiscovery()) return;
+        if (!try job.retireDiscovery(cancelled)) return;
         if (cancelled) job.cancel();
         _ = try self.event(.{ .available_upgrade = null });
     }
@@ -7711,7 +7711,7 @@ test "background discovery reaches the production version widget without request
             fn run(raw: *anyopaque, _: *ClientTask) !void {
                 const owner: *UpgradeJob = @ptrCast(@alignCast(raw));
                 try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), &release, test_poll.isSet);
-                owner.available = .{ .schema = 999, .patch = 2 };
+                owner.candidate = try @import("release_candidate.zig").fromEffectiveUrl(owner.allocator, "https://fixture/releases/tag/v0.999.2", "https://fixture", "https://fixture", "linux-x86_64");
             }
         };
         Worker.release.store(case != 2, .release);

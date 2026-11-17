@@ -109,10 +109,19 @@ pub fn discoverRelease(init: std.process.Init, allocator: std.mem.Allocator, can
 }
 
 pub fn check(init: std.process.Init, allocator: std.mem.Allocator, store: []const u8, cancellation: ?*client.Cancellation, diagnostic: *Download) !Check {
+    var discovered: ?release.ReleaseCandidate = null;
+    return checkDiscovered(init, allocator, store, cancellation, diagnostic, &discovered);
+}
+
+pub fn checkDiscovered(init: std.process.Init, allocator: std.mem.Allocator, store: []const u8, cancellation: ?*client.Cancellation, diagnostic: *Download, discovered: *?release.ReleaseCandidate) !Check {
+    try process.check(cancellation);
     const home = init.environ_map.get("HOME") orelse return error.HomeUnavailable;
     var selected = try Installation.inspectCancellable(allocator, init.io, home, cancellation);
     errdefer selected.deinit(allocator);
-    var candidate = try discoverRelease(init, allocator, cancellation, diagnostic);
+    var candidate = if (discovered.*) |candidate| take: {
+        discovered.* = null;
+        break :take candidate;
+    } else try discoverRelease(init, allocator, cancellation, diagnostic);
     errdefer candidate.deinit(allocator);
     var hosts = try restart_all.discover(init, allocator, home, cancellation);
     errdefer hosts.deinit(allocator);
@@ -356,4 +365,26 @@ test "upgrade restart results retain unknown failures and other Store guidance w
     var out = std.Io.Writer.fixed(&bytes);
     try result.hosts.write(&out);
     try std.testing.expectEqualStrings("No running Hosts.\n", out.buffered());
+}
+
+test "adopted candidate stays owned until fresh check preconditions permit consumption" {
+    const allocator = std.testing.allocator;
+    var environ: std.process.Environ.Map = .init(allocator);
+    defer environ.deinit();
+    var init: std.process.Init = undefined;
+    init.io = std.testing.io;
+    init.gpa = allocator;
+    init.environ_map = &environ;
+    var candidate: ?release.ReleaseCandidate = try release.fromEffectiveUrl(allocator, "https://fixture/releases/tag/v0.999.2", "https://fixture", "https://fixture", "linux-x86_64");
+    defer if (candidate) |*owned| owned.deinit(allocator);
+    const identity = candidate.?.archive_url.ptr;
+    var download: Download = .{ .family = .ipv4 };
+    defer download.deinit(allocator);
+    var cancellation: client.Cancellation = .{};
+    cancellation.requestStop();
+    try std.testing.expectError(error.Cancelled, checkDiscovered(init, allocator, "/fixture", &cancellation, &download, &candidate));
+    try std.testing.expectEqual(identity, candidate.?.archive_url.ptr);
+    try std.testing.expectError(error.HomeUnavailable, checkDiscovered(init, allocator, "/fixture", null, &download, &candidate));
+    try std.testing.expectEqual(identity, candidate.?.archive_url.ptr);
+    try std.testing.expectEqual(.ipv4, download.family);
 }
