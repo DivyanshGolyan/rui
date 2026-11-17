@@ -361,7 +361,8 @@ class RunOwnerTests(unittest.TestCase):
             return original_quarantine(checkpoint, report)
 
         def unlink(path, *args, **kwargs):
-            if fail_unlink and path == owners[1]:
+            fail_now = fail_unlink is True or (fail_unlink == "edit" and fixture.source.read_bytes().endswith(proof.Source.COMMENT))
+            if fail_now and path == owners[1]:
                 self.assertFalse(owners[0].exists())
                 raise OSError("injected failure after one owner unlink")
             return original_unlink(path, *args, **kwargs)
@@ -434,6 +435,16 @@ class RunOwnerTests(unittest.TestCase):
             self.assertEqual(len(builds), 1)
             self.assertEqual(events, ["build-control", "invalidate"])
             self.assertIn("failure after one owner unlink", "".join(summary["errors"]))
+
+    def test_partial_owner_failure_during_edit_restores_original_source(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            status, summary, events, builds, _ = self.run_fixture(Path(scratch), fail_unlink="edit")
+            self.assertEqual(status, 1)
+            self.assertFalse(summary["parity"])
+            self.assertEqual(len(builds), 3)
+            self.assertEqual(events[-2:], ["build-control", "invalidate"])
+            self.assertEqual(summary["pairs"][-1]["scenario"], "edit")
+            self.assertEqual(set(summary["pairs"][-1]["arms"]), {"control"})
 
     def test_archive_pair_is_separate_and_restores_main_checkpoint_before_builds(self):
         with tempfile.TemporaryDirectory() as scratch:
