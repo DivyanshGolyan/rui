@@ -24,9 +24,11 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       run: ${{ steps.select.outputs.run }}
+      tooling: ${{ steps.select.outputs.tooling }}
       pr: ${{ steps.select.outputs.pr }}
       head: ${{ steps.select.outputs.head }}
       base: ${{ steps.select.outputs.base }}
+      base_tip: ${{ steps.select.outputs.base_tip }}
       close: ${{ steps.select.outputs.close }}
       started: ${{ steps.select.outputs.started }}
     steps:
@@ -45,6 +47,7 @@ jobs:
         run: |
           set -euo pipefail
           echo "started=$(date +%s)" >> "$GITHUB_OUTPUT"
+          echo "tooling=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           if [ "$EVENT" = push ]; then
             echo 'run=true' >> "$GITHUB_OUTPUT"
             echo "head=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
@@ -63,6 +66,7 @@ jobs:
           base=$(jq -r .base.sha "$RUNNER_TEMP/pr.json")
           git fetch --no-tags origin "$head" "$base"
           git worktree add --detach "$RUNNER_TEMP/selector-head" "$head"
+          echo "base_tip=$base" >> "$GITHUB_OUTPUT"
           base=$(git merge-base "$base" "$head")
           echo "head=$head" >> "$GITHUB_OUTPUT"
           echo "base=$base" >> "$GITHUB_OUTPUT"
@@ -89,6 +93,13 @@ jobs:
           ref: ${{ needs.select.outputs.head }}
           fetch-depth: 0
           persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.select.outputs.tooling }}
+          path: .screens-tooling
+          persist-credentials: false
+      - name: Isolate trusted screen tooling
+        run: mv "$GITHUB_WORKSPACE/.screens-tooling" "$RUNNER_TEMP/screens-tooling"
       - uses: ./.github/actions/setup
         with:
           targets: '["terminal-restoration-integration"]'
@@ -97,7 +108,7 @@ jobs:
       - name: Build candidate
         run: |
           set -euo pipefail
-          V="$PWD/.claude/skills/verify-rui/scripts/verify-rui"
+          V="$RUNNER_TEMP/screens-tooling/.claude/skills/verify-rui/scripts/verify-rui"
           mkdir -p "$RUNNER_TEMP/screens-build"
           bash src/fetch_screen_dependencies.sh
           export VERIFY_RUI_CACHE="$RUNNER_TEMP/screens-build/cache"
@@ -116,6 +127,7 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       missing: ${{ steps.probe.outputs.missing }}
+      cacheable: ${{ steps.probe.outputs.cacheable }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -126,10 +138,22 @@ jobs:
         id: probe
         env:
           BASE: ${{ needs.select.outputs.base }}
+          BASE_TIP: ${{ needs.select.outputs.base_tip }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
-          git merge-base --is-ancestor "$BASE" "origin/$DEFAULT_BRANCH"
+          git fetch --no-tags origin "$BASE_TIP"
+          git merge-base --is-ancestor "$BASE" "$BASE_TIP"
+          if git merge-base --is-ancestor "$BASE" "origin/$DEFAULT_BRANCH"; then
+            echo 'cacheable=true' >> "$GITHUB_OUTPUT"
+          else
+            result=$?
+            if [ "$result" -ne 1 ]; then exit "$result"; fi
+            echo 'cacheable=false' >> "$GITHUB_OUTPUT"
+            echo 'missing=true' >> "$GITHUB_OUTPUT"
+            echo 'Stacked baseline is outside main; building without retaining it.'
+            exit 0
+          fi
           remote=$(git ls-remote --refs origin refs/heads/pr-screens)
           if [ -n "$remote" ]; then
             git fetch --no-tags origin refs/heads/pr-screens:refs/remotes/origin/pr-screens
@@ -161,6 +185,13 @@ jobs:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 0
           persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.select.outputs.tooling }}
+          path: .screens-tooling
+          persist-credentials: false
+      - name: Isolate trusted screen tooling
+        run: mv "$GITHUB_WORKSPACE/.screens-tooling" "$RUNNER_TEMP/screens-tooling"
       - uses: ./.github/actions/setup
         with:
           targets: '["terminal-restoration-integration"]'
@@ -169,9 +200,11 @@ jobs:
       - name: Build the exact base with trusted tooling
         env:
           BASE: ${{ needs.select.outputs.base }}
+          BASE_TIP: ${{ needs.select.outputs.base_tip }}
         run: |
           set -euo pipefail
-          V="$PWD/.claude/skills/verify-rui/scripts/verify-rui"
+          V="$RUNNER_TEMP/screens-tooling/.claude/skills/verify-rui/scripts/verify-rui"
+          git fetch --no-tags origin "$BASE_TIP"
           git worktree add --detach "$RUNNER_TEMP/base-source" "$BASE"
           mkdir -p "$RUNNER_TEMP/screens-baseline-build"
           export VERIFY_RUI_CACHE="$RUNNER_TEMP/screens-baseline-build/cache"
@@ -199,6 +232,13 @@ jobs:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 0
           persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.select.outputs.tooling }}
+          path: .screens-tooling
+          persist-credentials: false
+      - name: Isolate trusted screen tooling
+        run: mv "$GITHUB_WORKSPACE/.screens-tooling" "$RUNNER_TEMP/screens-tooling"
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: screens-baseline-build-${{ github.run_id }}
@@ -206,8 +246,10 @@ jobs:
       - name: Restore base build and source
         env:
           BASE: ${{ needs.select.outputs.base }}
+          BASE_TIP: ${{ needs.select.outputs.base_tip }}
         run: |
           set -euo pipefail
+          git fetch --no-tags origin "$BASE_TIP"
           git worktree add --detach "$RUNNER_TEMP/base-source" "$BASE"
           tar -xf "$RUNNER_TEMP/screens-baseline-build.tar" -C "$RUNNER_TEMP"
           python3 - "$RUNNER_TEMP/screens-baseline-build" "$RUNNER_TEMP/base-source" <<'PY_MANIFEST'
@@ -241,16 +283,16 @@ jobs:
           echo "VERIFY_RUI_UPGRADE_FIXTURE_USER=$(id -un)" >> "$GITHUB_ENV"
           "$RUNNER_TEMP/screens-node/node_modules/.bin/playwright" install --with-deps chromium
           # verify-rui shots starts the fixture Host, whose helpers import h2.
-          python3 -m pip install --disable-pip-version-check -r tests/integration/requirements.txt
+          python3 -m pip install --disable-pip-version-check -r "$RUNNER_TEMP/screens-tooling/tests/integration/requirements.txt"
       - name: Capture baseline shard with trusted tooling
         env:
           SHARD: ${{ matrix.shard }}
         run: |
           set -euo pipefail
-          V="$PWD/.claude/skills/verify-rui/scripts/verify-rui"
+          V="$RUNNER_TEMP/screens-tooling/.claude/skills/verify-rui/scripts/verify-rui"
           export VERIFY_RUI_CACHE="$RUNNER_TEMP/screens-baseline-build/cache"
           build_id=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["sha"])' "$RUNNER_TEMP/screens-baseline-build/build.json")
-          if "$V" shots "$build_id" --shard "$SHARD/4" --out "$RUNNER_TEMP/baseline-shard"; then
+          if "$V" shots "$build_id" --shard "$SHARD/4" --scenario "$RUNNER_TEMP/screens-tooling/.claude/skills/verify-rui/scripts/frames.json" --out "$RUNNER_TEMP/baseline-shard"; then
             echo success > "$RUNNER_TEMP/baseline-shard/verdict"
           else
             test -f "$RUNNER_TEMP/baseline-shard/shots.json"
@@ -279,6 +321,13 @@ jobs:
           ref: ${{ needs.select.outputs.head }}
           fetch-depth: 0
           persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.select.outputs.tooling }}
+          path: .screens-tooling
+          persist-credentials: false
+      - name: Isolate trusted screen tooling
+        run: mv "$GITHUB_WORKSPACE/.screens-tooling" "$RUNNER_TEMP/screens-tooling"
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: screens-build-${{ github.run_id }}
@@ -315,17 +364,17 @@ jobs:
           echo "VERIFY_RUI_UPGRADE_FIXTURE_USER=$(id -un)" >> "$GITHUB_ENV"
           "$RUNNER_TEMP/screens-node/node_modules/.bin/playwright" install --with-deps chromium
           # verify-rui shots starts the fixture Host, whose helpers import h2.
-          python3 -m pip install --disable-pip-version-check -r tests/integration/requirements.txt
+          python3 -m pip install --disable-pip-version-check -r "$RUNNER_TEMP/screens-tooling/tests/integration/requirements.txt"
       - name: Capture candidate shard
         env:
           SHARD: ${{ matrix.shard }}
         run: |
           set -euo pipefail
-          V="$PWD/.claude/skills/verify-rui/scripts/verify-rui"
+          V="$RUNNER_TEMP/screens-tooling/.claude/skills/verify-rui/scripts/verify-rui"
           mkdir -p "$RUNNER_TEMP/results"
           export VERIFY_RUI_CACHE="$RUNNER_TEMP/screens-build/cache"
           build_id=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["sha"])' "$RUNNER_TEMP/screens-build/build.json")
-          if "$V" shots "$build_id" --shard "$SHARD/4" --out "$RUNNER_TEMP/results/head"; then
+          if "$V" shots "$build_id" --shard "$SHARD/4" --scenario "$RUNNER_TEMP/screens-tooling/.claude/skills/verify-rui/scripts/frames.json" --out "$RUNNER_TEMP/results/head"; then
             echo success > "$RUNNER_TEMP/results/verdict"
           else
             test -f "$RUNNER_TEMP/results/head/shots.json"
@@ -357,6 +406,13 @@ jobs:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 0
           persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.select.outputs.tooling }}
+          path: .screens-tooling
+          persist-credentials: false
+      - name: Isolate trusted screen tooling
+        run: mv "$GITHUB_WORKSPACE/.screens-tooling" "$RUNNER_TEMP/screens-tooling"
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: screens-[1-4]-${{ github.run_id }}
@@ -378,7 +434,7 @@ jobs:
           BASELINE_MISSING: ${{ needs.baseline_probe.outputs.missing }}
         run: |
           set -euo pipefail
-          V="$PWD/.claude/skills/verify-rui/scripts/verify-rui"
+          V="$RUNNER_TEMP/screens-tooling/.claude/skills/verify-rui/scripts/verify-rui"
           candidate_ok=true
           baseline_ok=true
           shards=()
@@ -445,6 +501,7 @@ jobs:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           STARTED: ${{ needs.select.outputs.started }}
           BASELINE_MISSING: ${{ needs.baseline_probe.outputs.missing }}
+          BASELINE_CACHEABLE: ${{ needs.baseline_probe.outputs.cacheable }}
           CANDIDATE_OK: ${{ steps.merge.outputs.candidate_ok }}
           BASELINE_OK: ${{ steps.merge.outputs.baseline_ok }}
         run: |
@@ -496,10 +553,10 @@ jobs:
                   target.parent.mkdir(parents=True, exist_ok=True)
                   shutil.copy2(src, target)
           PY_MEDIA
-            if [ "$BASELINE_OK" = true ]; then
+            if [ "$BASELINE_CACHEABLE" = true ] && [ "$BASELINE_OK" = true ]; then
               mkdir -p "$RUNNER_TEMP/published/main/$BASE"
               cp -a "$RUNNER_TEMP/baseline/." "$RUNNER_TEMP/published/main/$BASE/"
-            else
+            elif [ "$BASELINE_CACHEABLE" = true ]; then
               rm -rf "$RUNNER_TEMP/published/main/$BASE"
             fi
           else
@@ -513,7 +570,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/published/main"
           git rev-list "origin/$DEFAULT_BRANCH" > "$RUNNER_TEMP/main-history"
           pin=""
-          if [ "$BASELINE_MISSING" = true ]; then pin="$BASE"; fi
+          if [ "$BASELINE_MISSING" = true ] && [ "$BASELINE_CACHEABLE" = true ]; then pin="$BASE"; fi
           python3 - "$RUNNER_TEMP/published/main" "$RUNNER_TEMP/main-history" "$pin" <<'PY'
           import pathlib, shutil, sys
           root = pathlib.Path(sys.argv[1])

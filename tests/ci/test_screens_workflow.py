@@ -14,6 +14,19 @@ WORKFLOW = pathlib.Path(__file__).resolve().parents[2] / '.github/workflows/scre
 
 
 class ScreensWorkflowTest(unittest.TestCase):
+    def test_every_verify_rui_job_uses_isolated_main_tooling(self):
+        workflow = WORKFLOW.read_text()
+        self.assertIn('echo "tooling=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"', workflow)
+        for name in ('build', 'capture', 'baseline_build', 'baseline_capture', 'screens'):
+            with self.subTest(job=name):
+                job = re.search(r'(?ms)^  ' + name + r':\n(.*?)(?=^  [a-z_]+:\n|\Z)', workflow)[1]
+                self.assertIn('ref: ${{ needs.select.outputs.tooling }}\n          path: .screens-tooling', job)
+                self.assertIn('mv "$GITHUB_WORKSPACE/.screens-tooling" "$RUNNER_TEMP/screens-tooling"', job)
+                self.assertIn('V="$RUNNER_TEMP/screens-tooling/.claude/skills/verify-rui/scripts/verify-rui"', job)
+                self.assertNotIn('V="$PWD/', job)
+        self.assertEqual(workflow.count('V="$RUNNER_TEMP/screens-tooling/.claude/skills/verify-rui/scripts/verify-rui"'), 5)
+        self.assertEqual(workflow.count('--scenario "$RUNNER_TEMP/screens-tooling/.claude/skills/verify-rui/scripts/frames.json"'), 2)
+
     def test_build_is_transferred_once_and_all_four_shards_are_required(self):
         workflow = WORKFLOW.read_text()
         self.assertIn('matrix:\n        shard: [1, 2, 3, 4]', workflow)
@@ -79,6 +92,7 @@ class ScreensWorkflowTest(unittest.TestCase):
                 for with_base in ((True, False) if side == 'candidate' else (True,)):
                     with self.subTest(side=side, failure=failure, with_base=with_base), tempfile.TemporaryDirectory() as tmp:
                         root = pathlib.Path(tmp)
+                        (root / 'screens-tooling').symlink_to(repo, target_is_directory=True)
                         for number in range(1, 5):
                             for kind in ('candidate', 'baseline'):
                                 shard = (root / ('shards' if kind == 'candidate' else 'baseline-shards') /
@@ -104,7 +118,7 @@ class ScreensWorkflowTest(unittest.TestCase):
                         candidate_failed = (side == 'candidate' and failure != 'none') or (side == 'baseline' and failure == 'record')
                         self.assertEqual(verdicts['candidate_ok'], 'false' if candidate_failed else 'true')
         publish = workflow.split('      - name: Publish screenshots and update comment', 1)[1].split('  cleanup:', 1)[0]
-        self.assertIn('if [ "$BASELINE_OK" = true ]; then', publish)
+        self.assertIn('if [ "$BASELINE_CACHEABLE" = true ] && [ "$BASELINE_OK" = true ]; then', publish)
         self.assertIn('if [ "$CANDIDATE_OK" = true ]; then', publish)
         self.assertIn('test "$CANDIDATE_OK" = true && test "$BASELINE_OK" = true', publish)
         self.assertNotIn("item['ok']", publish)
@@ -117,6 +131,7 @@ class ScreensWorkflowTest(unittest.TestCase):
         for failed in (False, True):
             with self.subTest(failed=failed), tempfile.TemporaryDirectory() as tmp:
                 root = pathlib.Path(tmp)
+                (root / 'screens-tooling').symlink_to(WORKFLOW.parents[2], target_is_directory=True)
                 record = {'name': 'screen', 'size': '80x24', 'ok': True, 'reason': None,
                           'fingerprint': 'same', 'files': {}}
                 for number in range(1, 5):
@@ -173,6 +188,74 @@ class ScreensWorkflowTest(unittest.TestCase):
         self.assertIn('git merge-base "$HEAD_SHA" "$current_base"', publish)
         self.assertIn('Screen preview wall time:', publish)
         self.assertIn('git rev-list "origin/$DEFAULT_BRANCH"', publish)
+
+    def test_baseline_probe_uses_real_pr_base_and_only_caches_main(self):
+        workflow = WORKFLOW.read_text()
+        step = workflow.split('      - name: Locate baseline on trusted main history\n', 1)[1].split('      - uses: actions/upload-artifact@', 1)[0]
+        script = textwrap.dedent(step.split('        run: |\n', 1)[1])
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            origin, work = root / 'origin.git', root / 'work'
+            subprocess.run(['git', 'init', '--bare', '-q', str(origin)], check=True)
+            subprocess.run(['git', 'init', '-q', '-b', 'main', str(work)], check=True)
+            def git(*args):
+                return subprocess.check_output(['git', '-C', str(work), *args], text=True, stderr=subprocess.PIPE).strip()
+            git('config', 'user.name', 'Tests')
+            git('config', 'user.email', 'tests@example.com')
+            git('remote', 'add', 'origin', str(origin))
+            (work / 'file').write_text('main')
+            git('add', '.')
+            git('commit', '-qm', 'main')
+            main = git('rev-parse', 'HEAD')
+            git('push', '-q', 'origin', 'main')
+            git('checkout', '-qb', 'stack')
+            (work / 'file').write_text('stack')
+            git('commit', '-qam', 'stack')
+            stacked = git('rev-parse', 'HEAD')
+            git('push', '-q', 'origin', 'stack')
+            git('checkout', '-q', 'main')
+            git('checkout', '-q', '--orphan', 'pr-screens')
+            git('rm', '-q', '-rf', '.')
+            cached = work / 'main' / main
+            cached.mkdir(parents=True)
+            (cached / 'shots.json').write_text('[]')
+            (cached / 'shots-meta.json').write_text('{"failed": false}')
+            git('add', '.')
+            git('commit', '-qm', 'cache')
+            git('push', '-q', 'origin', 'pr-screens')
+            git('checkout', '-q', 'main')
+            for label, base, tip, hit in (('main hit', main, main, True), ('main miss', main, main, False),
+                                           ('stacked', stacked, stacked, True)):
+                with self.subTest(label=label):
+                    if label == 'main miss':
+                        git('push', '-q', 'origin', ':pr-screens')
+                    if label == 'stacked':
+                        git('push', '-q', 'origin', 'pr-screens')
+                    output = root / 'output'
+                    output.unlink(missing_ok=True)
+                    (root / 'cached-baseline.tar').unlink(missing_ok=True)
+                    env = {**os.environ, 'BASE': base, 'BASE_TIP': tip, 'DEFAULT_BRANCH': 'main',
+                           'RUNNER_TEMP': tmp, 'GITHUB_OUTPUT': str(output)}
+                    result = subprocess.run(['bash', '-c', script], cwd=work, env=env, text=True, capture_output=True)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    values = dict(line.split('=', 1) for line in output.read_text().splitlines())
+                    self.assertEqual(values['cacheable'], 'false' if label == 'stacked' else 'true')
+                    self.assertEqual(values['missing'], 'false' if label == 'main hit' else 'true')
+                    self.assertEqual((root / 'cached-baseline.tar').exists(), label == 'main hit')
+        publish = workflow.split('      - name: Publish screenshots and update comment', 1)[1].split('  cleanup:', 1)[0]
+        self.assertIn('if [ "$BASELINE_CACHEABLE" = true ] && [ "$BASELINE_OK" = true ]; then', publish)
+        self.assertIn('if [ "$BASELINE_MISSING" = true ] && [ "$BASELINE_CACHEABLE" = true ]; then pin="$BASE"; fi', publish)
+        cache_block = publish.split('          PY_MEDIA\n', 1)[1].split('          else\n            if [ "$CANDIDATE_OK"', 1)[0]
+        cache_block = textwrap.dedent(cache_block)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            (root / 'baseline').mkdir()
+            (root / 'baseline/shots.json').write_text('[]')
+            for cacheable in ('false', 'true'):
+                env = {**os.environ, 'RUNNER_TEMP': tmp, 'BASE': 'base',
+                       'BASELINE_CACHEABLE': cacheable, 'BASELINE_OK': 'true'}
+                subprocess.run(['bash', '-c', 'set -e\n' + cache_block], env=env, check=True)
+                self.assertEqual((root / 'published/main/base/shots.json').exists(), cacheable == 'true')
 
     def test_baseline_runs_on_trusted_jobs_and_branch_errors_fail_closed(self):
         workflow = WORKFLOW.read_text()
