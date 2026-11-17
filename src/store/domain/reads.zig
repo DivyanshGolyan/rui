@@ -182,9 +182,9 @@ fn activitySources(comptime range: fn (comptime []const u8, comptime []const u8)
     const on = Kinds.on;
     return .{
         "SELECT admission_position AS position,0 AS ordinal,1 AS kind,admission_id AS id FROM message_admission @index(message_admission_person) " ++
-            "WHERE session_ref=?1 AND sender_session_ref IS NULL AND source_action_id IS NULL AND " ++ on(1) ++ " AND " ++ Kinds.off(11) ++ " AND " ++ range("admission_position", "0") ++
-            " UNION ALL SELECT admission_position,0,CASE WHEN sender_session_ref IS NULL AND source_action_id IS NULL THEN 1 ELSE 11 END,admission_id FROM message_admission @index(message_admission_position) " ++
-            "WHERE session_ref=?1 AND " ++ on(11) ++ " AND (sender_session_ref IS NOT NULL OR source_action_id IS NOT NULL OR " ++ on(1) ++ ") AND " ++ range("admission_position", "0") ++
+            "WHERE session_ref=?1 AND " ++ sourced_input.personSql("message_admission") ++ " AND " ++ on(1) ++ " AND " ++ Kinds.off(11) ++ " AND " ++ range("admission_position", "0") ++
+            " UNION ALL SELECT admission_position,0,CASE WHEN " ++ sourced_input.personSql("message_admission") ++ " THEN 1 ELSE 11 END,admission_id FROM message_admission @index(message_admission_position) " ++
+            "WHERE session_ref=?1 AND " ++ on(11) ++ " AND (NOT " ++ sourced_input.personSql("message_admission") ++ " OR " ++ on(1) ++ ") AND " ++ range("admission_position", "0") ++
             " UNION ALL SELECT session_position,0,CASE entry_kind WHEN 1 THEN 2 ELSE 3 END,source_admission_id FROM conversation_entry " ++
             "WHERE session_ref=?1 AND (entry_kind=1 AND " ++ on(2) ++ " OR entry_kind=3 AND " ++ on(3) ++ ") AND " ++ range("session_position", "0") ++
             " UNION ALL SELECT session_position,0,4,NULL FROM model_output_item @index(model_output_call_history) " ++
@@ -293,7 +293,7 @@ pub const queued = rsql.Read(.{
     .sql = "SELECT m.admission_id,m.admission_position," ++
         "EXISTS(SELECT 1 FROM conversation_entry e WHERE e.source_admission_id=m.admission_id AND e.session_position<=?2) OR " ++
         "EXISTS(SELECT 1 FROM session_stop s WHERE s.session_ref=?1 AND s.admission_cutoff>=m.admission_id AND s.position<=?2) AS taken " ++
-        "FROM message_admission m @index(message_admission_person) WHERE m.session_ref=?1 AND m.sender_session_ref IS NULL AND m.source_action_id IS NULL " ++
+        "FROM message_admission m @index(message_admission_person) WHERE m.session_ref=?1 AND " ++ sourced_input.personSql("m") ++ " " ++
         "AND m.admission_position<=?2 ORDER BY m.admission_position DESC",
     .Args = struct { session: []const u8, position: u64 },
     .Row = struct { admission_id: rsql.Positive, admission_position: rsql.Positive, taken: bool },

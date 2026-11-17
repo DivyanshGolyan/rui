@@ -40,7 +40,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const width = ctx.max.width.?;
     const height = ctx.max.height.?;
     if (width == 0 or height == 0) return vxfw.Surface.init(ctx.cell_arena, self.widget(), .{});
-    const rule: u16 = if (height >= 3) 1 else 0;
+    const rule: u16 = if (height >= layout.min_rule_height) 1 else 0;
     const prefix: u16 = if (width >= 4) 3 else 0;
     const area = &self.editor.area;
     area.style = self.style;

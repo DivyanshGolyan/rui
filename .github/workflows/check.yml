@@ -306,16 +306,21 @@ jobs:
           mkdir -p "$RUNNER_TEMP/actionlint"
           bash .github/scripts/install-actionlint.sh "$RUNNER_TEMP/actionlint"
           echo "$RUNNER_TEMP/actionlint" >> "$GITHUB_PATH"
-      - name: Validate workflows with one pinned-linter compatibility exception
+      - name: Validate workflows with pinned-linter compatibility exceptions
         run: |
           set -euo pipefail
           for workflow in .github/workflows/*.yml; do
-            if [ "$workflow" = .github/workflows/qualify-macos.yml ] || [ "$workflow" = .github/workflows/previous-release-upgrade.yml ] || [ "$workflow" = .github/workflows/release.yml ]; then
-              # 1.7.7 predates GitHub's server-enforced cache policy key.
-              actionlint -shellcheck= -ignore '^unexpected key "cache-mode" for "workflow" section\.' "$workflow"
-            else
-              actionlint -shellcheck= "$workflow"
+            ignores=()
+            # 1.7.7 predates GitHub's server-enforced cache policy key.
+            case "$workflow" in
+              .github/workflows/qualify-macos.yml|.github/workflows/previous-release-upgrade.yml|.github/workflows/release.yml|.github/workflows/screens.yml)
+                ignores+=(-ignore '^unexpected key "cache-mode" for "workflow" section\.') ;;
+            esac
+            # 1.7.7 predates GitHub's bounded concurrency queue option.
+            if [ "$workflow" = .github/workflows/screens.yml ]; then
+              ignores+=(-ignore '^unexpected key "queue" for "concurrency" section\.')
             fi
+            actionlint -shellcheck= "${ignores[@]}" "$workflow"
           done
   linux_build:
     needs: plan
@@ -978,11 +983,12 @@ jobs:
           ref: ${{ needs.plan.outputs.candidate_ref }}
           sparse-checkout: tests/ci
           persist-credentials: false
-      - name: Require screen evidence
+      - name: Require Screens CI
         if: ${{ needs.plan.outputs.screens_required == 'true' }}
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           GH_TOKEN: ${{ github.token }}
         run: python3 tests/ci/pr_shape.py --screens

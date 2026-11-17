@@ -8,6 +8,7 @@ import re
 import subprocess
 import sys
 import tarfile
+import time
 
 from conflict_alert import github
 
@@ -79,14 +80,8 @@ def visible_lines(body):
     return lines
 
 
-def screen_evidence(body):
-    # A plain link to an image is not an embed.
-    lines = visible_lines(body)
-    visible = "\n".join(lines)
-    if re.search(r"^No screen change:[ \t]*\S[^\n]*$", visible, re.M):
-        return True
-    return any(line.lstrip().startswith(("![", "<img", "<video"))
-               and "https://github.com/user-attachments/" in line for line in lines)
+def screen_exemption(body):
+    return bool(re.search(r"^No screen change:[ \t]*\S[^\n]*$", "\n".join(visible_lines(body)), re.M))
 
 
 def goal_present(body):
@@ -129,11 +124,53 @@ def screens_required(changed_paths, *, base=None) -> bool:
     return bool(paths & (ui | {".claude/skills/verify-rui/scripts/frames.json"}))
 
 
-def screen_refusal(body) -> str | None:
-    if not screen_evidence(body):
-        return ("UI PRs need a visible user-attachments image/video line or a line 'No screen change: <reason>'. "
-                "Run verify-rui frames HEAD --before BASE, then verify-rui publish DIR --pr PR (gh 2.104.0+ and a classic PAT or gh OAuth token with push access); re-run the failed admission job after updating the body.")
-    return None
+def screen_refusal(body, runs, head, number, *, timed_out=False):
+    """Decide from one workflow-runs snapshot; None means accepted, 'wait' means poll."""
+    if screen_exemption(body):
+        return None
+    matching = [run for run in runs
+                if run.get("event") == "pull_request" and run.get("head_sha") == head
+                and any(pr.get("number") == number and pr.get("head", {}).get("sha") == head
+                        for pr in run.get("pull_requests", []))]
+    if not matching:
+        state = "no matching Screens run appeared"
+    else:
+        run = max(matching, key=lambda item: item["id"])
+        if run.get("status") == "completed":
+            conclusion = run.get("conclusion")
+            if conclusion == "success":
+                return None
+            return f"Screens for PR head {head} concluded {conclusion or 'without a conclusion'}; fix or rerun Screens."
+        state = "Screens is still running"
+    if not timed_out:
+        return "wait"
+    return (f"Timed out waiting for Screens for PR head {head}: {state}. "
+            "Re-run the failed admission job after Screens completes, or add 'No screen change: <reason>' to the PR body.")
+
+
+def wait_for_screens(body, repo, number, head, *, timeout=180, interval=10, clock=time.monotonic, sleep=time.sleep):
+    if screen_exemption(body):
+        return None
+    if not repo or not number or not head or not re.fullmatch(r"[0-9a-f]{40}", head):
+        return "Cannot check Screens: missing repository, PR number, or full PR head SHA."
+    try:
+        number = int(number)
+        if number <= 0:
+            raise ValueError("invalid PR number")
+        deadline = clock() + timeout
+        path = f"repos/{repo}/actions/workflows/screens.yml/runs?event=pull_request&head_sha={head}&per_page=100"
+        print(f"Waiting up to {timeout} seconds for Screens on PR head {head}.", flush=True)
+        while True:
+            snapshot = github("GET", path)
+            runs = snapshot["workflow_runs"]
+            if not isinstance(runs, list):
+                raise ValueError("invalid workflow runs")
+            reason = screen_refusal(body, runs, head, number, timed_out=clock() >= deadline)
+            if reason != "wait":
+                return reason
+            sleep(min(interval, max(0, deadline - clock())))
+    except (OSError, subprocess.CalledProcessError, AttributeError, KeyError, TypeError, ValueError) as error:
+        return f"Cannot read Screens workflow runs from GitHub: {error}"
 
 
 def live_body(env_body) -> str:
@@ -159,7 +196,8 @@ def main():
     args = parser.parse_args()
     body = live_body(os.environ.get("PR_BODY", ""))
     if args.screens:
-        reason = screen_refusal(body)
+        reason = wait_for_screens(body, os.environ.get("GITHUB_REPOSITORY"),
+                                  os.environ.get("PR_NUMBER"), os.environ.get("PR_HEAD_SHA"))
     else:
         if not args.base:
             parser.error("provide BASE as an argument or environment variable")
