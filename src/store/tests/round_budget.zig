@@ -95,6 +95,7 @@ test "every function that enters the Store has a round budget" {
         @embedFile("../domain/session_obligation.zig"),
         @embedFile("../domain/session_report_read.zig"),
         @embedFile("../domain/skills.zig"),
+        @embedFile("../domain/sourced_input.zig"),
         @embedFile("../domain/tool_offer.zig"),
         @embedFile("../domain/tool_set.zig"),
         @embedFile("../domain/turn.zig"),
