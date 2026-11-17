@@ -204,7 +204,7 @@ fn expectMembershipRemovedOutput(storage: *Store, binding: store_core.AttemptBin
     } else return error.MissingToolResults;
     const result = (try view.nextToolResult()).?;
     var output: TestingReader = undefined;
-    try view.openContent(result.output, &output);
+    try view.openContent(result.output.?, &output);
     defer output.close();
     var buffer: [tool_defs.removed_tool_result.len + 1]u8 = undefined;
     const count = try output.read(0, &buffer);

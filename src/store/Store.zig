@@ -1272,7 +1272,7 @@ pub const Store = struct {
         result: []const u8,
         faults: Faults,
     ) !ActionSettlement {
-        return self.queue().write(settleActionAttemptHeld, .{ self, binding, code, result, faults });
+        return self.queue().write(settleActionAttemptHeld, .{ self, binding, code, result, null, faults });
     }
 
     fn settleActionAttemptHeld(
@@ -1280,10 +1280,24 @@ pub const Store = struct {
         binding: ActionAttemptBinding,
         code: ActionResolutionCode,
         result: []const u8,
+        parts: ?@import("../InputCapture.zig").Loan,
         faults: Faults,
     ) !ActionSettlement {
-        if (result.len == 0) return error.InvalidActionResult;
-        return transition.apply(self, action_domain.SettleAttempt, .{ .binding = binding, .code = code, .result = result }, faults);
+        var saving = try content_parts.Saving.init(if (parts) |captured| .{ .captured = captured } else .{ .text = .{ .slice = result } });
+        if (saving.reference == .bytes and saving.reference.bytes.length == 0) return error.InvalidActionResult;
+        return transition.apply(self, action_domain.SettleAttempt, .{ .binding = binding, .code = code, .result = result, .saving = &saving, .io = self.io }, faults);
+    }
+
+    /// Publishes the ordered value at the Action's sole immutable Resolution.
+    /// A single Text uses the same byte representation as settleActionAttempt.
+    pub fn settleActionAttemptParts(
+        self: *Store,
+        binding: ActionAttemptBinding,
+        code: ActionResolutionCode,
+        result: @import("../InputCapture.zig").Loan,
+        faults: Faults,
+    ) !ActionSettlement {
+        return self.queue().write(settleActionAttemptHeld, .{ self, binding, code, &.{}, result, faults });
     }
 
     pub fn deliverChildEnding(self: *Store, turn_id: u64, faults: Faults) !bool {

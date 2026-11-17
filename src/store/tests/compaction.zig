@@ -1325,3 +1325,59 @@ test "canonical compound pressure classification cannot overflow a near i64 byte
         }
     }.run);
 }
+
+test "compound Action Resolution pressure counts Text bytes and images through usage coverage" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            const policy = @import("../../turn_policy.zig");
+            const png = @embedFile("../../codecs/fixtures/image-input/pixel.png");
+            const text: [64]u8 = @splat('r');
+            for ([_]usize{ 0, 39, 40, 41, 64 }) |length| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                const session = try shared_fixtures.configureTestSessionWithMode(&storage, "result-pressure-config", "bypass");
+                var patch: wire_request.ConfigureCommand = .{};
+                try patch.key.set("result-pressure-policy");
+                try patch.session.set(session.slice());
+                patch.configuration.compaction_trigger.state = .value;
+                try patch.configuration.compaction_trigger.value.set("1000");
+                patch.configuration.output_reservation.state = .value;
+                try patch.configuration.output_reservation.value.set("0");
+                try std.testing.expect(try storage.configure(&patch, .{}) == .accepted);
+                try submitTestMessage(&storage, &tmp, "result-pressure-first", "result-pressure-first", session.slice(), "first");
+                const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                const calls = [_]TestingCall{.{
+                    .item_id = "result-item",
+                    .name = "bash",
+                    .encoded_call_id = "result-call",
+                    .decoded_call_id = "result-call",
+                    .encoded_arguments = "{\\\"cmd\\\":\\\"one\\\",\\\"description\\\":\\\"Run command\\\"}",
+                    .decoded_arguments = "{\"cmd\":\"one\",\"description\":\"Run command\"}",
+                }};
+                try settleCallsForTestingWithFaults(&storage, &tmp, first, "result-pressure-output", &calls, .{}, "{\"input_tokens\":990,\"output_tokens\":0}");
+                const selected = (try storage.nextAction(.bash, .fromFree(1, true))).?;
+                const action = (try storage.admitActionAttempt(selected, 30_000, .{})).?.permit.binding;
+                try store_testing.settleTestActionParts(&storage, &tmp, action, &.{
+                    .{ .bytes = text[0..length] },
+                    .{ .bytes = png, .kind = .{ .image = .{} } },
+                });
+                const facts = try compoundPressureForTesting(&storage, session.slice());
+                try std.testing.expectEqual(@as(u64, length), facts.uncovered_bytes);
+                try std.testing.expectEqual(@as(u64, 1), facts.unknown_images);
+                try std.testing.expectEqual(@as(?u64, 990 + length / 4), policy.comparedPressure(facts));
+                const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                try std.testing.expectEqual(if (length >= 40) ModelOperationKind.compaction else ModelOperationKind.assistant_response, try storage.modelOperationKind(next));
+                if (length < 40) {
+                    // A later provider usage report covers the complete value.
+                    try settleCallsForTestingWithFaults(&storage, &tmp, next, "result-pressure-covered", &.{}, .{}, "{\"input_tokens\":100,\"output_tokens\":0}");
+                    const covered = try compoundPressureForTesting(&storage, session.slice());
+                    try std.testing.expectEqual(@as(u64, 0), covered.uncovered_bytes);
+                    try std.testing.expectEqual(@as(u64, 0), covered.unknown_images);
+                }
+            }
+        }
+    }.run);
+}

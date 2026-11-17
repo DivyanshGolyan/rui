@@ -1081,6 +1081,33 @@ pub fn submitTestMessagePartsWithSkills(storage: *Store, tmp: *std.testing.TmpDi
     try std.testing.expect(reply == .accepted);
 }
 
+pub fn settleTestActionParts(storage: *Store, tmp: *std.testing.TmpDir, binding: @import("domain/action.zig").ActionAttemptBinding, parts: []const MessagePart) !void {
+    const Capture = @import("../InputCapture.zig");
+    var used: std.atomic.Value(u64) = .init(0);
+    var capture: Capture = undefined;
+    {
+        const spool = try tmp.dir.createFile(std.testing.io, "test-action-spool", .{ .read = true });
+        errdefer spool.close(std.testing.io);
+        const index = try tmp.dir.createFile(std.testing.io, "test-action-index", .{ .read = true });
+        errdefer index.close(std.testing.io);
+        try tmp.dir.deleteFile(std.testing.io, "test-action-spool");
+        try tmp.dir.deleteFile(std.testing.io, "test-action-index");
+        capture.init(std.testing.io, spool, index, .{ .used = &used, .limit = 4 * 1024 * 1024 });
+    }
+    defer capture.close();
+    for (parts) |part| {
+        try capture.begin(part.kind, part.bytes.len);
+        var at: usize = 0;
+        while (at < part.bytes.len) {
+            var allowance = part.bytes.len - at;
+            at += try capture.append(part.bytes[at..], &allowance, false);
+        }
+        try capture.end();
+    }
+    const reply = try storage.settleActionAttemptParts(binding, .succeeded, try capture.seal(), .{});
+    try std.testing.expectEqual(@import("domain/action.zig").ActionSettlement.effect, reply);
+}
+
 pub fn testingPublicProjection(
     storage: *Store,
     tmp: *std.testing.TmpDir,
