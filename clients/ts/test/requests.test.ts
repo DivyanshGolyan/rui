@@ -51,6 +51,23 @@ function report(work: CurrentReport["work"], parent: string | null = null): Curr
 	};
 }
 
+type CommandObservation = Extract<components["schemas"]["ObserveCommandReply"], { observation: unknown }>["observation"];
+type PendingMessageWork = Extract<CommandObservation, { kind: "message"; work: unknown }>["work"];
+
+function messageWorkTypeContract(work: PendingMessageWork): void {
+	const { attention: _attention, ...withoutAttention } = work;
+	const { group: _group, ...withoutGroup } = work;
+	const { actions: _actions, ...withoutActions } = work;
+	// @ts-expect-error Message work always carries the Host's attention, even when null.
+	const missingAttention: PendingMessageWork = withoutAttention;
+	// @ts-expect-error Message work always carries the Host's group.
+	const missingGroup: PendingMessageWork = withoutGroup;
+	// @ts-expect-error Message work always carries the Host's valid actions.
+	const missingActions: PendingMessageWork = withoutActions;
+	void [missingAttention, missingGroup, missingActions];
+}
+void messageWorkTypeContract;
+
 const idleWork: CurrentReport["work"] = {
 	state: { kind: "idle", since: "9007199254740993" }, turn: null, operation: null, first_action: null, attention: null, group: "done", actions: { stop: false, interrupt: null, decide: null }, latest_outcome: null,
 };
@@ -316,4 +333,31 @@ test("Action promotion reports capacity refusal and changed-key conflicts", asyn
 		await assert.rejects(new Session(link, "session").backgroundAction("1"), (error: unknown) =>
 			error instanceof RuiRequestError && error.type === status && error.code === code);
 	}
+});
+
+test("stop Action sends the selected Session, Action and recoverable request key", async () => {
+	const link: Link = {
+		async exchange(path, build) {
+			assert.equal(path, "/v1/control/action-stop");
+			assert.deepEqual(JSON.parse(build("store")), {
+				version: WIRE_VERSION, kind: "action_stop", store: "store",
+				key: "stop-request", session: "session", action: "42",
+			});
+			return Buffer.from(JSON.stringify({ answer: { status: "accepted", action: "42", resolution_position: null } }));
+		},
+	};
+	assert.equal(await new Session(link, "session").stopAction("42", { idempotencyKey: "stop-request" }), null);
+});
+
+test("stop Action reports refusal and request key conflicts", async () => {
+	for (const [status, code] of [["rejected", "unknown_action"], ["rejected", "target_mismatch"], ["conflict", "idempotency_key_conflict"]]) {
+		const link: Link = { exchange: async () => Buffer.from(JSON.stringify({ answer: { status, code } })) };
+		await assert.rejects(new Session(link, "session").stopAction("1", { idempotencyKey: "stop-request" }), (error: unknown) =>
+			error instanceof RuiRequestError && error.type === status && error.code === code);
+	}
+});
+
+test("stop Action preserves the existing Resolution position", async () => {
+    const link: Link = { exchange: async () => Buffer.from(JSON.stringify({ answer: { status: "accepted", action: "42", resolution_position: "9007199254740993" } })) };
+    assert.equal(await new Session(link, "session").stopAction("42"), "9007199254740993");
 });

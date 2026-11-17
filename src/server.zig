@@ -1474,6 +1474,7 @@ const Route = enum {
     model_interruption,
     permission_decision,
     action_background,
+    action_stop,
     observe,
     read_result,
     read_action,
@@ -1531,11 +1532,12 @@ test "command route projection preserves control classification" {
             .model_interruption => .model_interruption,
             .permission_decision => .permission_decision,
             .action_background => .action_background,
+            .action_stop => .action_stop,
             else => null,
         };
         try std.testing.expectEqual(expected, comptime route.commandKind());
         const expected_control = switch (route) {
-            .host_stop, .host_pause, .unsupported_control, .session_stop, .session_archive, .session_pin, .model_interruption, .permission_decision, .action_background => true,
+            .host_stop, .host_pause, .unsupported_control, .session_stop, .session_archive, .session_pin, .model_interruption, .permission_decision, .action_background, .action_stop => true,
             else => false,
         };
         try std.testing.expectEqual(expected_control, route.isControl());
@@ -1654,6 +1656,7 @@ fn submitControl(host: *Host, comptime kind: command_spec.CommandKind, command: 
         .model_interruption => host.store.interruptModel(command, faults),
         .permission_decision => host.store.decidePermission(command, faults),
         .action_background => host.store.backgroundAction(.{ .command = command }, faults),
+        .action_stop => host.store.requestActionStop(command, faults),
         .configure, .message => @compileError("control admission requires a control kind"),
     };
 }
@@ -1663,7 +1666,7 @@ fn controlSubject(comptime kind: command_spec.CommandKind, command: *const @Fiel
         .session_stop, .session_archive, .session_pin => command.session.slice(),
         .model_interruption => .{ .session = command.session, .turn_id = command.turn_id, .operation_id = command.operation_id },
         .permission_decision => .{ .session = command.session, .action_id = command.action_id, .decision = command.decision },
-        .action_background => .{ .session = command.session, .action_id = command.action_id },
+        .action_background, .action_stop => .{ .session = command.session, .action_id = command.action_id },
         .configure, .message => @compileError("control subject requires a control kind"),
     };
 }
@@ -1747,7 +1750,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
         .message => |*command| {
             _ = try answerMutation(host, fd, header, .message, command.session.slice(), try submitMessage(host, command, client_environment.?));
         },
-        inline .session_stop, .session_archive, .session_pin, .model_interruption, .permission_decision, .action_background => |*command, tag| {
+        inline .session_stop, .session_archive, .session_pin, .model_interruption, .permission_decision, .action_background, .action_stop => |*command, tag| {
             const kind = comptime @field(command_spec.CommandKind, @tagName(tag));
             var timing = ControlTiming.init(host, command.key, @tagName(kind), accepted_at_ns);
             const result = submitControl(host, kind, command, host.hooks.storeFaults(.{ .control = timing.storeTrace() }));
@@ -1942,15 +1945,67 @@ fn renderModelList(out: protocol.JsonOut, host: *Host, facts: []const @import("m
 }
 
 fn captureSessionReport(host: *Host, request: *const protocol.InspectSession, request_number: u64) !store_module.SessionReport {
-    var capture: store_module.SessionReportCapture = .{ .io = host.io, .writer = null, .budget = host.retention.sharedBudget() };
+    const State = struct {
+        capture: store_module.SessionReportCapture,
+        reply: session_report_reply.Reply(store_module.SessionReportCapture),
+    };
+    const state = try createUnfilled(host.allocator, State);
+    defer host.allocator.destroy(state);
+    const capture = &state.capture;
+    capture.* = .{ .io = host.io, .writer = null, .budget = host.retention.sharedBudget() };
     try capture.create(host.lease.paths.scratch.slice(), request_number, host.hooks.fails(.report_unlink));
     errdefer capture.deinit();
-    const reply = try createUnfilled(host.allocator, session_report_reply.Reply(store_module.SessionReportCapture));
-    defer host.allocator.destroy(reply);
-    reply.capture = &capture;
-    reply.execution = executionFacts(host);
-    try host.store.readSessionReport(request.session.slice(), request.profile, reply);
+    state.reply.capture = capture;
+    state.reply.execution = executionFacts(host);
+    try host.store.readSessionReport(request.session.slice(), request.profile, &state.reply);
     return capture.seal();
+}
+
+test "Session report capture releases its heap state after sealing or scratch exhaustion" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var lease: platform.StoreLease = undefined;
+    lease.paths = .{};
+    try lease.paths.scratch.set(root);
+    var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    var storage: store_module.Store = undefined;
+    try storage.open(std.testing.io, try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite", .{root}), root);
+    defer storage.close() catch unreachable;
+    var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = &lease, .store = &storage };
+    var retention = output_retention.Queue.initialize(host.io, root, .{ .used = &host.scratch_used, .limit = 9000 }, &.{});
+    host.retention = &retention;
+    var request: protocol.InspectSession = .{};
+    try request.session.set("k7m2qx");
+    {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+        host.allocator = failing.allocator();
+        defer host.allocator = std.testing.allocator;
+        try std.testing.expectError(error.OutOfMemory, captureSessionReport(&host, &request, 0));
+        try std.testing.expectEqual(@as(u64, 0), host.scratch_used.load(.acquire));
+        try std.testing.expect(!storage.isFenced());
+    }
+    {
+        var report = try captureSessionReport(&host, &request, 1);
+        defer report.deinit();
+        try std.testing.expect(report.length != 0);
+        try std.testing.expectEqual(report.length, host.scratch_used.load(.acquire));
+        var bytes: [1024]u8 = undefined;
+        const length = try report.read(0, &bytes);
+        try std.testing.expectEqual(report.length, length);
+        try std.testing.expect(std.mem.indexOf(u8, bytes[0..length], "session_not_found") != null);
+    }
+    try std.testing.expectEqual(@as(u64, 0), host.scratch_used.load(.acquire));
+    retention.budget.limit = 1;
+    try std.testing.expectError(error.ReportScratchExhausted, captureSessionReport(&host, &request, 2));
+    try std.testing.expectEqual(@as(u64, 0), host.scratch_used.load(.acquire));
+    try std.testing.expect(!storage.isFenced());
+    retention.budget.limit = 9000;
+    host.hooks.failures.insert(.report_unlink);
+    try std.testing.expectError(error.ReportScratchCleanupFailed, captureSessionReport(&host, &request, 3));
+    try std.testing.expectEqual(@as(u64, 0), host.scratch_used.load(.acquire));
+    try std.testing.expect(!storage.isFenced());
 }
 
 fn captureSessionList(host: *Host, request: *const protocol.ListSessions, request_number: u64) !store_module.SessionReport {
@@ -2834,14 +2889,14 @@ test "message observation renders Host state binding live work and persistent re
     } } };
     try observation.target.set("s");
     const message = &observation.kind.message.?;
-    try Expect.rendered(&observation, accepted ++ "queued\"" ++ input ++ queue ++ ",\"work\":{\"state\":{\"kind\":\"pending\",\"since\":\"10\"},\"first_action\":null}}}");
+    try Expect.rendered(&observation, accepted ++ "queued\"" ++ input ++ queue ++ ",\"work\":{\"state\":{\"kind\":\"pending\",\"since\":\"10\"},\"first_action\":null,\"attention\":null,\"group\":\"queued\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null}}}}");
     message.work = .{ .state = .{ .approval = .{ .since = 10 } }, .first_action = 7 };
-    try Expect.rendered(&observation, accepted ++ "waiting_for_permission\"" ++ input ++ queue ++ ",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"10\"},\"first_action\":\"7\"}}}");
+    try Expect.rendered(&observation, accepted ++ "waiting_for_permission\"" ++ input ++ queue ++ ",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"10\"},\"first_action\":\"7\",\"attention\":{\"kind\":\"approval\",\"turn\":\"0\",\"step\":\"7\"},\"group\":\"needs_you\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null}}}}");
     message.queue.?.state = .{ .processing = bound };
     message.work = .{ .state = .{ .working = .{ .since = 10 } } };
     message.recovery.count = 1;
     message.recovery.calls[0] = .{ .action_id = 8, .operation_id = 3, .call = 1, .at = 12 };
-    try Expect.rendered(&observation, accepted ++ "processing\"" ++ input ++ queue ++ binding ++ ",\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"10\"},\"first_action\":null}" ++ recovery ++ "}}");
+    try Expect.rendered(&observation, accepted ++ "processing\"" ++ input ++ queue ++ binding ++ ",\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"10\"},\"first_action\":null,\"attention\":null,\"group\":\"working\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null}}" ++ recovery ++ "}}");
     message.queue.?.state = .{ .completed = .{ .binding = bound, .answer = .{ .length = 6, .digest = @splat(0xff) } } };
     try Expect.rendered(&observation, accepted ++ "completed\"" ++ input ++ queue ++ binding ++ ",\"result\":{\"status\":\"completed\",\"text\":{\"type\":\"text\",\"bytes\":\"6\",\"sha256\":\"" ++ full_digest ++ "\"}}" ++ recovery ++ "}}");
     var code: protocol.Bounded(protocol.max_code_bytes) = .{};
@@ -2953,6 +3008,10 @@ test "command observation full and both unchanged tiers render byte exactly with
 }
 
 test "Message observation work and recovery fit their exchange-owned response bound" {
+    try std.testing.expectEqual(
+        protocol.shapeBytes(protocol.command_observation_reply.work_base) + protocol.shapeBytes(protocol.SessionWork.extra_fields) + "}".len,
+        protocol.shapeBytes(protocol.command_observation_reply.work),
+    );
     const max = std.math.maxInt(u64);
     const escaped_key = @as([protocol.max_key_bytes]u8, @splat(1));
     const escaped_session = @as([protocol.max_session_bytes]u8, @splat(1));
@@ -2964,7 +3023,7 @@ test "Message observation work and recovery fit their exchange-owned response bo
         .content = .{ .length = max, .digest = @splat(0xff) },
         .queue = .{ .admission_id = max, .state = .{ .processing = .{ .turn_id = max, .operation_id = max, .attempt_ordinal = max } } },
         .admitted_at = max,
-        .work = .{ .state = .{ .bash = .{ .since = max, .call = max, .description = bash_description, .running = max, .approvals = max } }, .first_action = max },
+        .work = .{ .state = .{ .bash = .{ .since = max, .call = max, .description = bash_description, .running = max, .approvals = max } }, .first_action = max, .served_attention = .{ .kind = .approval, .turn = max, .step = max }, .served_group = .needs_you, .actions = .{ .stop = false, .interrupt = .{ .turn = max, .operation = max }, .decide = max } },
     } } };
     try observation.target.set(&escaped_session);
     observation.kind.message.?.recovery.count = protocol.message_recovery_limit;
@@ -3217,6 +3276,7 @@ test "retired reserved exchanges cannot block their successors while workers are
                 .model_interruption => "control/model-interruption",
                 .permission_decision => "control/permission-decision",
                 .action_background => "control/action-background",
+                .action_stop => "control/action-stop",
                 .unsupported_control => "control/unknown",
                 else => unreachable,
             };
@@ -4801,7 +4861,7 @@ const MutationWitness = struct {
         return switch (kind) {
             .model_interruption => .{ .session = named(), .turn_id = 3, .operation_id = 11 },
             .permission_decision => .{ .session = named(), .action_id = 7, .decision = .deny },
-            .action_background => .{ .session = named(), .action_id = 7 },
+            .action_background, .action_stop => .{ .session = named(), .action_id = 7 },
             else => session,
         };
     }
@@ -4816,6 +4876,7 @@ const MutationWitness = struct {
             .model_interruption => .{ .model_interruption = .{ .turn = 3, .operation = if (wrong) 12 else 11 } },
             .permission_decision => .{ .permission_decision = .{ .action = 7, .decision = if (wrong) .allow_once else .deny } },
             .action_background => .{ .action_background = if (wrong) 8 else 7 },
+            .action_stop => .{ .action_stop = if (wrong) 8 else 7 },
         };
     }
 
@@ -4828,6 +4889,7 @@ const MutationWitness = struct {
             .session_pin => .{ .replayed = false, .pinned = false },
             .model_interruption, .permission_decision => .{ .replayed = false },
             .action_background => .{ .replayed = false, .action_id = 7, .selection = .{ .kind = .background, .position = 29 } },
+            .action_stop => .{ .replayed = false, .action_id = 7, .resolution = 29 },
         } };
     }
 
@@ -4906,6 +4968,7 @@ const MutationWitness = struct {
 test "mutation decoder preserves base bytes and the entire command domain" {
     var covered: u16 = 0;
     inline for (comptime std.meta.tags(command_spec.CommandKind)) |kind| {
+        if (comptime kind == .action_stop) continue;
         covered |= @as(u16, 1) << @backingInt(kind);
         const render = host_reply.renderMutationReply(kind);
         const Result = @typeInfo(@TypeOf(render)).@"fn".param_types[2].?;
@@ -4951,6 +5014,7 @@ test "mutation decoder preserves base bytes and the entire command domain" {
             .session_archive => alternate.accepted.archived = false,
             .session_pin => alternate.accepted.pinned = true,
             .action_background => alternate.accepted.selection.kind = .final,
+            .action_stop => alternate.accepted.resolution = null,
             else => {},
         }
         var response: protocol.ResponseBuffer = .{};
@@ -4970,6 +5034,7 @@ test "mutation decoder preserves base bytes and the entire command domain" {
             try MutationWitness.observe(&hash, response.slice(), 200, "", binding);
         }
         const expected = switch (kind) {
+            .action_stop => continue,
             .configure => "adca102951c1f18dc2ce00f9b558a24b2beaaec0c3e2e863316f44a6efb03321",
             .message => "3be943056ed34a9f484210e35c3aed5397a28a4fd2f52536d9bab4333101b562",
             .session_stop => "a98107ee7efe29d5c2480097568daa514649c76e9c7c1cc740ed5fbc697cbc90",
@@ -5020,10 +5085,10 @@ test "every accepted control publishes exactly one hint before reply handling" {
             std.testing.allocator.rawFree(memory, alignment, ret_addr);
         }
     };
-    var covered: u16 = 0;
+    var covered: std.EnumSet(command_spec.CommandKind) = .empty;
     inline for (comptime std.meta.tags(command_spec.CommandKind)) |kind| {
         if (comptime !command_spec.spec(kind).is_control) continue;
-        covered |= @as(u16, 1) << @backingInt(kind);
+        covered.insert(kind);
         const Result = host_reply.MutationResult(kind);
         const rejected: Result = .{ .rejected = .{ .replayed = false, .code = .invalid_session_reference } };
         for ([_]Result{ MutationWitness.accepted(kind), rejected, .conflict, .infrastructure_failure }) |initial| {
@@ -5079,7 +5144,11 @@ test "every accepted control publishes exactly one hint before reply handling" {
             }
         }
     }
-    try std.testing.expectEqual(@as(u16, 0xfc), covered);
+    const expected: std.EnumSet(command_spec.CommandKind) = .initMany(&.{
+        .session_stop, .session_archive,   .model_interruption, .permission_decision,
+        .session_pin,  .action_background, .action_stop,
+    });
+    try std.testing.expectEqual(expected, covered);
 }
 
 // Each symbol below is captured by the old decoders at 5472ccf5, independently
@@ -5221,7 +5290,18 @@ const ReplyDomainWitness = struct {
         return std.json.Stringify.valueAlloc(allocator, parsed.value, .{});
     }
 
-    fn check(lines: *std.mem.SplitIterator(u8, .scalar), label: []const u8, actual: []const u8, fields: []const Field, tighten_pinned: bool) !void {
+    fn legacyWork(body: []const u8) !bool {
+        var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
+        defer parsed.deinit();
+        if (parsed.value != .object) return false;
+        const observed = parsed.value.object.get("observation") orelse return false;
+        if (observed != .object) return false;
+        const work = observed.object.get("work") orelse return false;
+        if (work != .object) return false;
+        return !work.object.contains("attention") or !work.object.contains("group") or !work.object.contains("actions");
+    }
+
+    fn check(lines: *std.mem.SplitIterator(u8, .scalar), label: []const u8, actual: []const u8, fields: []const Field, tighten_pinned: bool, legacy_work: ?[]const bool) !void {
         const line = lines.next() orelse return error.MissingDomainBaseline;
         const split = std.mem.indexOfScalar(u8, line, ' ') orelse return error.InvalidDomainBaseline;
         try std.testing.expectEqualStrings(label, line[0..split]);
@@ -5232,8 +5312,11 @@ const ReplyDomainWitness = struct {
             const edit = if (index == 0) 0 else (index - 1) % 3;
             // Slice 3 intentionally closes the old session_pin rejection/conflict
             // hole: a present pinned value is accepted-only, even for its owner.
+            // An old successful or binding-mismatch Message work reply now needs
+            // the three required Host-derived members before it can be decoded.
+            const missing_work = if (legacy_work) |missing| missing[index] else false;
             const want: u8 = if (tighten_pinned and field != null and edit == 0 and
-                std.mem.eql(u8, field.?.path[field.?.path.len - 1], "pinned")) 'i' else base;
+                std.mem.eql(u8, field.?.path[field.?.path.len - 1], "pinned")) 'i' else if (missing_work and (base == 'a' or base == 'b')) 'o' else base;
             if (want != got) {
                 std.debug.print("domain {s}: field {any}, edit {s}: base={c}, expected={c}, actual={c}\n", .{
                     label, if (field) |value| value.path else @as([]const []const u8, &.{"<unedited>"}),
@@ -5255,6 +5338,7 @@ const ReplyDomainWitness = struct {
         @setEvalBranchQuota(20_000);
         var lines = std.mem.splitScalar(u8, fixture, '\n');
         inline for (comptime std.meta.tags(command_spec.CommandKind)) |kind| {
+            if (comptime kind == .action_stop) continue;
             const render = host_reply.renderMutationReply(kind);
             const Result = @typeInfo(@TypeOf(render)).@"fn".param_types[2].?;
             const rejected: Result = if (kind == .message)
@@ -5287,7 +5371,7 @@ const ReplyDomainWitness = struct {
                     }
                     var label_buffer: [128]u8 = undefined;
                     const label = try std.fmt.bufPrint(&label_buffer, "mutation/{s}/{s}/{d}", .{ @tagName(kind), @tagName(result), @intFromBool(replayed) });
-                    try check(&lines, label, &actual, &MutationWitness.fields, kind == .session_pin and (result == .rejected or result == .conflict));
+                    try check(&lines, label, &actual, &MutationWitness.fields, kind == .session_pin and (result == .rejected or result == .conflict), null);
                 }
             }
             inline for (.{ false, true }) |accepted| {
@@ -5300,24 +5384,29 @@ const ReplyDomainWitness = struct {
                     .model_interruption => ",\"interruption_target\":{\"session\":\"k7m2qx\",\"turn\":\"3\",\"operation\":\"7\"}",
                     .permission_decision => ",\"permission_target\":{\"action\":\"29\",\"decision\":\"allow_once\"}",
                     .action_background => ",\"action_target\":{\"action\":\"29\"},\"action_selection\":{\"kind\":\"background\",\"position\":\"31\"}",
+                    .action_stop => ",\"action_target\":{\"action\":\"29\"},\"resolution_position\":\"31\"",
                 } else switch (kind) {
                     .message => ",\"state\":\"rejected\"",
                     .model_interruption => ",\"interruption_target\":{\"session\":\"k7m2qx\",\"turn\":\"0\",\"operation\":\"0\"}",
                     .permission_decision => ",\"permission_target\":{\"action\":\"0\",\"decision\":\"deny\"}",
-                    .action_background => ",\"action_target\":{\"action\":\"29\"}",
+                    .action_background, .action_stop => ",\"action_target\":{\"action\":\"29\"}",
                     else => "",
                 };
                 const body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"command_observation\",\"key\":\"k\",\"delta\":\"full\",\"since\":null,\"observation\":{\"kind\":\"" ++ @tagName(kind) ++ "\",\"target\":\"k7m2qx\",\"status\":\"" ++ (if (accepted) "accepted\"" else "rejected\",\"code\":\"unknown_session\"") ++ fields ++ "}}";
                 var actual: [1 + observation_fields.len * 3]u8 = undefined;
+                var legacy: [actual.len]bool = undefined;
                 actual[0] = observation(body);
+                legacy[0] = try legacyWork(body);
                 for (observation_fields, 0..) |field, index| {
                     for (0..3) |edit| {
                         var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
                         defer parsed.deinit();
-                        actual[1 + index * 3 + edit] = observation(try editField(&parsed, field, edit));
+                        const edited = try editField(&parsed, field, edit);
+                        actual[1 + index * 3 + edit] = observation(edited);
+                        legacy[1 + index * 3 + edit] = try legacyWork(edited);
                     }
                 }
-                try check(&lines, "observation/" ++ @tagName(kind) ++ "/" ++ (if (accepted) "accepted" else "rejected"), &actual, &observation_fields, false);
+                try check(&lines, "observation/" ++ @tagName(kind) ++ "/" ++ (if (accepted) "accepted" else "rejected"), &actual, &observation_fields, false, &legacy);
             }
         }
         for (message_edges) |edge| {
@@ -5325,17 +5414,21 @@ const ReplyDomainWitness = struct {
             const body = try std.mem.concat(std.testing.allocator, u8, &.{ prefix, edge.fields, "}}" });
             defer std.testing.allocator.free(body);
             var actual: [1 + message_fields.len * 3]u8 = undefined;
+            var legacy: [actual.len]bool = undefined;
             actual[0] = observation(body);
+            legacy[0] = try legacyWork(body);
             for (message_fields, 0..) |field, index| {
                 for (0..3) |edit| {
                     var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
                     defer parsed.deinit();
-                    actual[1 + index * 3 + edit] = observation(try editField(&parsed, field, edit));
+                    const edited = try editField(&parsed, field, edit);
+                    actual[1 + index * 3 + edit] = observation(edited);
+                    legacy[1 + index * 3 + edit] = try legacyWork(edited);
                 }
             }
             const label = try std.mem.concat(std.testing.allocator, u8, &.{ "message/", edge.name });
             defer std.testing.allocator.free(label);
-            try check(&lines, label, &actual, &message_fields, false);
+            try check(&lines, label, &actual, &message_fields, false, &legacy);
         }
         try std.testing.expectEqualStrings("", lines.rest());
     }
@@ -5343,4 +5436,53 @@ const ReplyDomainWitness = struct {
 
 test "reply decoder frozen field domain from 5472ccf5" {
     try ReplyDomainWitness.run();
+}
+
+test "reply decoder requires the served work fields and closed enums" {
+    const body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"command_observation\",\"key\":\"k\",\"delta\":\"full\",\"since\":null,\"observation\":{\"status\":\"accepted\",\"kind\":\"message\",\"target\":\"k7m2qx\",\"state\":\"queued\",\"input\":{\"type\":\"text\",\"bytes\":\"1\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"},\"queue\":{\"admission\":\"1\",\"admitted_at\":\"2\"},\"work\":{\"state\":{\"kind\":\"pending\",\"since\":\"2\"},\"first_action\":null,\"attention\":null,\"group\":\"queued\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null}}}}";
+    try std.testing.expectEqual(@as(u8, 'a'), ReplyDomainWitness.observation(body));
+    const edits = [_]struct { before: []const u8, after: []const u8 }{
+        .{ .before = "\"attention\":null,", .after = "" },
+        .{ .before = "\"group\":\"queued\",", .after = "" },
+        .{ .before = ",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null}", .after = "" },
+        .{ .before = "\"group\":\"queued\"", .after = "\"group\":\"invented\"" },
+        .{ .before = "\"attention\":null", .after = "\"attention\":{\"kind\":\"invented\",\"turn\":\"1\",\"step\":\"2\"}" },
+        .{ .before = "\"stop\":false,", .after = "" },
+        .{ .before = "\"interrupt\":null,", .after = "" },
+        .{ .before = ",\"decide\":null", .after = "" },
+    };
+    for (edits) |edit| {
+        const changed = try std.mem.replaceOwned(u8, std.testing.allocator, body, edit.before, edit.after);
+        defer std.testing.allocator.free(changed);
+        try std.testing.expect(ReplyDomainWitness.observation(changed) != 'a');
+    }
+}
+
+test "Action stop mutation and observation preserve the selected Resolution" {
+    const command_reply = @import("command_reply.zig");
+    const reply = @import("protocol_reply.zig");
+    const subject = MutationWitness.subject(.action_stop);
+    for ([_]?u64{ null, 29, 9007199254740993 }) |position| {
+        var response: protocol.ResponseBuffer = .{};
+        try response.render(host_reply.renderMutationReply(.action_stop), .{ subject, @as(host_reply.MutationResult(.action_stop), .{ .accepted = .{ .replayed = true, .action_id = 7, .resolution = position } }) });
+        const decoded = reply.decodeMutationReply(.{ .status = 200, .body = response.slice() }, MutationWitness.session, .{ .action_stop = 7 });
+        try std.testing.expectEqual(position, (try decoded.answer).result.accepted.action_stop);
+        try std.testing.expect((try decoded.answer).replayed);
+        const foreign = reply.decodeMutationReply(.{ .status = 200, .body = response.slice() }, MutationWitness.session, .{ .action_stop = 8 });
+        try std.testing.expectError(error.RequestBindingMismatch, foreign.answer);
+        const another_session = reply.decodeMutationReply(.{ .status = 200, .body = response.slice() }, "p9q8rs", .{ .action_stop = 7 });
+        try std.testing.expectError(error.RequestBindingMismatch, another_session.answer);
+        var observed = command_reply.CommandObservation{ .status = .accepted, .target = subject.session, .kind = .{ .action_stop = .{ .action_id = 7, .resolution = position } } };
+        response = .{};
+        try response.render(host_reply.renderFullCommandObservation, .{ "stop", &observed, @as(?[]const u8, null) });
+        const parsed = try reply.CommandObservation.parse(.{ .status = 200, .body = response.slice() }, "stop");
+        try std.testing.expectEqual(position, parsed.resolution_position);
+        try std.testing.expectEqual(@as(u64, 7), parsed.action_target.?);
+    }
+    for ([_][]const u8{ "0", "-1", "1.0", "nullx" }) |invalid| {
+        const body = try std.fmt.allocPrint(std.testing.allocator, "{{\"version\":\"{s}\",\"type\":\"action_stop_reply\",\"answer\":{{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"action\":\"7\",\"resolution_position\":{s}}}}}", .{ protocol.wire_version, invalid });
+        defer std.testing.allocator.free(body);
+        const decoded = reply.decodeMutationReply(.{ .status = 200, .body = body }, MutationWitness.session, .{ .action_stop = 7 });
+        try std.testing.expect(std.meta.isError(decoded.answer));
+    }
 }

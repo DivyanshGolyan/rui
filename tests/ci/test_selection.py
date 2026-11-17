@@ -996,21 +996,21 @@ class SelectionTest(unittest.TestCase):
         for name, part, artifact in (('macos_build', 'compiled', 'compiled-macos'),
                                      ('macos_build_unit', 'compiled-unit', 'compiled-macos-unit')):
             job = jobs[name]
-            self.assertIn('needs: plan', job)
-            self.assertIn('runs-on: macos-15', job)
+            self.assertIn('needs: [plan, mac_runner]', job)
+            self.assertIn("runs-on: ${{ fromJSON(needs.mac_runner.outputs.runs_on || '\"macos-15\"') }}", job)
             self.assertIn('timeout-minutes: 60', job)
             self.assertIn('check-part: ' + part + '\n', job)
             self.assertIn('TARGETS: ${{ needs.plan.outputs.native_targets }}', job)
             self.assertIn('artifact: ${{ steps.publish.outputs.artifact-id }}', job)
             self.assertIn('name: ' + artifact + '-${{ github.run_attempt }}', job)
             self.assertIn('if-no-files-found: error', job)
-        self.assertIn("if: ${{ needs.plan.outputs.macos_split == 'true' }}", jobs['macos_build_unit'])
+        self.assertIn("if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.macos_split == 'true' }}", jobs['macos_build_unit'])
         self.assertIn('build "$TARGETS" --part unit', jobs['macos_build_unit'])
         self.assertIn("PART: ${{ needs.plan.outputs.macos_split == 'true' && 'rest' || 'all' }}",
                       jobs['macos_build'])
         self.assertIn('build "$TARGETS" --part "$PART"', jobs['macos_build'])
         suites = jobs['macos_suites']
-        self.assertIn('needs: [plan, macos_build, macos_build_unit]', suites)
+        self.assertIn('needs: [plan, mac_runner, macos_build, macos_build_unit]', suites)
         self.assertIn('max-parallel: 3', suites)
         self.assertIn('ARTIFACT_ID: ${{ needs.macos_build.outputs.artifact }}', suites)
         self.assertIn('UNIT_ARTIFACT_ID: ${{ needs.macos_build_unit.outputs.artifact }}', suites)
@@ -1697,6 +1697,13 @@ fi
                     self.assertEqual(workflow.count(diagnostic_gate), 1)
                     self.assertIn('tests/ci/cache_snapshot_proof.py', producer)
                     workflow = workflow.replace(diagnostic_gate, '', 1)
+                    mac_gate = ("publish-caches: ${{ github.ref == 'refs/heads/main' && "
+                                "needs.mac_runner.outputs.self_hosted != 'true' && 'true' || 'false' }}")
+                    for name in ('macos_build', 'macos_build_unit', 'macos_suites'):
+                        native = re.search(r'(?ms)^  ' + name + r':\n(.*?)(?=^  [\w-]+:\n|\Z)', workflow)[1]
+                        self.assertEqual(native.count(mac_gate), 1, name)
+                    self.assertEqual(workflow.count(mac_gate), 3)
+                    workflow = workflow.replace(mac_gate, '')
                 self.assertNotIn('publish-caches', workflow, f'{path.name} native checks must keep publishing')
         self.assertNotIn('actions/cache', Path('.github/actions/setup/action.yml').read_text())
         setup = Path('.github/actions/setup/caches/action.yml').read_text()
@@ -1714,14 +1721,11 @@ fi
             path = lambda body: re.search(r'(?ms)^        path: (.*?)(?=^        key:)', body).group(1)
             self.assertEqual(path(restore), path(save))
         self.assertIn("node .github/actions/setup/caches/save-keys.cjs", setup)
-        compaction = setup.index('run: python3 -B tests/ci/cache_snapshot.py --prune')
-        self.assertLess(setup.index('id: save-keys'), compaction)
-        self.assertLess(compaction, setup.index('key: ${{ steps.save-keys.outputs.build-key }}'))
-        compact_step = setup[setup.rfind('    - name:', 0, compaction):compaction]
-        for guard in ("inputs.save-only == 'true'", "inputs.work-outcome == 'success'",
-                      "runner.os == 'Linux'", "runner.arch == 'X64'",
-                      "steps.save-keys.outputs.build-key != ''"):
-            self.assertIn(guard, compact_step)
+        self.assertNotIn('cache_snapshot.py --prune', setup)
+        self.assertLess(setup.index('id: save-keys'), setup.index('key: ${{ steps.save-keys.outputs.build-key }}'))
+        publication = Path('.github/actions/setup/caches/save-keys.cjs').read_text()
+        self.assertIn("'tests/ci/cache_snapshot.py', '--publication-key', key", publication)
+        self.assertIn('Object.entries(publicationKeys(env))', publication)
 
     def test_ci_test_methods_cannot_silently_replace_another_check(self):
         for path in Path('tests/ci').glob('test_*.py'):

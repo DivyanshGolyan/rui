@@ -20,6 +20,8 @@ const action_domain = @import("action.zig");
 const configuration_domain = @import("configuration.zig");
 const operation_effort = @import("operation_effort.zig");
 const historical_domain = @import("historical.zig");
+const content_parts = @import("content_parts.zig");
+const content_domain = @import("content.zig");
 const history_floor_domain = @import("history_floor.zig");
 const model_settlement_domain = @import("model_settlement.zig");
 const model_facts_domain = @import("model_facts.zig");
@@ -36,6 +38,7 @@ const SessionFacts = configuration_domain.SessionFacts;
 const accepted_resolutions = store_schema.accepted_resolutions;
 
 pub const ModelAdmissionKind = enum { message, open_turn_message, tool_continuation };
+pub const AdmissionProgress = union(enum) { progress, done: ?AttemptAdmission };
 const complete_tool_results_sql =
     store_schema.resolutionIs("current.resolution_code", .tool_proposals) ++ " AND EXISTS(" ++
     " SELECT 1 FROM model_output_item item WHERE item.operation_id=current.operation_id AND item.item_ordinal>=0 AND item.session_ref=current.session_ref AND item.item_kind=3" ++
@@ -163,6 +166,7 @@ pub const compaction_failures = .{
     .{ first_runnable, error.CorruptStore },
     .{ admission_context, error.CorruptStore },
     .{ context_bytes, error.CorruptStore },
+    .{ context_compound_bytes, error.CorruptStore },
 };
 
 pub const CompactionRead = struct {
@@ -171,12 +175,14 @@ pub const CompactionRead = struct {
     provider: provider_name.Provider,
     model: []const u8,
     facts: turn_policy.CompactionFacts,
-    stage: enum { latest, first, bytes, done } = .latest,
+    stage: enum { latest, first, bytes, compound_bytes, done } = .latest,
     latest: latest_turn.Result = undefined,
     first: first_runnable.Result = undefined,
     context: admission_context.Result = undefined,
     bytes_args: context_bytes.Args = undefined,
     bytes: context_bytes.Result = undefined,
+    compound_bytes: context_compound_bytes.Result = undefined,
+    pressure: ?*const PartsPressure.Read = null,
 
     pub fn init(session: []const u8, boundary: u64, provider: provider_name.Provider, model: []const u8, policy: model_capability.CompactionPolicy) CompactionRead {
         return .{ .session = session, .boundary = boundary, .provider = provider, .model = model, .facts = .{
@@ -197,12 +203,14 @@ pub const CompactionRead = struct {
             },
             .first => a.read(first_runnable, .{ .session = read.session }, &read.first),
             .bytes => a.read(context_bytes, read.bytes_args, &read.bytes),
+            .compound_bytes => a.read(context_compound_bytes, read.bytes_args, &read.compound_bytes),
             .done => return false,
         }
         return true;
     }
 
-    pub fn advance(read: *CompactionRead) !void {
+    pub fn advance(read: *CompactionRead, a: anytype) !void {
+        _ = a;
         read.stage = switch (read.stage) {
             .latest => stage: {
                 const latest = read.latest orelse break :stage .done;
@@ -211,7 +219,20 @@ pub const CompactionRead = struct {
             },
             .first => try read.weigh(read.first.first),
             .bytes => stage: {
-                read.facts.uncovered_bytes = read.bytes.uncovered_bytes;
+                if (read.bytes.uncovered_bytes) |bytes| {
+                    read.facts.uncovered_bytes = bytes;
+                    break :stage .done;
+                }
+                const prepared = read.pressure orelse return error.PartsPressureRequired;
+                if (!prepared.ready or prepared.cutoff != std.math.maxInt(i64) or prepared.boundary != read.boundary or !std.mem.eql(u8, &prepared.session, read.bytes_args.session) or
+                    prepared.covered != read.bytes_args.covered or prepared.frontier != read.bytes_args.frontier or
+                    prepared.results != read.bytes_args.results) return error.PartsPressureRequired;
+                break :stage .compound_bytes;
+            },
+            .compound_bytes => stage: {
+                const parts = read.pressure.?.total;
+                read.facts.uncovered_bytes = read.compound_bytes.uncovered_bytes - parts.manifest_bytes +| parts.text_bytes;
+                read.facts.unknown_images = parts.unknown_images;
                 break :stage .done;
             },
             .done => .done,
@@ -288,11 +309,25 @@ fn latestUsageSql(comptime session: []const u8, comptime provider: []const u8, c
 }
 
 fn uncoveredBytesSql(comptime session: []const u8, comptime usage_position: []const u8, comptime frontier: []const u8, comptime result_admission: []const u8) []const u8 {
+    return uncoveredBytesThroughSql(session, usage_position, frontier, result_admission, null);
+}
+
+fn uncoveredBytesThroughSql(comptime session: []const u8, comptime usage_position: []const u8, comptime frontier: []const u8, comptime result_admission: []const u8, comptime cutoff: ?[]const u8) []const u8 {
+    return uncoveredBytesUsingSql(session, usage_position, frontier, result_admission, cutoff, null, null, null);
+}
+
+fn historyBytesSql(comptime session: []const u8, comptime usage_position: []const u8, comptime aggregate: []const u8) []const u8 {
+    return "(SELECT " ++ aggregate ++ " FROM conversation_entry e JOIN content c ON c.content_id=e.content_id " ++
+        "WHERE e.session_ref=" ++ session ++ " AND e.entry_kind IN (1,2,4) AND e.session_position>" ++ usage_position ++ ")";
+}
+
+fn uncoveredBytesUsingSql(comptime session: []const u8, comptime usage_position: []const u8, comptime frontier: []const u8, comptime result_admission: []const u8, comptime cutoff: ?[]const u8, comptime entries: ?[]const u8, comptime pending: ?[]const u8, comptime require_parts: ?[]const u8) []const u8 {
+    const pending_prefix = if (cutoff) |bound| " AND m.admission_id<=" ++ bound else "";
+    const aggregate = if (require_parts != null) "CASE WHEN @count_where(c.form<>0)=0 THEN coalesce(sum(c.byte_length),0) END" else "coalesce(sum(c.byte_length),0)";
     const later = "max(" ++ usage_position ++ "," ++ frontier ++ ")";
     const terms = .{
-        "(SELECT coalesce(sum(c.byte_length),0) FROM conversation_entry e JOIN content c ON c.content_id=e.content_id " ++
-            "WHERE e.session_ref=" ++ session ++ " AND e.entry_kind IN (1,2,4) AND e.session_position>" ++ usage_position ++ ")",
-        "(SELECT coalesce(sum(" ++ history_floor_domain.item_bytes_sql ++ "),0) FROM model_output_item i " ++
+        entries orelse historyBytesSql(session, usage_position, aggregate),
+        "(" ++ history_floor_domain.item_bytes_sql ++ " " ++
             "WHERE i.session_ref=" ++ session ++ " AND i.session_position>=max(" ++ usage_position ++ "+1,coalesce((SELECT max(anchor.session_position) " ++
             "FROM model_operation b @index(model_operation_compaction_bases) JOIN model_output_item anchor ON anchor.operation_id=b.operation_id AND anchor.session_ref=b.session_ref " ++
             "WHERE b.session_ref=" ++ session ++ " AND b.purpose=1 AND " ++ store_schema.resolutionIs("b.resolution_code", .compacted) ++ " AND b.admission_position=" ++ frontier ++ " AND anchor.item_kind=4),0)))",
@@ -300,14 +335,14 @@ fn uncoveredBytesSql(comptime session: []const u8, comptime usage_position: []co
             "CROSS JOIN model_tool_call tool_call ON tool_call.operation_id=o.operation_id AND tool_call.session_ref=o.session_ref " ++
             "JOIN content c ON c.content_id=tool_call.rejection_content_id WHERE o.session_ref=" ++ session ++ " AND o.admission_position>=" ++ result_admission ++ " " ++
             "AND " ++ store_schema.oneOf("o.resolution_code", &accepted_resolutions) ++ " AND tool_call.acceptance_position>" ++ later ++ ")",
-        "((SELECT coalesce(sum(c.byte_length),0) FROM action_operation a JOIN content c ON c.content_id=a.background_content_id " ++
+        "((SELECT " ++ aggregate ++ " FROM action_operation a JOIN content c ON c.content_id=a.background_content_id " ++
             "WHERE a.session_ref=" ++ session ++ " AND a.background_position>" ++ later ++ ") + " ++
-            "(SELECT coalesce(sum(c.byte_length),0) FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id " ++
+            "(SELECT " ++ aggregate ++ " FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id " ++
             "WHERE a.session_ref=" ++ session ++ " AND a.background_position IS NULL AND a.acceptance_position>" ++ later ++ "))",
-        "(SELECT coalesce(sum(c.byte_length),0) FROM message_admission m JOIN content c ON c.content_id=m.content_id " ++
-            "WHERE m.session_ref=" ++ session ++ " AND " ++ runnable_eligibility_sql ++ ")",
+        pending orelse "(SELECT " ++ aggregate ++ " FROM message_admission m JOIN content c ON c.content_id=m.content_id " ++
+            "WHERE m.session_ref=" ++ session ++ pending_prefix ++ " AND " ++ runnable_eligibility_sql ++ ")",
         "(SELECT coalesce(sum(c.byte_length),0) FROM message_admission m JOIN message_skill k ON k.admission_id=m.admission_id " ++
-            "JOIN content c ON c.content_id=k.content_id WHERE m.session_ref=" ++ session ++ " AND " ++ runnable_eligibility_sql ++ ")",
+            "JOIN content c ON c.content_id=k.content_id WHERE m.session_ref=" ++ session ++ pending_prefix ++ " AND " ++ runnable_eligibility_sql ++ ")",
         "(SELECT coalesce(sum(c.byte_length),0) FROM session_revision r JOIN content c ON c.content_id=r.instructions_content_id " ++
             "WHERE r.session_ref=" ++ session ++ " AND r.revision>coalesce((SELECT max(e.source_revision) FROM conversation_entry e WHERE e.session_ref=" ++ session ++ "),1) " ++
             "AND r.instructions_updated=1)",
@@ -488,20 +523,268 @@ const open_turn_context = SelectedContext(runnableCandidateSql(queued_input_sql 
 const tool_continuation_context = SelectedContext(tool_continuation_selection.made_from.sql);
 
 const context_bytes = rsql.Read(.{
-    .sql = "SELECT " ++ uncoveredBytesSql("?1", "?2", "?3", "?4") ++ " AS uncovered_bytes",
+    .sql = "SELECT " ++ uncoveredBytesUsingSql("?1", "?2", "?3", "?4", null, null, null, "classify") ++ " AS uncovered_bytes",
     .Args = struct { session: []const u8, covered: u64, frontier: u64, results: u64 },
+    .Row = struct { uncovered_bytes: ?u64 },
+    .cardinality = .one,
+});
+pub const context_bytes_sql = context_bytes.sql;
+
+const context_compound_bytes = rsql.Read(.{
+    .sql = "SELECT " ++ uncoveredBytesSql("?1", "?2", "?3", "?4") ++ " AS uncovered_bytes",
+    .Args = context_bytes.Args,
     .Row = struct { uncovered_bytes: u64 },
     .cardinality = .one,
 });
+pub const context_compound_bytes_sql = context_compound_bytes.sql;
+
+const pressure_pending_bound = rsql.Read(.{
+    .sql = "SELECT coalesce(max(m.admission_id),0) AS cutoff FROM message_admission m @index(message_admission_session_pending) WHERE m.session_ref=?1 AND m.turn_id IS NULL",
+    .Args = struct { session: []const u8 },
+    .Row = struct { cutoff: u64 },
+    .cardinality = .one,
+});
+
+const PressurePart = struct { position: u64, content_id: ?u64, form: ?u8, byte_length: ?u64, digest: ?[32]u8, eligible: bool };
+const pressure_pending = rsql.Read(.{
+    .sql = "SELECT m.admission_id AS position,c.content_id,c.form,c.byte_length,c.digest,(" ++ runnable_eligibility_sql ++ ") AS eligible " ++
+        "FROM message_admission m @index(message_admission_session_pending) LEFT JOIN content c ON c.content_id=m.content_id " ++
+        "WHERE m.session_ref=?1 AND m.turn_id IS NULL AND m.admission_id>?2 AND m.admission_id<=?3 ORDER BY m.admission_id LIMIT 16",
+    .Args = struct { session: []const u8, after: u64, cutoff: u64 },
+    .Row = PressurePart,
+    .cardinality = .{ .at_most = 16 },
+});
+const pressure_history = rsql.Read(.{
+    .sql = "SELECT e.session_position AS position,c.content_id,c.form,c.byte_length,c.digest,(e.entry_kind=1 AND e.source_admission_id<=?3) AS eligible " ++
+        "FROM conversation_entry e @index(conversation_entry_history) LEFT JOIN content c ON c.content_id=e.content_id " ++
+        "WHERE e.session_ref=?1 AND e.session_position>?2 AND e.session_position<?4 ORDER BY e.session_position LIMIT 16",
+    .Args = struct { session: []const u8, after: u64, cutoff: u64, boundary: u64 },
+    .Row = PressurePart,
+    .cardinality = .{ .at_most = 16 },
+});
+
+const pressure_results = rsql.Read(.{
+    .sql = "SELECT a.acceptance_position AS position,c.content_id,c.form,c.byte_length,c.digest,1 AS eligible " ++
+        "FROM action_operation a @index(action_operation_acceptance) JOIN content c ON c.content_id=a.resolution_content_id " ++
+        "WHERE a.session_ref=?1 AND a.acceptance_position>?2 AND a.acceptance_position<?3 AND a.background_position IS NULL UNION ALL " ++
+        "SELECT a.background_position,c.content_id,c.form,c.byte_length,c.digest,1 " ++
+        "FROM action_operation a @index(action_operation_background) JOIN content c ON c.content_id=a.background_content_id " ++
+        "WHERE a.session_ref=?1 AND a.background_position>?2 AND a.background_position<?3 ORDER BY 1 LIMIT 16",
+    .Args = struct { session: []const u8, after: u64, boundary: u64 },
+    .Row = PressurePart,
+    .cardinality = .{ .at_most = 16 },
+    .compound = true,
+});
+
+pub const PartsPressure = struct {
+    manifest_bytes: u64 = 0,
+    text_bytes: u64 = 0,
+    unknown_images: u64 = 0,
+
+    pub const Coverage = context_bytes.Args;
+
+    /// Caller-owned continuation; neither an Entry nor an Access survives a
+    /// step. The canonical Cursor certifies each manifest using bounded reads.
+    pub const Read = struct {
+        session: @import("../../change_ring.zig").Id = undefined,
+        covered: u64 = 0,
+        frontier: u64 = 0,
+        results: u64 = 0,
+        cutoff: u64 = 0,
+        pending_cutoff: ?u64 = null,
+        bound: pressure_pending_bound.Result = undefined,
+        boundary: u64 = std.math.maxInt(i64),
+        after: u64 = 0,
+        rows: pressure_pending.Result = undefined,
+        stream: enum { history, results, pending } = .history,
+        row: usize = 0,
+        loaded: bool = false,
+        cursor: ?@import("../../os/pages.zig").Mapped(content_parts.Cursor) = null,
+        total: PartsPressure = .{},
+        ready: bool = false,
+
+        pub fn init(self: *Read, session: []const u8, covered: u64, frontier: u64, results: u64, cutoff: u64) void {
+            std.debug.assert(session.len == self.session.len);
+            @memcpy(&self.session, session);
+            self.covered = covered;
+            self.frontier = frontier;
+            self.results = results;
+            self.cutoff = cutoff;
+            self.pending_cutoff = if (cutoff == std.math.maxInt(i64)) null else cutoff;
+            self.boundary = std.math.maxInt(i64);
+            self.after = covered;
+            self.stream = .history;
+            self.row = 0;
+            self.loaded = false;
+            self.cursor = null;
+            self.total = .{};
+            self.ready = false;
+        }
+
+        pub fn deinit(self: *Read) void {
+            if (self.cursor) |mapped| mapped.unmap();
+            self.cursor = null;
+        }
+
+        pub fn coverage(self: *const Read) Coverage {
+            return .{ .session = &self.session, .covered = self.covered, .frontier = self.frontier, .results = self.results };
+        }
+
+        pub fn step(self: *Read, a: anytype) !bool {
+            if (self.ready) return true;
+            if (self.pending_cutoff == null) {
+                a.read(pressure_pending_bound, .{ .session = &self.session }, &self.bound);
+                try store_access.runAs(a, error.CorruptStore);
+                self.pending_cutoff = self.bound.cutoff;
+                return false;
+            }
+            if (!self.loaded) {
+                switch (self.stream) {
+                    .history => a.read(pressure_history, .{ .session = &self.session, .after = self.after, .cutoff = self.cutoff, .boundary = self.boundary }, &self.rows),
+                    .results => a.read(pressure_results, .{ .session = &self.session, .after = self.after, .boundary = self.boundary }, &self.rows),
+                    .pending => a.read(pressure_pending, .{ .session = &self.session, .after = self.after, .cutoff = self.pending_cutoff.? }, &self.rows),
+                }
+                try store_access.runAs(a, error.CorruptStore);
+                self.row = 0;
+                self.loaded = true;
+                if (self.rows.len == 0) self.finishPage();
+                return self.ready;
+            }
+            const row = &self.rows.items[self.row];
+            if (!row.eligible or row.form == 0) {
+                self.finishRow(row.position);
+                return self.ready;
+            }
+            if (self.cursor == null) {
+                const value = try content_domain.Value.of(row.content_id orelse return error.CorruptStore, row.form orelse return error.CorruptStore, row.byte_length orelse return error.CorruptStore, row.digest orelse return error.CorruptStore);
+                const mapped = try @import("../../os/pages.zig").Mapped(content_parts.Cursor).map();
+                mapped.value.init(value);
+                self.cursor = mapped;
+            }
+            const cursor = self.cursor.?.value;
+            switch (try cursor.step(a)) {
+                .raw => {},
+                .rows => try store_access.runAs(a, error.CorruptStore),
+                .part, .done => unreachable, // Stop after complete certification.
+            }
+            if (cursor.certified) {
+                self.total.manifest_bytes +|= row.byte_length.?;
+                self.total.text_bytes +|= cursor.weight.text_bytes;
+                self.total.unknown_images +|= cursor.weight.unknown_images;
+                self.deinit();
+                self.finishRow(row.position);
+            }
+            return self.ready;
+        }
+
+        fn finishRow(self: *Read, admission: u64) void {
+            self.after = admission;
+            self.row += 1;
+            if (self.row == self.rows.len) self.finishPage();
+        }
+
+        fn finishPage(self: *Read) void {
+            self.loaded = false;
+            if (self.rows.len < 16) switch (self.stream) {
+                .history => {
+                    self.stream = .results;
+                    self.after = @max(self.covered, self.frontier);
+                },
+                .results => {
+                    self.stream = .pending;
+                    self.after = 0;
+                },
+                .pending => self.ready = true,
+            };
+        }
+    };
+};
+
+pub const AdmissionPreparation = struct {
+    kind: ?ModelAdmissionKind = null,
+    phase: enum { idle, candidate, weighing, ready } = .idle,
+    read: PartsPressure.Read = undefined,
+    selection: Selection = undefined,
+    revision: u64 = 0,
+    latest_operation: ?u64 = null,
+    latest_active: bool = false,
+    resolution: ?Bounded(outcome_code.max_bytes) = null,
+    floor: ?@import("../../os/pages.zig").Mapped(history_floor_domain.Preparation) = null,
+    floor_operation: u64 = 0,
+
+    pub fn init(self: *AdmissionPreparation) void {
+        self.kind = null;
+        self.phase = .idle;
+        self.floor = null;
+        self.floor_operation = 0;
+    }
+
+    pub fn deinit(self: *AdmissionPreparation) void {
+        if (self.phase != .idle) self.read.deinit();
+        if (self.floor) |mapped| {
+            mapped.value.deinit();
+            mapped.unmap();
+        }
+        self.init();
+    }
+
+    pub fn pending(self: *const AdmissionPreparation) bool {
+        return self.phase == .weighing or self.phase == .ready or self.floor != null;
+    }
+
+    pub fn pendingReady(self: *const AdmissionPreparation) bool {
+        return self.pending() and self.phase != .weighing and (if (self.floor) |mapped| mapped.value.ready else true);
+    }
+
+    fn capture(self: *AdmissionPreparation, kind: ModelAdmissionKind, selection: *const Selection, facts: *const SelectedRow, coverage: PartsPressure.Coverage) void {
+        self.deinit();
+        self.kind = kind;
+        self.selection = selection.*;
+        self.revision = facts.revision.get();
+        self.latest_operation = if (facts.latest_operation) |op| op.get() else null;
+        self.latest_active = facts.latest_active;
+        self.resolution = facts.latest_resolution;
+        self.read.init(&selection.session.ref, coverage.covered, coverage.frontier, coverage.results, selection.cutoff.get());
+        self.read.boundary = facts.session.next_position.get();
+        self.phase = .weighing;
+    }
+
+    fn matches(self: *const AdmissionPreparation, kind: ModelAdmissionKind, selection: *const Selection, facts: *const SelectedRow, coverage: PartsPressure.Coverage) bool {
+        if (self.phase == .idle or self.kind != kind) return false;
+        if (!std.mem.eql(u8, &self.read.session, &selection.session.ref) or self.revision != facts.revision.get() or
+            self.selection.first_admission.get() != selection.first_admission.get() or
+            self.selection.cutoff.get() > selection.cutoff.get() or self.latest_active != facts.latest_active or
+            self.latest_operation != (if (facts.latest_operation) |op| op.get() else null) or
+            self.read.covered != coverage.covered or self.read.frontier != coverage.frontier or self.read.results != coverage.results) return false;
+        if (self.resolution) |*old| {
+            const current = if (facts.latest_resolution) |*value| value else return false;
+            if (!std.mem.eql(u8, old.slice(), current.slice())) return false;
+        } else if (facts.latest_resolution != null) return false;
+        return true;
+    }
+};
 
 pub const Pressure = enum { weighed, over };
 
 const within_pressure = rsql.Write(.{
     .sql = "UPDATE session SET next_position=next_position WHERE session_ref=@session(?1) AND " ++
-        uncoveredBytesSql("session.session_ref", "?2", "?3", "?4") ++ "<?5",
+        // A compound produces NULL in the existing aggregate, so this guard
+        // requests canonical classification without estimating image tokens.
+        uncoveredBytesUsingSql("session.session_ref", "?2", "?3", "?4", null, null, null, "?5") ++ "<?5",
     .Args = struct { session: rsql.SessionHead, covered: u64, frontier: u64, results: u64, limit: u64 },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CompactionDue } },
 });
+
+const within_compound_pressure = rsql.Write(.{
+    .sql = "UPDATE session SET next_position=next_position WHERE session_ref=@session(?1) AND " ++
+        // Correct the shallow history term so the deeply nested eligibility
+        // branch keeps the same expression depth as the ordinary guard.
+        uncoveredBytesUsingSql("session.session_ref", "?2", "?3", "?4", "?8", "(" ++ historyBytesSql("session.session_ref", "?2", "coalesce(sum(c.byte_length),0)") ++ "-?6+?7)", null, null) ++ "<?5",
+    .Args = struct { session: rsql.SessionHead, covered: u64, frontier: u64, results: u64, limit: u64, manifest_bytes: u64, text_bytes: u64, cutoff: u64 },
+    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CompactionDue } },
+});
+
+const PressureGuard = union(enum) { plain: within_pressure.Args, parts: within_compound_pressure.Args };
 
 pub const within_pressure_sql = within_pressure.sql;
 
@@ -672,8 +955,10 @@ pub const AdmitModel = struct {
     pub const commit: transition.Commit = .transaction;
     pub const begin: ?rounds.At = .floor_facts;
     pub const Input = struct {
+        entry: *const store_core.Entry,
         kind: ModelAdmissionKind,
         pressure: Pressure,
+        preparation: *AdmissionPreparation,
         faults: Faults,
         start: ?Starting,
         scratch: *Scratch,
@@ -718,7 +1003,7 @@ pub const AdmitModel = struct {
         loaded_tool_set_id: ?u64,
         offer_stale: bool,
         compaction: bool,
-        weighed: ?within_pressure.Args,
+        weighed: ?PressureGuard,
     };
 
     pub fn step(t: *AdmitModel, r: *transition.Round(AdmitModel), ran: ?rounds.At) !transition.Next(AdmitModel) {
@@ -732,7 +1017,7 @@ pub const AdmitModel = struct {
             .select => return t.decide(r),
             .floor_facts, .floor_page => {
                 const search = &t.input.scratch.read.floor;
-                if (search.next(r)) return .{ .round = .floor_page };
+                if (try search.next(r)) return .{ .round = .floor_page };
                 const room = search.room() orelse return error.CorruptStore;
                 t.room = room.choice;
                 t.floor = room.choice.floor;
@@ -759,7 +1044,10 @@ pub const AdmitModel = struct {
     }
 
     fn decide(t: *AdmitModel, r: *transition.Round(AdmitModel)) !transition.Next(AdmitModel) {
-        const selection = &(t.found orelse return .{ .done = null });
+        const selection = if (t.found) |*value| value else {
+            t.input.preparation.deinit();
+            return .{ .done = null };
+        };
         if (selection.cutoff.get() < selection.first_admission.get()) return error.CorruptStore;
         const session_ref: []const u8 = &selection.session.ref;
         const first_admission = selection.first_admission.get();
@@ -783,17 +1071,38 @@ pub const AdmitModel = struct {
             compaction.previous = previousTurn(facts.latest_compaction orelse return error.CorruptStore, resolution, facts.latest_active, latest_first.get(), first_admission, output_format.OutputItemKind.compaction.replayableTo((facts.latest_model orelse return error.CorruptStore).slice(), facts.model.slice(), .selected_base));
         }
         var purpose = turn_policy.nextPurpose(compaction);
-        var weighed: ?within_pressure.Args = null;
+        var weighed: ?PressureGuard = null;
         if (try takeContext(&compaction, facts, facts.model.slice(), session_ref)) |coverage| {
             purpose = turn_policy.nextPurpose(compaction);
             if (purpose != .compaction) if (turn_policy.compactingBytes(compaction)) |limit| switch (t.input.pressure) {
                 .over => purpose = .compaction,
-                .weighed => weighed = .{
-                    .session = facts.session,
-                    .covered = coverage.covered,
-                    .frontier = coverage.frontier,
-                    .results = coverage.results,
-                    .limit = @min(limit, std.math.maxInt(i64)),
+                .weighed => {
+                    const prepared = t.input.preparation;
+                    if (prepared.matches(t.input.kind, selection, facts, coverage) and prepared.phase == .ready) {
+                        selection.cutoff = prepared.selection.cutoff;
+                        selection.selected = prepared.selection.selected;
+                        selection.skills = prepared.selection.skills;
+                        weighed = .{ .parts = .{
+                            .session = facts.session,
+                            .covered = coverage.covered,
+                            .frontier = coverage.frontier,
+                            .results = coverage.results,
+                            .limit = @min(limit, std.math.maxInt(i64)),
+                            .manifest_bytes = prepared.read.total.manifest_bytes,
+                            .text_bytes = prepared.read.total.text_bytes,
+                            .cutoff = selection.cutoff.get(),
+                        } };
+                    } else {
+                        prepared.capture(t.input.kind, selection, facts, coverage);
+                        prepared.phase = .candidate;
+                        weighed = .{ .plain = .{
+                            .session = facts.session,
+                            .covered = coverage.covered,
+                            .frontier = coverage.frontier,
+                            .results = coverage.results,
+                            .limit = @min(limit, std.math.maxInt(i64)),
+                        } };
+                    }
                 },
             };
         }
@@ -816,7 +1125,9 @@ pub const AdmitModel = struct {
             .weighed = weighed,
         };
         if (deepens) {
-            t.input.scratch.read = .{ .floor = .{ .operation = latest } };
+            t.input.preparation.floor_operation = latest;
+            const prepared_floor = if (t.input.preparation.floor) |mapped| if (mapped.value.ready) &mapped.value.prepared.? else null else null;
+            t.input.scratch.read = .{ .floor = .{ .operation = latest, .prepared = prepared_floor } };
             t.input.scratch.read.floor.start(r);
             return .{ .round = .floor_facts };
         }
@@ -844,7 +1155,10 @@ pub const AdmitModel = struct {
         const admitting = &t.admitting;
         const first_admission = selection.first_admission.get();
         const selected: u64 = if (admitting.compaction) 0 else selection.selected;
-        if (admitting.weighed) |args| r.write(within_pressure, args);
+        if (admitting.weighed) |guard| switch (guard) {
+            .plain => |args| r.write(within_pressure, args),
+            .parts => |args| r.write(within_compound_pressure, args),
+        };
         const turn_id = if (selection.turn_id) |existing| existing.get() else try r.identity(.turn_id);
         const operation_id = try r.identity(.operation_id);
         const cutoff = selection.cutoff.get();

@@ -43,7 +43,7 @@ The two lines at the bottom of a chat hold the live area: the input, and any pan
 Panels opened from the input appear between those two lines, on the plain background, with no box and no tint.
 So a glance answers two questions: what did I say (tint), and where do I type or choose (between the lines).
 
-Tint never touches text: leave at least two columns before it and at least one, preferably two, after it. Sent-message bands leave half a row above and below with half blocks; ASCII terminals or terminals unable to colour the blocks use a full blank tinted row instead. List rows keep only the sideways inset so neighbours stay together. Plain rows keep the same inset, so selection and hover never move text.
+Tint never touches text: leave at least two columns before it and at least one, preferably two, after it. Sent-message bands keep one blank tinted row above and below. List rows keep only the sideways inset so neighbours stay together. Plain rows keep the same inset, so selection and hover never move text.
 
 ## 6. One edge, one grammar
 

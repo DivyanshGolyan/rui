@@ -203,7 +203,7 @@ fn rowPosition(self: *const Self, first: viewport.Position, row: u16) ?viewport.
 }
 
 fn rowAt(self: *const Self, cells: []const vaxis.Cell, first: viewport.Position, index: u16) selecting.Row {
-    return .{ .document = self.document, .cells = cells, .line = if (self.rowPosition(first, index)) |position| position.offset else null };
+    return .{ .document = self.document, .cells = cells, .line = if (self.rowPosition(first, index)) |position| self.document.selectionLine(self.layout(), position) else null };
 }
 
 fn spotAt(self: *const Self, gpa: std.mem.Allocator, at: Point) !Spot {
@@ -281,11 +281,9 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         var rows = self.document.rowsFrom(self.layout(), self.first);
         for (0..height) |index| {
             const cells = surface.buffer[index * width ..][0..width];
-            const line = if (rows.next()) |position| position.offset else null;
+            const line = if (rows.next()) |position| self.document.selectionLine(self.layout(), position) else null;
             (selecting.Row{ .document = self.document, .cells = cells, .line = line }).covered(range, columns);
-            for (cells, columns) |*cell, selected| {
-                if (selected) cell.style.reverse = true;
-            }
+            selecting.highlight(cells, columns);
         }
     };
     return surface;

@@ -354,6 +354,21 @@ export class Session {
 		return answer.action_selection;
 	}
 
+	/** Selects an owned Action for stop. Reuse the key to recover a lost reply. */
+	async stopAction(action: string, options?: WriteOptions): Promise<string | null> {
+		const idempotencyKey = key(options);
+		const reply = parse<Schemas["ActionStopReply"]>(await this.#link.exchange(
+			"/v1/control/action-stop",
+			(store) => JSON.stringify({
+				version: WIRE_VERSION, kind: "action_stop", store,
+				key: idempotencyKey, session: this.id, action,
+			} satisfies Schemas["ActionStopRequest"]),
+		));
+		const answer = accepted(reply.answer);
+		this.#link.activity?.notify(this.id);
+		return answer.resolution_position;
+	}
+
 	/** Reads an owned Action. Acceptance and attempted state do not assert a running process. */
 	async readAction(action: string, offset = "0"): Promise<ActionStatus> {
 		return parse<ActionStatus>(await this.#link.exchange("/v1/read-action", (store) => JSON.stringify({

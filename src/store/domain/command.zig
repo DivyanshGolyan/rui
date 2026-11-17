@@ -46,8 +46,10 @@ const MessageObservation = reads_domain.MessageObservation;
 const session_work = @import("../../session_work.zig");
 const TurnOutcome = turn_domain.TurnOutcome;
 
-pub const session_stop_cutoff_sql =
-    "SELECT admission_cutoff FROM session_stop WHERE session_ref=?1 ORDER BY admission_cutoff DESC LIMIT 1";
+pub fn sessionStopCutoffSql(comptime session: []const u8) []const u8 {
+    return "SELECT admission_cutoff FROM session_stop WHERE session_ref=" ++ session ++ " ORDER BY admission_cutoff DESC LIMIT 1";
+}
+pub const session_stop_cutoff_sql = sessionStopCutoffSql("?1");
 pub const pending_message_count_sql =
     "SELECT count(*) AS pending FROM message_admission WHERE session_ref=?1 AND turn_id IS NULL AND admission_id>?2";
 
@@ -1845,17 +1847,29 @@ fn validId(id: u64) bool {
     return id != 0 and id <= std.math.maxInt(i64);
 }
 
+pub fn unresolvedModelOperationSql(comptime operation: []const u8) []const u8 {
+    return operation ++ ".resolution_code IS NULL";
+}
+
+pub fn currentModelOperationSql(comptime operation: []const u8, comptime turn: []const u8) []const u8 {
+    return turn ++ ".turn_id=" ++ operation ++ ".turn_id AND " ++ turn ++ ".session_ref=" ++ operation ++ ".session_ref AND " ++ turn ++ ".operation_id=" ++ operation ++ ".operation_id AND " ++ turn ++ ".outcome_code IS NULL";
+}
+
 const interruption_operation = rsql.Read(.{
-    .sql = "SELECT o.turn_id,o.session_ref,o.resolution_code IS NULL AS unresolved,EXISTS(SELECT 1 FROM turn t WHERE t.turn_id=o.turn_id " ++
-        "AND t.session_ref=o.session_ref AND t.operation_id=o.operation_id AND t.outcome_code IS NULL) AS current FROM model_operation o WHERE o.operation_id=?1",
+    .sql = "SELECT o.turn_id,o.session_ref," ++ unresolvedModelOperationSql("o") ++ " AS unresolved,EXISTS(SELECT 1 FROM turn t WHERE " ++
+        currentModelOperationSql("o", "t") ++ ") AS current FROM model_operation o WHERE o.operation_id=?1",
     .Args = struct { operation_id: u64 },
     .Row = struct { turn_id: rsql.Positive, session_ref: Bounded(session_id.max_reference_bytes), unresolved: bool, current: bool },
     .cardinality = .optional,
 });
 
+pub fn pendingMessageAfterStopSql(comptime session: []const u8) []const u8 {
+    return "EXISTS(SELECT 1 FROM message_admission WHERE session_ref=" ++ session ++ " AND turn_id IS NULL AND admission_id>coalesce((" ++
+        sessionStopCutoffSql(session) ++ "),0))";
+}
+
 const applicable_pending = rsql.Read(.{
-    .sql = "SELECT EXISTS(SELECT 1 FROM message_admission WHERE session_ref=?1 AND turn_id IS NULL AND admission_id>coalesce((" ++
-        session_stop_cutoff_sql ++ "),0)) AS pending",
+    .sql = "SELECT " ++ pendingMessageAfterStopSql("?1") ++ " AS pending",
     .Args = struct { session: []const u8 },
     .Row = struct { pending: bool },
     .cardinality = .one,
@@ -1990,13 +2004,14 @@ pub const InterruptModel = struct {
 };
 
 const decision_action = rsql.Read(.{
-    .sql = "SELECT s.session_ref,s.workspace_key,s.next_position,a.authorized,a.background_position IS NOT NULL AS background," ++ action_domain.actionStoppedSql("a", "operation") ++ " AS stopped,a.resolution_code IS NULL AS unresolved,(t.outcome_code IS NULL OR a.background_position IS NOT NULL) AS turn_open,t.turn_id," ++
+    .sql = "SELECT s.session_ref,s.workspace_key,s.next_position,a.background_position IS NOT NULL AS background," ++ action_domain.actionStoppedSql("a", "operation") ++ " AS stopped,t.turn_id," ++
         "EXISTS(SELECT 1 FROM session_forward f WHERE f.target_ref=?2 AND f.kind=1 AND f.source_id=a.action_id AND f.position IS NOT NULL) AS forwarded," ++
-        action_domain.messageDeclinesApprovalSql("a") ++ " AS message_decline " ++
+        action_domain.permissionDecisionEligibleSql("a", "t", false) ++ " AS external_eligible," ++
+        action_domain.permissionDecisionEligibleSql("a", "t", true) ++ " AS automatic_eligible " ++
         "FROM action_operation a JOIN session s ON s.session_ref=a.session_ref " ++
         "JOIN model_operation operation ON operation.operation_id=a.parent_operation_id JOIN turn t ON t.turn_id=operation.turn_id WHERE a.action_id=?1",
     .Args = struct { action_id: u64, target: []const u8 },
-    .Row = struct { session: rsql.SessionHead, authorized: bool, background: bool, stopped: bool, unresolved: bool, turn_open: bool, turn_id: rsql.Positive, forwarded: bool, message_decline: bool },
+    .Row = struct { session: rsql.SessionHead, background: bool, stopped: bool, turn_id: rsql.Positive, forwarded: bool, external_eligible: bool, automatic_eligible: bool },
     .cardinality = .optional,
 });
 
@@ -2037,7 +2052,7 @@ fn decisionRejection(
     if (target == null) return .unknown_session;
     const found = action orelse return .unknown_action;
     if (!std.mem.eql(u8, &found.session.ref, command.session.slice()) and !found.forwarded) return .target_mismatch;
-    if (found.authorized or !found.unresolved or !found.turn_open or (found.message_decline and !automatic)) return .action_not_pending;
+    if (!(if (automatic) found.automatic_eligible else found.external_eligible)) return .action_not_pending;
     return null;
 }
 
@@ -2169,6 +2184,7 @@ fn kindCode(kind: cli_value.CommandKind) u8 {
         .session_archive => 6,
         .session_pin => 7,
         .action_background => 8,
+        .action_stop => 9,
     };
 }
 
@@ -2390,6 +2406,9 @@ pub fn observeCommand(a: anytype, key: []const u8, observation: *CommandObservat
             a.read(interruption_target, .{ .key = key }, &row);
             try a.run();
             observation.kind = .{ .model_interruption = try modelInterruptionTarget(&row) };
+        },
+        .action_stop => {
+            observation.kind = .{ .action_stop = try @import("action_stop.zig").readSaved(a, key) };
         },
         .action_background => {
             observation.kind = .{ .action_background = try @import("action_control.zig").readSaved(a, key) };

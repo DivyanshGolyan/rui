@@ -1652,6 +1652,7 @@ pub const CommandObservation = struct {
     permission_target: ?struct { action: u64, decision: protocol.PermissionDecision } = null,
     action_target: ?u64 = null,
     action_selection: ?@import("action_control.zig").Selection = null,
+    resolution_position: ?u64 = null,
 
     pub const ContentReference = mutation_answer.ContentReference;
 
@@ -1733,6 +1734,10 @@ pub const CommandObservation = struct {
         }
         if (self.permission_target) |target| try writer.print(",\"permission_target\":{{\"action\":\"{d}\",\"decision\":\"{s}\"}}", .{ target.action, @tagName(target.decision) });
         if (self.action_target) |action| try writer.print(",\"action_target\":{{\"action\":\"{d}\"}}", .{action});
+        if (self.kind == .action_stop and self.status == .accepted) {
+            try writer.writeAll(",\"resolution_position\":");
+            if (self.resolution_position) |p| try writer.print("\"{d}\"", .{p}) else try writer.writeAll("null");
+        }
         if (self.action_selection) |selection| try writer.print(",\"action_selection\":{{\"kind\":\"{s}\",\"position\":\"{d}\"}}", .{ @tagName(selection.kind), selection.position });
         try writer.writeByte('}');
     }
@@ -1836,6 +1841,7 @@ pub const CommandObservation = struct {
         if (comptime @hasField(Facts, "completion")) observed.completion = std.meta.stringToEnum(protocol.SessionStopCompletion, facts.completion.status.slice()) orelse return error.InvalidObservation;
         if (comptime @hasField(Facts, "interruption_target")) observed.interruption_target = .{ .session = facts.interruption_target.session.value, .turn = try decimalId(facts.interruption_target.turn, true), .operation = try decimalId(facts.interruption_target.operation, true) };
         if (comptime @hasField(Facts, "permission_target")) observed.permission_target = .{ .action = try decimalId(facts.permission_target.action, true), .decision = std.meta.stringToEnum(protocol.PermissionDecision, facts.permission_target.decision.slice()) orelse return error.InvalidObservation };
+        if (comptime @hasField(Facts, "resolution_position")) observed.resolution_position = if (facts.resolution_position) |p| try decimalId(p, false) else null;
         if (comptime @hasField(Facts, "action_target")) observed.action_target = try decimalId(facts.action_target.action, true);
         if (comptime @hasField(Facts, "action_selection")) observed.action_selection = .{ .kind = std.meta.stringToEnum(@FieldType(@import("action_control.zig").Selection, "kind"), facts.action_selection.kind.slice()) orelse return error.InvalidObservation, .position = try decimalId(facts.action_selection.position, false) };
         try observed.validate();
@@ -1883,7 +1889,8 @@ pub const CommandObservation = struct {
             switch (state) {
                 .queued => if (self.binding != null) return error.InvalidObservation,
                 .processing => if (self.binding == null) return error.InvalidObservation,
-                .waiting_for_permission => if (self.work.?.first_action == null) return error.InvalidObservation,
+                // A newer Message hides the decision while automatic denial is pending.
+                .waiting_for_permission => {},
                 .completed, .failed, .cancelled, .rejected => return error.InvalidObservation,
             }
         }
@@ -3280,6 +3287,8 @@ fn observationFieldSample() !CommandObservation {
     sample.permission_target = .{ .action = 29, .decision = .allow_once };
     sample.action_target = 29;
     sample.action_selection = .{ .kind = .background, .position = 31 };
+    sample.kind = .action_stop;
+    sample.resolution_position = 31;
     return sample;
 }
 
@@ -3336,6 +3345,8 @@ test "keyed observation validates every operation shape and binding" {
         .{ "model_interruption", ",\"interruption_target\":{\"session\":\"k7m2qx\",\"turn\":\"3\",\"operation\":\"7\"}", ",\"interruption_target\":{\"session\":\"k7m2qx\",\"turn\":\"0\",\"operation\":\"0\"}" },
         .{ "permission_decision", ",\"permission_target\":{\"action\":\"29\",\"decision\":\"allow_once\"}", ",\"permission_target\":{\"action\":\"0\",\"decision\":\"deny\"}" },
         .{ "action_background", ",\"action_target\":{\"action\":\"29\"},\"action_selection\":{\"kind\":\"background\",\"position\":\"31\"}", ",\"action_target\":{\"action\":\"29\"}" },
+        .{ "action_stop", ",\"action_target\":{\"action\":\"29\"},\"resolution_position\":null", ",\"action_target\":{\"action\":\"29\"}" },
+        .{ "action_stop", ",\"action_target\":{\"action\":\"29\"},\"resolution_position\":\"31\"", ",\"action_target\":{\"action\":\"29\"}" },
     }) |case| {
         const accepted = prefix ++ "\"kind\":\"" ++ case[0] ++ "\",\"status\":\"accepted\"" ++ case[1] ++ "}}";
         const observed = try CommandObservation.parse(.{ .status = 200, .body = accepted }, "k");
@@ -3442,10 +3453,24 @@ test "keyed observation rejects malformed consequential fields before outcome in
     try std.testing.expectError(error.ResponseTooLarge, CommandObservation.parse(.{ .status = 200, .body = &oversized }, "k"));
 }
 
+test "keyed observation retains superseded approval work without a decision" {
+    inline for (.{ "", testing_observation_binding }) |binding| {
+        const facts = testing_observation_message ++ ",\"state\":\"waiting_for_permission\"" ++ testing_observation_input ++ testing_observation_queue ++ binding ++
+            ",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"1762329010\"},\"first_action\":null,\"attention\":{\"kind\":\"approval\",\"turn\":\"37\",\"step\":\"0\"},\"group\":\"needs_you\",\"actions\":{\"stop\":true,\"interrupt\":null,\"decide\":null}}}";
+        const observed = try CommandObservation.parse(.{ .status = 200, .body = testing_observation_prefix ++ facts ++ "}" }, "k");
+        try std.testing.expectEqual(.waiting_for_permission, observed.state.?);
+        try std.testing.expect(observed.work.?.first_action == null and observed.work.?.actions.decide == null);
+        try std.testing.expectEqual(.needs_you, observed.work.?.group);
+        var output: [protocol.command_observation_reply.max_bytes]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&output);
+        try observed.writeJson(&writer);
+        try std.testing.expectEqualStrings(facts, writer.buffered());
+    }
+}
+
 test "keyed observation rejects contradictory permission work variants" {
     inline for (.{
         .{ "waiting_for_permission", "", ",\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"1762329010\"},\"first_action\":\"57\",\"attention\":null,\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null}}" },
-        .{ "waiting_for_permission", "", ",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"1762329010\"},\"first_action\":null,\"attention\":null,\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null}}" },
         .{ "queued", "", ",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"1762329010\"},\"first_action\":\"57\",\"attention\":null,\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null}}" },
         .{ "processing", testing_observation_binding, ",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"1762329010\"},\"first_action\":\"57\",\"attention\":null,\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null}}" },
     }) |case| {

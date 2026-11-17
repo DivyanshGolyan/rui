@@ -522,8 +522,8 @@ test "list rows share chat heading marks except unmarked finished Sessions" {
         defer arena.deinit();
         for ([_]bool{ true, false }) |unicode_script| {
             const caps: overview.Caps = .{ .unicode = unicode_script };
-            try std.testing.expect(!overview.markSpins(&state, .{ .row = 0 }, caps));
-            const row = try overview.rowSegments(arena.allocator(), &state, 0, 80, caps, 4);
+            try std.testing.expect(!overview.Lines.spins(&state, 0, caps));
+            const row = (try overview.Lines.at(arena.allocator(), &state, 0, 80, caps, 4)).?.segments;
             try std.testing.expectEqualStrings(" ", row[0].text);
             const list_mark = if (case.state == .finished) marks.marks.get(.none) else shared;
             try std.testing.expectEqualStrings(if (unicode_script) list_mark.unicode else list_mark.ascii, row[1].text);
