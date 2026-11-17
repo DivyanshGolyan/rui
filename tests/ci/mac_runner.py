@@ -143,6 +143,8 @@ def main():
         pass
     output = f"runs_on={json.dumps(runs_on)}\nself_hosted={str(isinstance(runs_on, list)).lower()}\n"
     print(output, end="")
+    # The step summary is easy to miss; keep the reason in the job log too.
+    print(f"reason: {reason}")
     if os.environ.get("GITHUB_OUTPUT"):
         with open(os.environ["GITHUB_OUTPUT"], "a") as stream:
             stream.write(output)
