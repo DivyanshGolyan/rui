@@ -1546,8 +1546,11 @@ test "creation image defaults and parent authority match receipts on replay" {
     const product = @import("../../product_defaults.zig");
     const can_read_images = @import("../../os/read_image_file.zig").available;
     try store_testing.forEachEngine(struct {
+        const Loaded = enum { omitted, reachable, missing_discovery };
         fn run(case: *store_testing.Case) !void {
-            for ([_]bool{ false, true }) |as_message| for ([_]bool{ false, true }) |with_parent| for ([_]bool{ false, true }) |images| for ([_]bool{ false, true }) |explicit| for ([_]bool{ false, true }) |explicit_loaded| {
+            for ([_]bool{ false, true }) |as_message| for ([_]bool{ false, true }) |with_parent| for ([_]bool{ false, true }) |images| for ([_]bool{ false, true }) |explicit| for (std.enums.values(Loaded)) |loaded| {
+                var stage: []const u8 = "open";
+                errdefer std.debug.print("image-default case: message={} parent={} images={} explicit={} loaded={s} stage={s}\n", .{ as_message, with_parent, images, explicit, @tagName(loaded), stage });
                 var tmp = std.testing.tmpDir(.{});
                 defer tmp.cleanup();
                 var storage: Store = undefined;
@@ -1557,13 +1560,14 @@ test "creation image defaults and parent authority match receipts on replay" {
                 const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
                 var create = try completeConfiguration("image-default-create", "", workspace, if (images) "unlisted-model" else "gpt-3.5-turbo");
                 create.configuration.tools = if (explicit) try .of(&.{"bash"}) else .{};
-                if (explicit_loaded) create.configuration.loaded_tools = try .of(&.{"bash"});
+                if (loaded != .omitted) create.configuration.loaded_tools = if (!explicit and loaded == .reachable) try .of(&.{ "bash", "find_tools" }) else try .of(&.{"bash"});
                 if (with_parent) {
                     var parent = try completeConfiguration("image-default-parent", "", workspace, "unlisted-model");
                     parent.configuration.tools = .{ .state = .value };
                     for (@import("../../tools.zig").built_in_tool_set.records) |record| {
                         if (!std.mem.eql(u8, record.name, "read_image")) try parent.configuration.tools.insert(record.name);
                     }
+                    stage = "parent creation";
                     const result = try storage.configure(&parent, .{});
                     try std.testing.expect(result == .accepted);
                     create.configuration.workspace.state = .omitted;
@@ -1577,13 +1581,16 @@ test "creation image defaults and parent authority match receipts on replay" {
                 defer message.removeTemporaryContent(std.testing.io) catch unreachable;
                 var fresh: @import("../../creation_receipt.zig").Configuration = undefined;
                 var replay: @import("../../creation_receipt.zig").Configuration = undefined;
-                const refused = with_parent and images and can_read_images and !explicit;
+                const parent_refused = with_parent and images and can_read_images and !explicit;
+                const unreachable_loaded = !explicit and loaded == .missing_discovery;
+                const refused = parent_refused or unreachable_loaded;
+                stage = "creation and replay";
                 if (as_message) {
                     const first = storage.submitMessageWithModelInto(&message, null, &fresh, .{});
                     const again = storage.submitMessageWithModelInto(&message, null, &replay, .{});
                     if (refused) {
                         try std.testing.expect(first == .rejected and again == .rejected);
-                        try std.testing.expectEqual(protocol.MessageRejection.tools_not_in_parent, first.rejected.code);
+                        try std.testing.expectEqual(if (parent_refused) protocol.MessageRejection.tools_not_in_parent else .loaded_tools_unreachable, first.rejected.code);
                         try std.testing.expect(again.rejected.replayed);
                         continue;
                     }
@@ -1595,7 +1602,7 @@ test "creation image defaults and parent authority match receipts on replay" {
                     const again = try storage.configureInto(&create, &replay, .{});
                     if (refused) {
                         try std.testing.expect(first == .rejected and again == .rejected);
-                        try std.testing.expectEqual(protocol.ConfigurationRejection.tools_not_in_parent, first.rejected.code);
+                        try std.testing.expectEqual(if (parent_refused) protocol.ConfigurationRejection.tools_not_in_parent else .loaded_tools_unreachable, first.rejected.code);
                         try std.testing.expect(again.rejected.replayed);
                         continue;
                     }
@@ -1603,9 +1610,10 @@ test "creation image defaults and parent authority match receipts on replay" {
                     try std.testing.expect(first.accepted.configuration == &fresh and again.accepted.configuration == &replay);
                     try std.testing.expectEqualStrings(first.accepted.session.slice(), again.accepted.session.slice());
                 }
+                stage = "receipt defaults";
                 const defaults = product.creationTools(images, can_read_images);
                 try std.testing.expectEqualStrings(if (explicit) "bash" else defaults.allowed, fresh.tools.slice());
-                try std.testing.expectEqualStrings(if (explicit or explicit_loaded) "bash" else defaults.loaded, fresh.loaded_tools.slice());
+                try std.testing.expectEqualStrings(if (explicit) "bash" else if (loaded == .reachable) "bash,find_tools" else defaults.loaded, fresh.loaded_tools.slice());
                 try expectCreationReceipt(fresh, replay);
             };
         }
