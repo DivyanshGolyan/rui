@@ -65,7 +65,7 @@ FIXTURES = {
     "dispatch-integration": ((I + "dispatch_integration.py",), (), ("src/model_adapter.zig", *MODEL)),
     "dispatch-debug-integration": ((I + "dispatch_integration.py",), (), ()),
     "read-image-integration": ((I + "read_image_integration.py",), (),
-                               ("src/server_read_image.zig", "src/read_image_file.zig", "src/input_media.zig")),
+                               ("src/server_read_image.zig", "src/os/read_image_file.zig", "src/input_media.zig")),
     "bash-integration": ((I + "bash_integration.py",), (), BASH),
     "bash-owner-integration": ((I + "bash_owner_integration.py",), (), BASH),
     "bash-lifecycle-integration": ((I + "bash_lifecycle_integration.py",), (), BASH),
