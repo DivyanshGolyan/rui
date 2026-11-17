@@ -276,20 +276,7 @@ jobs:
       - name: Run tests/ci, less self-checks whose inputs are unchanged
         env:
           SKIPS: ${{ needs.plan.outputs.policy_skips }}
-        run: |
-          python3 -B - <<'PY'
-          import json, os, sys, unittest
-          skips = json.loads(os.environ['SKIPS'])
-          print('Self-checks with unchanged inputs (select_tests.POLICY_SELF_CHECKS):', skips or 'none')
-          def kept(suite):
-              for test in suite:
-                  if isinstance(test, unittest.TestSuite):
-                      yield from kept(test)
-                  elif not test.id().startswith(tuple(unit + '.' for unit in skips)):
-                      yield test
-          suite = unittest.TestSuite(kept(unittest.defaultTestLoader.discover('tests/ci')))
-          sys.exit(not unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful())
-          PY
+        run: python3 -B tests/ci/policy_suite.py --skips "$SKIPS"
       - name: Reject undefined fixture names before native builds
         # ruff is pinned in tests/ci/requirements.txt, which the pre-push hook installs too.
         run: python3 -m ruff check --select F821 tests
