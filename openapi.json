@@ -3498,11 +3498,7 @@
         },
         "additionalProperties": false,
         "required": [
-          "model",
-          "effort",
-          "compactAt",
-          "tools",
-          "permissionMode"
+          "model"
         ]
       },
       "CallActivity": {

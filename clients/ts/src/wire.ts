@@ -867,16 +867,16 @@ export interface components {
         AgentSpec: {
             model: string;
             instructions?: string;
-            tools: string[];
+            tools?: string[];
             loadedTools?: string[];
             /** @enum {string} */
-            permissionMode: "ask" | "bypass";
+            permissionMode?: "ask" | "bypass";
             /** @description Optional JSON output schema object; null clears it. */
             outputSchema?: Record<string, never> | null;
-            compactAt: number | null;
+            compactAt?: number | null;
             outputReservation?: number | null;
             /** @enum {string|null} */
-            effort: null | "none" | "low" | "medium" | "high" | "xhigh" | "max";
+            effort?: null | "none" | "low" | "medium" | "high" | "xhigh" | "max";
             label?: string | null;
             preferences?: {
                 /** @enum {string} */

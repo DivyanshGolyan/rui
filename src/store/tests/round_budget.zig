@@ -848,11 +848,12 @@ test "creating Message with a receipt keeps the no-output creation rounds" {
             const baseline = meter.measured.get(.submitMessageWithModel).?;
             var receipt: @import("../../creation_receipt.zig").Configuration = undefined;
             try message.key.set("budget-message-with-receipt");
-            meter.start();
+            var receipt_meter: RoundMeter = .{ .storage = &storage };
+            receipt_meter.start();
             const with = storage.submitMessageWithModelInto(&message, null, &receipt, .{});
-            meter.stop(.submitMessageWithModel);
+            receipt_meter.stop(.submitMessageWithModel);
             try std.testing.expect(with == .accepted and with.accepted.configuration != null);
-            const measured = meter.measured.get(.submitMessageWithModel).?;
+            const measured = receipt_meter.measured.get(.submitMessageWithModel).?;
             try std.testing.expectEqual(baseline.rounds, measured.rounds);
             try std.testing.expectEqual(baseline.content_rounds, measured.content_rounds);
             if (case.engine == .mysql) try std.testing.expectEqual(measured.shape.expected(), measured.shape.queries);
