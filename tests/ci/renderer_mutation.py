@@ -116,7 +116,7 @@ MUTATIONS = (
              native("sending a Message drops a closed chat-info capture still waiting to start")),
     Mutation("send-latest-view", "sending leaves a frozen inspection for latest conversation", "67f80e38",
              "src/SessionFrontend.zig",
-             "self.dropMessageRequest();\n    try self.jumpToEnd();\n}",
+             "self.dropMessageRequest();\n    try self.jumpToEnd();\n    self.screen.anchor.follow();\n}",
              "self.dropMessageRequest();\n}",
              native("sending a Message from a browsed page returns the screen to the latest conversation")),
     Mutation("paused-draft-submission", "paused approval cannot submit the retained draft", "52e9055d",
