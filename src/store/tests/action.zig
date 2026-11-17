@@ -1547,6 +1547,71 @@ test "background owed stop suppresses final admission across settlement recovery
     }.run);
 }
 
+test "queue records source kinds and source predicates for person peer and action final" {
+    const sourced_input = @import("../domain/sourced_input.zig");
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            for ([_]enum { person, peer, action_final }{ .person, .peer, .action_final }) |source| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                const parent = try shared_fixtures.configureTestSessionWithMode(&storage, "source-parent", "bypass");
+                var configure: wire_request.ConfigureCommand = .{};
+                try configure.key.set("source-child");
+                configure.configuration = try shared_fixtures.testingAgentSpec(&.{"bash"}, "bypass");
+                configure.configuration.parent.state = .value;
+                try configure.configuration.parent.value.set(parent.slice());
+                const child = (try storage.configure(&configure, .{})).accepted.session;
+                const action = try NativePromotion.promoted(&storage, &tmp, child.slice());
+                const binding = (try storage.admitNextActionAttempt(.fromFree(2, true), 30_000, .{})).?.permit.binding;
+                const key: []const u8 = switch (source) {
+                    .person => blk: {
+                        try submitTestMessage(&storage, &tmp, "source-person", "source-person-key", child.slice(), "Person input");
+                        break :blk "source-person-key";
+                    },
+                    .peer => blk: {
+                        _ = try NativePromotion.propose(&storage, &tmp, parent.slice());
+                        const sender = (try storage.admitNextActionAttempt(.fromFree(2, true), 30_000, .{})).?.permit.binding;
+                        var input: action_domain.ActionExecutionInput = undefined;
+                        try storage.readActionExecutionInput(.bash, sender, &input);
+                        const text = "Peer input";
+                        const file = try tmp.dir.createFile(std.testing.io, "source-peer", .{ .read = true });
+                        try file.writeStreamingAll(std.testing.io, text);
+                        try file.sync(std.testing.io);
+                        var message = try store_testing.completeMessage("source-peer-key", child.slice(), file, text);
+                        defer message.removeTemporaryContent(std.testing.io) catch unreachable;
+                        message.sender = .{ .store = storage.selector, .session = parent };
+                        message.sender_handle = input.sender_handle;
+                        try std.testing.expect(storage.submitMessageWithModel(&message, null, .{}) == .accepted);
+                        break :blk "source-peer-key";
+                    },
+                    .action_final => blk: {
+                        _ = try storage.settleActionAttempt(binding, .succeeded, "Final input", .{});
+                        break :blk "";
+                    },
+                };
+                const where = " FROM message_admission m WHERE m.session_ref=?1 AND (m.command_key=?2 OR m.source_action_id=?3)";
+                const args = .{ child.slice(), key, action };
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*)" ++ where, args));
+                const kind: u64 = switch (source) {
+                    .person => 1,
+                    .peer => 2,
+                    .action_final => 3,
+                };
+                try std.testing.expectEqual(kind, try store_testing.queryU64(&storage, "SELECT m.source_kind" ++ where, args));
+                try std.testing.expectEqual(@as(u64, if (source == .person) 1 else 0), try store_testing.queryU64(&storage, "SELECT count(*)" ++ where ++ " AND " ++ sourced_input.personSql("m"), args));
+                try std.testing.expectEqual(@as(u64, if (source != .action_final) 1 else 0), try store_testing.queryU64(&storage, "SELECT count(*)" ++ where ++ " AND " ++ sourced_input.messageSql("m"), args));
+                const constraint_error = if (case.engine == .mysql) error.MysqlFixtureFailed else error.StatementFailed;
+                const contradictory_kind: u64 = if (source == .person) 2 else 1;
+                try std.testing.expectError(constraint_error, store_testing.exec(&storage, "UPDATE message_admission SET source_kind=?4 WHERE session_ref=?1 AND (command_key=?2 OR source_action_id=?3)", .{ child.slice(), key, action, contradictory_kind }));
+                try std.testing.expectEqual(kind, try store_testing.queryU64(&storage, "SELECT m.source_kind" ++ where, args));
+            }
+        }
+    }.run);
+}
+
 test "background owed stop excludes person peer and previously admitted final input at active and idle boundaries" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
