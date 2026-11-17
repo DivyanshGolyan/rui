@@ -1299,6 +1299,7 @@ export interface components {
                     credentialFile?: (string | {
                         hex: string;
                     }) | null;
+                    tokenEndpoint?: string | null;
                     /** @description Send no credential to a development endpoint. */
                     unauthenticated?: boolean;
                 } | null;
@@ -1326,6 +1327,7 @@ export interface components {
                     credentialFile?: (string | {
                         hex: string;
                     }) | null;
+                    tokenEndpoint?: string | null;
                     /** @description Send no credential to a development endpoint. */
                     unauthenticated?: boolean;
                 } | null;

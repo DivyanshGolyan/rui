@@ -888,7 +888,7 @@ pub noinline fn serve(
     const settings = prepared.get();
     const active_capacity = settings.execution.active_capacity.value;
     const limits = tuning.limits;
-    const served_value = providers.fromSettings(settings, tuning.fixtures);
+    const served_value = providers.fromSettings(settings);
     const served = &served_value;
     var connections = try server_mcp_settings.Connections.init(allocator, settings);
     defer connections.deinit();

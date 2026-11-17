@@ -16,28 +16,19 @@ pub const managed_endpoint = @import("provider_name.zig").managed_endpoint;
 
 pub const api_endpoint = @import("provider_name.zig").api_endpoint;
 
-pub const Fixtures = struct {
-    openai: bool = false,
-    codex: bool = false,
-    chatgpt_token_endpoint: ?[]const u8 = null,
-};
-
-pub fn fromSettings(settings: *const @import("host_settings.zig").Settings, fixtures: Fixtures) Providers {
+pub fn fromSettings(settings: *const @import("host_settings.zig").Settings) Providers {
     var result: Providers = .{ .ca_file = if (settings.network.ca_file) |*ca| ca.slice() else null };
     inline for (std.enums.values(Provider)) |named| {
         if (@field(settings.providers.entries, @tagName(named))) |*entry| {
-            const fixture = switch (named) {
-                .openai => fixtures.openai,
-                .codex => fixtures.codex,
-                .chatgpt => fixtures.chatgpt_token_endpoint != null,
-            };
+            const target = if (entry.endpoint) |*url| url.slice() else endpoint(named);
+            const fixture = @import("host_settings.zig").fixtureEndpoint(settings, target);
             result.table.set(named, .{
-                .endpoint = if (entry.endpoint) |*url| url.slice() else endpoint(named),
-                .credential = if (entry.unauthenticated.value and !fixture) .none else switch (comptime named.facts().credential) {
-                    .api_key => .{ .key_file = .{ .key = entry.key.value(), .fixture = fixtures.openai } },
+                .endpoint = target,
+                .credential = if (entry.unauthenticated.value) .none else switch (comptime named.facts().credential) {
+                    .api_key => .{ .key_file = .{ .key = entry.key.value(), .fixture = fixture } },
                     .sign_in => switch (named) {
-                        .codex => .{ .chatgpt_device = .{ .path = entry.credential_file.?.slice(), .refresh = if (fixtures.codex) .synthetic else .issuer } },
-                        .chatgpt => .{ .chatgpt_plan = .{ .path = entry.credential_file.?.slice(), .refresh = if (fixtures.chatgpt_token_endpoint) |token| .{ .fixture_endpoint = token } else .issuer } },
+                        .codex => .{ .chatgpt_device = .{ .path = entry.credential_file.?.slice(), .refresh = if (fixture) .synthetic else .issuer } },
+                        .chatgpt => .{ .chatgpt_plan = .{ .path = entry.credential_file.?.slice(), .refresh = if (fixture and entry.token_endpoint != null) .{ .fixture_endpoint = entry.token_endpoint.?.slice() } else .issuer } },
                         .openai => unreachable,
                     },
                 },
@@ -564,7 +555,7 @@ test "prepared provider projection derives every credential endpoint and Host tr
             },
         }
     }
-    const served = fromSettings(settings, .{});
+    const served = fromSettings(settings);
     try std.testing.expectEqualStrings("relative/root.pem", served.ca_file.?);
     inline for (std.enums.values(Provider)) |named| {
         const entry = served.get(named).?;
@@ -575,14 +566,27 @@ test "prepared provider projection derives every credential endpoint and Host tr
         }
         @field(settings.providers.entries, @tagName(named)).?.unauthenticated.value = true;
     }
-    const uncredentialed = fromSettings(settings, .{});
+    const uncredentialed = fromSettings(settings);
     inline for (std.enums.values(Provider)) |named| try std.testing.expect(uncredentialed.get(named).?.credential == .none);
-    const fixture = fromSettings(settings, .{ .openai = true, .codex = true, .chatgpt_token_endpoint = "http://127.0.0.1:9/oauth/token" });
+    inline for (std.enums.values(Provider)) |named| {
+        const entry = &@field(settings.providers.entries, @tagName(named)).?;
+        entry.unauthenticated.value = false;
+        entry.endpoint = .{};
+        try entry.endpoint.?.text.set("http://127.0.0.1:9/responses");
+    }
+    settings.providers.entries.chatgpt.?.token_endpoint = .{};
+    try settings.providers.entries.chatgpt.?.token_endpoint.?.text.set("http://127.0.0.1:9/oauth/token");
+    const fixture = fromSettings(settings);
     try std.testing.expect(fixture.get(.openai).?.credential.key_file.fixture);
     try std.testing.expect(fixture.get(.codex).?.credential.chatgpt_device.refresh == .synthetic);
     try std.testing.expectEqualStrings("http://127.0.0.1:9/oauth/token", fixture.get(.chatgpt).?.credential.chatgpt_plan.refresh.fixture_endpoint);
+    inline for (std.enums.values(Provider)) |named| {
+        @field(settings.providers.entries, @tagName(named)).?.unauthenticated.value = true;
+    }
+    const unauthenticated_fixture = fromSettings(settings);
+    inline for (std.enums.values(Provider)) |named| try std.testing.expect(unauthenticated_fixture.get(named).?.credential == .none);
     settings.providers.entries.openai = null;
-    try std.testing.expect(!fromSettings(settings, .{}).serves(.openai));
+    try std.testing.expect(!fromSettings(settings).serves(.openai));
 }
 
 test "each route says how its model list reads, and a provider's list is live only over one that has a list" {

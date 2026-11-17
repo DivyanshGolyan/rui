@@ -65,7 +65,7 @@ def run(*, observed=False, intake=100):
         default_required = 3 + os_semantics.HOST_FIXED_DESCRIPTORS + DEFAULT_CLIENT_DESCRIPTORS + 10 + os_semantics.AUTHENTICATION_DESCRIPTORS + 2
         minimum_required = default_required - ORDINARY_EXCHANGE_DESCRIPTORS * (100 - 10)
         serve = [fixture.RUI, "host", "serve", "--store", store, "--set", 'execution.activeCapacity=1',
-                 "--test-codex-fixture-endpoint", f"https://localhost:{endpoint.server_address[1]}/responses",
+                 "--set", f"providers.codex.endpoint=https://localhost:{endpoint.server_address[1]}/responses",
                  "--set", "network.caFile=" + str(root / "cert.pem"), "--test-phase-trace"]
         def limited(limit):
             return ["sh", "-c", 'set -e; ulimit -Sn "$1"; ulimit -Hn "$1"; shift; exec "$@"',
@@ -482,6 +482,8 @@ def saved_catalog_run():
         codex.credentials(credential)
         codex_arguments = arguments.copy()
         codex_arguments[codex_arguments.index('providers={"openai":{}}')] = 'providers={"codex":{}}'
+        endpoint_index = next(i for i, value in enumerate(codex_arguments) if str(value).startswith('providers.openai.endpoint='))
+        del codex_arguments[endpoint_index - 1:endpoint_index + 1]
         host, ready = start_ready_process(codex_arguments, env={**env, "RUI_CODEX_CREDENTIAL_FILE": str(credential)})
         codex_list = h2_fixture.closed_host_request(ready["socket"], store, "model_list")["providers"]
         assert codex_list == [{"provider": "codex", "source": "catalog",

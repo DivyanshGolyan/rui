@@ -34,7 +34,7 @@ def main():
         url = f"http://127.0.0.1:{endpoint.server_port}/responses"
         host, _ = host_process.start_ready_process(
             [fixture.RUI, "host", "serve", "--store", store,
-             "--test-codex-fixture-endpoint", url, "--test-openai-fixture-endpoint", url],
+             "--set", f"providers.codex.endpoint={url}", "--set", f"providers.openai.endpoint={url}"],
             env={**env, "RUI_OPENAI_KEY_FILE": str(key),
                  "RUI_CODEX_CREDENTIAL_FILE": str(config / "codex.json")},
             required_fields={"execution": "enabled", "nghttp2": "1.70.0"})

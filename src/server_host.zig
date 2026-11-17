@@ -226,7 +226,6 @@ pub const Tuning = struct {
     /// A directory already admitted together with private frozen placement.
     admitted_directory: ?[]const u8 = null,
     home: ?[]const u8 = null,
-    fixtures: providers_module.Fixtures = .{},
     limits: Limits = .{},
     hooks: Hooks = .{},
 

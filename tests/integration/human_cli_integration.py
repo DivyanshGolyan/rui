@@ -1684,7 +1684,7 @@ def provider_line_cases():
         url = f"http://127.0.0.1:{endpoint.server_port}/responses"
         host, _ = host_process.start_ready_process(
             [fixture.RUI, "host", "serve", "--store", store,
-             "--test-codex-fixture-endpoint", url, "--test-openai-fixture-endpoint", url],
+             "--set", f"providers.codex.endpoint={url}", "--set", f"providers.openai.endpoint={url}"],
             env={**os.environ, "RUI_OPENAI_KEY_FILE": str(host_key), "RUI_CODEX_CREDENTIAL_FILE": str(host_codex)},
             required_fields={"execution": "enabled", "nghttp2": "1.70.0"})
         no_tty = state / "no-tty"

@@ -243,8 +243,9 @@ pub fn ProviderEntry(comptime credential: provider_name.Facts.Credential) type {
         .sign_in => struct {
             endpoint: ?Url(.https_endpoint) = null,
             credential_file: ?Path = null,
+            token_endpoint: ?Url(.https_endpoint) = null,
             unauthenticated: Flag = .{},
-            pub const doc = .{ .endpoint = "Responses endpoint. Default: the provider's own.", .credential_file = "Sign-in file. Default: the Adapter's saved sign-in.", .unauthenticated = "Send no credential to a development endpoint." };
+            pub const doc = .{ .endpoint = "Responses endpoint. Default: the provider's own.", .credential_file = "Sign-in file. Default: the Adapter's saved sign-in.", .token_endpoint = "Token refresh endpoint. Default: the provider's own.", .unauthenticated = "Send no credential to a development endpoint." };
         },
     };
 }
@@ -1250,6 +1251,11 @@ pub const Prepared = struct {
     }
 };
 
+/// Fixture identity is derived from the endpoint and the Host's transport trust.
+pub fn fixtureEndpoint(settings: *const Settings, endpoint: []const u8) bool {
+    return endpoint_value.fixtureEndpoint(endpoint, if (settings.network.ca_file) |*ca| ca.slice() else null);
+}
+
 pub fn seal(settings: *const Settings, failure: *start_report.Failure) error{SettingsInvalid}!Prepared {
     try validateShape(Settings, settings, "", failure);
     if (!settings.interface.dir.anchored and (settings.interface.dir.slice().len == 0 or std.mem.eql(u8, settings.interface.dir.slice(), "/"))) return refuse(failure, "interface.dir", "must be anchored to a non-root interface directory");
@@ -1263,15 +1269,24 @@ pub fn seal(settings: *const Settings, failure: *start_report.Failure) error{Set
             const at = "providers." ++ name;
             const endpoint = if (entry.endpoint) |*url| url.slice() else provider.facts().endpoint;
             endpoint_value.validateEndpoint(endpoint) catch return refuse(failure, at ++ ".endpoint", "invalid provider endpoint");
+            const fixture = fixtureEndpoint(settings, endpoint);
+            if (comptime provider.facts().credential == .sign_in) {
+                if (entry.token_endpoint) |*token| {
+                    if (provider != .chatgpt or !fixture or !endpoint_value.fixtureEndpoint(token.slice(), null))
+                        return refuse(failure, at ++ ".tokenEndpoint", "requires a ChatGPT loopback fixture endpoint and a loopback HTTP token URL");
+                }
+                if (provider == .chatgpt and fixture and !entry.unauthenticated.value and entry.token_endpoint == null)
+                    return refuse(failure, at ++ ".tokenEndpoint", "is required for an authenticated ChatGPT fixture endpoint");
+            }
             if (!entry.unauthenticated.value) {
                 switch (comptime provider.facts().credential) {
                     .api_key => {
-                        endpoint_value.validateKeyEndpoint(endpoint, if (settings.network.ca_file) |*ca| ca.slice() else null, false) catch return refuse(failure, at ++ ".endpoint", "credentials require HTTPS");
+                        endpoint_value.validateKeyEndpoint(endpoint, if (settings.network.ca_file) |*ca| ca.slice() else null, fixture) catch return refuse(failure, at ++ ".endpoint", "credentials require HTTPS or a loopback fixture endpoint");
                         if (!secret_value.valid(entry.key.value())) return refuse(failure, at ++ ".key", "credential source has not been resolved");
                     },
                     .sign_in => {
                         if (entry.credential_file == null) return refuse(failure, at ++ ".credentialFile", "credential source has not been resolved");
-                        if (!std.mem.eql(u8, endpoint, provider.facts().endpoint)) return refuse(failure, at ++ ".endpoint", "sign-in credentials require the Adapter's own endpoint");
+                        if (!fixture and !std.mem.eql(u8, endpoint, provider.facts().endpoint)) return refuse(failure, at ++ ".endpoint", "sign-in credentials require the Adapter's own endpoint or a loopback fixture endpoint");
                     },
                 }
             }
@@ -2581,5 +2596,68 @@ test "Host settings private decode preserves every secret reference and empty ow
         const literal = try sampleDocument(gpa, at, "{\"value\":\"credential\"}", false);
         defer gpa.free(literal);
         try std.testing.expectError(error.SettingsInvalid, applyComposed(a, gpa, literal, checkSample, &failure));
+    }
+}
+
+test "Host provider credential policy derives fixture mode from the endpoint" {
+    const gpa = std.testing.allocator;
+    const settings = try gpa.create(Settings);
+    defer gpa.destroy(settings);
+    const Mode = enum { own, fixture, remote };
+    inline for (std.enums.values(provider_name.Provider)) |provider| {
+        for (std.enums.values(Mode)) |mode| for ([_]bool{ false, true }) |unauthenticated| {
+            settings.* = .{};
+            defer settings.deinit();
+            var failure: start_report.Failure = undefined;
+            try apply(settings, gpa, "{\"providers\":{}}", .file, checkSample, &failure);
+            try assign(settings, gpa, "providers." ++ @tagName(provider), "{}", checkSample, &failure);
+            const entry = &@field(settings.providers.entries, @tagName(provider)).?;
+            entry.unauthenticated.value = unauthenticated;
+            if (mode != .own) {
+                entry.endpoint = .{};
+                try entry.endpoint.?.text.set(if (mode == .fixture) "http://127.0.0.1:9/responses" else "https://other.example/responses");
+            }
+            switch (comptime provider.facts().credential) {
+                .api_key => {
+                    entry.key.bytes.len = "fixture-key".len;
+                    @memcpy(entry.key.bytes.bytes[0..entry.key.bytes.len], "fixture-key");
+                    entry.key.source = .literal;
+                },
+                .sign_in => {
+                    entry.credential_file = .{};
+                    try entry.credential_file.?.text.set("/tmp/fixture-signin.json");
+                    if (provider == .chatgpt and mode == .fixture) {
+                        entry.token_endpoint = .{};
+                        try entry.token_endpoint.?.text.set("http://127.0.0.1:9/oauth/token");
+                    }
+                },
+            }
+            try anchor(settings, "/tmp/host-settings-fixture-domain");
+            const outcome = seal(settings, &failure);
+            if (!unauthenticated and mode == .remote and provider.facts().credential == .sign_in) {
+                try std.testing.expectError(error.SettingsInvalid, outcome);
+                try std.testing.expect(std.mem.indexOf(u8, failure.message.slice(), "providers." ++ @tagName(provider) ++ ".endpoint") != null);
+            } else _ = try outcome;
+        };
+    }
+    for ([_]enum { missing, remote, own }{ .missing, .remote, .own }) |which| {
+        settings.* = .{};
+        defer settings.deinit();
+        var failure: start_report.Failure = undefined;
+        try apply(settings, gpa, "{\"providers\":{\"chatgpt\":{}}}", .file, checkSample, &failure);
+        const entry = &settings.providers.entries.chatgpt.?;
+        entry.credential_file = .{};
+        try entry.credential_file.?.text.set("/tmp/fixture-signin.json");
+        if (which != .own) {
+            entry.endpoint = .{};
+            try entry.endpoint.?.text.set("http://127.0.0.1:9/responses");
+        }
+        if (which != .missing) {
+            entry.token_endpoint = .{};
+            try entry.token_endpoint.?.text.set(if (which == .remote) "https://other.example/token" else "http://127.0.0.1:9/oauth/token");
+        }
+        try anchor(settings, "/tmp/host-settings-fixture-domain");
+        try std.testing.expectError(error.SettingsInvalid, seal(settings, &failure));
+        try std.testing.expect(std.mem.indexOf(u8, failure.message.slice(), "providers.chatgpt.tokenEndpoint") != null);
     }
 }

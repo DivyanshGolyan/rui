@@ -5213,6 +5213,20 @@
                         "x-rui-kind": "bytes",
                         "x-rui-native-path-limit": true
                       },
+                      "tokenEndpoint": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "maxLength": 2048,
+                            "x-maxBytes": 2048,
+                            "format": "https_endpoint",
+                            "description": "Token refresh endpoint. Default: the provider's own."
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
                       "unauthenticated": {
                         "type": "boolean",
                         "description": "Send no credential to a development endpoint."
@@ -5415,6 +5429,20 @@
                         ],
                         "x-rui-kind": "bytes",
                         "x-rui-native-path-limit": true
+                      },
+                      "tokenEndpoint": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "maxLength": 2048,
+                            "x-maxBytes": 2048,
+                            "format": "https_endpoint",
+                            "description": "Token refresh endpoint. Default: the provider's own."
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
                       },
                       "unauthenticated": {
                         "type": "boolean",

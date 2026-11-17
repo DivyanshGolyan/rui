@@ -1093,7 +1093,6 @@ fn hostSettings(init: std.process.Init, command: cli_args.Command, parsed: *cons
         defer std.heap.c_allocator.destroy(settings);
         settings.* = .{};
         defer settings.deinit();
-        var fixtures: providers.Fixtures = .{};
         if (parsed.has(settings_handoff.check_option)) {
             var frozen = host_start.freezeStart(init, .{ .dir = selected, .settings_file = parsed.get("settings"), .assignments = parsed.all("set") }, settings, &failure) catch |err| {
                 if (err == error.SettingsInvalid) return writeRefusal(init.io, &failure, .invalid);
@@ -1101,9 +1100,9 @@ fn hostSettings(init: std.process.Init, command: cli_args.Command, parsed: *cons
             };
             defer frozen.deinit(init.gpa);
             settings.deinit();
-            _ = try admitHost(init, .{ .frozen = frozen.bytes }, selected, settings, &fixtures, &failure, .detached);
+            _ = try admitHost(init, .{ .frozen = frozen.bytes }, selected, settings, &failure, .detached);
             try std.Io.File.stdout().writeStreamingAll(init.io, frozen.bytes);
-        } else _ = try admitHost(init, .{ .layered = parsed }, selected, settings, &fixtures, &failure, .detached);
+        } else _ = try admitHost(init, .{ .layered = parsed }, selected, settings, &failure, .detached);
         return;
     }
     const result = if (command == .host_settings)
@@ -2128,8 +2127,8 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
         };
         defer frozen.deinit(init.gpa);
         tuning.admitted_directory = selected;
-        break :frozen try admitHost(init, .{ .frozen = frozen.bytes }, selected, settings, &tuning.fixtures, &preparation_failure, .detached);
-    } else try admitHost(init, .{ .layered = parsed }, selected, settings, &tuning.fixtures, &preparation_failure, .foreground);
+        break :frozen try admitHost(init, .{ .frozen = frozen.bytes }, selected, settings, &preparation_failure, .detached);
+    } else try admitHost(init, .{ .layered = parsed }, selected, settings, &preparation_failure, .foreground);
     var failure: ?start_report.Failure = null;
     return finishServe(io, host_start.shutdownPolicy(settings), host_start.storeKind(settings), &failure, server.serve(io, std.heap.c_allocator, selected, prepared, tuning, &failure));
 }
@@ -2138,26 +2137,26 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
 /// then Store selection and preparation. Refusals are reported here.
 const HostAdmissionSource = union(enum) { layered: *const cli_args.Parsed, frozen: []const u8 };
 
-fn admitHost(init: std.process.Init, source: HostAdmissionSource, selected: []const u8, settings: *host_settings.Settings, fixtures: *providers.Fixtures, failure: *start_report.Failure, admission: host_start.Admission) !host_settings.Prepared {
+fn admitHost(init: std.process.Init, source: HostAdmissionSource, selected: []const u8, settings: *host_settings.Settings, failure: *start_report.Failure, admission: host_start.Admission) !host_settings.Prepared {
     const intake = switch (source) {
-        .layered => |parsed| host_start.intake(init, parsed, selected, settings, fixtures, failure, admission),
-        .frozen => |bytes| host_start.intakeFrozen(init, bytes, selected, settings, fixtures.*, failure),
+        .layered => |parsed| host_start.intake(init, parsed, selected, settings, failure, admission),
+        .frozen => |bytes| host_start.intakeFrozen(init, bytes, selected, settings, failure),
     };
     intake catch |err| {
         if (err == error.SettingsInvalid) return writeRefusal(init.io, failure, caller_exit.knownError(err));
         return err;
     };
-    return finishHostAdmission(init, selected, settings, fixtures.*, failure);
+    return finishHostAdmission(init, selected, settings, failure);
 }
 
-fn finishHostAdmission(init: std.process.Init, selected: []const u8, settings: *host_settings.Settings, fixtures: providers.Fixtures, failure: *start_report.Failure) !host_settings.Prepared {
-    const served = providers.fromSettings(settings, fixtures);
+fn finishHostAdmission(init: std.process.Init, selected: []const u8, settings: *host_settings.Settings, failure: *start_report.Failure) !host_settings.Prepared {
+    const served = providers.fromSettings(settings);
     if (try served.proxyRefusal(std.heap.c_allocator)) |reason| {
         stderr.diagnostic("rui: https_proxy/HTTPS_PROXY {s}; Rui tunnels only through an http:// proxy. The Host did not start.\n", .{reason});
         recordExit(.environment);
         return error.Reported;
     }
-    return host_start.admitSelected(init, selected, settings, fixtures, failure) catch |err| {
+    return host_start.admitSelected(init, selected, settings, failure) catch |err| {
         if (err == error.SettingsInvalid) return writeRefusal(init.io, failure, caller_exit.knownError(err));
         return err;
     };
