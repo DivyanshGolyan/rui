@@ -521,13 +521,13 @@ pub const AdmitNextAttempt = struct {
 fn localInput(comptime runner: tool_defs.Runner) type {
     return rsql.Read(.{
         .sql = "SELECT item.session_position AS position,revision.workspace,action.session_ref AS session,action.sender_handle," ++
-            "action.attempt_timeout_ms AS timeout_ms FROM action_operation action " ++
+            "action.attempt_timeout_ms AS timeout_ms," ++ builtinCallSql(runner) ++ " AS runner_matches FROM action_operation action " ++
             "JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
             "JOIN session_revision revision ON revision.session_ref=action.session_ref AND revision.revision=action.permission_revision " ++
             "JOIN model_tool_call tool_call ON tool_call.operation_id=action.parent_operation_id AND tool_call.call_ordinal=action.call_ordinal " ++
             "LEFT JOIN model_output_item item ON item.operation_id=tool_call.operation_id AND item.item_ordinal=tool_call.item_ordinal " ++
             "WHERE action.action_id=?1 AND action.parent_operation_id=?2 AND operation.turn_id=?3 AND action." ++ action_attempted_sql ++
-            " AND action.authorized=1 AND action.resolution_code IS NULL AND " ++ builtinCallSql(runner),
+            " AND action.authorized=1 AND action.resolution_code IS NULL",
         .Args = struct { action_id: u64, parent_operation_id: u64, turn_id: u64 },
         .Row = struct {
             position: ?rsql.Positive,
@@ -535,6 +535,7 @@ fn localInput(comptime runner: tool_defs.Runner) type {
             session: *Bounded(session_id.max_reference_bytes),
             sender_handle: *Bounded(32),
             timeout_ms: rsql.Positive,
+            runner_matches: bool,
         },
         .cardinality = .optional,
     });
@@ -552,13 +553,16 @@ fn readLocalExecutionInput(a: anytype, comptime runner: tool_defs.Runner, bindin
     const input = localInput(runner);
     out.binding = binding;
     out.runner = @unionInit(@FieldType(ActionExecutionInput, "runner"), @tagName(runner), .{ .workspace = .{ .len = 0 } });
-    var row: input.Row = .{ .position = null, .workspace = &@field(out.runner, @tagName(runner)).workspace, .session = &out.session, .sender_handle = &out.sender_handle, .timeout_ms = undefined };
+    var row: input.Row = .{ .position = null, .workspace = &@field(out.runner, @tagName(runner)).workspace, .session = &out.session, .sender_handle = &out.sender_handle, .timeout_ms = undefined, .runner_matches = undefined };
     var found: store_access.Found = undefined;
     a.readInto(input, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id }, &row, &found);
     try a.run();
     if (!found.get()) return error.StaleActionAttemptBinding;
     const position = (row.position orelse return error.CorruptStore).get();
-    const reference = (try reads_domain.proposal(a, out.session.slice(), position)).fields[@backingInt(tool_proposal.Field.arguments)];
+    // Corrupt proposal fields must fence the Store even when the runner no longer matches.
+    const proposal = try reads_domain.proposal(a, out.session.slice(), position);
+    if (!row.runner_matches) return error.StaleActionAttemptBinding;
+    const reference = proposal.fields[@backingInt(tool_proposal.Field.arguments)];
     out.arguments = .{ .length = reference.length, .digest = reference.digest };
     out.timeout_ms = row.timeout_ms.get();
 }
