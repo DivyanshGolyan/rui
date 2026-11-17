@@ -501,6 +501,21 @@ jobs:
           sysctl hw.ncpu hw.memsize vm.swapusage
           /usr/bin/time -l python3 -B tests/ci/build_artifact.py build "$TARGETS" --part "$PART"
           sysctl vm.swapusage
+      - name: Pack a fixed warm cache for the paired diagnostic
+        run: |
+          set -euo pipefail
+          tar -czf "$RUNNER_TEMP/mac-benchmark-cache.tar.gz" \
+            -C "$HOME" .cache/zig \
+            -C "$GITHUB_WORKSPACE" .zig-cache zig-pkg screen-emulator/zig-pkg \
+            -C "$RUNNER_TEMP" rui-zig
+          shasum -a 256 "$RUNNER_TEMP/mac-benchmark-cache.tar.gz"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mac-benchmark-warm-cache
+          path: ${{ runner.temp }}/mac-benchmark-cache.tar.gz
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 14
       - name: Save reusable caches even after failure
         if: ${{ always() }}
         uses: ./.github/actions/setup/caches
