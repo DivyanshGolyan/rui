@@ -12,6 +12,7 @@ from host_process import canonical_fixture_root, dispose_all
 import model_fixture as model
 import codex_fixture as codex
 from canonical_fixture import ReplyProxy
+from human_cli_fixture import conversation_text, composer_line, chat_footer_row
 
 
 def assert_submitted(requests, expected):
@@ -183,18 +184,36 @@ def recovery(fixture, row):
             lambda response: b"" if len(fixture.proxy.exchanges) == 1 else response)
     tty = fixture.terminal()
     tty.send("original éZ\r".encode())
-    tty.marker("Not confirmed")
+    note = "Not confirmed · ctrl+r retries original"
+    tty.wait(lambda: note in conversation_text(tty.screen.completed)
+        and conversation_text(tty.screen.completed).count("› original éZ") == 1,
+        label="unconfirmed note attached to the original optimistic Message")
+    failed = tty.screen.completed
+    transcript = conversation_text(failed)
+    assert transcript.count(note) == 1 and transcript.index("› original éZ") < transcript.index(note), failed
+    assert "Sending" not in failed and "! Not confirmed" not in failed, failed
+    assert note not in "\n".join(composer_line(failed, index)
+        for index in range(chat_footer_row(failed), len(failed.split("\n")))), failed
     assert len(fixture.proxy.exchanges) == 1, "original not transmitted exactly once"
     original = fixture.proxy.exchanges[0][0]
-    assert json.loads(original)["text"]["value"] == "original éZ", "wrong original capture"
+    original_request = json.loads(original)
+    assert original_request["text"]["value"] == "original éZ", "wrong original capture"
+    record = fixture.home / ".config/rui/requests" / f"{original_request['key']}.json"
+    assert record.read_bytes() == original, "saved original differs from transmitted Message"
     tty.send("next café!\x1b[D\x1b[DX".encode())
     tty.draft("next cafXé!", 11)
     release.set()
     tty.marker("TD4 original answer")
     chunks(tty, row["chunks"])
-    tty.marker("Original confirmed")
+    tty.wait(lambda: len(fixture.proxy.exchanges) == 2
+        and conversation_text(tty.screen.completed).count("› original éZ") == 1
+        and "Not confirmed" not in tty.screen.completed
+        and "ctrl+r retries original" not in tty.screen.completed,
+        label="original Message recovered once with its failure note cleared")
+    assert "Original confirmed" not in tty.screen.completed and "Sending" not in tty.screen.completed, tty.screen.completed
     assert len(fixture.proxy.exchanges) == 2, "recovery did not replay exactly once"
     assert fixture.proxy.exchanges[1][0] == original, "recovery changed original key or bytes"
+    assert record.read_bytes() == original, "recovery changed the saved original Message"
     tty.draft("next cafXé!", 11)
     tty.send(b"Y\r")
     tty.marker("TD4 next answer")

@@ -403,9 +403,19 @@ def interactive_cases(state, binding=False, null_code=False):
                         human.settle_screen(master, quiet=0.5)
                         assert len(proxy.exchanges) == 1, "empty input retried unconfirmed intent"
                         proxy.rewrite = lambda response: response
-                        os.write(master, b"\x12")
-                        output += human.read_terminal(master, "Decision confirmed." if route == "/v1/control/permission-decision" else "Original confirmed.")
+                        if route == "/v1/control/permission-decision":
+                            os.write(master, b"\x12")
+                            output += human.read_terminal(master, "Decision confirmed.")
+                        else:
+                            recovered = human.keyed_frame(master, b"\x12", lambda frame, x, y:
+                                human.conversation_text(frame).count("› " + line) == 1
+                                and "Not confirmed" not in frame
+                                and "ctrl+r retries original" not in frame
+                                and len(proxy.exchanges) == 2)
+                            assert "Original confirmed." not in recovered and "Sending" not in recovered, recovered
+                            output += recovered
                         assert len(proxy.exchanges) == 2 and proxy.exchanges[1][0] == original
+                        assert record.read_bytes() == original, "recovery changed captured authority"
                         recovered = json.loads(proxy.exchanges[1][1].split(b"\r\n\r\n", 1)[1])["answer"]
                         assert recovered["status"] == "accepted" and recovered["replayed"] is True, recovered
                         assert record.read_bytes() == original

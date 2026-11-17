@@ -3,6 +3,35 @@ const vaxis = @import("vaxis");
 const view = @import("overview_view.zig");
 const theme = @import("theme.zig");
 
+// The returned segments and their text borrow the frame arena and the input, respectively.
+pub fn segments(arena: std.mem.Allocator, caps: view.Caps, input: []const view.Segment, background: ?view.Background) std.mem.Allocator.Error![]vaxis.Segment {
+    const result = try arena.alloc(vaxis.Segment, input.len);
+    for (input, result) |segment, *dest| {
+        var role = segment.style;
+        if (background) |value| role.background = value;
+        dest.* = .{ .text = segment.text, .style = of(caps, role) };
+    }
+    return result;
+}
+
+test "segments preserve roles unless a background is supplied" {
+    const input = [_]view.Segment{
+        .{ .text = "one", .style = .{ .colour = .failure, .background = .band, .bold = true } },
+        .{ .text = " two", .style = .{ .colour = .quiet, .background = .hover, .dim = true } },
+    };
+    for (std.enums.values(view.Caps.Depth)) |depth| for ([_]?view.Background{ null, .selection, .hover }) |background| {
+        const caps: view.Caps = .{ .depth = depth };
+        const converted = try segments(std.testing.allocator, caps, &input, background);
+        defer std.testing.allocator.free(converted);
+        for (input, converted) |source, actual| {
+            var role = source.style;
+            if (background) |value| role.background = value;
+            try std.testing.expectEqualStrings(source.text, actual.text);
+            try std.testing.expectEqualDeep(of(caps, role), actual.style);
+        }
+    };
+}
+
 pub fn of(caps: view.Caps, role: view.Style) vaxis.Style {
     var style: vaxis.Style = .{ .bold = role.bold, .reverse = role.reverse, .dim = role.dim };
     if (caps.depth == .none) {
@@ -23,6 +52,7 @@ pub fn of(caps: view.Caps, role: view.Style) vaxis.Style {
     const background: theme.Background = switch (role.background) {
         .ground => .ground,
         .bar, .input_surface => .selvedge,
+        .user_message => .user_message,
         .selection => .selection,
         .hover => .hover,
         .band => .alert,
