@@ -5847,17 +5847,37 @@ test "upgrade census merges socket hints and retains pathless identified failure
     try std.testing.expect(candidates.items[1].socket == null);
 }
 
-test "upgrade process retirement requires exact generation and complete census not lease release" {
+test "upgrade process retirement covers macOS zombie generations and living cleanup tails" {
     const pid: c_int = 42;
     const generation: u64 = 100;
-    for ([_][]const u8{ "42 S\n80 R\n", "42 Sl+\n80 R\n", "42 T\n80 R\n" }) |living| try std.testing.expect(!try retirementReading(living, pid, generation, generation, generation));
-    try std.testing.expect(try retirementReading("42 Z\n80 R\n", pid, generation, generation, generation));
-    try std.testing.expect(!try retirementReading("42 Z\n80 R\n", pid, generation, null, generation));
-    try std.testing.expect(try retirementReading("42 S\n80 R\n", pid, generation, generation + 1, generation + 1));
-    try std.testing.expect(try retirementReading("80 R\n", pid, generation, null, null));
-    try std.testing.expect(!try retirementReading("80 R\n", pid, generation, generation, generation));
-    try std.testing.expect(!try retirementReading("80 R\n", pid, generation, generation, null));
-    try std.testing.expect(!try retirementReading("80 R\n", pid, generation, null, generation));
+    const Case = struct {
+        name: []const u8,
+        census: []const u8,
+        before: ?u64,
+        after: ?u64,
+        retired: bool,
+    };
+    // These injected observations run on every OS. Darwin's arg=0 query cannot
+    // identify an unreaped zombie; arg=1 retains its start time like /proc does.
+    // A census Z without that identity is deliberately NOT sufficient proof.
+    for ([_]Case{
+        .{ .name = "alive", .census = "42 S\n80 R\n", .before = generation, .after = generation, .retired = false },
+        .{ .name = "living cleanup tail", .census = "42 Sl+\n80 R\n", .before = generation, .after = generation, .retired = false },
+        .{ .name = "stopped but not exited", .census = "42 T\n80 R\n", .before = generation, .after = generation, .retired = false },
+        .{ .name = "old macOS query excludes zombie", .census = "42 Z\n80 R\n", .before = null, .after = null, .retired = false },
+        .{ .name = "macOS query includes exact zombie", .census = "42 Z+\n80 R\n", .before = generation, .after = generation, .retired = true },
+        .{ .name = "zombie generation unavailable before", .census = "42 Z\n80 R\n", .before = null, .after = generation, .retired = false },
+        .{ .name = "zombie generation unavailable after", .census = "42 Z\n80 R\n", .before = generation, .after = null, .retired = false },
+        .{ .name = "PID reused before census", .census = "42 S\n80 R\n", .before = generation + 1, .after = generation + 1, .retired = true },
+        .{ .name = "PID reused across census", .census = "42 S\n80 R\n", .before = generation, .after = generation + 1, .retired = true },
+        .{ .name = "gone", .census = "80 R\n", .before = null, .after = null, .retired = true },
+        .{ .name = "contradictory absence", .census = "80 R\n", .before = generation, .after = generation, .retired = false },
+        .{ .name = "absence contradicts earlier generation", .census = "80 R\n", .before = generation, .after = null, .retired = false },
+        .{ .name = "absence contradicts later generation", .census = "80 R\n", .before = null, .after = generation, .retired = false },
+    }) |case| {
+        errdefer std.debug.print("retirement case: {s}\n", .{case.name});
+        try std.testing.expectEqual(case.retired, try retirementReading(case.census, pid, generation, case.before, case.after));
+    }
     for ([_][]const u8{ "", "42\n", "not-a-pid Z\n", "42 Z extra\n", "42 Z\n42 S\n" }) |malformed| try std.testing.expectError(error.HostProcessSnapshotUnavailable, retirementReading(malformed, pid, generation, generation, generation));
 }
 
@@ -5892,6 +5912,9 @@ test "client upgrade retirement observes a live tail then an unreaped exit" {
     };
     var wait: Wait = .{ .gpa = gpa, .io = io, .pid = pid, .started = started, .until = until.raw.nanoseconds };
     try @import("test_poll").waitUntil(io, until, &wait, Wait.ready);
+    // Still unreaped: Darwin must retain the exact generation for a zombie,
+    // not merely make the census-based decision table pass.
+    try std.testing.expectEqual(started, try @import("host_identity.zig").generation(pid));
     _ = try child.wait(io);
     // PID absence uses the same complete-census proof, not kill(pid, 0).
     try std.testing.expect(try upgradeGenerationRetired(gpa, io, pid, started, @import("test_poll").after(io, .fromSeconds(5)).raw.nanoseconds));
