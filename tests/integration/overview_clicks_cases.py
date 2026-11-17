@@ -47,7 +47,7 @@ def finished(report):
 
 
 def row_of(frame, label):
-    found = [n + 1 for n, line in enumerate(frame.split("\n")) if re.match(rf" \S {re.escape(label)}( |$)", line)]
+    found = [n + 1 for n, line in enumerate(frame.split("\n")) if re.match(rf" . {re.escape(label)}( |$)", line)]
     assert len(found) == 1, (label, found, frame)
     return found[0]
 
@@ -89,31 +89,31 @@ def opening_and_views():
         wait_for_host(w, [charlie], lambda report: report["archive_state"] == "archived", "charlie archived")
 
         with w.overview(columns=WIDTH, rows=30) as screen:
-            screen.wait(lambda frame: " ✓ alpha" in frame and " ✓ bravo" in frame, "both answered rows")
+            screen.wait(lambda frame: "   alpha" in frame and "   bravo" in frame, "both answered rows")
             screen.keys(b"\r")
             opened = screen.wait(lambda frame: conversation_of("alpha")(frame) or conversation_of("bravo")(frame),
                                  "Enter opens the selected Session")
             selected = "alpha" if conversation_of("alpha")(opened) else "bravo"
             other = "bravo" if selected == "alpha" else "alpha"
             assert f"answer from {selected}" in opened and f"answer from {other}" not in opened, opened
-            listed = back_to_overview(screen, " ✓ alpha", " ✓ bravo")
+            listed = back_to_overview(screen, "   alpha", "   bravo")
 
             click_label(screen, listed, other)
             screen.wait(conversation_of(other), f"a click opens {other}")
             screen.wait(lambda frame: f"answer from {other}" in frame, f"{other}'s answer")
             assert f"answer from {selected}" not in screen.text, screen.text
             assert f"ask {other}" in screen.text, screen.text
-            listed = back_to_overview(screen, " ✓ alpha", " ✓ bravo")
+            listed = back_to_overview(screen, "   alpha", "   bravo")
 
             click_label(screen, listed, other)
             screen.wait(lambda frame: conversation_of(other)(frame) and f"answer from {other}" in frame,
                         f"a click on selected {other} opens it")
-            back_to_overview(screen, " ✓ alpha", " ✓ bravo")
+            back_to_overview(screen, "   alpha", "   bravo")
         print("overview clicks: a click on a Session row other than the selected one opens the clicked Session's "
               "conversation, a click on the selected row opens it, and Esc returns to the overview", flush=True)
 
         with w.overview(columns=WIDTH, rows=30) as screen:
-            screen.wait(lambda frame: " ✓ alpha" in frame, "the default view")
+            screen.wait(lambda frame: "   alpha" in frame, "the default view")
             listed = screen.text
             alpha_row = row_of(listed, "alpha")
             screen.keys(b"\x1b[F\r")
@@ -128,7 +128,7 @@ def opening_and_views():
             settings = screen.wait(lambda frame: "Notifications" in frame and "Version" in frame, "Esc closes only Keys after an inert click")
             assert "earlier message" not in settings, settings
             screen.keys(b"\x1b")
-            screen.wait(lambda frame: is_overview(frame) and "✓ alpha" in frame, "Esc returns from Settings to the overview")
+            screen.wait(lambda frame: is_overview(frame) and "   alpha" in frame, "Esc returns from Settings to the overview")
         print("overview clicks: a line of an open panel over a Session's row opens nothing", flush=True)
 
 
@@ -146,21 +146,21 @@ def flat_list():
         assert replies.lead_requests == 2, replies.lead_requests
 
         with w.overview(columns=WIDTH, rows=30) as screen:
-            listed = screen.wait(lambda frame: all(f" ✓ {label}" in frame for label in peers_by_label),
+            listed = screen.wait(lambda frame: all(f"   {label}" in frame for label in peers_by_label),
                                  "every finished peer without folding")
             lines = listed.split("\n")
-            assert lines[0] == "  + New Session" and lines[1] == "  Sessions  Archived" and re.fullmatch(r" ✓ (?:lead|peer-[0-6]) +\d+[smhd]", lines[2]), listed
+            assert lines[0] == " + New Session" and lines[1] == "  Sessions  Archived" and re.fullmatch(r"   (?:lead|peer-[0-6]) +(?:now|\d+[mhd])", lines[2]), listed
             assert not any(re.fullmatch(r" \S.* · \d+", line) for line in lines), listed
             assert " more" not in listed, listed
             screen.click(4, 1)
             screen.wait(lambda frame: "Type a task" in frame and not is_overview(frame), "New Session opens chat")
             listed = back_to_overview(screen, *peers_by_label)
             lines = listed.split("\n")
-            label = lines[max(row_of(listed, peer) for peer in peers_by_label) - 1].split()[1]
+            label = lines[max(row_of(listed, peer) for peer in peers_by_label) - 1].split()[0]
             click_label(screen, listed, label)
             screen.wait(lambda frame: conversation_of(label)(frame) and "peer done" in frame,
                         f"a click opens the last peer {label}")
-            back_to_overview(screen, f" ✓ {label}")
+            back_to_overview(screen, f"   {label}")
         print("overview clicks: all finished rows remain visible without headings or folds, and the last opens directly", flush=True)
 
 

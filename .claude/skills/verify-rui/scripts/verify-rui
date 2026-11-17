@@ -2527,6 +2527,7 @@ class FrameTerminal:
         cols, rows = size
         with self.condition:
             generation = self.capture.generation
+            reset_generation = self.capture.reset_generation
             fcntl.ioctl(self.master, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
             self.output_events.write(json.dumps({"t_ns": now_ns(), "resize": [cols, rows]}) + "\n")
             self.output_events.flush()
@@ -2534,7 +2535,8 @@ class FrameTerminal:
             if self.collected:
                 # An exited terminal cannot repaint; reflow its final screen.
                 self.capture.commit()
-        self.wait(lambda c: c.generation > generation, "committed resize frame", allow_exit=True)
+        self.wait(lambda c: c.generation > generation and (self.collected or c.frame_reset_generation > reset_generation),
+                  "committed resize repaint", allow_exit=True)
 
     def mouse(self, step, *, repaint=True):
         with self.condition:

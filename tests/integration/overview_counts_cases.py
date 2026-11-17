@@ -36,7 +36,7 @@ def rows_by_mark():
     with world("drawing-marks", responses, active_capacity=2) as w, released(*holds.values()):
         with w.overview(columns=99, rows=30) as screen:
             frame = screen.contains("+ New Session")
-            assert frame.split("\n")[0] == "  + New Session", frame
+            assert frame.split("\n")[0] == " + New Session", frame
             asking = w.session("--label", "Asking", "--tools", "bash", "--permission-mode", "ask")
             failing = w.session("--label", "Failing")
             send(w, asking, "ask")
@@ -49,18 +49,18 @@ def rows_by_mark():
             frame = screen.contains("◌ q1")
             lines = frame.split("\n")
             queued = next(i for i, line in enumerate(lines) if "◌ q1" in line)
-            assert re.fullmatch(r"◌ q1 +\d+s", lines[queued].strip()), frame
+            assert re.fullmatch(r"◌ q1 +now", lines[queued].strip()), frame
             assert "Queued" not in frame and "workspace" not in frame, frame
             assert "slots " not in frame, frame
             for line in lines:
-                if not line.startswith("  Settings"):
+                if not line.startswith("   Settings"):
                     assert not re.search(r"(?:rui|tools) \d+(?:\.\d+)? (?:MB|GB)\b", line), frame
             assert screen.style("? Asking").fg != screen.style("× Failing").fg, frame
             holds["w1"].set()
-            screen.wait(lambda f: "✓ w1" in f and "◌ q1" not in f, "queue admission")
+            screen.wait(lambda f: "   w1" in f and "◌ q1" not in f, "queue admission")
             for held in holds.values():
                 held.set()
-            screen.contains("✓ q1")
+            screen.contains("   q1")
     print("overview drawing: one-line state rows replace counts and slots", flush=True)
 
 
@@ -96,7 +96,7 @@ def unconfirmed_status():
         session = w.session("--label", "Talk")
         send(w, session, "first")
         with w.overview() as screen:
-            frame = screen.contains("✓ Talk")
+            frame = screen.contains("   Talk")
             assert "Not confirmed" not in frame, frame
             screen.keys(b"\r")
             screen.wait(lambda f: "first done" in f and "Talk ·" in f, "the conversation")

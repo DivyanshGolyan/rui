@@ -1087,7 +1087,7 @@ def silent_read_edit_cases():
 
 
 def wait_for_listed_call(tty):
-    running = re.compile(r"⠹ Held call · (?:[0-9]+s|[0-9]+m [0-9]+s|[0-9]+h [0-9]+m)")
+    running = re.compile(r"[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Held call *")
     tty.wait(predicate=lambda: any(running.fullmatch(row) for row in conversation_text(tty.capture.completed).splitlines()), timeout=30)
 
 
@@ -1095,18 +1095,17 @@ def listed_call_readiness_cases():
     from terminal_screen import ScreenCapture
 
     class OfferedFrames:
-        def __init__(self, elapsed):
+        def __init__(self, spinner):
             self.capture = ScreenCapture(80, 24)
             self.frames = (
-                "⠹ Held call\n◌ Queued · 0s",
-                "✓ Held call · 42s",
-                "⠹ Other call · 42s",
-                "prefix ⠹ Held call · 42s",
-                "⠹ Held call · 42s extra",
-                "⠹ Held call · " + elapsed,
+                "   Held call                  now",
+                " ◌ Held call                  now",
+                " ⠹ Other call",
+                "prefix ⠹ Held call",
+                " ⠹ Held call                  now",
+                " " + spinner + " Held call",
             )
             self.offered = None
-            self.frame("⠹ Held call · 99s")
             self.frame(self.frames[0])
 
         def frame(self, text):
@@ -1120,8 +1119,8 @@ def listed_call_readiness_cases():
                     return self.capture.completed
             raise AssertionError(("running listed call was not accepted", self.capture.completed))
 
-    for elapsed in ("0s", "2m 3s", "1h 2m"):
-        tty = OfferedFrames(elapsed)
+    for spinner in "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏":
+        tty = OfferedFrames(spinner)
         wait_for_listed_call(tty)
         assert tty.offered == len(tty.frames) - 1, ("listed call accepted before current running row", tty.capture.completed)
 
@@ -1364,8 +1363,8 @@ def renderer_cases():
         master, writer = os.pipe()
         try:
             tty = Terminal(master, None, None)
-            os.write(writer, terminal_frame(["  + New Session │", "  edited 2      │ edited 1", "                │ ⠹ Waiting"])
-                + terminal_frame(["  + New Session │", "  edited 2      │ edited 2", "                │ ›"]))
+            os.write(writer, terminal_frame([" + New Session │", "  edited 2      │ edited 1", "                │ ⠹ Waiting"])
+                + terminal_frame([" + New Session │", "  edited 2      │ edited 2", "                │ ›"]))
             observed = tty.wait("edited 2", after=0)
             assert "\nedited 2" in conversation_text(observed), observed
         finally:

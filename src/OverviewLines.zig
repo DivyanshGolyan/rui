@@ -6,6 +6,7 @@ const widget_style = @import("widget_style.zig");
 const Hover = @import("widgets/Hover.zig");
 
 pub const Header = struct {
+    drawn: bool = false,
     state: *const overview_view.State,
     caps: overview_view.Caps = .{},
     pub fn widget(self: *Header) vxfw.Widget {
@@ -20,6 +21,7 @@ pub const Header = struct {
         for (lines, spans) |segment, *span| span.* = .{ .text = segment.text, .style = widget_style.of(self.caps, segment.style) };
         const text: vxfw.RichText = .{ .text = spans, .softwrap = false, .width_basis = .parent };
         var surface = try text.draw(ctx.withConstraints(.{ .width = width }, ctx.max));
+        self.drawn = width > 0 and surface.size.height > 0 and lines.len > 0;
         surface.widget = self.widget();
         return surface;
     }
@@ -146,7 +148,7 @@ pub const Settings = struct {
         for (0..size.width) |column| surface.writeCell(@intCast(column), 0, .{ .char = .{ .grapheme = if (self.caps.unicode) "─" else "-", .width = 1 }, .style = widget_style.of(self.caps, .{ .colour = .quiet }) });
         if (height < 2) return surface;
         const ground: overview_view.Background = if (self.selected) .selection else if (self.hover.contains(target)) .hover else .ground;
-        const name: vxfw.RichText = .{ .text = &.{.{ .text = "  Settings", .style = widget_style.of(self.caps, .{ .colour = if (self.selected) .strong else .normal, .bold = self.selected, .background = ground }) }}, .softwrap = false };
+        const name: vxfw.RichText = .{ .text = &.{.{ .text = "   Settings", .style = widget_style.of(self.caps, .{ .colour = if (self.selected) .strong else .normal, .bold = self.selected, .background = ground }) }}, .softwrap = false };
         const label = try name.widget().draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = 1 }));
         @memset(surface.buffer[size.width .. 2 * size.width], .{ .style = widget_style.of(self.caps, .{ .background = ground }) });
         if (label.size.height > 0) @memcpy(surface.buffer[size.width..][0..label.size.width], label.buffer[0..label.size.width]);
@@ -200,7 +202,7 @@ test "session tabs press only separate drawn destinations and clear clipped targ
             try shown.render(window, controls.widget());
             var line: std.ArrayList(u8) = .empty;
             for (0..width) |col| try line.appendSlice(arena.allocator(), screen.readCell(@intCast(col), 0).?.char.grapheme);
-            try std.testing.expect(std.mem.startsWith(u8, line.items, "  + New Session"));
+            try std.testing.expect(std.mem.startsWith(u8, line.items, " + New Session"));
         }
         for (0..3) |row| for (0..@max(1, width)) |col| {
             clicks.got = null;
@@ -224,7 +226,7 @@ test "sidebar bottom separates Settings memory and update targets across geometr
             const frame = try settings.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = height }, .cell_size = .{} });
             try std.testing.expectEqual(@min(height, 3), frame.size.height);
             if (width >= 20 and height >= 3) {
-                try std.testing.expect(std.mem.startsWith(u8, try cells(arena.allocator(), frame, 1), "  Settings"));
+                try std.testing.expect(std.mem.startsWith(u8, try cells(arena.allocator(), frame, 1), "   Settings"));
                 const bottom = try cells(arena.allocator(), frame, 2);
                 try std.testing.expect(std.mem.indexOf(u8, bottom, "Settings") == null);
                 try std.testing.expect(std.mem.indexOf(u8, bottom, "rui") == null);

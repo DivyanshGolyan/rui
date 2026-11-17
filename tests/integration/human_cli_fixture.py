@@ -201,7 +201,7 @@ def keyed_frame(master, keys, accept, timeout=15):
 
 
 def overview_title(frame):
-    return "  + New Session" in frame and "  Settings" in frame and "Type a task" not in frame
+    return " + New Session" in frame and "   Settings" in frame and "Type a task" not in frame
 
 
 def overview_frame(master, accept, keys=b"", timeout=15, *, ready=True):
