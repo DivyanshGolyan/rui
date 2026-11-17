@@ -137,7 +137,7 @@ pub const Query = struct {
             if (entry.providers.contains(one)) break one;
         } else unreachable;
         return .{
-            .effort = model_capability.startEffort(catalog.shipped, self.effort, entry.id) orelse client_defaults.startEffort(entry.id, defaults.effort),
+            .effort = model_capability.startEffort(catalog.shipped, self.effort, entry.id) orelse if (defaults.effort) |saved| client_defaults.savedEffort(entry.id, saved) else null,
             .provider = provider,
             .current = if (defaults.model) |model| std.mem.eql(u8, model, entry.id) else false,
         };
@@ -376,7 +376,7 @@ fn plainRow(menu: *const Menu, id: []const u8, defaults: Defaults) Row {
     return Query.parse("").row(entryOf(menu, id), defaults).?;
 }
 
-test "a row would save the saved effort and sign-in where its model offers them, else the model's own" {
+test "a row previews only typed or saved effort and keeps provider selection" {
     var menu = try pickerMenu();
     defer menu.deinit(std.testing.allocator);
     const Case = struct { id: []const u8, effort: ?ReasoningEffort, provider: Provider };
@@ -395,10 +395,10 @@ test "a row would save the saved effort and sign-in where its model offers them,
         try std.testing.expectEqual(case.provider, row.provider);
     }
     for ([_]Case{
-        .{ .id = "gpt-6.1-sol", .effort = .low, .provider = .codex },
-        .{ .id = "gpt-5.5-pro", .effort = .medium, .provider = .codex },
-        .{ .id = "ft:custom", .effort = .low, .provider = .openai },
-        .{ .id = "azure/gpt-5-pro", .effort = .high, .provider = .openai },
+        .{ .id = "gpt-6.1-sol", .effort = null, .provider = .codex },
+        .{ .id = "gpt-5.5-pro", .effort = null, .provider = .codex },
+        .{ .id = "ft:custom", .effort = null, .provider = .openai },
+        .{ .id = "azure/gpt-5-pro", .effort = null, .provider = .openai },
     }) |case| {
         const row = plainRow(&menu, case.id, .{});
         try std.testing.expectEqual(case.effort, row.effort);

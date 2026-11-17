@@ -10,7 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from client_locality import (
-    ALLOWED, CLASSIFIER, DEFAULT_IMPORT, GATE, ISSUES, MESSAGE, REQUIRED_SOURCES,
+    ALLOWED, CLASSIFIER, DEFAULT_IMPORT, DEFERRED_ISSUES, GATE, ISSUES, MESSAGE, REQUIRED_SOURCES,
     ROOT, TS_DEFAULT, allowance_growth, allowed_entries, findings, scan,
     stale_allowances, surfaces, violations,
 )
@@ -24,8 +24,9 @@ class ClientLocalityTest(unittest.TestCase):
     def test_every_allowance_is_still_needed_and_names_its_issue(self):
         self.assertEqual(stale_allowances(), [])
         self.assertEqual(allowed_entries((ROOT / GATE).read_text()), ALLOWED)
-        for (_, rule), issue in ALLOWED.items():
-            self.assertEqual(issue, ISSUES[rule])
+        for pair, issue in ALLOWED.items():
+            self.assertEqual(issue, DEFERRED_ISSUES.get(pair, ISSUES[pair[1]]))
+        self.assertEqual(ALLOWED["src/client_defaults.zig", DEFAULT_IMPORT], "#1629")
 
     def test_allowances_do_not_grow_from_trusted_base(self):
         self.assertEqual(allowance_growth(), [])
@@ -210,6 +211,15 @@ class ClientSourceInventoryTest(unittest.TestCase):
         self.assertEqual(stale_allowances(self.root, allowed),
                          [f"src/cli_args.zig: remove stale allowance for {DEFAULT_IMPORT} (#1621)"])
 
+    def test_saved_effort_exception_requires_the_real_product_import(self):
+        pair = ("src/client_defaults.zig", DEFAULT_IMPORT)
+        allowed = {pair: "#1629"}
+        self.write(pair[0], 'const defaults = @import("product_defaults.zig");')
+        self.assertEqual(stale_allowances(self.root, allowed), [])
+        self.write(pair[0], 'const defaults = @import("configuration_defaults.zig");')
+        self.assertEqual(stale_allowances(self.root, allowed),
+                         [f"{pair[0]}: remove stale allowance for {pair[1]} (#1629)"])
+
 
 class ClientAllowanceRatchetTest(unittest.TestCase):
     def setUp(self):
@@ -255,6 +265,37 @@ class ClientAllowanceRatchetTest(unittest.TestCase):
         found = allowance_growth(self.root)
         self.assertEqual(found, [f"{file}: {rule}: allowance exceeds the trusted review base: {MESSAGE}"
                                  for file, rule in sorted((removed, new))])
+
+    def test_existing_saved_effort_pair_can_move_to_its_deferred_issue(self):
+        pair = ("src/client_defaults.zig", DEFAULT_IMPORT)
+        self.write_allowances({pair: "#1621"})
+        self.commit(trusted=True)
+        self.write_allowances({pair: "#1629"})
+        self.assertEqual(allowance_growth(self.root), [])
+
+    def test_saved_effort_deferral_cannot_add_its_pair_to_a_new_baseline(self):
+        self.write_allowances({})
+        self.commit(trusted=True)
+        pair = ("src/client_defaults.zig", DEFAULT_IMPORT)
+        self.write_allowances({pair: "#1629"})
+        self.assertEqual(allowance_growth(self.root),
+                         [f"{pair[0]}: {pair[1]}: allowance exceeds the trusted review base: {MESSAGE}"])
+
+    def test_saved_effort_removal_issue_is_specific_and_old_tag_is_historical(self):
+        pair = ("src/client_defaults.zig", DEFAULT_IMPORT)
+        current = "ALLOWED = " + repr({pair: "#1629"})
+        self.assertEqual(allowed_entries(current), {pair: "#1629"})
+        historical = "ALLOWED = " + repr({pair: "#1621"})
+        self.assertEqual(allowed_entries(historical, trusted=True), {pair: "#1621"})
+        with self.assertRaises(ValueError):
+            allowed_entries(historical)
+        for invalid in ({("src/cli.zig", DEFAULT_IMPORT): "#1629"},
+                        {("src/client_defaults.zig", CLASSIFIER): "#1629"},
+                        {pair: "#1622"}, {pair: "#9999"}):
+            for trusted in (False, True):
+                with self.subTest(entries=invalid, trusted=trusted):
+                    with self.assertRaises(ValueError):
+                        allowed_entries("ALLOWED = " + repr(invalid), trusted=trusted)
 
     def test_candidate_cannot_supply_its_own_trusted_baseline(self):
         self.write_allowances({})

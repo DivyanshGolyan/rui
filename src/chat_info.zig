@@ -6,7 +6,6 @@ const Footer = @import("widgets/Footer.zig");
 const status = @import("status_page.zig");
 const catalog = @import("model_catalog.zig");
 const capability = @import("model_capability.zig");
-const client_defaults = @import("client_defaults.zig");
 const tools = @import("built_in_tool.zig");
 const ModelChoice = @import("model_choice.zig");
 const keymap = @import("keymap.zig");
@@ -514,8 +513,10 @@ fn drawBodyContents(raw: *anyopaque, ctx: vxfw.DrawContext) !vxfw.Surface {
         if (self.session.context_estimate) |tokens| {
             var context: std.Io.Writer.Allocating = .init(ctx.arena);
             try status.writeGrouped(&context.writer, tokens);
-            try context.writer.writeAll(" of ");
-            try status.writeGrouped(&context.writer, self.session.compaction_trigger orelse client_defaults.compactionTrigger(self.session.provider, self.session.model.slice()));
+            if (self.session.compaction_trigger) |trigger| {
+                try context.writer.writeAll(" of ");
+                try status.writeGrouped(&context.writer, trigger);
+            }
             self.fields[5].value = context.written();
         }
     }
@@ -1225,6 +1226,29 @@ test "Chat info Context appears only for measured estimates regardless of work o
     const unavailable = try dumpWidget(page.bodyWidget(), arena.allocator(), 99, 14);
     try std.testing.expect(std.mem.indexOf(u8, unavailable, "Context") == null);
     try std.testing.expect(std.mem.indexOf(u8, unavailable, "unknown") == null);
+}
+
+test "Chat info Context never invents an unreported compaction threshold" {
+    var fixture: Fixture = .{};
+    fixture.init();
+    var page: Self = .{ .backend = fixture.backend() };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |unicode| for ([_]?u64{ null, 0, 18, 31_200 }) |estimate| {
+        fixture.session.context_estimate = estimate;
+        fixture.session.compaction_trigger = null;
+        fixture.unicode = unicode;
+        page.refresh();
+        const text = try dumpWidget(page.bodyWidget(), arena.allocator(), width, 14);
+        try std.testing.expectEqual(estimate != null, page.fields[5].visible);
+        try std.testing.expect(std.mem.indexOf(u8, text, " of ") == null);
+        if (estimate) |tokens| try std.testing.expectEqualStrings(switch (tokens) {
+            0 => "0",
+            18 => "18",
+            else => "31,200",
+        }, page.fields[5].value);
+        _ = arena.reset(.retain_capacity);
+    };
 }
 
 test "Chat info hidden Context preserves action IDs failures and the blank action separator" {

@@ -2294,7 +2294,6 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
     var binding: new_session_selection.Binding = .{};
     var saved_effort: ?model_capability.ReasoningEffort = null;
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
-    var compaction_buffer: [20]u8 = undefined;
     if (input.session == .create and !input.preset.present) {
         const intent: new_session_selection.Intent = .{
             .provider = if (input.provider.present) input.provider.value else null,
@@ -2311,13 +2310,7 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
             input.model = .{ .present = true, .value = binding.model.slice() };
             if (!input.parent.present) input.provider = .{ .present = true, .value = binding.provider.slice() };
         }
-        input.completeCreation(
-            if (reads.binding) std.meta.stringToEnum(protocol.Provider, binding.provider.slice()).? else null,
-            input.model.value,
-            saved_effort,
-            snapshot.defaults.permission_mode,
-            &compaction_buffer,
-        );
+        input.applySavedCreation(input.model.value, saved_effort, snapshot.defaults.permission_mode);
         if (!input.parent.present and !input.workspace.present) {
             var cwd = try std.Io.Dir.cwd().openDir(io, ".", .{});
             defer cwd.close(io);
@@ -2344,19 +2337,6 @@ fn configureCaptured(init: std.process.Init, requester: client.Requests, parsed:
     var input = configuration;
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     input.store = try selectedStore(init, if (live) |address| address.store else parsed.get("store"), &selected_buffer);
-    var compaction_buffer: [20]u8 = undefined;
-    if (input.session == .named and !input.preset.present and input.resetsToDefault()) {
-        var current_model: protocol.Bounded(protocol.max_model_bytes) = .{};
-        var current_provider: protocol.Provider = undefined;
-        {
-            var discard: std.Io.Writer.Discarding = .init(&.{});
-            const observed = try inspectWorkTo(init, requester, input.store, input.session.named, &discard.writer);
-            defer observed.file.close(io);
-            try current_model.set(if (input.model.present) input.model.value else observed.current.settings.model.slice());
-            current_provider = observed.current.settings.provider.value;
-        }
-        input.completeReset(current_provider, current_model.slice(), &compaction_buffer);
-    }
 
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const target = try captureTarget(init, parsed, &directory_buffer);
@@ -2450,9 +2430,19 @@ fn messageWithStep(init: std.process.Init, parsed: *const cli_args.Parsed, confi
     var reply_buffer: client.ReplyBuffer = .{};
     const reply = try takeReply(step, sender.sendCaptured(&captured, .{ .map = init.environ_map }, &reply_buffer), &captured);
     if (!reply.isAccepted()) return writeMutationReply(io, reply, .json, captured.replay);
+    const admitted = readStartConfiguration(init, sender, input.store, reply.context.session.slice(), reply.context.key.slice()) catch |err| {
+        // Admission is known even when its immutable settings cannot be read.
+        try writeMutationReply(io, reply, .json, captured.replay);
+        return err;
+    };
+    const receipt = configuration.?.receipt.observed(
+        @tagName(admitted.provider.value),
+        admitted.model.slice(),
+        if (admitted.reasoning_effort) |effort| @tagName(effort.value) else null,
+    );
     var output: JsonOutput = undefined;
     const writer = output.init(io, .stdout);
-    writeMutationJson(writer, reply, configuration.?.receipt) catch |err| return output.failure(err);
+    writeMutationJson(writer, reply, receipt) catch |err| return output.failure(err);
     writer.writeByte('\n') catch |err| return output.failure(err);
     try output.finish();
 }
@@ -3672,6 +3662,31 @@ fn presentMutationReply(writer: *std.Io.Writer, reply: protocol_reply.MutationRe
     try writer.flush();
 }
 
+fn readStartConfiguration(init: std.process.Init, requester: client.Requests, store: []const u8, session: []const u8, key: []const u8) !protocol_reply.CreationRevision {
+    const file = try renderScratch(init);
+    defer file.close(init.io);
+    var response: client.ReplyBuffer = .{};
+    const reply = requester.inspectSession(store, session, .full, file, &response) catch |err| return readTransportFailure(init.io, store, err);
+    const bytes = switch (reply) {
+        .report => |report| report.bytes,
+        .command => |command| {
+            try writeCommandReply(init.io, command, .stderr);
+            try protocol_reply.checkCanonicalFailure(command);
+            return error.HostInvocationFailed;
+        },
+    };
+    var input: [protocol.content_window_bytes]u8 = undefined;
+    var file_reader = file.reader(init.io, &.{});
+    var body = file_reader.interface.limited(.limited64(bytes), &input);
+    var storage: [protocol.content_window_bytes]u8 = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&storage);
+    var reader = std.json.Reader.init(fixed.allocator(), &body.interface);
+    defer reader.deinit();
+    const result = try protocol_reply.decodeCreationRevision(fixed.allocator(), &reader, session, key);
+    if (body.remaining != .nothing) return error.InvalidObservation;
+    return result;
+}
+
 const StartConfiguration = struct {
     provider: ?[]const u8,
     parent: ?[]const u8 = null,
@@ -3688,6 +3703,14 @@ const StartConfiguration = struct {
             .reasoning_effort = input.reasoning_effort.value,
             .effort_source = if (effort_flag) .flag else if (model_capability.startEffort(model_catalog.shipped, saved_effort, model) != null) .saved else .model_default,
         };
+    }
+
+    fn observed(self: StartConfiguration, provider: []const u8, model: []const u8, effort: ?[]const u8) StartConfiguration {
+        var result = self;
+        result.provider = if (self.parent == null) provider else null;
+        result.model = model;
+        result.reasoning_effort = effort;
+        return result;
     }
 };
 
@@ -3811,6 +3834,27 @@ test "session start configuration reports resolved effort and its source" {
             try std.testing.expectEqualStrings(effort, value.reasoning_effort.?);
         } else try std.testing.expectEqual(@as(?[]const u8, null), value.reasoning_effort);
     }
+}
+
+test "session start reports Host settings while retaining invocation effort source" {
+    const requested = StartConfiguration.resolve(.{
+        .store = "/store",
+        .session = .create,
+        .provider = .{ .present = true, .value = "openai" },
+        .model = .{ .present = true, .value = "model-requested" },
+    }, false, null);
+    try std.testing.expect(requested.reasoning_effort == null);
+    const report = requested.observed("codex", "model-served", "high");
+    try std.testing.expectEqualStrings("codex", report.provider.?);
+    try std.testing.expectEqualStrings("model-served", report.model);
+    try std.testing.expectEqualStrings("high", report.reasoning_effort.?);
+    try std.testing.expectEqual(requested.effort_source, report.effort_source);
+    try std.testing.expect(report.observed("codex", "no-effort", null).reasoning_effort == null);
+    var attached = requested;
+    attached.parent = "k7m2qx";
+    const attached_report = attached.observed("codex", "model-served", "high");
+    try std.testing.expect(attached_report.provider == null);
+    try std.testing.expectEqualStrings("k7m2qx", attached_report.parent.?);
 }
 
 test "session start mutation receipt adds configuration without changing send" {
@@ -4732,7 +4776,7 @@ test "native promotion saved refusals keep their catalog code and refused exit" 
 test "saved CLI rejection goldens preserve JSON and explain permission and incomplete configuration" {
     const cases = [_]struct { code: []const u8, session: []const u8, line: []const u8 }{
         .{ .code = "unsupported_permission_mode", .session = "k7m2qx", .line = "rui session configure: --permission-mode: Rui has no such permission mode. Accepted: ask, bypass. Next: Use one of the accepted values. This rejection was saved and replays as saved; a resend needs a new key. [unsupported_permission_mode]\n" },
-        .{ .code = "incomplete_initial_configuration", .session = "", .line = "rui session configure: --workspace, --provider, --model: A new Session's spec is missing a required setting. Accepted: model, reasoning effort, compaction trigger, tools and permission mode, a workspace when tools include bash, and a provider when the Host serves several. Next: State every required setting; rui session start fills them for you. This rejection was saved and replays as saved; a resend needs a new key. [incomplete_initial_configuration]\n" },
+        .{ .code = "incomplete_initial_configuration", .session = "", .line = "rui session configure: --workspace, --provider: A new Session's spec is missing a required setting. Accepted: a Workspace for standalone creation and a provider when the Host serves several. Next: Supply the missing Workspace or provider; Workspace may come from a preset or parent. This rejection was saved and replays as saved; a resend needs a new key. [incomplete_initial_configuration]\n" },
     };
     for (cases) |case| {
         var wire: [1024]u8 = undefined;
