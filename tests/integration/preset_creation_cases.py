@@ -9,10 +9,17 @@ import settings_fixture
 
 
 def preset_creation(binary, root, store_settings, env):
+    # Exercise the socket limit even when the fixture runner has a short TMPDIR.
+    long_root = pathlib.Path(root) / ("long-root-" + "x" * 80)
+    with host_process.short_interface_directory() as runtime:
+        _preset_creation(binary, long_root, store_settings, env, runtime)
+
+
+def _preset_creation(binary, root, store_settings, env, runtime):
     root = pathlib.Path(root)
-    root.mkdir(mode=0o700)
-    home, workspace, elsewhere, runtime = (root / name for name in ("home", "workspace", "cwd", "run"))
-    for path in (home, workspace, elsewhere, runtime):
+    root.mkdir(mode=0o700, parents=True)
+    home, workspace, elsewhere = (root / name for name in ("home", "workspace", "cwd"))
+    for path in (home, workspace, elsewhere):
         path.mkdir(mode=0o700)
     clean = dict(env, HOME=str(home), RUI_RUNTIME_DIR=str(runtime))
     for name in ("RUI_STORE", "RUI_ADDRESS", "RUI_SENDER_HANDLE"):
