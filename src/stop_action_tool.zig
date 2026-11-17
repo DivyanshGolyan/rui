@@ -205,3 +205,75 @@ test "stop_action cancellation races do not fence the Store" {
         }
     }.check);
 }
+
+test "client Action stop shares selection, replay and final input suppression" {
+    try storage.testing.forEachEngine(struct {
+        fn check(case: *storage.testing.Case) !void {
+            for ([_]enum { running, restart, ended, waiting }{ .running, .restart, .ended, .waiting }) |mode| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var database: storage.Store = undefined;
+                try storage.testing.testingStore(case, &database, &tmp, std.testing.io);
+                defer database.close() catch unreachable;
+                var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+                defer arena_state.deinit();
+                const arena = arena_state.allocator();
+                var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+                const workspace = try storage.testingCanonicalCwd(std.testing.io, &workspace_buffer);
+                var configure = try storage.testingCompleteConfiguration("client-stop", "", workspace, "model-a");
+                configure.configuration.tools = try .of(&.{"bash"});
+                configure.configuration.permission_mode.state = .value;
+                try configure.configuration.permission_mode.value.set(if (mode == .waiting) "ask" else "bypass");
+                const session = (try database.configure(&configure, .{})).accepted.session;
+                try storage.testingSubmitMessage(&database, &tmp, "task", "task", session.slice(), "run");
+                const first = (try database.admitNextModelAttempt(.{})).?.permit.binding;
+                try queueCallsForTesting(&database, &tmp, arena, first, "target", "bash", &.{"{\"cmd\":\"true\",\"description\":\"Held\"}"});
+                const target = try storage.testing.queryU64(&database, "SELECT action_id FROM action_operation WHERE parent_operation_id=?1", .{first.operation_id});
+                var background: @import("command_input.zig").ActionBackgroundCommand = .{ .session = session, .action_id = target };
+                try background.key.set("background");
+                try std.testing.expect(database.backgroundAction(.{ .command = &background }, .{}) == .accepted);
+                const effect = if (mode != .waiting) (try database.admitNextActionAttempt(.fromFree(2, true), 30_000, .{})).?.permit.binding else null;
+                if (mode == .ended) _ = try database.settleActionAttempt(effect.?, .succeeded, "finished before stop", .{});
+                var stop: @import("command_input.zig").ActionStopCommand = .{ .session = session, .action_id = target };
+                try stop.key.set("stop");
+                const result = database.requestActionStop(&stop, .{});
+                try std.testing.expect(result == .accepted);
+                try std.testing.expect(!result.accepted.replayed);
+                if (mode == .ended) {
+                    try std.testing.expectEqual(try storage.testing.queryU64(&database, "SELECT acceptance_position FROM action_operation WHERE action_id=?1", .{target}), result.accepted.resolution.?);
+                } else try std.testing.expect(result.accepted.resolution == null);
+                if (mode == .running) {
+                    try std.testing.expect((try database.actionSupersededByStop(effect.?)) != null);
+                    _ = try database.settleActionAttempt(effect.?, .succeeded, "late result", .{});
+                } else if (mode == .restart) {
+                    try database.close();
+                    try storage.testing.testingStore(case, &database, &tmp, std.testing.io);
+                    try std.testing.expect(try database.recoverOneUncertainAction(.empty()));
+                }
+                const replay = database.requestActionStop(&stop, .{});
+                try std.testing.expect(replay == .accepted and replay.accepted.replayed);
+                try std.testing.expectEqual(result.accepted.resolution, replay.accepted.resolution);
+                try std.testing.expectEqual(@as(u64, 1), try storage.testing.queryU64(&database, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND resolution_code=?2", .{ target, if (mode == .ended) "succeeded" else "cancelled" }));
+                if (mode != .ended) try std.testing.expectEqual(@as(u64, 0), try storage.testing.queryU64(&database, "SELECT count(*) FROM message_admission WHERE source_action_id=?1", .{target}));
+                try stop.key.set("stop-after");
+                const after = database.requestActionStop(&stop, .{});
+                try std.testing.expectEqual(try storage.testing.queryU64(&database, "SELECT acceptance_position FROM action_operation WHERE action_id=?1", .{target}), after.accepted.resolution.?);
+                stop.action_id = 0;
+                try std.testing.expect(database.requestActionStop(&stop, .{}) == .conflict);
+                try stop.key.set("invalid");
+                try std.testing.expectEqual(@import("action_control.zig").Rejection.invalid_target, database.requestActionStop(&stop, .{}).rejected.code);
+                stop.action_id = std.math.maxInt(i64);
+                try stop.key.set("unknown");
+                try std.testing.expectEqual(@import("action_control.zig").Rejection.unknown_action, database.requestActionStop(&stop, .{}).rejected.code);
+                try configure.key.set("foreign");
+                stop.session = (try database.configure(&configure, .{})).accepted.session;
+                stop.action_id = target;
+                try stop.key.set("foreign-stop");
+                const foreign = database.requestActionStop(&stop, .{});
+                try std.testing.expect(foreign == .rejected);
+                try std.testing.expectEqual(@import("action_control.zig").Rejection.target_mismatch, foreign.rejected.code);
+                try std.testing.expect(database.requestActionStop(&stop, .{}).rejected.replayed);
+            }
+        }
+    }.check);
+}

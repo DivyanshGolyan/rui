@@ -484,6 +484,12 @@ pub const ActionBackgroundInput = struct {
     action_id: u64,
 };
 
+pub const ActionStopInput = struct {
+    store: []const u8,
+    session: []const u8,
+    action_id: u64,
+};
+
 pub const PermissionDecisionInput = struct {
     store: []const u8,
     session: []const u8,
@@ -2049,6 +2055,7 @@ fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: protocol
             .operation = protocol_reply.decimalId(fields.target.?.operation, true) catch return error.InvalidRequestRecord,
         } },
         .action_background => .{ .action_background = protocol_reply.decimalId(fields.action orelse return error.InvalidRequestRecord, false) catch return error.InvalidRequestRecord },
+        .action_stop => .{ .action_stop = protocol_reply.decimalId(fields.action orelse return error.InvalidRequestRecord, false) catch return error.InvalidRequestRecord },
         .permission_decision => .{ .permission_decision = .{
             .action = protocol_reply.decimalId(fields.action orelse return error.InvalidRequestRecord, true) catch return error.InvalidRequestRecord,
             .decision = std.meta.stringToEnum(protocol.PermissionDecision, (fields.decision orelse return error.InvalidRequestRecord).slice()) orelse return error.InvalidRequestRecord,
@@ -2060,7 +2067,7 @@ fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: protocol
         (kind != .session_pin and fields.pinned != null) or
         (kind != .message and (fields.text != null or fields.sender != null or fields.sender_handle != null)) or (kind != .model_interruption and fields.target != null) or
         (kind != .permission_decision and fields.decision != null) or
-        (kind != .permission_decision and kind != .action_background and fields.action != null)) return error.InvalidRequestRecord;
+        (kind != .permission_decision and kind != .action_background and kind != .action_stop and fields.action != null)) return error.InvalidRequestRecord;
     return .{ .saved = saved, .target = target };
 }
 
@@ -2241,6 +2248,16 @@ pub fn captureActionBackground(io: std.Io, input: ActionBackgroundInput, target:
     try protocol_reply.validateIdentityInputs(location.key, input.session);
     if (input.action_id == 0 or input.action_id > std.math.maxInt(i64)) return error.InvalidTarget;
     return runCapture(io, &paths, &location, input.session, .action_background, null, Capture.writeRequest, .{ protocol.action_background_request, .{ paths.store_identity.slice(), location.key, input.session, input.action_id } });
+}
+
+pub fn captureActionStop(io: std.Io, input: ActionStopInput, target: CaptureTarget) !CapturedRecord {
+    const paths = try resolveClientPaths(io, input.store);
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var key_buffer: [36]u8 = undefined;
+    const location = try target.resolve(io, &path_buffer, &key_buffer);
+    try protocol_reply.validateIdentityInputs(location.key, input.session);
+    if (input.action_id == 0 or input.action_id > std.math.maxInt(i64)) return error.InvalidTarget;
+    return runCapture(io, &paths, &location, input.session, .action_stop, null, Capture.writeRequest, .{ protocol.action_stop_request, .{ paths.store_identity.slice(), location.key, input.session, input.action_id } });
 }
 
 fn finishCapture(io: std.Io, capture: *Capture, location: *const CaptureTarget.Location, store: []const u8, session: []const u8, kind: protocol.CommandKind) !CapturedRecord {
@@ -3559,6 +3576,7 @@ test "client capture rejects noncanonical Session references before publication"
                 .model_interruption => captureModelInterruption(io, .{ .store = root, .session = session, .turn_id = 1, .operation_id = 1 }, target),
                 .permission_decision => capturePermissionDecision(io, .{ .store = root, .session = session, .action_id = 1 }, target),
                 .action_background => captureActionBackground(io, .{ .store = root, .session = session, .action_id = 1 }, target),
+                .action_stop => captureActionStop(io, .{ .store = root, .session = session, .action_id = 1 }, target),
             };
             if (result) |record| {
                 var unexpected = record;
@@ -3598,7 +3616,7 @@ test "client recovery rejects noncanonical Session references without retransmis
                     .session_pin => ",\"pinned\":true}",
                     .model_interruption => ",\"turn\":\"1\",\"operation\":\"1\"}}",
                     .permission_decision => ",\"action\":\"1\",\"decision\":\"deny\"}",
-                    .action_background => ",\"action\":\"1\"}",
+                    .action_background, .action_stop => ",\"action\":\"1\"}",
                 });
                 const file = try tmp.dir.createFile(io, handle ++ ".json", .{});
                 try file.writeStreamingAll(io, body.slice());
@@ -6404,4 +6422,40 @@ test "preset Configure capture reopens with sparse settings through native ingre
     try std.testing.expect(request.configure.configuration.tools.state == .value);
     try std.testing.expectEqualStrings("", request.configure.configuration.tools.names.slice());
     try std.testing.expect(request.configure.configuration.reasoning_effort.state == .explicit_null);
+}
+
+test "Action stop captures preserve target and bytes through generated and explicit recovery" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(io, .fromMode(0o700));
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    for ([_]u64{ 1, 9007199254740993, std.math.maxInt(i64) }) |action_id| {
+        var captured = try captureActionStop(io, .{ .store = root, .session = "k7m2qx", .action_id = action_id }, .{ .generated = root });
+        const identity = captured.saved;
+        var original: [2048]u8 = undefined;
+        const count = try captured.file.readPositionalAll(io, &original, 0);
+        try std.testing.expectEqual(protocol.CommandKind.action_stop, identity.kind);
+        try std.testing.expectEqual(action_id, captured.target.action_stop);
+        captured.close(io);
+        var recovered = try openCaptured(io, .{ .generated = .{ .directory = root, .handle = identity.key.slice() } });
+        try std.testing.expectEqual(action_id, recovered.target.action_stop);
+        try std.testing.expectEqualStrings(identity.key.slice(), recovered.saved.key.slice());
+        try std.testing.expectEqualStrings("k7m2qx", recovered.saved.session.slice());
+        var replayed: [2048]u8 = undefined;
+        const replayed_count = try recovered.file.readPositionalAll(io, &replayed, 0);
+        try std.testing.expectEqualSlices(u8, original[0..count], replayed[0..replayed_count]);
+        recovered.close(io);
+        var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const path = try requestPath(root, identity.key.slice(), &path_buffer);
+        var explicit = try openCaptured(io, .{ .explicit = .{ .store = root, .record = path, .kind = .action_stop } });
+        try std.testing.expectEqual(action_id, explicit.target.action_stop);
+        explicit.close(io);
+        try std.testing.expectEqual(protocol.CommandKind.action_stop, (try inspectCaptured(io, root, identity.key.slice())).kind);
+        try std.testing.expectError(error.RequestBindingMismatch, openCaptured(io, .{ .explicit = .{ .store = root, .record = path, .kind = .action_background } }));
+    }
+    for ([_]u64{ 0, std.math.maxInt(u64) }) |action_id| {
+        try std.testing.expectError(error.InvalidTarget, captureActionStop(io, .{ .store = root, .session = "k7m2qx", .action_id = action_id }, .{ .generated = root }));
+    }
 }

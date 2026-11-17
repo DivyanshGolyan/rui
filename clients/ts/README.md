@@ -241,3 +241,12 @@ A later Message to an archived Session restores it transactionally before admitt
 `unarchive()` restores only organization and never resumes stopped work.
 Replaying an archive request with its original key does not archive again after a later restore.
 Both methods notify local activity followers without submitting a Message or starting work.
+
+## Stop one Action
+
+`session.stopAction(action, { idempotencyKey })` selects one Action in that Session for stop.
+It returns the existing Resolution position when the Action has already ended, or `null` when stop selection precedes completion.
+Use `session.readAction(action)` to read completion and saved output.
+Retain the key and exact inputs before sending. Retry them unchanged to recover a lost reply.
+A stop selection suppresses that Action's final Session input and preserves its sole Resolution.
+Other Actions continue.

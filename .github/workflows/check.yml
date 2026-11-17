@@ -55,6 +55,48 @@ concurrency:
 # Leave setup uncapped: cold fetch outliers still have the original job budget.
 
 jobs:
+  mac_runner:
+    continue-on-error: true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    permissions:
+      contents: read
+    outputs:
+      runs_on: ${{ steps.decide.outputs.runs_on || '"macos-15"' }}
+      self_hosted: ${{ steps.decide.outputs.self_hosted || 'false' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        continue-on-error: true
+        with:
+          ref: ${{ github.sha }}
+          sparse-checkout: tests/ci/mac_runner.py
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - name: Read the runner status snapshot
+        continue-on-error: true
+        env:
+          MAC_RUNNER_STATUS_TOKEN: ${{ secrets.MAC_RUNNER_STATUS_TOKEN }}
+        run: |
+          if [ -n "$MAC_RUNNER_STATUS_TOKEN" ]; then
+            curl --fail --silent --show-error --max-time 10 \
+              -H "Authorization: Bearer $MAC_RUNNER_STATUS_TOKEN" \
+              -H 'Accept: application/vnd.github+json' \
+              "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/runners?per_page=100" \
+              -o "$RUNNER_TEMP/mac-runners.json" || rm -f "$RUNNER_TEMP/mac-runners.json"
+          fi
+      - name: Choose the Mac runner with hosted fallback
+        id: decide
+        if: ${{ always() }}
+        continue-on-error: true
+        env:
+          INPUTS: ${{ toJSON(inputs) }}
+          RUI_MAC_RUNNER: ${{ vars.RUI_MAC_RUNNER }}
+          RUNNERS_PATH: ${{ runner.temp }}/mac-runners.json
+        run: python3 -B tests/ci/mac_runner.py
+      - name: Explain an unavailable routing decision
+        if: ${{ always() && steps.decide.outcome != 'success' }}
+        continue-on-error: true
+        run: echo 'Hosted macOS is selected because the routing step was unavailable.' >> "$GITHUB_STEP_SUMMARY"
   plan:
     if: ${{ !github.event.repository.private }}
     runs-on: ubuntu-24.04
@@ -372,9 +414,9 @@ jobs:
           setup-outcome: ${{ steps.setup.outcome }}
           work-outcome: ${{ steps.compile.outcome }}
   macos_build:
-    needs: plan
-    if: ${{ needs.plan.outputs.native == 'true' }}
-    runs-on: macos-15
+    needs: [plan, mac_runner]
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.native == 'true' }}
+    runs-on: ${{ fromJSON(needs.mac_runner.outputs.runs_on || '"macos-15"') }}
     # Match the cold Release producer budget without extending acceptance deadlines.
     timeout-minutes: 60
     outputs:
@@ -386,6 +428,7 @@ jobs:
       - uses: ./.github/actions/setup
         id: setup
         with:
+          publish-caches: ${{ github.ref == 'refs/heads/main' && needs.mac_runner.outputs.self_hosted != 'true' && 'true' || 'false' }}
           targets: ${{ needs.plan.outputs.native_targets }}
           check-part: compiled
       - name: Compile selected gates once, never test acceptance
@@ -418,9 +461,9 @@ jobs:
   macos_build_unit:
     # Keep the parallel unit roots off the cores building the other gates.
     # One extra Mac briefly; suites still use at most three of the five Macs.
-    needs: plan
-    if: ${{ needs.plan.outputs.macos_split == 'true' }}
-    runs-on: macos-15
+    needs: [plan, mac_runner]
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.macos_split == 'true' }}
+    runs-on: ${{ fromJSON(needs.mac_runner.outputs.runs_on || '"macos-15"') }}
     # A cold cache compiles the unit roots from scratch; match the cold producer budget.
     timeout-minutes: 60
     outputs:
@@ -432,6 +475,7 @@ jobs:
       - uses: ./.github/actions/setup
         id: setup
         with:
+          publish-caches: ${{ github.ref == 'refs/heads/main' && needs.mac_runner.outputs.self_hosted != 'true' && 'true' || 'false' }}
           check-part: compiled-unit
       - name: Compile the unit test roots once, never test acceptance
         id: compile
@@ -746,10 +790,10 @@ jobs:
         run: python3 -B tests/ci/failure_cause.py explain
   macos_suites:
     name: macos suites (${{ matrix.name }})
-    needs: [plan, macos_build, macos_build_unit]
+    needs: [plan, mac_runner, macos_build, macos_build_unit]
     # A skipped unit producer is expected only for an unsplit selection.
     if: ${{ !cancelled() && needs.plan.outputs.native == 'true' && needs.macos_build.result == 'success' && needs.macos_build_unit.result == (needs.plan.outputs.macos_split == 'true' && 'success' || 'skipped') }}
-    runs-on: macos-15
+    runs-on: ${{ fromJSON(needs.mac_runner.outputs.runs_on || '"macos-15"') }}
     timeout-minutes: ${{ inputs.promotion && 300 || 35 }}
     strategy:
       # Start alongside Linux; bound Mac occupancy while keeping suites isolated.
@@ -763,6 +807,7 @@ jobs:
       - uses: ./.github/actions/setup
         id: setup
         with:
+          publish-caches: ${{ github.ref == 'refs/heads/main' && needs.mac_runner.outputs.self_hosted != 'true' && 'true' || 'false' }}
           targets: ${{ toJSON(matrix.targets) }}
           compiled: 'true'
       - name: Use the verified producer artifact or compile locally

@@ -548,6 +548,7 @@ fn dropBackgroundUpgradeShape(storage: *Store) !void {
     try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM session_pin WHERE command_key IS NOT NULL", .{}));
     try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM action_control_command", .{}));
     try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM action_stop", .{}));
+    try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM action_stop_command", .{}));
     try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM action_operation WHERE background_content_id IS NOT NULL OR background_position IS NOT NULL OR background_at IS NOT NULL", .{}));
     try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM session_stop WHERE action_cutoff<>0", .{}));
     try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM message_admission WHERE source_action_id IS NOT NULL", .{}));
@@ -565,7 +566,7 @@ fn dropBackgroundUpgradeShape(storage: *Store) !void {
             try std.testing.expectEqual(@as(u64, check[2]), try mysql_testing.rawQueryU64(storage, "SELECT count(*) AS value" ++ catalog ++ "'" ++ check[0] ++ "' AND " ++ check[1]));
         }
         try std.testing.expectEqual(@as(u64, 1), try mysql_testing.rawQueryU64(storage, "SELECT count(*) AS value" ++ background_fk));
-        try std.testing.expectEqual(@as(u64, 1), try mysql_testing.rawQueryU64(storage, "SELECT count(*) AS value" ++ catalog ++ "'core_command' AND LOWER(TRIM(REPLACE(REPLACE(REPLACE(cc.CHECK_CLAUSE,'`',''),'(',''),')','')))='kind between 1 and 8'"));
+        try std.testing.expectEqual(@as(u64, 1), try mysql_testing.rawQueryU64(storage, "SELECT count(*) AS value" ++ catalog ++ "'core_command' AND LOWER(TRIM(REPLACE(REPLACE(REPLACE(cc.CHECK_CLAUSE,'`',''),'(',''),')','')))='kind between 1 and 9'"));
         inline for (checks) |check| {
             try Native.exec(storage, "SET @rui_rewind_ddl=(SELECT CONCAT('ALTER TABLE " ++ check[0] ++ " ',GROUP_CONCAT(CONCAT('DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`') ORDER BY tc.CONSTRAINT_NAME SEPARATOR ', '))" ++ catalog ++ "'" ++ check[0] ++ "' AND " ++ check[1] ++ ")");
             try Native.exec(storage, "PREPARE rui_rewind FROM @rui_rewind_ddl");
@@ -578,6 +579,7 @@ fn dropBackgroundUpgradeShape(storage: *Store) !void {
         try Native.exec(storage, "DEALLOCATE PREPARE rui_rewind");
         try Native.exec(storage, "SET @rui_rewind_ddl=NULL");
     }
+    try Native.exec(storage, "DROP TABLE action_stop_command");
     try Native.exec(storage, "DROP TABLE action_stop");
     try dropFinalInputUpgradeShape(storage);
     try Native.exec(storage, "DROP TABLE action_control_command");
@@ -643,7 +645,7 @@ fn dropPinOrganization(storage: *Store) !void {
     try Native.exec(storage, "DROP TABLE session_pin_command");
     if (storage.engine == .mysql) {
         try Native.exec(storage, "SET @rui_pin_kind_ddl=NULL");
-        try Native.exec(storage, "SET @rui_pin_kind_ddl=(SELECT CONCAT('ALTER TABLE core_command DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`, ADD CHECK(kind BETWEEN 1 AND 6)') FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='core_command' AND tc.CONSTRAINT_TYPE='CHECK' AND LOWER(TRIM(REPLACE(REPLACE(REPLACE(cc.CHECK_CLAUSE,'`',''),'(',''),')','')))='kind between 1 and 8')");
+        try Native.exec(storage, "SET @rui_pin_kind_ddl=(SELECT CONCAT('ALTER TABLE core_command DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`, ADD CHECK(kind BETWEEN 1 AND 6)') FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='core_command' AND tc.CONSTRAINT_TYPE='CHECK' AND LOWER(TRIM(REPLACE(REPLACE(REPLACE(cc.CHECK_CLAUSE,'`',''),'(',''),')','')))='kind between 1 and 9')");
         try Native.exec(storage, "PREPARE rui_pin_kind FROM @rui_pin_kind_ddl");
         try Native.exec(storage, "EXECUTE rui_pin_kind");
         try Native.exec(storage, "DEALLOCATE PREPARE rui_pin_kind");
@@ -1093,6 +1095,33 @@ pub fn submitTestMessagePartsWithSkills(storage: *Store, tmp: *std.testing.TmpDi
     try std.testing.expect(reply == .accepted);
 }
 
+pub fn settleTestActionParts(storage: *Store, tmp: *std.testing.TmpDir, binding: @import("domain/action.zig").ActionAttemptBinding, parts: []const MessagePart) !void {
+    const Capture = @import("../InputCapture.zig");
+    var used: std.atomic.Value(u64) = .init(0);
+    var capture: Capture = undefined;
+    {
+        const spool = try tmp.dir.createFile(std.testing.io, "test-action-spool", .{ .read = true });
+        errdefer spool.close(std.testing.io);
+        const index = try tmp.dir.createFile(std.testing.io, "test-action-index", .{ .read = true });
+        errdefer index.close(std.testing.io);
+        try tmp.dir.deleteFile(std.testing.io, "test-action-spool");
+        try tmp.dir.deleteFile(std.testing.io, "test-action-index");
+        capture.init(std.testing.io, spool, index, .{ .used = &used, .limit = 4 * 1024 * 1024 });
+    }
+    defer capture.close();
+    for (parts) |part| {
+        try capture.begin(part.kind, part.bytes.len);
+        var at: usize = 0;
+        while (at < part.bytes.len) {
+            var allowance = part.bytes.len - at;
+            at += try capture.append(part.bytes[at..], &allowance, false);
+        }
+        try capture.end();
+    }
+    const reply = try storage.settleActionAttemptParts(binding, .succeeded, try capture.seal(), .{});
+    try std.testing.expectEqual(@import("domain/action.zig").ActionSettlement.effect, reply);
+}
+
 pub fn testingPublicProjection(
     storage: *Store,
     tmp: *std.testing.TmpDir,
@@ -1220,7 +1249,15 @@ pub fn settleItemsForTesting(storage: *Store, tmp: *std.testing.TmpDir, binding:
     return settleSelectedItemsForTesting(storage, tmp, binding, items, null, answer);
 }
 
+pub fn settleItemsForTestingWithUsage(storage: *Store, tmp: *std.testing.TmpDir, binding: AttemptBinding, items: []const []const u8, answer: []const u8, usage: []const u8) !void {
+    return settleSelectedItemsAndUsageForTesting(storage, tmp, binding, items, null, answer, usage);
+}
+
 pub fn settleSelectedItemsForTesting(storage: *Store, tmp: *std.testing.TmpDir, binding: AttemptBinding, items: []const []const u8, selected: ?u64, answer: []const u8) !void {
+    return settleSelectedItemsAndUsageForTesting(storage, tmp, binding, items, selected, answer, null);
+}
+
+fn settleSelectedItemsAndUsageForTesting(storage: *Store, tmp: *std.testing.TmpDir, binding: AttemptBinding, items: []const []const u8, selected: ?u64, answer: []const u8, usage: ?[]const u8) !void {
     if (!@import("builtin").is_test) @compileError("test-only Store fixture");
     const source = try tmp.dir.createFile(std.testing.io, "items-output", .{ .read = true, .truncate = true });
     defer source.close(std.testing.io);
@@ -1239,6 +1276,18 @@ pub fn settleSelectedItemsForTesting(storage: *Store, tmp: *std.testing.TmpDir, 
         const record = try output_decode.recordItemForTesting(&metadata, source, offset, bytes.len, ordinal, .assistant_response);
         if (record.kind == .message) answer_item = ordinal;
         if (record.kind == .function_call) calls += 1;
+        offset += bytes.len;
+    }
+    if (usage) |bytes| {
+        try source.writeStreamingAll(std.testing.io, bytes);
+        try source.sync(std.testing.io);
+        try metadata.append(&.{
+            .tag = .usage,
+            .start = offset,
+            .length = bytes.len,
+            .content_digest = protocol.contentDigest(bytes),
+            .usage = try output_decode.readUsageForTesting(std.testing.io, source, offset, bytes.len),
+        });
         offset += bytes.len;
     }
     try metadata.sealForRead();

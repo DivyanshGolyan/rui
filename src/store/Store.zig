@@ -1272,7 +1272,7 @@ pub const Store = struct {
         result: []const u8,
         faults: Faults,
     ) !ActionSettlement {
-        return self.queue().write(settleActionAttemptHeld, .{ self, binding, code, result, faults });
+        return self.queue().write(settleActionAttemptHeld, .{ self, binding, code, result, null, faults });
     }
 
     fn settleActionAttemptHeld(
@@ -1280,10 +1280,29 @@ pub const Store = struct {
         binding: ActionAttemptBinding,
         code: ActionResolutionCode,
         result: []const u8,
+        parts: ?@import("../InputCapture.zig").Loan,
         faults: Faults,
     ) !ActionSettlement {
-        if (result.len == 0) return error.InvalidActionResult;
-        return transition.apply(self, action_domain.SettleAttempt, .{ .binding = binding, .code = code, .result = result }, faults);
+        // The serialized settlement lends the existing Store workspace to its
+        // compound publisher, including failures before the first Entry.
+        comptime std.debug.assert(@sizeOf(content_parts.Saving) <= scratch_bytes and @alignOf(content_parts.Saving) <= scratch_align);
+        const saving: *content_parts.Saving = @ptrCast(@alignCast(self.scratch(.action)));
+        defer self.scratch_use = .none;
+        saving.* = try .init(if (parts) |captured| .{ .captured = captured } else .{ .text = .{ .slice = result } });
+        if (saving.reference == .bytes and saving.reference.bytes.length == 0) return error.InvalidActionResult;
+        return transition.apply(self, action_domain.SettleAttempt, .{ .binding = binding, .code = code, .result = result, .saving = saving, .io = self.io }, faults);
+    }
+
+    /// Publishes the ordered value at the Action's sole immutable Resolution.
+    /// A single Text uses the same byte representation as settleActionAttempt.
+    pub fn settleActionAttemptParts(
+        self: *Store,
+        binding: ActionAttemptBinding,
+        code: ActionResolutionCode,
+        result: @import("../InputCapture.zig").Loan,
+        faults: Faults,
+    ) !ActionSettlement {
+        return self.queue().write(settleActionAttemptHeld, .{ self, binding, code, &.{}, result, faults });
     }
 
     pub fn deliverChildEnding(self: *Store, turn_id: u64, faults: Faults) !bool {
@@ -1393,12 +1412,23 @@ pub const Store = struct {
     }
 
     pub fn stopAction(self: *Store, source: ActionAttemptBinding, target: u64, faults: Faults) !@import("domain/action_stop.zig").Outcome {
-        return self.queue().write(stopActionHeld, .{ self, source, target, faults });
+        const result = try self.queue().write(stopActionHeld, .{ self, @as(@import("domain/action_stop.zig").Source, .{ .model = .{ .binding = source, .target = target } }), faults });
+        return result.model;
     }
 
-    fn stopActionHeld(self: *Store, source: ActionAttemptBinding, target: u64, faults: Faults) !@import("domain/action_stop.zig").Outcome {
-        const result = try transition.apply(self, @import("domain/action_stop.zig").Stop, .{ .source = source, .target = target }, faults);
-        if (result == .selected or result == .pending) _ = @as(*OutOfLine, @fieldParentPtr("ring", self.changes)).control_generation.fetchAdd(1, .release);
+    pub fn requestActionStop(self: *Store, request: *const @import("../command_input.zig").ActionStopCommand, faults: Faults) @import("domain/action_stop.zig").Reply {
+        const result = self.queue().write(stopActionHeld, .{ self, @as(@import("domain/action_stop.zig").Source, .{ .command = request }), faults }) catch return .infrastructure_failure;
+        return result.command;
+    }
+
+    fn stopActionHeld(self: *Store, source: @import("domain/action_stop.zig").Source, faults: Faults) !@import("domain/action_stop.zig").Stop.Result {
+        const Stop = @import("domain/action_stop.zig").Stop;
+        const result = try transition.apply(self, Stop, .{ .source = source, .scratch = self.reportScratch(Stop.Scratch) }, faults);
+        const selected = switch (result) {
+            .model => |outcome| outcome == .selected or outcome == .pending,
+            .command => |reply| reply == .accepted,
+        };
+        if (selected) _ = @as(*OutOfLine, @fieldParentPtr("ring", self.changes)).control_generation.fetchAdd(1, .release);
         return result;
     }
 
@@ -1774,7 +1804,7 @@ const OutOfLine = struct {
     scratch: Scratch align(scratch_align),
 };
 
-const ScratchUse = enum(u8) { none, configuration, settlement, report };
+const ScratchUse = enum(u8) { none, configuration, settlement, action, report };
 
 const Scratch = [scratch_bytes]u8;
 const scratch_bytes = @max(@sizeOf(configuration_domain.ConfigurationReads), @sizeOf(model_settlement_domain.Batch));

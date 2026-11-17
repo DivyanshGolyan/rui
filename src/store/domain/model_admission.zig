@@ -327,7 +327,7 @@ fn uncoveredBytesUsingSql(comptime session: []const u8, comptime usage_position:
     const later = "max(" ++ usage_position ++ "," ++ frontier ++ ")";
     const terms = .{
         entries orelse historyBytesSql(session, usage_position, aggregate),
-        "(SELECT coalesce(sum(" ++ history_floor_domain.item_bytes_sql ++ "),0) FROM model_output_item i " ++
+        "(" ++ history_floor_domain.item_bytes_sql ++ " " ++
             "WHERE i.session_ref=" ++ session ++ " AND i.session_position>=max(" ++ usage_position ++ "+1,coalesce((SELECT max(anchor.session_position) " ++
             "FROM model_operation b @index(model_operation_compaction_bases) JOIN model_output_item anchor ON anchor.operation_id=b.operation_id AND anchor.session_ref=b.session_ref " ++
             "WHERE b.session_ref=" ++ session ++ " AND b.purpose=1 AND " ++ store_schema.resolutionIs("b.resolution_code", .compacted) ++ " AND b.admission_position=" ++ frontier ++ " AND anchor.item_kind=4),0)))",
@@ -335,9 +335,9 @@ fn uncoveredBytesUsingSql(comptime session: []const u8, comptime usage_position:
             "CROSS JOIN model_tool_call tool_call ON tool_call.operation_id=o.operation_id AND tool_call.session_ref=o.session_ref " ++
             "JOIN content c ON c.content_id=tool_call.rejection_content_id WHERE o.session_ref=" ++ session ++ " AND o.admission_position>=" ++ result_admission ++ " " ++
             "AND " ++ store_schema.oneOf("o.resolution_code", &accepted_resolutions) ++ " AND tool_call.acceptance_position>" ++ later ++ ")",
-        "((SELECT coalesce(sum(c.byte_length),0) FROM action_operation a JOIN content c ON c.content_id=a.background_content_id " ++
+        "((SELECT " ++ aggregate ++ " FROM action_operation a JOIN content c ON c.content_id=a.background_content_id " ++
             "WHERE a.session_ref=" ++ session ++ " AND a.background_position>" ++ later ++ ") + " ++
-            "(SELECT coalesce(sum(c.byte_length),0) FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id " ++
+            "(SELECT " ++ aggregate ++ " FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id " ++
             "WHERE a.session_ref=" ++ session ++ " AND a.background_position IS NULL AND a.acceptance_position>" ++ later ++ "))",
         pending orelse "(SELECT " ++ aggregate ++ " FROM message_admission m JOIN content c ON c.content_id=m.content_id " ++
             "WHERE m.session_ref=" ++ session ++ pending_prefix ++ " AND " ++ runnable_eligibility_sql ++ ")",
@@ -563,6 +563,19 @@ const pressure_history = rsql.Read(.{
     .cardinality = .{ .at_most = 16 },
 });
 
+const pressure_results = rsql.Read(.{
+    .sql = "SELECT a.acceptance_position AS position,c.content_id,c.form,c.byte_length,c.digest,1 AS eligible " ++
+        "FROM action_operation a @index(action_operation_acceptance) JOIN content c ON c.content_id=a.resolution_content_id " ++
+        "WHERE a.session_ref=?1 AND a.acceptance_position>?2 AND a.acceptance_position<?3 AND a.background_position IS NULL UNION ALL " ++
+        "SELECT a.background_position,c.content_id,c.form,c.byte_length,c.digest,1 " ++
+        "FROM action_operation a @index(action_operation_background) JOIN content c ON c.content_id=a.background_content_id " ++
+        "WHERE a.session_ref=?1 AND a.background_position>?2 AND a.background_position<?3 ORDER BY 1 LIMIT 16",
+    .Args = struct { session: []const u8, after: u64, boundary: u64 },
+    .Row = PressurePart,
+    .cardinality = .{ .at_most = 16 },
+    .compound = true,
+});
+
 pub const PartsPressure = struct {
     manifest_bytes: u64 = 0,
     text_bytes: u64 = 0,
@@ -583,7 +596,7 @@ pub const PartsPressure = struct {
         boundary: u64 = std.math.maxInt(i64),
         after: u64 = 0,
         rows: pressure_pending.Result = undefined,
-        stream: enum { history, pending } = .history,
+        stream: enum { history, results, pending } = .history,
         row: usize = 0,
         loaded: bool = false,
         cursor: ?@import("../../os/pages.zig").Mapped(content_parts.Cursor) = null,
@@ -628,6 +641,7 @@ pub const PartsPressure = struct {
             if (!self.loaded) {
                 switch (self.stream) {
                     .history => a.read(pressure_history, .{ .session = &self.session, .after = self.after, .cutoff = self.cutoff, .boundary = self.boundary }, &self.rows),
+                    .results => a.read(pressure_results, .{ .session = &self.session, .after = self.after, .boundary = self.boundary }, &self.rows),
                     .pending => a.read(pressure_pending, .{ .session = &self.session, .after = self.after, .cutoff = self.pending_cutoff.? }, &self.rows),
                 }
                 try store_access.runAs(a, error.CorruptStore);
@@ -673,6 +687,10 @@ pub const PartsPressure = struct {
             self.loaded = false;
             if (self.rows.len < 16) switch (self.stream) {
                 .history => {
+                    self.stream = .results;
+                    self.after = @max(self.covered, self.frontier);
+                },
+                .results => {
                     self.stream = .pending;
                     self.after = 0;
                 },

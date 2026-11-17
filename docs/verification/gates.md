@@ -259,11 +259,44 @@ Warm compilation snapshots are not test acceptance. Cleanup waits for all mainte
 Maintenance also builds the pinned previous release per platform for the read-only upgrade check.
 The API-only cleanup job runs trusted main code with cache-deletion permission and consumes no producer code, caches or artifacts.
 
-CI uses only standard `ubuntu-24.04` and Apple Silicon `macos-15` runners, plus `ubuntu-24.04-arm` for the Linux arm64 release build, in this public repository, with no paid host or storage expansion.
+CI uses standard `ubuntu-24.04` and Apple Silicon `macos-15` runners, plus `ubuntu-24.04-arm` for the Linux arm64 release build and the optional [self-hosted Mac runner](#self-hosted-mac-runner) for eligible Selected checks, with no paid host or storage expansion.
 Free eligibility does not prove capacity; report the actual runner outcome and do not raise paid spend silently.
 Apart from the shard rerun above and a [listed flake](#listed-flakes)'s rerun, test execution has no automatic retry.
 Infrastructure failures are not test execution: [Retry infrastructure failures](../../.github/workflows/infra-retry.yml) reruns a PR run's failed jobs once when every failure was infrastructure (no runner took or kept the job, or a step that only fetches, installs or starts services failed with a network error such as GitHub's 504) and the run still tests the PR's head.
 A build or test step's failure, a later attempt or any check failure in the run never reruns, and a rerun job's tests had not run.
+
+## Self-hosted Mac runner
+
+Selected checks decides once per run whether to send `macos_build`, `macos_build_unit` and `macos_suites` to `["self-hosted", "macOS", "ARM64", "rui-mac"]`.
+Only same-repository pull requests authored by DivyanshGolyan, with both actor and triggering actor allowlisted, and manual dispatches by those actors are eligible.
+The allowlist lives in [mac_runner.py](../../tests/ci/mac_runner.py).
+Fork PRs, including NimishGolyan/rui, stay hosted.
+Promotion, compile-only main builds, macOS qualification and the existing cache-execution checks keep their hosted runners; hosted-VM measurements therefore remain comparable.
+The routing job reads `GET /repos/{repo}/actions/runners` with the repository secret `MAC_RUNNER_STATUS_TOKEN`, a fine-grained PAT limited to this repository with Administration: read.
+An online, idle runner labelled `rui-mac` selects the Mac; a missing secret, API error, ten-second timeout, malformed response, busy/offline runner or `RUI_MAC_RUNNER=off` selects `macos-15`.
+This is a snapshot, not a reservation: after choosing the Mac, jobs queue for its one runner process; a later disconnect does not reroute that run.
+The Mac restores caches but never publishes them to GitHub.
+Compilation and build-runner cache keys include the actual native-tool identity (including Xcode and SDK); compiler/package caches have their existing platform/dependency keys.
+
+An administrator signed into `gh` as DivyanshGolyan runs `bash tests/ci/mac-runner/install.sh` on the Apple Silicon Mac with full Xcode selected.
+The script checks native fixture tools, warns about a readable admin home (`--lock-home` sets mode 700), enables approval for all external fork contributors, and installs one runner under hidden standard user `ruici` with a LaunchDaemon at lowered priority.
+Rerunning repairs or updates the installation.
+One root-owned registration record retains the installed name and remote ID across hostname changes and interrupted setup/removal; repair and uninstall check that identity against a fresh API snapshot.
+Conflicting remote identities, missing credentials or damaged configuration preserve local recovery state; an old removal marker never authorizes deleting a new registration.
+`bash tests/ci/mac-runner/install.sh status-token` opens GitHub's fine-grained-token form; select only this repository, then supply the token on stdin to store the status secret.
+The root-owned job-started hook, installed `mac_runner.py` policy and generated allowlist live outside the runner application under the protected `ruici` home.
+Routing and the hook call the same pure admission predicate; the hook executes the exact protected installed source bytes, avoiding checkout, package and bytecode shadowing.
+Before any job step, the hook rejects another repository, event, actor, triggering actor, fork head or non-allowlisted PR author, independently of workflow routing.
+A nonzero hook exit alone still permits workflow steps using `always()`; on any hook failure, its Bash exit trap kills its direct parent job worker so those steps cannot run.
+This relies on the direct worker-child process relationship checked in `actions/runner` v2.338.2; a rejection can appear in GitHub as a crashed-worker failure.
+Never run `job-started.sh` directly: a rejected invocation kills its calling process.
+The process-supervision test runs in a disposable subprocess; installation and native Actions behavior still need verification on the Mac.
+It deletes the global Zig cache before a job when that cache exceeds 40 GiB.
+The separate account isolates local files; it still executes trusted PR code on a personal Mac.
+
+Pause scheduling with `gh variable set RUI_MAC_RUNNER --repo DivyanshGolyan/rui --body off` (unset it or set `on` to resume).
+Stop the local service with `sudo launchctl bootout system /Library/LaunchDaemons/com.rui.actions-runner.plist`; bootstrap the same plist to resume it.
+Run `bash tests/ci/mac-runner/uninstall.sh` as the signed-in administrator to stop the daemon, deregister the runner and delete `ruici` and its home.
 
 ## Listed flakes
 

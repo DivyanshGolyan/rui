@@ -1474,6 +1474,7 @@ const Route = enum {
     model_interruption,
     permission_decision,
     action_background,
+    action_stop,
     observe,
     read_result,
     read_action,
@@ -1531,11 +1532,12 @@ test "command route projection preserves control classification" {
             .model_interruption => .model_interruption,
             .permission_decision => .permission_decision,
             .action_background => .action_background,
+            .action_stop => .action_stop,
             else => null,
         };
         try std.testing.expectEqual(expected, comptime route.commandKind());
         const expected_control = switch (route) {
-            .host_stop, .host_pause, .unsupported_control, .session_stop, .session_archive, .session_pin, .model_interruption, .permission_decision, .action_background => true,
+            .host_stop, .host_pause, .unsupported_control, .session_stop, .session_archive, .session_pin, .model_interruption, .permission_decision, .action_background, .action_stop => true,
             else => false,
         };
         try std.testing.expectEqual(expected_control, route.isControl());
@@ -1654,6 +1656,7 @@ fn submitControl(host: *Host, comptime kind: command_spec.CommandKind, command: 
         .model_interruption => host.store.interruptModel(command, faults),
         .permission_decision => host.store.decidePermission(command, faults),
         .action_background => host.store.backgroundAction(.{ .command = command }, faults),
+        .action_stop => host.store.requestActionStop(command, faults),
         .configure, .message => @compileError("control admission requires a control kind"),
     };
 }
@@ -1663,7 +1666,7 @@ fn controlSubject(comptime kind: command_spec.CommandKind, command: *const @Fiel
         .session_stop, .session_archive, .session_pin => command.session.slice(),
         .model_interruption => .{ .session = command.session, .turn_id = command.turn_id, .operation_id = command.operation_id },
         .permission_decision => .{ .session = command.session, .action_id = command.action_id, .decision = command.decision },
-        .action_background => .{ .session = command.session, .action_id = command.action_id },
+        .action_background, .action_stop => .{ .session = command.session, .action_id = command.action_id },
         .configure, .message => @compileError("control subject requires a control kind"),
     };
 }
@@ -1747,7 +1750,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
         .message => |*command| {
             _ = try answerMutation(host, fd, header, .message, command.session.slice(), try submitMessage(host, command, client_environment.?));
         },
-        inline .session_stop, .session_archive, .session_pin, .model_interruption, .permission_decision, .action_background => |*command, tag| {
+        inline .session_stop, .session_archive, .session_pin, .model_interruption, .permission_decision, .action_background, .action_stop => |*command, tag| {
             const kind = comptime @field(command_spec.CommandKind, @tagName(tag));
             var timing = ControlTiming.init(host, command.key, @tagName(kind), accepted_at_ns);
             const result = submitControl(host, kind, command, host.hooks.storeFaults(.{ .control = timing.storeTrace() }));
@@ -3273,6 +3276,7 @@ test "retired reserved exchanges cannot block their successors while workers are
                 .model_interruption => "control/model-interruption",
                 .permission_decision => "control/permission-decision",
                 .action_background => "control/action-background",
+                .action_stop => "control/action-stop",
                 .unsupported_control => "control/unknown",
                 else => unreachable,
             };
@@ -4857,7 +4861,7 @@ const MutationWitness = struct {
         return switch (kind) {
             .model_interruption => .{ .session = named(), .turn_id = 3, .operation_id = 11 },
             .permission_decision => .{ .session = named(), .action_id = 7, .decision = .deny },
-            .action_background => .{ .session = named(), .action_id = 7 },
+            .action_background, .action_stop => .{ .session = named(), .action_id = 7 },
             else => session,
         };
     }
@@ -4872,6 +4876,7 @@ const MutationWitness = struct {
             .model_interruption => .{ .model_interruption = .{ .turn = 3, .operation = if (wrong) 12 else 11 } },
             .permission_decision => .{ .permission_decision = .{ .action = 7, .decision = if (wrong) .allow_once else .deny } },
             .action_background => .{ .action_background = if (wrong) 8 else 7 },
+            .action_stop => .{ .action_stop = if (wrong) 8 else 7 },
         };
     }
 
@@ -4884,6 +4889,7 @@ const MutationWitness = struct {
             .session_pin => .{ .replayed = false, .pinned = false },
             .model_interruption, .permission_decision => .{ .replayed = false },
             .action_background => .{ .replayed = false, .action_id = 7, .selection = .{ .kind = .background, .position = 29 } },
+            .action_stop => .{ .replayed = false, .action_id = 7, .resolution = 29 },
         } };
     }
 
@@ -4962,6 +4968,7 @@ const MutationWitness = struct {
 test "mutation decoder preserves base bytes and the entire command domain" {
     var covered: u16 = 0;
     inline for (comptime std.meta.tags(command_spec.CommandKind)) |kind| {
+        if (comptime kind == .action_stop) continue;
         covered |= @as(u16, 1) << @backingInt(kind);
         const render = host_reply.renderMutationReply(kind);
         const Result = @typeInfo(@TypeOf(render)).@"fn".param_types[2].?;
@@ -5007,6 +5014,7 @@ test "mutation decoder preserves base bytes and the entire command domain" {
             .session_archive => alternate.accepted.archived = false,
             .session_pin => alternate.accepted.pinned = true,
             .action_background => alternate.accepted.selection.kind = .final,
+            .action_stop => alternate.accepted.resolution = null,
             else => {},
         }
         var response: protocol.ResponseBuffer = .{};
@@ -5026,6 +5034,7 @@ test "mutation decoder preserves base bytes and the entire command domain" {
             try MutationWitness.observe(&hash, response.slice(), 200, "", binding);
         }
         const expected = switch (kind) {
+            .action_stop => continue,
             .configure => "adca102951c1f18dc2ce00f9b558a24b2beaaec0c3e2e863316f44a6efb03321",
             .message => "3be943056ed34a9f484210e35c3aed5397a28a4fd2f52536d9bab4333101b562",
             .session_stop => "a98107ee7efe29d5c2480097568daa514649c76e9c7c1cc740ed5fbc697cbc90",
@@ -5076,10 +5085,10 @@ test "every accepted control publishes exactly one hint before reply handling" {
             std.testing.allocator.rawFree(memory, alignment, ret_addr);
         }
     };
-    var covered: u16 = 0;
+    var covered: std.EnumSet(command_spec.CommandKind) = .empty;
     inline for (comptime std.meta.tags(command_spec.CommandKind)) |kind| {
         if (comptime !command_spec.spec(kind).is_control) continue;
-        covered |= @as(u16, 1) << @backingInt(kind);
+        covered.insert(kind);
         const Result = host_reply.MutationResult(kind);
         const rejected: Result = .{ .rejected = .{ .replayed = false, .code = .invalid_session_reference } };
         for ([_]Result{ MutationWitness.accepted(kind), rejected, .conflict, .infrastructure_failure }) |initial| {
@@ -5135,7 +5144,11 @@ test "every accepted control publishes exactly one hint before reply handling" {
             }
         }
     }
-    try std.testing.expectEqual(@as(u16, 0xfc), covered);
+    const expected: std.EnumSet(command_spec.CommandKind) = .initMany(&.{
+        .session_stop, .session_archive,   .model_interruption, .permission_decision,
+        .session_pin,  .action_background, .action_stop,
+    });
+    try std.testing.expectEqual(expected, covered);
 }
 
 // Each symbol below is captured by the old decoders at 5472ccf5, independently
@@ -5325,6 +5338,7 @@ const ReplyDomainWitness = struct {
         @setEvalBranchQuota(20_000);
         var lines = std.mem.splitScalar(u8, fixture, '\n');
         inline for (comptime std.meta.tags(command_spec.CommandKind)) |kind| {
+            if (comptime kind == .action_stop) continue;
             const render = host_reply.renderMutationReply(kind);
             const Result = @typeInfo(@TypeOf(render)).@"fn".param_types[2].?;
             const rejected: Result = if (kind == .message)
@@ -5370,11 +5384,12 @@ const ReplyDomainWitness = struct {
                     .model_interruption => ",\"interruption_target\":{\"session\":\"k7m2qx\",\"turn\":\"3\",\"operation\":\"7\"}",
                     .permission_decision => ",\"permission_target\":{\"action\":\"29\",\"decision\":\"allow_once\"}",
                     .action_background => ",\"action_target\":{\"action\":\"29\"},\"action_selection\":{\"kind\":\"background\",\"position\":\"31\"}",
+                    .action_stop => ",\"action_target\":{\"action\":\"29\"},\"resolution_position\":\"31\"",
                 } else switch (kind) {
                     .message => ",\"state\":\"rejected\"",
                     .model_interruption => ",\"interruption_target\":{\"session\":\"k7m2qx\",\"turn\":\"0\",\"operation\":\"0\"}",
                     .permission_decision => ",\"permission_target\":{\"action\":\"0\",\"decision\":\"deny\"}",
-                    .action_background => ",\"action_target\":{\"action\":\"29\"}",
+                    .action_background, .action_stop => ",\"action_target\":{\"action\":\"29\"}",
                     else => "",
                 };
                 const body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"command_observation\",\"key\":\"k\",\"delta\":\"full\",\"since\":null,\"observation\":{\"kind\":\"" ++ @tagName(kind) ++ "\",\"target\":\"k7m2qx\",\"status\":\"" ++ (if (accepted) "accepted\"" else "rejected\",\"code\":\"unknown_session\"") ++ fields ++ "}}";
@@ -5440,5 +5455,34 @@ test "reply decoder requires the served work fields and closed enums" {
         const changed = try std.mem.replaceOwned(u8, std.testing.allocator, body, edit.before, edit.after);
         defer std.testing.allocator.free(changed);
         try std.testing.expect(ReplyDomainWitness.observation(changed) != 'a');
+    }
+}
+
+test "Action stop mutation and observation preserve the selected Resolution" {
+    const command_reply = @import("command_reply.zig");
+    const reply = @import("protocol_reply.zig");
+    const subject = MutationWitness.subject(.action_stop);
+    for ([_]?u64{ null, 29, 9007199254740993 }) |position| {
+        var response: protocol.ResponseBuffer = .{};
+        try response.render(host_reply.renderMutationReply(.action_stop), .{ subject, @as(host_reply.MutationResult(.action_stop), .{ .accepted = .{ .replayed = true, .action_id = 7, .resolution = position } }) });
+        const decoded = reply.decodeMutationReply(.{ .status = 200, .body = response.slice() }, MutationWitness.session, .{ .action_stop = 7 });
+        try std.testing.expectEqual(position, (try decoded.answer).result.accepted.action_stop);
+        try std.testing.expect((try decoded.answer).replayed);
+        const foreign = reply.decodeMutationReply(.{ .status = 200, .body = response.slice() }, MutationWitness.session, .{ .action_stop = 8 });
+        try std.testing.expectError(error.RequestBindingMismatch, foreign.answer);
+        const another_session = reply.decodeMutationReply(.{ .status = 200, .body = response.slice() }, "p9q8rs", .{ .action_stop = 7 });
+        try std.testing.expectError(error.RequestBindingMismatch, another_session.answer);
+        var observed = command_reply.CommandObservation{ .status = .accepted, .target = subject.session, .kind = .{ .action_stop = .{ .action_id = 7, .resolution = position } } };
+        response = .{};
+        try response.render(host_reply.renderFullCommandObservation, .{ "stop", &observed, @as(?[]const u8, null) });
+        const parsed = try reply.CommandObservation.parse(.{ .status = 200, .body = response.slice() }, "stop");
+        try std.testing.expectEqual(position, parsed.resolution_position);
+        try std.testing.expectEqual(@as(u64, 7), parsed.action_target.?);
+    }
+    for ([_][]const u8{ "0", "-1", "1.0", "nullx" }) |invalid| {
+        const body = try std.fmt.allocPrint(std.testing.allocator, "{{\"version\":\"{s}\",\"type\":\"action_stop_reply\",\"answer\":{{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"action\":\"7\",\"resolution_position\":{s}}}}}", .{ protocol.wire_version, invalid });
+        defer std.testing.allocator.free(body);
+        const decoded = reply.decodeMutationReply(.{ .status = 200, .body = body }, MutationWitness.session, .{ .action_stop = 7 });
+        try std.testing.expect(std.meta.isError(decoded.answer));
     }
 }

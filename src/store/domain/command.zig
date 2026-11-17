@@ -2184,6 +2184,7 @@ fn kindCode(kind: cli_value.CommandKind) u8 {
         .session_archive => 6,
         .session_pin => 7,
         .action_background => 8,
+        .action_stop => 9,
     };
 }
 
@@ -2405,6 +2406,9 @@ pub fn observeCommand(a: anytype, key: []const u8, observation: *CommandObservat
             a.read(interruption_target, .{ .key = key }, &row);
             try a.run();
             observation.kind = .{ .model_interruption = try modelInterruptionTarget(&row) };
+        },
+        .action_stop => {
+            observation.kind = .{ .action_stop = try @import("action_stop.zig").readSaved(a, key) };
         },
         .action_background => {
             observation.kind = .{ .action_background = try @import("action_control.zig").readSaved(a, key) };
