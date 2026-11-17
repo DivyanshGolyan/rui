@@ -17,6 +17,7 @@ import os_semantics
 import settings_fixture as frame_host
 import store_rounds_cases
 from request_routing_cases import capture_routing
+from attached_creation_cases import attached_creation
 
 
 def main():
@@ -228,6 +229,16 @@ def main():
                 if started is not None:
                     command("host", "pause", "--store", directory, "--instance", started["instance"])
                     released()
+
+        attached_directory = root / "attached-host"
+        attached_env = dict(os.environ, RUI_SETTINGS_MYSQL_URL=url)
+        saved = subprocess.run([rui, "host", "set", "--store", str(attached_directory),
+                                "store.mysql.url", "env:RUI_SETTINGS_MYSQL_URL"],
+                               env=attached_env, capture_output=True, text=True, timeout=20)
+        assert saved.returncode == 0, saved
+        attached_creation(rui, attached_directory, root, attached_env,
+                          scalar=lambda statement: int(sql(f"USE {database};" + statement)))
+        released()
 
         # Post-login access checks cover both ownership writes: SELECT-only
         # cannot INSERT, and SELECT+INSERT still cannot advance the epoch.

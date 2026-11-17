@@ -39,7 +39,19 @@ Its start-only `configuration` member reports the resolved provider, model and e
 Without a compatible saved override, the client prefers its product effort, then the model's lowest catalog effort, or null when the listed model has no efforts.
 An unlisted model keeps a saved effort or the product effort; any explicit effort word is passed through for the provider to accept or refuse.
 An ID is exactly six random lowercase Crockford base32 characters (`0123456789abcdefghjkmnpqrstvwxyz`), such as `k7m2qx`.
-Creation settings you omit come from the current directory and your saved defaults.
+For an ordinary new Session, omitted creation settings come from the current directory and your saved defaults.
+
+### Create an attached Session
+
+Use `--parent ID` with `session start` or with `session configure` without `--session`:
+
+```sh
+printf '%s' 'Investigate the error path' | rui session start --store "$STORE" --parent "$SESSION" --tools bash --permission-mode ask
+```
+
+The child inherits the parent's provider, Workspace and saved Bash environment. Do not pass `--provider` or `--workspace`, even with the parent's values. The child's tools must be within the parent's configured allowed tools, and an asking parent cannot have a bypass child. Other omitted settings use CLI creation defaults. If the ordinary default provider differs from the parent, set `--compaction-trigger` explicitly to choose the desired threshold.
+
+`session start` still admits the first Message in the same transaction. Its receipt reports `configuration.provider` as null and includes `configuration.parent`, because the provider comes from the parent. `session configure --parent` creates the child without a Message. A parent cannot be added to an existing Session. Recovering a captured request keeps the original child and does not replace its inherited environment.
 
 ## Send Messages and read results
 
@@ -121,7 +133,7 @@ Bash runs in the environment of the terminal that last sent the Session a Messag
 The `rui` installation that runs the Host comes first on `PATH`.
 A Message from another agent never replaces your environment, but fills a Session no person has sent to.
 Rui keeps the environment only in the Host's memory, never in the Store or request records, and never passes on variables whose names start with `RUI_`.
-A recovered request carries the environment of the terminal that recovers it.
+An ordinary recovered request carries the environment of the terminal that recovers it; an attached creation inherits its parent's saved environment when it is first admitted.
 
 An environment over 64 KiB is refused before anything is sent, naming its largest variables; recover the request from a shell with a smaller one.
 After a Host restart, or when the Host has dropped a long-unused Session's environment, Bash gets the system's own command directories (on macOS, those listed in `/etc/paths` and `/etc/paths.d`, such as Homebrew's) and the Host's `HOME` until a Message arrives.
