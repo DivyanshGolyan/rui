@@ -4,7 +4,8 @@ pub const DispatchCapacity = @import("execution.zig").DispatchCapacity;
 pub const retained_cleanup_retry_ms = 100;
 pub const retry_poll_interval_ns: u64 = std.time.ns_per_s;
 
-pub const Admission = enum { no_work, retry_later, admitted };
+pub const Admission = enum { no_work, retry_later, progress, admitted };
+pub const PendingModelAdmission = enum { message, tool_continuation };
 const Kind = enum { bash, retry, message, tool_continuation };
 
 pub const Allowance = struct {
@@ -101,6 +102,7 @@ noinline fn admitWork(state: *State, context: anytype, now: std.Io.Clock.Timesta
         state.work = .{ .key = work_key, .found = try context.scanWork(admission_key.paused, admission_key.capacity) };
     }
     const work: Work = if (state.work) |kept| kept.found else .{};
+    const pending_model = context.pendingModelAdmission();
     const retries_absent = !work.retry and std.meta.eql(state.work.?.key, work_key);
     const retries_idle = keyIs(state.idle_exhausted, retry_key) and keyIs(state.idle_retry, retry_key);
     const maintain_retries = context.providerConfigured() and !retries_absent and
@@ -127,6 +129,10 @@ noinline fn admitWork(state: *State, context: anytype, now: std.Io.Clock.Timesta
                 return true;
             },
             .retry_later => state.idle_core = null,
+            .progress => {
+                state.idle_core = null;
+                return true;
+            },
             .no_work => state.idle_core = work_key,
         }
     }
@@ -135,11 +141,16 @@ noinline fn admitWork(state: *State, context: anytype, now: std.Io.Clock.Timesta
             found_nothing = false;
             break;
         }
-        if (scanned and kind != .retry) continue;
+        const pending_kind = switch (kind) {
+            .message => pending_model == .message,
+            .tool_continuation => pending_model == .tool_continuation,
+            .bash, .retry => false,
+        };
+        if (scanned and kind != .retry and !pending_kind) continue;
         switch (kind) {
             .bash => if (!work.bash) continue,
-            .message => if (!work.message) continue,
-            .tool_continuation => if (!work.tool_continuation) continue,
+            .message => if (!work.message and !pending_kind) continue,
+            .tool_continuation => if (!work.tool_continuation and !pending_kind) continue,
             .retry => {},
         }
         const admission = switch (kind) {
@@ -170,6 +181,10 @@ noinline fn admitWork(state: *State, context: anytype, now: std.Io.Clock.Timesta
             };
         }
         if (kind != .retry and admission != .no_work) found_nothing = false;
+        if (admission == .progress) {
+            state.idle_admission = null;
+            return true;
+        }
         if (admission == .admitted) {
             std.mem.copyForwards(Kind, state.preference[index .. state.preference.len - 1], state.preference[index + 1 ..]);
             state.preference[state.preference.len - 1] = kind;
@@ -193,6 +208,7 @@ fn keyIs(kept: ?RetryKey, key: RetryKey) bool {
 
 pub fn run(state: *State, context: anytype) Outcome {
     var made_progress = serviceLifecycle(state, context);
+    if (context.advanceModelAdmission()) made_progress = true;
     const now = context.now();
     if (!context.dispatchFenced()) {
         const admitted = admitWork(state, context, now) catch return .terminate;
@@ -278,6 +294,9 @@ const Recording = struct {
     capacity_work: bool = false,
     release_during_scan: bool = false,
     released_credits: usize = 1,
+    pending_model_admission: ?PendingModelAdmission = null,
+    admission_read_progress: bool = false,
+    admission_read_steps: usize = 0,
     new_admission: Admission = .no_work,
     continuation_admission: Admission = .no_work,
     completions_available: usize = 0,
@@ -470,6 +489,16 @@ const Recording = struct {
         const paused = self.paused;
         if (self.flip_pause_after_read) self.paused = !paused;
         return paused;
+    }
+
+    fn pendingModelAdmission(self: *const Recording) ?PendingModelAdmission {
+        return self.pending_model_admission;
+    }
+
+    fn advanceModelAdmission(self: *Recording) bool {
+        if (self.pending_model_admission == null) return false;
+        self.admission_read_steps += 1;
+        return self.admission_read_progress;
     }
 
     fn admitNewModel(self: *Recording, paused: bool) Admission {
@@ -1193,4 +1222,53 @@ test "a dispatch snapshot is not relabeled when custody releases during its scan
     try std.testing.expect(run(&state, &context) == .continue_immediately);
     try std.testing.expectEqual(@as(usize, 2), context.work_scans);
     try std.testing.expectEqual(@as(usize, 1), context.mcp_runs);
+}
+
+test "pending admission work yields a service turn without rotating or becoming idle" {
+    for ([_]bool{ false, true }) |continuation| {
+        var context: Recording = .{
+            .generation_advance = 0,
+            .new_admission = if (continuation) .no_work else .progress,
+            .continuation_admission = if (continuation) .progress else .no_work,
+        };
+        var state: State = .{};
+        const preference = state.preference;
+        const phase: Phase = if (continuation) .admit_continuation else .admit_new;
+        for (0..3) |turn| {
+            try std.testing.expectEqual(Outcome.continue_immediately, run(&state, &context));
+            try std.testing.expectEqual(preference, state.preference);
+            try std.testing.expect(state.idle_admission == null);
+            try std.testing.expectEqual(turn + 1, context.count(phase));
+            try std.testing.expectEqual(3 * (turn + 1), context.lifecycle_count);
+            try std.testing.expectEqual(turn + 1, context.count(.completion));
+            try std.testing.expectEqual(turn + 1, context.model_advances);
+        }
+        if (continuation) context.continuation_admission = .admitted else context.new_admission = .admitted;
+        try std.testing.expectEqual(Outcome.continue_immediately, run(&state, &context));
+        try std.testing.expectEqual(if (continuation) Kind.tool_continuation else Kind.message, state.preference[3]);
+    }
+}
+
+test "pending admission reads progress with full capacity and stale discovery hints" {
+    var context: Recording = .{
+        .generation_advance = 0,
+        .free = 0,
+        .pending_model_admission = .message,
+        .admission_read_progress = true,
+        .new_admission = .progress,
+        .work = .{ .core = false, .mcp = false, .bash = false, .message = false, .tool_continuation = false, .retry = false },
+    };
+    var state: State = .{};
+    const preference = state.preference;
+    try std.testing.expectEqual(Outcome.continue_immediately, run(&state, &context));
+    try std.testing.expectEqual(@as(usize, 1), context.admission_read_steps);
+    try std.testing.expectEqual(@as(usize, 0), context.count(.admit_new));
+    try std.testing.expectEqual(preference, state.preference);
+    try std.testing.expectEqual(@as(usize, 3), context.lifecycle_count);
+    context.free = 1;
+    try std.testing.expectEqual(Outcome.continue_immediately, run(&state, &context));
+    try std.testing.expectEqual(@as(usize, 2), context.admission_read_steps);
+    try std.testing.expectEqual(@as(usize, 1), context.count(.admit_new));
+    try std.testing.expectEqual(preference, state.preference);
+    try std.testing.expect(state.idle_admission == null);
 }

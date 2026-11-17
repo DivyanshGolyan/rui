@@ -7,6 +7,11 @@ const Engine = @import("Engine.zig");
 const tls_client = @import("tls_client");
 const url_value = @import("url");
 
+/// Loopback fixtures share the transport's existing peer and wire counters.
+pub const testing = if (@import("builtin").is_test) struct {
+    pub const Peer = @import("testing/Peer.zig");
+} else struct {};
+
 pub const nghttp2_version = "1.70.0";
 pub const openssl_version = "3.6.3";
 

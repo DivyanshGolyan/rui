@@ -633,6 +633,20 @@ pub const Store = struct {
         return self.queue().write(submitMessageWithModelHeld, .{ self, command, committed, @as(?*const skills_domain.Initial, null), @as(?*const skills_domain.MessageCapture, null), @as(?*content_parts.Saving, &saving), faults });
     }
 
+    /// Fixture adapter for a compound Message and its captured skills. Both
+    /// enter the same canonical admission transition as ordinary Messages.
+    pub fn submitMessagePartsCapturedSkillsForTesting(
+        self: *Store,
+        command: *const content_custody.MessageCommand,
+        loan: @import("../InputCapture.zig").Loan,
+        initial_skills: ?*const skills_domain.Initial,
+        captured_skill: ?*const skills_domain.MessageCapture,
+    ) !MessageReply {
+        if (!@import("builtin").is_test) @compileError("test-only compound Message fixture");
+        var saving = try content_parts.Saving.init(.{ .captured = loan });
+        return self.queue().write(submitMessageWithModelHeld, .{ self, command, @as(?MessageCommitted, null), initial_skills, captured_skill, @as(?*content_parts.Saving, &saving), Faults{} });
+    }
+
     fn submitMessageWithModelHeld(
         self: *Store,
         command: *const content_custody.MessageCommand,
@@ -941,19 +955,51 @@ pub const Store = struct {
     }
 
     pub fn readSessionReport(self: *Store, session_ref: []const u8, profile: cli_value.ReportProfile, visitor: anytype) !void {
+        const PressureRead = model_admission_domain.PartsPressure.Read;
+        var mapped: ?@import("../os/pages.zig").Mapped(PressureRead) = null;
+        defer if (mapped) |work| {
+            work.value.deinit();
+            work.unmap();
+        };
+        var pressure: session_report_read.Pressure = .{};
+        var token: ?change_ring.SessionToken = null;
+        while (!try self.readSessionReportStep(session_ref, profile, visitor, &pressure, &token)) {
+            const coverage = pressure.needed orelse return error.CorruptStore;
+            if (mapped == null) mapped = try @import("../os/pages.zig").Mapped(PressureRead).map();
+            const read = mapped.?.value;
+            read.deinit();
+            read.init(coverage.session, coverage.covered, coverage.frontier, coverage.results, std.math.maxInt(i64));
+            read.boundary = pressure.needed_boundary;
+            while (!try self.advancePartsPressure(read)) {}
+            pressure.read = read;
+        }
+    }
+
+    /// Returns before visitor output when canonical pressure needs preparation.
+    /// The caller owns and may cancel the scanner between short Store entries.
+    pub fn readSessionReportStep(self: *Store, session_ref: []const u8, profile: cli_value.ReportProfile, visitor: anytype, pressure: *session_report_read.Pressure, token: *?change_ring.SessionToken) !bool {
         var watched: session_report_read.Watched(@TypeOf(visitor)) = .{ .visitor = visitor };
-        try self.queue().run(SessionReportHeld(@TypeOf(visitor)).readSessionReportHeld, .{ self, session_ref, profile, &watched });
+        return self.queue().run(SessionReportHeld(@TypeOf(visitor)).readSessionReportHeld, .{ self, session_ref, profile, &watched, pressure, token });
     }
 
     fn SessionReportHeld(comptime Visitor: type) type {
         return struct {
-            fn readSessionReportHeld(self: *Store, session_ref: []const u8, profile: cli_value.ReportProfile, watched: *session_report_read.Watched(Visitor)) !void {
+            fn readSessionReportHeld(self: *Store, session_ref: []const u8, profile: cli_value.ReportProfile, watched: *session_report_read.Watched(Visitor), pressure: *session_report_read.Pressure, token: *?change_ring.SessionToken) !bool {
                 const entry = try enter(self, .none);
                 defer entry.release();
+                const generation = self.commitGeneration();
+                if (pressure.read != null and self.unchangedSessionHeld(token.*, generation) == null) pressure.read = null;
                 var access: ReadAccess = .open(&entry);
                 defer access.deinit();
-                const result = session_report_read.readSessionReport(&access, session_ref, profile, watched);
-                return entry.finishCapture(watched.failed, result);
+                const result = session_report_read.readSessionReportWithPressure(&access, session_ref, profile, watched, pressure);
+                if (result) |_| {} else |err| {
+                    if (err == error.PartsPressureRequired) {
+                        token.* = .{ .instance = self.instance, .generation = generation, .session = session_ref[0..session_id.bytes].* };
+                        return false;
+                    }
+                }
+                try entry.finishCapture(watched.failed, result);
+                return true;
             }
         };
     }
@@ -1021,17 +1067,74 @@ pub const Store = struct {
     }
 
     pub fn admitModelAttemptInto(self: *Store, admission_kind: ModelAdmissionKind, faults: Faults, start: ?historical_domain.Start) !?AttemptAdmission {
-        return self.queue().write(admitModelAttemptHeld, .{ self, admission_kind, faults, start });
+        const mapped = try @import("../os/pages.zig").Mapped(model_admission_domain.AdmissionPreparation).map();
+        defer mapped.unmap();
+        mapped.value.init();
+        defer mapped.value.deinit();
+        while (true) switch (try self.admitModelAttemptStep(admission_kind, faults, start, mapped.value)) {
+            .progress => {},
+            .done => |selected_attempt| return selected_attempt,
+        };
     }
 
-    noinline fn admitModelAttemptHeld(self: *Store, admission_kind: ModelAdmissionKind, faults: Faults, start: ?historical_domain.Start) !?AttemptAdmission {
+    /// A compound preflight advances one canonical read per call. No Entry or
+    /// transaction survives a progress result.
+    pub fn admitModelAttemptStep(self: *Store, admission_kind: ModelAdmissionKind, faults: Faults, start: ?historical_domain.Start, preparation: *model_admission_domain.AdmissionPreparation) !model_admission_domain.AdmissionProgress {
+        std.debug.assert(preparation.kind == null or preparation.kind == admission_kind);
+        errdefer preparation.deinit();
+        if (preparation.phase == .weighing) {
+            if (try self.advancePartsPressure(&preparation.read)) preparation.phase = .ready;
+            return .progress;
+        }
+        if (preparation.floor) |mapped| if (!mapped.value.ready) {
+            _ = try self.advanceHistoryFloor(mapped.value);
+            return .progress;
+        };
+        const selected_attempt = try self.queue().write(admitModelAttemptHeld, .{ self, admission_kind, faults, start, preparation });
+        if (selected_attempt != null) {
+            preparation.deinit();
+            return .{ .done = selected_attempt };
+        }
+        if (preparation.pending()) return .progress;
+        return .{ .done = null };
+    }
+
+    pub fn advancePartsPressure(self: *Store, read: *model_admission_domain.PartsPressure.Read) !bool {
+        return self.queue().run(advancePartsPressureHeld, .{ self, read });
+    }
+
+    fn advancePartsPressureHeld(self: *Store, read: *model_admission_domain.PartsPressure.Read) !bool {
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: ReadAccess = .open(&entry);
+        defer access.deinit();
+        return entry.finish(error{}, read.step(&access));
+    }
+
+    noinline fn admitModelAttemptHeld(self: *Store, admission_kind: ModelAdmissionKind, faults: Faults, start: ?historical_domain.Start, preparation: *model_admission_domain.AdmissionPreparation) !?AttemptAdmission {
         const entry = try enter(self, .none);
         defer entry.release();
         const starting: ?model_admission_domain.AdmitModel.Starting = if (start) |into| if (self.engine.batches()) .{ .start = into, .selector = &self.selector } else null else null;
-        const first = admitModelAttemptOnce(&entry, admission_kind, .weighed, faults, starting);
+        const first = admitModelAttemptOnce(&entry, admission_kind, .weighed, faults, starting, preparation);
         const due = if (first) |_| false else |err| err == error.CompactionDue;
-        const outcome = if (due) admitModelAttemptOnce(&entry, admission_kind, .over, faults, starting) else first;
-        return entry.finishTransaction(Ordinary.none, faults, idleUnlessAdmitted(&entry, outcome));
+        if (due and preparation.phase == .candidate) {
+            preparation.phase = .weighing;
+            return null;
+        }
+        const outcome = if (due) admitModelAttemptOnce(&entry, admission_kind, .over, faults, starting, preparation) else first;
+        return entry.finishTransaction(Ordinary.none || error{FloorPreparationRequired}, faults, if (preparation.pending()) outcome else idleUnlessAdmitted(&entry, outcome)) catch |err| {
+            if (err != error.FloorPreparationRequired) return err;
+            if (preparation.floor) |mapped| {
+                mapped.value.deinit();
+                mapped.value.init(preparation.floor_operation);
+            } else {
+                const mapped = try @import("../os/pages.zig").Mapped(@import("domain/history_floor.zig").Preparation).map();
+                mapped.value.init(preparation.floor_operation);
+                preparation.floor = mapped;
+            }
+            preparation.kind = admission_kind;
+            return null;
+        };
     }
 
     noinline fn idleUnlessAdmitted(entry: *const Entry, outcome: anytype) !?AttemptAdmission {
@@ -1041,11 +1144,13 @@ pub const Store = struct {
         return null;
     }
 
-    noinline fn admitModelAttemptOnce(entry: *const Entry, admission_kind: ModelAdmissionKind, pressure: model_admission_domain.Pressure, faults: Faults, starting: ?model_admission_domain.AdmitModel.Starting) !?AttemptAdmission {
+    noinline fn admitModelAttemptOnce(entry: *const Entry, admission_kind: ModelAdmissionKind, pressure: model_admission_domain.Pressure, faults: Faults, starting: ?model_admission_domain.AdmitModel.Starting, preparation: *model_admission_domain.AdmissionPreparation) !?AttemptAdmission {
         const Admit = model_admission_domain.AdmitModel;
         var admission: Admit = .{ .input = .{
+            .entry = entry,
             .kind = admission_kind,
             .pressure = pressure,
+            .preparation = preparation,
             .faults = faults,
             .start = starting,
             .scratch = entry.store.reportScratch(Admit.Scratch),
@@ -1362,6 +1467,18 @@ pub const Store = struct {
         return historical_domain.readPage(self, page);
     }
 
+    pub fn readHistoricalMessagePart(self: *Store, page: *RequestPage) !RequestPage.MessageProgress {
+        return self.queue().run(readHistoricalMessagePartHeld, .{ self, page });
+    }
+
+    fn readHistoricalMessagePartHeld(self: *Store, page: *RequestPage) !RequestPage.MessageProgress {
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: ReadAccess = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.none, historical_domain.messagePartFrom(&access, page));
+    }
+
     pub fn modelOperationKind(self: *Store, binding: AttemptBinding) !ModelOperationKind {
         return model_settlement_domain.checkAttempt(self, binding);
     }
@@ -1427,16 +1544,54 @@ pub const Store = struct {
         disposition: ModelFailureClass,
         faults: Faults,
     ) !void {
-        return self.queue().write(settleModelAttemptFailureHeld, .{ self, binding, failure, disposition, faults });
+        if (try self.settleModelAttemptFailurePrepared(binding, failure, disposition, faults, null)) return;
+        const FloorPreparation = @import("domain/history_floor.zig").Preparation;
+        const mapped = try @import("../os/pages.zig").Mapped(FloorPreparation).map();
+        defer mapped.unmap();
+        const work = mapped.value;
+        work.init(binding.operation_id);
+        defer work.deinit();
+        while (true) {
+            while (!try self.advanceHistoryFloor(work)) {}
+            if (try self.settleModelAttemptFailurePrepared(binding, failure, disposition, faults, &work.prepared.?)) return;
+            work.deinit();
+            work.init(binding.operation_id);
+        }
     }
 
-    fn settleModelAttemptFailureHeld(
+    pub fn advanceHistoryFloor(self: *Store, work: *@import("domain/history_floor.zig").Preparation) !bool {
+        return self.queue().run(advanceHistoryFloorHeld, .{ self, work });
+    }
+
+    fn advanceHistoryFloorHeld(self: *Store, work: *@import("domain/history_floor.zig").Preparation) !bool {
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: ReadAccess = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.none, work.step(&access));
+    }
+
+    /// A missing or stale floor witness requests preparation without settling
+    /// the Attempt. Its recipe is checked again inside the final transaction.
+    pub fn settleModelAttemptFailurePrepared(
         self: *Store,
         binding: AttemptBinding,
         failure: ModelFailure,
         disposition: ModelFailureClass,
         faults: Faults,
-    ) !void {
+        prepared: ?*const @import("domain/history_floor.zig").Prepared,
+    ) !bool {
+        return self.queue().write(settleModelAttemptFailurePreparedHeld, .{ self, binding, failure, disposition, faults, prepared });
+    }
+
+    fn settleModelAttemptFailurePreparedHeld(
+        self: *Store,
+        binding: AttemptBinding,
+        failure: ModelFailure,
+        disposition: ModelFailureClass,
+        faults: Faults,
+        prepared: ?*const @import("domain/history_floor.zig").Prepared,
+    ) !bool {
         const code = failure.code();
         if (code.len == 0 or code.len > 96 or !std.unicode.utf8ValidateSlice(code)) {
             return error.InvalidFailureCode;
@@ -1446,7 +1601,14 @@ pub const Store = struct {
         }
         const report = failure.report();
         std.debug.assert(report.len <= outcome_code.max_report_bytes and std.unicode.utf8ValidateSlice(report));
-        return transition.apply(self, model_settlement_domain.SettleFailure, .{ .io = self.io, .binding = binding, .failure = &failure, .disposition = &disposition }, faults);
+        const entry = try enter(self, .fromControl(faults.control_trace));
+        defer entry.release();
+        var settlement: model_settlement_domain.SettleFailure = .{ .input = .{ .entry = &entry, .floor = self.reportScratch(@import("domain/history_floor.zig").FloorSearch), .prepared = prepared, .io = self.io, .binding = binding, .failure = &failure, .disposition = &disposition } };
+        entry.finishTransaction(model_settlement_domain.SettleFailure.Ordinary, faults, transition.run(&entry, model_settlement_domain.SettleFailure, &settlement, faults)) catch |err| {
+            if (err == error.FloorPreparationRequired) return false;
+            return err;
+        };
+        return true;
     }
 
     pub fn recoverOneExhaustedModelAttempt(

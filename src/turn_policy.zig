@@ -67,6 +67,7 @@ pub const CompactionFacts = struct {
     context_changed: bool,
     usage_tokens: ?u64,
     uncovered_bytes: u64,
+    unknown_images: u64 = 0,
     builtin_instruction_bytes: u64 = 0,
     output_reservation: u64,
 };

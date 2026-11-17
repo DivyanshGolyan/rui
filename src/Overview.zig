@@ -845,14 +845,14 @@ const SessionRows = struct {
 
     fn count(raw: *const anyopaque, first: u32) u32 {
         const self: *const SessionRows = @ptrCast(@alignCast(raw));
-        return @intCast(view.sessionsFrom(self.state, first));
+        return @intCast(view.Lines.sessionsFrom(self.state, first));
     }
 
-    fn above(count_: u32, arena: std.mem.Allocator) std.mem.Allocator.Error!@import("widgets/List.zig").Line {
+    fn above(count_: u32, arena: std.mem.Allocator) std.mem.Allocator.Error!@import("widgets/List.zig").List(u32).Line {
         return try arena.dupe(vaxis.Segment, &.{.{ .text = try std.fmt.allocPrint(arena, "↑ {d} more", .{count_}) }});
     }
 
-    fn below(count_: u32, arena: std.mem.Allocator) std.mem.Allocator.Error!@import("widgets/List.zig").Line {
+    fn below(count_: u32, arena: std.mem.Allocator) std.mem.Allocator.Error!@import("widgets/List.zig").List(u32).Line {
         const segments = try arena.alloc(vaxis.Segment, 1);
         segments[0] = .{ .text = try std.fmt.allocPrint(arena, "↓ {d} more", .{count_}) };
         return segments;
@@ -860,9 +860,8 @@ const SessionRows = struct {
 
     fn row(raw: *const anyopaque, index: usize, arena: std.mem.Allocator) std.mem.Allocator.Error!GroupedList.Row {
         const self: *const SessionRows = @ptrCast(@alignCast(raw));
-        const item = view.listItem(self.state, index).?;
-        const built = try view.listSegments(arena, self.state, item, self.width, self.caps, self.frame);
-        return .{ .segments = built.segments, .heading = built.heading, .target = view.clickOf(self.state, item), .alternate_target = view.pinClickOf(self.state, item) };
+        const built = (try view.Lines.at(arena, self.state, index, self.width, self.caps, self.frame)).?;
+        return .{ .segments = built.segments, .heading = built.heading, .target = built.target, .alternate_target = built.alternate };
     }
 };
 
@@ -945,9 +944,9 @@ fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: AppScreen.Overview.Part) s
     const frame = awake_ms / view.spin_interval_ms;
     const rows = try ctx.arena.create(SessionRows);
     rows.* = .{ .state = &self.state, .width = @import("widgets/RowInset.zig").contentWidth(size.width), .caps = self.caps, .frame = frame };
-    self.app_sessions.selected = if (view.focusedLine(&self.state, self.root.input.listFocused() or self.root.session == null)) |line| @intCast(line) else null;
+    self.app_sessions.selected = if (view.Lines.highlighted(&self.state, self.root.input.listFocused() or self.root.session == null)) |line| @intCast(line) else null;
     self.app_sessions.selection_background = if (self.root.session != null and !self.root.input.listFocused()) .bar else .selection;
-    self.app_sessions.rows = .{ .userdata = rows, .count = @intCast(view.listLength(&self.state)), .rowFn = SessionRows.row, .countFromFn = SessionRows.count };
+    self.app_sessions.rows = .{ .userdata = rows, .count = @intCast(view.Lines.count(&self.state)), .rowFn = SessionRows.row, .countFromFn = SessionRows.count };
     self.app_sessions.aboveFn = SessionRows.above;
     self.app_sessions.belowFn = SessionRows.below;
     self.app_settings_line.selected = self.root.input.area == .settings_row or (self.root.input.listFocused() and self.state.selected == .settings);
@@ -2498,21 +2497,21 @@ test "only your working Session's mark spins, at the frame's step, and without c
     defer arena.deinit();
     var spinning: usize = 0;
     var line: usize = 0;
-    while (view.listItem(&overview.state, line)) |item| : (line += 1) {
-        const at_two = try view.listSegments(arena.allocator(), &overview.state, item, 80, overview.caps, 2);
-        const at_three = try view.listSegments(arena.allocator(), &overview.state, item, 80, overview.caps, 3);
+    while (line < view.Lines.count(&overview.state)) : (line += 1) {
+        const at_two = (try view.Lines.at(arena.allocator(), &overview.state, line, 80, overview.caps, 2)).?;
+        const at_three = (try view.Lines.at(arena.allocator(), &overview.state, line, 80, overview.caps, 3)).?;
         try std.testing.expectEqual(at_two.segments.len, at_three.segments.len);
         for (at_two.segments, at_three.segments) |two, three| if (!std.mem.eql(u8, two.text, three.text)) {
             try std.testing.expectEqualStrings(view.spinner[2], two.text);
             try std.testing.expectEqualStrings(view.spinner[3], three.text);
-            try std.testing.expect(view.markSpins(&overview.state, item, overview.caps));
+            try std.testing.expect(view.Lines.spins(&overview.state, line, overview.caps));
             spinning += 1;
         };
     }
     try std.testing.expectEqual(@as(usize, 1), spinning);
     overview.caps = .{ .depth = .none };
     line = 0;
-    while (view.listItem(&overview.state, line)) |item| : (line += 1) try std.testing.expect(!view.markSpins(&overview.state, item, overview.caps));
+    while (line < view.Lines.count(&overview.state)) : (line += 1) try std.testing.expect(!view.Lines.spins(&overview.state, line, overview.caps));
 }
 
 test "idle overview polls real Host reads without requesting unchanged frames" {
@@ -4698,7 +4697,7 @@ test "App overview list stays live beside a focused child and wheels stay in the
     const draw: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 4 }, .cell_size = .{} };
     const frame = try overview.root.widget().draw(draw);
     const selected = overview.app_sessions.selected.?;
-    const target = view.clickOf(&overview.state, view.listItem(&overview.state, selected).?).?;
+    const target = (try view.Lines.at(arena.allocator(), &overview.state, selected, 40, overview.caps, 0)).?.target.?;
     try std.testing.expectEqualStrings("k7m2qx", &target.open);
     try std.testing.expectEqualStrings("b4n8wd", &overview.state.selected.session);
     const before = overview.app_sessions.list.scroll;
@@ -5418,7 +5417,7 @@ test "chat sidebar and overview share pinned New Session and Archived controls" 
         try std.testing.expectEqual(width == 140, std.mem.indexOf(u8, text, "Archived") != null);
         if (width == 140) {
             const line = rig.overview.app_sessions.selected.?;
-            const target = view.clickOf(&rig.overview.state, view.listItem(&rig.overview.state, line).?).?;
+            const target = (try view.Lines.at(shown.arena.allocator(), &rig.overview.state, line, 40, rig.overview.caps, 0)).?.target.?;
             try std.testing.expectEqualStrings(&selected, &target.open);
         }
     }
@@ -6884,7 +6883,7 @@ const EmptySessionOwner = struct {
         const overview = self.rig.overview;
         try self.expectVisible(&.{reference});
         try std.testing.expectEqual(reference, overview.state.conversing.?);
-        try std.testing.expectEqual(@as(?usize, 0), view.selectedLine(&overview.state));
+        try std.testing.expectEqual(@as(?usize, 0), view.Lines.named(&overview.state));
         for ([_]u16{ 46, 140 }) |width| {
             var shown = try self.rig.shown(width, 24);
             defer shown.deinit();
@@ -6903,7 +6902,7 @@ const EmptySessionOwner = struct {
             try std.testing.expect(std.mem.indexOf(u8, text.written(), &reference) == null);
             try std.testing.expectEqual(@as(?u32, 0), overview.app_sessions.selected);
             var bold_name = false;
-            for (try view.rowSegments(shown.arena.allocator(), &overview.state, 0, columns, overview.caps, 0)) |segment| {
+            for ((try view.Lines.at(shown.arena.allocator(), &overview.state, 0, columns, overview.caps, 0)).?.segments) |segment| {
                 if (std.mem.indexOf(u8, segment.text, name) != null) bold_name = segment.style.bold;
             }
             try std.testing.expect(bold_name);
@@ -7240,7 +7239,7 @@ test "App list selection consumes the core projection through arrivals covered S
                 var shown = try rig.shown(width, 24);
                 defer shown.deinit();
                 if (!overview.root.listVisible()) _ = try overview.listWidget().draw(.{ .arena = shown.arena.allocator(), .cell_arena = shown.arena.allocator(), .min = .{}, .max = .{ .width = Root.list_width, .height = 24 }, .cell_size = .{} });
-                const expected: ?u32 = if (view.focusedLine(&overview.state, overview.root.input.listFocused() or overview.root.session == null)) |line| @intCast(line) else null;
+                const expected: ?u32 = if (view.Lines.highlighted(&overview.state, overview.root.input.listFocused() or overview.root.session == null)) |line| @intCast(line) else null;
                 try std.testing.expectEqual(expected, overview.app_sessions.selected);
             }
         }
@@ -7254,7 +7253,7 @@ test "App list selection consumes the core projection through arrivals covered S
     try std.testing.expect(try rig.press("\x1b[H\r") == null);
     try std.testing.expect(try rig.settle() == null);
     const first = overview.app_session.?.session;
-    try std.testing.expect(view.selectedLine(&overview.state) == null);
+    try std.testing.expect(view.Lines.named(&overview.state) == null);
     try Check.draw(rig);
     try fixture.readCurrent();
     try Check.draw(rig);

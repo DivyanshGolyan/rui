@@ -1845,13 +1845,17 @@ fn validId(id: u64) bool {
     return id != 0 and id <= std.math.maxInt(i64);
 }
 
+pub fn unresolvedModelOperationSql(comptime operation: []const u8) []const u8 {
+    return operation ++ ".resolution_code IS NULL";
+}
+
 pub fn currentModelOperationSql(comptime operation: []const u8, comptime turn: []const u8) []const u8 {
     return turn ++ ".turn_id=" ++ operation ++ ".turn_id AND " ++ turn ++ ".session_ref=" ++ operation ++ ".session_ref AND " ++ turn ++ ".operation_id=" ++ operation ++ ".operation_id AND " ++ turn ++ ".outcome_code IS NULL";
 }
 
 const interruption_operation = rsql.Read(.{
-    .sql = "SELECT o.turn_id,o.session_ref,o.resolution_code IS NULL AS unresolved,EXISTS(SELECT 1 FROM turn t WHERE t.turn_id=o.turn_id " ++
-        "AND " ++ currentModelOperationSql("o", "t") ++ ") AS current FROM model_operation o WHERE o.operation_id=?1",
+    .sql = "SELECT o.turn_id,o.session_ref," ++ unresolvedModelOperationSql("o") ++ " AS unresolved,EXISTS(SELECT 1 FROM turn t WHERE " ++
+        currentModelOperationSql("o", "t") ++ ") AS current FROM model_operation o WHERE o.operation_id=?1",
     .Args = struct { operation_id: u64 },
     .Row = struct { turn_id: rsql.Positive, session_ref: Bounded(session_id.max_reference_bytes), unresolved: bool, current: bool },
     .cardinality = .optional,

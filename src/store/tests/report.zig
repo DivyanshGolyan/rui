@@ -645,7 +645,7 @@ test "derived work facts are served across all work replies" {
 
 test "served work intents imply admission across permission and control states" {
     try store_testing.forEachEngine(struct {
-        const Scenario = enum { idle, queued, in_flight, approval, message_decline, mixed };
+        const Scenario = enum { idle, queued, in_flight, retrying, finished, stopped, approval, message_decline, mixed };
         const Intent = enum { stop, interrupt, decide };
 
         fn run(case: *store_testing.Case) !void {
@@ -661,7 +661,14 @@ test "served work intents imply admission across permission and control states" 
                     try submitTestMessage(&storage, &tmp, "intent-input", "intent-first", session.slice(), "run");
                     if (scenario != .queued) {
                         const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-                        if (scenario != .in_flight) {
+                        if (scenario == .retrying) {
+                            try storage.settleModelAttemptFailure(model, .{ .uncorrelated = "provider_temporary_http_429" }, .{ .retryable = .{ .waits_ms = .{ 60_000, 60_000, 60_000 } } }, .{});
+                        } else if (scenario == .finished) {
+                            try store_testing.settleItemsForTesting(&storage, &tmp, model, &.{"{\"type\":\"message\",\"id\":\"answer\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"Done.\"}]}"}, "Done.");
+                        } else if (scenario == .stopped) {
+                            var stop = try completeSessionStop("intent-prior-stop", session.slice());
+                            try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+                        } else if (scenario != .in_flight) {
                             try settleTwoActionsForTesting(&storage, &tmp, model, "intent-calls");
                             old_action = try store_testing.queryU64(&storage, "SELECT min(action_id) FROM action_operation WHERE session_ref=?1", .{session.slice()});
                             if (scenario == .mixed) {
@@ -686,11 +693,20 @@ test "served work intents imply admission across permission and control states" 
                 var request: protocol.ActivityPage = .{};
                 request.session = session;
                 const work = (try store_core.activityPageForTesting(&storage, request)).work.work;
-                try std.testing.expectEqual(scenario != .idle, work.actions.stop);
+                try std.testing.expectEqual(scenario != .idle and scenario != .finished and scenario != .stopped, work.actions.stop);
                 try std.testing.expectEqual(scenario == .in_flight, work.actions.interrupt != null);
                 try std.testing.expectEqual(scenario == .approval or scenario == .mixed, work.actions.decide != null);
                 try std.testing.expectEqual(work.actions.decide, work.first_action);
                 if (scenario == .mixed) try std.testing.expect(work.actions.decide.? > old_action);
+                if (scenario == .message_decline or scenario == .mixed) {
+                    const bytes = try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, .current);
+                    defer std.testing.allocator.free(bytes);
+                    var report = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
+                    defer report.deinit();
+                    const permissions = report.value.object.get("actionable_permissions").?.array.items;
+                    try std.testing.expectEqual(@as(usize, if (scenario == .mixed) 2 else 0), permissions.len);
+                    for (permissions) |permission| try std.testing.expect((try std.fmt.parseInt(u64, permission.object.get("action").?.string, 10)) != old_action);
+                }
                 if (scenario == .message_decline or scenario == .mixed) {
                     var late: protocol.PermissionDecisionCommand = .{ .session = session, .action_id = old_action, .decision = .allow_once };
                     try late.key.set("intent-late-allow");
@@ -714,6 +730,120 @@ test "served work intents imply admission across permission and control states" 
                     },
                 }
             };
+        }
+    }.run);
+}
+
+test "compound report preparation can cancel and restarts stale pressure before visitor output" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try configureTestSession(&storage, "report-pressure-config");
+            try submitTestMessage(&storage, &tmp, "report-pressure-first", "report-pressure-first", session.slice(), "first");
+            const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            const parts: [65]store_testing.MessagePart = @splat(.{ .bytes = "report pressure text" });
+            try store_testing.submitTestMessageParts(&storage, &tmp, "report-pressure-parts", session.slice(), &parts);
+            try settleCallsForTestingWithFaults(&storage, &tmp, first, "report-pressure-answer", &.{}, .{}, "{\"input_tokens\":990,\"output_tokens\":0}");
+
+            var root: [protocol.max_store_bytes]u8 = undefined;
+            const root_length = try tmp.dir.realPath(std.testing.io, &root);
+            var used = std.atomic.Value(u64).init(0);
+            var capture: report_domain.SessionReportCapture = .{ .io = std.testing.io, .writer = null, .budget = .{ .used = &used, .limit = 1024 * 1024 } };
+            try capture.create(root[0..root_length], 73, false);
+            defer capture.deinit();
+            var reply: TestingReportReply = .{ .capture = &capture, .execution = .{ .dispatch_fenced = false, .custody_occupied = 0, .scratch_used_bytes = 0 } };
+            var pressure: session_report_read_domain.Pressure = .{};
+            var token: ?@import("../../change_ring.zig").SessionToken = null;
+            try std.testing.expect(!try storage.readSessionReportStep(session.slice(), .current, &reply, &pressure, &token));
+            try std.testing.expectEqual(@as(u64, 0), capture.length);
+            try std.testing.expectEqual(@as(usize, 0), capture.buffered);
+            const Read = @import("../domain/model_admission.zig").PartsPressure.Read;
+            const mapped = try @import("../../os/pages.zig").Mapped(Read).map();
+            defer mapped.unmap();
+            const read = mapped.value;
+            const coverage = pressure.needed.?;
+            read.init(coverage.session, coverage.covered, coverage.frontier, coverage.results, std.math.maxInt(i64));
+            read.boundary = pressure.needed_boundary;
+            defer read.deinit();
+            var steps: usize = 0;
+            while (read.cursor == null) : (steps += 1) {
+                try std.testing.expect(steps < 16);
+                try std.testing.expect(!try storage.advancePartsPressure(read));
+            }
+            read.deinit();
+            try std.testing.expect(read.cursor == null);
+            try std.testing.expect(!storage.isFenced());
+            read.init(coverage.session, coverage.covered, coverage.frontier, coverage.results, std.math.maxInt(i64));
+            read.boundary = pressure.needed_boundary;
+            while (!try storage.advancePartsPressure(read)) {}
+            pressure.read = read;
+            try submitTestMessage(&storage, &tmp, "report-pressure-later", "report-pressure-later", session.slice(), "later");
+            try std.testing.expect(!try storage.readSessionReportStep(session.slice(), .current, &reply, &pressure, &token));
+            try std.testing.expect(pressure.read == null);
+            try std.testing.expectEqual(@as(u64, 0), capture.length);
+            try std.testing.expectEqual(@as(usize, 0), capture.buffered);
+            const fresh = pressure.needed.?;
+            read.deinit();
+            read.init(fresh.session, fresh.covered, fresh.frontier, fresh.results, std.math.maxInt(i64));
+            read.boundary = pressure.needed_boundary;
+            while (!try storage.advancePartsPressure(read)) {}
+            pressure.read = read;
+            try std.testing.expect(try storage.readSessionReportStep(session.slice(), .current, &reply, &pressure, &token));
+            var report = try capture.seal();
+            defer report.deinit();
+            const body = try std.testing.allocator.alloc(u8, @intCast(report.length));
+            defer std.testing.allocator.free(body);
+            try std.testing.expectEqual(body.len, try report.read(0, body));
+            var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
+            defer parsed.deinit();
+            const fresh_body = try testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024);
+            defer std.testing.allocator.free(fresh_body);
+            try std.testing.expectEqualStrings(fresh_body, body);
+            try std.testing.expect(!storage.isFenced());
+        }
+    }.run);
+}
+
+test "Current reports preserve equal distinct and empty loaded tool names" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            const Variant = struct { tools: []const []const u8, loaded: ?[]const []const u8 };
+            const variants = [_]Variant{
+                .{ .tools = &.{ "bash", "find_tools" }, .loaded = null },
+                .{ .tools = &.{ "bash", "find_tools" }, .loaded = &.{ "bash", "find_tools" } },
+                .{ .tools = &.{ "bash", "find_tools" }, .loaded = &.{"find_tools"} },
+                .{ .tools = &.{}, .loaded = &.{} },
+            };
+            for (variants) |variant| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                var workspace: [protocol.max_workspace_bytes]u8 = undefined;
+                var command = try store_testing.completeConfiguration("report-names-config", "", try store_testing.canonicalCwd(std.testing.io, &workspace), "model-a");
+                command.configuration.tools = try .of(variant.tools);
+                if (variant.loaded) |loaded| command.configuration.loaded_tools = try .of(loaded);
+                const configured = try storage.configure(&command, .{});
+                try std.testing.expect(configured == .accepted);
+                const body = try testingSessionReport(&storage, &tmp, configured.accepted.session.slice(), 1024 * 1024);
+                defer std.testing.allocator.free(body);
+                var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
+                defer parsed.deinit();
+                const session = parsed.value.object.get("session").?.object;
+                const tools = session.get("tools").?.array.items;
+                const loaded = session.get("loaded_tools").?.array.items;
+                const expected = variant.loaded orelse variant.tools;
+                try std.testing.expectEqual(variant.tools.len, tools.len);
+                try std.testing.expectEqual(expected.len, loaded.len);
+                for (tools, variant.tools) |actual, name| try std.testing.expectEqualStrings(name, actual.string);
+                for (loaded, expected) |actual, name| try std.testing.expectEqualStrings(name, actual.string);
+                try std.testing.expect(!storage.isFenced());
+            }
         }
     }.run);
 }

@@ -36,6 +36,14 @@ pub fn Mapped(comptime T: type) type {
     };
 }
 
+/// Borrowed writable storage for an already sized, owned scratch file.
+/// The owner keeps the file and its byte charge until this mapping is released.
+pub fn mapWritable(io: std.Io, file: std.Io.File, length: usize) ![]align(std.heap.page_size_min) u8 {
+    if (length == 0) return &.{};
+    if (try file.length(io) < length) return error.FileShorter;
+    return std.posix.mmap(null, length, .{ .READ = true, .WRITE = true }, .{ .TYPE = .SHARED }, file.handle, 0);
+}
+
 /// The first `length` bytes of `file`, mapped read-only and shared: the
 /// pages are the file's page cache, so no second copy is made. Pages written
 /// but not yet written back show as Private_Dirty while mapped, and clean

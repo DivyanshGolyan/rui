@@ -531,6 +531,51 @@ class PublicationTest(unittest.TestCase):
                         self.write()
                         self.assertEqual(snapshot.publication_prefix(self.env), self.root / "rui-compiled-build/bin")
 
+    def test_complete_partial_by_work_outcome_uses_one_compaction_policy(self):
+        original = self.env["RUI_CACHE_BUILD_KEY"]
+        for partial in (False, True):
+            for outcome in ("success", "failure", "cancelled"):
+                for successful in ("true", "false"):
+                    with self.subTest(partial=partial, outcome=outcome, job_success=successful):
+                        env = dict(self.env, WORK_OUTCOME=outcome, JOB_SUCCESS=successful)
+                        key = original + ("-partial-42-2" if partial else "")
+                        with patch.object(snapshot, "compact", return_value=dict(
+                                removable=[], removable_bytes=0, invalidated_manifests=0)) as compact:
+                            if not partial and outcome == "success":
+                                report = snapshot.publication_report(env, key, "local", "global")
+                                self.assertEqual(report["key"], original)
+                                self.assertEqual(report["invalidated_manifests"], 0)
+                                compact.assert_called_once_with("local", "global", prefixes=[
+                                    self.root / "rui-compiled-build/bin"])
+                            else:
+                                with self.assertRaises(snapshot.SnapshotError):
+                                    snapshot.publication_report(env, key, "local", "global")
+                                compact.assert_not_called()
+
+    def test_target_key_cannot_bypass_compaction_with_missing_or_mismatched_environment(self):
+        key = self.env["RUI_CACHE_BUILD_KEY"]
+        for changes in ({"RUI_CACHE_BUILD_KEY": ""}, {"RUNNER_OS": "macOS"},
+                        {"RUNNER_ARCH": "ARM64"}, {"SETUP_OUTCOME": "failure"}):
+            with self.subTest(changes=changes), patch.object(snapshot, "compact") as compact:
+                with self.assertRaises(snapshot.SnapshotError):
+                    snapshot.publication_report(dict(self.env, **changes), key, "local", "global")
+                compact.assert_not_called()
+        with patch.object(snapshot, "compact", side_effect=snapshot.SnapshotError("audit failed")):
+            with self.assertRaisesRegex(snapshot.SnapshotError, "audit failed"):
+                snapshot.publication_report(self.env, key, "local", "global")
+
+    def test_other_platform_and_partition_candidates_keep_their_partial_policy(self):
+        key = self.env["RUI_CACHE_BUILD_KEY"]
+        for other in (key.replace("Linux-X64", "macOS-ARM64"),
+                      key.replace("-compiled.", "-compiled-unit."),
+                      key.replace("-compiled.", "-baseline."),
+                      key.replace("-compiled.", "-typecheck.")):
+            for partial in ("", "-partial-42-2"):
+                with self.subTest(key=other, partial=partial), patch.object(snapshot, "compact") as compact:
+                    self.assertEqual(snapshot.publication_report({}, other + partial, "local", "global"),
+                                     dict(key=other + partial))
+                    compact.assert_not_called()
+
     def test_nonpublishers_failed_work_partitions_and_exact_hits_do_not_compact(self):
         cases = (("GITHUB_REF", "refs/pull/1/merge"), ("GITHUB_REF", "refs/heads/feature"),
                  ("GITHUB_EVENT_NAME", "pull_request"), ("GITHUB_EVENT_NAME", "pull_request_target"),

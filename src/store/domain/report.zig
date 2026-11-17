@@ -507,7 +507,7 @@ fn WorkLatest(comptime Args: type, comptime session: []const u8) type {
     return rsql.Read(.{
         .sql = "SELECT t.turn_id,t.operation_id,t.input_cutoff,t.outcome_code,t.outcome_content_id,t.outcome_at,t.outcome_position," ++
             "coalesce(o.resolution_code,o.last_failure_code) AS operation_code,o.retry_due_at_ms,o.attempt_ordinal,o.attempt_at,o.retry_scheduled_at,o.resolved_at," ++
-            "(o.resolution_code IS NULL AND " ++ command_domain.currentModelOperationSql("o", "t") ++ ") AS interruptible," ++
+            "(" ++ command_domain.unresolvedModelOperationSql("o") ++ " AND " ++ command_domain.currentModelOperationSql("o", "t") ++ ") AS interruptible," ++
             "(SELECT @payload(content) FROM content WHERE content_id=o.resolution_content_id AND byte_length<=" ++ std.fmt.comptimePrint("{d}", .{Quota.max_bytes}) ++
             " AND t.outcome_code NOT IN ('completed','cancelled')) AS diagnostic," ++
             "(SELECT stopped_at FROM session_stop @index(session_stop_turn) WHERE selected_turn_id=t.turn_id ORDER BY position LIMIT 1) AS stopped_at " ++
@@ -887,10 +887,10 @@ pub fn readWorks(a: *ReadAccess, works: []WorkRead) !void {
 
 pub const full_compound_value = rsql.Read(.{
     .compound = true,
-    .sql = "SELECT c.content_id,c.byte_length,c.digest,c.private,c.form FROM message_admission m JOIN content c ON c.content_id=m.content_id WHERE m.session_ref=?1 AND c.form=1 " ++
-        "UNION ALL SELECT c.content_id,c.byte_length,c.digest,c.private,c.form FROM conversation_entry e JOIN content c ON c.content_id=e.content_id WHERE e.session_ref=?1 AND c.form=1 " ++
-        "UNION ALL SELECT c.content_id,c.byte_length,c.digest,c.private,c.form FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id WHERE a.session_ref=?1 AND c.form=1 " ++
-        "UNION ALL SELECT c.content_id,c.byte_length,c.digest,c.private,c.form FROM action_operation a JOIN content c ON c.content_id=a.background_content_id WHERE a.session_ref=?1 AND c.form=1 LIMIT 1",
+    .sql = "SELECT c.content_id,c.byte_length,c.digest,c.private,c.form FROM message_admission m JOIN content c ON c.content_id=m.content_id WHERE m.session_ref=?1 AND c.form<>0 " ++
+        "UNION ALL SELECT c.content_id,c.byte_length,c.digest,c.private,c.form FROM conversation_entry e JOIN content c ON c.content_id=e.content_id WHERE e.session_ref=?1 AND c.form<>0 " ++
+        "UNION ALL SELECT c.content_id,c.byte_length,c.digest,c.private,c.form FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id WHERE a.session_ref=?1 AND c.form<>0 " ++
+        "UNION ALL SELECT c.content_id,c.byte_length,c.digest,c.private,c.form FROM action_operation a JOIN content c ON c.content_id=a.background_content_id WHERE a.session_ref=?1 AND c.form<>0 LIMIT 1",
     .Args = struct { session: []const u8 },
     .Row = struct { content_id: rsql.Positive, byte_length: u64, digest: [32]u8, private: bool, form: u8 },
     .cardinality = .optional,
@@ -1155,16 +1155,16 @@ pub noinline fn readRun(a: *ReadAccess, comptime Ls: anytype, session_ref: []con
     const lists = a.store.reportScratch(RunState(Ls, Watcher));
     inline for (0..Ls.len) |i| lists[i] = .{
         .after = .{ .session = session_ref },
-        .status = .{ .previous = if (i == 0) null else &lists[i - 1].status },
+        .status = .{ .previous = if (i == 0) null else &lists.*[i - 1].status },
     };
     var current: usize = 0;
     while (current < Ls.len) {
         var ahead = false;
         inline for (0..Ls.len) |i| if (i == current) {
-            ahead = lists[i].first;
+            ahead = lists.*[i].first;
         };
         inline for (Ls, 0..) |L, i| if (i >= current) {
-            const list = &lists[i];
+            const list = &lists.*[i];
             list.status.queued = false;
             if (!list.status.empty and (i == current or ahead)) {
                 list.status.queued = true;
@@ -1182,7 +1182,7 @@ pub noinline fn readRun(a: *ReadAccess, comptime Ls: anytype, session_ref: []con
         a.run() catch |err| return runFailure(a, Ls, Watcher, lists, current, err);
         var blocked = false;
         inline for (Ls, 0..) |L, i| if (i >= current) {
-            const list = &lists[i];
+            const list = &lists.*[i];
             if (!list.status.queued and !list.status.empty) {
                 blocked = true;
             } else if (blocked or !list.status.previousFinished()) {

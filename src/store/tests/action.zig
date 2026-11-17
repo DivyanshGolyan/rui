@@ -663,7 +663,7 @@ const NativePromotion = struct {
         var row: Query.Result = undefined;
         access.read(Query, .{ .session = session, .covered = covered, .frontier = 0, .results = 0 }, &row);
         try entry.finish(store_core.Ordinary.none, access.run());
-        return row.uncovered_bytes;
+        return row.uncovered_bytes orelse return error.TestUnexpectedResult;
     }
 
     fn propose(storage: *Store, tmp: *std.testing.TmpDir, session: []const u8) !u64 {
