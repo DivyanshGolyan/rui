@@ -13,7 +13,7 @@ import time
 import host_process
 from host_process import canonical_fixture_root, dispose_all, retain_failure_state
 import model_fixture as fixture
-from bash_fixture import action_for, allow
+from bash_fixture import action_for, allow, rows
 
 
 CASES = (
@@ -151,22 +151,21 @@ def prove_case(root, name):
         else:
             wait(lambda: fixture.completed_observation(store, "message", deadline=deadline), "model continuation after tool outcome")
             assert fixture.read_result(store, "message", deadline=deadline) == b"continued"
-        report = command("session", "inspect", "--store", store, "--session", session, "--profile", "full")
-        actions = report["full"]["actions"]
-        assert len(actions) == 1, report
-        action = actions[0]["action"] if action is None else action
         if expected == "succeeded":
-            # Byte-only Action reads deliberately exclude compound image results.
-            # Inspect their saved Resolution and validate the typed provider input.
+            # Both byte-only Action reads and Full reports refuse compound parts.
+            # Check the sole canonical Resolution and the typed provider output.
             def image_resolution():
-                report = command("session", "inspect", "--store", store, "--session", session, "--profile", "full")
-                rows = [row for row in report["full"]["actions"] if row["action"] == action]
-                assert len(rows) == 1, report
-                return rows[0] if rows[0]["resolution"] is not None else None
+                saved = rows(store, "SELECT resolution_code,acceptance_position FROM action_operation WHERE session_ref=? AND action_id=?", (session, int(action)))
+                assert len(saved) == 1, saved
+                return saved[0] if saved[0][0] is not None else None
 
             final = wait(image_resolution, "saved image Resolution")
-            assert final["resolution"] == expected, final
+            assert final[0] == expected and final[1] > 0, final
         else:
+            report = command("session", "inspect", "--store", store, "--session", session, "--profile", "full")
+            actions = report["full"]["actions"]
+            assert len(actions) == 1, report
+            action = actions[0]["action"] if action is None else action
             final = wait(lambda: (value if (value := read(action))["state"] == "resolved" else None), "saved explicit Resolution")
             assert final["final"]["code"] == expected, final
             assert int(final["final"]["content"]["bytes"]) > 0, final
