@@ -310,6 +310,9 @@ pub const Event = union(enum) {
     launch_start: struct { explicit_session: bool, restoring: bool },
     launch_size: struct { size: Size, wide: bool },
     launch_poll,
+    presentation_start: u64,
+    presentation_presented,
+    presentation_tick: struct { now_ms: u64, list_visible: ?bool, host_unavailable: bool },
 
     tick: u64,
     list: ListReply,
@@ -675,6 +678,7 @@ pub const State = struct {
     size: Size = .{},
     sidebar_rule: ?u16 = null,
     launch: enum { sizing, waiting, creating, done } = .done,
+    presentation: union(enum) { done, holding: u64, released } = .done,
 
     host_line: bool = false,
 
@@ -790,6 +794,14 @@ pub const State = struct {
         if (self.selected != .session) return null;
         const row = self.find(self.selected.session) orelse return null;
         return if (visible(self, row)) row else null;
+    }
+
+    pub fn initialPresentation(self: *const State, list_visible: bool) enum { holding, released, done } {
+        return switch (self.presentation) {
+            .done => .done,
+            .released => .released,
+            .holding => if (list_visible) .holding else .done,
+        };
     }
 
     pub fn hidesOverview(self: *const State) bool {
@@ -1174,7 +1186,7 @@ const RowPresentation = struct {
 
 pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
     switch (event) {
-        .tick, .list, .host, .memory, .observed, .first_line, .resized, .launch_size, .launch_poll, .list_settled => {},
+        .tick, .list, .host, .memory, .observed, .first_line, .resized, .launch_size, .launch_poll, .presentation_start, .presentation_presented, .presentation_tick, .list_settled => {},
         else => state.presentation_revision +%= 1,
     }
 
@@ -1205,6 +1217,7 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
                 },
             }
             if (state.listed_at_ms == null and state.list_stale and (state.launch == .sizing or state.launch == .waiting)) state.launch = .done;
+            if (state.listed_at_ms != null or state.list_stale) releaseInitialPresentation(state, &effects);
         },
         .first_line => |result| try firstLine(state, result),
         .clicked => |input| {
@@ -1332,6 +1345,17 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
             state.releaseModels();
         },
         .resized => |size| state.size = size,
+        .presentation_start => |now_ms| state.presentation = .{ .holding = now_ms +| 150 },
+        .presentation_presented => if (state.presentation == .released) {
+            state.presentation = .done;
+        },
+        .presentation_tick => |frame| if (state.presentation == .holding) {
+            const deadline = state.presentation.holding;
+            if (frame.now_ms >= deadline or frame.host_unavailable or frame.list_visible == false) {
+                if (state.listed_at_ms == null and (state.launch == .sizing or state.launch == .waiting)) state.launch = .done;
+                releaseInitialPresentation(state, &effects);
+            }
+        },
         .launch_start => |startup| {
             if (!startup.explicit_session and !startup.restoring and !state.left and state.conversing == null) state.launch = .sizing;
         },
@@ -1371,7 +1395,10 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
         },
         .host => |facts| {
             if (!std.meta.eql(state.host, facts)) state.presentation_revision +%= 1;
-            if (facts == null) state.launch = .done;
+            if (facts == null) {
+                state.launch = .done;
+                releaseInitialPresentation(state, &effects);
+            }
             state.host = facts;
             if (facts) |host| {
                 if (state.read_instance) |known| if (!std.mem.eql(u8, &known, &host.instance)) {
@@ -1408,6 +1435,13 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
         else => {},
     };
     return effects;
+}
+
+fn releaseInitialPresentation(state: *State, effects: *Effects) void {
+    if (state.presentation != .holding) return;
+    state.presentation = .released;
+    state.presentation_revision +%= 1;
+    effects.redraw = true;
 }
 
 fn readModels(state: *State, read: ModelsRead) void {
@@ -6442,6 +6476,88 @@ test "sidebar update admission binds drawn availability run and frontend readine
         _ = try step(&state, .{ .clicked = .{ .target = .{ .update = .{ .available = drawn, .run = drawn_run } }, .upgrade_admitted = admitted } });
         if (expected) try std.testing.expect(state.upgrade.run.? == .checking) else try std.testing.expect(std.meta.eql(current_run, state.upgrade.run));
     };
+}
+
+test "initial presentation core releases for live answer deadline failure and Host loss" {
+    const Outcome = enum { early, late, failed, empty, host_lost, host_unavailable };
+    for ([_]u16{ 46, 140 }) |width| for (std.enums.values(Outcome)) |outcome| {
+        var state = try testState();
+        defer state.deinit();
+        _ = try step(&state, .{ .launch_start = .{ .explicit_session = false, .restoring = false } });
+        _ = try step(&state, .{ .presentation_start = 1000 });
+        try std.testing.expect(state.initialPresentation(true) == .holding);
+        _ = try step(&state, .{ .launch_size = .{ .size = .{ .width = width, .height = 30 }, .wide = width >= 100 } });
+        _ = try step(&state, .{ .tick = test_now_s * 1000 });
+        const unknown = try step(&state, .{ .presentation_tick = .{ .now_ms = 1001, .list_visible = null, .host_unavailable = false } });
+        try std.testing.expect(!unknown.redraw);
+        const before = try step(&state, .{ .presentation_tick = .{ .now_ms = 1149, .list_visible = true, .host_unavailable = false } });
+        try std.testing.expect(!before.redraw);
+        try std.testing.expect(state.initialPresentation(true) == .holding);
+        const revision = state.presentation_revision;
+        switch (outcome) {
+            .early, .empty => {
+                const partial = try step(&state, .{ .list = .{ .page = .{ .rows = &.{}, .answer = null } } });
+                try std.testing.expect(!partial.redraw);
+                try std.testing.expect(state.initialPresentation(true) == .holding);
+                const rows = [_]Listed{session("live01", .{ .idle = ago(1) }, .{ .label = "Live Session" })};
+                const answer = try respond(&state, .full, testToken(1), if (outcome == .empty) &.{} else &rows);
+                try std.testing.expect(answer.redraw);
+                try std.testing.expect(state.listed_at_ms != null);
+                const text = try screenText(&state, width, 30, .{});
+                defer std.testing.allocator.free(text);
+                try std.testing.expect(std.mem.indexOf(u8, text, "Loading") == null);
+                try std.testing.expect(std.mem.indexOf(u8, text, if (outcome == .empty) "No unarchived Sessions." else "Live Session") != null);
+            },
+            .late => {
+                const deadline = try step(&state, .{ .presentation_tick = .{ .now_ms = 1150, .list_visible = true, .host_unavailable = false } });
+                try std.testing.expect(deadline.redraw);
+                try std.testing.expectEqual(.done, state.launch);
+                try std.testing.expect(state.listed_at_ms == null);
+                const fallback = try screenText(&state, width, 30, .{});
+                defer std.testing.allocator.free(fallback);
+                try std.testing.expect(std.mem.indexOf(u8, fallback, "Loading") != null);
+                const rows = [_]Listed{session("live01", .{ .idle = ago(1) }, .{ .label = "Live Session" })};
+                _ = try respond(&state, .full, testToken(1), &rows);
+                try std.testing.expect(state.listed_at_ms != null);
+            },
+            .failed => {
+                const failed = try step(&state, .{ .list = .failed });
+                try std.testing.expect(failed.redraw);
+                try std.testing.expect(state.list_stale);
+                try std.testing.expectEqual(.done, state.launch);
+            },
+            .host_lost => {
+                const lost = try step(&state, .{ .host = null });
+                try std.testing.expect(lost.redraw);
+                try std.testing.expectEqual(.done, state.launch);
+            },
+            .host_unavailable => {
+                const lost = try step(&state, .{ .presentation_tick = .{ .now_ms = 1001, .list_visible = true, .host_unavailable = true } });
+                try std.testing.expect(lost.redraw);
+                try std.testing.expectEqual(.done, state.launch);
+            },
+        }
+        try std.testing.expect(state.initialPresentation(true) != .holding);
+        try std.testing.expect(state.presentation_revision > revision);
+        try std.testing.expectEqual(.released, state.initialPresentation(true));
+        _ = try step(&state, .presentation_presented);
+        try std.testing.expectEqual(.done, state.initialPresentation(true));
+        const again = try step(&state, .{ .presentation_tick = .{ .now_ms = 1200, .list_visible = true, .host_unavailable = false } });
+        try std.testing.expect(!again.redraw);
+    };
+}
+
+test "initial presentation core does not hold a narrow resumed chat" {
+    var state = try testState();
+    defer state.deinit();
+    _ = try step(&state, .{ .launch_start = .{ .explicit_session = true, .restoring = false } });
+    _ = try step(&state, .{ .presentation_start = 1000 });
+    try std.testing.expect(state.initialPresentation(false) != .holding);
+    try std.testing.expect(state.initialPresentation(true) == .holding);
+    const release = try step(&state, .{ .presentation_tick = .{ .now_ms = 1001, .list_visible = false, .host_unavailable = false } });
+    try std.testing.expect(release.redraw);
+    try std.testing.expect(state.initialPresentation(true) != .holding);
+    try std.testing.expectEqual(.done, state.launch);
 }
 
 test "launch core creation outcomes reveal or open exactly once" {

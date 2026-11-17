@@ -431,6 +431,11 @@ fn initScreen(self: *Self, screen: *SessionScreen) !void {
     self.screen_ready = true;
 }
 
+fn holdInitialPresentation(raw: *anyopaque, width: u16) bool {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    return self.state.initialPresentation(width >= Root.split_at or self.root.session == null) == .holding;
+}
+
 fn widget(self: *Self) vxfw.Widget {
     return .{ .userdata = self, .eventHandler = appEvent, .drawFn = appDraw };
 }
@@ -487,6 +492,7 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
             try app.vx.queryColor(app.tty.writer(), .bg);
             try self.paintCursor();
             try ctx.requestFocus(self.widget());
+            if (!self.signInIsFirstRun()) _ = try self.event(.{ .presentation_start = self.animationMs() });
             if (self.options.open) |reference| try self.appNext(ctx, try self.event(.{ .open = reference }));
         },
         .focus_in => try ctx.requestFocus(self.widget()),
@@ -527,10 +533,23 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
                     try self.dispatch(.all);
                 }
             }
+            const presentation = try self.eventResult(.{ .presentation_tick = .{
+                .now_ms = self.animationMs(),
+                .list_visible = if (self.root.size.width == 0) null else self.root.size.width >= Root.split_at or self.root.session == null,
+                .host_unavailable = hostHeld(self),
+            } });
+            ctx.redraw = ctx.redraw or presentation.redraw;
             if (!self.state.upgrading()) try self.appDiscoverUpgrade(ctx);
             const launch = try self.eventResult(.launch_poll);
             try self.appNext(ctx, launch.next);
             ctx.redraw = ctx.redraw or launch.redraw;
+            if (self.state.initialPresentation(true) == .released) {
+                if (self.root.input.layer == .main and self.root.input.mainFocused()) {
+                    if (self.root.session) |session| try ctx.requestFocus(session);
+                }
+                _ = try self.event(.presentation_presented);
+                ctx.redraw = true;
+            }
             if (!self.root.input.layer.settingsOpen()) try self.root.settings_page.widget().handleEvent(ctx, .tick);
             if (self.state.presentation_revision != revision or self.hostState() != host_state or !std.meta.eql(self.host_launch, host_launch) or self.wantsFrame()) ctx.redraw = true;
             const open: ?[]const u8 = if (self.app_session) |shown| if (shown.frontend) |frontend| frontend.titleName() else null else null;
@@ -1062,7 +1081,7 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
         .caps = .of(.{ .lc_all = init.environ_map.get("LC_ALL"), .lc_ctype = init.environ_map.get("LC_CTYPE"), .lang = init.environ_map.get("LANG"), .no_color = init.environ_map.get("NO_COLOR"), .colorterm = init.environ_map.get("COLORTERM") }),
         .interrupted = interrupted,
     };
-    self.root = .{ .settings_control = self.app_settings_line.widget(), .settings_activate = OverviewLines.Settings.activate, .main_presentation = .{ .context = self, .close = closeMainPresentation }, .overview = self.widget(), .settings_input_host = self.inputHostWidget(), .overview_keys = .{ .context = self, .take = appKey }, .list = self.listWidget(), .settings_page = .{ .backend = self.settingsBackend(), .version = @import("transport_options").version }, .input = .{ .area = .list, .layer = if (options.sign_in) .{ .sign_in = .{ .over = .main } } else .main } };
+    self.root = .{ .settings_control = self.app_settings_line.widget(), .settings_activate = OverviewLines.Settings.activate, .main_presentation = .{ .context = self, .close = closeMainPresentation }, .presentation_hold = .{ .context = self, .held = holdInitialPresentation }, .overview = self.widget(), .settings_input_host = self.inputHostWidget(), .overview_keys = .{ .context = self, .take = appKey }, .list = self.listWidget(), .settings_page = .{ .backend = self.settingsBackend(), .version = @import("transport_options").version }, .input = .{ .area = .list, .layer = if (options.sign_in) .{ .sign_in = .{ .over = .main } } else .main } };
     self.sign_in = .{ .init = init, .selectors = options.selectors, .activate = hooks.activate, .ready = hooks.ready, .scratch = hooks.scratch, .userdata = self, .on_done = signedIn, .on_close = closeSignIn };
     try self.sign_in.target.set(options.store);
     self.root.sign_in = self.sign_in.widget();
@@ -1111,6 +1130,7 @@ fn closeSignIn(raw: *anyopaque, ctx: *vxfw.EventContext) !void {
 
 fn signedIn(raw: *anyopaque, ctx: *vxfw.EventContext, activation: SignIn.Activation) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
+    const first_run = self.signInIsFirstRun();
     if (!std.mem.eql(u8, self.options.store, activation.store.slice())) {
         std.debug.assert(self.worker.thread == null);
         self.signed_in_store = activation.store;
@@ -1131,6 +1151,7 @@ fn signedIn(raw: *anyopaque, ctx: *vxfw.EventContext, activation: SignIn.Activat
         self.state.notice = notice;
     }
     try self.root.signedIn(ctx);
+    if (first_run) _ = try self.event(.{ .presentation_start = self.animationMs() });
     if (self.root.session == null) try ctx.requestFocus(self.widget());
 }
 
@@ -1221,8 +1242,9 @@ fn eventResult(self: *Self, value: view.Event) !EventResult {
         .list => |since| {
             self.traversal = .init(since);
             self.traversal_archive = self.state.listing_archive.?;
-            self.queueHost();
+            if (self.state.listed_at_ms != null) self.queueHost();
             self.queue(.list);
+            if (self.state.listed_at_ms == null) self.queueHost();
         },
         .read_first_lines => |reads| self.queue(.{ .lines = reads }),
         .create => |binding| self.queue(.{ .create = self.creationSnapshot(binding) }),
@@ -2193,6 +2215,41 @@ const Rig = struct {
     }
 };
 
+test "initial list is queued before Host observation" {
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
+    defer rig.close();
+    _ = try rig.overview.event(.{ .tick = test_now_s * 1000 });
+    try std.testing.expectEqual(Job.list, std.meta.activeTag(rig.overview.jobs[0]));
+    try std.testing.expectEqual(Job.host, std.meta.activeTag(rig.overview.jobs[1]));
+}
+
+test "initial presentation release restores focus only to the active Session" {
+    for ([_]bool{ false, true }) |main_focused| {
+        var cancellation: client.Cancellation = .{};
+        const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
+        defer rig.close();
+        const overview = rig.overview;
+        const chat: vxfw.Text = .{ .text = "Chat" };
+        overview.root.session = chat.widget();
+        overview.root.size = .{ .width = 140, .height = 30 };
+        overview.root.input.area = if (main_focused) .main else .list;
+        _ = try overview.event(.{ .presentation_start = overview.animationMs() });
+        _ = try overview.event(.{ .host = null });
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        try appEvent(overview, &ctx, .tick);
+        var focused = false;
+        for (ctx.cmds.items) |command| if (command == .request_focus and command.request_focus.eql(chat.widget())) {
+            focused = true;
+        };
+        try std.testing.expectEqual(main_focused, focused);
+        try std.testing.expect(ctx.redraw);
+        try std.testing.expectEqual(.done, overview.state.initialPresentation(true));
+    }
+}
+
 test "App overview paints its ground and plain footer" {
     var cancellation: client.Cancellation = .{};
     const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .provider = "codex", .model = "gpt-5.5" }, fake_operations, &cancellation);
@@ -2850,13 +2907,13 @@ test "while a conversation holds the terminal its stop goes first, the listing g
     try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
     overview.opened = "k7m2qx".*;
     try overview.dispatch(.lent);
-    try std.testing.expectEqual(Job.host, std.meta.activeTag(overview.job));
+    try std.testing.expectEqual(Job.list, std.meta.activeTag(overview.job));
     _ = try conversed(overview, .working, .stop);
     try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(2)), overview, Lent.answered);
     try std.testing.expectEqual(Job.stop, std.meta.activeTag(overview.job));
     try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(2)), overview, Lent.answered);
     try std.testing.expectEqual(@as(usize, 1), Seen.now.stops);
-    try std.testing.expectEqual(Job.list, std.meta.activeTag(overview.job));
+    try std.testing.expectEqual(Job.host, std.meta.activeTag(overview.job));
     try rig.lend();
     try std.testing.expect(Seen.now.hosts >= 1 and Seen.now.lists >= 1);
     try std.testing.expectEqual(@as(usize, 0), overview.job_count);
@@ -2871,7 +2928,6 @@ test "while a conversation holds the terminal its stop goes first, the listing g
     defer failing.close();
     try std.testing.expect(try failing.overview.event(.{ .tick = test_now_s * 1000 }) == null);
     try failing.overview.dispatch(.all);
-    try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(2)), failing.overview, Lent.answered);
     try std.testing.expectEqual(Job.list, std.meta.activeTag(failing.overview.job));
     failing.overview.opened = "k7m2qx".*;
     try std.testing.expectError(error.CanonicalStoreFailure, test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(2)), failing.overview, Lent.answered));
@@ -4027,10 +4083,6 @@ test "a listing failure under a conversation ends the overview once the terminal
     rig.overview.hooks.scratch = Scratch.scratch;
     const overview = rig.overview;
     try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
-    try overview.dispatch(.all);
-    try std.testing.expectEqual(Job.host, std.meta.activeTag(overview.job));
-    try rig.answered();
-    try std.testing.expect(try overview.complete() == null);
     try overview.dispatch(.all);
     try std.testing.expectEqual(Job.list, std.meta.activeTag(overview.job));
     try rig.answered();

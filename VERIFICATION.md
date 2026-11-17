@@ -26,6 +26,10 @@ The [Session UI contract](docs/contracts/session-ui.md#required-evidence) requir
 
 The [Session UI contract](docs/contracts/session-ui.md#required-evidence) requires a bounded Keys viewport that makes the full shortcut reference reachable without shrinking or changing a retained draft. Exercise unmodified Up/Down by row, Page Up/Down (including shifted page keys) by viewport, both ends and overscroll, narrow and short viewports, resize and reopen at the top, and verify every shared key row becomes visible. Cover the actual input/close path and assert the exact retained draft and input geometry before, during and after scrolling; include a broken-scroll or bounds negative control. Capture the relevant changed-binary terminal cells at wide and narrow sizes, including a scrolled view. These are required checks and captures, not evidence that they have been run; renderer frames do not establish physical input.
 
+## First launch list
+
+Run `zig build test-logic -Dtest-filter='initial presentation core'` and `zig build test-native -Dtest-filter='initial list is queued'` and capture wide-launch, narrow-launch and chat before and after. The Session UI evidence row covers early, late, unavailable and empty live answers; PTY frames are not physical-terminal evidence.
+
 ## List tint padding
 
 `GroupedList row inset is stable for selection hover and plain rows` checks shared row bounds at zero, narrow and wide widths in direct, indexed and no colour. Run the touched list, overview, panel, model-choice and palette owners, and remove the inset as a negative control. Capture before and after list and panel frames in day and night at 140×40 and 46×30 through verify-rui; these are renderer evidence, not physical-terminal evidence.
