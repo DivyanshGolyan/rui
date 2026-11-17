@@ -28,6 +28,35 @@ def committed(text, columns=100, lines=20):
 
 
 class VerifyRuiTest(unittest.TestCase):
+    def test_resize_ignores_inflight_spinner_until_reset_frame_commits(self):
+        import io
+        import threading
+
+        terminal_type = runpy.run_path(str(SCRIPT))["FrameTerminal"]
+        terminal = terminal_type.__new__(terminal_type)
+        capture = types.SimpleNamespace(generation=7, reset_generation=0, frame_reset_generation=0)
+        capture.resize = lambda *_: None
+        terminal.capture = capture
+        terminal.condition = threading.Condition()
+        terminal.master = 41
+        terminal.output_events = io.StringIO()
+        terminal.process = types.SimpleNamespace(output=types.SimpleNamespace(complete=False))
+        accepted = []
+
+        def wait(predicate, _description, **_kwargs):
+            capture.generation += 1
+            accepted.append(predicate(capture))
+            capture.reset_generation += 1
+            accepted.append(predicate(capture))
+            capture.frame_reset_generation = capture.reset_generation
+            capture.generation += 1
+            accepted.append(predicate(capture))
+
+        terminal.wait = wait
+        with patch("fcntl.ioctl"):
+            terminal.resize((46, 30))
+        self.assertEqual(accepted, [False, False, True])
+
     def test_host_launcher_uses_exact_credential_free_generic_settings(self):
         launch = runpy.run_path(str(SCRIPT))["launch_host"]
         with tempfile.TemporaryDirectory() as directory:

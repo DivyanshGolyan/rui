@@ -33,7 +33,7 @@ The subsystem references keep accepted behavior and required evidence together. 
 - [Store transactions and representation](docs/contracts/store.md#required-evidence).
 - [Session stops and outcomes](docs/contracts/sessions.md#required-evidence).
 - [CLI operations and configuration](docs/contracts/cli.md#required-evidence).
-- [Session UI and terminal lifetime](docs/contracts/session-ui.md#required-evidence), including shared full-list/sidebar row marks, state-age boundaries, alignment, 100 ms spinner frames and the earliest visible row-age/quota-countdown deadline, including header-only countdowns and minute-scale quota wording.
+- [Session UI and terminal lifetime](docs/contracts/session-ui.md#required-evidence), including shared full-list/sidebar row marks, state-age boundaries, alignment, 100 ms spinner frames and the earliest visible row-age/quota-countdown deadline, including header-only countdowns and minute-scale quota wording. Native empty-chat Escape and spinner repaint tests preserve all four row states at narrow width; frame resize tests reject old-viewport spinner commits until the resize reset and repaint commit.
 - [Reports, Activity, and local protocol](docs/contracts/inspection.md#required-evidence).
 - [Host ownership and lifetime](docs/contracts/host.md#required-evidence).
 - [Resources and selection progress](docs/contracts/resources.md#required-evidence).

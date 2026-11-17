@@ -8001,3 +8001,127 @@ test "wide launch shows stopped Host recovery and failed listing" {
         try std.testing.expectEqual(.done, rig.overview.state.launch);
     }
 }
+
+test "narrow empty chat exit retains every list row through spinner repaints and resize" {
+    var stage: []const u8 = "setup";
+    errdefer std.debug.print("repaint stage: {s}\n", .{stage});
+    const Frames = struct {
+        var dir: std.Io.Dir = undefined;
+        var files: u8 = 0;
+        const labels = [_][]const u8{ "Working row", "Finished row", "Waiting on you row", "Failed row" };
+        fn scratch(init: std.process.Init) !std.Io.File {
+            files += 1;
+            return dir.createFile(init.io, &.{'a' + files}, .{ .read = true });
+        }
+        fn list(self: *Self, requests: client.Requests, cursor: protocol_reply.SessionListCursor, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
+            const failure = try fake_operations.list(self, requests, cursor, page);
+            for (page.rows[0..4], labels, 0..) |*row, label, at| {
+                row.label = try protocol.Bounded(100).from(label);
+                const since = test_now_s - 10;
+                row.work.state = switch (at) {
+                    0 => .{ .working = .{ .since = since } },
+                    1 => .{ .finished = .{ .since = since } },
+                    2 => .{ .approval = .{ .since = since } },
+                    else => .{ .failed = .{ .since = since, .code = .{}, .resets_at = null } },
+                };
+            }
+            return failure;
+        }
+        fn paint(rig: *Rig, vx: *vaxis.Vaxis, output: *std.Io.Writer, size: vxfw.Size) !void {
+            if (vx.screen.width != size.width or vx.screen.height != size.height) try vx.resize(std.testing.allocator, output, .{ .cols = size.width, .rows = size.height, .x_pixel = 0, .y_pixel = 0 });
+            var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer arena.deinit();
+            const surface = try rig.overview.root.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = size.width, .height = size.height }, .cell_size = .{} });
+            vx.window().clear();
+            try surface.render(vx.window(), rig.overview.root.overview);
+            try vx.render(output);
+            var text: std.Io.Writer.Allocating = .init(std.testing.allocator);
+            defer text.deinit();
+            for (0..size.height) |row| {
+                for (0..size.width) |col| {
+                    const last = vx.screen_last.readCell(@intCast(col), @intCast(row)).?;
+                    const cell = vx.screen.readCell(@intCast(col), @intCast(row)).?;
+                    try std.testing.expectEqualStrings(cell.char.grapheme, last.char.grapheme);
+                    try text.writer.writeAll(last.char.grapheme);
+                }
+                try text.writer.writeByte('\n');
+            }
+            errdefer std.debug.print("paint cells: {s}\n", .{text.written()});
+            for (labels) |label| try std.testing.expect(std.mem.indexOf(u8, text.written(), label) != null);
+            try std.testing.expect(std.mem.indexOf(u8, text.written(), "+ New Session") != null);
+            try std.testing.expect(std.mem.indexOf(u8, text.written(), "Settings") != null);
+        }
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const home = home_buffer[0..try tmp.dir.realPath(std.testing.io, &home_buffer)];
+    Frames.dir = tmp.dir;
+    Frames.files = 0;
+    var ops = fake_operations;
+    ops.list = Frames.list;
+    ops.open = openSession;
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = home, .workspace = "/work", .home = home, .directory = home, .provider = "codex", .model = "gpt-6-luna" }, ops, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    overview.hooks.scratch = Frames.scratch;
+    defer {
+        if (overview.app_session) |left| {
+            left.frontend.?.stop();
+            overview.disposeSession(left);
+            overview.app_session = null;
+        }
+        for (overview.retired.items) |retired| overview.disposeSession(retired.left);
+        overview.retired.deinit(std.testing.allocator);
+    }
+    Seen.now.listed = 4;
+    _ = try overview.event(.{ .tick = test_now_s * 1000 });
+    try std.testing.expect(try rig.settle() == null);
+    overview.caps = .{};
+    stage = "open";
+    try std.testing.expect(try rig.press("\x1b[H\r") == null);
+    try std.testing.expect(try rig.settle() == null);
+    const frontend = overview.app_session.?.frontend.?;
+    frontend.reading.opening = false;
+    frontend.poll_at = std.math.maxInt(i96);
+    frontend.line.read = .{ .revision = 1, .end = 0 };
+    frontend.line.folder = .{};
+    try frontend.line.folder.?.set("/work");
+    stage = "chat";
+    var chat = try rig.shown(46, 30);
+    defer chat.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, try chat.text(), "Type a task") != null);
+    stage = "escape";
+    try std.testing.expect(try rig.press("\x1b") == null);
+    try std.testing.expect(overview.root.session == null);
+    try std.testing.expect(overview.app_session == null);
+    var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer output.deinit();
+    var vx = try vaxis.init(std.testing.io, std.testing.allocator, &rig.environ, .{});
+    defer vx.deinit(std.testing.allocator, &output.writer);
+    vx.state.alt_screen = true;
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    defer ctx.cmds.deinit(arena.allocator());
+    for ([_]vxfw.Size{ .{ .width = 46, .height = 30 }, .{ .width = 140, .height = 40 }, .{ .width = 46, .height = 30 } }) |size| {
+        stage = "paint";
+        try Frames.paint(rig, &vx, &output.writer, size);
+        var previous: protocol.Bounded(8) = .{};
+        var changed = false;
+        for (0..10) |_| {
+            try std.testing.io.sleep(.fromMilliseconds(view.spin_interval_ms), .awake);
+            ctx.redraw = false;
+            try overview.root.widget().handleEvent(&ctx, .tick);
+            stage = "tick";
+            try std.testing.expect(ctx.redraw);
+            stage = "spinner paint";
+            try Frames.paint(rig, &vx, &output.writer, size);
+            const glyph = vx.screen_last.readCell(1, 3).?.char.grapheme;
+            if (previous.len != 0 and !std.mem.eql(u8, previous.slice(), glyph)) changed = true;
+            try previous.set(glyph);
+        }
+        try std.testing.expect(changed);
+    }
+}

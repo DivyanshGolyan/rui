@@ -26,6 +26,32 @@ DEVICE_ANSWER = b"\x1b[?62;22c"
 
 
 class TerminalProcessTest(unittest.TestCase):
+    def test_resize_reset_receipt_waits_for_full_paint_across_every_split(self):
+        from terminal_screen import RESIZE_RESET
+
+        paint = b"\x1b[?2026h\x1b[H + New Session\r\n Working row\r\n Finished row\r\n Waiting on you row\r\n Failed row\x1b[29;1H   Settings\x1b[?2026l"
+        for split in range(len(RESIZE_RESET) + 1):
+            with self.subTest(split=split):
+                capture = ScreenCapture(140, 40)
+                self.addCleanup(capture.free)
+                capture.feed(b"\x1b[?1049h\x1b[?2026h\x1b[H Type a task\x1b[?2026l")
+                capture.resize(46, 30)
+                before = capture.reset_generation
+                capture.feed(b"\x1b[?2026h\x1b[4;2H" + "⠙".encode() + b"\x1b[?2026l" + RESIZE_RESET[:split])
+                self.assertEqual(capture.frame_reset_generation, before)
+                capture.feed(RESIZE_RESET[split:] + paint[:-1])
+                self.assertGreater(capture.reset_generation, before)
+                self.assertEqual(capture.frame_reset_generation, before)
+                capture.feed(paint[-1:])
+                self.assertGreater(capture.frame_reset_generation, before)
+                for text in ("New Session", "Working row", "Finished row", "Waiting on you row", "Failed row", "Settings"):
+                    self.assertIn(text, capture.completed)
+                for _ in range(10):
+                    capture.feed(b"\x1b[?2026h\x1b[4;2H" + "⠹".encode() + b"\x1b[?2026l")
+                    self.assertEqual(capture.frame_reset_generation, capture.reset_generation)
+                    self.assertIn("Working row", capture.completed)
+                    self.assertIn("Finished row", capture.completed)
+
     def test_composer_oracles_follow_the_caret_pane(self):
         from human_cli_fixture import composer_empty, composer_ready
 

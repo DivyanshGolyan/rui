@@ -9,8 +9,9 @@ import weakref
 
 
 LIMIT = 1024 * 1024
-BOUNDARY = re.compile(rb"\x1b\[\?2026([hl])")
-MARKS = (b"\x1b[?2026h", b"\x1b[?2026l")
+RESIZE_RESET = b"\x1b[H\x1b[m\x1b[J\x1b[?25l"
+BOUNDARY = re.compile(rb"\x1b\[\?2026([hl])|" + re.escape(RESIZE_RESET))
+MARKS = (b"\x1b[?2026h", b"\x1b[?2026l", RESIZE_RESET)
 ALTERNATE = re.compile(r"(\x1b\[\?1049[hl])")
 PLAIN_CONTROL = re.compile(r"\x1b\[[0-9;?$]*[A-Za-z~]|\x1b[()][A-Z0-9]|\r(?!\n)")
 PLAIN_UNFINISHED = re.compile(r"\x1b(?:\[[0-9;?$]*|[()])?")
@@ -187,6 +188,8 @@ class ScreenCapture:
         self.frame = None
         self.synchronized = False
         self.generation = 0
+        self.reset_generation = 0
+        self.frame_reset_generation = 0
         self.listener = None
         self.received_bytes = 0
         self.alternate = False
@@ -331,12 +334,17 @@ class ScreenCapture:
         while True:
             match = BOUNDARY.search(self.pending)
             if match is None:
-                cut = self.pending.rfind(b"\x1b")
-                if cut < 0 or not any(mark.startswith(self.pending[cut:]) for mark in MARKS):
-                    cut = len(self.pending)
+                held = max((length for mark in MARKS for length in range(1, min(len(mark), len(self.pending)) + 1)
+                            if self.pending.endswith(mark[:length])), default=0)
+                cut = len(self.pending) - held
                 self.cells(self.pending[:cut])
                 self.pending = self.pending[cut:]
                 return
+            if match[0] == RESIZE_RESET:
+                self.cells(self.pending[:match.end()])
+                self.pending = self.pending[match.end():]
+                self.reset_generation += 1
+                continue
             if match[1] == b"l" and not self.synchronized:
                 suffix = self.pending[match.start():]
                 if RESTORE.startswith(suffix) and len(suffix) < len(RESTORE):
@@ -372,6 +380,7 @@ class ScreenCapture:
         self.frame = Frame(self.columns, self.lines, self.view.cursor, visible.value, tuple(self.cells_by_row),
                            bytes(background).hex(), bytes(foreground).hex(),
                            bytes(cursor).hex() if result == 0 else bytes(foreground).hex())
+        self.frame_reset_generation = self.reset_generation
         self.generation += 1
         self.completed = self.frame.text
         self.completed_cells = list(self.frame.cells)
