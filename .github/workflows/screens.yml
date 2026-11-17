@@ -112,6 +112,20 @@ jobs:
           mkdir -p "$RUNNER_TEMP/screens-build"
           bash src/fetch_screen_dependencies.sh
           export VERIFY_RUI_CACHE="$RUNNER_TEMP/screens-build/cache"
+          # Build artifacts run on different hosted machines; do not target the build runner's CPU.
+          export SCREENS_REAL_ZIG="$(command -v zig)"
+          mkdir -p "$RUNNER_TEMP/screens-zig"
+          cat > "$RUNNER_TEMP/screens-zig/zig" <<'ZIG_WRAPPER'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          if [ "${1:-}" = build ]; then
+            shift
+            exec "$SCREENS_REAL_ZIG" build -Dcpu=baseline "$@"
+          fi
+          exec "$SCREENS_REAL_ZIG" "$@"
+          ZIG_WRAPPER
+          chmod +x "$RUNNER_TEMP/screens-zig/zig"
+          export PATH="$RUNNER_TEMP/screens-zig:$PATH"
           "$V" build --here > "$RUNNER_TEMP/screens-build/build.json"
           tar -cf "$RUNNER_TEMP/screens-build.tar" -C "$RUNNER_TEMP" screens-build
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -215,6 +229,20 @@ jobs:
           done
           mkdir -p "$RUNNER_TEMP/screens-baseline-build"
           export VERIFY_RUI_CACHE="$RUNNER_TEMP/screens-baseline-build/cache"
+          # Build artifacts run on different hosted machines; do not target the build runner's CPU.
+          export SCREENS_REAL_ZIG="$(command -v zig)"
+          mkdir -p "$RUNNER_TEMP/screens-zig"
+          cat > "$RUNNER_TEMP/screens-zig/zig" <<'ZIG_WRAPPER'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          if [ "${1:-}" = build ]; then
+            shift
+            exec "$SCREENS_REAL_ZIG" build -Dcpu=baseline "$@"
+          fi
+          exec "$SCREENS_REAL_ZIG" "$@"
+          ZIG_WRAPPER
+          chmod +x "$RUNNER_TEMP/screens-zig/zig"
+          export PATH="$RUNNER_TEMP/screens-zig:$PATH"
           (cd "$RUNNER_TEMP/base-source"; bash src/fetch_dependencies.sh; bash src/fetch_screen_dependencies.sh; "$V" build --here > "$RUNNER_TEMP/screens-baseline-build/build.json")
           tar -cf "$RUNNER_TEMP/screens-baseline-build.tar" -C "$RUNNER_TEMP" screens-baseline-build
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

@@ -75,6 +75,25 @@ class ScreensWorkflowTest(unittest.TestCase):
                 self.assertIn('No screenshot changes to publish.', result.stdout)
         self.assertLess(end, workflow.index('python3 tests/ci/screens_comment.py', end))
 
+    def test_build_jobs_use_portable_cpu_for_all_zig_builds(self):
+        workflow = WORKFLOW.read_text()
+        wrappers = re.findall(r"(?ms)^          cat > \"\$RUNNER_TEMP/screens-zig/zig\" <<'ZIG_WRAPPER'\n(.*?)^          ZIG_WRAPPER$", workflow)
+        self.assertEqual(len(wrappers), 2)
+        for wrapper in wrappers:
+            with tempfile.TemporaryDirectory() as tmp:
+                root = pathlib.Path(tmp)
+                tool = root / 'zig'
+                tool.write_text(textwrap.dedent(wrapper))
+                tool.chmod(0o755)
+                real = root / 'real-zig'
+                real.write_text("#!/bin/sh\nprintf '%s\\n' \"$@\"\n")
+                real.chmod(0o755)
+                env = {**os.environ, 'SCREENS_REAL_ZIG': str(real)}
+                for args, expected in ((['build', '--summary', 'all'], ['build', '-Dcpu=baseline', '--summary', 'all']),
+                                       (['version'], ['version'])):
+                    result = subprocess.check_output([str(tool), *args], env=env, text=True)
+                    self.assertEqual(result.splitlines(), expected)
+
     def test_every_verify_rui_job_uses_isolated_main_tooling(self):
         workflow = WORKFLOW.read_text()
         self.assertIn('echo "tooling=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"', workflow)
