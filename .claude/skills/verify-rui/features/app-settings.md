@@ -17,7 +17,7 @@ On Overview press End then Enter, or click **Settings** in the list beside a wid
 
 Run `$V frames FULLSHA --only settings,settings-field-hover,mouse-settings,keys`.
 
-Frame states: `settings`, `settings-field-hover`, `mouse-settings`, `keys`
+Frame states: `settings`, `settings-field-hover`, `mouse-settings`, `keys`, `panels-settings`
 
 Check both sizes. Hovering Notifications must leave the selection unchanged. Compare keyboard and mouse entry into Settings. Keys must show aligned pairs at 140 columns and one column at 46, without a title, footer or command list. Model captures belong to [Model choice](./model-choice.md).
 

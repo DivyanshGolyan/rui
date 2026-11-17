@@ -246,13 +246,19 @@ def panel_frame(master, accept, keys=b"", timeout=15):
 def assert_chat_info_layout(screen, *, context=None):
     rows = screen.split("\n")
     contents = [pane_content(row) for row in rows]
-    footers = [index for index, row in enumerate(contents) if " · info" in row]
-    assert footers == [len(rows) - 1], ("one info footer at the bottom", screen)
+    footers = [index for index, row in enumerate(contents) if row.endswith("esc")]
+    assert footers == [chat_footer_row(screen)], ("one plain panel footer after the input", screen)
+    assert " · info" not in screen and "esc close" not in screen, screen
     assert "alt+i info" not in screen, ("live chat footer must be substituted", screen)
-    prompts = [index for index, row in enumerate(contents)
-               if row.strip() in ("›", ">") or row.lstrip().startswith(("› ", "> "))]
+    bounds = composer_bounds(screen)
+    assert bounds is not None, ("composer rules", screen)
+    prompts = [index for index in range(bounds[0] + 1, bounds[1])
+               if contents[index].strip() in ("›", ">") or contents[index].lstrip().startswith(("› ", "> "))]
     assert prompts and max(prompts) < footers[0], ("info footer follows input", screen)
-    actions = next(index for index, row in enumerate(contents) if "Rename" in row)
+    effort = next(index for index in range(bounds[0] + 1, bounds[1]) if contents[index].startswith("   Effort"))
+    assert bounds[0] < effort < min(prompts), ("panel inside input rules", screen)
+    assert not any(any(char in row for char in "┌┐└┘│") for row in contents[bounds[0] + 1:bounds[1]]), screen
+    actions = next(index for index in range(bounds[0] + 1, bounds[1]) if "Rename" in contents[index])
     assert not contents[actions - 1].strip(), ("blank row before chat actions", screen)
     assert not any(row.strip().startswith("Context") and "unknown" in row for row in contents), screen
     if context is not None:
@@ -262,13 +268,16 @@ def assert_chat_info_layout(screen, *, context=None):
 
 def chat_info_geometry(screen):
     content = [pane_content(row) for row in screen.split("\n")]
-    effort = next(index for index, row in enumerate(content) if row.startswith("   Effort"))
-    composer = next(index for index, row in enumerate(content) if row.rstrip() in (" ›", " >") or row.startswith((" › ", " > ")))
-    actions = [index for index, row in enumerate(content)
-               if row.strip().startswith(("Rename", "Archive", "Copy last answer"))]
-    assert actions and actions[-1] == composer - 3, screen
-    return {"top": effort - 2, "input": composer, "footer": len(content) - 1,
-            "feed": content[:effort - 2], "rows": content}
+    bounds = composer_bounds(screen)
+    assert bounds is not None, ("composer rules", screen)
+    panel_rows = range(bounds[0] + 1, bounds[1])
+    effort = next(index for index in panel_rows if content[index].startswith("   Effort"))
+    composer = next(index for index in panel_rows if content[index].rstrip() in (" ›", " >") or content[index].startswith((" › ", " > ")))
+    actions = [index for index in panel_rows
+               if content[index].strip().startswith(("Rename", "Archive", "Copy last answer"))]
+    assert actions and bounds[0] < effort <= actions[-1] < composer < bounds[1], screen
+    return {"top": bounds[0], "input": composer, "footer": chat_footer_row(screen),
+            "feed": content[:bounds[0]], "rows": content}
 
 
 
@@ -298,8 +307,7 @@ def chat_info_frame(master, timeout=15):
 
 def app_settings_open(master):
     overview_frame(master, lambda screen: "Settings" in screen, b"\x1b[F")
-    return panel_frame(master, lambda screen: any("Rui" in row and "settings" in row
-                       for row in screen.splitlines()), b"\r")
+    return panel_frame(master, lambda screen: composer_line(screen, len(screen.split("\n")) - 1).split() == ["Settings", "esc"], b"\r")
 
 
 
