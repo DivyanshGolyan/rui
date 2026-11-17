@@ -548,7 +548,7 @@ fn firstApprovalSql(comptime session: []const u8) []const u8 {
         "JOIN turn source_turn ON source_turn.turn_id=source_operation.turn_id " ++
         "WHERE approval.session_ref=" ++ session ++ " AND " ++
         action_domain.permissionDecisionEligibleSql("approval", "source_turn", false) ++ " AND " ++
-        action_domain.eligibleSql("approval", "source_operation", "source_turn") ++ " ORDER BY approval.action_id LIMIT 1";
+        "NOT " ++ action_domain.actionStoppedSql("approval", "source_operation") ++ " ORDER BY approval.action_id LIMIT 1";
 }
 
 test "optional approval index does not change MySQL prepared slots or tokens" {
