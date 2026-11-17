@@ -201,7 +201,10 @@ test "core tool table routes every built-in and promotion excludes the full core
                 defer storage.close() catch unreachable;
                 var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
                 var command = try completeConfiguration("table-config", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
-                command.configuration.tools = try .of(&.{@tagName(tool)});
+                command.configuration.tools = if (tool == .stop_action)
+                    try .of(&.{ "read_action", "stop_action" })
+                else
+                    try .of(&.{@tagName(tool)});
                 const configured = try storage.configure(&command, .{});
                 try std.testing.expect(configured == .accepted);
                 const session = configured.accepted.session;
@@ -210,6 +213,7 @@ test "core tool table routes every built-in and promotion excludes the full core
                 const arguments = switch (tool) {
                     .bash => "{\"cmd\":\"true\",\"description\":\"Run table check\"}",
                     .message_agent => "{\"id\":\"zzzzzz\",\"text\":\"hi\"}",
+                    .stop_action => "{\"action\":\"1\"}",
                     else => "{}",
                 };
                 var encoded: std.Io.Writer.Allocating = .init(std.testing.allocator);
@@ -726,10 +730,10 @@ const NativePromotion = struct {
     }
 };
 
-test "historical fixture rewinds refuse retained pin background and stop-cutoff facts before DDL" {
+test "historical fixture rewinds refuse retained pin background and stop facts before DDL" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
-            const Evidence = enum { pin, refused_control, background, stop_cutoff };
+            const Evidence = enum { pin, refused_control, background, stop_cutoff, action_stop };
             inline for (std.enums.values(Evidence)) |evidence| {
                 inline for (.{ false, true }) |ending| {
                     var tmp = std.testing.tmpDir(.{});
@@ -750,6 +754,14 @@ test "historical fixture rewinds refuse retained pin background and stop-cutoff 
                             try std.testing.expect(storage.backgroundAction(.{ .command = &command }, .{}) == .rejected);
                         },
                         .background => _ = try NativePromotion.promoted(&storage, &tmp, session.slice()),
+                        .action_stop => {
+                            try submitTestMessage(&storage, &tmp, "rewind-action-message", "rewind-action-message", session.slice(), "run");
+                            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                            try settleTwoActionsForTesting(&storage, &tmp, model, "rewind-action-calls");
+                            const first = try store_testing.queryU64(&storage, "SELECT min(action_id) FROM action_operation", .{});
+                            const second = try store_testing.queryU64(&storage, "SELECT max(action_id) FROM action_operation", .{});
+                            try store_testing.exec(&storage, "INSERT INTO action_stop(source_action_id,target_action_id) VALUES(?1,?2)", .{ first, second });
+                        },
                         .stop_cutoff => {
                             _ = try NativePromotion.propose(&storage, &tmp, session.slice());
                             var stop = try completeSessionStop("rewind-stop", session.slice());
@@ -760,6 +772,7 @@ test "historical fixture rewinds refuse retained pin background and stop-cutoff 
                     const pins = try store_testing.queryU64(&storage, "SELECT count(*) FROM session_pin", .{});
                     const controls = try store_testing.queryU64(&storage, "SELECT count(*) FROM action_control_command", .{});
                     const stops = try store_testing.queryU64(&storage, "SELECT count(*) FROM session_stop WHERE action_cutoff>0", .{});
+                    const direct_stops = try store_testing.queryU64(&storage, "SELECT count(*) FROM action_stop", .{});
                     if (ending) {
                         try std.testing.expectError(error.TestExpectedEqual, store_testing.stageEndingMessageUpgrade(&storage, false));
                     } else {
@@ -768,6 +781,7 @@ test "historical fixture rewinds refuse retained pin background and stop-cutoff 
                     try std.testing.expectEqual(pins, try store_testing.queryU64(&storage, "SELECT count(*) FROM session_pin", .{}));
                     try std.testing.expectEqual(controls, try store_testing.queryU64(&storage, "SELECT count(*) FROM action_control_command", .{}));
                     try std.testing.expectEqual(stops, try store_testing.queryU64(&storage, "SELECT count(*) FROM session_stop WHERE action_cutoff>0", .{}));
+                    try std.testing.expectEqual(direct_stops, try store_testing.queryU64(&storage, "SELECT count(*) FROM action_stop", .{}));
                     try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM store_meta WHERE meta_key='format' AND meta_value=?1", .{comptime std.fmt.comptimePrint("{d}", .{@import("../schema.zig").schema_version})}));
                     try std.testing.expect(!storage.isFenced());
                     _ = try store_testing.configureTestSession(&storage, "rewind-still-usable");

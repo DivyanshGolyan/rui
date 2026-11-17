@@ -40,6 +40,7 @@ test "approved product defaults" {
     var allowed = std.mem.splitScalar(u8, tools, ',');
     for (std.meta.fieldNames(@import("built_in_tool.zig").BuiltInTool)) |name| try std.testing.expectEqualStrings(name, allowed.next().?);
     try std.testing.expect(allowed.next() == null);
+    try std.testing.expect(std.mem.indexOf(u8, tools, "stop_action") != null);
     try std.testing.expectEqualStrings("bash,find_tools,skill,web_search", loaded_tools);
     try std.testing.expectEqualStrings("bypass", permission_mode);
     try std.testing.expectEqualStrings("codex", provider);

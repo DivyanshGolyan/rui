@@ -69,6 +69,7 @@ Resolution commitment and input admission share one transaction, so restart and 
 The existing Resolution reader validates the reference when model history renders it.
 Eligible final input joins the running Turn at its next input boundary without changing an in-flight model request, and starts a Turn when the Session is idle.
 A Session stop suppresses final input from its selected Actions, retaining readable terminal evidence; archive uses that same stop selection.
+`stop_action` selects one Action owned by the calling Session. The Host stops a running Action through its existing runner, records one cancelled Resolution, and retains its credit until cleanup. A saved per-Action stop also suppresses the Action's final Session input after Host restart. A stop requested after Resolution returns the existing Resolution.
 Native users can also read the sole terminal Resolution through `action read`.
 A Session Stop keeps the existing runner-aware cancellation and uncertainty rules; Host recovery records uncertainty without replaying an invocation.
 
@@ -96,9 +97,10 @@ Call rejection, Action denial, failure, cancellation and uncertainty all produce
 #### Authorizing exact actions
 
 The model-visible **Tool Catalog** contains definitions/schema/result contracts, not execution authority.
-It holds `bash`, which Rui runs as Actions; `find_tools`, `message_agent`, `read_action`, `read_transcript`, `skill` and `start_agent`, which the core runs itself; and `web_search`, which the provider hosts: the request names it (OpenAI with live page access) and the provider runs it inside the response, so it never becomes an Action and needs no approval.
-The CLI and TUI allow all built-in tools in a fresh Session and initially load `bash`, `find_tools`, `skill` and `web_search`; the Host never supplies a tools list (D104). Explicit tool selections retain their own loaded-tool behavior.
-CLI `--tools` accepts a comma list of those names or `none`; the public configuration and report arrays list each chosen tool once, in catalog order (`bash`, `find_tools`, `message_agent`, `read_action`, `read_transcript`, `skill`, `start_agent`, `web_search`).
+It holds `bash`, which Rui runs as Actions; `find_tools`, `message_agent`, `read_action`, `read_transcript`, `skill`, `start_agent` and `stop_action`, which the core runs itself; and `web_search`, which the provider hosts: the request names it (OpenAI with live page access) and the provider runs it inside the response, so it never becomes an Action and needs no approval.
+The CLI and TUI allow all built-in tools in a fresh Session and initially load `bash`, `find_tools`, `skill` and `web_search`; the Host never supplies a tools list (D104).
+Explicit tool selections retain their own loaded-tool behavior.
+CLI `--tools` accepts a comma list of those names or `none`; the public configuration and report arrays list each chosen tool once, in catalog order (`bash`, `find_tools`, `message_agent`, `read_action`, `read_transcript`, `skill`, `start_agent`, `stop_action`, `web_search`).
 A Session's optional `loaded_tools` uses the same name-list grammar (`--loaded-tools a,b|none` in the CLI), defaults to all its `tools` when omitted from an explicit spec, and records loaded-name intent; the Operation's projected, frozen offer is sent to the model and used to validate calls.
 Every loaded name must be in its resulting tools or configure refuses `loaded_tools_not_in_tools`; a strict subset must contain `find_tools` or configure refuses `loaded_tools_unreachable`.
 Changing tools without specifying loaded_tools keeps equality when the saved sets were equal; otherwise it intersects the saved loaded set with the new tools and applies the same checks.
@@ -114,6 +116,7 @@ Newly loaded definitions join the next request as `additional_tools`; a call to 
 `read_action(action, offset?)` accepts canonical decimal strings and reads only the caller's Session, using the same sole Resolution and bounded UTF-8 byte cursor as native `action read`.
 Pending calls report their approval, queued or attempted state; settled calls return the immutable final identity and up to 4096 bytes, with `next` and `more` for continued reads.
 Reading neither consumes nor stops an Action and does not subscribe to completion. The Operation's frozen offer controls availability; invalid arguments, foreign Actions and invalid cursors resolve the tool call failed when it runs.
+`stop_action(action)` accepts a canonical decimal Action ID from the caller's Session. The Operation offers it exactly when it offers `read_action`. The call waits for the target's Resolution and returns its reference. A foreign or invalid target fails the call.
 `read_transcript(id?, kinds?, before?, limit?, query?, full?, offset?)` reads any Session's public activity feed, defaulting to the caller, and resolves only its call: newest-first outlines page up to 16 entries, and `full` opens one entry in UTF-8-aligned 16 KiB windows.
 It uses the public activity visibility and provenance rules, never private provider material; invalid arguments, unknown Sessions and missing entries resolve failed when the core runs the call, not at settlement.
 `start_agent(task, attached, spec)` creates a Session configured by the full agent `spec` (model, effort, token-count compaction threshold, tools, initially loaded tools, Permission Mode, output reservation, instructions, output schema and label) in the caller's Workspace with its provider, admits `task` to it as its first Message from the caller under the key `rui.core/start_agent/<action>`, and resolves the call `Started ID.`, all in one transaction; an attached agent records the caller as its parent.
@@ -122,7 +125,7 @@ A spec that widens the caller's tools or asks for `bypass` under a caller that a
 Both `start_agent` and native creation with a parent narrow against the parent's configured-name intent, not its loaded intent or current projected offer; ordinary configuration validation still refuses requested names absent from the Host tool set.
 The child saves only its own configured and loaded intent, with its effective offer frozen at each Operation admission by the same projection as any Session.
 The agent's Bash starts from the caller's client environment, installed as the task commits.
-A core tool acts only on the Store, so admission authorizes its call at once under either Permission Mode, and a stop cancels it like any other unattempted Action.
+A core tool acts on the Store, so admission authorizes its call at once under either Permission Mode. A stop cancels an unattempted core call. `stop_action` records its selection in the Store and waits for the Host to settle the target.
 Removed `edit`, duplicate names and alternate spellings reject rather than aliasing another selection.
 Classify proposed Tool Calls against the proposing model Operation's frozen Tool Catalog, not the latest Session configuration.
 Removing Bash while that model request runs changes future model requests, not the applicability of its Bash proposal.

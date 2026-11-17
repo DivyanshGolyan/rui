@@ -739,7 +739,7 @@ test "tool help lists every built-in including skill in name order" {
         var help: std.Io.Writer.Allocating = .init(std.testing.allocator);
         defer help.deinit();
         try command.definition().help(&help.writer);
-        try std.testing.expect(std.mem.indexOf(u8, help.written(), "--tools bash,find_tools,message_agent,read_action,read_transcript,skill,start_agent,web_search|none") != null);
+        try std.testing.expect(std.mem.indexOf(u8, help.written(), "--tools bash,find_tools,message_agent,read_action,read_transcript,skill,start_agent,stop_action,web_search|none") != null);
     }
 }
 

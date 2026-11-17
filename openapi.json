@@ -14141,6 +14141,7 @@
                   "read_transcript",
                   "skill",
                   "start_agent",
+                  "stop_action",
                   "web_search"
                 ]
               },
