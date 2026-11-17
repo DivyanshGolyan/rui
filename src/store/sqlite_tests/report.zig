@@ -302,10 +302,10 @@ test "Current pending count skips excluded Message history by indexed cutoff" {
         try store_testing.sqlite_only.exec(&storage, "DELETE FROM message_admission; DELETE FROM session_stop", .{});
         const insert = try std.testing.allocator.printSentinel(
             "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
-                "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id,admitted_at) " ++
-                "SELECT value,'{1s}',printf('excluded-%d',value),1,NULL,1 FROM sequence; " ++
-                "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id,admitted_at) " ++
-                "VALUES({0}+1,'{1s}','eligible',1,NULL,1); " ++
+                "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id,admitted_at,source_kind) " ++
+                "SELECT value,'{1s}',printf('excluded-%d',value),1,NULL,1,1 FROM sequence; " ++
+                "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id,admitted_at,source_kind) " ++
+                "VALUES({0}+1,'{1s}','eligible',1,NULL,1,1); " ++
                 "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff,stopped_at) " ++
                 "VALUES('history-stop','{1s}',NULL,{0},1)",
             .{ history, session.slice() },

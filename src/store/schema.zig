@@ -16,7 +16,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631;
-pub const schema_version: u32 = 81;
+pub const schema_version: u32 = 82;
 
 pub const IdentityMismatch = struct {
     saved_selector: Bounded(store_path.max_bytes) = .{},
@@ -60,6 +60,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 79, .digest = 0x73f89feb47e61ded },
     .{ .schema_version = 80, .digest = 0xa19f085a8611c762 },
     .{ .schema_version = 81, .digest = 0x3fc38cd4bb9b66b9 },
+    .{ .schema_version = 82, .digest = 0x367836567791809e },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -768,6 +769,27 @@ pub const migrations = [_]Migration{
             "CREATE TABLE action_stop_command(\n command_key VARCHAR(128) NOT NULL,\n action_id TEXT NOT NULL,\n resolution_position BIGINT,\n PRIMARY KEY(command_key),\n FOREIGN KEY(command_key) REFERENCES core_command(command_key),\n CHECK(OCTET_LENGTH(action_id) BETWEEN 1 AND 20 AND (NOT REGEXP_LIKE(action_id,'[^0-9]','c'))),\n CHECK(resolution_position>0)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
         },
     },
+    .{
+        .from = 81,
+        .sqlite = &.{
+            "ALTER TABLE message_admission RENAME TO message_admission_before_82",
+            "CREATE TABLE message_admission(\n admission_id INTEGER PRIMARY KEY NOT NULL CHECK(admission_id>0),\n session_ref TEXT NOT NULL REFERENCES session(session_ref),\n command_key TEXT NOT NULL UNIQUE REFERENCES core_command(command_key),\n content_id INTEGER NOT NULL REFERENCES content(content_id),\n admission_position INTEGER CHECK(admission_position>0),\n turn_id INTEGER REFERENCES turn(turn_id),\n admitted_at INTEGER NOT NULL CHECK(admitted_at>0),\n sender_session_ref TEXT REFERENCES session(session_ref),\n sender_position INTEGER CHECK(sender_position>0),\n source_action_id INTEGER UNIQUE REFERENCES action_operation(action_id),\n source_kind INTEGER NOT NULL CHECK(source_kind BETWEEN 1 AND 5),\n CHECK((sender_session_ref IS NULL)=(sender_position IS NULL)),\n CHECK(source_action_id IS NULL OR sender_session_ref IS NULL),\n CHECK((source_kind=1 AND sender_session_ref IS NULL AND source_action_id IS NULL) OR (source_kind=2 AND sender_session_ref IS NOT NULL) OR (source_kind=3 AND source_action_id IS NOT NULL) OR (source_kind IN (4,5) AND sender_session_ref IS NULL))\n) STRICT",
+            "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at,sender_session_ref,sender_position,source_action_id,source_kind) SELECT admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at,sender_session_ref,sender_position,source_action_id,CASE WHEN sender_session_ref IS NOT NULL THEN 2 WHEN source_action_id IS NOT NULL THEN 3 ELSE 1 END FROM message_admission_before_82",
+            "DROP TABLE message_admission_before_82",
+            "CREATE UNIQUE INDEX message_admission_sent ON message_admission(sender_session_ref,sender_position) WHERE sender_session_ref IS NOT NULL",
+            "CREATE INDEX message_admission_session_order ON message_admission(session_ref,turn_id,admission_id)",
+            "CREATE INDEX message_admission_pending ON message_admission(admission_id,session_ref) WHERE turn_id IS NULL",
+            "CREATE INDEX message_admission_session_pending ON message_admission(session_ref,admission_id) WHERE turn_id IS NULL",
+            "CREATE INDEX message_admission_person ON message_admission(session_ref,admission_position) WHERE source_kind=1",
+            "CREATE INDEX message_admission_unpositioned ON message_admission(session_ref) WHERE admission_position IS NULL",
+            "CREATE INDEX message_admission_position ON message_admission(session_ref,admission_position)",
+        },
+        .mysql = &.{
+            "ALTER TABLE message_admission ADD COLUMN source_kind BIGINT AFTER source_action_id",
+            "UPDATE message_admission SET source_kind=CASE WHEN sender_session_ref IS NOT NULL THEN 2 WHEN source_action_id IS NOT NULL THEN 3 ELSE 1 END",
+            "ALTER TABLE message_admission MODIFY COLUMN source_kind BIGINT NOT NULL, ADD CHECK(source_kind BETWEEN 1 AND 5), ADD CHECK((source_kind=1 AND sender_session_ref IS NULL AND source_action_id IS NULL) OR (source_kind=2 AND sender_session_ref IS NOT NULL) OR (source_kind=3 AND source_action_id IS NOT NULL) OR (source_kind IN (4,5) AND sender_session_ref IS NULL)), MODIFY COLUMN message_admission_person_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN source_kind=1 THEN session_ref END) STORED",
+        },
+    },
 };
 
 comptime {
@@ -1260,6 +1282,7 @@ pub const tables = [_]Table{
             .{ .name = "sender_session_ref", .type = .{ .text = null }, .nullable = true, .read_by = .both },
             .{ .name = "sender_position", .type = .int, .nullable = true, .check = "sender_position>0", .read_by = .both },
             .{ .name = "source_action_id", .type = .int, .nullable = true },
+            .{ .name = "source_kind", .type = .int, .check = "source_kind BETWEEN 1 AND 5" },
         },
         .primary_key = &.{"admission_id"},
         .uniques = &.{ &.{"command_key"}, &.{"source_action_id"} },
@@ -1271,7 +1294,7 @@ pub const tables = [_]Table{
             references("sender_session_ref", "session", session_reference),
             references("source_action_id", "action_operation", &.{"action_id"}),
         },
-        .checks = &.{ "(sender_session_ref IS NULL)=(sender_position IS NULL)", "source_action_id IS NULL OR sender_session_ref IS NULL" },
+        .checks = &.{ "(sender_session_ref IS NULL)=(sender_position IS NULL)", "source_action_id IS NULL OR sender_session_ref IS NULL", "(source_kind=1 AND sender_session_ref IS NULL AND source_action_id IS NULL) OR (source_kind=2 AND sender_session_ref IS NOT NULL) OR (source_kind=3 AND source_action_id IS NOT NULL) OR (source_kind IN (4,5) AND sender_session_ref IS NULL)" },
     },
     .{
         .name = "sent_rejection",
@@ -1766,7 +1789,7 @@ pub const indexes = [_]Index{
     .{ .name = "message_admission_session_order", .table = "message_admission", .columns = &.{ "session_ref", "turn_id", "admission_id" } },
     .{ .name = "message_admission_pending", .table = "message_admission", .columns = &.{ "admission_id", "session_ref" }, .where = "turn_id IS NULL" },
     .{ .name = "message_admission_session_pending", .table = "message_admission", .columns = &.{ "session_ref", "admission_id" }, .where = "turn_id IS NULL" },
-    .{ .name = "message_admission_person", .table = "message_admission", .columns = &.{ "session_ref", "admission_position" }, .where = "sender_session_ref IS NULL AND source_action_id IS NULL" },
+    .{ .name = "message_admission_person", .table = "message_admission", .columns = &.{ "session_ref", "admission_position" }, .where = "source_kind=1" },
     .{ .name = "message_admission_unpositioned", .table = "message_admission", .columns = &.{"session_ref"}, .where = "admission_position IS NULL" },
     .{ .name = "message_admission_position", .table = "message_admission", .columns = &.{ "session_ref", "admission_position" } },
     .{ .name = "core_command_target_order", .table = "core_command", .columns = &.{ "target", "kind", "command_seq" } },
@@ -3430,5 +3453,41 @@ test "schema 81 preserves model stop sources and adds exclusive command sources"
             for (if (dialect == .sqlite) migrations[80 - migration_baseline].sqlite else migrations[80 - migration_baseline].mysql) |statement| found = found or std.mem.eql(u8, object.sql, statement);
             try std.testing.expect(found);
         }
+    }
+}
+
+test "schema 82 backfills input sources and preserves admissions" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [store_path.max_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var path_buffer: [store_path.max_bytes + 32]u8 = undefined;
+    const path = try std.fmt.bufPrintSentinel(&path_buffer, "{s}/sources.sqlite3", .{root}, 0);
+    var raw: ?*c.sqlite3 = null;
+    defer _ = c.sqlite3_close(raw);
+    try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_open(path, &raw));
+    const database = raw.?;
+    try sqlite.exec(database, @embedFile("migration_baseline.sqlite.sql"));
+    try sqlite.exec(database, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
+    try sqlite.exec(database, @embedFile("migration_baseline_rows.sql"));
+    for (migrations) |step| {
+        if (step.from >= 81) break;
+        for (step.sqlite) |statement| try sqlite.exec(database, statement);
+    }
+    try sqlite.exec(database, "UPDATE message_admission SET sender_session_ref='brhkcj',sender_position=1 WHERE admission_id=1");
+    try sqlite.exec(database, "UPDATE message_admission SET source_action_id=(SELECT min(action_id) FROM action_operation) WHERE admission_id=2");
+    try sqlite.exec(database, "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admitted_at) VALUES(3,'rhvzwc','fixture-stop',1,1)");
+    try sqlite.exec(database, "CREATE TEMP TABLE old_admissions AS SELECT * FROM message_admission");
+    for (migrations[81 - migration_baseline].sqlite) |statement| try sqlite.exec(database, statement);
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM old_admissions EXCEPT SELECT admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at,sender_session_ref,sender_position,source_action_id FROM message_admission)"));
+    try std.testing.expectEqual(@as(u32, 3), try sqlite.pragmaInt(database, "SELECT count(*) FROM message_admission WHERE (admission_id=1 AND source_kind=2) OR (admission_id=2 AND source_kind=3) OR (admission_id=3 AND source_kind=1)"));
+    try sqlite.exec(database, "PRAGMA foreign_keys=ON;PRAGMA legacy_alter_table=OFF");
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM pragma_foreign_key_check"));
+    try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, "UPDATE message_admission SET source_kind=1 WHERE admission_id=1"));
+    for (comptime objects(.sqlite)) |object| {
+        if (!std.mem.eql(u8, object.name, "message_admission") and !std.mem.startsWith(u8, object.name, "message_admission_")) continue;
+        var found = false;
+        for (migrations[81 - migration_baseline].sqlite) |statement| found = found or std.mem.eql(u8, object.sql, statement);
+        try std.testing.expect(found);
     }
 }

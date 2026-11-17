@@ -474,8 +474,7 @@ def info_natural_height_case():
             columns = [width - 1]
             opened = None
             for column in columns:
-                click = f"\x1b[<0;{column + 1};{height}M\x1b[<0;{column + 1};{height}m".encode()
-                opened = chrome.frame(master, click,
+                opened = chrome.frame(master, footer_click(live, column=column),
                                       lambda screen: "Copy last answer" in screen and " · info" in screen and "unavailable" not in screen)
                 assert_chat_info_layout(opened, context=True)
                 base = chat_info_geometry(opened)

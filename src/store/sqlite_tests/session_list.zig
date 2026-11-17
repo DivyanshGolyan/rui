@@ -162,7 +162,7 @@ test "a person's Message next to a position is a one-row page of admission rows,
     {
         const entry = try store_core.enter(&storage, .none);
         defer entry.release();
-        try store_testing.sqlite_only.exec(&storage, "UPDATE message_admission SET sender_session_ref=?1,sender_position=1000000 WHERE command_key='from-peer'", .{peer.slice()});
+        try store_testing.sqlite_only.exec(&storage, "UPDATE message_admission SET sender_session_ref=?1,sender_position=1000000,source_kind=2 WHERE command_key='from-peer'", .{peer.slice()});
         try touchForTesting(&storage, session.slice());
         try touchForTesting(&storage, peer.slice());
     }

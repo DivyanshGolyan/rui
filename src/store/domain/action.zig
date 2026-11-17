@@ -151,7 +151,7 @@ pub fn stoppedSql(comptime session: []const u8, comptime selected: []const u8) [
 }
 
 fn messageDeclinesApprovalWithIndexSql(comptime action: []const u8, comptime index: []const u8) []const u8 {
-    return "EXISTS(SELECT 1 FROM message_admission m" ++ index ++ " WHERE m.session_ref=" ++ action ++ ".session_ref AND m.source_action_id IS NULL AND m.admission_position>" ++ action ++ ".approval_position)";
+    return "EXISTS(SELECT 1 FROM message_admission m" ++ index ++ " WHERE m.session_ref=" ++ action ++ ".session_ref AND " ++ sourced_input.messageSql("m") ++ " AND m.admission_position>" ++ action ++ ".approval_position)";
 }
 
 pub fn messageDeclinesApprovalSql(comptime action: []const u8) []const u8 {
@@ -160,7 +160,7 @@ pub fn messageDeclinesApprovalSql(comptime action: []const u8) []const u8 {
 
 test "automatic Message denial keeps its original selection predicate" {
     try std.testing.expectEqualStrings(
-        "EXISTS(SELECT 1 FROM message_admission m WHERE m.session_ref=action.session_ref AND m.source_action_id IS NULL AND m.admission_position>action.approval_position)",
+        "EXISTS(SELECT 1 FROM message_admission m WHERE m.session_ref=action.session_ref AND m.source_kind IN (1,2) AND m.admission_position>action.approval_position)",
         messageDeclinesApprovalSql("action"),
     );
 }
@@ -694,7 +694,7 @@ pub fn validateActionDispatch(a: anytype, binding: ActionAttemptBinding) !u64 {
 }
 
 const message_after_launch = rsql.Read(.{
-    .sql = "SELECT EXISTS(SELECT 1 FROM message_admission m WHERE m.session_ref=action.session_ref AND m.admission_id>?2 AND m.turn_id IS NULL AND m.source_action_id IS NULL) AS present FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id JOIN turn active ON active.turn_id=operation.turn_id WHERE action.action_id=?1 AND action.background_position IS NULL AND action.resolution_code IS NULL AND active.outcome_code IS NULL AND NOT " ++ actionStoppedSql("action", "operation"),
+    .sql = "SELECT EXISTS(SELECT 1 FROM message_admission m WHERE m.session_ref=action.session_ref AND m.admission_id>?2 AND m.turn_id IS NULL AND " ++ sourced_input.messageSql("m") ++ ") AS present FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id JOIN turn active ON active.turn_id=operation.turn_id WHERE action.action_id=?1 AND action.background_position IS NULL AND action.resolution_code IS NULL AND active.outcome_code IS NULL AND NOT " ++ actionStoppedSql("action", "operation"),
     .Args = struct { action_id: u64, cutoff: u64 },
     .Row = struct { present: bool },
     .cardinality = .optional,
