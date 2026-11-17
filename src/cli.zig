@@ -292,6 +292,7 @@ noinline fn clientCommand(init: std.process.Init, command: cli_args.Command, par
         .action_read => try readAction(init, parsed),
         .action_background => try backgroundAction(init, parsed),
         .action_stop => try requestActionStop(init, parsed),
+        .action_publish => try publishAction(init, parsed),
         .action_inspect => try inspectAction(init, .{ .io = init.io }, parsed.get("store"), parsed.get("session").?, (try parsed.number(u64, "action")).?),
         .action_allow => try decideAction(init, parsed, .allow_once),
         .action_deny => try decideAction(init, parsed, .deny),
@@ -3204,6 +3205,43 @@ fn sendCapturedMutation(sender: client.Requests, captured: *client.CapturedRecor
         break :blk try takeReply(step, sender.sendCaptured(captured, environment, &reply_buffer), captured);
     };
     try writeMutationReply(io, reply, presentation, replay);
+}
+
+fn publishAction(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
+    const address = init.environ_map.get("RUI_ADDRESS") orelse return error.InvalidRuiAddress;
+    const store = init.environ_map.get("RUI_STORE") orelse return error.InvalidRuiAddress;
+    const handle = init.environ_map.get("RUI_SENDER_HANDLE") orelse return error.InvalidRuiAddress;
+    if (handle.len != 32) return error.InvalidRuiAddress;
+    try client.validatePeer(store, address, handle);
+    var bytes: [protocol.max_action_value_bytes + 1]u8 = undefined;
+    var len: usize = 0;
+    while (len < bytes.len) {
+        const n = std.Io.File.stdin().readStreaming(init.io, &.{bytes[len..]}) catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => return err,
+        };
+        if (n == 0) break;
+        len += n;
+    }
+    if (len > protocol.max_action_value_bytes) {
+        stderr.diagnostic("rui: action publish refused: too_large\n", .{});
+        return error.CallerFailure;
+    }
+    if (!std.unicode.utf8ValidateSlice(bytes[0..len])) return error.InvalidUtf8;
+    var reply_buffer: client.ReplyBuffer = .{};
+    var output: JsonOutput = undefined;
+    var sink: JsonOutput.Sink = .{ .writer = output.init(init.io, .stdout) };
+    const reply = (client.Requests{ .io = init.io }).publishAction(store, handle, parsed.get("key").?, bytes[0..len], &sink, &reply_buffer) catch |err| return readTransportFailure(init.io, store, err);
+    switch (reply) {
+        .report => {
+            try sink.writer.writeByte('\n');
+            try output.finish();
+        },
+        .command => |failure| {
+            try writeCommandReply(init.io, failure, .stderr);
+            return error.HostInvocationFailed;
+        },
+    }
 }
 
 fn readAction(init: std.process.Init, parsed: *const cli_args.Parsed) !void {

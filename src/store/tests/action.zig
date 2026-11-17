@@ -1974,3 +1974,116 @@ test "compound Action Resolution read verifies the whole value before declining 
         }
     }.run);
 }
+
+const ValueRowCounts = struct {
+    content: u64,
+    commands: u64,
+    admissions: u64,
+    values: u64,
+
+    fn read(storage: *Store) !ValueRowCounts {
+        return .{
+            .content = try store_testing.queryU64(storage, "SELECT count(*) FROM content", .{}),
+            .commands = try store_testing.queryU64(storage, "SELECT count(*) FROM core_command", .{}),
+            .admissions = try store_testing.queryU64(storage, "SELECT count(*) FROM message_admission", .{}),
+            .values = try store_testing.queryU64(storage, "SELECT count(*) FROM action_value", .{}),
+        };
+    }
+};
+
+test "action values publish replay refuse and bound the pending backlog" {
+    const value = @import("../domain/action_value.zig");
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            for ([_]bool{ false, true }) |background| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                const session = try shared_fixtures.configureTestSessionWithMode(&storage, "values-session", "bypass");
+                const action_id = if (background) try NativePromotion.promoted(&storage, &tmp, session.slice()) else try NativePromotion.propose(&storage, &tmp, session.slice());
+                const binding = (try storage.admitNextActionAttempt(.fromFree(2, true), 30_000, .{})).?.permit.binding;
+                var input: action_domain.ActionExecutionInput = undefined;
+                try storage.readActionExecutionInput(.bash, binding, &input);
+                const handle = input.sender_handle.slice();
+                const before_rollback = try ValueRowCounts.read(&storage);
+                try std.testing.expectError(error.InjectedCommitFailure, storage.publishActionValueForTesting(handle, "rollback", "rollback payload", .{ .before_commit = true }));
+                try std.testing.expectEqual(before_rollback, try ValueRowCounts.read(&storage));
+                try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_value WHERE action_id=?1", .{action_id}));
+                const first = try storage.publishActionValue(handle, "first", "one");
+                try std.testing.expect(first == .accepted);
+                try std.testing.expectEqual(action_id, first.accepted.action_id);
+                try std.testing.expectEqual(@as(u64, 1), first.accepted.ordinal);
+                try std.testing.expectEqual(background, first.accepted.admission_id != null);
+                const before_replay = try ValueRowCounts.read(&storage);
+                const replay = try storage.publishActionValue(handle, "first", "one");
+                try std.testing.expect(replay == .accepted and replay.accepted.replayed);
+                try std.testing.expectEqual(first.accepted.admission_id, replay.accepted.admission_id);
+                try std.testing.expectEqual(before_replay, try ValueRowCounts.read(&storage));
+                try std.testing.expect((try storage.publishActionValue(handle, "first", "different")).refused == .conflict);
+                try std.testing.expectEqual(before_replay, try ValueRowCounts.read(&storage));
+                const before_oversized = try ValueRowCounts.read(&storage);
+                const oversized: [value.max_value_bytes + 1]u8 = @splat('x');
+                try std.testing.expect((try storage.publishActionValue(handle, "oversized", &oversized)).refused == .too_large);
+                try std.testing.expectEqual(before_oversized, try ValueRowCounts.read(&storage));
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_value WHERE action_id=?1", .{action_id}));
+                try std.testing.expectEqual(@as(u64, if (background) 1 else 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_value WHERE action_id=?1 AND admission_id IS NOT NULL", .{action_id}));
+                if (background) {
+                    for (1..value.max_pending) |index| {
+                        var key_buffer: [32]u8 = undefined;
+                        const key = try std.fmt.bufPrint(&key_buffer, "value-{d}", .{index});
+                        try std.testing.expect((try storage.publishActionValue(handle, key, "pending")) == .accepted);
+                    }
+                    const before_overflow = try ValueRowCounts.read(&storage);
+                    try std.testing.expect((try storage.publishActionValue(handle, "overflow", "overflow payload")).refused == .backlog_full);
+                    try std.testing.expectEqual(before_overflow, try ValueRowCounts.read(&storage));
+                    try std.testing.expectEqual(@as(u64, value.max_pending), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_value WHERE action_id=?1", .{action_id}));
+                }
+                const before_stop = try store_testing.queryU64(&storage, "SELECT count(*) FROM action_value WHERE action_id=?1", .{action_id});
+                var stop = try completeSessionStop("values-stop", session.slice());
+                try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+                const stopped_counts = try ValueRowCounts.read(&storage);
+                try std.testing.expect((try storage.publishActionValue(handle, "after-stop", "stopped payload")).refused == .stopped);
+                try std.testing.expectEqual(stopped_counts, try ValueRowCounts.read(&storage));
+                try std.testing.expectEqual(before_stop, try store_testing.queryU64(&storage, "SELECT count(*) FROM action_value WHERE action_id=?1", .{action_id}));
+                try std.testing.expect((try storage.publishActionValue(handle, "first", "one")).accepted.replayed);
+                try storage.revokeActionSender(binding);
+                try std.testing.expect((try storage.publishActionValue(handle, "first", "one")).accepted.replayed);
+                const retired_counts = try ValueRowCounts.read(&storage);
+                try std.testing.expect((try storage.publishActionValue(handle, "first", "different")).refused == .conflict);
+                try std.testing.expectEqual(retired_counts, try ValueRowCounts.read(&storage));
+                try std.testing.expect((try storage.publishActionValue(handle, "new", "unknown payload")).refused == .unknown_handle);
+                try std.testing.expectEqual(retired_counts, try ValueRowCounts.read(&storage));
+            }
+        }
+    }.run);
+}
+
+test "resolved action value replay survives retirement of its sender handle" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try shared_fixtures.configureTestSessionWithMode(&storage, "values-resolved", "bypass");
+            const action_id = try NativePromotion.promoted(&storage, &tmp, session.slice());
+            const binding = (try storage.admitNextActionAttempt(.fromFree(2, true), 30_000, .{})).?.permit.binding;
+            var input: action_domain.ActionExecutionInput = undefined;
+            try storage.readActionExecutionInput(.bash, binding, &input);
+            const handle = input.sender_handle.slice();
+            try std.testing.expect((try storage.publishActionValue(handle, "saved", "value")) == .accepted);
+            _ = try storage.settleActionAttempt(binding, .succeeded, "done", .{});
+            try std.testing.expect((try storage.publishActionValue(handle, "saved", "value")).accepted.replayed);
+            try std.testing.expect((try storage.publishActionValue(handle, "fresh", "value")).refused == .unknown_handle);
+            // Exercise a resolved row with a still-present handle separately from normal retirement.
+            try store_testing.exec(&storage, "UPDATE action_operation SET sender_handle=?1 WHERE action_id=?2", .{ handle, action_id });
+            const resolved_counts = try ValueRowCounts.read(&storage);
+            try std.testing.expect((try storage.publishActionValue(handle, "fresh", "resolved payload")).refused == .resolved);
+            try std.testing.expectEqual(resolved_counts, try ValueRowCounts.read(&storage));
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_value WHERE action_id=?1", .{action_id}));
+        }
+    }.run);
+}

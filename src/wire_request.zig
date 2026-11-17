@@ -178,6 +178,10 @@ pub const Ingress = struct {
                     moved += 1;
                 }
             },
+            .action_publish => |*command| {
+                self.take(&command.text);
+                moved += 1;
+            },
             .message => |*command| {
                 if (command.configuration) |*configuration| {
                     for ([_]*ContentField{ &configuration.instructions, &configuration.output_schema }) |field| {
@@ -250,7 +254,7 @@ const ContentCapture = struct {
         });
         self.options = options;
         self.path_len = path.len;
-        self.sink = .{ .io = options.io, .file = writer, .scratch_budget = options.scratch_budget };
+        self.sink = .{ .io = options.io, .file = writer, .scratch_budget = options.scratch_budget, .limit = if (options.expected_kind == .action_publish) protocol.max_action_value_bytes else protocol.max_sqlite_content_bytes };
         self.sealed = null;
         self.transferred = false;
     }
@@ -307,12 +311,13 @@ const ContentSink = struct {
     buffer: [protocol.content_window_bytes]u8 = undefined,
     used: usize = 0,
     length: u64 = 0,
+    limit: u64 = protocol.max_sqlite_content_bytes,
     hash: std.crypto.hash.sha2.Sha256 = protocol.contentHasher(),
     utf8: protocol.Utf8State = .{},
 
     pub fn write(self: *ContentSink, bytes: []const u8) !void {
         const next_length = std.math.add(u64, self.length, bytes.len) catch return error.ContentTooLarge;
-        if (next_length > protocol.max_sqlite_content_bytes) return error.ContentTooLarge;
+        if (next_length > self.limit) return error.ContentTooLarge;
         try self.utf8.feed(bytes);
         self.hash.update(bytes);
         self.length = next_length;
@@ -972,4 +977,79 @@ test "schema object custody is canonical and cannot collide with reference-shape
         try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
         try std.testing.expect(retained == null);
     }
+}
+
+test "action publication captures bounded exact content and releases refusals" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root);
+    const cases = [_]struct { body: []const u8, expected: ?[]const u8 = null, failure: ?anyerror = null, kind: protocol.Kind = .action_publish }{
+        .{ .body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"action_publish\",\"store\":\"s\",\"handle\":\"abc\",\"key\":\"k\",\"value\":\"line\\n\\u00e9\"}", .expected = "line\né" },
+        .{ .body = "{\"value\":\"\",\"key\":\"k\",\"handle\":\"abc\",\"store\":\"s\",\"kind\":\"action_publish\",\"version\":\"" ++ protocol.wire_version ++ "\"}", .expected = "" },
+        .{ .body = "{\"value\":\"abc\",\"kind\":\"host_info\",\"store\":\"s\",\"version\":\"" ++ protocol.wire_version ++ "\"}", .kind = .host_info, .failure = error.UnexpectedField },
+        .{ .body = "{\"value\":\"abc\",\"key\":\"\",\"handle\":\"abc\",\"store\":\"s\",\"kind\":\"action_publish\",\"version\":\"" ++ protocol.wire_version ++ "\"}", .failure = error.InvalidKey },
+    };
+    var used = std.atomic.Value(u64).init(0);
+    var retained: ?named_scratch.Owner = null;
+    for (cases, 0..) |case, index| {
+        const ingress = try std.testing.allocator.create(Ingress);
+        defer std.testing.allocator.destroy(ingress);
+        ingress.init(std.testing.allocator, .{ .io = io, .content_length = case.body.len, .scratch_path = root[0..root_len], .request_number = index, .retained_scratch = &retained, .scratch_budget = .{ .used = &used, .limit = protocol.max_action_value_bytes }, .expected_kind = case.kind });
+        const result: anyerror!*Request = blk: {
+            for (case.body) |byte| ingress.feed(&.{byte}) catch |err| break :blk err;
+            break :blk ingress.finish();
+        };
+        if (case.failure) |failure| {
+            try std.testing.expectError(failure, result);
+        } else {
+            const request = try result;
+            var bytes: [16]u8 = undefined;
+            const n = try request.action_publish.text.file.?.readPositionalAll(io, &bytes, 0);
+            try std.testing.expectEqualStrings(case.expected.?, bytes[0..n]);
+            try request.removeTemporaryContent(io);
+        }
+        ingress.deinit();
+        try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+        try std.testing.expect(retained == null);
+    }
+}
+
+test "action publication capture stops at the decoded byte limit" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "bounded", .{ .read = true });
+    defer file.close(io);
+    var sink: ContentSink = .{ .io = io, .file = file, .limit = protocol.max_action_value_bytes };
+    const payload = try std.testing.allocator.alloc(u8, protocol.max_action_value_bytes);
+    defer std.testing.allocator.free(payload);
+    @memset(payload, 'a');
+    try sink.write(payload);
+    try std.testing.expectError(error.ContentTooLarge, sink.write("x"));
+    try std.testing.expectEqual(@as(u64, protocol.max_action_value_bytes), sink.length);
+}
+
+test "oversized action publication releases scratch on refusal" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root);
+    const prefix = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"action_publish\",\"store\":\"s\",\"handle\":\"h\",\"key\":\"k\",\"value\":\"";
+    const suffix = "\"}";
+    const payload = try std.testing.allocator.alloc(u8, protocol.max_action_value_bytes + 1);
+    defer std.testing.allocator.free(payload);
+    @memset(payload, 'x');
+    var used = std.atomic.Value(u64).init(0);
+    var retained: ?named_scratch.Owner = null;
+    const ingress = try std.testing.allocator.create(Ingress);
+    defer std.testing.allocator.destroy(ingress);
+    ingress.init(std.testing.allocator, .{ .io = io, .content_length = prefix.len + payload.len + suffix.len, .scratch_path = root[0..root_len], .request_number = 42, .retained_scratch = &retained, .scratch_budget = .{ .used = &used, .limit = protocol.max_action_value_bytes }, .expected_kind = .action_publish });
+    try ingress.feed(prefix);
+    try std.testing.expectError(error.ContentTooLarge, ingress.feed(payload));
+    ingress.deinit();
+    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+    try std.testing.expect(retained == null);
 }

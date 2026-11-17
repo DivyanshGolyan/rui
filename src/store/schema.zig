@@ -16,7 +16,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631;
-pub const schema_version: u32 = 82;
+pub const schema_version: u32 = 83;
 
 pub const IdentityMismatch = struct {
     saved_selector: Bounded(store_path.max_bytes) = .{},
@@ -61,6 +61,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 80, .digest = 0xa19f085a8611c762 },
     .{ .schema_version = 81, .digest = 0x3fc38cd4bb9b66b9 },
     .{ .schema_version = 82, .digest = 0x367836567791809e },
+    .{ .schema_version = 83, .digest = 0xad86d8b30da91d1c },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -790,6 +791,11 @@ pub const migrations = [_]Migration{
             "ALTER TABLE message_admission MODIFY COLUMN source_kind BIGINT NOT NULL, ADD CHECK(source_kind BETWEEN 1 AND 5), ADD CHECK((source_kind=1 AND sender_session_ref IS NULL AND source_action_id IS NULL) OR (source_kind=2 AND sender_session_ref IS NOT NULL) OR (source_kind=3 AND source_action_id IS NOT NULL) OR (source_kind IN (4,5) AND sender_session_ref IS NULL)), MODIFY COLUMN message_admission_person_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN source_kind=1 THEN session_ref END) STORED",
         },
     },
+    .{
+        .from = 82,
+        .sqlite = &.{"CREATE TABLE action_value(action_id INTEGER NOT NULL REFERENCES action_operation(action_id), ordinal INTEGER NOT NULL CHECK(ordinal>0), handle TEXT NOT NULL CHECK(length(CAST(handle AS BLOB))=32 AND handle NOT GLOB '*[^0-9a-f]*'), publication_key TEXT NOT NULL CHECK(length(CAST(publication_key AS BLOB)) BETWEEN 1 AND 128), content_id INTEGER NOT NULL REFERENCES content(content_id), admission_id INTEGER UNIQUE REFERENCES message_admission(admission_id), published_at INTEGER NOT NULL CHECK(published_at>0), PRIMARY KEY(action_id,ordinal), UNIQUE(handle,publication_key)) STRICT, WITHOUT ROWID"},
+        .mysql = &.{"CREATE TABLE action_value(action_id BIGINT NOT NULL, ordinal BIGINT NOT NULL, handle VARCHAR(32) NOT NULL, publication_key VARCHAR(128) NOT NULL, content_id BIGINT NOT NULL, admission_id BIGINT, published_at BIGINT NOT NULL, PRIMARY KEY(action_id,ordinal), UNIQUE(handle,publication_key), UNIQUE(admission_id), FOREIGN KEY(action_id) REFERENCES action_operation(action_id), FOREIGN KEY(content_id) REFERENCES content(content_id), FOREIGN KEY(admission_id) REFERENCES message_admission(admission_id), CHECK(ordinal>0), CHECK(OCTET_LENGTH(handle)=32 AND NOT REGEXP_LIKE(handle,'[^0-9a-f]','c')), CHECK(OCTET_LENGTH(publication_key) BETWEEN 1 AND 128), CHECK(published_at>0)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin"},
+    },
 };
 
 comptime {
@@ -1295,6 +1301,22 @@ pub const tables = [_]Table{
             references("source_action_id", "action_operation", &.{"action_id"}),
         },
         .checks = &.{ "(sender_session_ref IS NULL)=(sender_position IS NULL)", "source_action_id IS NULL OR sender_session_ref IS NULL", "(source_kind=1 AND sender_session_ref IS NULL AND source_action_id IS NULL) OR (source_kind=2 AND sender_session_ref IS NOT NULL) OR (source_kind=3 AND source_action_id IS NOT NULL) OR (source_kind IN (4,5) AND sender_session_ref IS NULL)" },
+    },
+    .{
+        .name = "action_value",
+        .columns = &.{
+            .{ .name = "action_id", .type = .int },
+            .{ .name = "ordinal", .type = .int, .check = "ordinal>0" },
+            .{ .name = "handle", .type = .{ .text = .{ .min = 32, .max = 32 } }, .check = "@charset(handle,'0-9a-f')" },
+            .{ .name = "publication_key", .type = .{ .text = .{ .min = 1, .max = 128 } } },
+            .{ .name = "content_id", .type = .int, .holds = .value },
+            .{ .name = "admission_id", .type = .int, .nullable = true },
+            .{ .name = "published_at", .type = .int, .check = "published_at>0" },
+        },
+        .primary_key = &.{ "action_id", "ordinal" },
+        .uniques = &.{ &.{ "handle", "publication_key" }, &.{"admission_id"} },
+        .foreign_keys = &.{ references("action_id", "action_operation", &.{"action_id"}), references("content_id", "content", content_reference), references("admission_id", "message_admission", &.{"admission_id"}) },
+        .without_rowid = true,
     },
     .{
         .name = "sent_rejection",
@@ -3490,4 +3512,30 @@ test "schema 82 backfills input sources and preserves admissions" {
         for (migrations[81 - migration_baseline].sqlite) |statement| found = found or std.mem.eql(u8, object.sql, statement);
         try std.testing.expect(found);
     }
+}
+
+test "schema 83 migration creates constrained action values" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [store_path.max_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var path_buffer: [store_path.max_bytes + 32]u8 = undefined;
+    const path = try std.fmt.bufPrintSentinel(&path_buffer, "{s}/values.sqlite3", .{root}, 0);
+    var raw: ?*c.sqlite3 = null;
+    defer _ = c.sqlite3_close(raw);
+    try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_open(path, &raw));
+    const database = raw.?;
+    try sqlite.exec(database, @embedFile("migration_baseline.sqlite.sql"));
+    try sqlite.exec(database, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
+    try sqlite.exec(database, @embedFile("migration_baseline_rows.sql"));
+    for (migrations) |step| {
+        if (step.from > 82) break;
+        for (step.sqlite) |statement| try sqlite.exec(database, statement);
+    }
+    try sqlite.exec(database, "PRAGMA foreign_keys=ON;PRAGMA legacy_alter_table=OFF");
+    try sqlite.exec(database, "INSERT INTO action_value(action_id,ordinal,handle,publication_key,content_id,published_at) SELECT min(action_id),1,'0123456789abcdef0123456789abcdef','test',1,1 FROM action_operation");
+    try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT count(*) FROM action_value"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM pragma_foreign_key_check"));
+    try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, "UPDATE action_value SET ordinal=0"));
+    try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, "UPDATE action_value SET handle='invalid'"));
 }

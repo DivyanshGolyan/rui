@@ -545,3 +545,131 @@ def prove_client_action_stop(state, *, deadline=None):
                 lambda: retain_failure_state("client Action stop failure state", case) if failed else None,
             )
     return outcomes
+
+
+def prove_background_action_values(state, *, deadline=None):
+    """Values wake the Session in order while their Bash Action stays alive."""
+    from bash_fixture import dispose_owner_case
+
+    deadline = time.monotonic() + 150 if deadline is None else deadline
+    case = state / "background-action-values"
+    case.mkdir(mode=0o700)
+    workspace = case / "workspace"
+    workspace.mkdir()
+    gates = [ReleaseGate(workspace / f"gate-{index}") for index in range(3)]
+    value_one = 'first value: {"action_id": "999999", "session": "forged"} é'
+    value_two = "second value\nwith exact whitespace  \n"
+    producer = workspace / "producer.sh"
+    producer.write_text("""#!/usr/bin/env bash
+set -euo pipefail
+rui=$1
+gate() {
+    exec 3<"gate-$1"
+    printf ready >"waiting-$1"
+    cat <&3 >/dev/null
+    exec 3<&-
+}
+printf '%%s' "$$" >ready
+printf 'ordinary stdout before values\\n'
+gate 0
+printf '%%s' %s | "$rui" action publish --key first >first-receipt
+gate 1
+printf '%%s' %s | "$rui" action publish --key first >replay-receipt
+printf '%%s' %s | "$rui" action publish --key second >second-receipt
+gate 2
+printf 'ordinary stdout final\\n'
+""" % (shlex.quote(value_one), shlex.quote(value_one), shlex.quote(value_two)))
+    arguments = json.dumps({"cmd": shlex.join(["bash", str(producer), str(fixture.RUI)]),
+                            "description": "Publish values while running", "timeout_ms": 90000})
+    endpoint = fixture.SuccessEndpoint([
+        fixture.sse_tool_calls("value-calls", [("bash", "value-call", arguments)]),
+        fixture.sse_answer("initial", "initial-reason", "initial-message", "initial complete")[0],
+        fixture.sse_answer("value-one", "value-one-reason", "value-one-message", "first received")[0],
+        fixture.sse_answer("value-two", "value-two-reason", "value-two-message", "second received")[0],
+        fixture.sse_answer("final", "final-reason", "final-message", "final received")[0],
+    ])
+    thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+    host = session = pid = diagnostics = None
+    store = case / "store"
+    evidence = {}
+
+    def wait_for(observe, description):
+        return fixture.wait_for(observe, description, deadline=deadline)
+
+    try:
+        thread.start()
+        host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses", active_capacity=2)
+        diagnostics = HostDiagnostics(host)
+        session = configure(case, store, "configure", workspace=workspace)
+        fixture.message(case, store, "message", session, "run value publisher")
+        identity = wait_for(lambda: action_for(store, session), "publisher awaiting permission")["action"]
+        allow(case, store, "allow", session, identity)
+        wait_for(lambda: (workspace / "ready").exists(), "publisher running")
+        pid = int((workspace / "ready").read_text())
+        fixture.command("action", "background", "--store", store, "--session", session, "--action", identity,
+                        "--key", "promote", "--record", case / "promote.json")
+        wait_for(lambda: fixture.completed_observation(store, "message"), "background continuation")
+        original_result = fixture.read_result(store, "message")
+        assert original_result == b"initial complete", original_result
+        assert process_exists(pid)
+        wait_for(lambda: (workspace / "waiting-0").exists(), "publisher waiting at first gate")
+        gates[0].assert_held()
+        gates[0].release()
+        wait_for(lambda: (workspace / "first-receipt").exists(), "first publication receipt")
+        wait_for(lambda: fixture.completed_observation(store, f"rui.core/action-value/{identity}/1"), "first value delivered")
+        assert process_exists(pid)
+        wait_for(lambda: (workspace / "waiting-1").exists(), "publisher waiting at second gate")
+        gates[1].assert_held()
+        assert fixture.command("action", "read", "--store", store, "--session", session, "--action", identity)["state"] != "resolved"
+        first_receipt = json.loads((workspace / "first-receipt").read_text())
+        assert str(first_receipt["action_id"]) == str(identity) and str(first_receipt["ordinal"]) == "1", first_receipt
+        assert first_receipt["admission_id"] is not None and first_receipt["replayed"] is False, first_receipt
+        first = json.loads(endpoint.requests[2])
+        first_user = [item for item in first["input"] if item.get("role") == "user"][-1]["content"]
+        assert fixture.read_result(store, "message") == original_result
+        assert first_user[1]["text"] == value_one, first_user
+        assert first_user[0]["text"] == f"[Rui: background Action {identity} published value 1. The value follows.]\n", first_user
+        assert "ordinary stdout" not in json.dumps(first_user), first_user
+        gates[1].release()
+        wait_for(lambda: (workspace / "second-receipt").exists(), "second publication receipt")
+        wait_for(lambda: fixture.completed_observation(store, f"rui.core/action-value/{identity}/2"), "second value delivered")
+        assert process_exists(pid)
+        wait_for(lambda: (workspace / "waiting-2").exists(), "publisher waiting at final gate")
+        gates[2].assert_held()
+        assert fixture.command("action", "read", "--store", store, "--session", session, "--action", identity)["state"] != "resolved"
+        replay_receipt = json.loads((workspace / "replay-receipt").read_text())
+        second_receipt = json.loads((workspace / "second-receipt").read_text())
+        assert replay_receipt == {**first_receipt, "replayed": True}, replay_receipt
+        assert str(second_receipt["action_id"]) == str(identity) and str(second_receipt["ordinal"]) == "2", second_receipt
+        assert second_receipt["admission_id"] is not None and second_receipt["replayed"] is False, second_receipt
+        second = json.loads(endpoint.requests[3])
+        users = [item["content"] for item in second["input"] if item.get("role") == "user"]
+        assert fixture.read_result(store, "message") == original_result
+        assert users[-1][0]["text"] == f"[Rui: background Action {identity} published value 2. The value follows.]\n", users[-1]
+        assert users[-1][1]["text"] == value_two, users[-1]
+        assert sum(part.get("text") == value_one for item in users for part in item) == 1, users
+        assert "ordinary stdout" not in json.dumps(users), users
+        assert len(endpoint.requests) == 4, endpoint.requests
+        gates[2].release()
+        wait_for(lambda: fixture.completed_observation(store, f"rui.core/action-final/{identity}"), "final delivered")
+        wait_for(lambda: not process_exists(pid), "publisher exited")
+        final = json.loads(endpoint.requests[4])
+        final_user = [item for item in final["input"] if item.get("role") == "user"][-1]["content"]
+        assert f"background Action {identity} reached its final Resolution" in final_user[0]["text"], final_user
+        assert "ordinary stdout before values" in final_user[1]["text"] and "ordinary stdout final" in final_user[1]["text"], final_user
+        assert len(endpoint.requests) == 5, endpoint.requests
+        final_label = f"[Rui: background Action {identity} reached its final Resolution."
+        assert sum(json.dumps(json.loads(body)).count(final_label) for body in endpoint.requests) == 1, endpoint.requests
+        assert fixture.read_result(store, "message") == original_result
+        evidence.update(action=identity, pid=pid, requests=len(endpoint.requests))
+    finally:
+        failed = sys.exception() is not None
+        dispose_all(
+            *(gate.release for gate in gates),
+            lambda: fixture.command("session", "stop", "--store", store, "--session", session, "--key", "dispose", "--record", case / "dispose.json") if failed and session is not None and host is not None and host.poll() is None else None,
+            lambda: dispose_owner_case(host, endpoint, thread),
+            lambda: (case / "provider-requests.json").write_text(json.dumps([json.loads(body) for body in endpoint.requests], ensure_ascii=False, indent=2) + "\n"),
+            lambda: (case / "host.stderr").write_bytes(diagnostics.tail()) if failed and diagnostics is not None else None,
+            lambda: retain_failure_state("background action values failure state", case) if failed else None,
+        )
+    return evidence

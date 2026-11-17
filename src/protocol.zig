@@ -132,6 +132,7 @@ pub const Kind = enum {
     permission_decision,
     action_background,
     action_stop,
+    action_publish,
     observe_command,
     read_result,
     read_action,
@@ -586,6 +587,7 @@ pub const session_list_reply = struct {
 pub const ActivityFacts = activity_facts.Page;
 
 fn RequestOf(comptime Custody: type) type {
+    const ContentField = Requests(Custody).ContentField;
     const ConfigureCommand = Requests(Custody).ConfigureCommand;
     const MessageCommand = Requests(Custody).MessageCommand;
     return union(Kind) {
@@ -603,6 +605,7 @@ fn RequestOf(comptime Custody: type) type {
         permission_decision: PermissionDecisionCommand,
         action_background: command_input.ActionBackgroundCommand,
         action_stop: command_input.ActionStopCommand,
+        action_publish: struct { store: Bounded(max_store_bytes) = .{}, handle: Bounded(32) = .{}, key: Bounded(max_key_bytes) = .{}, text: ContentField = .{} },
         observe_command: ObserveCommand,
         read_result: ReadResult,
         read_action: @import("action_read.zig").Request,
@@ -622,6 +625,7 @@ fn RequestOf(comptime Custody: type) type {
             switch (self.*) {
                 .configure => |*command| try command.removeTemporaryContent(io),
                 .message => |*command| try command.removeTemporaryContent(io),
+                .action_publish => |*command| try command.text.removeTemporaryContent(io),
                 .host_info, .host_stop, .host_pause, .session_stop, .session_archive, .session_pin, .model_interruption, .permission_decision, .action_background, .action_stop, .observe_command, .read_result, .read_action, .read_action_call_id, .read_action_arguments, .inspect_session, .list_sessions, .conversation_page, .conversation_content, .activity_page, .activity_search, .activity_content, .skill_suggestions, .model_list => {},
             }
         }
@@ -737,6 +741,10 @@ fn ParserOf(comptime Custody: type) type {
                     out.* = .{ .action_stop = .{ .store = store } };
                     try self.parseActionStop(&out.action_stop, &members);
                 },
+                .action_publish => {
+                    out.* = .{ .action_publish = .{ .store = store } };
+                    try self.parseActionPublish(&out.action_publish, &members);
+                },
                 .read_action => {
                     out.* = .{ .read_action = .{ .store = store } };
                     try self.parseReadAction(&out.read_action, &members);
@@ -813,7 +821,7 @@ fn ParserOf(comptime Custody: type) type {
         const Header = struct { kind: Kind, store: Bounded(max_store_bytes) };
 
         fn scanHeader(self: *Parser) !Header {
-            const Field = enum { version, kind, store, text, configuration };
+            const Field = enum { version, kind, store, text, value, configuration };
             try self.expectByte('{');
             var members: Members = .{};
             var seen: std.enums.EnumSet(Field) = .empty;
@@ -847,6 +855,12 @@ fn ParserOf(comptime Custody: type) type {
                         if (kind) |named| if (named != .message) return error.UnexpectedField;
                         try self.scanContentEnvelope(true);
                     },
+                    .value => {
+                        if (self.expected_kind) |expected| if (expected != .action_publish) return error.UnexpectedField;
+                        if (kind) |named| if (named != .action_publish) return error.UnexpectedField;
+                        var counted: ContentField = .{};
+                        try self.readContentString(&counted);
+                    },
                     .configuration => {
                         if (kind) |named| if (named != .configure and named != .message) return error.UnexpectedField;
                         try self.scanConfiguration();
@@ -854,7 +868,9 @@ fn ParserOf(comptime Custody: type) type {
                 }
             }
             if (!seen.contains(.version) or !seen.contains(.store)) return error.MissingField;
-            return .{ .kind = kind orelse return error.MissingField, .store = store };
+            const selected = kind orelse return error.MissingField;
+            if (seen.contains(.value) and selected != .action_publish) return error.UnexpectedField;
+            return .{ .kind = selected, .store = store };
         }
 
         fn scanConfiguration(self: *Parser) !void {
@@ -1219,6 +1235,21 @@ fn ParserOf(comptime Custody: type) type {
                 .action => out.action_id = try self.readCanonicalU64(),
             };
             try require(Field, seen, &.{ .key, .session, .action });
+        }
+
+        fn parseActionPublish(self: *Parser, out: anytype, members: *Members) !void {
+            const Field = enum { handle, key, value };
+            var seen: std.enums.EnumSet(Field) = .empty;
+            while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
+                .handle => try self.readSmallString(&out.handle),
+                .key => try self.readSmallString(&out.key),
+                .value => {
+                    try self.readContentString(&out.text);
+                    out.text.state = .value;
+                },
+            };
+            try require(Field, seen, &.{ .handle, .key, .value });
+            if (out.key.len == 0) return error.InvalidKey;
         }
 
         fn parseReadAction(self: *Parser, out: *@import("action_read.zig").Request, members: *Members) !void {
@@ -1914,6 +1945,9 @@ pub const model_interruption_request = .{ "{\"version\":\"" ++ wire_version ++ "
 pub const permission_decision_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"permission_decision\",\"store\":", store_hole, ",\"key\":", key_hole, ",\"session\":", session_hole, ",\"action\":\"", Hole.decimal, "\",\"decision\":\"", Hole{ .tag = PermissionDecision }, "\"}" };
 pub const action_background_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"action_background\",\"store\":", store_hole, ",\"key\":", key_hole, ",\"session\":", session_hole, ",\"action\":\"", Hole.decimal, "\"}" };
 pub const action_stop_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"action_stop\",\"store\":", store_hole, ",\"key\":", key_hole, ",\"session\":", session_hole, ",\"action\":\"", Hole.decimal, "\"}" };
+pub const max_action_value_bytes = @import("action_value_limits.zig").max_value_bytes;
+pub const action_publish_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"action_publish\",\"store\":", store_hole, ",\"handle\":", Hole{ .string = 32 }, ",\"key\":", key_hole, ",\"value\":", Hole{ .string = max_action_value_bytes }, "}" };
+pub const action_publish_reply = .{ "{\"action_id\":\"", Hole.decimal, "\",\"ordinal\":\"", Hole.decimal, "\",\"admission_id\":", Hole.optional_id, ",\"replayed\":", Hole.boolean, "}" };
 pub const observe_command_request = struct {
     pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"observe_command\",\"store\":", store_hole, ",\"key\":", key_hole };
     pub const since = .{ ",\"since\":", Hole{ .optional_string = change_ring.SessionToken.max_bytes } };

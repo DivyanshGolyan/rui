@@ -63,6 +63,10 @@ Promotion keeps an attempted Action's existing custody credit and never needs a 
 When background Actions hold every credit, new foreground work waits for one as usual. Deadlines bound that starvation; no Action waits on its own continuation to finish.
 A repeated matching command preserves the original selection; an existing background or final selection takes precedence over a later stop. A fresh stop refusal leaves the original call and executor unchanged.
 
+A cooperating Bash Action can publish an exact UTF-8 value with `rui action publish --key KEY`, reading the value from standard input. The Host derives the Action and Session from its live sender handle. Values are limited to 16 KiB, and each Action can have at most 32 admitted values waiting for a Turn. The Host stores values in publication order. A foreground value is stored without delivery; later promotion does not deliver it. A background value and its sourced Session input commit in one transaction, and model history identifies the Action and value ordinal. A publication does not finish the Action or change its final Resolution.
+
+The publication key and payload identify a replay for the same handle. An exact replay returns the original receipt even after the handle is retired; a different payload conflicts. A new publication from a stopped or resolved Action is refused. Accepted values remain saved after stop. Ordinary Bash standard output and standard error are not publications.
+
 A promoted Action’s final Resolution atomically admits one sourced Session input through the same admission owner as person and peer Messages.
 The input identifies its source Action and references the sole Resolution’s content; it never copies the payload.
 Resolution commitment and input admission share one transaction, so restart and replay cannot admit it twice.

@@ -10,12 +10,14 @@ pub const Source = union(enum) {
     person: []const u8,
     peer: struct { key: []const u8, session: rsql.SessionHead },
     action_final: struct { key: []const u8, action_id: u64 },
+    action_value: struct { key: []const u8, action_id: u64, ordinal: u64 },
 
     pub fn kind(source: Source) SourceKind {
         return switch (source) {
             .person => .person,
             .peer => .peer,
             .action_final => .action_final,
+            .action_value => .action_value,
         };
     }
 };
@@ -33,7 +35,7 @@ pub fn consistentSql(comptime message: []const u8, comptime command: []const u8)
         command ++ ".target=" ++ message ++ ".session_ref AND " ++
         command ++ ".primary_content_id=" ++ message ++ ".content_id AND (" ++ message ++ ".source_action_id IS NULL OR EXISTS(" ++
         "SELECT 1 FROM action_operation source WHERE source.action_id=" ++ message ++ ".source_action_id AND source.session_ref=" ++ message ++
-        ".session_ref AND source.background_position IS NOT NULL AND source.resolution_code IS NOT NULL AND source.resolution_content_id=" ++ message ++ ".content_id))";
+        ".session_ref AND source.background_position IS NOT NULL AND source.resolution_code IS NOT NULL AND source.resolution_content_id=" ++ message ++ ".content_id)) AND ((" ++ message ++ ".source_kind<>4 AND NOT EXISTS(SELECT 1 FROM action_value v WHERE v.admission_id=" ++ message ++ ".admission_id)) OR (" ++ message ++ ".source_kind=4 AND EXISTS(SELECT 1 FROM action_value v JOIN action_operation source ON source.action_id=v.action_id WHERE v.admission_id=" ++ message ++ ".admission_id AND v.content_id=" ++ message ++ ".content_id AND source.session_ref=" ++ message ++ ".session_ref AND source.background_position IS NOT NULL)))";
 }
 
 const admit_message = rsql.Write(.{
@@ -87,6 +89,14 @@ pub fn queue(a: anytype, target: *const rsql.SessionHead, source: Source, conten
             .position = position,
             .source_kind = source_kind,
             .action_id = final.action_id,
+        }),
+        .action_value => |value| a.write(admit_message, .{
+            .admission_id = admission_id,
+            .session = target.*,
+            .key = value.key,
+            .content_id = content_id,
+            .position = position,
+            .source_kind = source_kind,
         }),
         .person => |key| a.write(admit_message, .{
             .admission_id = admission_id,
