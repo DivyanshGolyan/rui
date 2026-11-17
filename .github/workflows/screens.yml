@@ -15,6 +15,9 @@ permissions:
   contents: read
   pull-requests: read
 
+# Screen builds restore shared inputs but do not publish caches.
+cache-mode: read
+
 jobs:
   select:
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
