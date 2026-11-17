@@ -849,16 +849,14 @@ test "Session list rolls up descendants beyond the page through real agent birth
             try std.testing.expect(leaf_found);
             var samples: [5]u64 = undefined;
             for (&samples) |*sample| {
-                var counter: @import("../sqlite_tests.zig").TestingSteps = .{};
-                const before = if (case.engine == .mysql) try @import("../mysql_testing.zig").handlerReads(&storage) else 0;
-                if (case.engine == .sqlite) counter.begin(storage.sqliteDatabase());
+                var counter: store_testing.ReadWork = .{};
+                try counter.begin(case, &storage);
                 var measured = testingListRow(&storage, &tmp, root.slice()) catch |err| {
-                    if (case.engine == .sqlite) counter.end(storage.sqliteDatabase());
+                    counter.cancel();
                     return err;
                 };
-                if (case.engine == .sqlite) counter.end(storage.sqliteDatabase());
                 defer measured.deinit();
-                sample.* = if (case.engine == .mysql) (try @import("../mysql_testing.zig").handlerReads(&storage)) - before else counter.steps;
+                sample.* = try counter.finish();
                 try std.testing.expectEqual(@as(u64, 150), try measured.number(&.{"state_change_at"}));
                 try std.testing.expectEqual(@as(u64, 400), try measured.number(&.{"subtree_state_change_at"}));
                 try std.testing.expectEqual(@as(u64, 11), try measured.number(&.{"descendant_count"}));
@@ -866,7 +864,10 @@ test "Session list rolls up descendants beyond the page through real agent birth
                 try std.testing.expect(sample.* > 0);
             }
             std.mem.sort(u64, &samples, {}, std.sort.asc(u64));
-            std.debug.print("list rollup three-level, eleven descendants ({s}, five warmed pages): min={d} median={d} max={d} {s}\n", .{ @tagName(case.engine), samples[0], samples[2], samples[4], if (case.engine == .sqlite) "SQLite VM steps" else "MySQL handler reads" });
+            std.debug.print("list rollup three-level, eleven descendants ({s}, five warmed pages): min={d} median={d} max={d} {s}\n", .{ @tagName(case.engine), samples[0], samples[2], samples[4], switch (case.engine) {
+                .sqlite => "SQLite VM steps",
+                .mysql => "MySQL handler reads",
+            } });
         }
     }.run);
 }

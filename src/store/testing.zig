@@ -335,6 +335,41 @@ pub const Case = struct {
     rerun: bool = false,
 };
 
+pub const ReadWork = struct {
+    storage: *Store = undefined,
+    engine: Engine = undefined,
+    before: u64 = 0,
+    steps: u64 = 0,
+
+    pub fn begin(self: *ReadWork, case: *const Case, storage: *Store) !void {
+        self.* = .{ .storage = storage, .engine = case.engine };
+        switch (self.engine) {
+            .sqlite => sqlite.c.sqlite3_progress_handler(storage.sqliteDatabase(), 1, progress, self),
+            .mysql => self.before = try mysql_testing.handlerReads(storage),
+        }
+    }
+
+    pub fn finish(self: *ReadWork) !u64 {
+        return switch (self.engine) {
+            .sqlite => blk: {
+                self.cancel();
+                break :blk self.steps;
+            },
+            .mysql => (try mysql_testing.handlerReads(self.storage)) - self.before,
+        };
+    }
+
+    pub fn cancel(self: *ReadWork) void {
+        if (self.engine == .sqlite) sqlite.c.sqlite3_progress_handler(self.storage.sqliteDatabase(), 0, null, null);
+    }
+
+    fn progress(context: ?*anyopaque) callconv(.c) c_int {
+        const self: *ReadWork = @ptrCast(@alignCast(context.?));
+        self.steps += 1;
+        return 0;
+    }
+};
+
 pub const EngineName = required_engines.EngineName;
 pub const parseRequiredEngines = required_engines.parse;
 
