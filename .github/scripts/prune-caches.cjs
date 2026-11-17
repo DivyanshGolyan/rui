@@ -9,26 +9,47 @@ module.exports = async function pruneCaches({github, context, core}) {
     if (!cache.key.startsWith('rui-') || (!pull && cache.ref !== 'refs/heads/main')) continue;
     const created = Date.parse(cache.created_at);
     if (!Number.isFinite(created)) throw new Error('Invalid cache creation time');
-    candidates.push({cache, pull, created});
+    const group = pull ? null : mainGroup(cache.key);
+    const compiledVersion = group === 'build/Linux-X64/compiled' || group === 'partial/build/Linux-X64/compiled'
+      ? /^rui-build-v([234])-/.exec(cache.key)[1] : null;
+    candidates.push({cache, pull, created, group, compiledVersion});
   }
 
+  // A completed migration supersedes every legacy snapshot, even when an
+  // older in-flight v2/v3 producer finishes after v4. Partial v4 work cannot
+  // establish this transition; each generation retains complete and partial
+  // snapshots independently until a complete v4 supersedes the legacy formats.
+  const migrated = candidates.some(({compiledVersion, group}) =>
+    group === 'build/Linux-X64/compiled' && compiledVersion === '4');
   candidates.sort((a, b) => b.created - a.created || b.cache.id - a.cache.id);
   const retained = new Set();
   const obsolete = [];
-  for (const {cache, pull} of candidates) {
+  for (const {cache, pull, group, compiledVersion} of candidates) {
     if (pull) {
       obsolete.push(cache);
       continue;
     }
-    const group = mainGroup(cache.key);
     if (group === null) continue;
-    if (retained.has(group)) obsolete.push(cache);
-    retained.add(group);
+    if (migrated && compiledVersion !== null && compiledVersion !== '4') {
+      obsolete.push(cache);
+      continue;
+    }
+    // Unfinished v4 cannot evict any generation's usable fallback.
+    const retentionGroup = compiledVersion === null ? group : `v${compiledVersion}/${group}`;
+    if (retained.has(retentionGroup)) obsolete.push(cache);
+    retained.add(retentionGroup);
   }
+  const deleting = new Set(obsolete.map(cache => cache.id));
+  const bytes = {};
+  for (const {cache, group} of candidates) {
+    if (group === null || deleting.has(cache.id)) continue;
+    bytes[group] = (bytes[group] || 0) + cache.size_in_bytes;
+  }
+  core.info(`Retained main cache bytes by group: ${JSON.stringify(bytes)}`);
   for (const cache of obsolete) {
     try {
       await actions.deleteActionsCacheById({...context.repo, cache_id: cache.id});
-      core.info(`Deleted cache ${cache.id} (${cache.ref}, ${cache.size_in_bytes} bytes)`);
+      core.info(`Deleted cache ${cache.id} (${cache.ref}, ${cache.size_in_bytes} bytes, key=${cache.key}, version=${cache.version})`);
     } catch (error) {
       if (error.status !== 404) throw error;
       core.info(`Cache ${cache.id} was already removed`);
@@ -41,6 +62,9 @@ function mainGroup(key) {
   if (partial) {
     const complete = mainGroup(partial[1]);
     return complete !== null && /^(build|runner)\//.test(complete) ? `partial/${complete}` : null;
+  }
+  if (/^rui-build-v[34]-Linux-X64-0\.17\.[0-9]+-[a-f0-9]{64}-compiled\.[a-f0-9]{64}-[a-f0-9]{64}$/.test(key)) {
+    return 'build/Linux-X64/compiled';
   }
   const reordered = /^rui-build-v2-(Linux-X64|macOS-ARM64)-0\.17\.[0-9]+-[a-f0-9]{64}-([a-z][a-z0-9-]*)\.[a-f0-9]{64}-[a-f0-9]{64}$/.exec(key);
   if (reordered) return `build/${reordered[1]}/${reordered[2]}`;

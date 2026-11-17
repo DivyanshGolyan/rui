@@ -10,7 +10,7 @@ pub const Colour = enum {
     on_band,
 };
 
-pub const Background = enum { ground, bar, input_surface, selection, hover, band };
+pub const Background = enum { ground, bar, input_surface, user_message, selection, hover, band };
 
 pub const Style = struct {
     colour: Colour = .normal,

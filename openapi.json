@@ -11877,6 +11877,18 @@
       "PageWork": {
         "type": "object",
         "properties": {
+          "creator": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 6,
+                "x-rui-max-bytes": 6
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "read_version": {
             "type": "string",
             "x-rui-max-bytes": 53
@@ -11934,6 +11946,7 @@
           }
         },
         "required": [
+          "creator",
           "read_version",
           "state",
           "turn",
@@ -12958,6 +12971,18 @@
               }
             ]
           },
+          "creator": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 6,
+                "x-rui-max-bytes": 6
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "label": {
             "anyOf": [
               {
@@ -13017,6 +13042,7 @@
           "tools",
           "permission_mode",
           "parent",
+          "creator",
           "label",
           "created_at",
           "revision",
@@ -14891,6 +14917,17 @@
               "max",
               null
             ]
+          },
+          "offered_tools": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{1,64}$"
+            },
+            "maxItems": 129,
+            "uniqueItems": true,
+            "x-rui-max-bytes": 4107,
+            "description": "None repeated; the names' bytes total at most x-rui-max-bytes. The effective tool offer frozen at this Operation's admission."
           }
         },
         "required": [
@@ -14900,7 +14937,8 @@
           "interrupted_by",
           "settings_revision",
           "request_id",
-          "reasoning_effort"
+          "reasoning_effort",
+          "offered_tools"
         ],
         "additionalProperties": false
       },

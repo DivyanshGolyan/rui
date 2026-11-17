@@ -1,9 +1,10 @@
-"""Pure checks for Upgrade screen readiness; no native fixture is launched."""
+"""Pure checks for Upgrade fixture ownership and readiness; no native fixture is launched."""
 import copy
 import importlib.util
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, call, patch
@@ -44,42 +45,143 @@ class UpgradeEmptyChatTest(unittest.TestCase):
         self.wait.start()
         self.addCleanup(self.wait.stop)
 
-    def observe(self, footer, *, notice=None, report=None, listing=None, model="gpt-6-luna"):
+    def observe(self, footer, *, report=None, listing=None, model="gpt-6-luna"):
         self.case.json.side_effect = [copy.deepcopy(self.report if report is None else report),
                                       copy.deepcopy(self.listing if listing is None else listing)]
         frame = f"│ › conversation β draft\n│ {model} · low    {footer}"
         self.screen.observe = lambda: frame
-        return self.screen.empty_chat(self.case, self.session, expected_notice=notice)
+        return self.screen.empty_chat(self.case, self.session)
 
-    def test_initial_info_action_and_explicit_relaunch_notice(self):
+    def test_case_disk_lifetime_follows_successful_process_retirement(self):
+        for body_fails, cleanup_fails in ((False, False), (True, False), (False, True)):
+            with self.subTest(body_fails=body_fails, cleanup_fails=cleanup_fails), tempfile.TemporaryDirectory() as root:
+                directory = Path(root) / "case"
+                directory.mkdir()
+                (directory / "diagnostics").write_text("retained on failure")
+                def retire():
+                    self.assertTrue(directory.exists(), "files removed before process retirement")
+                    if cleanup_fails:
+                        raise RuntimeError("cleanup")
+                value = SimpleNamespace(root=directory, close=Mock(side_effect=retire))
+                releases = SimpleNamespace(gates={}, status={}, latest_location="old", sums_name="old")
+                with patch.object(self.fixture, "Case", return_value=value):
+                    try:
+                        with self.fixture.case(Path(root), None, releases, "case"):
+                            if body_fails:
+                                raise ValueError("body")
+                    except (RuntimeError, ValueError):
+                        self.assertTrue(body_fails or cleanup_fails)
+                    else:
+                        self.assertFalse(body_fails or cleanup_fails)
+                value.close.assert_called_once_with()
+                self.assertEqual(directory.exists(), body_fails or cleanup_fails)
+                self.assertIsNone(releases.latest_location)
+                self.assertIsNone(releases.sums_name)
+
+    def test_shared_home_cases_can_start_distinct_default_retained_installations(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            binary_a, binary_b = root / "binary-a", root / "binary-b"
+            binary_a.write_bytes(b"first retained native artifact")
+            binary_b.write_bytes(b"second retained native artifact")
+            releases = SimpleNamespace(origin="http://fixture.invalid")
+            first = self.fixture.Case(root, binary_a, releases, "first")
+            second = self.fixture.Case(root, binary_b, releases, "second")
+            second.home, second.env, second.link = first.home, first.env, first.link
+            children = [SimpleNamespace(pid=101), SimpleNamespace(pid=102)]
+            ready = [{"socket": "first.sock"}, {"socket": "second.sock"}]
+            first.status = Mock(return_value={"status": "ready", "instance": "first"})
+            second.status = Mock(return_value={"status": "ready", "instance": "second"})
+            # Exercise the actual Case.start_host -> Case.build path and its
+            # file copies; only the native launch/socket observation is mocked.
+            with patch.object(self.fixture, "start_ready_process", side_effect=zip(children, ready)) as start, \
+                    patch.object(self.fixture, "peer_pid", side_effect=[101, 102]):
+                first_child, first_status = first.start_host(sources_only=True)
+                first_executable = Path(start.call_args.args[0][0])
+                original = first_executable.read_bytes()
+                second_child, second_status = second.start_host(sources_only=True)
+                second_executable = Path(start.call_args.args[0][0])
+            self.assertEqual([first_child, second_child], children)
+            self.assertEqual([first_status["instance"], second_status["instance"]], ["first", "second"])
+            self.assertEqual(first.hosts, [children[0]])
+            self.assertEqual(second.hosts, [children[1]])
+            self.assertNotEqual(first_executable, second_executable)
+            self.assertFalse(first_executable.samefile(second_executable))
+            self.assertEqual(first_executable.read_bytes(), original)
+            self.assertEqual(original, binary_a.read_bytes())
+            self.assertEqual(second_executable.read_bytes(), binary_b.read_bytes())
+            for executable in (first_executable, second_executable):
+                build = executable.parent.parent
+                self.assertEqual(build.parent, first.home / ".local/lib/rui")
+                self.assertEqual(executable.relative_to(build), Path("bin/rui"))
+                self.assertTrue(build.name.endswith("-retained-real-host"))
+                self.assertTrue((build / "THIRD_PARTY_NOTICES.md").is_file())
+            self.assertEqual(start.call_count, 2)
+
+    def test_case_build_never_reuses_or_overwrites_its_existing_installation(self):
+        for managed in (False, True):
+            for version in (None, "0.1.0"):
+                with self.subTest(managed=managed, version=version), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    binary = root / "binary"
+                    binary.write_bytes(b"original native artifact")
+                    owner = self.fixture.Case(root, binary, SimpleNamespace(origin="http://fixture.invalid"), "owner")
+                    build = owner.build("retained", version, managed=managed)
+                    executable = build / "bin/rui"
+                    original = executable.read_bytes()
+                    notices = (build / "THIRD_PARTY_NOTICES.md").read_bytes()
+                    binary.write_bytes(b"replacement must not overwrite a retained artifact")
+                    with self.assertRaises(FileExistsError):
+                        owner.build("retained", None if version is None else "0.2.0", managed=managed)
+                    self.assertEqual(executable.read_bytes(), original)
+                    self.assertEqual((build / "THIRD_PARTY_NOTICES.md").read_bytes(), notices)
+                    if managed:
+                        self.assertEqual(build.parent, owner.home / ".local/lib/rui")
+                    else:
+                        self.assertEqual(build, owner.root / "retained")
+
+    def test_chat_footer_rejects_upgrade_notices_before_and_after_relaunch(self):
         self.assertIn("alt+i info", self.observe("alt+i info"))
-        with self.assertRaises(NotReady):
-            self.observe(self.notice)
-        self.assertIn(self.notice, self.observe(self.notice, notice=self.notice))
-        for footer in ("alt+i info", "Upgraded to another version · Host restarted", ""):
+        for footer in (self.notice, "Upgraded to another version · Host restarted", "",
+                       "alt+i info · upgraded to 0.76.0", "alt+i info  Upgraded to 0.76.0"):
             with self.subTest(footer=footer), self.assertRaises(NotReady):
-                self.observe(footer, notice=self.notice)
-        for notice in (None, self.notice):
-            with self.subTest(notice=notice), self.assertRaises(NotReady):
-                self.observe(notice or "alt+i info", notice=notice, model="wrong-model")
+                self.observe(footer)
+        with self.assertRaises(NotReady):
+            self.observe("alt+i info", model="wrong-model")
 
-    def test_public_identity_and_zero_messages_remain_required_in_both_paths(self):
-        for notice in (None, self.notice):
-            footer = notice or "alt+i info"
-            self.case.json.reset_mock()
-            self.observe(footer, notice=notice)
-            self.assertEqual(self.case.json.call_args_list, [
-                call("session", "inspect", "--store", self.case.store, "--session", self.session),
-                call("session", "list", "--store", self.case.store, "--all")])
-            for field, value in (("session", {"reference": "wrong1", "model": "gpt-6-luna"}),
-                                 ("selected_message", "message1"), ("recent_messages", [{"message": "message1"}])):
-                report = {**self.report, field: value}
-                with self.subTest(notice=notice, field=field), self.assertRaises(AssertionError):
-                    self.observe(footer, notice=notice, report=report)
-            for sessions in ([], [{"reference": "wrong1"}],
-                             [{"reference": self.session}, {"reference": "wrong1"}]):
-                with self.subTest(notice=notice, sessions=sessions), self.assertRaises(AssertionError):
-                    self.observe(footer, notice=notice, listing={"sessions": sessions})
+    def test_quiet_version_is_below_settings_not_a_version_elsewhere(self):
+        version = "0.76.0"
+        valid = [f"Settings\n  38 MB    {version} ", f"Settings │ chat\n {version} │ model"]
+        invalid = [f"Settings {version}\n footer", f"Settings\nUpdate to {version}",
+                   f"Settings\nrui 38 MB {version}", f"Settings\n38 MB tools 12 MB {version}",
+                   f"Settings\n{version}\nUpgraded to {version}",
+                   f"Settings\n{version}\n · upgraded to {version}",
+                   f"Settings\n0.76.1\n{version}", f"Settings\n38 MB\n{version}"]
+        for frame in valid:
+            self.screen.observe = lambda: frame
+            with self.subTest(frame=frame):
+                self.assertEqual(frame, self.screen.quiet_version(version))
+        for frame in invalid:
+            self.screen.observe = lambda: frame
+            with self.subTest(frame=frame), self.assertRaises(NotReady):
+                self.screen.quiet_version(version)
+
+    def test_public_identity_and_zero_messages_remain_required(self):
+        footer = "alt+i info"
+        self.case.json.reset_mock()
+        self.observe(footer)
+        self.assertEqual(self.case.json.call_args_list, [
+            call("session", "inspect", "--store", self.case.store, "--session", self.session),
+            call("session", "list", "--store", self.case.store, "--all")])
+        for field, value in (("session", {"reference": "wrong1", "model": "gpt-6-luna"}),
+                             ("selected_message", "message1"), ("recent_messages", [{"message": "message1"}])):
+            report = {**self.report, field: value}
+            with self.subTest(field=field), self.assertRaises(AssertionError):
+                self.observe(footer, report=report)
+        for sessions in ([], [{"reference": "wrong1"}],
+                         [{"reference": self.session}, {"reference": "wrong1"}]):
+            with self.subTest(sessions=sessions), self.assertRaises(AssertionError):
+                self.observe(footer, listing={"sessions": sessions})
 
 
     def hidden(self, frame, *, report=None, listing=None):
@@ -102,7 +204,7 @@ class UpgradeEmptyChatTest(unittest.TestCase):
                 self.hidden(wrong)
 
     def test_overview_waits_past_sidebar_controls_for_the_full_list(self):
-        sidebar = "  + New Session                Archived │\n  Settings │ gpt-6-luna · low\n"
+        sidebar = " + New Session                Archived │\n   Settings │ gpt-6-luna · low\n"
         frames = [sidebar + "│ › Type a task", sidebar + "│ › unsent draft",
                   "+ New Session                Archived\nSettings"]
         self.screen.observe = Mock(side_effect=frames)

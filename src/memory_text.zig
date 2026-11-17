@@ -10,6 +10,13 @@ pub fn fit(arena: std.mem.Allocator, memory: ?Memory, unicode: bool, columns: u1
     return "";
 }
 
+pub fn sidebar(arena: std.mem.Allocator, memory: ?Memory, columns: u16) error{OutOfMemory}![]const u8 {
+    const live = memory orelse return "";
+    var buffer: [16]u8 = undefined;
+    const text = sizeText(&buffer, live.rui);
+    return if (display_text.width(text, .terminal) <= columns) try arena.dupe(u8, text) else "";
+}
+
 fn choices(arena: std.mem.Allocator, memory: ?Memory, unicode: bool) error{OutOfMemory}![3][]const u8 {
     const live = memory orelse return .{ "", "", "" };
     var buffer: [16]u8 = undefined;
@@ -72,4 +79,13 @@ test "memory fits its widest form: full, then rui alone, then nothing, at every 
     };
     try std.testing.expectEqualStrings("rui 38 MB", try fit(arena.allocator(), .{ .rui = 38 * mib, .tools = null }, true, 9));
     try std.testing.expectEqualStrings("", try fit(arena.allocator(), .{ .rui = 38 * mib, .tools = null }, true, 8));
+}
+
+test "sidebar memory is process-only and whole across widths" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    for ([_]?u64{ null, 0, 120 * mib }) |tools| for (0..40) |width| {
+        try std.testing.expectEqualStrings(if (width >= 5) "38 MB" else "", try sidebar(arena.allocator(), .{ .rui = 38 * mib, .tools = tools }, @intCast(width)));
+        try std.testing.expectEqualStrings("", try sidebar(arena.allocator(), null, @intCast(width)));
+    };
 }

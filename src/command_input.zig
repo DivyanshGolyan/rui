@@ -97,6 +97,16 @@ pub const ToolsField = struct {
         return std.mem.tokenizeScalar(u8, self.names.slice(), ' ');
     }
 
+    pub fn eql(self: *const ToolsField, other: *const ToolsField) bool {
+        return self.state == other.state and self.count == other.count and self.names.eql(other.names.slice());
+    }
+
+    pub fn contains(self: *const ToolsField, name: []const u8) bool {
+        var names = self.iterator();
+        while (names.next()) |held| if (std.mem.eql(u8, held, name)) return true;
+        return false;
+    }
+
     pub fn of(names: []const []const u8) error{ InvalidToolName, InvalidJsonShape }!ToolsField {
         var out: ToolsField = .{ .state = .value };
         for (names) |name| try out.append(name);
@@ -457,4 +467,19 @@ fn hashContentIdentity(hash: *std.crypto.hash.sha2.Sha256, state: FieldState, si
         hash.update(&length);
         hash.update(digest);
     }
+}
+
+test "tool list equality compares semantic names rather than unused capacity" {
+    var first = try ToolsField.of(&.{ "bash", "none" });
+    var second = first;
+    @memset(first.names.bytes[first.names.len..], 'a');
+    @memset(second.names.bytes[second.names.len..], 'b');
+    try std.testing.expect(first.eql(&second));
+    second.count -= 1;
+    try std.testing.expect(!first.eql(&second));
+    second = first;
+    second.state = .omitted;
+    try std.testing.expect(!first.eql(&second));
+    second = try .of(&.{ "bash", "lookup" });
+    try std.testing.expect(!first.eql(&second));
 }

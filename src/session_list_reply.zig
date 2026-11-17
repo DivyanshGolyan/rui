@@ -25,6 +25,7 @@ pub fn Reply(comptime Capture: type) type {
                 .pin_order = values.pin_order,
                 .reference = values.reference,
                 .parent = values.parent,
+                .creator = values.creator,
                 .workspace = values.workspace,
                 .provider = values.provider,
                 .model = values.model,

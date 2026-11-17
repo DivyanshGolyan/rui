@@ -481,6 +481,7 @@ pub const SessionRow = struct {
     tools: ToolsField = .{ .state = .value },
     permission_mode: PermissionMode = .ask,
     parent: ?Bounded(session_id_bytes) = null,
+    creator: ?Bounded(session_id_bytes) = null,
     label: ?Bounded(max_label_bytes) = null,
     created_at: u64 = 0,
     revision: u64 = 0,
@@ -491,10 +492,10 @@ pub const SessionRow = struct {
     peers: PeerFacts = .{},
 
     pub const json_shape = .{
-        "{\"read_version\":\"", Hole{ .text = change_ring.Token.max_bytes }, "\",\"archive_state\":\"", Hole{ .tag = SessionArchiveState }, "\",\"pin_order\":",  Hole.optional_id,                          ",\"reference\":",         Hole{ .string = max_session_bytes }, ",\"workspace\":",       Hole{ .string = max_workspace_bytes },
-        ",\"provider\":\"",     Hole{ .tag = Provider },                     "\",\"model\":",           Hole{ .string = max_model_bytes },  ",\"tools\":",        Hole{ .text = max_tool_names_json_bytes }, ",\"permission_mode\":\"", Hole{ .tag = PermissionMode },       "\",\"parent\":",        Hole{ .optional_string = session_id_bytes },
-        ",\"label\":",          Hole{ .optional_string = max_label_bytes },  ",\"created_at\":\"",      Hole.decimal,                       "\",\"revision\":\"", Hole.decimal,                              "\",\"end\":\"",           Hole.decimal,                        "\",\"first_message\":", Hole{ .optional_json = FirstMessage },
-        ",\"last_line\":",      Hole{ .optional_json = LastLine.Fields },    ",\"work\":",              Hole{ .json = SessionWork },        ",\"peers\":",        Hole{ .json = PeerFacts },                 "}",
+        "{\"read_version\":\"",  Hole{ .text = change_ring.Token.max_bytes }, "\",\"archive_state\":\"", Hole{ .tag = SessionArchiveState },         "\",\"pin_order\":",  Hole.optional_id,                          ",\"reference\":",         Hole{ .string = max_session_bytes }, ",\"workspace\":", Hole{ .string = max_workspace_bytes },
+        ",\"provider\":\"",      Hole{ .tag = Provider },                     "\",\"model\":",           Hole{ .string = max_model_bytes },          ",\"tools\":",        Hole{ .text = max_tool_names_json_bytes }, ",\"permission_mode\":\"", Hole{ .tag = PermissionMode },       "\",\"parent\":",  Hole{ .optional_string = session_id_bytes },
+        ",\"creator\":",         Hole{ .optional_string = session_id_bytes }, ",\"label\":",             Hole{ .optional_string = max_label_bytes }, ",\"created_at\":\"", Hole.decimal,                              "\",\"revision\":\"",      Hole.decimal,                        "\",\"end\":\"",   Hole.decimal,
+        "\",\"first_message\":", Hole{ .optional_json = FirstMessage },       ",\"last_line\":",         Hole{ .optional_json = LastLine.Fields },   ",\"work\":",         Hole{ .json = SessionWork },               ",\"peers\":",             Hole{ .json = PeerFacts },           "}",
     };
     pub const max_json_bytes = shapeBytes(json_shape);
     pub const budget_bytes = 36 * 1024;
@@ -513,6 +514,7 @@ pub const SessionRow = struct {
         tools: []const u8,
         permission_mode: PermissionMode,
         parent: ?[]const u8,
+        creator: ?[]const u8 = null,
         label: ?[]const u8,
         created_at: u64,
         revision: u64,
@@ -527,9 +529,9 @@ pub const SessionRow = struct {
         pub fn writeJson(f: *const Fields, out: *std.Io.Writer) !void {
             var token_buffer: [change_ring.Token.max_bytes]u8 = undefined;
             try writeShape(out, json_shape, .{
-                f.read_version.format(&token_buffer), f.archive_state,   f.pin_order, f.reference, f.workspace,  f.provider, f.model,
-                f.tools,                              f.permission_mode, f.parent,    f.label,     f.created_at, f.revision, f.end,
-                f.first_message,                      f.last_line,       f.work,      f.peers,
+                f.read_version.format(&token_buffer), f.archive_state,   f.pin_order, f.reference, f.workspace, f.provider,   f.model,
+                f.tools,                              f.permission_mode, f.parent,    f.creator,   f.label,     f.created_at, f.revision,
+                f.end,                                f.first_message,   f.last_line, f.work,      f.peers,
             });
         }
     };
@@ -557,6 +559,7 @@ pub const SessionRow = struct {
             .tools = tools_writer.buffered(),
             .permission_mode = self.permission_mode,
             .parent = if (self.parent) |*parent| parent.slice() else null,
+            .creator = if (self.creator) |*creator| creator.slice() else null,
             .label = if (self.label) |*label| label.slice() else null,
             .created_at = self.created_at,
             .revision = self.revision,

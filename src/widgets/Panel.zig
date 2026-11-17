@@ -4,8 +4,18 @@ const vxfw = vaxis.vxfw;
 const Self = @This();
 const Hover = @import("Hover.zig");
 const cell_line = @import("cell_line.zig");
+const RowInset = @import("RowInset.zig");
 
 pub const value_column: u16 = 19;
+
+/// The right edge and width of a standard field value, after the row inset.
+pub fn valueEnd(width: u16) u16 {
+    return RowInset.bounds(width).end;
+}
+
+pub fn valueWidth(width: u16) u16 {
+    return valueEnd(width) -| value_column;
+}
 
 pub const Field = struct { label: []const u8, value: []const u8, tail: ?[]const u8 = null, selectable: bool = true, visible: bool = true };
 pub const Choice = struct { field: usize, labels: []const []const u8, current: ?usize, selected: usize };
@@ -262,7 +272,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
             const selected = self.choice == null and self.custom_choice == null and self.selected == index and field.selectable;
             const style = if (self.custom_choice == null and field.selectable) self.look(selected, .{ .row = row, .width = size.width }) else self.ground;
             fillRow(surface, row, style);
-            _ = paintTo(ctx, surface, try displayText(ctx.arena, field.label, self.unicode), 3, row, style, @min(value_column, size.width));
+            _ = paintTo(ctx, surface, try displayText(ctx.arena, field.label, self.unicode), 3, row, style, @min(value_column, RowInset.bounds(size.width).end));
             try self.drawFieldValue(ctx, &surface, index, row, value_column, style, &children, &targets);
         }
         if (self.choice) |choice| if (choice.field == index) {
@@ -270,8 +280,8 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
                 const row = self.visible(self.rowOf(index) + 1 + at) orelse continue;
                 const style = self.look(at == choice.selected, .{ .row = row, .width = size.width });
                 fillRow(surface, row, style);
-                _ = paint(ctx, surface, if (choice.current == at) (if (self.unicode) "✓" else "+") else " ", 5, row, style);
-                _ = paint(ctx, surface, try displayText(ctx.arena, label, self.unicode), 7, row, style);
+                _ = paintTo(ctx, surface, if (choice.current == at) (if (self.unicode) "✓" else "+") else " ", 5, row, style, RowInset.bounds(size.width).end);
+                _ = paintTo(ctx, surface, try displayText(ctx.arena, label, self.unicode), 7, row, style, RowInset.bounds(size.width).end);
                 try targets.append(.{ .row = row, .start = 0, .end = size.width, .index = at, .choice = true });
             }
         };
@@ -307,8 +317,8 @@ fn drawFieldValue(self: *Self, ctx: vxfw.DrawContext, surface: *vxfw.Surface, in
     const field = self.fields[index];
     const value_widget = if (self.custom_choice) |choice| if (choice.field == index) choice.value_widget else null else null;
     if (value_widget) |value| {
-        if (surface.size.width > start) {
-            const drawn = try value.draw(ctx.withConstraints(.{}, .{ .width = surface.size.width - start, .height = 1 }));
+        if (valueEnd(surface.size.width) > start) {
+            const drawn = try value.draw(ctx.withConstraints(.{}, .{ .width = valueEnd(surface.size.width) - start, .height = 1 }));
             try children.append(.{ .origin = .{ .row = row, .col = start }, .surface = drawn });
             if (drawn.cursor) |cursor| {
                 surface.cursor = cursor;
@@ -318,14 +328,14 @@ fn drawFieldValue(self: *Self, ctx: vxfw.DrawContext, surface: *vxfw.Surface, in
         }
     } else {
         const tail = try displayText(ctx.arena, field.tail orelse "", self.unicode);
-        const limit: u16 = @intCast(surface.size.width -| ctx.stringWidth(tail));
+        const limit: u16 = @intCast(valueEnd(surface.size.width) -| ctx.stringWidth(tail));
         const end = paintTo(ctx, surface.*, try displayText(ctx.arena, field.value, self.unicode), start, row, style, limit);
         if (tail.len > 0) {
             var quiet = self.quiet;
             quiet.bg = style.bg;
             quiet.reverse = style.reverse;
             quiet.ul_style = style.ul_style;
-            _ = paint(ctx, surface.*, tail, end, row, quiet);
+            _ = paintTo(ctx, surface.*, tail, end, row, quiet, valueEnd(surface.size.width));
         }
     }
     if (field.selectable) try targets.append(.{ .row = row, .start = 0, .end = surface.size.width, .index = index });
@@ -383,14 +393,14 @@ pub fn drawChoice(self: *Self, ctx: vxfw.DrawContext, index: usize) std.mem.Allo
             const rect: Hover.Rect = .{ .row = row, .width = size.width };
             const style = self.look(at == choice.selected, rect);
             fillRow(surface, row, style);
-            _ = paint(ctx, surface, if (choice.current == at) (if (self.unicode) "✓" else "+") else " ", 1, row, style);
-            _ = paint(ctx, surface, try displayText(ctx.arena, choice.labels[at], self.unicode), 3, row, style);
+            _ = paintTo(ctx, surface, if (choice.current == at) (if (self.unicode) "✓" else "+") else " ", 3, row, style, RowInset.bounds(size.width).end);
+            _ = paintTo(ctx, surface, try displayText(ctx.arena, choice.labels[at], self.unicode), 5, row, style, RowInset.bounds(size.width).end);
             try targets.append(.{ .row = row, .start = 0, .end = size.width, .index = at, .choice = true });
         }
     } else if (size.height > 1) {
         const style = if (field.selectable) self.look(false, .{ .row = 1, .width = size.width }) else self.ground;
         fillRow(surface, 1, style);
-        try self.drawFieldValue(ctx, &surface, index, 1, 1, style, &children, &targets);
+        try self.drawFieldValue(ctx, &surface, index, 1, 3, style, &children, &targets);
     }
     try self.bindTargets(ctx.arena, targets.items);
     surface.children = children.items;
@@ -481,14 +491,14 @@ test "Panel draws bounded text ground selection and quiet tails without wrapping
     };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 26, .height = 7 }, .cell_size = .{} };
+    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 30, .height = 7 }, .cell_size = .{} };
     const surface = try panel.widget().draw(ctx);
     try std.testing.expectEqualStrings("T", surface.readCell(1, 1).char.grapheme);
     try std.testing.expect(surface.readCell(1, 1).style.bold);
     try std.testing.expectEqualStrings("F", surface.readCell(3, 2).char.grapheme);
     try std.testing.expectEqualStrings("l", surface.readCell(19, 2).char.grapheme);
-    try std.testing.expectEqualStrings("t", surface.readCell(25, 2).char.grapheme);
-    try std.testing.expectEqual(panel.quiet.fg, surface.readCell(25, 2).style.fg);
+    try std.testing.expectEqualStrings("t", surface.readCell(27, 2).char.grapheme);
+    try std.testing.expectEqual(panel.quiet.fg, surface.readCell(27, 2).style.fg);
     try std.testing.expectEqualStrings("O", surface.readCell(3, 3).char.grapheme);
     try std.testing.expectEqualStrings("t", surface.readCell(21, 3).char.grapheme);
     try std.testing.expectEqual(panel.quiet.fg, surface.readCell(21, 3).style.fg);
@@ -500,7 +510,7 @@ test "Panel draws bounded text ground selection and quiet tails without wrapping
         for (tiny.buffer, 0..) |cell, at| try std.testing.expect(at % @max(width, 1) + cell.char.width <= width);
     };
     panel.fields = &.{.{ .label = "界", .value = "界e\u{301}q\nnever" }};
-    const unicode = try panel.widget().draw(ctx.withConstraints(.{}, .{ .width = 22, .height = 4 }));
+    const unicode = try panel.widget().draw(ctx.withConstraints(.{}, .{ .width = 24, .height = 4 }));
     try std.testing.expectEqualStrings("界", unicode.readCell(19, 2).char.grapheme);
     try std.testing.expectEqualStrings("e\u{301}", unicode.readCell(21, 2).char.grapheme);
     try std.testing.expectEqualStrings(" ", unicode.readCell(0, 3).char.grapheme);
@@ -940,8 +950,8 @@ test "Panel choice-only renders title checked rows and bounded natural content w
     const drawn = try panel.drawChoice(ctx, 1);
     try std.testing.expectEqual(@as(u16, 4), drawn.size.height);
     try std.testing.expectEqualStrings("E", drawn.readCell(1, 0).char.grapheme);
-    try std.testing.expectEqualStrings("✓", drawn.readCell(1, 2).char.grapheme);
-    try std.testing.expectEqualStrings("h", drawn.readCell(3, 2).char.grapheme);
+    try std.testing.expectEqualStrings("✓", drawn.readCell(3, 2).char.grapheme);
+    try std.testing.expectEqualStrings("h", drawn.readCell(5, 2).char.grapheme);
     var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
     try panel.choiceEvent(&events, .{ .mouse = .{ .button = .left, .type = .press, .mods = .{}, .row = 3, .col = 2 } }, 1);
     try std.testing.expectEqual(@as(?usize, 1), fixture.picked_field);

@@ -15,6 +15,18 @@ const Event = union(enum) {
     progress: HostLifecycle.Stage,
     version: release.Version,
     entry: restart_all.Entry,
+    /// Only the live typed refusal line crosses the private pipe, never the
+    /// unused backing bytes of Failure.message.
+    refused: struct {
+        socket: ?[]const u8 = null,
+        directory: ?[]const u8 = null,
+        store: ?[]const u8 = null,
+        pid: ?c_int = null,
+        stage: @FieldType(@FieldType(HostLifecycle.ActivationOutcome, "refused"), "stage"),
+        failure_line: []const u8,
+    },
+    // Error sets are not JSON-decodable. Preserve cancellation semantically;
+    // other global failures retain their original diagnostic in the worker.
     failure: enum { cancelled, unconfirmed },
     done,
 };
@@ -84,17 +96,18 @@ fn readEvents(io: std.Io, allocator: std.mem.Allocator, file: std.Io.File, progr
                 .unconfirmed => error.HostRestartFailed,
             },
             .entry => |entry| {
-                if (entry.state == .observed) return error.HostRestartFailed;
-                const socket = try allocator.dupe(u8, entry.socket);
-                errdefer allocator.free(socket);
-                const store = if (entry.store) |path| try allocator.dupe(u8, path) else null;
-                errdefer if (store) |path| allocator.free(path);
-                const directory = if (entry.directory) |path| try allocator.dupe(u8, path) else null;
-                errdefer if (directory) |path| allocator.free(path);
-                var state = entry.state;
-                if (state == .failed) state.failed.cause = try allocator.dupe(u8, state.failed.cause);
-                errdefer if (state == .failed) allocator.free(state.failed.cause);
-                try entries.append(allocator, .{ .socket = socket, .directory = directory, .store = store, .state = state });
+                if (entry.state == .observed or (entry.state == .outcome and entry.state.outcome == .refused)) return error.InvalidCoordinatorEvent;
+                try receiveEntry(allocator, &entries, entry);
+            },
+            .refused => |refusal| {
+                const failure = (try @import("start_report.zig").parseLine(allocator, refusal.failure_line)) orelse return error.InvalidCoordinatorEvent;
+                try receiveEntry(allocator, &entries, .{
+                    .socket = refusal.socket,
+                    .directory = refusal.directory,
+                    .store = refusal.store,
+                    .pid = refusal.pid,
+                    .state = .{ .outcome = .{ .refused = .{ .stage = refusal.stage, .failure = failure } } },
+                });
             },
             .done => {
                 result.entries = try entries.toOwnedSlice(allocator);
@@ -105,10 +118,46 @@ fn readEvents(io: std.Io, allocator: std.mem.Allocator, file: std.Io.File, progr
     return error.HostRestartFailed;
 }
 
+fn receiveEntry(allocator: std.mem.Allocator, entries: *std.ArrayList(restart_all.Entry), entry: restart_all.Entry) !void {
+    const socket = if (entry.socket) |path| try allocator.dupe(u8, path) else null;
+    errdefer if (socket) |path| allocator.free(path);
+    const directory = if (entry.directory) |path| try allocator.dupe(u8, path) else null;
+    errdefer if (directory) |path| allocator.free(path);
+    const store = if (entry.store) |path| try allocator.dupe(u8, path) else null;
+    errdefer if (store) |path| allocator.free(path);
+    var state = entry.state;
+    if (state == .failed) state.failed.cause = try allocator.dupe(u8, state.failed.cause);
+    errdefer if (state == .failed) allocator.free(state.failed.cause);
+    try entries.append(allocator, .{ .socket = socket, .directory = directory, .pid = entry.pid, .store = store, .state = state });
+}
+
+// std.json preserves OS-byte slices: valid UTF-8 is text; other bytes are
+// numeric arrays. Keep that existing codec, not a second hex/path protocol.
+fn writeEvent(value: Event, writer: *std.Io.Writer) !void {
+    var line: [@import("start_report.zig").max_line_bytes]u8 = undefined;
+    var encoded = value;
+    if (encoded == .entry) {
+        if (encoded.entry.state == .observed) return error.InvalidCoordinatorEvent;
+        if (encoded.entry.state == .outcome and encoded.entry.state.outcome == .refused) {
+            const entry = encoded.entry;
+            const refusal = entry.state.outcome.refused;
+            encoded = .{ .refused = .{
+                .socket = entry.socket,
+                .directory = entry.directory,
+                .store = entry.store,
+                .pid = entry.pid,
+                .stage = refusal.stage,
+                .failure_line = @import("start_report.zig").line(&refusal.failure, &line),
+            } };
+        }
+    }
+    try std.json.Stringify.value(encoded, .{}, writer);
+}
+
 fn event(init: std.process.Init, value: Event) void {
     var buffer: [event_limit]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
-    std.json.Stringify.value(value, .{}, &writer) catch unreachable;
+    writeEvent(value, &writer) catch unreachable;
     writer.writeByte('\n') catch unreachable;
     std.Io.File.stdout().writeStreamingAll(init.io, writer.buffered()) catch {
         stderr.diagnosticBytes(writer.buffered());
@@ -161,6 +210,7 @@ fn outcomeEvent(outcome: HostLifecycle.ActivationOutcome) Event {
 test "coordinator transfers every batch outcome and progress without reduction" {
     const info = @typeInfo(HostLifecycle.ActivationOutcome).@"union";
     inline for (info.field_names, info.field_types) |name, Payload| {
+        if (comptime std.mem.eql(u8, name, "refused")) continue;
         try expectRoundTrip(outcomeEvent(@unionInit(HostLifecycle.ActivationOutcome, name, std.mem.zeroes(Payload))));
     }
     inline for (std.enums.values(HostLifecycle.Stage)) |stage| {
@@ -200,7 +250,7 @@ test "coordinator events keep each failed Host's cause after the line is freed" 
         .{ .entry = .{ .socket = "/observed.sock", .directory = "/selected-host", .store = "/store", .state = .{ .failed = .{ .stage = .observation, .cause = "ConnectionRefused" } } } },
         .done,
     }) |value| {
-        try std.json.Stringify.value(value, .{}, &lines.writer);
+        try writeEvent(value, &lines.writer);
         try lines.writer.writeByte('\n');
     }
     try tmp.dir.writeFile(io, .{ .sub_path = "events", .data = lines.written() });
@@ -217,4 +267,65 @@ test "coordinator events keep each failed Host's cause after the line is freed" 
     try batch.write(&writer);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Host state is unconfirmed (HostPeerPidMismatch)") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "failed at observation (ConnectionRefused)") != null);
+}
+
+test "coordinator event transport preserves OS routing bytes and typed refusals" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var lines: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer lines.deinit();
+    const refusal = @import("start_report.zig").Failure.init(.runtime_dir_unusable, "private runtime required");
+    try writeEvent(.{ .entry = .{
+        .socket = "/runtime/\xff.sock",
+        .directory = "/host/\xfe",
+        .store = "/database/\xfd",
+        .state = .{ .outcome = .{ .refused = .{ .stage = .starting, .failure = refusal } } },
+    } }, &lines.writer);
+    try lines.writer.writeByte('\n');
+    try writeEvent(.{ .entry = .{ .pid = 42, .state = .{ .failed = .{ .stage = .discovery, .cause = "HostServeArgumentsUnreadable" } } } }, &lines.writer);
+    try lines.writer.writeByte('\n');
+    try writeEvent(.done, &lines.writer);
+    try lines.writer.writeByte('\n');
+    try tmp.dir.writeFile(io, .{ .sub_path = "events", .data = lines.written() });
+    const file = try tmp.dir.openFile(io, "events", .{});
+    defer file.close(io);
+    var batch = try readEvents(io, std.testing.allocator, file, null);
+    defer batch.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("/runtime/\xff.sock", batch.entries[0].socket.?);
+    try std.testing.expectEqualStrings("/host/\xfe", batch.entries[0].directory.?);
+    try std.testing.expectEqualStrings("/database/\xfd", batch.entries[0].store.?);
+    try std.testing.expectEqual(refusal.code, batch.entries[0].state.outcome.refused.failure.code);
+    try std.testing.expectEqualStrings(refusal.message.slice(), batch.entries[0].state.outcome.refused.failure.message.slice());
+    try std.testing.expectEqual(@as(?c_int, 42), batch.entries[1].pid);
+    try std.testing.expect(batch.entries[1].socket == null);
+}
+
+test "coordinator never transmits unused typed refusal backing bytes" {
+    var failure = @import("start_report.zig").Failure.init(.settings_invalid, "safe");
+    @memset(failure.message.bytes[failure.message.len..], 'X');
+    var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer output.deinit();
+    try writeEvent(.{ .entry = .{ .directory = "/host", .state = .{ .outcome = .{ .refused = .{ .stage = .checking, .failure = failure } } } } }, &output.writer);
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "XXXXXXXX") == null);
+}
+
+test "coordinator refusal envelopes preserve both stages and semantic failure fields" {
+    inline for (.{ .checking, .starting }) |stage| {
+        var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer output.deinit();
+        const failure = @import("start_report.zig").Failure.init(.settings_invalid, "typed\nrefusal");
+        try writeEvent(outcomeEvent(.{ .refused = .{ .stage = stage, .failure = failure } }), &output.writer);
+        const parsed = try std.json.parseFromSlice(Event, std.testing.allocator, output.written(), .{});
+        defer parsed.deinit();
+        try std.testing.expect(parsed.value == .refused);
+        try std.testing.expectEqual(stage, parsed.value.refused.stage);
+        const decoded = (try @import("start_report.zig").parseLine(std.testing.allocator, parsed.value.refused.failure_line)).?;
+        try std.testing.expectEqual(failure.code, decoded.code);
+        try std.testing.expectEqualStrings(failure.message.slice(), decoded.message.slice());
+    }
+}
+
+test "coordinator task routing preserves OS bytes through the existing JSON slice codec" {
+    try expectRoundTrip(Task{ .home = "/home/\xff", .target = .{ .build = "/target/\xfe", .version = .{ .schema = 75, .patch = 1 } }, .report = .events });
 }

@@ -113,7 +113,22 @@ def restrictions_and_resume(world, engine):
         ("none", "none", [], []),
     )
     replies = {f"restricted-{index}": answer(f"restricted-{index}") for index in range(len(cases))}
+    replies["narrowed-fresh"] = answer("narrowed-fresh")
     with world("restricted-tool-profile", replies) as w:
+        # This tools-only update previously refused because the intersection of
+        # the fresh loaded set with these tools lacks find_tools.
+        narrowed = w.session()
+        original = profile(w, narrowed, DEFAULTS.tools.split(","), DEFAULTS.loaded_tools.split(","))
+        w.run("session", "configure", "--session", narrowed, "--tools", "bash,skill,start_agent")
+        next_tools = ["bash", "skill", "start_agent"]
+        current = profile(w, narrowed, next_tools, next_tools)
+        assert int(current["revision"]) == int(original["revision"]) + 1, current
+        rejected = json.loads(w.run("session", "configure", "--session", narrowed,
+                                    "--loaded-tools", "bash,skill", expect=3))
+        assert rejected["answer"]["code"] == "loaded_tools_unreachable", rejected
+        assert profile(w, narrowed, next_tools, next_tools)["revision"] == current["revision"]
+        w.run("session", "send", "--to", narrowed, input="narrowed-fresh")
+        first_request(w, narrowed, next_tools)
         for index, (tools, initial, allowed, loaded) in enumerate(cases):
             args = ["--tools", tools, "--permission-mode", "ask"]
             if initial is not None:

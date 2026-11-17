@@ -727,8 +727,21 @@ pub fn storeKind(settings: *const hs.Settings) start_report.Store {
     return if (settings.store == .mysql) .mysql else .sqlite;
 }
 
-pub fn intake(init: std.process.Init, parsed: *const cli_args.Parsed, dir: []const u8, settings: *hs.Settings, fixtures: *providers.Fixtures, failure: *start_report.Failure) !void {
-    try fillAt(init, parsed, dir, settings, fixtures, failure);
+pub const Admission = enum { foreground, detached };
+
+/// Shared --check/serve intake: detached checks use the starter's read and
+/// placement admission, without rebasing a running Host's argv. Both doors
+/// finish provider selection and resolve before the caller's proxy precondition
+/// and `admitSelected` anchor/seal. No Store or Host is opened here.
+pub fn intake(init: std.process.Init, parsed: *const cli_args.Parsed, dir: []const u8, settings: *hs.Settings, fixtures: *providers.Fixtures, failure: *start_report.Failure, admission: Admission) !void {
+    switch (admission) {
+        .foreground => try fillAt(init, parsed, dir, settings, fixtures, failure),
+        .detached => {
+            const intent = try readStart(init, .{ .dir = dir, .settings_file = parsed.get("settings"), .assignments = parsed.all("set") }, settings, failure);
+            try finishSources(init, settings, intent, failure);
+            try fixtureInputs(init, parsed, settings, fixtures, failure);
+        },
+    }
     try resolveProviders(init, settings, fixtures.*, failure);
 }
 
@@ -1226,6 +1239,7 @@ test "Host start reads a previous release's retired flags as the settings those 
         defer gpa.destroy(replayed);
         replayed.* = .{};
         defer replayed.deinit();
+        // Restart source finishing prefixes the previous release's provider set.
         const translated = try serve_grammar.currentArguments(arena.allocator(), case.args);
         const replayed_args = try std.mem.concat(arena.allocator(), []const u8, &.{ &.{ "--set", serve_grammar.previousProviders(false, false).? }, translated });
         const parsed = try parseForTest(arena.allocator(), replayed_args);
@@ -1329,6 +1343,33 @@ const HostLaunchResult = @import("host_launch.zig").Result;
 extern "c" fn rui_launch_detached_reported(executable: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, argc: usize, startup_read: *c_int, report_read: *c_int, launched_pid: *c_int, launched_started: *c_ulonglong) c_int;
 pub const Progress = struct { context: *anyopaque, report: *const fn (*anyopaque, []const u8) void };
 pub const Spawn = struct { dir: []const u8, settings_file: ?[]const u8 = null, assignments: []const []const u8 = &.{} };
+
+/// Finish a running Host's semantic sources, not a child launch plan. Older
+/// releases had flag-fill provider policy; prefix that baseline BEFORE explicit
+/// providers, and keep observed runtime capacity authoritative LAST. The caller
+/// owns a wiping arena and has authenticated the running release identity.
+pub fn restartSources(init: std.process.Init, allocator: std.mem.Allocator, sources: Spawn, previous_release: bool, active_capacity: usize) !Spawn {
+    const baseline = if (previous_release) base: {
+        const names = if (sources.settings_file) |file| names: {
+            // Never consume stdin or open a cwd-dependent source during upgrade.
+            // The target's check supplies its typed detached refusal instead.
+            if (!std.fs.path.isAbsolute(file)) break :names false;
+            break :names try documentNamesProviders(init, file);
+        } else false;
+        break :base @import("serve_grammar.zig").previousProviders(sources.settings_file != null, names);
+    } else null;
+    const assignments = try allocator.alloc([]const u8, sources.assignments.len + 1 + @intFromBool(baseline != null));
+    var offset: usize = 0;
+    if (baseline) |value| {
+        assignments[0] = value;
+        offset = 1;
+    }
+    @memcpy(assignments[offset..][0..sources.assignments.len], sources.assignments);
+    var buffer: [128]u8 = undefined;
+    assignments[assignments.len - 1] = try allocator.dupe(u8, try capacityAssignment(active_capacity, &buffer));
+    return .{ .dir = sources.dir, .settings_file = sources.settings_file, .assignments = assignments };
+}
+
 pub const Ops = struct {
     context: ?*anyopaque = null,
     observe: *const fn (?*anyopaque, std.Io, *const platform.Paths, ?i128) @import("protocol_reply.zig").HostStatus = nativeObserve,
@@ -1369,6 +1410,12 @@ pub const Ops = struct {
 pub fn launchFailure(result: *HostLaunchResult, kind: HostLaunchResult.Cause.Kind, err: anyerror, store: ?[]const u8) void {
     result.outcome = .{ .failed = .{ .cause = .{ .kind = kind, .err = err }, .store = .{ .len = 0 } } };
     if (store) |canonical| result.outcome.failed.store.set(canonical) catch unreachable;
+}
+
+fn launchRefusal(result: *HostLaunchResult, failure: start_report.Failure, selector: []const u8) void {
+    launchFailure(result, if (failure.code == .store_schema_behind) .store_format else if (failure.code == .store_fenced) .store_identity else .child_refused, if (failure.code == .store_fenced) error.StoreIdentityMismatch else error.HostStartupFailed, selector);
+    result.outcome.failed.refusal = failure;
+    result.outcome.failed.cause.refusal_code = failure.code;
 }
 
 pub fn launchReady(result: *HostLaunchResult, ready: @import("protocol_reply.zig").HostInfoFacts, paths: *const platform.Paths, adopted: bool) void {
@@ -1454,7 +1501,11 @@ fn anchorAssignment(gpa: std.mem.Allocator, cwd: *Cwd, assignment: []const u8, f
     return assignment;
 }
 
-fn readDetached(init: std.process.Init, request: Spawn, settings: *hs.Settings, failure: *start_report.Failure) !void {
+/// Read every layer a detached launch applies and refuse what cannot run in
+/// `/` without stdin: a stdin or relative --settings, a relative @FILE, any
+/// relative path or `file:` source in any layer, and the stdin lifetime. The
+/// Host directory itself is the anchored default, never relative.
+fn readDetached(init: std.process.Init, request: Spawn, settings: *hs.Settings, failure: *start_report.Failure) !ProviderIntent {
     if (request.settings_file) |file| {
         if (std.mem.eql(u8, file, "-")) return invalid(failure, "settings", "a Host started by bare rui or rui host start has no stdin; pass a document on stdin with rui host serve --settings -");
         if (!std.fs.path.isAbsolute(file)) return invalid(failure, "settings", relative);
@@ -1464,7 +1515,7 @@ fn readDetached(init: std.process.Init, request: Spawn, settings: *hs.Settings, 
         const value = assignment[equals + 1 ..];
         if (std.mem.startsWith(u8, value, "@") and !std.fs.path.isAbsolute(value[1..])) return invalid(failure, "settings", "@FILE " ++ relative);
     }
-    _ = try readSources(init, request, settings, failure);
+    const intent = try readSources(init, request, settings, failure);
     if (settings.interface.lifetime.value == .stdin) return invalid(failure, "interface.lifetime", "a Host started by bare rui or rui host start has no stdin; use detached, or run rui host serve");
     var name: LeafName = .{};
     if (relativeLeaf(hs.Settings, settings, &name)) {
@@ -1473,6 +1524,7 @@ fn readDetached(init: std.process.Init, request: Spawn, settings: *hs.Settings, 
         failure.* = .init(.settings_invalid, message);
         return error.SettingsInvalid;
     }
+    return intent;
 }
 
 const relative = "a Host started in / has no base for a relative path; give an absolute path";
@@ -1537,19 +1589,6 @@ fn relativeBelow(comptime T: type, value: *const T, name: *LeafName) bool {
     return false;
 }
 
-pub fn replayable(init: std.process.Init, request: Spawn) error{OutOfMemory}!bool {
-    const settings = try init.gpa.create(hs.Settings);
-    defer init.gpa.destroy(settings);
-    settings.* = .{};
-    defer settings.deinit();
-    var failure: start_report.Failure = undefined;
-    readDetached(init, request, settings, &failure) catch |err| {
-        if (err == error.OutOfMemory) return error.OutOfMemory;
-        return false;
-    };
-    return true;
-}
-
 /// Admission before any effect: detached-safe sources and saved placement.
 /// Non-placement overrides are replayable; placement must also be visible to
 /// a later client given only the Host directory.
@@ -1558,10 +1597,17 @@ pub fn checkStart(init: std.process.Init, request: Spawn, failure: *start_report
     defer init.gpa.destroy(settings);
     settings.* = .{};
     defer settings.deinit();
-    try readDetached(init, request, settings, failure);
+    _ = try readStart(init, request, settings, failure);
+}
+
+/// One detached source/placement owner for spawn and settings --check. Keep
+/// provider finishing/resolution out of this read-only phase: attachment and
+/// saved connection editing do not eagerly need another provider's login.
+fn readStart(init: std.process.Init, request: Spawn, settings: *hs.Settings, failure: *start_report.Failure) !ProviderIntent {
+    const intent = try readDetached(init, request, settings, failure);
     try anchorPlacement(init, settings, request.dir, failure);
     // Only overridden sources need a comparison with the saved placement.
-    if (request.settings_file == null and request.assignments.len == 0) return;
+    if (request.settings_file == null and request.assignments.len == 0) return intent;
     // Only saved placement is discoverable by subsequent directory clients.
     const saved_settings = try init.gpa.create(hs.Settings);
     defer init.gpa.destroy(saved_settings);
@@ -1582,6 +1628,7 @@ pub fn checkStart(init: std.process.Init, request: Spawn, failure: *start_report
             return error.SettingsInvalid;
         }
     }
+    return intent;
 }
 
 pub noinline fn spawn(init: std.process.Init, typed: Spawn, ops: Ops, progress: ?Progress, result: *HostLaunchResult) void {
@@ -1697,21 +1744,21 @@ pub noinline fn spawn(init: std.process.Init, typed: Spawn, ops: Ops, progress: 
         result.wait.?.observe(result.startup(), now);
         const until: i128 = result.wait.?.until(now);
         if (progress) |hook| hook.report(hook.context, result.startup());
-        if ((refusal != null and refusal.?.code != .store_locked) or count == 0 or result.startup_len == HostLaunchResult.max_startup_bytes or report_len == report_bytes.len) {
-            if (ops.observe(ops.context, io, &paths, until) != .ready) {
-                if (refusal) |failure| {
-                    launchFailure(result, if (failure.code == .store_schema_behind) .store_format else if (failure.code == .store_fenced) .store_identity else .child_refused, if (failure.code == .store_fenced) error.StoreIdentityMismatch else error.HostStartupFailed, paths.selector());
-                    result.outcome.failed.refusal = failure;
-                    result.outcome.failed.cause.refusal_code = failure.code;
-                    return;
-                }
+        const observed = ops.observe(ops.context, io, &paths, until);
+        const contended = refusal != null and refusal.?.code == .store_locked;
+        const full = result.startup_len == HostLaunchResult.max_startup_bytes or report_len == report_bytes.len;
+        // A losing child can exit before the winner is ready. EOF ends that
+        // child, not the caller's existing opportunity to adopt a ready owner.
+        if ((!contended and (refusal != null or count == 0)) or full) {
+            if (observed != .ready) {
+                if (refusal) |failure| return launchRefusal(result, failure, paths.selector());
                 if (result.startup_len == HostLaunchResult.max_startup_bytes or report_len == report_bytes.len) return launchFailure(result, .startup_full, error.HostReadinessUnconfirmed, paths.selector());
                 if (std.mem.endsWith(u8, result.startup(), "[store_identity_mismatch]\n")) return launchFailure(result, .store_identity, error.StoreIdentityMismatch, paths.selector());
                 if (std.mem.endsWith(u8, result.startup(), "[store_format_unsupported]\n")) return launchFailure(result, .store_format, error.HostStartupFailed, paths.selector());
                 return launchFailure(result, if (result.startup_len == 0) .child_closed else .child_refused, error.HostStartupFailed, paths.selector());
             }
         }
-        switch (ops.observe(ops.context, io, &paths, until)) {
+        switch (observed) {
             .ready => |ready| {
                 const final_count = ops.read(ops.context, startup_read, result.startup_bytes[result.startup_len..]);
                 if (final_count > 0) result.startup_len += @intCast(final_count);
@@ -1725,11 +1772,19 @@ pub noinline fn spawn(init: std.process.Init, typed: Spawn, ops: Ops, progress: 
             },
             .incompatible => return launchFailure(result, .incompatible, error.IncompatibleHost, paths.selector()),
             .access_failure => return launchFailure(result, .store_access, error.StoreAccessFailed, paths.selector()),
-            .unavailable, .owned_unavailable => {},
+            .unavailable, .owned_unavailable => {
+                if (contended and count == 0) {
+                    // Reuse the acknowledged interposition owner: a fixture
+                    // can hold the former premature-refusal transition.
+                    const remaining = @max(0, until - ops.now(ops.context, io));
+                    @import("upgrade_process.zig").waitForTestGate(gpa, io, init.environ_map.get("RUI_TEST_HOST_STORE_LOCKED_GATE"), null, .fromNanoseconds(@intCast(remaining))) catch |err| return launchFailure(result, .interrupted, err, paths.selector());
+                }
+            },
         }
         const remaining = until - ops.now(ops.context, io);
         if (remaining > 0) ops.pause(ops.context, io, @intCast(@min(remaining, 100 * std.time.ns_per_ms))) catch |err| return launchFailure(result, .interrupted, err, paths.selector());
     }
+    if (refusal) |failure| return launchRefusal(result, failure, paths.selector());
     return launchFailure(result, .readiness_timeout, error.HostReadinessUnconfirmed, paths.selector());
 }
 
@@ -1848,7 +1903,7 @@ test "Host start detached first provider assignment selects an exact ordered set
         settings.* = .{};
         defer settings.deinit();
         var failure: start_report.Failure = undefined;
-        try readDetached(init, .{ .dir = dir, .assignments = case.assignments }, settings, &failure);
+        _ = try readDetached(init, .{ .dir = dir, .assignments = case.assignments }, settings, &failure);
         try std.testing.expectEqual(case.openai, settings.providers.entries.openai != null);
         try std.testing.expectEqual(case.codex, settings.providers.entries.codex != null);
         try std.testing.expectEqual(case.chatgpt, settings.providers.entries.chatgpt != null);
@@ -1920,7 +1975,7 @@ test "Host start detached launches rebase typed paths and refuse paths with no b
             try std.testing.expectEqual(@as(u8, ':'), failure.message.slice()[kind.leaf.len]);
             try std.testing.expect(std.mem.indexOf(u8, failure.message.slice(), if (kind.anchored == null) "no stdin" else "absolute path") != null);
         }
-        try std.testing.expect(!try replayable(init, request));
+        try std.testing.expectError(error.SettingsInvalid, checkStart(init, request, &failure));
     };
     var host = try here_dir.createDirPathOpen(init.io, "host-references", .{ .permissions = .fromMode(0o700) });
     defer host.close(init.io);
@@ -1936,7 +1991,7 @@ test "Host start detached launches rebase typed paths and refuse paths with no b
         var failure: start_report.Failure = undefined;
         var cwd: Cwd = .{ .io = init.io, .path = here };
         try checkStart(init, try anchorTyped(a, &cwd, request, &failure), &failure);
-        try std.testing.expect(!try replayable(init, request));
+        try std.testing.expectError(error.SettingsInvalid, checkStart(init, request, &failure));
     }
     var failure: start_report.Failure = undefined;
     var cwd: Cwd = .{ .io = init.io, .path = here };
@@ -1985,7 +2040,7 @@ test "Host start placement agrees across Store interface and every door without 
                 },
                 .starter => result: {
                     try checkStart(init, .{ .dir = dir }, &failure);
-                    try readDetached(init, .{ .dir = dir }, settings, &failure);
+                    _ = try readDetached(init, .{ .dir = dir }, settings, &failure);
                     try anchorPlacement(init, settings, dir, &failure);
                     break :result try platform.placementPaths(init.io, settings);
                 },
@@ -2490,4 +2545,128 @@ test "Host start guided recheck separates supersession from publication durabili
         try std.testing.expect(try api_key.present(first.saved.key_file.slice()));
         if (state == .matching) try std.testing.expect((try confirmConnection(init, dir, &first.saved)) == .saved);
     };
+}
+
+test "Host detached check shares source admission then resolves and seals without opening a Store" {
+    const gpa = std.testing.allocator;
+    var environment: std.process.Environ.Map = .init(gpa);
+    defer environment.deinit();
+    try environment.put("CHECK_MYSQL_URL", "mysql://user:password@127.0.0.1:9/database");
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const init = initForTest(&arena, &environment);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const dir = try testHostDir(&tmp, &root);
+    const settings = try gpa.create(hs.Settings);
+    defer gpa.destroy(settings);
+    const cases = [_]struct { args: []const []const u8, foreground: bool = true, detached: bool = true }{
+        .{ .args = &.{} },
+        .{ .args = &.{ "--set", "execution.activeCapacity=3" } },
+        .{ .args = &.{ "--set", "interface.lifetime=stdin" }, .detached = false },
+        .{ .args = &.{ "--set", "tools.bash.path=relative/bash" }, .detached = false },
+        .{ .args = &.{ "--set", "tools.bash.path=relative/bash", "--set", "tools.bash.path=/bin/bash" } },
+        .{ .args = &.{ "--set", "interface.dir=/tmp/unsaved-check-interface" }, .detached = false },
+        .{ .args = &.{ "--set", "execution.activeCapacity=0" } },
+        .{ .args = &.{ "--set", "execution.activeCapacity=-1" }, .foreground = false, .detached = false },
+        .{ .args = &.{ "--set", "providers.codex.credentialFile=/tmp/check-credential", "--set", "providers.codex.endpoint=https://example.com/responses" }, .foreground = false, .detached = false },
+        .{ .args = &.{ "--set", "providers.openai.key=env:CHECK_ABSENT_KEY" }, .foreground = false, .detached = false },
+    };
+    for (cases, 0..) |case, index| for (std.enums.values(Admission)) |door| {
+        errdefer std.debug.print("check admission case {d}, door {s}\n", .{ index, @tagName(door) });
+        settings.* = .{};
+        defer settings.deinit();
+        var failure: start_report.Failure = undefined;
+        var fixtures: providers.Fixtures = .{};
+        var args: std.ArrayList([]const u8) = .empty;
+        defer args.deinit(gpa);
+        try args.appendSlice(gpa, &.{ "--set", "providers={}" });
+        try args.appendSlice(gpa, case.args);
+        const parsed = try parseForTest(arena.allocator(), args.items);
+        const admitted: anyerror!void = admit: {
+            intake(init, &parsed, dir, settings, &fixtures, &failure, door) catch |err| break :admit err;
+            _ = admitSelected(init, dir, settings, fixtures, &failure) catch |err| break :admit err;
+        };
+        if (if (door == .foreground) case.foreground else case.detached) {
+            try admitted;
+        } else {
+            try std.testing.expectError(error.SettingsInvalid, admitted);
+            try std.testing.expectEqual(start_report.StartError.settings_invalid, failure.code);
+        }
+    };
+    // Check resolves/seals MySQL input, but never dials or locks it.
+    var host = try tmp.dir.openDir(init.io, "host-dir", .{});
+    defer host.close(init.io);
+    try host.writeFile(init.io, .{ .sub_path = "host.json", .data = "{\"providers\":{},\"store\":{\"mysql\":{\"url\":{\"env\":\"CHECK_MYSQL_URL\"}}}}" });
+    try host.setFilePermissions(init.io, "host.json", .fromMode(0o600), .{});
+    settings.* = .{};
+    defer settings.deinit();
+    var failure: start_report.Failure = undefined;
+    var fixtures: providers.Fixtures = .{};
+    const parsed = try parseForTest(arena.allocator(), &.{});
+    try intake(init, &parsed, dir, settings, &fixtures, &failure, .detached);
+    _ = try admitSelected(init, dir, settings, fixtures, &failure);
+    try std.testing.expectEqual(.mysql, std.meta.activeTag(settings.store));
+}
+
+test "Host restart sources preserve previous and current release provider semantics" {
+    const gpa = std.testing.allocator;
+    var environment: std.process.Environ.Map = .init(gpa);
+    defer environment.deinit();
+    // Signed out with no key: the current automatic set is codex alone.
+    try environment.put("HOME", "/nonexistent-upgrade-provider-test-home");
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const init: std.process.Init = .{ .minimal = .{ .args = .{ .vector = &.{} }, .environ = .empty }, .arena = &arena, .gpa = gpa, .io = std.testing.io, .environ_map = &environment, .preopens = .empty };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var host = try tmp.dir.createDirPathOpen(init.io, "host", .{ .permissions = .fromMode(0o700) });
+    defer host.close(init.io);
+    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const dir = root[0..try host.realPath(init.io, &root)];
+    const without = try std.fmt.allocPrint(arena.allocator(), "{s}/without.json", .{dir});
+    const with = try std.fmt.allocPrint(arena.allocator(), "{s}/with.json", .{dir});
+    try host.writeFile(init.io, .{ .sub_path = "without.json", .data = "{\"execution\":{\"activeCapacity\":2}}" });
+    try host.writeFile(init.io, .{ .sub_path = "with.json", .data = "{\"providers\":{\"openai\":{}}}" });
+    for ([_][]const u8{ "without.json", "with.json" }) |name| try host.setFilePermissions(init.io, name, .fromMode(0o600), .{});
+    const Served = struct { codex: bool = false, openai: bool = false, chatgpt: bool = false };
+    // Each `served` is what the old Host served: a flag-only fill started
+    // from no providers, and a document without `providers` served every
+    // built-in entry; named providers added to either.
+    const Case = struct { argv: []const []const u8, previous: bool, served: Served };
+    for ([_]Case{
+        .{ .argv = &.{ "rui", "host", "serve", "--store", dir }, .previous = true, .served = .{} },
+        .{ .argv = &.{ "rui", "host", "serve", "--store", dir, "--active-capacity", "3" }, .previous = true, .served = .{} },
+        .{ .argv = &.{ "rui", "host", "serve", "--store", dir, "--provider", "codex", "--provider", "chatgpt", "--active-capacity", "3" }, .previous = true, .served = .{ .codex = true, .chatgpt = true } },
+        .{ .argv = &.{ "rui", "host", "serve", "--store", dir, "--provider-endpoint", "http://127.0.0.1:9/responses" }, .previous = true, .served = .{ .codex = true } },
+        .{ .argv = &.{ "rui", "host", "serve", "--store", dir, "--settings", without }, .previous = true, .served = .{ .codex = true, .openai = true, .chatgpt = true } },
+        .{ .argv = &.{ "rui", "host", "serve", "--store", dir, "--settings", without, "--provider", "codex" }, .previous = true, .served = .{ .codex = true, .openai = true, .chatgpt = true } },
+        .{ .argv = &.{ "rui", "host", "serve", "--store", dir, "--settings", with }, .previous = true, .served = .{ .openai = true } },
+        .{ .argv = &.{ "rui", "host", "serve", "--store", dir, "--settings", with, "--provider", "chatgpt" }, .previous = true, .served = .{ .openai = true, .chatgpt = true } },
+        // This release's Host with unset providers keeps the current default.
+        .{ .argv = &.{ "rui", "host", "serve", "--store", dir }, .previous = false, .served = .{ .codex = true } },
+        .{ .argv = &.{ "rui", "host", "serve", "--store", dir, "--settings", without }, .previous = false, .served = .{ .codex = true } },
+        .{ .argv = &.{ "rui", "host", "serve", "--store", dir, "--set", "providers.chatgpt={}" }, .previous = false, .served = .{ .chatgpt = true } },
+    }) |case| {
+        const running = try @import("serve_grammar.zig").runningSources(arena.allocator(), case.argv);
+        const request = try restartSources(init, arena.allocator(), .{ .dir = dir, .settings_file = running.settings_file, .assignments = running.assignments }, case.previous, 7);
+        var args: std.ArrayList([]const u8) = .empty;
+        defer args.deinit(gpa);
+        try args.appendSlice(gpa, &.{ "--store", request.dir });
+        if (request.settings_file) |file| try args.appendSlice(gpa, &.{ "--settings", file });
+        for (request.assignments) |value| try args.appendSlice(gpa, &.{ "--set", value });
+        var problem: cli_args.Refusal = undefined;
+        const parsed = try cli_args.Command.host_serve.definition().parse(args.items, arena.allocator(), &problem);
+        const settings = try gpa.create(@import("host_settings.zig").Settings);
+        defer gpa.destroy(settings);
+        settings.* = .{};
+        defer settings.deinit();
+        var fixtures: @import("providers.zig").Fixtures = .{};
+        var failure: @import("start_report.zig").Failure = undefined;
+        try fillAt(init, &parsed, dir, settings, &fixtures, &failure);
+        try std.testing.expectEqual(@as(usize, 7), settings.execution.active_capacity.value);
+        const entries = settings.providers.entries;
+        try std.testing.expectEqual(case.served, Served{ .codex = entries.codex != null, .openai = entries.openai != null, .chatgpt = entries.chatgpt != null });
+    }
 }
