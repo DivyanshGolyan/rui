@@ -181,7 +181,7 @@ fn readChangedSessions(a: *ReadAccess, request: *const session_list.ListSessions
         .{ .last = .{ .delta = .changed, .since = next } });
 }
 
-const settings_columns = "session.session_ref,session.parent_ref,session.workspace,session.provider,session.model," ++ tool_set.namesSql("session.tool_set_id") ++ " AS tools,session.permission_mode,session.label,session.created_at,session.revision,session.next_position," ++
+const settings_columns = "session.session_ref,session.parent_ref,session.creator_ref,session.workspace,session.provider,session.model," ++ tool_set.namesSql("session.tool_set_id") ++ " AS tools,session.permission_mode,session.label,session.created_at,session.revision,session.next_position," ++
     command_domain.archive_state_sql ++ " AS archive_state," ++
     "(SELECT pin_command.command_seq FROM session_pin pin JOIN core_command pin_command ON pin_command.command_key=pin.command_key WHERE pin.session_ref=session.session_ref) AS pin_order," ++
     "(" ++ report_domain.person_message_sql ++ ") AS from_person_at," ++
@@ -217,6 +217,7 @@ const list_row_bare = rsql.Read(.{
 const ListRow = struct {
     session_ref: SessionText,
     parent_ref: ?Bounded(session_id.bytes),
+    creator_ref: ?Bounded(session_id.bytes),
     workspace: Bounded(workspace_path.max_bytes),
     provider: provider_name.Provider,
     model: Bounded(model_capability.max_model_bytes),
@@ -335,6 +336,7 @@ fn rowValues(rows: []const ShownRow, index: usize, now_ms: u64, row: *const List
         .pin_order = if (row.pin_order) |rank| rank.get() else null,
         .reference = row.session_ref.slice(),
         .parent = if (row.parent_ref) |*parent| parent.slice() else null,
+        .creator = if (row.creator_ref) |*creator| creator.slice() else null,
         .workspace = row.workspace.slice(),
         .provider = row.provider,
         .model = row.model.slice(),

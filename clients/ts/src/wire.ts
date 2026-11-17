@@ -2868,6 +2868,7 @@ export interface components {
             since?: string | null;
         };
         PageWork: {
+            creator: string | null;
             read_version: string;
             state: components["schemas"]["WorkStateJson"];
             turn: components["schemas"]["Decimal"] | null;
@@ -3149,6 +3150,7 @@ export interface components {
             /** @enum {string} */
             permission_mode: "ask" | "bypass";
             parent: string | null;
+            creator: string | null;
             label: string | null;
             created_at: components["schemas"]["Decimal"];
             revision: components["schemas"]["Decimal"];
@@ -3525,6 +3527,8 @@ export interface components {
             request_id: string | null;
             /** @enum {unknown} */
             reasoning_effort: "none" | "low" | "medium" | "high" | "xhigh" | "max" | null;
+            /** @description None repeated; the names' bytes total at most x-rui-max-bytes. The effective tool offer frozen at this Operation's admission. */
+            offered_tools: string[];
         };
         domainreport_full_shapeFullOutcome: {
             code: string;

@@ -57,7 +57,7 @@ class NavigationTests(unittest.TestCase):
         with patch.object(sys, "argv", [sys.argv[0], sys.executable]):
             from human_cli_fixture import composer_bounds, footer_click
             from session_chrome_cases import composing, feed_bottom, status, transcript_rows
-        for persistent in ([], ["Sending…"], ["held line 1", "held line 2", "held line 3"]):
+        for persistent in ([], ["Opening…"], ["held line 1", "held line 2", "held line 3"]):
             for draft in ("", "kept draft"):
                 for split in (False, True):
                     for right in ("alt+i info", "! Unknown command /nosuch"):
@@ -92,14 +92,17 @@ class NavigationTests(unittest.TestCase):
 
         lines = ["History line 099", "TD4 history end", "─" * 80, " Chat",
                  "   Effort          low", "   Permissions     run without asking",
-                 "   Tools           bash", "   Folder          …/long-parent/specimen",
+                 "   Allowed tools   bash", "   Folder          …/long-parent/specimen",
                  "   Model           gpt-6-luna", "",
                  "   Rename     Archive     Copy last answer", "", "─" * 80, " › ", "─" * 80,
                  " ‹ Chat · info       esc close"]
         chat_info_ready(Terminal(lines), "specimen")
-        for label in ("Effort", "Permissions", "Tools", "Folder", "Model", "Rename", "Archive", "Copy last answer", " · info", "esc close"):
+        for label in ("Effort", "Permissions", "Allowed tools", "Folder", "Model", "Rename", "Archive", "Copy last answer", " · info", "esc close"):
             with self.subTest(missing=label), self.assertRaisesRegex(AssertionError, "chat info fields and footer"):
                 chat_info_ready(Terminal([line.replace(label, "missing") for line in lines]), "specimen")
+        for label in ("Tools", "Loaded tools", "Model offer"):
+            with self.subTest(misleading_tools_label=label), self.assertRaisesRegex(AssertionError, "chat info fields and footer"):
+                chat_info_ready(Terminal([line.replace("Allowed tools", label) for line in lines]), "specimen")
         with self.assertRaisesRegex(AssertionError, "chat info fields and footer"):
             chat_info_ready(Terminal([line.replace("…/long-parent/specimen", "unavailable") for line in lines]), "specimen")
         for changed, expected in (
@@ -142,13 +145,13 @@ class OverviewTests(unittest.TestCase):
             def wait(self, predicate, *, label):
                 assert predicate(), label
 
-        frame = "  + New Session\n  ✓ TD4 saved conversation\n  Settings"
+        frame = "   + New Session\n     TD4 saved conversation\n     Settings"
         escaped_overview(Terminal(frame), "TD4 saved conversation")
         for marker in ("+ New Session", "TD4 saved conversation", "Settings"):
             with self.subTest(missing=marker), self.assertRaisesRegex(AssertionError, "overview after expired standalone Esc"):
                 escaped_overview(Terminal(frame.replace(marker, "missing")), "TD4 saved conversation")
         with self.assertRaisesRegex(AssertionError, "overview after expired standalone Esc"):
-            escaped_overview(Terminal(frame.replace("✓ TD4 saved conversation", "○ a1b2c3")),
+            escaped_overview(Terminal(frame.replace("  TD4 saved conversation", "○ a1b2c3")),
                              "TD4 saved conversation")
         for editor, failure in (("Type a task", "overview has an editor"),
                                 (" › ab", "overview has a composer"),

@@ -18,9 +18,10 @@ function cache(id, ref, platform = 'Linux-X64', part = 'all') {
 async function run(caches, faults = {}) {
   const remaining = new Map(caches.map(c => [c.id, c]));
   let error;
+  const logs = [];
   try {
     await prune({
-      context: {repo: {owner: 'test', repo: 'rui'}}, core: {info() {}},
+      context: {repo: {owner: 'test', repo: 'rui'}}, core: {info(message) { logs.push(message); }},
       github: {
         paginate: async () => {
           if (faults.inventory) throw new Error('Inventory unavailable');
@@ -39,7 +40,7 @@ async function run(caches, faults = {}) {
       },
     });
   } catch (failure) { error = failure; }
-  return {ids: [...remaining.keys()].sort((a, b) => a - b), error};
+  return {ids: [...remaining.keys()].sort((a, b) => a - b), error, logs};
 }
 
 test('prune every PR snapshot and old main snapshots without crossing platform or partition boundaries', async () => {
@@ -66,6 +67,18 @@ test('prune every PR snapshot and old main snapshots without crossing platform o
   assert.deepEqual(result.ids, [3, 7, 8, 9, 10, 14, 15, 16, 18, 20, 21]);
 });
 
+test('maintenance attributes deleted snapshots and reports retained group bytes', async () => {
+  const main = 'refs/heads/main';
+  const old = {...cache(1, main), version: 'old-format'};
+  const newest = {...cache(2, main), size_in_bytes: 6400};
+  const compiler = {...cache(3, main), key: 'rui-compiler-Linux-X64-0.17.1', size_in_bytes: 86};
+  const result = await run([old, newest, compiler]);
+  assert.ifError(result.error);
+  assert.deepEqual(result.ids, [2, 3]);
+  assert.equal(result.logs[0], 'Retained main cache bytes by group: {"compiler/Linux-X64":86,"build/Linux-X64/all":6400}');
+  assert.ok(result.logs.some(line => line.includes(`key=${old.key}, version=old-format`)));
+});
+
 test('build layouts share partition groups across repins without crossing parts', async () => {
   const main = 'refs/heads/main';
   const reordered = (id, part, platform = 'Linux-X64') => ({
@@ -85,15 +98,36 @@ test('build layouts share partition groups across repins without crossing parts'
   assert.deepEqual(result.ids, [3, 5, 6, 7, 9]);
 });
 
-test('build restores keep each part apart and seed parts without snapshots from baseline', () => {
-  const root = `${__dirname}/../..`;
-  const action = readFileSync(`${root}/.github/actions/setup/caches/action.yml`, 'utf8');
+function buildKeyPolicy() {
+  const action = readFileSync(`${__dirname}/../../.github/actions/setup/caches/action.yml`, 'utf8');
   const step = action.match(/- name: Name the build cache keys\n[\s\S]*?\n    - /)[0];
   const script = step.match(/^      run: \|\n((?: {8}.*\n)+)/m)[1].replace(/^ {8}/gm, '');
   const restore = [...action.matchAll(/restore-keys: \|\n((?: {10}.*\n)+)/g)].map(match => match[1]);
   assert.equal(restore.length, 1);
   const order = [...restore[0].matchAll(/build-keys\.outputs\.([a-z-]+)/g)].map(m => m[1]);
-  assert.deepEqual(order, ['prefix-deps', 'prefix-part', 'prefix-seed']);
+  const keys = (part, deps, sources, platform = 'Linux-X64') => {
+    const [os, arch] = platform.split('-');
+    const expressions = {'runner.os': os, 'runner.arch': arch, 'steps.tools.outputs.identity': 'a'.repeat(64)};
+    const prefix = step.match(/^        PREFIX: (.*)$/m)[1].replace(/\$\{\{ (.*?) \}\}/g, (_, name) => {
+      assert.ok(Object.hasOwn(expressions, name), `unknown prefix input ${name}`);
+      return expressions[name];
+    });
+    const dir = mkdtempSync(join(tmpdir(), 'rui-keys-'));
+    try {
+      const output = join(dir, 'output');
+      execFileSync('bash', ['-ec', script], {
+        env: {PATH: process.env.PATH, PREFIX: prefix, DEPS: deps, SOURCES: sources, CHECK_PART: part, GITHUB_OUTPUT: output},
+      });
+      return Object.fromEntries(readFileSync(output, 'utf8').trimEnd().split('\n').map(line => line.split(/=(.*)/s).slice(0, 2)));
+    } finally { rmSync(dir, {recursive: true, force: true}); }
+  };
+  return {keys, order, step};
+}
+
+test('build restores keep each part apart and seed parts without snapshots from baseline', () => {
+  const root = `${__dirname}/../..`;
+  const {keys: nameKeys, order} = buildKeyPolicy();
+  assert.deepEqual(order, ['prefix-deps', 'prefix-part', 'prefix-previous-deps', 'prefix-previous-part', 'prefix-legacy-deps', 'prefix-legacy-part', 'prefix-seed']);
   const workflows = `${root}/.github/workflows`;
   const parts = new Set(['all']);
   for (const file of readdirSync(workflows).filter(file => file.endsWith('.yml'))) {
@@ -112,18 +146,8 @@ test('build restores keep each part apart and seed parts without snapshots from 
     }
   }
   for (const part of ['compiled', 'compiled-unit', 'codegen', 'baseline']) assert.ok(parts.has(part), part);
-  const prefix = `rui-build-v2-Linux-X64-0.17.1-${'a'.repeat(64)}-`;
   const [d1, d2, s1, s2] = ['d', 'e', 'b', 'c'].map(c => c.repeat(64));
-  const keys = (part, deps, sources = s2) => {
-    const dir = mkdtempSync(join(tmpdir(), 'rui-keys-'));
-    try {
-      const output = join(dir, 'output');
-      execFileSync('bash', ['-ec', script], {
-        env: {PATH: process.env.PATH, PREFIX: prefix, DEPS: deps, SOURCES: sources, CHECK_PART: part, GITHUB_OUTPUT: output},
-      });
-      return Object.fromEntries(readFileSync(output, 'utf8').trimEnd().split('\n').map(line => line.split(/=(.*)/s).slice(0, 2)));
-    } finally { rmSync(dir, {recursive: true, force: true}); }
-  };
+  const keys = (part, deps, sources = s2) => nameKeys(part, deps, sources);
   // actions/cache: an exact key, else the newest key matching the first restore
   // prefix that matches anything; empty restore keys are dropped.
   const restored = (part, deps, existing) => {
@@ -155,6 +179,151 @@ test('build restores keep each part apart and seed parts without snapshots from 
         else assert.deepEqual(reached, [], `${own} restores ${other}: ${snapshot}`);
       }
     }
+  }
+});
+
+test('only Linux X64 compiled migrates with ordered legacy fallbacks and unchanged source identity', () => {
+  const {keys, order, step} = buildKeyPolicy();
+  const [deps, sources, otherDeps] = ['b', 'c', 'd'].map(c => c.repeat(64));
+  assert.match(step, /SOURCES: \$\{\{ hashFiles\('build.zig', 'build\/\*\*', 'src\/\*\*', 'tests\/integration\/\*\*'\) \}\}/);
+  const v2 = `rui-build-v2-Linux-X64-0.17.1-${'a'.repeat(64)}-`;
+  const v3 = v2.replace('-v2-', '-v3-');
+  const v4 = v2.replace('-v2-', '-v4-');
+  const named = keys('compiled', deps, sources);
+  assert.equal(named.key, `${v4}compiled.${deps}-${sources}`);
+  const prefixes = order.map(field => named[field]);
+  assert.deepEqual(prefixes, [
+    `${v4}compiled.${deps}-`, `${v4}compiled.`,
+    `${v3}compiled.${deps}-`, `${v3}compiled.`,
+    `${v2}compiled.${deps}-`, `${v2}compiled.`, `${v2}baseline.${deps}-`,
+  ]);
+  const restore = existing => {
+    if (existing.includes(named.key)) return {key: named.key, exact: true};
+    for (const prefix of prefixes) {
+      const matched = existing.filter(key => key.startsWith(prefix));
+      if (matched.length) return {key: matched[matched.length - 1], exact: false};
+    }
+    return {key: null, exact: false};
+  };
+  const ordered = [
+    `${v4}compiled.${deps}-${'e'.repeat(64)}`,
+    `${v4}compiled.${otherDeps}-${sources}`,
+    `${v3}compiled.${deps}-${'e'.repeat(64)}`,
+    `${v3}compiled.${otherDeps}-${sources}`,
+    `${v2}compiled.${deps}-${sources}`,
+    `${v2}compiled.${otherDeps}-${sources}`,
+    `${v2}baseline.${deps}-${sources}`,
+  ];
+  for (let i = 0; i < ordered.length; i++) {
+    assert.deepEqual(restore(ordered.slice(i)), {key: ordered[i], exact: false}, `restore priority ${i}`);
+  }
+  assert.deepEqual(restore([...ordered, named.key]), {key: named.key, exact: true});
+  for (const version of [v2, v3]) {
+    assert.deepEqual(restore([`${version}compiled.${deps}-${sources}`]), {key: `${version}compiled.${deps}-${sources}`, exact: false});
+    assert.notEqual(`${version}compiled.${deps}-${sources}`, named.key, 'immutable legacy exact snapshot cannot mask migration');
+  }
+  const partial = saveKey({kind: 'build', key: named.key, setupOutcome: 'success', workOutcome: 'failure', runId: '1', runAttempt: '1'});
+  assert.deepEqual(restore([partial]), {key: partial, exact: false});
+  assert.equal(saveKey({kind: 'build', key: named.key, setupOutcome: 'success', workOutcome: 'success'}), named.key);
+  for (const platform of ['Linux-X64', 'Linux-ARM64', 'macOS-ARM64', 'Windows-X64']) {
+    for (const part of ['all', 'compiled', 'compiled-unit', 'compiled-other', 'codegen', 'baseline']) {
+      if (platform === 'Linux-X64' && part === 'compiled') continue;
+      const ordinary = keys(part, deps, sources, platform);
+      const prefix = `rui-build-v2-${platform}-0.17.1-${'a'.repeat(64)}-`;
+      assert.equal(ordinary.key, `${prefix}${part}.${deps}-${sources}`);
+      assert.equal(ordinary['prefix-previous-deps'], '');
+      assert.equal(ordinary['prefix-previous-part'], '');
+      assert.equal(ordinary['prefix-legacy-deps'], '');
+      assert.equal(ordinary['prefix-legacy-part'], '');
+      const restoreKeys = order.map(field => ordinary[field]).filter(Boolean);
+      assert.equal(new Set(restoreKeys).size, restoreKeys.length, `${platform}/${part} duplicates fallbacks`);
+    }
+  }
+});
+
+function compiledSnapshot(id, version = 4, partial = false) {
+  const entry = cache(id, 'refs/heads/main', 'Linux-X64', 'compiled');
+  entry.key = `rui-build-v${version}-Linux-X64-0.17.1-${'a'.repeat(64)}-compiled.${'b'.repeat(64)}-${id.toString(16).padStart(64, '0')}`;
+  if (partial) entry.key += '-partial-123-1';
+  return entry;
+}
+
+test('complete v4 retires every v2/v3 layout and partial despite a later concurrent legacy save', async () => {
+  const entries = [
+    compiledSnapshot(1), compiledSnapshot(2, 4, true),
+    compiledSnapshot(10, 3), compiledSnapshot(11, 3, true),
+    compiledSnapshot(3, 2), compiledSnapshot(4, 2, true),
+    cache(5, 'refs/heads/main', 'Linux-X64', 'compiled'),
+    {...cache(6, 'refs/heads/main', 'Linux-X64', 'compiled'), key: `${cache(6, 'refs/heads/main', 'Linux-X64', 'compiled').key}-partial-1-1`},
+    cache(7, 'refs/heads/main', 'Linux-X64', 'compiled-unit'),
+    cache(8, 'refs/heads/main', 'macOS-ARM64', 'compiled'),
+    {...cache(9, 'refs/heads/main'), key: 'rui-compiler-Linux-X64-0.17.1'},
+  ];
+  const first = await run(entries);
+  assert.ifError(first.error);
+  assert.deepEqual(first.ids, [1, 2, 7, 8, 9]);
+  const later = await run([...entries.filter(entry => first.ids.includes(entry.id)), compiledSnapshot(20, 2), compiledSnapshot(21, 2, true), compiledSnapshot(22, 3), compiledSnapshot(23, 3, true)]);
+  assert.ifError(later.error);
+  assert.deepEqual(later.ids, first.ids, 'newer legacy writers cannot evict the only complete v4');
+});
+
+test('partial v4 preserves legacy fallbacks until completion, then retains its own newest partial independently', async () => {
+  const entries = [compiledSnapshot(1, 2), compiledSnapshot(2, 2, true), compiledSnapshot(3, 4, true), compiledSnapshot(7, 3), compiledSnapshot(8, 3, true)];
+  const partialOnly = await run(entries);
+  assert.ifError(partialOnly.error);
+  assert.deepEqual(partialOnly.ids, [1, 2, 3, 7, 8], 'unfinished v4 cannot retire complete or partial v2/v3 fallbacks');
+  const completed = await run([...entries, compiledSnapshot(4), compiledSnapshot(5, 4, true), compiledSnapshot(6)]);
+  assert.ifError(completed.error);
+  assert.deepEqual(completed.ids, [5, 6]);
+  for (const ref of ['refs/pull/12/merge', 'refs/heads/feature']) {
+    const otherRef = await run([compiledSnapshot(1, 2), {...compiledSnapshot(7), ref}]);
+    assert.ifError(otherRef.error);
+    assert.ok(otherRef.ids.includes(1), `${ref} cannot establish main migration`);
+  }
+});
+
+test('compiled retention covers complete and partial states across v2/v3/v4 and timestamp orders', async () => {
+  // Each bit independently enables a complete or partial generation. Every
+  // enabled group has two snapshots so the oracle also checks newest wins.
+  for (let state = 0; state < 64; state++) {
+    for (const versions of [[2, 3, 4], [4, 3, 2]]) {
+      const entries = [], newest = [];
+      let id = 0;
+      for (const version of versions) {
+        for (const partial of [false, true]) {
+          const bit = (version - 2) * 2 + Number(partial);
+          if (!(state & (1 << bit))) continue;
+          entries.push(compiledSnapshot(++id, version, partial));
+          const latest = compiledSnapshot(++id, version, partial);
+          entries.push(latest);
+          newest.push({entry: latest, version});
+        }
+      }
+      const hasCompleteV4 = Boolean(state & (1 << 4));
+      const expected = newest.filter(({version}) => !hasCompleteV4 || version === 4)
+        .map(({entry}) => entry.id).sort((a, b) => a - b);
+      const result = await run(entries);
+      assert.ifError(result.error);
+      assert.deepEqual(result.ids, expected, `state=${state}, timestamp order=${versions}`);
+    }
+  }
+});
+
+test('malformed v4 lookalikes neither trigger migration nor participate in pruning', async () => {
+  const valid = compiledSnapshot(10).key;
+  const lookalikes = [
+    valid + '-extra', valid.replace('-compiled.', '-compiled-unit.'),
+    valid.replace('Linux-X64', 'macOS-ARM64'), valid.replace('Linux-X64', 'Linux-ARM64'),
+    valid.replace('0.17.1', '0.18.1'), valid.replace('a'.repeat(64), 'a'.repeat(63)),
+    valid.replace('a'.repeat(64), 'A'.repeat(64)), valid.replace('compiled.', 'compiled-'),
+    valid + '-partial-0-1', valid + '-partial-123-no', valid + '-partial-123-1-extra',
+    valid + '-partial-123-1-partial-124-1',
+  ].map((key, i) => ({...cache(i + 20, 'refs/heads/main'), key}));
+  const legacy = compiledSnapshot(1, 2);
+  for (const extra of [[], [compiledSnapshot(2)]]) {
+    const result = await run([legacy, ...lookalikes, ...extra]);
+    assert.ifError(result.error);
+    assert.deepEqual(result.ids, [...(extra.length ? [2] : [1]), ...lookalikes.map(entry => entry.id)]);
   }
 });
 
@@ -338,13 +507,14 @@ test('capture only missing exact keys, preserving fallback and cold misses even 
   assert.match(capture, /always\(\) && inputs.save-only != 'true'/);
   const script = capture.match(/^      run: \|\n((?: {8}.*\n)+)/m)[1].replace(/^ {8}/gm, '');
   const caches = ['COMPILER', 'BUILD', 'PACKAGES', 'RUNNER'];
+  const migratedBuildKey = buildKeyPolicy().keys('compiled', 'b'.repeat(64), 'c'.repeat(64)).key;
   for (const publish of ['true', 'false']) {
     for (let state = 0; state < 3 ** caches.length; state++) {
       const env = {PATH: process.env.PATH, PUBLISH: publish};
       let rest = state;
       for (const cache of caches) {
         const status = rest % 3; rest = Math.floor(rest / 3);
-        env[`${cache}_KEY`] = status === 2 ? '' : `key-${cache}`;
+        env[`${cache}_KEY`] = status === 2 ? '' : cache === 'BUILD' ? migratedBuildKey : `key-${cache}`;
         env[`${cache}_HIT`] = status === 0 ? 'true' : status === 1 ? 'false' : '';
       }
       const directory = mkdtempSync(join(tmpdir(), 'rui-cache-save-'));

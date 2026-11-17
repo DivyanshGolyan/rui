@@ -2,7 +2,7 @@ const std = @import("std");
 
 pub const Rgb = [3]u8;
 pub const Mode = enum { light, dark };
-pub const Background = enum { ground, selvedge, selection, hover, alert };
+pub const Background = enum { ground, selvedge, user_message, selection, hover, alert };
 pub const Text = enum { strong, body, indigo, quiet, attention, failure, on_alert };
 pub const Depth = enum { direct, indexed };
 pub const Color = union(Depth) { direct: Rgb, indexed: u8 };
@@ -63,6 +63,7 @@ pub fn background(mode: Mode, depth: Depth, role: Background) Color {
     const rgb = switch (role) {
         .ground => p.ground,
         .selvedge => p.selvedge,
+        .user_message => midpoint(p.ground, p.selvedge),
         .selection => p.selection,
         .hover => midpoint(p.selvedge, p.selection),
         .alert => Rgb{ 0xe9, 0xb1, 0x30 },
@@ -245,7 +246,7 @@ test "readable text meets WCAG contrast on its layout backgrounds" {
         }
     };
     for (std.enums.values(Mode)) |mode| for (std.enums.values(Depth)) |depth| {
-        for ([_]Background{ .ground, .selvedge, .selection, .hover }) |bg| {
+        for ([_]Background{ .ground, .selvedge, .user_message, .selection, .hover }) |bg| {
             for ([_]Text{ .strong, .body, .indigo, .quiet, .attention, .failure }) |fg| {
                 const contrast = Check.contrast(text(mode, depth, fg, bg), background(mode, depth, bg));
                 if (contrast < 4.5) std.debug.print("{s} {s}: {s} on {s}: {d:.3}\n", .{ @tagName(mode), @tagName(depth), @tagName(fg), @tagName(bg), contrast });
@@ -253,5 +254,15 @@ test "readable text meets WCAG contrast on its layout backgrounds" {
             }
         }
         try std.testing.expect(Check.contrast(text(mode, depth, .on_alert, .alert), background(mode, depth, .alert)) >= 4.5);
+    };
+}
+
+test "user message tint is faint cloth distinct from ground in both themes and depths" {
+    try std.testing.expectEqual(Rgb{ 0xec, 0xe5, 0xd5 }, background(.light, .direct, .user_message).direct);
+    try std.testing.expectEqual(Rgb{ 0x16, 0x1d, 0x3c }, background(.dark, .direct, .user_message).direct);
+    try std.testing.expectEqual(@as(u8, 254), background(.light, .indexed, .user_message).indexed);
+    try std.testing.expectEqual(@as(u8, 235), background(.dark, .indexed, .user_message).indexed);
+    for (std.enums.values(Mode)) |mode| for (std.enums.values(Depth)) |depth| {
+        try std.testing.expect(!std.meta.eql(background(mode, depth, .ground), background(mode, depth, .user_message)));
     };
 }

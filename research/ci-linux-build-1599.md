@@ -96,3 +96,51 @@ Subtract the REST step timestamps for setup and compile; parse the matching buil
 Use `gh api 'repos/DivyanshGolyan/rui/actions/workflows/promote.yml/runs?per_page=10'` for the Promote sample. For PRs, paginate `check.yml` runs with `event=pull_request&status=completed`, retaining the first 20 successful Linux build jobs; retain skipped/cancelled jobs as inventory, outside timing medians.
 
 The collection's raw logs, REST payloads, analysis scripts, structured metrics, skipped/cancelled inventory and SHA256SUMS are retained at `/mnt/project-files/ci-speed-1116/linux-build-1599-measurements/`. Six independent measurement-validation checks passed. These hosted baselines and source inspections are not evidence of the experiment's result.
+
+
+## Part 2: snapshot contents and compiler disappearance
+
+A Linux LLVM diagnostic on November 17, 2026, [run 44017555448](https://github.com/DivyanshGolyan/rui/actions/runs/44017555448), restored a 6,695,209,472-byte compressed snapshot. Setup took 256 seconds, including 216.891 seconds for that restore: 32.093 seconds receiving and 184.557 seconds extracting. The compiler archive hit and restored in 1.507 seconds. The instrumented compile took 484 seconds and the producer job 757 seconds; `strace` overhead prevents treating this as an ordinary build comparison.
+
+The restored four roots held 41,826,321,591 apparent bytes: local cache 41,320,346,503; global compiler cache 278,602,931; packages 180,916,197; screen packages 46,455,960. `du -a -b` suppresses repeated hardlinked entries, so these are inventory values, not allocated bytes or a full independent per-file logical sum.
+
+| Restored understood CLI class | Directories | Apparent directory bytes | Manifest input references | Opened by measured producer |
+|---|---:|---:|---:|---:|
+| Debug | 48 | 13,385,947,737 | 0 | 0 |
+| ReleaseSafe | 47 | 6,709,376,928 | 0 | 0 |
+| ReleaseSmall | 47 | 1,331,659,816 | 0 | 0 |
+| Upgrade fixture / PR check | 0 | 0 | 0 | 0 |
+| Total | 142 | 21,426,984,481 | 0 | 0 |
+
+All 142 directories were outputs of old complete manifests. Revision-specific generated options give historical CLI compilations distinct input manifests, so retaining every discovered manifest output retains those obsolete generations too. Compaction instead preserves all manifest **inputs**, the actual current installed CLI content and unknown output classes. Only complete recognized native CLI layouts with proven local owning manifests may expire; their manifests are invalidated first. This does not infer that every unopened directory is dead: the measured producer opened only 144/1,221 restored local output directories, and most unvisited classes remain untouched. In particular, 73 `test` output directories account for another 9,196,551,989 apparent bytes including companions, but three were used by the rest producer and this first sweep retains the entire class.
+
+The compiler key and installation path are unchanged across hits and misses. In Promote 44003556067, unit producer [133773548353](https://github.com/DivyanshGolyan/rui/actions/runs/44003556067/job/133773548353) missed at 02:31:50 UTC and successfully recreated `rui-compiler-Linux-X64-0.17.1` at 02:32:45. The long producer's reservation collision at 02:51 followed that successful recreation; it did not cause the disappearance. Maintenance logs contain no compiler-sized scripted deletion in either investigated miss window. A preceding publisher replaced a 6,484,314,810-byte build snapshot with a 6,612,528,053-byte one. Their potential overlap alone totals 13,096,842,863 bytes, before other partitions/platforms. Capacity pressure is the leading inference, not a measured eviction event: cache inventory/usage access was refused, so actual quota, simultaneous persistence and external deletion remain unverified. The evidence does not justify an independent compiler-key change. The snapshot and retention fix addresses the shared pressure; new maintenance logging records key/version and retained group bytes for future attribution.
+
+The raw compiler lifecycle, publisher and maintenance logs, source provenance and checksums are under `/mnt/project-files/ci-speed-1116/linux-build-1599-measurements/compiler-misses/`. The diagnostic artifact, manifests, trace, classified inventories and 30 passing consistency checks are under the sibling `cache-profile/` directory. These are measured diagnosis and source evidence. The 21.4 GB figure is **not yet** a compressed saving or a no-extra-compiles result.
+
+The opt-in paired diagnostic begins after a successful ordinary LLVM producer. It checkpoints the main-only cache, protects its installed production CLIs (and the upgrade fixture when selected) and tests unchanged and fixed-source-edit producers in both LLVM and PR profiles. Each control/candidate arm restores the same manifests and mutable outputs, runs the existing inode restat and compares named compile/cache statuses plus verbose C/link commands. Existing executable trees stay in place with inode/metadata guards; an unexpected write fails the experiment. This bounds disk use while preserving evidence. The diagnostic also streams identical tar+zstd commands before and after compaction, recording compressed bytes and elapsed time without storing two multi-GB archives. Publication is disabled for diagnostics, including main dispatches.
+
+Qualification remains pending until these actual paired builds and hosted byte measurements finish. This in-place comparison does not independently reproduce a second complete tar extraction or a fresh-inode checkout. Ordinary PR restore timing after compaction also requires a trusted main publication: branch and PR workflows restore main's caches and cannot publish the optimized snapshot themselves. Keep that distinction when adding the before/after setup and producer timing table.
+
+
+### Fresh ordinary PR baseline before part 2 publication
+
+The newest three successful ordinary PR producers after #1601, collected at 2026-11-17T07:45:45Z, show continued archive growth. All three compiler restores hit the same 86,862,966-byte archive; all build restores were prefix hits.
+
+| Baseline | Setup s | Compile s | linux_build s | Build archive B | Restore / download / extract s |
+|---|---:|---:|---:|---:|---:|
+| PR [44034556280](https://github.com/DivyanshGolyan/rui/actions/runs/44034556280/job/133889572371), attempt 2 | 358 | 267 | 642 | 7,313,055,640 | 313.469 / 62.769 / 250.179 |
+| PR [44033721963](https://github.com/DivyanshGolyan/rui/actions/runs/44033721963/job/133871683724) | 192 | 326 | 528 | 7,313,055,640 | 164.439 / 30.283 / 133.869 |
+| PR [44025518071](https://github.com/DivyanshGolyan/rui/actions/runs/44025518071/job/133844918998) | 258 | 215 | 486 | 7,022,722,895 | 223.486 / 25.210 / 198.073 |
+| Fresh three-job median | 258 | 267 | 528 | 7,313,055,640 | 223.486 / 30.283 / 198.073 |
+
+Two observations are attempts from the same PR; workloads and runners differ, and two parent workflows failed outside these successful producers. This is an observational pre-compaction baseline, with no speedup inference. Full keys, target/part lists, REST timestamps, raw logs, 50 passing extraction/selection checks and checksums are retained under `/mnt/project-files/ci-speed-1116/linux-build-1599-measurements/part2-before/`.
+
+
+### First main publication and qualification preflight
+
+After #1618 auto-merged, [main run 44053736418, job 133937839403](https://github.com/DivyanshGolyan/rui/actions/runs/44053736418/job/133937839403) passed with setup 378 s, compile 326 s and job 856 s. It restored a 7,633,162,867-byte v2 archive, then saved a 7,716,570,173-byte v3 archive. Compaction **skipped** with `manifest has no final sentinel`: no bytes were removed and no reduction is established. The save took 129.188 s; restore took 334.051 s (118.503 s download, 215.136 s extraction). The compiler hit. This is a publication witness, not a compacted-cache result.
+
+Pinned `std.Build.Cache.Manifest.checkLocked` treats a zero-byte h file as never finalized and returns an incomplete-manifest miss. `finalize` appends the final sentinel only when writing a complete manifest. The restored diagnostic inventory contains such ordinary zero-length placeholders. They must be preserved and checked for mutation, but cannot be decoded as complete artifact owners. In contrast, a one-byte NUL manifest is complete with zero inputs. Nonempty invalid manifests still block compaction. The corrected publication policy uses v4 with legacy restore fallback because the untrimmed v3 exact key is immutable.
+
+The earlier [qualification dispatch 44050257637](https://github.com/DivyanshGolyan/rui/actions/runs/44050257637/job/133926218927) passed its 147-step initial LLVM producer (setup 333 s, traced compile 526 s), then failed checkpointing Ghostty's relative shared-library aliases. Its uploaded summary has zero comparison pairs: no audit, candidate compaction or parity build ran. Contained relative file aliases need identity/target guards and literal-link backup; escaping, broken, cyclic, absolute and directory aliases remain unsupported. The follow-up prints full errors and pair differences in the job log. Neither preflight failure demonstrates additional compilation from a compacted snapshot; real paired reuse and size qualification remains required.

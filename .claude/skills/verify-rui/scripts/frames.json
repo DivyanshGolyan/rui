@@ -5,6 +5,744 @@
   ],
   "states": [
     {
+      "name": "send-optimistic-night",
+      "note": "A real client Message stays in the feed while its fixture-owned Host is suspended; capture before the admission deadline with an empty composer",
+      "theme": "night",
+      "open": "Night optimistic witness",
+      "cast": [
+        {
+          "label": "Night optimistic witness",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "messages": [
+            "Earlier conversation witness"
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "text": "Optimistic send witness"
+        },
+        {
+          "wait": "Optimistic send witness"
+        },
+        {
+          "host": "suspend"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Optimistic send witness",
+          "empty_composer": true,
+          "timeout": 3
+        }
+      ],
+      "expect": [
+        "Optimistic send witness",
+        "alt+i info"
+      ],
+      "absent": [
+        "Sending…",
+        "Sending...",
+        "Not confirmed"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      ]
+    },
+    {
+      "name": "send-failed-night",
+      "note": "A real client Message stays in the feed while its fixture-owned Host is suspended; admission timeout attaches retry to the original Message",
+      "theme": "night",
+      "open": "Night failed witness",
+      "cast": [
+        {
+          "label": "Night failed witness",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "messages": [
+            "Earlier conversation witness"
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "text": "Send failure witness"
+        },
+        {
+          "wait": "Send failure witness"
+        },
+        {
+          "host": "suspend"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Not confirmed · ctrl+r retries original",
+          "empty_composer": true,
+          "timeout": 12
+        }
+      ],
+      "expect": [
+        "Send failure witness",
+        "Not confirmed · ctrl+r retries original",
+        "alt+i info"
+      ],
+      "absent": [
+        "Sending…",
+        "Sending..."
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      ],
+      "expect_next": {
+        "Send failure witness": "Not confirmed · ctrl+r retries original"
+      },
+      "expect_style": [
+        {
+          "text": "Not confirmed · ctrl+r retries original",
+          "foreground": "#a2a3bc"
+        }
+      ],
+      "expect_background": {
+        "Not confirmed · ctrl+r retries original": "#121933"
+      }
+    },
+    {
+      "name": "send-optimistic-day",
+      "note": "A real client Message stays in the feed while its fixture-owned Host is suspended; capture before the admission deadline with an empty composer",
+      "theme": "day",
+      "open": "Day optimistic witness",
+      "cast": [
+        {
+          "label": "Day optimistic witness",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "messages": [
+            "Earlier conversation witness"
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "text": "Optimistic send witness"
+        },
+        {
+          "wait": "Optimistic send witness"
+        },
+        {
+          "host": "suspend"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Optimistic send witness",
+          "empty_composer": true,
+          "timeout": 3
+        }
+      ],
+      "expect": [
+        "Optimistic send witness",
+        "alt+i info"
+      ],
+      "absent": [
+        "Sending…",
+        "Sending...",
+        "Not confirmed"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      ]
+    },
+    {
+      "name": "send-failed-day",
+      "note": "A real client Message stays in the feed while its fixture-owned Host is suspended; admission timeout attaches retry to the original Message",
+      "theme": "day",
+      "open": "Day failed witness",
+      "cast": [
+        {
+          "label": "Day failed witness",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "messages": [
+            "Earlier conversation witness"
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "text": "Send failure witness"
+        },
+        {
+          "wait": "Send failure witness"
+        },
+        {
+          "host": "suspend"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Not confirmed · ctrl+r retries original",
+          "empty_composer": true,
+          "timeout": 12
+        }
+      ],
+      "expect": [
+        "Send failure witness",
+        "Not confirmed · ctrl+r retries original",
+        "alt+i info"
+      ],
+      "absent": [
+        "Sending…",
+        "Sending..."
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      ],
+      "expect_next": {
+        "Send failure witness": "Not confirmed · ctrl+r retries original"
+      },
+      "expect_style": [
+        {
+          "text": "Not confirmed · ctrl+r retries original",
+          "foreground": "#6a6253"
+        }
+      ],
+      "expect_background": {
+        "Not confirmed · ctrl+r retries original": "#f3eee2"
+      }
+    },
+    {
+      "name": "chatfeed-night-blank-line",
+      "note": "One sent multiline Message retains its interior blank row inside an uninterrupted user tint band, with time on its first line",
+      "theme": "night",
+      "open": "Blank line witness",
+      "steps": [
+        {
+          "wait": "second line"
+        }
+      ],
+      "expect": [
+        "first line",
+        "second line",
+        "alt+i info"
+      ],
+      "absent": [
+        "Browsing · Esc returns",
+        "enter retry"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      ],
+      "cast": [
+        {
+          "label": "Blank line witness",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "messages": [
+            "first line\n\nsecond line"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "chatfeed-day-blank-line",
+      "note": "One sent multiline Message retains its interior blank row inside an uninterrupted user tint band, with time on its first line",
+      "theme": "day",
+      "open": "Blank line witness",
+      "steps": [
+        {
+          "wait": "second line"
+        }
+      ],
+      "expect": [
+        "first line",
+        "second line",
+        "alt+i info"
+      ],
+      "absent": [
+        "Browsing · Esc returns",
+        "enter retry"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      ]
+    },
+    {
+      "name": "sidebar-current",
+      "theme": "night",
+      "upgrade": "current",
+      "open": "overview",
+      "steps": [],
+      "expect": [
+        "Settings",
+        "{upgrade_version}"
+      ],
+      "absent": [
+        "Notifications",
+        "enter open"
+      ],
+      "note": "Real release HTTP discovery and managed install; comparison uses native controls on each revision",
+      "expect_next": {
+        "Settings": "{upgrade_version}"
+      },
+      "expect_regex": [
+        "^\\s*\\d+(?:\\.\\d+)? (?:MB|GB)\\s+{upgrade_version}\\s*(?:│.*)?$"
+      ],
+      "comparison": {
+        "before": {
+          "expect": [
+            "Settings",
+            "{upgrade_version}"
+          ],
+          "expect_next": {},
+          "expect_regex": [
+            "^\\s*Settings\\s+(?:rui \\d+(?:\\.\\d+)? (?:MB|GB)(?: [·.] tools \\d+(?:\\.\\d+)? (?:MB|GB))?\\s+)?{upgrade_version}\\s*(?:│.*)?$"
+          ],
+          "absent": [
+            "Notifications",
+            "Update to ",
+            "Updating…",
+            "Update failed",
+            "enter open"
+          ]
+        }
+      }
+    },
+    {
+      "name": "sidebar-available",
+      "theme": "night",
+      "upgrade": "available",
+      "open": "overview",
+      "steps": [],
+      "expect": [
+        "Settings",
+        "Update to {available_version}"
+      ],
+      "absent": [
+        "Notifications",
+        "enter open"
+      ],
+      "note": "Real release HTTP discovery and managed install; comparison uses native controls on each revision",
+      "expect_next": {
+        "Settings": "Update to {available_version}"
+      },
+      "expect_regex": [
+        "^\\s*\\d+(?:\\.\\d+)? (?:MB|GB)\\s+Update to {available_version}\\s*(?:│.*)?$"
+      ],
+      "comparison": {
+        "before": {
+          "expect": [
+            "Settings",
+            "{upgrade_version}"
+          ],
+          "expect_next": {},
+          "expect_regex": [
+            "^\\s*Settings\\s+(?:rui \\d+(?:\\.\\d+)? (?:MB|GB)(?: [·.] tools \\d+(?:\\.\\d+)? (?:MB|GB))?\\s+)?{upgrade_version}\\s*(?:│.*)?$"
+          ],
+          "absent": [
+            "Notifications",
+            "Update to ",
+            "Updating…",
+            "Update failed",
+            "enter open"
+          ]
+        }
+      }
+    },
+    {
+      "name": "sidebar-updating",
+      "theme": "night",
+      "upgrade": "updating",
+      "open": "overview",
+      "steps": [],
+      "expect": [
+        "Settings",
+        "Updating…"
+      ],
+      "absent": [
+        "Notifications",
+        "enter open"
+      ],
+      "note": "Real release HTTP discovery and managed install; comparison uses native controls on each revision",
+      "expect_next": {
+        "Settings": "Updating…"
+      },
+      "expect_regex": [
+        "^\\s*\\d+(?:\\.\\d+)? (?:MB|GB)\\s+Updating…\\s*(?:│.*)?$"
+      ],
+      "comparison": {
+        "before": {
+          "expect": [
+            "Settings",
+            "{upgrade_version}",
+            "Publishing; cancelling no longer rolls back"
+          ],
+          "expect_next": {},
+          "expect_regex": [
+            "^\\s*Settings\\s+(?:rui \\d+(?:\\.\\d+)? (?:MB|GB)(?: [·.] tools \\d+(?:\\.\\d+)? (?:MB|GB))?\\s+)?{upgrade_version}\\s*(?:│.*)?$"
+          ],
+          "absent": [
+            "Notifications",
+            "Update to ",
+            "Updating…",
+            "Update failed",
+            "enter open"
+          ]
+        }
+      }
+    },
+    {
+      "name": "sidebar-failure",
+      "theme": "night",
+      "upgrade": "failure",
+      "open": "overview",
+      "steps": [],
+      "expect": [
+        "Settings",
+        "Update failed: Couldn't reach GitHub"
+      ],
+      "absent": [
+        "Notifications",
+        "Host paused",
+        "enter open",
+        "Reading this Session"
+      ],
+      "note": "Real release HTTP discovery and managed install; comparison uses native controls on each revision",
+      "expect_next": {
+        "Settings": "Update failed: Couldn't reach GitHub"
+      },
+      "expect_regex": [
+        "^\\s*(?:\\d+(?:\\.\\d+)? (?:MB|GB)\\s+)?Update failed: Couldn't reach GitHub\\s*(?:│.*)?$"
+      ],
+      "comparison": {
+        "before": {
+          "expect": [
+            "Settings",
+            "{upgrade_version}",
+            "! Couldn't reach GitHub; nothing changed"
+          ],
+          "expect_next": {},
+          "expect_regex": [
+            "^\\s*Settings\\s+(?:rui \\d+(?:\\.\\d+)? (?:MB|GB)(?: [·.] tools \\d+(?:\\.\\d+)? (?:MB|GB))?\\s+)?{upgrade_version}\\s*(?:│.*)?$"
+          ],
+          "absent": [
+            "Notifications",
+            "Update to ",
+            "Updating…",
+            "Update failed",
+            "enter open",
+            "Host paused",
+            "Reading this Session"
+          ]
+        }
+      }
+    },
+    {
+      "name": "chat-after-upgrade",
+      "theme": "night",
+      "upgrade": "chat",
+      "open": "Upgrade witness",
+      "steps": [],
+      "expect": [
+        "alt+i info",
+        "Upgrade witness"
+      ],
+      "absent": [
+        "Upgraded to ",
+        " · upgraded to ",
+        "Checking for updates",
+        "Preparing Upgrade",
+        "Upgrade failed",
+        "Update cancelled",
+        "Update failed",
+        "Updating…",
+        "Publishing; cancelling no longer rolls back",
+        "restart rui to continue",
+        "enter open"
+      ],
+      "note": "Real release HTTP discovery and managed install; comparison uses native controls on each revision",
+      "cast": [
+        {
+          "label": "Upgrade witness",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "messages": [
+            "Upgrade witness"
+          ]
+        }
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      ],
+      "comparison": {
+        "before": {
+          "expect": [
+            "Upgrade witness",
+            "Upgraded to {upgrade_version}"
+          ],
+          "absent": [
+            "Checking for updates",
+            "Preparing Upgrade",
+            "Upgrade failed",
+            "Update cancelled",
+            "Update failed",
+            "Updating…",
+            "Publishing; cancelling no longer rolls back",
+            "restart rui to continue",
+            "Update failed",
+            "Updating…",
+            "Publishing; cancelling no longer rolls back",
+            "restart rui to continue",
+            "enter open"
+          ]
+        }
+      }
+    },
+    {
+      "name": "day-sidebar-current",
+      "theme": "day",
+      "upgrade": "current",
+      "open": "overview",
+      "steps": [],
+      "expect": [
+        "Settings",
+        "{upgrade_version}"
+      ],
+      "absent": [
+        "Notifications",
+        "enter open"
+      ],
+      "note": "Real release HTTP discovery and managed install; comparison uses native controls on each revision",
+      "expect_next": {
+        "Settings": "{upgrade_version}"
+      },
+      "expect_regex": [
+        "^\\s*\\d+(?:\\.\\d+)? (?:MB|GB)\\s+{upgrade_version}\\s*(?:│.*)?$"
+      ],
+      "comparison": {
+        "before": {
+          "expect": [
+            "Settings",
+            "{upgrade_version}"
+          ],
+          "expect_next": {},
+          "expect_regex": [
+            "^\\s*Settings\\s+(?:rui \\d+(?:\\.\\d+)? (?:MB|GB)(?: [·.] tools \\d+(?:\\.\\d+)? (?:MB|GB))?\\s+)?{upgrade_version}\\s*(?:│.*)?$"
+          ],
+          "absent": [
+            "Notifications",
+            "Update to ",
+            "Updating…",
+            "Update failed",
+            "enter open"
+          ]
+        }
+      }
+    },
+    {
+      "name": "day-sidebar-available",
+      "theme": "day",
+      "upgrade": "available",
+      "open": "overview",
+      "steps": [],
+      "expect": [
+        "Settings",
+        "Update to {available_version}"
+      ],
+      "absent": [
+        "Notifications",
+        "enter open"
+      ],
+      "note": "Real release HTTP discovery and managed install; comparison uses native controls on each revision",
+      "expect_next": {
+        "Settings": "Update to {available_version}"
+      },
+      "expect_regex": [
+        "^\\s*\\d+(?:\\.\\d+)? (?:MB|GB)\\s+Update to {available_version}\\s*(?:│.*)?$"
+      ],
+      "comparison": {
+        "before": {
+          "expect": [
+            "Settings",
+            "{upgrade_version}"
+          ],
+          "expect_next": {},
+          "expect_regex": [
+            "^\\s*Settings\\s+(?:rui \\d+(?:\\.\\d+)? (?:MB|GB)(?: [·.] tools \\d+(?:\\.\\d+)? (?:MB|GB))?\\s+)?{upgrade_version}\\s*(?:│.*)?$"
+          ],
+          "absent": [
+            "Notifications",
+            "Update to ",
+            "Updating…",
+            "Update failed",
+            "enter open"
+          ]
+        }
+      }
+    },
+    {
+      "name": "day-sidebar-updating",
+      "theme": "day",
+      "upgrade": "updating",
+      "open": "overview",
+      "steps": [],
+      "expect": [
+        "Settings",
+        "Updating…"
+      ],
+      "absent": [
+        "Notifications",
+        "enter open"
+      ],
+      "note": "Real release HTTP discovery and managed install; comparison uses native controls on each revision",
+      "expect_next": {
+        "Settings": "Updating…"
+      },
+      "expect_regex": [
+        "^\\s*\\d+(?:\\.\\d+)? (?:MB|GB)\\s+Updating…\\s*(?:│.*)?$"
+      ],
+      "comparison": {
+        "before": {
+          "expect": [
+            "Settings",
+            "{upgrade_version}",
+            "Publishing; cancelling no longer rolls back"
+          ],
+          "expect_next": {},
+          "expect_regex": [
+            "^\\s*Settings\\s+(?:rui \\d+(?:\\.\\d+)? (?:MB|GB)(?: [·.] tools \\d+(?:\\.\\d+)? (?:MB|GB))?\\s+)?{upgrade_version}\\s*(?:│.*)?$"
+          ],
+          "absent": [
+            "Notifications",
+            "Update to ",
+            "Updating…",
+            "Update failed",
+            "enter open"
+          ]
+        }
+      }
+    },
+    {
+      "name": "day-sidebar-failure",
+      "theme": "day",
+      "upgrade": "failure",
+      "open": "overview",
+      "steps": [],
+      "expect": [
+        "Settings",
+        "Update failed: Couldn't reach GitHub"
+      ],
+      "absent": [
+        "Notifications",
+        "Host paused",
+        "enter open",
+        "Reading this Session"
+      ],
+      "note": "Real release HTTP discovery and managed install; comparison uses native controls on each revision",
+      "expect_next": {
+        "Settings": "Update failed: Couldn't reach GitHub"
+      },
+      "expect_regex": [
+        "^\\s*(?:\\d+(?:\\.\\d+)? (?:MB|GB)\\s+)?Update failed: Couldn't reach GitHub\\s*(?:│.*)?$"
+      ],
+      "comparison": {
+        "before": {
+          "expect": [
+            "Settings",
+            "{upgrade_version}",
+            "! Couldn't reach GitHub; nothing changed"
+          ],
+          "expect_next": {},
+          "expect_regex": [
+            "^\\s*Settings\\s+(?:rui \\d+(?:\\.\\d+)? (?:MB|GB)(?: [·.] tools \\d+(?:\\.\\d+)? (?:MB|GB))?\\s+)?{upgrade_version}\\s*(?:│.*)?$"
+          ],
+          "absent": [
+            "Notifications",
+            "Update to ",
+            "Updating…",
+            "Update failed",
+            "enter open",
+            "Host paused",
+            "Reading this Session"
+          ]
+        }
+      }
+    },
+    {
+      "name": "day-chat-after-upgrade",
+      "theme": "day",
+      "upgrade": "chat",
+      "open": "Day upgrade witness",
+      "steps": [],
+      "expect": [
+        "alt+i info",
+        "Day upgrade witness"
+      ],
+      "absent": [
+        "Upgraded to ",
+        " · upgraded to ",
+        "Checking for updates",
+        "Preparing Upgrade",
+        "Upgrade failed",
+        "Update cancelled",
+        "Update failed",
+        "Updating…",
+        "Publishing; cancelling no longer rolls back",
+        "restart rui to continue",
+        "enter open"
+      ],
+      "note": "Real release HTTP discovery and managed install; comparison uses native controls on each revision",
+      "cast": [
+        {
+          "label": "Day upgrade witness",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "messages": [
+            "Day upgrade witness"
+          ]
+        }
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      ],
+      "comparison": {
+        "before": {
+          "expect": [
+            "Day upgrade witness",
+            "Upgraded to {upgrade_version}"
+          ],
+          "absent": [
+            "Checking for updates",
+            "Preparing Upgrade",
+            "Upgrade failed",
+            "Update cancelled",
+            "Update failed",
+            "Updating…",
+            "Publishing; cancelling no longer rolls back",
+            "restart rui to continue",
+            "Update failed",
+            "Updating…",
+            "Publishing; cancelling no longer rolls back",
+            "restart rui to continue",
+            "enter open"
+          ]
+        }
+      }
+    },
+    {
       "name": "wide-launch",
       "note": "Bare launch opens an empty chat beside the list at wide widths",
       "open": "overview",
@@ -24,7 +762,7 @@
         "enter open"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
       ]
     },
     {
@@ -36,7 +774,7 @@
       "expect": ["+ New Session", "Settings"],
       "absent": ["Type a task", "enter open"],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
       ]
     },
     {
@@ -59,12 +797,12 @@
       ],
       "absent": [],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
       ]
     },
     {
       "name": "inputtint-night-empty",
-      "note": "Input surface, plain footer and ink-wash selection; colour-only changes are asserted by style-role tests",
+      "note": "Untinted input, plain footer and ink-wash selection; colour-only changes are asserted by style-role tests",
       "theme": "night",
       "open": "Input tint chat",
       "steps": [],
@@ -73,7 +811,7 @@
         "alt+i info"
       ],
       "absent": [
-        "Browsing · Esc returns",
+        "Browsing \u00b7 Esc returns",
         "enter retry"
       ],
       "cast": [
@@ -87,12 +825,12 @@
         }
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
       ]
     },
     {
       "name": "inputtint-night-draft",
-      "note": "Input surface, plain footer and ink-wash selection; colour-only changes are asserted by style-role tests",
+      "note": "Untinted input, plain footer and ink-wash selection; colour-only changes are asserted by style-role tests",
       "theme": "night",
       "open": "Input tint chat",
       "steps": [
@@ -111,12 +849,12 @@
         "Third draft row"
       ],
       "absent": [
-        "Browsing · Esc returns",
+        "Browsing \u00b7 Esc returns",
         "enter retry",
         "Type a task"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
       ]
     },
     {
@@ -143,7 +881,7 @@
         "enter retry"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
       ]
     },
     {
@@ -179,15 +917,15 @@
         "enter start"
       ],
       "expect_background": {
-        "› Type a task": "#1a2246"
+        "› Type a task": "#121933"
       },
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
       ]
     },
     {
       "name": "inputtint-night-chat-selected",
-      "note": "Input surface, plain footer and ink-wash selection; colour-only changes are asserted by style-role tests",
+      "note": "Untinted input, plain footer and ink-wash selection; colour-only changes are asserted by style-role tests",
       "theme": "night",
       "open": "Input tint chat",
       "steps": [
@@ -202,16 +940,16 @@
         "Settings"
       ],
       "absent": [
-        "Browsing · Esc returns",
+        "Browsing \u00b7 Esc returns",
         "enter retry"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
       ]
     },
     {
       "name": "inputtint-day-empty",
-      "note": "Input surface, plain footer and ink-wash selection; colour-only changes are asserted by style-role tests",
+      "note": "Untinted input, plain footer and ink-wash selection; colour-only changes are asserted by style-role tests",
       "theme": "day",
       "open": "Input tint chat",
       "steps": [],
@@ -220,16 +958,16 @@
         "alt+i info"
       ],
       "absent": [
-        "Browsing · Esc returns",
+        "Browsing \u00b7 Esc returns",
         "enter retry"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
       ]
     },
     {
       "name": "inputtint-day-draft",
-      "note": "Input surface, plain footer and ink-wash selection; colour-only changes are asserted by style-role tests",
+      "note": "Untinted input, plain footer and ink-wash selection; colour-only changes are asserted by style-role tests",
       "theme": "day",
       "open": "Input tint chat",
       "steps": [
@@ -248,12 +986,12 @@
         "Third draft row"
       ],
       "absent": [
-        "Browsing · Esc returns",
+        "Browsing \u00b7 Esc returns",
         "enter retry",
         "Type a task"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
       ]
     },
     {
@@ -280,7 +1018,7 @@
         "enter retry"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
       ]
     },
     {
@@ -316,15 +1054,15 @@
         "enter start"
       ],
       "expect_background": {
-        "› Type a task": "#e6ddc8"
+        "› Type a task": "#f3eee2"
       },
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
       ]
     },
     {
       "name": "inputtint-day-chat-selected",
-      "note": "Input surface, plain footer and ink-wash selection; colour-only changes are asserted by style-role tests",
+      "note": "Untinted input, plain footer and ink-wash selection; colour-only changes are asserted by style-role tests",
       "theme": "day",
       "open": "Input tint chat",
       "steps": [
@@ -339,11 +1077,11 @@
         "Settings"
       ],
       "absent": [
-        "Browsing · Esc returns",
+        "Browsing \u00b7 Esc returns",
         "enter retry"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
       ]
     },
     {
@@ -376,12 +1114,12 @@
         "No Sessions yet."
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
       ]
     },
     {
       "name": "quiet-overview",
-      "note": "Whole rows, including marks, names and state durations, dim only for never-written finished and working chats; approval stays loud",
+      "note": "Whole rows, including marks, names and compact activity ages, dim only for never-written finished and working chats; approval stays loud",
       "open": "overview",
       "cast": [
         {
@@ -441,7 +1179,7 @@
       ],
       "expect_dim": [
         {
-          "text": "✓ Agent done",
+          "text": "Agent done",
           "dim": true
         },
         {
@@ -458,7 +1196,7 @@
         }
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
       ]
     },
     {
@@ -490,7 +1228,7 @@
       ],
       "expect_dim": [
         {
-          "text": "✓ Agent done",
+          "text": "Agent done",
           "dim": true,
           "min_columns": 140
         },
@@ -511,7 +1249,7 @@
         }
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
       ]
     },
     {
@@ -557,7 +1295,7 @@
         "append catal"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ],
       "expect_dim": [
         {
@@ -621,7 +1359,7 @@
         "append catal"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ],
       "expect_dim": [
         {
@@ -679,7 +1417,7 @@
         "enter pick"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
       ]
     },
     {
@@ -751,7 +1489,7 @@
         "append catal"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$",
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$",
         "/review +Verify the project and review\\s*$"
       ]
     },
@@ -785,7 +1523,7 @@
         "Usage:"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -823,7 +1561,7 @@
         "/clear"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -861,7 +1599,7 @@
         "/clear"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -903,7 +1641,7 @@
         "Archived Archive audit"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -928,7 +1666,7 @@
         "/sessions"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
       ]
     },
     {
@@ -961,7 +1699,7 @@
         "Archive audit"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
       ]
     },
     {
@@ -998,7 +1736,7 @@
         "[Archived]"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
       ]
     },
     {
@@ -1032,7 +1770,7 @@
         "· archived"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
       ]
     },
     {
@@ -1077,7 +1815,7 @@
         "No archived Sessions"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
       ]
     },
     {
@@ -1107,7 +1845,7 @@
         "{session:Archive audit}"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -1284,7 +2022,7 @@
         "gpt-6.1-sol \u00b7 low"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -1321,7 +2059,7 @@
         "Configured."
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -1364,7 +2102,7 @@
         "enter pick"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -1400,7 +2138,7 @@
         "Type a task"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -1448,7 +2186,7 @@
         "Type a task"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -1502,7 +2240,7 @@
         "Type a task"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -1543,7 +2281,7 @@
         "Type a task"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -1593,7 +2331,7 @@
         "Filter:"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -1647,7 +2385,7 @@
         "Filter:"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -1704,7 +2442,7 @@
         "\u25be"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -1758,7 +2496,7 @@
         "enter start"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ],
       "sizes": [
         "140x40",
@@ -1837,7 +2575,7 @@
         "enter start"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ],
       "sizes": [
         "140x40",
@@ -1914,7 +2652,7 @@
         "enter start"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ],
       "sizes": [
         "140x40",
@@ -1960,7 +2698,7 @@
         "Type a task"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -2056,7 +2794,7 @@
         "Type a task"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -2091,7 +2829,7 @@
         "Type a task"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -2125,7 +2863,7 @@
         "Type a task"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -2184,7 +2922,7 @@
         "Type a task"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -2229,7 +2967,7 @@
         "Fail with an excerpt \u00b7 1"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ],
       "expect_next": {
         "\u2713 List project files": "\u00d7 Fail with exit 127",
@@ -2276,7 +3014,7 @@
         "\u25be"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -2328,7 +3066,7 @@
         "Fail with an excerpt \u00b7 1"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -2378,7 +3116,7 @@
       ],
       "note": "10a-tool-open: Ctrl-O selects the lowest tool; output is indented on its band, other rows folded; no extra mark; literal stored envelope in quiet colour",
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ],
       "expect_next": {
         "\u2713 List project files": "\u00d7 Fail with exit 127",
@@ -2489,7 +3227,7 @@
         "Fail with an excerpt \u00b7 1"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ],
       "expect_next": {
         "    src": "\u00d7 Fail with exit 127",
@@ -2541,7 +3279,7 @@
       ],
       "note": "10c-tool-open-long: twenty quiet stored-result rows, including status and label, then fourteen remaining lines",
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -2594,7 +3332,7 @@
       ],
       "note": "10d-tool-open-nocolor: the same open tool is indented without selection or output backgrounds; no extra mark; literal stored envelope in quiet colour",
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ],
       "expect_next": {
         "\u2713 List project files": "\u00d7 Fail with exit 127",
@@ -2634,7 +3372,7 @@
       ],
       "expect": "Keep this chat draft",
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -2659,7 +3397,7 @@
         "third"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
       ]
     },
     {
@@ -2680,7 +3418,7 @@
         "\u2193"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -2705,7 +3443,7 @@
         "\u2193"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -2741,7 +3479,7 @@
         "new"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -2772,7 +3510,7 @@
         "retry policy notes"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -2798,7 +3536,7 @@
         "retry policy notes"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -2840,7 +3578,7 @@
         "Waiting"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -2881,7 +3619,7 @@
         "No code block in the last answer."
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -2929,7 +3667,7 @@
         "Waiting"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -2971,7 +3709,7 @@
         }
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -3025,7 +3763,7 @@
         "\u25a0 Stop the slow job": "   Stopped"
       },
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -3074,7 +3812,7 @@
       ],
       "first_frame": true,
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -3087,7 +3825,7 @@
         }
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -3105,7 +3843,7 @@
         "enter sends"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -3130,7 +3868,7 @@
         "more lines \u00b7 shift+\u2193"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -3161,7 +3899,7 @@
         "Deny"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -3187,7 +3925,7 @@
         "more lines \u00b7 shift+\u2193"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -3211,7 +3949,7 @@
         }
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -3289,7 +4027,7 @@
         "Type a task"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
       ]
     },
     {
@@ -3323,7 +4061,7 @@
         "code \u00b7 file"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -3353,7 +4091,7 @@
         "/effort"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -3400,7 +4138,7 @@
         "/configure"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -3416,7 +4154,7 @@
         }
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -3477,7 +4215,7 @@
         }
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ],
       "expect_background": {
         "/help           Verify": "#2b2f45"
@@ -3541,7 +4279,7 @@
         }
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ],
       "expect_background": {
         "/help           Verify": "#2b2f45"
@@ -3595,7 +4333,7 @@
         }
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ],
       "expect_background": {
         "/new            start": "#2b2f45"
@@ -3659,7 +4397,7 @@
         }
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ],
       "theme": "day",
       "expect_background": {
@@ -3724,7 +4462,7 @@
         }
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ],
       "theme": "day",
       "expect_background": {
@@ -3779,7 +4517,7 @@
         }
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ],
       "theme": "day",
       "expect_background": {
@@ -3815,7 +4553,7 @@
         }
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -3841,7 +4579,7 @@
       "expect": [
         "Effort",
         "Permissions",
-        "Tools",
+        "Allowed tools",
         "Folder",
         "Model",
         "Copy last answer",
@@ -3869,7 +4607,7 @@
         }
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -3921,7 +4659,7 @@
         "\u2191 "
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -3967,7 +4705,7 @@
         "Type a task"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -4019,7 +4757,7 @@
         "Type a task"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -4055,7 +4793,7 @@
         "enter start"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -4090,7 +4828,7 @@
         "Type a task"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -4130,7 +4868,7 @@
         "Type a task"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -4190,7 +4928,7 @@
         "Type a task"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -4232,7 +4970,7 @@
         "Type a task"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -4276,7 +5014,7 @@
         "Type a task"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -4315,7 +5053,7 @@
         }
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -4341,7 +5079,7 @@
         "+ New Session"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -4366,7 +5104,7 @@
         "gpt-6.1-sol \u00b7 low"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -4387,7 +5125,7 @@
         "retry policy notes"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -4409,7 +5147,7 @@
         "\u2193"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -4432,7 +5170,7 @@
         "retry policy notes"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -4455,7 +5193,7 @@
         "Type a task"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -4482,7 +5220,7 @@
       ],
       "expect": "Host stopped",
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -4506,7 +5244,7 @@
         "Type a task"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -4532,7 +5270,7 @@
       ],
       "expect": "Detached. Host work continues.",
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -4587,7 +5325,7 @@
         }
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
       ]
     },
     {
@@ -4640,7 +5378,7 @@
         }
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
       ]
     },
     {
@@ -4673,7 +5411,7 @@
         "140x40"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
       ]
     },
     {
@@ -4701,7 +5439,7 @@
         "Opening…"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
       ]
     },
     {
@@ -4733,7 +5471,7 @@
         "Opening…"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
       ]
     },
     {
@@ -4765,7 +5503,7 @@
         "140x40"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
       ]
     },
     {
@@ -4832,7 +5570,7 @@
         }
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
       ]
     },
     {
@@ -4865,7 +5603,7 @@
         "The retry draft is ready."
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
       ]
     },
     {
@@ -4901,7 +5639,7 @@
         "Opening…"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
       ],
       "cast": [
         {
@@ -4949,7 +5687,7 @@
         "The retry draft is ready."
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
       ]
     },
     {
@@ -4982,7 +5720,7 @@
         "Opening…"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
       ]
     },
     {
@@ -5020,7 +5758,7 @@
         "Opening…"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
       ]
     },
     {
@@ -5059,7 +5797,7 @@
         "Opening…"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
       ]
     },
     {
@@ -5099,7 +5837,7 @@
         "Opening…"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
       ]
     },
     {
@@ -5126,7 +5864,7 @@
         "Alternate focus audit"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -5158,7 +5896,7 @@
         "Alternate focus audit"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -5191,7 +5929,7 @@
         "Alternate focus audit"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -5233,7 +5971,7 @@
         "Usage:"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -5273,7 +6011,7 @@
         "Usage:"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -5307,7 +6045,7 @@
       ],
       "absent_regex": [
         "^\\s*/discard\\s+",
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -5341,7 +6079,7 @@
       ],
       "absent_regex": [
         "^\\s*/recover\\s+",
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -5369,7 +6107,7 @@
         "\u203a /new unexpected"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -5390,7 +6128,119 @@
         }
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      ]
+    },
+    {
+      "name": "chatfeed-night-empty",
+      "note": "Real user messages across a recorded minute boundary, a Bash tool row and a bottom-anchored input",
+      "theme": "night",
+      "open": "Chatfeed witness",
+      "steps": [
+        {
+          "sleep": 61
+        },
+        {
+          "send": {
+            "to": "Chatfeed witness",
+            "text": "Next minute witness"
+          }
+        },
+        {
+          "wait": "Next minute witness"
+        }
+      ],
+      "expect": [
+        "Next minute witness",
+        "alt+i info"
+      ],
+      "absent": [
+        "Browsing \u00b7 Esc returns",
+        "enter retry"
+      ],
+      "cast": [
+        {
+          "label": "Chatfeed witness",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "messages": [
+            "First minute witness",
+            "tool demonstration"
+          ]
+        }
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      ]
+    },
+    {
+      "name": "chatfeed-night-draft",
+      "note": "Real user messages across a recorded minute boundary, a Bash tool row and a bottom-anchored input",
+      "theme": "night",
+      "open": "Chatfeed witness",
+      "steps": [
+        {
+          "text": "Retained chatfeed draft"
+        },
+        {
+          "wait": "Retained chatfeed draft"
+        }
+      ],
+      "expect": [
+        "Next minute witness",
+        "alt+i info",
+        "Retained chatfeed draft"
+      ],
+      "absent": [
+        "Browsing \u00b7 Esc returns",
+        "enter retry"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      ]
+    },
+    {
+      "name": "chatfeed-day-empty",
+      "note": "Real user messages across a recorded minute boundary, a Bash tool row and a bottom-anchored input",
+      "theme": "day",
+      "open": "Chatfeed witness",
+      "steps": [],
+      "expect": [
+        "Next minute witness",
+        "alt+i info"
+      ],
+      "absent": [
+        "Browsing \u00b7 Esc returns",
+        "enter retry"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      ]
+    },
+    {
+      "name": "chatfeed-day-draft",
+      "note": "Real user messages across a recorded minute boundary, a Bash tool row and a bottom-anchored input",
+      "theme": "day",
+      "open": "Chatfeed witness",
+      "steps": [
+        {
+          "text": "Retained chatfeed draft"
+        },
+        {
+          "wait": "Retained chatfeed draft"
+        }
+      ],
+      "expect": [
+        "Next minute witness",
+        "alt+i info",
+        "Retained chatfeed draft"
+      ],
+      "absent": [
+        "Browsing \u00b7 Esc returns",
+        "enter retry"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     }
   ]

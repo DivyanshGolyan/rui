@@ -196,6 +196,7 @@ pub const Operation = struct {
     resolution: ?Resolution,
     interrupted_by: ?[]const u8,
     settings_revision: u64,
+    offered_tools: []const []const u8,
     request_id: ?[]const u8,
     reasoning_effort: ?model_capability.ReasoningEffort,
 };

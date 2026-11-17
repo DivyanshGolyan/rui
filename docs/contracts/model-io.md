@@ -82,7 +82,11 @@ The Message's own text follows unchanged.
 Sending a report requires an explicit Message admission.
 The receiving Session uses the existing input boundaries, pending-prefix selection, stop exclusions and original-result guarantees.
 There is no separate inbox, callback or resident waiter for a future reply.
-A Session an attached `start_agent` call created records its creator as its **parent** (`session.parent_ref`, never itself); a standalone agent and every other Session has none.
+A Session created with validated parent input records its creator in immutable `session.creator_ref`, whether attached or detached.
+An attached `start_agent` child also records its lifecycle **parent** in `session.parent_ref`, never itself.
+A detached child retains creator provenance with no lifecycle parent.
+Creation without parent input records neither fact.
+[Session provenance](sessions.md#session-provenance) owns creator identity; the following stop, ending-Message, and forwarding rules follow lifecycle parent links alone.
 When a parent stops, or a Turn of it ends out of context, each of its attached children owes a stop (`session_stop_owed`, written in the same transaction, keyed `rui.core/stop/<child>/<parent>/<position>` by the parent position that caused it).
 The Host runs each owed stop before any core tool call, as that child's own ordinary Session stop, which settles the owed row and passes the stop on to the child's own children.
 A child that owes a stop runs none of its core tool calls; the stop cancels them.
