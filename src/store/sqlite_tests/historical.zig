@@ -559,11 +559,13 @@ test "historical context selection work excludes nonmatching Operation populatio
 }
 
 test "a failed context read answers its reader's name and fences" {
-    for ([_]struct { report: bool, bytes: bool }{
-        .{ .report = false, .bytes = false },
-        .{ .report = true, .bytes = false },
-        .{ .report = false, .bytes = true },
-        .{ .report = true, .bytes = true },
+    const Read = enum { context, bytes, compound_bytes };
+    for ([_]struct { report: bool, read: Read }{
+        .{ .report = false, .read = .context },
+        .{ .report = true, .read = .context },
+        .{ .report = false, .read = .bytes },
+        .{ .report = true, .read = .bytes },
+        .{ .report = true, .read = .compound_bytes },
     }) |case| {
         const report = case.report;
         var tmp = std.testing.tmpDir(.{});
@@ -580,22 +582,25 @@ test "a failed context read answers its reader's name and fences" {
         try std.testing.expect(try storage.configure(&patch, .{}) == .accepted);
         try submitTestMessage(&storage, &tmp, "context-fold-one", "context-fold-one", session.slice(), "one");
         const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-        try submitTestMessage(&storage, &tmp, "context-fold-two", "context-fold-two", session.slice(), "two");
-        try settleCallsForTestingWithFaults(&storage, &tmp, first, "context-fold-output", &.{}, .{}, "{\"input_tokens\":10,\"output_tokens\":0}");
-        var fault: TestingStatementFault = .{ .sql = if (case.bytes and !report)
-            model_admission_domain.within_pressure_sql
-        else if (case.bytes)
-            namedStatementForTesting(model_admission_domain.compaction_failures, null, " AS uncovered_bytes")
-        else if (report)
-            namedStatementForTesting(model_admission_domain.compaction_failures, null, "since AS (SELECT")
+        if (case.read == .compound_bytes)
+            try store_testing.submitTestMessageParts(&storage, &tmp, "context-fold-two", session.slice(), &.{ .{ .bytes = "two" }, .{ .bytes = "parts" } })
         else
-            model_admission_domain.selected_context_sql };
+            try submitTestMessage(&storage, &tmp, "context-fold-two", "context-fold-two", session.slice(), "two");
+        try settleCallsForTestingWithFaults(&storage, &tmp, first, "context-fold-output", &.{}, .{}, "{\"input_tokens\":10,\"output_tokens\":0}");
+        var fault: TestingStatementFault = .{ .sql = switch (case.read) {
+            .context => if (report)
+                namedStatementForTesting(model_admission_domain.compaction_failures, null, "since AS (SELECT")
+            else
+                model_admission_domain.selected_context_sql,
+            .bytes => if (report) model_admission_domain.context_bytes_sql else model_admission_domain.within_pressure_sql,
+            .compound_bytes => model_admission_domain.context_compound_bytes_sql,
+        } };
         fault.arm(storage.sqliteDatabase());
         defer fault.disarm(storage.sqliteDatabase());
         if (report)
             try std.testing.expectError(error.CorruptStore, testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024))
         else
-            try std.testing.expectError(if (case.bytes) error.StatementFailed else error.SessionReadFailed, storage.admitNextModelAttempt(.{}));
+            try std.testing.expectError(if (case.read == .bytes) error.StatementFailed else error.SessionReadFailed, storage.admitNextModelAttempt(.{}));
         try std.testing.expect(fault.failed > 0);
         try std.testing.expect(storage.isFenced());
     }
