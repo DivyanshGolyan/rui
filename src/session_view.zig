@@ -478,7 +478,7 @@ fn toolState(code: protocol.ToolPresentation.Code) struct { glyph: []const u8, s
     return .{ .glyph = shown.unicode, .suffix = state.suffix, .style = Style.fromTone(shown.tone) };
 }
 
-test "list rows share every mark and script with the chat heading table" {
+test "list rows share chat heading marks except unmarked finished Sessions" {
     const overview = @import("overview_view.zig");
     const Case = struct {
         mark: marks.Mark,
@@ -525,7 +525,8 @@ test "list rows share every mark and script with the chat heading table" {
             try std.testing.expect(!overview.markSpins(&state, .{ .row = 0 }, caps));
             const row = try overview.rowSegments(arena.allocator(), &state, 0, 80, caps, 4);
             try std.testing.expectEqualStrings(" ", row[0].text);
-            try std.testing.expectEqualStrings(if (unicode_script) shared.unicode else shared.ascii, row[1].text);
+            const list_mark = if (case.state == .finished) marks.marks.get(.none) else shared;
+            try std.testing.expectEqualStrings(if (unicode_script) list_mark.unicode else list_mark.ascii, row[1].text);
             try std.testing.expectEqual(case.colour, row[1].style.colour);
         }
         if (case.tool) |code| {
@@ -537,6 +538,7 @@ test "list rows share every mark and script with the chat heading table" {
     }
     var states: std.enums.EnumSet(marks.Mark) = .full;
     states.remove(.newer);
+    states.remove(.none);
     try std.testing.expect(seen.eql(states));
 }
 

@@ -1087,7 +1087,7 @@ def silent_read_edit_cases():
 
 
 def wait_for_listed_call(tty):
-    running = re.compile(r"⠹ Held call · (?:[0-9]+s|[0-9]+m [0-9]+s|[0-9]+h [0-9]+m)")
+    running = re.compile(r"[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Held call *")
     tty.wait(predicate=lambda: any(running.fullmatch(row) for row in conversation_text(tty.capture.completed).splitlines()), timeout=30)
 
 
@@ -1095,18 +1095,17 @@ def listed_call_readiness_cases():
     from terminal_screen import ScreenCapture
 
     class OfferedFrames:
-        def __init__(self, elapsed):
+        def __init__(self, spinner):
             self.capture = ScreenCapture(80, 24)
             self.frames = (
-                "⠹ Held call\n◌ Queued · 0s",
-                "✓ Held call · 42s",
-                "⠹ Other call · 42s",
-                "prefix ⠹ Held call · 42s",
-                "⠹ Held call · 42s extra",
-                "⠹ Held call · " + elapsed,
+                "   Held call                  now",
+                " ◌ Held call                  now",
+                " ⠹ Other call",
+                "prefix ⠹ Held call",
+                " ⠹ Held call                  now",
+                " " + spinner + " Held call",
             )
             self.offered = None
-            self.frame("⠹ Held call · 99s")
             self.frame(self.frames[0])
 
         def frame(self, text):
@@ -1120,8 +1119,8 @@ def listed_call_readiness_cases():
                     return self.capture.completed
             raise AssertionError(("running listed call was not accepted", self.capture.completed))
 
-    for elapsed in ("0s", "2m 3s", "1h 2m"):
-        tty = OfferedFrames(elapsed)
+    for spinner in "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏":
+        tty = OfferedFrames(spinner)
         wait_for_listed_call(tty)
         assert tty.offered == len(tty.frames) - 1, ("listed call accepted before current running row", tty.capture.completed)
 
@@ -1364,8 +1363,8 @@ def renderer_cases():
         master, writer = os.pipe()
         try:
             tty = Terminal(master, None, None)
-            os.write(writer, terminal_frame(["  + New Session │", "  edited 2      │ edited 1", "                │ ⠹ Waiting"])
-                + terminal_frame(["  + New Session │", "  edited 2      │ edited 2", "                │ ›"]))
+            os.write(writer, terminal_frame([" + New Session │", "  edited 2      │ edited 1", "                │ ⠹ Waiting"])
+                + terminal_frame([" + New Session │", "  edited 2      │ edited 2", "                │ ›"]))
             observed = tty.wait("edited 2", after=0)
             assert "\nedited 2" in conversation_text(observed), observed
         finally:
@@ -1825,11 +1824,16 @@ def provider_line_cases():
 def main(selected="all"):
     import canonical_failure_cases
     import canonical_fixture
+    import fresh_tool_profile_cases
     import session_chrome_cases
     import terminal_restoration_cases
     from terminal_process_test import prove_terminal_process
     split_callers = selected == "callers"
-    assert selected in ("all", "callers", "caller-core", "renderer", "compiled-models", "terminal-waits", "help", "copy", "provider-lines", "session-chrome"), selected
+    assert selected in ("all", "callers", "caller-core", "renderer", "compiled-models", "terminal-waits", "help", "copy", "provider-lines", "session-chrome", "tool-profiles"), selected
+    if selected in ("all", "callers", "caller-core", "tool-profiles"):
+        fresh_tool_profile_cases.main()
+    if selected == "tool-profiles":
+        return
     if selected in ("all", "renderer", "session-chrome"):
         session_chrome_cases.main()
     if selected == "session-chrome":
@@ -1888,8 +1892,9 @@ def main(selected="all"):
     sibling_arguments = json.dumps({"cmd": f"touch {shlex.quote(str(sibling_started))}; "
         f"while [ ! -e {shlex.quote(str(sibling_release))} ]; do sleep 0.05; done; "
         "printf y >> sibling-effect", "description": "Write delayed sibling effect", "timeout_ms": None}, separators=(",", ":"))
+    first_call_release = threading.Event()
     endpoint = fixture.SuccessEndpoint([
-        fixture.sse_tool_calls("human-calls", [("bash", control_call, control_arguments)]),
+        (fixture.ResponseSpec(fixture.sse_tool_calls("human-calls", [("bash", control_call, control_arguments)]), {}), first_call_release),
         fixture.sse_answer("human-answer", "human-reason", "human-message", "first answer")[0],
         fixture.sse_answer("second-answer", "second-reason", "second-message", "second answer")[0],
         fixture.sse_tool_calls("sibling-calls", [("bash", "pending-call", arguments),
@@ -2394,6 +2399,9 @@ def main(selected="all"):
         assert record.read_bytes() == captured
         assert len(endpoint.requests) == 1, endpoint.requests
 
+        queued = admit(home, "session", "send", "--to", session,
+            input="queued behind permission")["request"]
+        first_call_release.set()
         attention = fixture.wait_for(lambda: (value if (value := fixture.observe(store, first))["state"]
             == "waiting_for_permission" else None), "first request attention")
         assert attention["work"]["state"]["kind"] == "approval", attention
@@ -2401,8 +2409,6 @@ def main(selected="all"):
         blocked = fixture.command("session", "inspect", "--store", store, "--session", session)
         assert blocked["selected_message"] == first and blocked["work"]["state"]["kind"] == "approval", blocked
         assert [entry["action"] for entry in blocked["actionable_permissions"]] == [action], blocked
-        queued = admit(home, "session", "send", "--to", session,
-            input="queued behind permission")["request"]
         queued_fact = fixture.command("request", "inspect", "--store", store, "--key", queued)["observation"]
         assert queued_fact["status"] == "accepted" and "result" not in queued_fact, queued_fact
         assert queued_fact["state"] == "waiting_for_permission" and "binding" not in queued_fact, queued_fact
@@ -2990,6 +2996,7 @@ def main(selected="all"):
                 endpoint.responses.append(fixture.sse_answer(f"burst-answer-{index}",
                     f"burst-reason-{index}", f"burst-message-{index}", marker)[0])
                 observed = terminal_bulk(master, cluster * count + "\x7f" * count + "Z", marker)
+                print(f"editor burst {index}: {terminal_bulk.received} terminal bytes")
                 assert terminal_bulk.received < 100_000, ("tail deletion repainted the whole draft per key", terminal_bulk.received)
                 body = json.loads(endpoint.requests[-1])
                 actual = next(item["content"][0]["text"] for item in reversed(body["input"])
@@ -3113,6 +3120,9 @@ def main(selected="all"):
             proxy = canonical_fixture.ReplyProxy(host, "/v1/message", after_admission)
             os.write(master, b"observe after Host loss\r")
             terminal_gate(entered, master, observation_held, "accepted Message before activity loss", timeout=8)
+            optimistic = await_screen(master, "observe after Host loss", composer=True)
+            assert "Sending" not in optimistic, optimistic
+            assert conversation_text(optimistic).count("› observe after Host loss") == 1, optimistic
             after = set(json.loads(run(home, "request", "list")))
             assert len(after - before) == 1, (before, after)
             saved_key = (after - before).pop()
@@ -3186,6 +3196,7 @@ def main(selected="all"):
         print("human CLI: saved recovery, one-shot observation/re-entry, exact PTY approval, bounded input and Host restart passed")
     finally:
         dispose_all(
+            first_call_release.set,
             sibling_release.touch,
             lambda: failure_release.set() if failure_release is not None else None,
             lambda: stop_release.set() if stop_release is not None else None,

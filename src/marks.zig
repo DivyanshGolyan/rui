@@ -2,7 +2,7 @@ const std = @import("std");
 const failure_class = @import("failure_class.zig");
 const Provider = @import("provider_name.zig").Provider;
 
-pub const Mark = enum { needs_you, active, queued, waiting, finished, failed, stopped, newer };
+pub const Mark = enum { needs_you, active, queued, waiting, finished, failed, stopped, newer, none };
 pub const Tone = enum { ink, normal, quiet, attention, failure };
 
 pub const marks = std.enums.EnumArray(Mark, struct { unicode: []const u8, ascii: []const u8, tone: Tone }).init(.{
@@ -13,6 +13,7 @@ pub const marks = std.enums.EnumArray(Mark, struct { unicode: []const u8, ascii:
     .finished = .{ .unicode = "✓", .ascii = "+", .tone = .quiet },
     .failed = .{ .unicode = "×", .ascii = "x", .tone = .failure },
     .stopped = .{ .unicode = "■", .ascii = "#", .tone = .normal },
+    .none = .{ .unicode = " ", .ascii = " ", .tone = .quiet },
     .newer = .{ .unicode = "↓", .ascii = "v", .tone = .quiet },
 });
 
@@ -52,6 +53,7 @@ test "marks have distinct state meanings, nonempty scripts and printable ASCII" 
         .{ .mark = .finished, .unicode = "✓", .ascii = "+", .tone = .quiet },
         .{ .mark = .failed, .unicode = "×", .ascii = "x", .tone = .failure },
         .{ .mark = .stopped, .unicode = "■", .ascii = "#", .tone = .normal },
+        .{ .mark = .none, .unicode = " ", .ascii = " ", .tone = .quiet },
         .{ .mark = .newer, .unicode = "↓", .ascii = "v", .tone = .quiet },
     };
     var seen: std.enums.EnumSet(Mark) = .empty;

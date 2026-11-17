@@ -36,6 +36,7 @@ from qualification import matrix_targets
 from pr_overlap import repo_from_remote
 from select_tests import FIXTURES
 
+import build_artifact
 import build_files
 from caller_errors import inventory_path
 import fixture_user
@@ -52,6 +53,9 @@ SOURCE_POLICY = (
     ((".claude/skills/verify-rui/scripts/frames.json", ".claude/skills/verify-rui/features/*.md"),
      (("test_verify_rui_map.py", "*"),)),
     (("tests/integration/settings_fixture.py",), (("test_settings_fixture.py", "*"),)),
+    (("tests/integration/previous_release_upgrade.py", "tests/integration/host_serve_dialect.py"),
+     (("test_previous_release_upgrade.py", "*"),)),
+    (("tests/integration/upgrade_integration.py",), (("test_upgrade_fixture.py", "*"),)),
     (("src/*.zig", "tests/*.zig"), (("test_import_architecture.py", "*"),)),
     (("src/*.zig",), (("test_provider_locality.py", "*"), ("test_wire_version.py", "*"))),
     (("src/*.zig", "tests/*.zig", "tests/integration/*.py", "tests/ci/test_*.py", "tests/ci/*_test.py"),
@@ -142,9 +146,12 @@ while read -r _ local_sha _ _; do
 done
 """,)
 
-UNIT_COMPILE = ["zig", "build", "ci-build", "-Dci-targets=test", "-Dci-part=unit", "--summary", "line"]
 STACK_FRAMES = ["zig", "build", "-j1", "stack-frames", "-Dcpu=baseline", "--summary", "line"]
 RECEIPT = "rui-prepush-receipt.json"
+
+
+def unit_compile():
+    return [*build_artifact.compile_command(["test"], "unit", jobs=1), "--summary", "line"]
 
 
 class Skipped(NamedTuple):
@@ -206,11 +213,11 @@ def red_command(job, cause, available, *, compile_targets=(), graph=None):
     if "upgrade" in name.lower():
         return Skipped("Upgrade requires an exclusive ordinary hosted runner UID")
     if name == "linux_build_unit":
-        return [*UNIT_COMPILE, "-j1"]
+        return unit_compile()
     if name == "linux_build":
         if not compile_targets or not set(compile_targets) <= available:
             return Skipped("producer's selected compile targets are unavailable in this checkout")
-        return [*zig, "ci-build", "-Dci-targets=" + ",".join(compile_targets), "-Dci-part=all", "--summary", "line"]
+        return [*build_artifact.compile_command(compile_targets, jobs=1), "--summary", "line"]
     if name == "linux_codegen":
         return STACK_FRAMES
     selected = matrix_targets(name.partition("(")[2].removesuffix(")"))
@@ -431,7 +438,7 @@ def checks(paths, available, base, mode="default", mysql=False):
     if zig_inputs and select(zig_inputs, "review", available)["targets"]:
         yield "macOS type check", ["zig", "build", "typecheck-macos", "--summary", "line"]
     if mode == "full":
-        yield "unfiltered unit compile", UNIT_COMPILE
+        yield "unfiltered unit compile", unit_compile()
     yield "stack frames", STACK_FRAMES
     reads_mysql = LIVE_MYSQL_DIALECT_TARGETS | set(development["mysql_suites"])
     live = sorted({root for root, _ in development["live_needs"] if root in reads_mysql})

@@ -27,6 +27,7 @@ const command_domain = @import("domain/command.zig");
 const configuration_domain = @import("domain/configuration.zig");
 const skills_domain = @import("domain/skills.zig");
 const content_domain = @import("domain/content.zig");
+const content_parts = @import("domain/content_parts.zig");
 const tool_set_domain = @import("domain/tool_set.zig");
 const model_facts_domain = @import("domain/model_facts.zig");
 const model_catalog = @import("../model_catalog.zig");
@@ -624,7 +625,12 @@ pub const Store = struct {
     }
 
     pub fn submitMessageCapturedSkills(self: *Store, command: *const content_custody.MessageCommand, committed: ?MessageCommitted, initial_skills: ?*const skills_domain.Initial, captured_skill: ?*const skills_domain.MessageCapture, faults: Faults) MessageReply {
-        return self.queue().write(submitMessageWithModelHeld, .{ self, command, committed, initial_skills, captured_skill, faults });
+        return self.queue().write(submitMessageWithModelHeld, .{ self, command, committed, initial_skills, captured_skill, @as(?*content_parts.Saving, null), faults });
+    }
+
+    pub fn submitMessageParts(self: *Store, command: *const content_custody.MessageCommand, loan: @import("../InputCapture.zig").Loan, committed: ?MessageCommitted, faults: Faults) !MessageReply {
+        var saving = try content_parts.Saving.init(.{ .captured = loan });
+        return self.queue().write(submitMessageWithModelHeld, .{ self, command, committed, @as(?*const skills_domain.Initial, null), @as(?*const skills_domain.MessageCapture, null), @as(?*content_parts.Saving, &saving), faults });
     }
 
     fn submitMessageWithModelHeld(
@@ -633,6 +639,7 @@ pub const Store = struct {
         committed: ?MessageCommitted,
         initial_skills: ?*const skills_domain.Initial,
         captured_skill: ?*const skills_domain.MessageCapture,
+        saving: ?*content_parts.Saving,
         faults: Faults,
     ) MessageReply {
         var reply: MessageReply = undefined;
@@ -645,6 +652,7 @@ pub const Store = struct {
             .committed = committed,
             .initial_skills = initial_skills,
             .captured = captured_skill,
+            .parts_saving = saving,
             .reply = &reply,
         }, faults) catch {
             reply = .infrastructure_failure;
@@ -732,6 +740,14 @@ pub const Store = struct {
         return self.noteControl(transition.apply(self, command_domain.DecidePermission, .{ .command = command }, faults) catch .infrastructure_failure);
     }
 
+    pub fn declineForMessage(self: *Store, command: *const command_input.PermissionDecisionCommand, faults: Faults) PermissionDecisionReply {
+        return self.queue().write(declineForMessageHeld, .{ self, command, faults });
+    }
+
+    fn declineForMessageHeld(self: *Store, command: *const command_input.PermissionDecisionCommand, faults: Faults) PermissionDecisionReply {
+        return self.noteControl(transition.apply(self, command_domain.DecidePermission, .{ .command = command, .denial_reason = "declined: a new message arrived; ask again if still needed" }, faults) catch .infrastructure_failure);
+    }
+
     pub fn backgroundAction(self: *Store, source: action_control_domain.Control.Source, faults: Faults) @import("../action_control.zig").Reply {
         EntryTrace.fromControl(faults.control_trace).mark(.requested);
         return self.queue().write(backgroundActionHeld, .{ self, source, faults });
@@ -787,7 +803,7 @@ pub const Store = struct {
         out.* = .{ .full = .{ .token = null } };
         var access: ReadAccess = .open(&entry);
         defer access.deinit();
-        try entry.finish(Ordinary.none, command_domain.observeCommand(&access, key, &out.full.observation));
+        try entry.finish(error{InputPartsNotSupported}, command_domain.observeCommand(&access, key, &out.full.observation));
         const observation = &out.full.observation;
         if (observation.status != .absent and session_id.valid(observation.target.slice())) {
             out.full.token = .{ .instance = self.instance, .generation = generation, .session = observation.target.slice()[0..session_id.bytes].* };
@@ -921,7 +937,7 @@ pub const Store = struct {
         defer entry.release();
         var access: ReadAccess = .open(&entry);
         defer access.deinit();
-        return entry.finish(Ordinary.content, report_domain.failedResponseBinding(&access, session_ref, operation, attempt_ordinal));
+        return entry.finish(error{ContentNotFound}, report_domain.failedResponseBinding(&access, session_ref, operation, attempt_ordinal));
     }
 
     pub fn readSessionReport(self: *Store, session_ref: []const u8, profile: cli_value.ReportProfile, visitor: anytype) !void {
@@ -1113,17 +1129,35 @@ pub const Store = struct {
         context: anytype,
         comptime handoff: anytype,
     ) !void {
-        try self.queue().callHeld(withActionDispatchHandoffHeld, .{ self, binding });
+        _ = try self.queue().callHeld(withActionDispatchHandoffHeld, .{ self, binding });
         defer self.queue().release();
         try handoff(context);
     }
 
-    fn withActionDispatchHandoffHeld(self: *Store, binding: ActionAttemptBinding) !void {
+    pub fn withActionLaunchHandoff(self: *Store, binding: ActionAttemptBinding, context: anytype, comptime handoff: anytype) !void {
+        const cutoff = try self.queue().callHeld(withActionDispatchHandoffHeld, .{ self, binding });
+        defer self.queue().release();
+        try handoff(context, cutoff);
+    }
+
+    fn withActionDispatchHandoffHeld(self: *Store, binding: ActionAttemptBinding) !u64 {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: ReadAccess = .open(&entry);
         defer access.deinit();
-        try entry.finish(Ordinary.action_dispatch, action_domain.validateActionDispatch(&access, binding));
+        return entry.finish(Ordinary.action_dispatch, action_domain.validateActionDispatch(&access, binding));
+    }
+
+    pub fn messageAfterActionLaunch(self: *Store, binding: ActionAttemptBinding, cutoff: u64) !bool {
+        return self.queue().run(messageAfterActionLaunchHeld, .{ self, binding, cutoff });
+    }
+
+    fn messageAfterActionLaunchHeld(self: *Store, binding: ActionAttemptBinding, cutoff: u64) !bool {
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: ReadAccess = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.none, action_domain.messageAfterLaunch(&access, binding, cutoff));
     }
 
     pub fn settleActionAttempt(
@@ -1622,14 +1656,14 @@ fn destroyRing(ring: *change_ring.Ring) void {
 
 pub const Ordinary = struct {
     pub const none = error{};
-    const page = error{ SessionNotFound, InvalidCursor };
-    const content = error{ContentNotFound};
-    const public_content = error{ ContentNotFound, RangeOutOfBounds };
+    const page = error{ SessionNotFound, InvalidCursor, InputPartsNotSupported };
+    const content = error{ ContentNotFound, InputPartsNotSupported };
+    const public_content = error{ ContentNotFound, RangeOutOfBounds, InputPartsNotSupported };
     pub const action = error{ActionNotFound};
-    pub const action_read = action || error{InvalidCursor};
+    pub const action_read = action || error{ InvalidCursor, InputPartsNotSupported };
     const result = error{ ResultNotFound, ResultNotReady, ResultFailed };
     pub const attempt_binding = error{ StaleAttemptBinding, SupersededByControl };
-    pub const historical_entry = error{HistoricalPending};
+    pub const historical_entry = error{ HistoricalPending, InputPartsNotSupported };
     pub const model_success = attempt_binding || error{InvalidProviderEnvelope};
     pub const action_attempt = error{StaleActionAttemptBinding};
     const action_dispatch = action_attempt || error{SupersededByControl};
@@ -1713,7 +1747,7 @@ pub const Entry = struct {
     fn finishCapture(self: Entry, ordinary: bool, result: anytype) @TypeOf(result) {
         comptime assertSmallResult(@TypeOf(result));
         return result catch |err| {
-            if (ordinary) return err;
+            if (ordinary or err == error.InputPartsNotSupported) return err;
             return fence(self.store, err);
         };
     }

@@ -621,19 +621,15 @@ pub fn writeTestTrace(host: *Host, trace: *protocol.ResponseBuffer, publication:
         host.trace_lost.store(true, .release);
         return;
     }
-    var complete: protocol.ResponseBuffer = .{};
-    complete.append(original[0 .. original.len - 1]) catch {
-        host.trace_lost.store(true, .release);
-        return;
-    };
-    complete.appendFmt(
+    trace.len -= 1;
+    trace.appendFmt(
         ",\"process\":\"{d}\",\"run\":\"{d}\",\"clock\":\"awake_ns\",\"sequence\":\"{d}\",\"trace_lost\":{s}}}\n",
         .{ trace_native.getpid(), host.trace_run_ns, host.trace_sequence, if (host.trace_lost.load(.acquire)) "true" else "false" },
     ) catch {
         host.trace_lost.store(true, .release);
         return;
     };
-    if (!stderr.writeHeld(complete.slice())) host.trace_lost.store(true, .release);
+    if (!stderr.writeHeld(trace.slice())) host.trace_lost.store(true, .release);
 }
 
 pub inline fn traceSubject(host: *Host, phase: []const u8, subject_kind: []const u8, subject: []const u8) void {

@@ -332,6 +332,11 @@ test "SessionChrome puts notices in Footer without a state row and preserves nee
         const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 12 }, .cell_size = .{} };
         self.place(&screen, &input, .{ .width = width, .facts = .{ .name = "Archive audit", .archive = .archived } });
         const idle = try input.widget().draw(ctx);
+        self.place(&screen, &input, .{ .width = width, .facts = .{ .name = "Archive audit", .archive = .archived }, .progress = "Opening…" });
+        const opening = try input.widget().draw(ctx);
+        try std.testing.expectEqual(idle.size.height, opening.size.height);
+        try std.testing.expectEqualStrings("", self.state.text);
+        try std.testing.expectEqualStrings("Opening…", self.status.bar.notice.?);
         self.place(&screen, &input, .{ .width = width, .facts = .{ .name = "Archive audit", .archive = .archived }, .notice = "Copied 3 lines", .stoppable = true });
         const noticed = try input.widget().draw(ctx);
         try std.testing.expectEqual(idle.size.height, noticed.size.height);
@@ -423,7 +428,7 @@ test "SessionChrome transient reply categories appear once in Footer and never i
     defer arena.deinit();
     var screen: AppScreen.Session = undefined;
     screen.input = input.widget();
-    for ([_][]const u8{ "Copied 3 lines", "Configured.", "! Unknown command /nope", "! Copy unavailable", "Opening tool output…", "No earlier message.", "Restored chat", "Upgraded to 0.60.0" }) |notice| for ([_]u16{ 46, 99 }) |width| {
+    for ([_][]const u8{ "Copied 3 lines", "Configured.", "! Unknown command /nope", "! Copy unavailable", "Opening tool output…", "No earlier message.", "Restored chat" }) |notice| for ([_]u16{ 46, 99 }) |width| {
         self.place(&screen, &input, .{ .width = width, .facts = .{ .name = "Chat" }, .notice = notice });
         const drawn = try input.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 30 }, .cell_size = .{} });
         try std.testing.expectEqual(@as(u16, 4), drawn.size.height);

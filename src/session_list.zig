@@ -42,6 +42,7 @@ pub const Row = struct {
     pin_order: ?@import("session_pin.zig").PinOrder = null,
     reference: []const u8,
     parent: ?[]const u8,
+    creator: ?[]const u8 = null,
     workspace: []const u8,
     provider: provider_name.Provider,
     model: []const u8,

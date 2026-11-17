@@ -16,7 +16,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631;
-pub const schema_version: u32 = 78;
+pub const schema_version: u32 = 80;
 
 pub const IdentityMismatch = struct {
     saved_selector: Bounded(store_path.max_bytes) = .{},
@@ -57,6 +57,8 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 76, .digest = 0x0d2cb1706af6379c },
     .{ .schema_version = 77, .digest = 0x180d1a249b979d56 },
     .{ .schema_version = 78, .digest = 0xa3f9fee49afacee2 },
+    .{ .schema_version = 79, .digest = 0x73f89feb47e61ded },
+    .{ .schema_version = 80, .digest = 0xa19f085a8611c762 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -709,6 +711,32 @@ pub const migrations = [_]Migration{
             "CREATE INDEX action_stop_target ON action_stop(target_action_id)",
         },
     },
+    .{
+        .from = 78,
+        .sqlite = &.{
+            "ALTER TABLE content ADD COLUMN form INTEGER NOT NULL DEFAULT 0 CHECK(form IN (0,1) AND (form=0 OR private=0))",
+            "CREATE TABLE content_part(\n content_id INTEGER NOT NULL REFERENCES content(content_id),\n ordinal INTEGER NOT NULL CHECK(ordinal>=0),\n part_content_id INTEGER NOT NULL REFERENCES content(content_id),\n PRIMARY KEY(content_id,ordinal),\n CHECK(part_content_id<>content_id)\n) STRICT, WITHOUT ROWID",
+            "CREATE INDEX content_part_by_part ON content_part(part_content_id)",
+            "UPDATE core_command SET secondary_content_id=primary_content_id,primary_content_id=NULL WHERE kind=2 AND accepted=0",
+        },
+        .mysql = &.{
+            "ALTER TABLE content ADD COLUMN form BIGINT NOT NULL DEFAULT 0, ADD CHECK(form IN (0,1) AND (form=0 OR private=0))",
+            "CREATE TABLE content_part(\n content_id BIGINT NOT NULL,\n ordinal BIGINT NOT NULL,\n part_content_id BIGINT NOT NULL,\n PRIMARY KEY(content_id,ordinal),\n FOREIGN KEY(content_id) REFERENCES content(content_id),\n FOREIGN KEY(part_content_id) REFERENCES content(content_id),\n CHECK(ordinal>=0),\n CHECK(part_content_id<>content_id)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
+            "CREATE INDEX content_part_by_part ON content_part(part_content_id)",
+            "UPDATE core_command SET secondary_content_id=primary_content_id,primary_content_id=NULL WHERE kind=2 AND accepted=0",
+        },
+    },
+    .{
+        .from = 79,
+        .sqlite = &.{
+            "ALTER TABLE session ADD COLUMN creator_ref TEXT REFERENCES session(session_ref) CHECK(creator_ref IS NULL OR creator_ref<>session_ref)",
+            "UPDATE session SET creator_ref=parent_ref",
+        },
+        .mysql = &.{
+            "ALTER TABLE session ADD COLUMN creator_ref VARCHAR(6) AFTER obligation_since, ADD FOREIGN KEY(creator_ref) REFERENCES session(session_ref), ADD CHECK(creator_ref IS NULL OR creator_ref<>session_ref)",
+            "UPDATE session SET creator_ref=parent_ref",
+        },
+    },
 };
 
 comptime {
@@ -822,6 +850,7 @@ pub const Column = struct {
     read_by: ReadBy = .recipient,
     engines: Engines = .all,
     sqlite_added: bool = false,
+    holds: enum { bytes, value } = .bytes,
 };
 
 pub const Engines = enum {
@@ -962,6 +991,7 @@ pub const tables = [_]Table{
             .{ .name = "byte_length", .type = .int, .check = "byte_length>=0 AND byte_length<=1073737728" },
             .{ .name = "private", .type = .flag },
             .{ .name = "payload", .type = .{ .bytes = null }, .check = "length(payload)=byte_length", .engines = .sqlite },
+            .{ .name = "form", .type = .int, .default = "0", .check = "form IN (0,1) AND (form=0 OR private=0)", .sqlite_added = true },
         },
         .primary_key = &.{"content_id"},
         .uniques = &.{&.{ "digest", "byte_length", "private" }},
@@ -976,6 +1006,18 @@ pub const tables = [_]Table{
         .primary_key = &.{ "content_id", "chunk_index" },
         .foreign_keys = &.{references("content_id", "content", content_reference)},
         .engines = .mysql,
+    },
+    .{
+        .name = "content_part",
+        .columns = &.{
+            .{ .name = "content_id", .type = .int },
+            .{ .name = "ordinal", .type = .int, .check = "ordinal>=0" },
+            .{ .name = "part_content_id", .type = .int },
+        },
+        .primary_key = &.{ "content_id", "ordinal" },
+        .foreign_keys = &.{ references("content_id", "content", content_reference), references("part_content_id", "content", content_reference) },
+        .checks = &.{"part_content_id<>content_id"},
+        .without_rowid = true,
     },
     .{
         .name = "tool_record",
@@ -1082,6 +1124,7 @@ pub const tables = [_]Table{
             .{ .name = "workspace_key", .type = .int },
             .{ .name = "parent_ref", .type = .{ .text = null }, .nullable = true },
             .{ .name = "obligation_since", .type = .int, .nullable = true, .sqlite_added = true, .check = "obligation_since IS NULL OR obligation_since>0" },
+            .{ .name = "creator_ref", .type = .{ .text = null }, .nullable = true, .sqlite_added = true, .check = "creator_ref IS NULL OR creator_ref<>session_ref" },
         },
         .primary_key = &.{"session_ref"},
         .uniques = &.{&.{"created_seq"}},
@@ -1092,6 +1135,7 @@ pub const tables = [_]Table{
             references("loaded_tool_set_id", "tool_set", &.{"tool_set_id"}),
             references("output_schema_content_id", "content", content_reference),
             references("parent_ref", "session", session_reference),
+            references("creator_ref", "session", session_reference),
         },
     },
     .{
@@ -1101,7 +1145,7 @@ pub const tables = [_]Table{
             .{ .name = "kind", .type = .int, .check = "kind BETWEEN 1 AND 8" },
             .{ .name = "target", .type = .{ .text = .{ .max = 128 } } },
             .{ .name = "input_digest", .type = .{ .bytes = .{ .min = 32, .max = 32 } } },
-            .{ .name = "primary_content_id", .type = .int, .nullable = true },
+            .{ .name = "primary_content_id", .type = .int, .nullable = true, .holds = .value },
             .{ .name = "secondary_content_id", .type = .int, .nullable = true },
             .{ .name = "accepted", .type = .flag },
             .{ .name = "code", .type = .{ .text = .{ .max = 96 } } },
@@ -1178,7 +1222,7 @@ pub const tables = [_]Table{
             .{ .name = "admission_id", .type = .int, .check = "admission_id>0", .read_by = .both },
             .{ .name = "session_ref", .type = .{ .text = null }, .read_by = .both },
             .{ .name = "command_key", .type = .{ .text = null }, .read_by = .both },
-            .{ .name = "content_id", .type = .int, .read_by = .both },
+            .{ .name = "content_id", .type = .int, .read_by = .both, .holds = .value },
             .{ .name = "admission_position", .type = .int, .nullable = true, .check = "admission_position>0" },
             .{ .name = "turn_id", .type = .int, .nullable = true },
             .{ .name = "admitted_at", .type = .int, .check = "admitted_at>0", .read_by = .both },
@@ -1462,7 +1506,7 @@ pub const tables = [_]Table{
             .{ .name = "source_skill_position", .type = .int, .nullable = true },
             .{ .name = "source_operation_id", .type = .int, .nullable = true },
             .{ .name = "source_item_ordinal", .type = .int, .nullable = true, .check = "source_item_ordinal IS NULL OR source_item_ordinal>=0" },
-            .{ .name = "content_id", .type = .int },
+            .{ .name = "content_id", .type = .int, .holds = .value },
             .{ .name = "recorded_at", .type = .int, .check = "recorded_at>0" },
         },
         .primary_key = &.{ "session_ref", "entry_ordinal" },
@@ -1589,13 +1633,13 @@ pub const tables = [_]Table{
                 .type = .{ .tag = &.{ "denied", "cancelled", "succeeded", "failed", "timed_out", "indeterminate", "storage_failed", "spawn_failed", "infrastructure_shutdown" } },
                 .nullable = true,
             },
-            .{ .name = "resolution_content_id", .type = .int, .nullable = true },
+            .{ .name = "resolution_content_id", .type = .int, .nullable = true, .holds = .value },
             .{ .name = "acceptance_position", .type = .int, .nullable = true, .check = "acceptance_position IS NULL OR acceptance_position>0" },
             .{ .name = "attempt_at", .type = .int, .nullable = true, .check = "attempt_at IS NULL OR attempt_at>0" },
             .{ .name = "decided_at", .type = .int, .nullable = true, .check = "decided_at IS NULL OR decided_at>0" },
             .{ .name = "resolved_at", .type = .int, .nullable = true, .check = "resolved_at IS NULL OR resolved_at>0" },
             .{ .name = "approval_position", .type = .int, .nullable = true, .check = "approval_position IS NULL OR approval_position>0" },
-            .{ .name = "background_content_id", .type = .int, .nullable = true, .sqlite_added = true },
+            .{ .name = "background_content_id", .type = .int, .nullable = true, .sqlite_added = true, .holds = .value },
             .{ .name = "background_position", .type = .int, .nullable = true, .check = "(background_content_id IS NULL AND background_position IS NULL) OR (background_content_id IS NOT NULL AND background_position IS NOT NULL AND background_position>0 AND (acceptance_position IS NULL OR background_position<acceptance_position))", .sqlite_added = true },
             .{ .name = "background_at", .type = .int, .nullable = true, .check = "(background_position IS NULL AND background_at IS NULL) OR (background_position IS NOT NULL AND background_at IS NOT NULL AND background_at>0)", .sqlite_added = true },
         },
@@ -1666,6 +1710,7 @@ pub const tables = [_]Table{
 
 pub const indexes = [_]Index{
     .{ .name = "action_stop_target", .table = "action_stop", .columns = &.{"target_action_id"} },
+    .{ .name = "content_part_by_part", .table = "content_part", .columns = &.{"part_content_id"} },
     .{ .name = "session_obligation_parent", .table = "session", .columns = &.{ "parent_ref", "obligation_since", "session_ref" }, .where = "obligation_since IS NOT NULL" },
     .{ .name = "session_forward_owed_message", .table = "session_forward", .columns = &.{ "target_ref", "message_delivered" } },
     .{ .name = "session_workspace_list", .table = "session", .columns = &.{ "workspace_digest", "created_seq" } },
@@ -3215,4 +3260,89 @@ test "model call timing format 68 migration preserves format 67 resolutions with
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT operation_id,attempt_ordinal,resolution_code,resolved_at FROM model_operation EXCEPT SELECT * FROM old_model_resolutions)"));
     try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, "UPDATE model_operation SET latency_ms=-1"));
     try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, "UPDATE model_operation SET first_event_ms=-1"));
+}
+
+test "schema 80 creator migration retains all prior session facts and backfills only known parents" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [store_path.max_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var path_buffer: [store_path.max_bytes + 32]u8 = undefined;
+    const path = try std.fmt.bufPrintSentinel(&path_buffer, "{s}/creator.sqlite3", .{root}, 0);
+    var raw: ?*c.sqlite3 = null;
+    defer _ = c.sqlite3_close(raw);
+    try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_open(path, &raw));
+    const database = raw.?;
+    try sqlite.exec(database, @embedFile("migration_baseline.sqlite.sql"));
+    try sqlite.exec(database, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
+    try sqlite.exec(database, @embedFile("migration_baseline_rows.sql"));
+    for (migrations) |step| {
+        if (step.from >= 79) break;
+        for (step.sqlite) |statement| try sqlite.exec(database, statement);
+    }
+    try sqlite.exec(database, "UPDATE session SET parent_ref='d8mv7p' WHERE session_ref='brhkcj'");
+    try sqlite.exec(database, "UPDATE session SET parent_ref='brhkcj' WHERE session_ref='rhvzwc'");
+    const old_columns = comptime blk: {
+        var names: []const u8 = "";
+        for (tables) |table| {
+            if (!std.mem.eql(u8, table.name, "session")) continue;
+            for (table.columns) |column| {
+                if (std.mem.eql(u8, column.name, "creator_ref")) continue;
+                if (names.len != 0) names = names ++ ",";
+                names = names ++ column.name;
+            }
+        }
+        break :blk names;
+    };
+    try sqlite.exec(database, "CREATE TEMP TABLE original_sessions AS SELECT " ++ old_columns ++ " FROM session");
+    try sqlite.exec(database, "PRAGMA foreign_keys=ON;PRAGMA legacy_alter_table=OFF;PRAGMA user_version=79");
+    try sqlite.exec(database, identity_sql);
+    const meta = try sqlite.prepare(database, "INSERT INTO store_meta(meta_key,meta_value) VALUES('store_selector',?1),('format','79')");
+    defer _ = c.sqlite3_finalize(meta);
+    try sqlite.bindText(meta, 1, root);
+    try sqlite.expectDone(meta);
+    for (0..2) |_| {
+        try openExisting(std.testing.io, database, root, null, null);
+        try std.testing.expectEqual(schema_version, try sqlite.pragmaInt(database, "PRAGMA user_version"));
+        try std.testing.expectEqual(@as(u32, 3), try sqlite.pragmaInt(database, "SELECT count(*) FROM session"));
+        try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM original_sessions EXCEPT SELECT " ++ old_columns ++ " FROM session)"));
+        try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT " ++ old_columns ++ " FROM session EXCEPT SELECT * FROM original_sessions)"));
+        try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT count(*) FROM session WHERE session_ref='d8mv7p' AND creator_ref IS NULL"));
+        try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT count(*) FROM session WHERE session_ref='brhkcj' AND creator_ref='d8mv7p'"));
+        try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT count(*) FROM session WHERE session_ref='rhvzwc' AND creator_ref='brhkcj'"));
+        try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM pragma_foreign_key_check"));
+        try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, "UPDATE session SET creator_ref='zzzzzz' WHERE session_ref='d8mv7p'"));
+        try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, "UPDATE session SET creator_ref=session_ref WHERE session_ref='d8mv7p'"));
+    }
+}
+
+test "schema 80 creator migration matches canonical SQLite and MySQL column constraints" {
+    const step = migrations[79 - migration_baseline];
+    try std.testing.expectEqual(@as(u32, 79), step.from);
+    try std.testing.expectEqual(@as(usize, 2), step.sqlite.len);
+    try std.testing.expectEqual(@as(usize, 2), step.mysql.len);
+    const session = comptime blk: {
+        for (tables) |table| if (std.mem.eql(u8, table.name, "session")) break :blk table;
+        unreachable;
+    };
+    const creator = comptime blk: {
+        for (session.columns) |column| if (std.mem.eql(u8, column.name, "creator_ref")) break :blk column;
+        unreachable;
+    };
+    try std.testing.expect(creator.nullable and creator.sqlite_added);
+    try std.testing.expectEqualStrings("ALTER TABLE session ADD COLUMN" ++ comptime columnDefinition(session, creator), step.sqlite[0]);
+    try std.testing.expectEqualStrings("UPDATE session SET creator_ref=parent_ref", step.sqlite[1]);
+    try std.testing.expectEqualStrings(step.sqlite[1], step.mysql[1]);
+    const canonical_session_mysql = comptime blk: {
+        for (objects(.mysql)) |object| if (std.mem.eql(u8, object.name, "session")) break :blk object.sql;
+        unreachable;
+    };
+    const obligation_position = std.mem.indexOf(u8, canonical_session_mysql, "obligation_since BIGINT").?;
+    const creator_position = std.mem.indexOf(u8, canonical_session_mysql, "creator_ref VARCHAR(6)").?;
+    const generated_position = std.mem.indexOf(u8, canonical_session_mysql, "session_obligation_parent_lead").?;
+    try std.testing.expect(obligation_position < creator_position and creator_position < generated_position);
+    try std.testing.expect(std.mem.indexOf(u8, step.mysql[0], "ADD COLUMN creator_ref VARCHAR(6) AFTER obligation_since") != null);
+    try std.testing.expect(std.mem.indexOf(u8, canonical_session_mysql, "CHECK(" ++ creator.check.? ++ ")") != null);
+    try std.testing.expect(std.mem.indexOf(u8, step.mysql[0], "CHECK(" ++ creator.check.? ++ ")") != null);
+    try std.testing.expect(std.mem.indexOf(u8, step.mysql[0], "FOREIGN KEY(creator_ref) REFERENCES session(session_ref)") != null);
 }

@@ -7,6 +7,7 @@ import threading
 
 import model_fixture as fixture
 from overview_fixture import world
+from human_cli_fixture import conversation_text, composer_line, chat_footer_row
 
 
 def answer(name):
@@ -35,7 +36,7 @@ def rows_by_mark():
     with world("drawing-marks", responses, active_capacity=2) as w, released(*holds.values()):
         with w.overview(columns=99, rows=30) as screen:
             frame = screen.contains("+ New Session")
-            assert frame.split("\n")[0] == "  + New Session", frame
+            assert frame.split("\n")[0] == " + New Session", frame
             asking = w.session("--label", "Asking", "--tools", "bash", "--permission-mode", "ask")
             failing = w.session("--label", "Failing")
             send(w, asking, "ask")
@@ -48,18 +49,18 @@ def rows_by_mark():
             frame = screen.contains("◌ q1")
             lines = frame.split("\n")
             queued = next(i for i, line in enumerate(lines) if "◌ q1" in line)
-            assert re.fullmatch(r"◌ q1 +\d+s", lines[queued].strip()), frame
+            assert re.fullmatch(r"◌ q1 +now", lines[queued].strip()), frame
             assert "Queued" not in frame and "workspace" not in frame, frame
             assert "slots " not in frame, frame
             for line in lines:
-                if not line.startswith("  Settings"):
+                if not line.startswith("   Settings"):
                     assert not re.search(r"(?:rui|tools) \d+(?:\.\d+)? (?:MB|GB)\b", line), frame
             assert screen.style("? Asking").fg != screen.style("× Failing").fg, frame
             holds["w1"].set()
-            screen.wait(lambda f: "✓ w1" in f and "◌ q1" not in f, "queue admission")
+            screen.wait(lambda f: "   w1" in f and "◌ q1" not in f, "queue admission")
             for held in holds.values():
                 held.set()
-            screen.contains("✓ q1")
+            screen.contains("   q1")
     print("overview drawing: one-line state rows replace counts and slots", flush=True)
 
 
@@ -68,8 +69,10 @@ def pinned_settings():
         frame = screen.contains("Settings")
         rows = frame.split("\n")
         settings = next(i for i, line in enumerate(rows) if "Settings" in line)
-        assert settings == len(rows) - 2, frame
-        assert re.fullmatch(r"─+", rows[settings - 1]), frame
+        assert settings == len(rows) - 3, frame
+        assert set(rows[settings - 1].strip()) <= {"─", "-"} and rows[settings - 1].strip(), frame
+        assert re.search(r"0\.\d+\.\d+|unreleased", rows[settings + 1]), frame
+        assert "rui " not in rows[settings + 1] and "tools " not in rows[settings + 1], frame
         assert "enter open" not in frame, frame
         assert "Type a task" not in frame and "gpt-6-luna" not in frame, frame
         before = requests(w)
@@ -81,7 +84,7 @@ def pinned_settings():
         assert "Type a task" not in frame and "/nope" not in frame and "pasted task" not in frame, frame
         assert "Unknown command" not in frame and requests(w) == before, frame
         assert json.loads(w.run("session", "list", "--store", w.store, "--all"))["sessions"] == [], frame
-    print("overview drawing: Settings ends the list above one Footer; text and paste create no draft or request", flush=True)
+    print("overview drawing: Settings sits above memory/version and one Footer; text and paste create no draft or request", flush=True)
 
 
 def requests(w):
@@ -93,7 +96,7 @@ def unconfirmed_status():
         session = w.session("--label", "Talk")
         send(w, session, "first")
         with w.overview() as screen:
-            frame = screen.contains("✓ Talk")
+            frame = screen.contains("   Talk")
             assert "Not confirmed" not in frame, frame
             screen.keys(b"\r")
             screen.wait(lambda f: "first done" in f and "Talk ·" in f, "the conversation")
@@ -103,8 +106,16 @@ def unconfirmed_status():
                 screen.keys(b"lost")
                 screen.contains("lost")
                 screen.keys(b"\r")
-                screen.wait(lambda f: "! Not confirmed" in f and "ctrl+r retries original" in f,
-                            "unconfirmed state below footer and retry key in footer", timeout=30)
+                note = "Not confirmed · ctrl+r retries original"
+                frame = screen.wait(lambda f: note in conversation_text(f)
+                    and conversation_text(f).count("› lost") == 1,
+                    "unconfirmed note attached to the original sent Message", timeout=30)
+                transcript = conversation_text(frame)
+                assert transcript.count(note) == 1 and transcript.index("› lost") < transcript.index(note), frame
+                assert "! Not confirmed" not in frame and "Sending" not in frame, frame
+                footer = chat_footer_row(frame)
+                assert note not in "\n".join(composer_line(frame, index)
+                    for index in range(footer, len(frame.split("\n")))), frame
             finally:
                 os.kill(w.host.pid, signal.SIGCONT)
             saved = requests(w) - before

@@ -327,7 +327,9 @@ pub fn build(b: *std.Build) void {
     if (pr_ci) upgrade_release.root_module.strip = true;
     const upgrade_fixture_step = b.step("upgrade-fixture", "Build the same-source native actor with synthetic release identity for upgrade evidence");
     upgrade_fixture_step.dependOn(&b.addInstallArtifact(upgrade_release, .{}).step);
-    const upgrade_integration = screen_module.screenCommand(b, screen, &.{"python3"});
+    const upgrade_integration = screen_module.screenCommand(b, screen, &.{});
+    upgrade_integration.addPrefixedFileArg("RUI_TEST_MYSQL_ADMIN=", ci.path(mysql_launch_admin));
+    upgrade_integration.addArg("python3");
     upgrade_integration.addFileArg(b.path("tests/integration/upgrade_integration.py"));
     upgrade_integration.addFileArg(ci.path(upgrade_release));
     const upgrade_step = b.step("upgrade-integration", "Run isolated release publication and exact Host upgrade lifecycle cases");
@@ -363,6 +365,7 @@ pub fn build(b: *std.Build) void {
 
     const human_cli = screen_module.screenCommand(b, screen, &.{});
     human_cli.addPrefixedFileArg("RUI_TEST_TERMINAL_NOTICE=", ci.path(terminal_notice));
+    human_cli.addPrefixedFileArg("RUI_TEST_MYSQL_ADMIN=", ci.path(mysql_launch_admin));
     human_cli.addArg("python3");
     human_cli.addFileArg(b.path("tests/integration/human_cli_integration.py"));
     human_cli.addFileArg(ci.path(release_safe));

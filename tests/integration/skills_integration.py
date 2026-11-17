@@ -502,7 +502,8 @@ def main():
         skill(project, "added", "Added metadata", directory="Vendor_Added")
         child_only = skill(project, "child-only", "Unique child discovery after parent creation")
         configured = invoke("session", "configure", "--store", store, "--session", parent,
-                            "--tools", "bash,skill,start_agent", "--key", "parent-tools",
+                            "--tools", "bash,skill,start_agent", "--loaded-tools", "bash,skill,start_agent",
+                            "--key", "parent-tools",
                             "--record", state / "parent-tools.json")
         assert configured["answer"]["status"] == "accepted", configured
         send("spawn", "start the unique child")

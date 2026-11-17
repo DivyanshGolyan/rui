@@ -13,6 +13,7 @@ import time
 
 import host_process
 import os_semantics
+from preset_creation_cases import preset_creation
 from settings_fixture import WIRE, frame, host_info, mcp_server, output, post, refusal, wait_for_host
 
 
@@ -318,6 +319,8 @@ def main(network, ci):
     assert update["answer"]["code"] == "preset_on_update", update
     host_process.close_stdin(host)
     assert host.wait(timeout=30) == 0, output(host)
+
+    preset_creation(RUI, root / "cli-presets", good["store"], os.environ)
 
     for presets in [
         {"Bad": preset},

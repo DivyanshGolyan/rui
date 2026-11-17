@@ -108,6 +108,7 @@ const tool_continuation_selection = model_admission_domain.tool_continuation_sel
 const output_metadata_record_bytes = output_format.output_metadata_record_bytes;
 
 test {
+    _ = @import("creator_tests.zig");
     _ = @import("domain/configuration.zig");
     _ = @import("domain/session_obligation.zig");
     _ = @import("rsql.zig");
@@ -1124,6 +1125,7 @@ pub const EntryPoint = enum {
     pinSession,
     interruptModel,
     decidePermission,
+    declineForMessage,
     observeCommand,
     commandResult,
     inspectSession,
@@ -1158,6 +1160,7 @@ pub const EntryPoint = enum {
     resolveCoreCall,
     actionSupersededByStop,
     withActionDispatchHandoff,
+    messageAfterActionLaunch,
     settleActionAttempt,
     recoverOneUncertainAction,
     tryAdmitNextModelRetry,
@@ -1193,6 +1196,7 @@ pub const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .pinSession = 3,
     .interruptModel = 2,
     .decidePermission = 2,
+    .declineForMessage = 2,
     .observeCommand = 3,
     .commandResult = 1,
     .inspectSession = 3,
@@ -1227,6 +1231,7 @@ pub const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .resolveCoreCall = 2,
     .actionSupersededByStop = 1,
     .withActionDispatchHandoff = 1,
+    .messageAfterActionLaunch = 1,
     .settleActionAttempt = 3,
     .recoverOneUncertainAction = 1,
     .tryAdmitNextModelRetry = 1,

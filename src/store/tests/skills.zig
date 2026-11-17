@@ -250,7 +250,7 @@ test "skills a Message's refusal diagnostic that fails to import saves nothing" 
             const rejected = storage.submitMessageCapturedSkills(&message, null, null, &captured, .{});
             try std.testing.expect(rejected == .rejected and !rejected.rejected.replayed);
             try std.testing.expectEqual(protocol.MessageRejection.skill_file_unavailable, rejected.rejected.code);
-            try std.testing.expectEqual(@as(u64, diagnostic.len), try store_testing.queryU64(&storage, "SELECT content.byte_length FROM core_command JOIN content ON content.content_id=core_command.primary_content_id WHERE command_key=?1", .{"skills-diagnostic-message"}));
+            try std.testing.expectEqual(@as(u64, diagnostic.len), try store_testing.queryU64(&storage, "SELECT content.byte_length FROM core_command JOIN content ON content.content_id=core_command.secondary_content_id WHERE command_key=?1", .{"skills-diagnostic-message"}));
         }
     }.run);
 }
@@ -431,7 +431,7 @@ test "skills peer refusal persists authenticated activity diagnostic and keyed r
                 try std.testing.expectEqual(sender_position, activity.items[0].position);
                 try std.testing.expectEqualStrings("skill_file_unavailable", activity.items[0].value.send_failed.code.slice());
                 try std.testing.expectEqualStrings(receiver.slice(), activity.items[0].value.send_failed.target.?.session.slice());
-                const diagnostic_id = try store_testing.queryU64(&storage, "SELECT primary_content_id FROM core_command WHERE command_key=?1 AND accepted=0 AND code='skill_file_unavailable'", .{command.key.slice()});
+                const diagnostic_id = try store_testing.queryU64(&storage, "SELECT secondary_content_id FROM core_command WHERE command_key=?1 AND accepted=0 AND code='skill_file_unavailable'", .{command.key.slice()});
                 const reference = try testingContentReference(&storage, diagnostic_id);
                 var reader: ContentReader = undefined;
                 reader.open(try storage.openContent(reference));
@@ -854,7 +854,8 @@ test "inline skills initial failure preserves all ordinary configuration refusal
                 try std.testing.expectEqual(test_case.code, reply.rejected.code);
                 try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{}));
                 try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission", .{}));
-                try std.testing.expectEqual(baseline, try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
+                try std.testing.expectEqual(baseline + 1, try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM core_command cmd JOIN content c ON c.content_id=cmd.primary_content_id WHERE cmd.command_key=?1 AND cmd.accepted=0 AND c.byte_length=8 AND c.digest=?2 AND c.form=0 AND cmd.secondary_content_id IS NULL", .{ command.key.slice(), store_testing.Blob{ .bytes = &protocol.contentDigest("authored") } }));
             }
         }
     }.run);

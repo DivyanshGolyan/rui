@@ -663,23 +663,240 @@ pub fn observeHostForUpgradeAtSocket(allocator: std.mem.Allocator, io: std.Io, s
     const pid = try identity.peer(fd);
     var snapshot = try identity.snapshot(allocator, pid);
     defer snapshot.deinit(allocator);
-    if (snapshot.argv.len < 3 or !std.mem.eql(u8, snapshot.argv[1], "host") or !std.mem.eql(u8, snapshot.argv[2], "serve")) return error.HostPeerNotServing;
-    var arena = std.heap.ArenaAllocator.init(allocator);
+    var wiping: @import("secret_value.zig").WipingAllocator = .{ .backing = allocator };
+    var arena = std.heap.ArenaAllocator.init(wiping.allocator());
     defer arena.deinit();
-    var problem: @import("cli_grammar.zig").Refusal = undefined;
-    const serve_grammar = @import("serve_grammar.zig");
-    const arguments = serve_grammar.currentArguments(arena.allocator(), snapshot.argv[3..]) catch return error.HostServeArgumentsUnreadable;
-    const parsed = serve_grammar.definition.parseSyntax(arguments, arena.allocator(), &problem) catch return error.HostServeArgumentsUnreadable;
-    const supplied = parsed.get("store") orelse return error.HostServeStoreMissing;
+    const sources = @import("serve_grammar.zig").runningSources(arena.allocator(), snapshot.argv) catch |err| {
+        if (err == error.HostPeerNotServing) return error.HostPeerNotServing;
+        return error.HostServeArgumentsUnreadable;
+    };
+    const supplied = sources.dir orelse return error.HostServeStoreMissing;
+    // A relative argv path is not relative to this client. Without a verified
+    // canonical identity, report it rather than probing a guessed Store.
     if (!std.fs.path.isAbsolute(supplied)) return error.HostServeStoreRelative;
     const paths = try resolveClientPaths(io, supplied);
     if (!std.mem.eql(u8, paths.socket.slice(), socket_path)) return error.HostSocketStoreMismatch;
-    var observed = try observeHostForUpgradeAt(io, &paths, until);
-    if (observed.pid != pid) return error.HostPeerPidMismatch;
-    try observed.host_directory.set(supplied);
+    const observed = try observeHostForUpgradeAt(io, &paths, until);
+    if (observed.pid != pid or (identity.generation(pid) catch 0) != snapshot.started) return error.HostPeerPidMismatch;
     return observed;
 }
 
+/// Authenticate the process at the saved DIR socket without decoding its wire
+/// or resolving MySQL identity. The caller owns (and must wipe) the snapshot.
+pub fn observeUpgradePeer(allocator: std.mem.Allocator, io: std.Io, directory: []const u8, deadline: ?i128) !@import("host_identity.zig").Snapshot {
+    const paths = try platform.resolveClientPaths(io, directory);
+    const address = try std.Io.net.UnixAddress.init(paths.socket.slice());
+    const fd = try connectRequest(.{ .io = io }, address, hostObservationDeadline(io, deadline));
+    defer closeSocket(io, fd);
+    const identity = @import("host_identity.zig");
+    return identity.snapshot(allocator, try identity.peer(fd));
+}
+
+pub const ReplacementFacts = struct {
+    instance: protocol.InstanceId,
+    store: @import("host_settings.zig").OsBytes(protocol.max_store_bytes) = .{},
+    active_capacity: usize,
+};
+
+/// The public status envelope, not a foreign Host wire decoder. Additive fields
+/// are harmless; the envelope's version is a wire version, not a build identity.
+pub fn parseUpgradeStatus(allocator: std.mem.Allocator, bytes: []const u8) !?ReplacementFacts {
+    if (bytes.len > 64 * 1024) return null;
+    const Envelope = struct {
+        type: []const u8,
+        status: []const u8,
+        instance: ?[]const u8 = null,
+        store: ?[]const u8 = null,
+        active_capacity: ?[]const u8 = null,
+    };
+    const parsed = std.json.parseFromSlice(Envelope, allocator, bytes, .{ .ignore_unknown_fields = true }) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return null,
+    };
+    defer parsed.deinit();
+    const value = parsed.value;
+    if (!std.mem.eql(u8, value.type, "host_status") or !std.mem.eql(u8, value.status, "ready")) return null;
+    var facts: ReplacementFacts = .{
+        .instance = protocol.parseInstanceId(value.instance orelse return null) catch return null,
+        .active_capacity = std.fmt.parseInt(usize, value.active_capacity orelse return null, 10) catch return null,
+    };
+    facts.store.set(value.store orelse return null) catch return null;
+    return facts;
+}
+
+/// Read-only census results. A process-table PID is only a hint; observations
+/// below authenticate the resolved socket and confirm the hinted generation.
+/// Paths are OS bytes and are owned independently of the temporary snapshots.
+pub const UpgradeCandidate = struct {
+    socket: ?[]const u8 = null,
+    directory: ?[]const u8 = null,
+    pid: ?c_int = null,
+    generation: ?u64 = null,
+    result: union(enum) { observed: HostControlObservation, failed: anyerror },
+
+    pub fn deinit(self: UpgradeCandidate, allocator: std.mem.Allocator) void {
+        if (self.socket) |path| allocator.free(path);
+        if (self.directory) |path| allocator.free(path);
+    }
+};
+
+fn knownUpgradeSocket(candidates: []const UpgradeCandidate, socket: []const u8) bool {
+    for (candidates) |candidate| if (candidate.socket) |path| {
+        if (std.mem.eql(u8, path, socket) and candidate.result == .observed) return true;
+    };
+    return false;
+}
+
+/// Takes ownership on success. Keep one result for a socket found by both
+/// census routes, preferring authenticated facts over an earlier failed hint.
+fn appendUpgradeCandidate(allocator: std.mem.Allocator, candidates: *std.ArrayList(UpgradeCandidate), candidate: UpgradeCandidate) !void {
+    if (candidate.socket) |socket| {
+        for (candidates.items) |*existing| {
+            const other = existing.socket orelse continue;
+            if (!std.mem.eql(u8, socket, other)) continue;
+            if (existing.result == .observed) {
+                candidate.deinit(allocator);
+            } else {
+                existing.deinit(allocator);
+                existing.* = candidate;
+            }
+            return;
+        }
+    }
+    try candidates.append(allocator, candidate);
+}
+
+/// Union shallow private sockets with same-user process hints. A vanished or
+/// unreadable unrelated process is not a Host failure. Once argv identifies a
+/// Host, unreadable required sources are an explained per-Host failure instead.
+pub fn discoverUpgradeHosts(allocator: std.mem.Allocator, io: std.Io, cancellation: ?*const Cancellation) ![]UpgradeCandidate {
+    const requests: Requests = .{ .io = io, .cancellation = cancellation };
+    try requests.check();
+    var candidates: std.ArrayList(UpgradeCandidate) = .empty;
+    errdefer {
+        for (candidates.items) |candidate| candidate.deinit(allocator);
+        candidates.deinit(allocator);
+    }
+    const sockets = try platform.listHostSockets(allocator, io);
+    defer {
+        for (sockets) |socket| allocator.free(socket);
+        allocator.free(sockets);
+    }
+    for (sockets) |socket| {
+        try requests.check();
+        try candidates.ensureUnusedCapacity(allocator, 1);
+        const observed = observeHostForUpgradeAtSocket(allocator, io, socket, null);
+        const result: @FieldType(UpgradeCandidate, "result") = if (observed) |facts| .{ .observed = facts orelse continue } else |err| .{ .failed = err };
+        const owned_socket = try allocator.dupe(u8, socket);
+        errdefer allocator.free(owned_socket);
+        const directory = if (result == .observed) try allocator.dupe(u8, result.observed.directory()) else null;
+        candidates.appendAssumeCapacity(.{ .socket = owned_socket, .directory = directory, .generation = if (result == .observed) @import("host_identity.zig").generation(result.observed.pid) catch null else null, .result = result });
+    }
+    var uid: [32]u8 = undefined;
+    const uid_text = try std.fmt.bufPrint(&uid, "{d}", .{std.c.geteuid()});
+    const processes = std.process.run(allocator, io, .{
+        .argv = &.{ "/bin/ps", "-u", uid_text, "-o", "pid=" },
+        .stdout_limit = .limited(1024 * 1024),
+        .stderr_limit = .limited(4096),
+        .timeout = .{ .deadline = .fromNow(io, .{ .raw = .fromSeconds(10), .clock = .awake }) },
+    }) catch |err| {
+        if (err == error.OutOfMemory) return error.OutOfMemory;
+        try candidates.append(allocator, .{ .result = .{ .failed = err } });
+        return candidates.toOwnedSlice(allocator);
+    };
+    defer allocator.free(processes.stdout);
+    defer allocator.free(processes.stderr);
+    if (!processes.term.success()) {
+        try candidates.append(allocator, .{ .result = .{ .failed = error.HostProcessSnapshotUnavailable } });
+        return candidates.toOwnedSlice(allocator);
+    }
+    var pids = std.mem.tokenizeAny(u8, processes.stdout, " \t\r\n");
+    const identity = @import("host_identity.zig");
+    while (pids.next()) |text| {
+        try requests.check();
+        const pid = std.fmt.parseInt(c_int, text, 10) catch continue;
+        var snapshot = identity.snapshot(allocator, pid) catch continue;
+        defer snapshot.deinit(allocator);
+        if (snapshot.argv.len < 3 or !std.mem.eql(u8, snapshot.argv[1], "host") or !std.mem.eql(u8, snapshot.argv[2], "serve")) continue;
+        // A socket census may have already authenticated this same Host.
+        var known = false;
+        for (candidates.items) |candidate| if (candidate.result == .observed and candidate.result.observed.pid == pid and candidate.generation == snapshot.started) {
+            known = true;
+            break;
+        };
+        if (known) continue;
+        var wiping: @import("secret_value.zig").WipingAllocator = .{ .backing = allocator };
+        var arena = std.heap.ArenaAllocator.init(wiping.allocator());
+        defer arena.deinit();
+        var candidate: UpgradeCandidate = .{ .pid = pid, .generation = snapshot.started, .result = .{ .failed = error.HostServeArgumentsUnreadable } };
+        errdefer candidate.deinit(allocator);
+        candidate.result = result: {
+            const sources = @import("serve_grammar.zig").runningSources(arena.allocator(), snapshot.argv) catch |err| break :result .{ .failed = err };
+            const directory = sources.dir orelse break :result .{ .failed = error.HostServeStoreMissing };
+            candidate.directory = try allocator.dupe(u8, directory);
+            if (!std.fs.path.isAbsolute(directory)) break :result .{ .failed = error.HostServeStoreRelative };
+            const paths = platform.resolveClientPaths(io, directory) catch |err| break :result .{ .failed = err };
+            const canonical_directory = try allocator.dupe(u8, paths.selector());
+            allocator.free(candidate.directory.?);
+            candidate.directory = canonical_directory;
+            candidate.socket = try allocator.dupe(u8, paths.socket.slice());
+            if (knownUpgradeSocket(candidates.items, paths.socket.slice())) break :result .{ .failed = error.HostPeerPidMismatch };
+            var peer = observeUpgradePeer(allocator, io, directory, null) catch |err| break :result .{ .failed = err };
+            defer peer.deinit(allocator);
+            if (peer.pid != pid or peer.started != snapshot.started) break :result .{ .failed = error.HostPeerPidMismatch };
+            const observed = observeHostForUpgrade(io, directory, null) catch |err| break :result .{ .failed = err };
+            if (observed.pid != pid or (identity.generation(pid) catch 0) != snapshot.started) break :result .{ .failed = error.HostPeerPidMismatch };
+            break :result .{ .observed = observed };
+        };
+        try appendUpgradeCandidate(allocator, &candidates, candidate);
+    }
+    return candidates.toOwnedSlice(allocator);
+}
+
+/// Process generation and retirement are independent of runtime/Store leases.
+/// A successful same-user census (which includes ps itself) proves absence;
+/// unknown, truncated or failed observations never do. Zombies have retired
+/// even when a foreground caller has not yet reaped them.
+pub fn upgradeGenerationRetired(allocator: std.mem.Allocator, io: std.Io, pid: c_int, started: u64, deadline: i128) !bool {
+    const identity = @import("host_identity.zig");
+    const before = identity.generation(pid) catch null;
+    var uid: [32]u8 = undefined;
+    const processes = try std.process.run(allocator, io, .{
+        .argv = &.{ "/bin/ps", "-u", try std.fmt.bufPrint(&uid, "{d}", .{std.c.geteuid()}), "-o", "pid=,stat=" },
+        .stdout_limit = .limited(1024 * 1024),
+        .stderr_limit = .limited(4096),
+        .timeout = .{ .deadline = .{ .raw = .{ .nanoseconds = @intCast(deadline) }, .clock = .awake } },
+    });
+    defer allocator.free(processes.stdout);
+    defer allocator.free(processes.stderr);
+    if (!processes.term.success() or processes.stderr.len != 0) return error.HostProcessSnapshotUnavailable;
+    const after = identity.generation(pid) catch null;
+    return retirementReading(processes.stdout, pid, started, before, after);
+}
+
+fn retirementReading(bytes: []const u8, pid: c_int, started: u64, before: ?u64, after: ?u64) !bool {
+    if ((before != null and before.? != started) or (after != null and after.? != started)) return true;
+    var lines = std.mem.tokenizeScalar(u8, bytes, '\n');
+    var populated = false;
+    var state: ?[]const u8 = null;
+    while (lines.next()) |line| {
+        var fields = std.mem.tokenizeAny(u8, line, " \t\r");
+        const actual = std.fmt.parseInt(c_int, fields.next() orelse return error.HostProcessSnapshotUnavailable, 10) catch return error.HostProcessSnapshotUnavailable;
+        const status = fields.next() orelse return error.HostProcessSnapshotUnavailable;
+        if (actual <= 0 or status.len == 0 or fields.next() != null) return error.HostProcessSnapshotUnavailable;
+        populated = true;
+        if (actual == pid) {
+            if (state != null) return error.HostProcessSnapshotUnavailable;
+            state = status;
+        }
+    }
+    if (!populated) return error.HostProcessSnapshotUnavailable;
+    if (state) |status| return status[0] == 'Z' and before == started and after == started;
+    return before != started and after != started;
+}
+
+/// How long socket discovery retries a refused connect to a Store whose lease
+/// is still held: a live Host's full backlog refuses until it accepts.
 const refused_connect_retry_ns = 200 * std.time.ns_per_ms;
 
 fn hostObservationDeadline(io: std.Io, deadline: ?i128) i128 {
@@ -1785,6 +2002,7 @@ fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: protocol
         key: protocol_reply.JsonString(protocol.max_key_bytes),
         session: ?protocol_reply.JsonString(protocol.max_session_bytes) = null,
         configuration: ?CapturedConfiguration = null,
+        preset: ?protocol_reply.JsonString(protocol.max_preset_name_bytes) = null,
         require_model: ?bool = null,
         archived: bool = true,
         pinned: ?bool = null,
@@ -1838,7 +2056,7 @@ fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: protocol
     };
     if ((kind != .configure and kind != .message and fields.configuration != null) or
         (fields.require_model != null and !(kind == .configure or kind == .message and fields.configuration != null)) or
-        (kind != .configure and fields.reload_skills != null) or
+        (kind != .configure and (fields.reload_skills != null or fields.preset != null)) or
         (kind != .session_pin and fields.pinned != null) or
         (kind != .message and (fields.text != null or fields.sender != null or fields.sender_handle != null)) or (kind != .model_interruption and fields.target != null) or
         (kind != .permission_decision and fields.decision != null) or
@@ -1918,6 +2136,7 @@ fn writeConfigureRequest(capture: *Capture, store: []const u8, key: []const u8, 
     try capture.writeConfiguration(input);
     if (input.reload_skills) try capture.writeRequest(protocol.configure_request.reload_skills, .{});
     if (input.require_model) try capture.writeRequest(protocol.configure_request.require_model, .{});
+    if (input.preset.present) try capture.writeRequest(protocol.configure_request.preset, .{input.preset.value});
     try capture.writeRequest(protocol.configure_request.tail, .{});
 }
 
@@ -2212,7 +2431,7 @@ const Capture = struct {
     fn writeConfiguration(self: *Capture, input: ConfigureInput) !void {
         try self.write("{");
         var separator: []const u8 = "";
-        inline for (@import("session_settings.zig").entries) |entry| {
+        inline for (@import("session_settings.zig").spec_entries) |entry| {
             const value = @field(input, entry.field);
             const present = switch (entry.kind) {
                 .content => value.state != .omitted,
@@ -3232,7 +3451,7 @@ test "client activity peer boundary rejects noncanonical IDs and owns canonical 
         var body: protocol.RequestBuffer = .{};
         try body.append("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"activity_page\",\"delta\":\"full\",\"since\":null,\"end\":\"1\",\"direction\":\"forward\",\"items\":[{\"position\":\"1\",\"ordinal\":\"0\",\"at\":\"1\",\"value\":{\"send_failed\":{\"key\":\"key\\u0000雪\",\"target\":{\"session\":");
         try body.appendJsonString(session);
-        try body.append("},\"code\":\"invalid_sender_handle\"}}}],\"more\":false,\"call_activity\":{\"total\":\"0\",\"entries\":[]},\"queued\":{\"count\":\"0\",\"oldest_position\":\"0\",\"newest_admission\":\"0\",\"newest_position\":\"0\"},\"work\":{\"read_version\":\"00000000000000000000000000000000.0\",\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"revision\":\"1\",\"workspace\":\"/w\"}}");
+        try body.append("},\"code\":\"invalid_sender_handle\"}}}],\"more\":false,\"call_activity\":{\"total\":\"0\",\"entries\":[]},\"queued\":{\"count\":\"0\",\"oldest_position\":\"0\",\"newest_admission\":\"0\",\"newest_position\":\"0\"},\"work\":{\"creator\":null,\"read_version\":\"00000000000000000000000000000000.0\",\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"revision\":\"1\",\"workspace\":\"/w\"}}");
         if (index < 2) {
             const page = try protocol_reply.ActivityPage.parse(body.slice(), .{});
             @memset(body.bytes[0..body.len], 'x');
@@ -3258,7 +3477,7 @@ test "client failed-send target is required and nullable without relaxing peers"
         var body: protocol.RequestBuffer = .{};
         try body.append("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"activity_page\",\"delta\":\"full\",\"since\":null,\"end\":\"1\",\"direction\":\"forward\",\"items\":[{\"position\":\"1\",\"ordinal\":\"0\",\"at\":\"1\",\"value\":{\"send_failed\":{\"key\":\"refused\",");
         try body.append(case.field);
-        try body.append("\"code\":\"unsupported_reasoning_effort\"}}}],\"more\":false,\"call_activity\":{\"total\":\"0\",\"entries\":[]},\"queued\":{\"count\":\"0\",\"oldest_position\":\"0\",\"newest_admission\":\"0\",\"newest_position\":\"0\"},\"work\":{\"read_version\":\"00000000000000000000000000000000.0\",\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"revision\":\"1\",\"workspace\":\"/w\"}}");
+        try body.append("\"code\":\"unsupported_reasoning_effort\"}}}],\"more\":false,\"call_activity\":{\"total\":\"0\",\"entries\":[]},\"queued\":{\"count\":\"0\",\"oldest_position\":\"0\",\"newest_admission\":\"0\",\"newest_position\":\"0\"},\"work\":{\"creator\":null,\"read_version\":\"00000000000000000000000000000000.0\",\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"revision\":\"1\",\"workspace\":\"/w\"}}");
         if (case.failure) |failure| {
             try std.testing.expectError(failure, protocol_reply.ActivityPage.parse(body.slice(), .{}));
             continue;
@@ -5583,6 +5802,103 @@ test "pin captures preserve pin and unpin intent through generated and explicit 
     }
 }
 
+test "upgrade public status decodes readiness without assuming the target wire" {
+    const allocator = std.testing.allocator;
+    const bytes = "{\"version\":\"future\",\"type\":\"host_status\",\"status\":\"ready\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"store\":\"/host\",\"active_capacity\":\"3\",\"future_field\":true}";
+    const facts = (try parseUpgradeStatus(allocator, bytes)).?;
+    try std.testing.expectEqual(@as(usize, 3), facts.active_capacity);
+    try std.testing.expectEqualStrings("/host", facts.store.slice());
+    try std.testing.expectEqual(@as(u8, 15), facts.instance[15]);
+    for ([_][]const u8{
+        "{}",
+        "{\"type\":\"host_status\",\"status\":\"incompatible\"}",
+        "{\"type\":\"host_status\",\"status\":\"ready\",\"instance\":\"invalid\",\"store\":\"/host\",\"active_capacity\":\"3\"}",
+        "{\"type\":\"host_status\",\"status\":\"ready\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"store\":\"/host\",\"active_capacity\":\"overflow\"}",
+    }) |invalid| try std.testing.expect(try parseUpgradeStatus(allocator, invalid) == null);
+}
+
+test "upgrade census merges socket hints and retains pathless identified failures" {
+    const allocator = std.testing.allocator;
+    var candidates: std.ArrayList(UpgradeCandidate) = .empty;
+    defer {
+        for (candidates.items) |candidate| candidate.deinit(allocator);
+        candidates.deinit(allocator);
+    }
+    try appendUpgradeCandidate(allocator, &candidates, .{
+        .socket = try allocator.dupe(u8, "/socket"),
+        .result = .{ .failed = error.ConnectionRefused },
+    });
+    var observation: HostControlObservation = .{ .profile = .current, .facts = std.mem.zeroes(protocol_reply.HostInfoFacts), .pid = 42 };
+    try observation.host_directory.set("/host/\xff");
+    try appendUpgradeCandidate(allocator, &candidates, .{
+        .socket = try allocator.dupe(u8, "/socket"),
+        .directory = try allocator.dupe(u8, "/host/\xff"),
+        .pid = 42,
+        .generation = 7,
+        .result = .{ .observed = observation },
+    });
+    try appendUpgradeCandidate(allocator, &candidates, .{
+        .socket = try allocator.dupe(u8, "/socket"),
+        .result = .{ .failed = error.HostPeerPidMismatch },
+    });
+    try appendUpgradeCandidate(allocator, &candidates, .{ .pid = 43, .result = .{ .failed = error.HostServeStoreMissing } });
+    try std.testing.expectEqual(@as(usize, 2), candidates.items.len);
+    try std.testing.expectEqualStrings("/host/\xff", candidates.items[0].directory.?);
+    try std.testing.expectEqual(@as(c_int, 42), candidates.items[0].result.observed.pid);
+    try std.testing.expectEqual(@as(?c_int, 43), candidates.items[1].pid);
+    try std.testing.expect(candidates.items[1].socket == null);
+}
+
+test "upgrade process retirement requires exact generation and complete census not lease release" {
+    const pid: c_int = 42;
+    const generation: u64 = 100;
+    for ([_][]const u8{ "42 S\n80 R\n", "42 Sl+\n80 R\n", "42 T\n80 R\n" }) |living| try std.testing.expect(!try retirementReading(living, pid, generation, generation, generation));
+    try std.testing.expect(try retirementReading("42 Z\n80 R\n", pid, generation, generation, generation));
+    try std.testing.expect(!try retirementReading("42 Z\n80 R\n", pid, generation, null, generation));
+    try std.testing.expect(try retirementReading("42 S\n80 R\n", pid, generation, generation + 1, generation + 1));
+    try std.testing.expect(try retirementReading("80 R\n", pid, generation, null, null));
+    try std.testing.expect(!try retirementReading("80 R\n", pid, generation, generation, generation));
+    try std.testing.expect(!try retirementReading("80 R\n", pid, generation, generation, null));
+    try std.testing.expect(!try retirementReading("80 R\n", pid, generation, null, generation));
+    for ([_][]const u8{ "", "42\n", "not-a-pid Z\n", "42 Z extra\n", "42 Z\n42 S\n" }) |malformed| try std.testing.expectError(error.HostProcessSnapshotUnavailable, retirementReading(malformed, pid, generation, generation, generation));
+}
+
+test "client upgrade retirement observes a live tail then an unreaped exit" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var child = try std.process.spawn(io, .{
+        .argv = &.{ "/bin/sh", "-c", "printf R; read gate" },
+        .stdin = .pipe,
+        .stdout = .pipe,
+        .stderr = .ignore,
+    });
+    defer child.kill(io);
+    var buffer: [64]u8 = undefined;
+    var reader = child.stdout.?.readerStreaming(io, &buffer);
+    try std.testing.expectEqual(@as(u8, 'R'), try reader.interface.takeByte());
+    const pid = child.id.?;
+    const started = try @import("host_identity.zig").generation(pid);
+    const until = @import("test_poll").after(io, .fromSeconds(5));
+    try std.testing.expect(!try upgradeGenerationRetired(gpa, io, pid, started, until.raw.nanoseconds));
+    child.stdin.?.close(io);
+    child.stdin = null;
+    const Wait = struct {
+        gpa: std.mem.Allocator,
+        io: std.Io,
+        pid: c_int,
+        started: u64,
+        until: i128,
+        fn ready(self: *@This()) !bool {
+            return upgradeGenerationRetired(self.gpa, self.io, self.pid, self.started, self.until);
+        }
+    };
+    var wait: Wait = .{ .gpa = gpa, .io = io, .pid = pid, .started = started, .until = until.raw.nanoseconds };
+    try @import("test_poll").waitUntil(io, until, &wait, Wait.ready);
+    _ = try child.wait(io);
+    // PID absence uses the same complete-census proof, not kill(pid, 0).
+    try std.testing.expect(try upgradeGenerationRetired(gpa, io, pid, started, @import("test_poll").after(io, .fromSeconds(5)).raw.nanoseconds));
+}
+
 test "capture routing round trips six placements without conflating selector and wire identity" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
@@ -5928,4 +6244,92 @@ test "read-only capture routing does not eagerly validate a replay body" {
     const observed = try inspectCapturedRequest(io, root, key.slice());
     try std.testing.expectEqualStrings(root, observed.paths.selector());
     try std.testing.expectEqualStrings(key.slice(), observed.identity.key.slice());
+}
+
+test "parent relation survives Configure and creating Message capture through native ingress" {
+    const host_request = @import("wire_request.zig");
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(io, .fromMode(0o700));
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    for ([_]bool{ false, true }) |creating_message| {
+        for ([_]bool{ false, true }) |explicit_overrides| {
+            const input: ConfigureInput = .{
+                .store = root,
+                .session = .create,
+                .parent = .{ .present = true, .value = "k7m2qx" },
+                .provider = if (explicit_overrides) .{ .present = true, .value = "codex" } else .{},
+                .workspace = if (explicit_overrides) .{ .present = true, .value = root } else .{},
+                .model = .{ .present = true, .value = "unlisted-model" },
+                .tools = "bash,find_tools",
+                .loaded_tools = "bash",
+                .permission_mode = .{ .present = true, .value = "ask" },
+                .compaction_trigger = .{ .present = true, .value = "1000" },
+                .reasoning_effort = .{ .present = true, .value = "low" },
+            };
+            var captured = try (if (creating_message)
+                captureMessage(io, .{ .store = root, .session = "", .text_path = "", .text = "task\x00\n", .configuration = input }, .{ .generated = root })
+            else
+                captureConfigure(io, input, .{ .generated = root })).get();
+            defer captured.close(io);
+            try std.testing.expectEqual(if (creating_message) protocol.CommandKind.message else .configure, captured.identity().kind);
+            try std.testing.expectEqualStrings("", captured.identity().session.slice());
+            var bytes: [8192]u8 = undefined;
+            const length = try captured.file.readPositionalAll(io, &bytes, 0);
+            const ingress = try std.testing.allocator.create(host_request.Ingress);
+            defer std.testing.allocator.destroy(ingress);
+            var retained: ?@import("named_scratch.zig").Owner = null;
+            ingress.init(std.testing.allocator, .{ .io = io, .content_length = length, .scratch_path = root, .request_number = 1, .retained_scratch = &retained });
+            defer ingress.deinit();
+            try ingress.feed(bytes[0..length]);
+            const request = try ingress.finish();
+            defer request.removeTemporaryContent(io) catch unreachable;
+            const configuration = if (creating_message) &request.message.configuration.? else &request.configure.configuration;
+            try std.testing.expectEqualStrings("k7m2qx", configuration.parent.value.slice());
+            try std.testing.expectEqualStrings("unlisted-model", configuration.model.value.slice());
+            try std.testing.expectEqualStrings("bash find_tools", configuration.tools.names.slice());
+            try std.testing.expectEqualStrings("bash", configuration.loaded_tools.names.slice());
+            try std.testing.expectEqualStrings("ask", configuration.permission_mode.value.slice());
+            try std.testing.expectEqualStrings("1000", configuration.compaction_trigger.value.slice());
+            try std.testing.expectEqualStrings("low", configuration.reasoning_effort.value.slice());
+            if (explicit_overrides) {
+                try std.testing.expectEqualStrings("codex", configuration.provider.value.slice());
+                try std.testing.expectEqualStrings(root, configuration.workspace.value.slice());
+            } else {
+                try std.testing.expect(configuration.provider.state == .omitted);
+                try std.testing.expect(configuration.workspace.state == .omitted);
+            }
+        }
+    }
+}
+
+test "preset Configure capture reopens with sparse settings through native ingress" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(io, .fromMode(0o700));
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    const input: ConfigureInput = .{ .store = root, .session = .create, .preset = .{ .present = true, .value = "restricted" }, .tools = "none", .reasoning_effort = .{ .present = true, .value = null } };
+    var captured = try captureConfigure(io, input, .{ .generated = root }).get();
+    defer captured.close(io);
+    var reopened = try openCaptured(io, .{ .generated = .{ .directory = root, .handle = captured.identity().key.slice() } });
+    defer reopened.close(io);
+    var bytes: [8192]u8 = undefined;
+    const length = try reopened.file.readPositionalAll(io, &bytes, 0);
+    const ingress = try std.testing.allocator.create(@import("wire_request.zig").Ingress);
+    defer std.testing.allocator.destroy(ingress);
+    var retained: ?@import("named_scratch.zig").Owner = null;
+    ingress.init(std.testing.allocator, .{ .io = io, .content_length = length, .scratch_path = root, .request_number = 1, .retained_scratch = &retained });
+    defer ingress.deinit();
+    try ingress.feed(bytes[0..length]);
+    const request = try ingress.finish();
+    defer request.removeTemporaryContent(io) catch unreachable;
+    try std.testing.expectEqualStrings("restricted", request.configure.preset.?.slice());
+    try std.testing.expect(request.configure.configuration.workspace.state == .omitted);
+    try std.testing.expect(request.configure.configuration.tools.state == .value);
+    try std.testing.expectEqualStrings("", request.configure.configuration.tools.names.slice());
+    try std.testing.expect(request.configure.configuration.reasoning_effort.state == .explicit_null);
 }

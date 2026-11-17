@@ -1087,7 +1087,7 @@ fn hostSettings(init: std.process.Init, command: cli_args.Command, parsed: *cons
         settings.* = .{};
         defer settings.deinit();
         var fixtures: providers.Fixtures = .{};
-        _ = try admitHost(init, parsed, selected, settings, &fixtures, &failure);
+        _ = try admitHost(init, parsed, selected, settings, &fixtures, &failure, .detached);
         return;
     }
     const result = if (command == .host_settings)
@@ -1254,7 +1254,10 @@ fn reportHostLaunch(io: std.Io, result: *const HostLaunchResult, quiet: bool, ov
     if (writer.buffered().len != 0) _ = stderr.write(writer.buffered());
     switch (result.outcome) {
         .ready => |*ready| try reportStartedHost(io, ready, quiet, overrides and ready.adopted),
-        .failed => |failure| return failure.cause.err,
+        .failed => |*failure| {
+            if (failure.refusal) |*refusal| return writeRefusal(io, refusal, caller_exit.knownError(failure.cause.err));
+            return failure.cause.err;
+        },
     }
 }
 
@@ -2081,13 +2084,15 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const selected = try selectedStore(init, parsed.get("store"), &selected_buffer);
     var preparation_failure: start_report.Failure = undefined;
-    const prepared = try admitHost(init, parsed, selected, settings, &tuning.fixtures, &preparation_failure);
+    const prepared = try admitHost(init, parsed, selected, settings, &tuning.fixtures, &preparation_failure, .foreground);
     var failure: ?start_report.Failure = null;
     return finishServe(io, host_start.shutdownPolicy(settings), host_start.storeKind(settings), &failure, server.serve(io, std.heap.c_allocator, selected, prepared, tuning, &failure));
 }
 
-fn admitHost(init: std.process.Init, parsed: *const cli_args.Parsed, selected: []const u8, settings: *host_settings.Settings, fixtures: *providers.Fixtures, failure: *start_report.Failure) !host_settings.Prepared {
-    host_start.intake(init, parsed, selected, settings, fixtures, failure) catch |err| {
+/// Shared by serve and settings --check: intake, then the proxy precondition,
+/// then Store selection and preparation. Refusals are reported here.
+fn admitHost(init: std.process.Init, parsed: *const cli_args.Parsed, selected: []const u8, settings: *host_settings.Settings, fixtures: *providers.Fixtures, failure: *start_report.Failure, admission: host_start.Admission) !host_settings.Prepared {
+    host_start.intake(init, parsed, selected, settings, fixtures, failure, admission) catch |err| {
         if (err == error.SettingsInvalid) return writeRefusal(init.io, failure, caller_exit.knownError(err));
         return err;
     };
@@ -2167,6 +2172,48 @@ test "start report CLI publishes once before settling every Host outcome" {
     }
 }
 
+test "public Host starter preserves every typed refusal before and after waiting" {
+    const Probe = struct {
+        var output: [4096]u8 = undefined;
+        var used: usize = 0;
+        fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
+            if (operation == .file_write_streaming and operation.file_write_streaming.file.handle == 1) {
+                const write = operation.file_write_streaming;
+                var out = std.Io.Writer.fixed(output[used..]);
+                out.writeAll(write.header) catch return .{ .file_write_streaming = error.NoSpaceLeft };
+                for (write.data, 0..) |bytes, index| {
+                    const repeats = if (index == write.data.len - 1) write.splat else 1;
+                    for (0..repeats) |_| out.writeAll(bytes) catch return .{ .file_write_streaming = error.NoSpaceLeft };
+                }
+                used += out.buffered().len;
+                return .{ .file_write_streaming = out.buffered().len };
+            }
+            return std.testing.io.vtable.operate(userdata, operation);
+        }
+    };
+    var vtable = std.testing.io.vtable.*;
+    vtable.operate = Probe.operate;
+    const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+    const saved_status = exit_status;
+    defer exit_status = saved_status;
+    const causes = [_]struct { err: anyerror, status: caller_exit.Status }{
+        .{ .err = error.HostStartupFailed, .status = .unclassified },
+        .{ .err = error.StoreIdentityMismatch, .status = .environment },
+        .{ .err = error.StoreAlreadyOwned, .status = .environment },
+    };
+    for (causes) |cause| for (std.enums.values(start_report.StartError)) |code| for ([_]bool{ false, true }) |waited| for ([_]bool{ false, true }) |quiet| {
+        var result: HostLaunchResult = .failed(.child_refused, cause.err);
+        result.outcome.failed.refusal = .init(code, "the original typed refusal, including its reason");
+        if (waited) result.wait = .init(0);
+        Probe.used = 0;
+        exit_status = .done;
+        try std.testing.expectError(error.Reported, reportHostLaunch(io, &result, quiet, false, 0));
+        var expected: [start_report.max_line_bytes]u8 = undefined;
+        try std.testing.expectEqualStrings(start_report.line(&result.outcome.failed.refusal.?, &expected), Probe.output[0..Probe.used]);
+        try std.testing.expectEqual(if (waited) cause.status else .invalid, exit_status);
+    };
+}
+
 noinline fn writeRefusal(io: std.Io, failure: *const start_report.Failure, status: caller_exit.Status) error{Reported} {
     recordExit(status);
     host_start.report(io, failure);
@@ -2226,6 +2273,8 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
     };
     if (input.reload_skills and named == null) return usage();
     if (named != null and named.?.len == 0) return usage();
+    if (parsed.get("parent")) |reference| input.parent = .{ .present = true, .value = reference };
+    if (parsed.get("preset")) |name| input.preset = .{ .present = true, .value = name };
     if (parsed.get("provider")) |name| input.provider = .{ .present = true, .value = name };
     if (parsed.get("model")) |model| {
         try admitModel(model);
@@ -2246,22 +2295,30 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
     var saved_effort: ?model_capability.ReasoningEffort = null;
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
     var compaction_buffer: [20]u8 = undefined;
-    if (input.session == .create) {
+    if (input.session == .create and !input.preset.present) {
         const intent: new_session_selection.Intent = .{
             .provider = if (input.provider.present) input.provider.value else null,
             .model = if (input.model.present) input.model.value else null,
         };
-        const reads_binding_defaults = intent.provider == null or intent.model == null;
-        const snapshot: new_session_selection.Snapshot = .{ .intent = intent, .defaults = if (reads_binding_defaults or !input.permission_mode.present) blk: {
-            const home = init.environ_map.get("HOME") orelse return homeRequired("fresh configuration without explicit binding or permission mode reads saved defaults");
+        const reads = input.creationReads();
+        const snapshot: new_session_selection.Snapshot = .{ .intent = intent, .defaults = if (reads.preferences) blk: {
+            const home = init.environ_map.get("HOME") orelse return homeRequired("fresh configuration with omitted defaults reads saved preferences");
             break :blk preferences.load(home) catch |err| return preferenceFailure(err);
         } else .{} };
-        saved_effort = if (reads_binding_defaults) snapshot.defaults.reasoning_effort else null;
-        binding = try snapshot.resolveUnprompted();
-        input.provider = .{ .present = true, .value = binding.provider.slice() };
-        input.model = .{ .present = true, .value = binding.model.slice() };
-        input.completeCreation(std.meta.stringToEnum(protocol.Provider, binding.provider.slice()).?, binding.model.slice(), saved_effort, snapshot.defaults.permission_mode, &compaction_buffer);
-        if (!input.workspace.present) {
+        saved_effort = if (reads.saved_effort) snapshot.defaults.reasoning_effort else null;
+        if (reads.binding) {
+            binding = try snapshot.resolveUnprompted();
+            input.model = .{ .present = true, .value = binding.model.slice() };
+            if (!input.parent.present) input.provider = .{ .present = true, .value = binding.provider.slice() };
+        }
+        input.completeCreation(
+            if (reads.binding) std.meta.stringToEnum(protocol.Provider, binding.provider.slice()).? else null,
+            input.model.value,
+            saved_effort,
+            snapshot.defaults.permission_mode,
+            &compaction_buffer,
+        );
+        if (!input.parent.present and !input.workspace.present) {
             var cwd = try std.Io.Dir.cwd().openDir(io, ".", .{});
             defer cwd.close(io);
             const length = try cwd.realPath(io, &workspace_buffer);
@@ -2288,7 +2345,7 @@ fn configureCaptured(init: std.process.Init, requester: client.Requests, parsed:
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     input.store = try selectedStore(init, if (live) |address| address.store else parsed.get("store"), &selected_buffer);
     var compaction_buffer: [20]u8 = undefined;
-    if (input.session == .named and input.resetsToDefault()) {
+    if (input.session == .named and !input.preset.present and input.resetsToDefault()) {
         var current_model: protocol.Bounded(protocol.max_model_bytes) = .{};
         var current_provider: protocol.Provider = undefined;
         {
@@ -3606,7 +3663,8 @@ fn presentMutationReply(writer: *std.Io.Writer, reply: protocol_reply.MutationRe
 }
 
 const StartConfiguration = struct {
-    provider: []const u8,
+    provider: ?[]const u8,
+    parent: ?[]const u8 = null,
     model: []const u8,
     reasoning_effort: ?[]const u8,
     effort_source: enum { flag, saved, model_default },
@@ -3614,7 +3672,8 @@ const StartConfiguration = struct {
     fn resolve(input: configure_input.ConfigureInput, effort_flag: bool, saved_effort: ?model_capability.ReasoningEffort) StartConfiguration {
         const model = input.model.value;
         return .{
-            .provider = input.provider.value,
+            .provider = if (input.parent.present) null else input.provider.value,
+            .parent = if (input.parent.present) input.parent.value else null,
             .model = model,
             .reasoning_effort = input.reasoning_effort.value,
             .effort_source = if (effort_flag) .flag else if (model_capability.startEffort(model_catalog.shipped, saved_effort, model) != null) .saved else .model_default,
@@ -3633,7 +3692,16 @@ fn writeMutationJson(writer: *std.Io.Writer, reply: protocol_reply.MutationReply
     if (configuration) |value| {
         std.debug.assert(reply.isAccepted() and reply.target == .message and reply.target.message.creates_session);
         try writer.writeAll(",\"configuration\":");
-        try std.json.Stringify.value(value, .{}, writer);
+        if (value.parent != null) {
+            try std.json.Stringify.value(value, .{}, writer);
+        } else {
+            try std.json.Stringify.value(.{
+                .provider = value.provider,
+                .model = value.model,
+                .reasoning_effort = value.reasoning_effort,
+                .effort_source = value.effort_source,
+            }, .{}, writer);
+        }
     }
     switch (reply.target) {
         .model_interruption => |target| try writer.print(",\"request_target\":{{\"turn\":\"{d}\",\"operation\":\"{d}\"}}", .{ target.turn, target.operation }),
@@ -3725,7 +3793,7 @@ test "session start configuration reports resolved effort and its source" {
             .model = .{ .present = true, .value = case.model },
             .reasoning_effort = .{ .present = case.present, .value = case.override },
         }, case.flag, case.saved);
-        try std.testing.expectEqualStrings("openai", value.provider);
+        try std.testing.expectEqualStrings("openai", value.provider.?);
         try std.testing.expectEqualStrings(case.model, value.model);
         try std.testing.expectEqual(case.source, value.effort_source);
         if (case.effort) |effort| {
@@ -3747,6 +3815,18 @@ test "session start mutation receipt adds configuration without changing send" {
     var writer = std.Io.Writer.fixed(&buffer);
     try writeMutationJson(&writer, reply, .{ .provider = "codex", .model = "gpt-6.1-sol", .reasoning_effort = "low", .effort_source = .model_default });
     try std.testing.expectEqualStrings(context ++ ",\"configuration\":{\"provider\":\"codex\",\"model\":\"gpt-6.1-sol\",\"reasoning_effort\":\"low\",\"effort_source\":\"model_default\"}" ++ tail, writer.buffered());
+    writer.end = 0;
+    const attached = StartConfiguration.resolve(.{
+        .store = "/store",
+        .session = .create,
+        .parent = .{ .present = true, .value = "09azvw" },
+        .model = .{ .present = true, .value = "unlisted-model" },
+        .reasoning_effort = .{ .present = true, .value = "low" },
+    }, false, null);
+    try std.testing.expect(attached.provider == null);
+    try std.testing.expectEqualStrings("09azvw", attached.parent.?);
+    try writeMutationJson(&writer, reply, attached);
+    try std.testing.expectEqualStrings(context ++ ",\"configuration\":{\"provider\":null,\"parent\":\"09azvw\",\"model\":\"unlisted-model\",\"reasoning_effort\":\"low\",\"effort_source\":\"model_default\"}" ++ tail, writer.buffered());
     writer.end = 0;
     reply.target.message.creates_session = false;
     try writeMutationJson(&writer, reply, null);

@@ -617,6 +617,10 @@ fn clickCommand(self: *Self, text: []const u8) !void {
 }
 
 fn sayBusy(self: *Self, action: ?session_notice.Action, letter: bool) void {
+    if (self.submission.messageHeld() and self.submission.intent == null) {
+        self.refreshAcceptedMessage();
+        return;
+    }
     const phase = self.upgradePhase();
     const command = self.input.queuedCommand() != null or self.inspection.command_running;
     self.notice = if (phase != .active and !command) session_upgrade.refusal(phase) else session_notice.busy(.{ .command = self.commandActive(), .held = self.heldOriginal(), .preparing = self.reading.phase == .permission, .action = action, .letter = letter });
@@ -806,7 +810,7 @@ fn appKey(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event, delivery:
         .draft_empty = self.input.composition().bytes.len == 0,
         .host_startable = if (self.app_hooks.host) |host| host.startable(host.context) else false,
         .shown_row = accepted != null,
-        .send = .{ .host_held = self.hostHeld(), .opening = self.reading.opening, .preparing = self.reading.phase == .permission, .command_active = self.commandActive(), .submitting = self.submission.intent != null },
+        .send = .{ .host_held = self.hostHeld(), .opening = self.reading.opening, .preparing = self.reading.phase == .permission, .command_active = self.commandActive(), .submitting = self.submission.intent != null or self.submission.messageHeld() },
     }, input);
     switch (take) {
         .taken => {},
@@ -1006,6 +1010,12 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     self.app_content.hover_style = hover;
     self.app_content.colours = colours;
     self.app_content.method = self.app_caps.width;
+    const message_note = self.messageNote();
+    self.app_content.message_note = if (message_note) |note| .{ .key = self.submission.messageKey().?, .text = note } else null;
+    self.app_content.pending = if (self.submission.messageText()) |text|
+        (if (!self.submission.messageProjected() and (screen.feed.at_end or (self.reading.opening and screen.anchor.following()))) .{ .text = text, .note = message_note } else null)
+    else
+        null;
     self.app_document.style = normal;
     self.app_document.colours = colours;
     self.app_document.hover_style = hover;
@@ -1048,7 +1058,8 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     chrome.marker.method = self.app_caps.width;
     chrome.marker.style = .{ .reverse = true };
     const held = self.heldOriginal();
-    const send = session_chrome.send(session_notice.status(self.reading.opening, self.app_consent.request != null, held), self.reading.opening or (held != null and held.?.state == .submitting));
+    const chrome_held = if (held != null and held.?.kind == .message) null else held;
+    const send = session_chrome.send(session_notice.status(self.reading.opening, self.app_consent.request != null, chrome_held), self.reading.opening or (chrome_held != null and chrome_held.?.state == .submitting));
     const list_visible = self.app_hooks.root.listVisible();
     chrome.place(&self.app_screen, &self.app_input, .{
         .list_visible = list_visible,
@@ -1059,7 +1070,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
         .needs_key = if (send.needs) |needs| session_chrome.needsKey(needs) else "",
         .progress = if (self.upgradePhase() == .reobserving) session_upgrade.rereading else send.progress,
         .stoppable = said.stoppable,
-        .details = held != null and held.?.state != .submitting,
+        .details = chrome_held != null and chrome_held.?.state != .submitting,
         .facts = .{ .current = self.footerFacts(), .name = self.session, .archive = self.line.archive_state },
         .notice = self.shown_notice.current(now_ms) orelse said.notice,
         .overview = said.text,
@@ -1490,6 +1501,7 @@ pub fn back(self: *Self, room: bool) Back {
     const recovery: original_state.Recovery = if (self.submission.view() != null) self.submission.recovery() else .none;
     if (recovery != .none and !room) return .{ .ended = .detached };
     self.submission.close();
+    self.submission.disposeMessage();
     return .{ .overview = recovery };
 }
 
@@ -1511,6 +1523,7 @@ pub fn leave(self: *Self, ended: anyerror!Outcome, restored: anyerror!void) Depa
 pub fn settleDeparture(self: *Self, ended: anyerror!Outcome, restored: anyerror!void) Departure {
     const settled = self.settle(restored);
     self.submission.close();
+    self.submission.disposeMessage();
     const cause: ?anyerror = if (ended) |_| null else |err| err;
     const plan = departure.exit(settled, cause, self.submission.view() != null);
     const action_view = self.screen.action_view != null;
@@ -2260,16 +2273,26 @@ fn recover(self: *Self, key: ?[]const u8) !void {
     }
     if (self.submission.intent != null or key != null) {
         try self.submission.requestRecovery(key);
+    } else if (self.submission.messageHeld()) {
+        self.refreshAcceptedMessage();
     } else if (self.retryable()) |fence| {
         self.retry_fence = fence;
     }
+}
+
+fn refreshAcceptedMessage(self: *Self) void {
+    self.reading.opening = true;
+    self.reading.fills = .{};
+    self.poll_at = 0;
+    self.notice = "Message accepted; refreshing conversation. Draft retained.";
+    self.dirty = true;
 }
 
 fn retryable(self: *const Self) ?RetryFence {
     const ending = self.live.latest_ending orelse return null;
     if (ending.cause.key == null or self.hostHeld()) return null;
     if (self.live.work.state.progress() != null or self.live.queued.count != 0) return null;
-    if (self.submission.intent != null or self.submission.task.thread != null or
+    if (self.submission.intent != null or self.submission.messageHeld() or self.submission.task.thread != null or
         self.waitingAction() != null or self.live.work.first_action != null or
         self.reading.prepared_action != null or self.reading.opening or
         self.reading.phase == .permission or self.commandActive() or
@@ -2370,11 +2393,17 @@ fn withdrawDecided(self: *Self) void {
 }
 
 fn beginMessage(self: *Self, intent: Submission.Intent) !void {
-    if (!try self.beginSubmission(intent)) return;
+    const begun = self.beginSubmission(intent) catch |err| {
+        try self.jumpToEnd();
+        self.screen.anchor.follow();
+        return err;
+    };
+    if (!begun) return;
     self.admission.sent += 1;
     self.inspection.status_requested = false;
     self.dropMessageRequest();
     try self.jumpToEnd();
+    self.screen.anchor.follow();
 }
 
 fn inspectionQueued(self: *const Self) bool {
@@ -2629,6 +2658,17 @@ fn heldOriginal(self: *const Self) ?session_notice.Held {
     return .{ .kind = submission.kind, .state = submission.state, .failure = if (self.heldFailure()) |failure| failure.bar else null };
 }
 
+fn messageNote(self: *const Self) ?[]const u8 {
+    const original = self.submission.view() orelse return null;
+    if (original.kind != .message) return null;
+    return switch (original.state) {
+        .submitting => null,
+        .not_started => "Not sent · ctrl+r retries original",
+        .unconfirmed => "Not confirmed · ctrl+r retries original",
+        .rejected => "Rejected · /discard",
+    };
+}
+
 fn runLine(self: *Self) !void {
     const held = self.upgradeHeld();
     defer if (!held) self.input.clear();
@@ -2682,6 +2722,7 @@ fn beginSubmission(self: *Self, intent: Submission.Intent) !bool {
         self.notice = session_upgrade.refusal(phase);
         return false;
     }
+    self.submission.retain_message = true;
     try self.submission.begin(intent);
     return true;
 }
@@ -2699,7 +2740,7 @@ fn presentAdmission(self: *Self, end: AdmissionEnd) !void {
     switch (end) {
         .accepted => |accepted| {
             self.poll_at = 0;
-            if (accepted.confirmed) self.notice = if (accepted.kind == .decision) "  • Decision confirmed." else "  • Original confirmed.";
+            if (accepted.confirmed and accepted.kind == .decision) self.notice = "  • Decision confirmed.";
         },
         .rejected => |rejected| {
             var writer = std.Io.Writer.fixed(&self.failure_buffer);
@@ -2847,11 +2888,12 @@ fn showStaged(self: *Self) !void {
                 target_count += 1;
             }
         }
-        const entry: feed_window.Entry = .{ .key = row.key, .text = feed_window.Text.fromDocument(document), .tight = row.tight, .provisional = row.provisional, .messages = targets[0..target_count] };
+        const entry: feed_window.Entry = .{ .key = row.key, .text = feed_window.Text.fromDocument(document), .tight = row.tight, .provisional = row.provisional, .messages = targets[0..target_count], .message_key = row.message_key };
         if (!self.insertFeed(entry, backward)) {
             complete = false;
             break;
         }
+        if (entry.text.bytes.len != 0) if (entry.message_key) |key| self.submission.observeMessage(key);
         inserted += 1;
     }
     if (!complete and inserted == 0) self.reading.fills = self.reading.fills.failed(read, page);
@@ -4716,7 +4758,8 @@ test "app settings starts the overview's run and keeps the original submission; 
         try std.testing.expectEqualStrings("", self.input.composition().bytes);
         try std.testing.expect(self.input.queuedCommand() == null);
         try std.testing.expectEqual(session_upgrade.Phase.quiescing, self.upgradePhase());
-        try std.testing.expectEqualStrings("Checking for updates…", self.lender.line(self.lender.context, .idle).text.?);
+        const said = self.lender.line(self.lender.context, .idle);
+        try std.testing.expect(said.text == null and said.notice == null);
         _ = try overview_view.step(&overview.state, .start_upgrade);
         try std.testing.expect(overview.state.upgrade.run.? == .checking);
         try sendKeys(self, "keep\x1b");
@@ -4869,7 +4912,6 @@ const ArchiveOverview = struct {
     stops: usize = 0,
     host_inputs: usize = 0,
     cancels: usize = 0,
-    said: [256]u8 = undefined,
     archived: ?overview_view.Reference = null,
     requested: bool = true,
 
@@ -4908,7 +4950,7 @@ const ArchiveOverview = struct {
 
     fn line(raw: *anyopaque, work: protocol.session_work.Kind) Lender.Said {
         const self: *ArchiveOverview = @ptrCast(@alignCast(raw));
-        const said = overview_view.conversation(&self.state, "k7m2qx".*, work, .{}, self.said[0..160]);
+        const said = overview_view.conversation(&self.state, "k7m2qx".*, work);
         return .{ .text = said.text, .notice = said.notice, .stoppable = said.stoppable };
     }
 
@@ -5804,10 +5846,14 @@ const ChromeFixture = struct {
     }
 
     fn rows(fixture: *ChromeFixture) ![24][]const u8 {
+        return fixture.rowsAtWidth(80);
+    }
+
+    fn rowsAtWidth(fixture: *ChromeFixture, width: u16) ![24][]const u8 {
         const arena = fixture.arena.allocator();
-        const surface = try fixture.draw();
-        var screen: vaxis.Screen = try .init(arena, .{ .rows = 24, .cols = 80, .x_pixel = 0, .y_pixel = 0 });
-        const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 80, .height = 24, .screen = &screen };
+        const surface = try fixture.widget.draw(.{ .arena = arena, .cell_arena = arena, .min = .{}, .max = .{ .width = width, .height = 24 }, .cell_size = .{} });
+        var screen: vaxis.Screen = try .init(arena, .{ .rows = 24, .cols = width, .x_pixel = 0, .y_pixel = 0 });
+        const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 24, .screen = &screen };
         try surface.render(window, fixture.self.app_input.composer.widget());
         var result: [24][]const u8 = undefined;
         for (&result, 0..) |*line, row| {
@@ -5934,7 +5980,78 @@ test "App Session shows the newest waiting Message as ◌ [N ·] its first line,
     try std.testing.expect(ChromeFixture.find(&(try fixture.rows()), "◌") == null);
 }
 
-test "App Session's frame after Enter shows the Message as sending, the same frame that clears the composer" {
+test "App Session optimistic submission keeps input rows fixed" {
+    for ([_]u16{ 46, 140 }) |width| {
+        var fixture: ChromeFixture = undefined;
+        try fixture.init();
+        defer fixture.deinit();
+        const self = fixture.self;
+        const idle = try fixture.rowsAtWidth(width);
+        const original = self.input.submitText("original model input");
+        self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty, .intent = .{ .message = original }, .state = .submitting, .key = @splat('K') };
+        defer self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty };
+        const pending = try fixture.rowsAtWidth(width);
+        try std.testing.expect(ChromeFixture.find(&pending, "› original model input") != null);
+        var messages: usize = 0;
+        for (pending) |line| {
+            messages += std.mem.count(u8, line, "original model input");
+            try std.testing.expect(std.mem.indexOf(u8, line, "Sending") == null);
+        }
+        try std.testing.expectEqual(@as(usize, 1), messages);
+        try std.testing.expect(std.mem.startsWith(u8, idle[20], "─"));
+        for (idle[20..24], pending[20..24]) |before, during| try std.testing.expectEqualStrings(before, during);
+        self.submission.state = .unconfirmed;
+        const unconfirmed = try fixture.rowsAtWidth(width);
+        errdefer for (unconfirmed, 0..) |line, row| std.debug.print("optimistic width={d} row={d}: {s}\n", .{ width, row, line });
+        const message_row = ChromeFixture.find(&unconfirmed, "› original model input");
+        const note_row = ChromeFixture.find(&unconfirmed, "Not confirmed · ctrl+r retries original");
+        try std.testing.expect(message_row != null);
+        try std.testing.expect(note_row != null);
+        try std.testing.expect(note_row.? > message_row.? and note_row.? < 20);
+        for (idle[20..24], unconfirmed[20..24]) |before, after| try std.testing.expectEqualStrings(before, after);
+        try std.testing.expectEqualStrings("original model input", try self.input.message(original));
+        self.submission.state = .rejected;
+        const rejected = try fixture.rowsAtWidth(width);
+        try std.testing.expect(ChromeFixture.find(&rejected, "› original model input") != null);
+        const rejected_note = ChromeFixture.find(&rejected, "Rejected · /discard");
+        try std.testing.expect(rejected_note != null);
+        try std.testing.expect(rejected_note.? < 20);
+        for (idle[20..24], rejected[20..24]) |before, after| try std.testing.expectEqualStrings(before, after);
+        _ = self.input.append("next draft");
+        _ = try fixture.rowsAtWidth(width);
+        try std.testing.expectEqualStrings("next draft", self.input.composition().bytes);
+        try std.testing.expectEqualStrings("original model input", try self.input.message(original));
+    }
+}
+
+test "App Session accepted message refresh keeps the next draft intact without projection" {
+    var fixture: ChromeFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const self = fixture.self;
+    const original = self.input.submitText("accepted original");
+    self.submission.settled_message = .{ .ticket = original, .key = @splat('K') };
+    self.submission.accepted = .{ .kind = .message, .key = @splat('K') };
+    defer self.submission.disposeMessage();
+    _ = self.input.append("next draft");
+    self.screen.feed.at_end = false;
+    self.reading.opening = false;
+    try fixture.press(.{ .codepoint = vaxis.Key.enter });
+    try std.testing.expect(self.reading.opening);
+    try std.testing.expectEqualStrings("next draft", self.input.composition().bytes);
+    try std.testing.expectEqualStrings("accepted original", self.submission.messageText().?);
+    try std.testing.expect(self.submission.intent == null and self.submission.task.thread == null);
+    self.reading.opening = false;
+    try fixture.press(.{ .codepoint = 'r', .mods = .{ .ctrl = true } });
+    try std.testing.expect(self.reading.opening);
+    try std.testing.expectEqualStrings("next draft", self.input.composition().bytes);
+    try std.testing.expectEqualStrings("accepted original", self.submission.messageText().?);
+    try std.testing.expect(self.submission.retry == null);
+    const shown = try fixture.rows();
+    try std.testing.expect(ChromeFixture.find(&shown, "› accepted original") != null);
+}
+
+test "App Session frame after Enter shows the optimistic Message and clears the composer" {
     var fixture: ChromeFixture = undefined;
     try fixture.init();
     defer fixture.deinit();
@@ -5952,7 +6069,8 @@ test "App Session's frame after Enter shows the Message as sending, the same fra
     try fixture.press(.{ .codepoint = vaxis.Key.enter });
     const shown = try fixture.rows();
     try std.testing.expectEqualStrings("", self.input.composition().bytes);
-    try std.testing.expect(ChromeFixture.find(&shown, "Sending…") != null);
+    try std.testing.expect(ChromeFixture.find(&shown, "› hi") != null);
+    for (shown) |line| try std.testing.expect(std.mem.indexOf(u8, line, "Sending") == null);
     try std.testing.expectEqual(session_chrome.Tone.quiet, self.chrome.status.bar.tone);
 }
 
@@ -6048,20 +6166,19 @@ test "App Session Footer notice replaces the stop hint without changing stoppabi
     try std.testing.expect(ChromeFixture.findEnding(&try fixture.rows(), "Port overview to vxfw finished") != null);
 }
 
-test "App Session's last row says the send state, which stays past a key and five seconds" {
+test "App Session retains Permission Decision state past a key and five seconds" {
     var fixture: ChromeFixture = undefined;
     try fixture.init();
     defer fixture.deinit();
     const self = fixture.self;
-    const original = self.input.submitText("original model input");
-    self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty, .intent = .{ .message = original }, .state = .submitting, .key = @splat('K') };
+    self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty, .intent = .{ .decision = .{ .action = 19, .decision = .allow_once } }, .state = .submitting, .key = @splat('K') };
     defer self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty };
-    try std.testing.expect(ChromeFixture.find(&try fixture.rows(), "Sending…") != null);
+    try std.testing.expect(ChromeFixture.findEnding(&try fixture.rows(), "Sending…") != null);
     self.submission.state = .unconfirmed;
     self.shown_notice.show("Copied 3 lines", ChromeFixture.now() - 6_000);
     try fixture.press(.{ .codepoint = 'a', .text = "a" });
     const unconfirmed = try fixture.rows();
-    try std.testing.expect(ChromeFixture.find(&unconfirmed, "! Not confirmed") != null);
+    try std.testing.expect(ChromeFixture.find(&unconfirmed, "! Decision not confirmed") != null);
     try std.testing.expect(std.mem.endsWith(u8, unconfirmed[22], "ctrl+r retries original"));
     try std.testing.expectEqualStrings("ctrl+r retries original", self.chrome.status.key.label);
 }
@@ -6369,7 +6486,7 @@ test "SessionFrontend failed historical fills retain the edge while scans approv
 const FeedFixture = struct {
     held: *HeldFrontend,
     file: std.Io.File,
-    const Row = struct { key: u64, text: []const u8, provisional: bool = false, target: ?View.Collapsed = null };
+    const Row = struct { key: u64, text: []const u8, provisional: bool = false, target: ?View.Collapsed = null, message_key: ?[36]u8 = null };
 
     fn create() !FeedFixture {
         return createWithDrafts("unused", null);
@@ -6400,7 +6517,7 @@ const FeedFixture = struct {
         var offset: u64 = 0;
         for (rows, 0..) |row, i| {
             try self.file.writePositionalAll(std.testing.io, row.text, offset);
-            frontend.job.result.rows[i] = .{ .key = .{ .position = row.key }, .offset = offset, .length = row.text.len, .tight = false, .provisional = row.provisional };
+            frontend.job.result.rows[i] = .{ .key = .{ .position = row.key }, .offset = offset, .length = row.text.len, .tight = false, .provisional = row.provisional, .message_key = row.message_key };
             if (row.target) |target| {
                 frontend.job.result.rows[i].collapsed_targets[0] = target;
                 frontend.job.result.rows[i].collapsed_count = 1;
@@ -6429,6 +6546,51 @@ fn firstRows(text: []const u8, count: usize) []const u8 {
     var end: usize = 0;
     for (0..count) |_| end = 1 + (std.mem.indexOfScalarPos(u8, text, end, '\n') orelse return text);
     return text[0..end];
+}
+
+test "SessionFrontend canonical insertion retires accepted message custody only for its key" {
+    const fixture = try FeedFixture.create();
+    defer fixture.destroy();
+    const self = &fixture.held.self;
+    const original = self.input.submitText("accepted keyed original");
+    self.submission.settled_message = .{ .ticket = original, .key = @splat('K') };
+    defer self.submission.disposeMessage();
+    _ = self.input.append("next draft");
+    try fixture.page(.opening, &.{.{ .key = 10, .text = "other message\n", .message_key = @splat('J') }}, true, true);
+    try std.testing.expect(self.submission.messageHeld());
+    try std.testing.expectEqualStrings("accepted keyed original", self.submission.messageText().?);
+    try fixture.page(.opening, &.{.{ .key = 11, .text = "› accepted keyed original\n", .message_key = @splat('K') }}, true, true);
+    try std.testing.expect(!self.submission.messageHeld());
+    try std.testing.expect(self.input.submitted == null);
+    try std.testing.expectEqualStrings("next draft", self.input.composition().bytes);
+    const shown = try fixture.held.shown();
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, shown, "accepted keyed original"));
+}
+
+test "SessionFrontend canonical message replaces unknown echo while preserving attached recovery" {
+    const fixture = try FeedFixture.create();
+    defer fixture.destroy();
+    const self = &fixture.held.self;
+    const original = self.input.submitText("keyed original");
+    self.submission.intent = .{ .message = original };
+    self.submission.key = @splat('K');
+    self.submission.state = .unconfirmed;
+    self.submission.publication = .published;
+    defer {
+        self.submission.intent = null;
+        self.input.release(original) catch unreachable;
+    }
+    try fixture.page(.opening, &.{.{ .key = 10, .text = "› keyed original\n", .message_key = @splat('K') }}, true, true);
+    try std.testing.expect(self.submission.messageProjected());
+    try std.testing.expect(self.submission.view() != null);
+    const shown = try fixture.held.shown();
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, shown, "keyed original"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, shown, "Not confirmed · ctrl+r retries original"));
+    self.screen.feed.trim(self.screen.feed.count, 0);
+    self.screen.feed.at_end = true;
+    const evicted = try fixture.held.shown();
+    try std.testing.expect(std.mem.indexOf(u8, evicted, "keyed original") == null);
+    try std.testing.expectEqualStrings("keyed original", try self.input.message(original));
 }
 
 test "SessionFrontend feed keeps following when full rows leave no room inside the margins" {
