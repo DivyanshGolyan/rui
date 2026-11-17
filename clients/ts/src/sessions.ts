@@ -33,10 +33,10 @@ export interface AgentSpec {
 	/** Tokens reserved for model output; null clears the override. */
 	outputReservation?: number | null;
 	permissionMode?: "ask" | "bypass";
-	/** Reasoning effort. `null` sends none, so the provider uses its own; only for a model Rui does not list (D111). */
+	/** Reasoning effort. `null` requests the Host default for the selected model. */
 	effort?: Schemas["AgentSpec"]["effort"];
-	/** Compact the conversation at this many tokens. */
-	compactAt?: number;
+	/** Compact the conversation at this many tokens. `null` requests the Host default. */
+	compactAt?: number | null;
 	/** A name shown in lists. `null` clears it. */
 	label?: string | null;
 }

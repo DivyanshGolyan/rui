@@ -41,8 +41,8 @@ test("creation sends only chosen settings for every omitted and explicit field c
 	}
 });
 
-test("creation preserves explicit empty tools and null effort without completing omissions", async () => {
-	const spec: AgentSpec = { model: "custom-model", tools: [], loadedTools: [], effort: null };
+test("creation preserves empty tools and Host default requests without completing omissions", async () => {
+	const spec: AgentSpec = { model: "custom-model", tools: [], loadedTools: [], effort: null, compactAt: null };
 	const sessions = new Sessions({
 		async exchange(path, build) {
 			assert.equal(path, "/v1/configure");

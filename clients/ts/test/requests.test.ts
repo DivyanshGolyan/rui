@@ -173,13 +173,30 @@ test("model updates serialize without changing omitted settings", async () => {
 	assert.equal(calls, 1);
 });
 
+test("settings resets forward null to the Host without completing omitted settings", async () => {
+	const update: SessionUpdate = { effort: null, compactAt: null };
+	let calls = 0;
+	const link: Link = {
+		async exchange(path, build) {
+			calls++;
+			assert.equal(path, "/v1/configure");
+			const request = JSON.parse(build("store"));
+			assert.equal(request.session, "existing-session");
+			assert.equal(request.key, "reset-defaults");
+			assert.deepEqual(request.configuration, { effort: null, compactAt: null });
+			return Buffer.from(JSON.stringify({ answer: { status: "accepted" } }));
+		},
+	};
+	await new Session(link, "existing-session").update(update, { idempotencyKey: "reset-defaults" });
+	assert.equal(calls, 1);
+});
+
 function sessionTypeContract(spec: SessionSpec): void {
 	const { effort: _effort, ...withoutEffort } = spec;
 	const missingEffort: SessionSpec = withoutEffort;
 	const minimal: SessionSpec = { model: "gpt-6.1-sol" };
 	// @ts-expect-error creation still needs a model
 	const missingModel: SessionSpec = {};
-	// @ts-expect-error compaction is never nullable
 	const nullCompaction: SessionUpdate = { compactAt: null };
 	const sparse: SessionUpdate = {};
 	void [missingEffort, minimal, missingModel, nullCompaction, sparse];
