@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Real-Host image Action authorization, explicit failures and pending lifecycle."""
 import base64
+import http.server
 import json
 import os
 import re
@@ -20,7 +21,7 @@ from bash_fixture import action_for, allow, rows
 CASES = (
     "ask-missing", "deny-missing", "deny-fifo", "stop-pending", "background-pending",
     "missing", "directory", "fifo", "text", "gif", "empty", "truncated-png",
-    "truncated-jpeg", "oversized",
+    "truncated-jpeg", "oversized", "mcp-mixed",
 )
 PNG = fixture.ROOT / "src/codecs/fixtures/image-input/pixel.png"
 
@@ -197,6 +198,95 @@ def prove_case(root, name):
         fixture.dispose_dispatch(processes, endpoints, [])
 
 
+def prove_mcp_mixed(root):
+    state = root / "mcp-mixed"
+    state.mkdir(mode=0o700)
+    workspace = state / "workspace"
+    workspace.mkdir()
+    image = PNG.read_bytes()
+    before, after = "Before the image: α", "After the image: Ω"
+    call_id = "mcp-mixed-original-call"
+
+    class MCPHandler(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_POST(self):
+            request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            self.server.requests.append(request)
+            if request["method"] == "tools/list":
+                result = {"tools": [{"name": "mixed_image", "inputSchema": {"type": "object"}}]}
+            elif request["method"] == "tools/call":
+                result = {"content": [
+                    {"type": "text", "text": before},
+                    {"type": "image", "mimeType": "image/png", "data": base64.b64encode(image).decode()},
+                    {"type": "text", "text": after},
+                ]}
+            else:
+                raise AssertionError(request)
+            body = json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": result}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    mcp = http.server.HTTPServer(("127.0.0.1", 0), MCPHandler)
+    mcp.requests = []
+    mcp_thread = threading.Thread(target=mcp.serve_forever, daemon=True)
+    endpoint = fixture.SuccessEndpoint([
+        fixture.sse_tool_calls("mixed", [("mixed_image", call_id, "{}")]),
+        fixture.sse_answer("mixed-answer", "reasoning", "message", "continued")[0],
+    ])
+    thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+    endpoints = {endpoint: thread, mcp: mcp_thread}
+    processes = []
+    mcp_thread.start()
+    thread.start()
+    try:
+        store = state / "store"
+        token = state / "token"
+        token.write_text("t")
+        processes.append(fixture.start_host(
+            store, f"http://127.0.0.1:{endpoint.server_port}/responses",
+            "--set", f"tools.mcp.images.url=http://127.0.0.1:{mcp.server_port}/mcp",
+            "--set", f"tools.mcp.images.bearerToken=file:{token}",
+        ))
+        configured = fixture.command(
+            "session", "configure", "--store", store, "--workspace", workspace,
+            "--record", state / "configure.json", "--key", "configure",
+            "--provider", "codex", "--model", "gpt-6-sol", "--tools", "mixed_image",
+            "--permission-mode", "bypass",
+        )
+        assert configured["answer"]["status"] == "accepted", configured
+        session = configured["context"]["session"]
+        deadline = time.monotonic() + 20
+        fixture.message(state, store, "message", session, "Call the image tool")
+        fixture.wait_for(lambda: fixture.completed_observation(store, "message", deadline=deadline),
+                         "MCP mixed result continuation", deadline=deadline)
+        assert fixture.read_result(store, "message", deadline=deadline) == b"continued"
+        calls = [request for request in mcp.requests if request["method"] == "tools/call"]
+        assert len(calls) == 1 and calls[0]["params"]["name"] == "mixed_image", calls
+        assert len(endpoint.requests) == 2, endpoint.requests
+        continuation = json.loads(endpoint.requests[1])
+        outputs = [item for item in continuation["input"] if item.get("type") == "function_call_output"]
+        assert len(outputs) == 1 and outputs[0]["call_id"] == call_id, outputs
+        parts = outputs[0]["output"]
+        assert isinstance(parts, list) and len(parts) == 3, parts
+        assert parts[0] == {"type": "input_text", "text": before}, parts
+        assert parts[1]["type"] == "input_image", parts
+        url = parts[1]["image_url"]
+        assert url.startswith("data:image/png;base64,"), parts
+        assert base64.b64decode(url.split(",", 1)[1], validate=True) == image, parts
+        assert parts[2] == {"type": "input_text", "text": after}, parts
+        print("MCP mixed text and PNG: provider continuation preserved order and bytes")
+    finally:
+        fixture.dispose_dispatch(processes, endpoints, [])
+
+
 def main():
     names = sys.argv[2:] or CASES
     assert all(name in CASES for name in names), names
@@ -204,7 +294,10 @@ def main():
     completed = False
     try:
         for name in names:
-            prove_case(state, name)
+            if name == "mcp-mixed":
+                prove_mcp_mixed(state)
+            else:
+                prove_case(state, name)
         completed = True
     finally:
         dispose_all(lambda: shutil.rmtree(state) if completed else retain_failure_state("read_image integration failure state", state))
