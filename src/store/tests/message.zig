@@ -835,7 +835,23 @@ test "compound Message retains ordered input across replay and saved refusal" {
             var historical: store_testing.TestingPage = undefined;
             historical.open(&storage, binding);
             defer historical.close();
-            try std.testing.expectError(error.InputPartsNotSupported, historical.nextEntry(0));
+            var frozen: @import("../domain/historical.zig").HistoricalSettings = undefined;
+            try historical.settings(&frozen);
+            try std.testing.expect(historical.page.compound_inputs);
+            const message_entry = (try historical.nextEntry(0)).?;
+            try std.testing.expect(message_entry.content == null);
+            try historical.page.openMessage(message_entry.input.?);
+            for ([_][]const u8{ "before", image, "after" }, 0..) |expected, ordinal| {
+                const part = (try historical.nextMessagePart()).?;
+                try std.testing.expect((part.kind == .image) == (ordinal == 1));
+                var part_reader: store_testing.TestingReader = undefined;
+                try historical.openContent(part.content, &part_reader);
+                defer part_reader.close();
+                var bytes: [image.len]u8 = undefined;
+                const length = try part_reader.read(0, &bytes);
+                try std.testing.expectEqualSlices(u8, expected, bytes[0..length]);
+            }
+            try std.testing.expect((try historical.nextMessagePart()) == null);
             try std.testing.expect(!storage.isFenced());
             {
                 const entry = try store_core.enter(&storage, .none);

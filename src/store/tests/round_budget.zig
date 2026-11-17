@@ -210,7 +210,8 @@ test "each Store entry point takes its round budget on its common path" {
             try std.testing.expectEqualStrings(tool_defs.bash_record.description, &text);
             try plainTurn(&storage, &tmp, &meter);
             try toolTurn(&storage, &tmp, &meter);
-            try compactedTurn(&storage, &tmp);
+            try compoundTurn(&storage, &tmp, &meter);
+            try compactedTurn(&storage, &tmp, &meter);
             try coreTurn(&storage, &tmp, &meter);
             try mcpTurn(case, &meter);
             try findTurn(&storage, &tmp, &meter);
@@ -266,6 +267,39 @@ test "each Store entry point takes its round budget on its common path" {
         const Launch = struct {
             fn run(_: void) !void {}
         };
+
+        fn compoundTurn(storage: *Store, tmp: *std.testing.TmpDir, meter: *RoundMeter) !void {
+            const session = try configureTestSession(storage, "budget-compound");
+            try store_testing.submitTestMessageParts(storage, tmp, "budget-compound-message", session.slice(), &.{ .{ .bytes = "first" }, .{ .bytes = "second" } });
+            const PressureRead = @import("../domain/model_admission.zig").PartsPressure.Read;
+            const pressure_map = try @import("../../os/pages.zig").Mapped(PressureRead).map();
+            defer pressure_map.unmap();
+            pressure_map.value.init(session.slice(), 0, 0, 0, std.math.maxInt(i64));
+            defer pressure_map.value.deinit();
+            meter.start();
+            try std.testing.expect(!try storage.advancePartsPressure(pressure_map.value));
+            meter.stop(.advancePartsPressure);
+            const binding = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
+            var view: TestingPage = undefined;
+            view.open(storage, binding);
+            defer view.close();
+            var settings: HistoricalSettings = undefined;
+            try view.settings(&settings);
+            try std.testing.expect(view.page.compound_inputs);
+            const message = (try view.nextEntry(0)).?;
+            try view.page.openMessage(message.input.?);
+            try std.testing.expectError(error.PageRead, view.page.nextMessagePart());
+            try storage.readRequestPage(&view.page); // One bounded raw manifest window.
+            try std.testing.expectError(error.PageRead, view.page.nextMessagePart());
+            meter.start();
+            try storage.readRequestPage(&view.page); // One bounded index page.
+            meter.stop(.readHistoricalMessagePart);
+            var count: usize = 0;
+            while (try view.nextMessagePart()) |_| count += 1;
+            try std.testing.expectEqual(@as(usize, 2), count);
+            try std.testing.expect(view.page.message_cursor == null);
+            try storage.settleModelAttemptFailure(binding, .{ .uncorrelated = "provider_http_422" }, .ordinary, .{});
+        }
 
         fn plainTurn(storage: *Store, tmp: *std.testing.TmpDir, meter: *RoundMeter) !void {
             meter.start();
@@ -684,8 +718,8 @@ test "each Store entry point takes its round budget on its common path" {
                 meter.stop(.recordPrefixSeal);
             }
             meter.start();
-            try storage.settleModelAttemptFailure(continuation, .{ .uncorrelated = "provider_http_422" }, .ordinary, .{});
-            meter.stop(.settleModelAttemptFailure);
+            try std.testing.expect(try storage.settleModelAttemptFailurePrepared(continuation, .{ .uncorrelated = "provider_http_422" }, .ordinary, .{}, null));
+            meter.stop(.settleModelAttemptFailurePrepared);
             meter.start();
             try std.testing.expect(try storage.tryAdmitNextModelRetry(ActiveOperationFilter.empty(), .{}, null) == null);
             meter.stop(.tryAdmitNextModelRetry);
@@ -720,7 +754,7 @@ test "each Store entry point takes its round budget on its common path" {
             try std.testing.expectEqualDeep(continuation, binding);
         }
 
-        fn compactedTurn(storage: *Store, tmp: *std.testing.TmpDir) !void {
+        fn compactedTurn(storage: *Store, tmp: *std.testing.TmpDir, meter: *RoundMeter) !void {
             const session = try configureTestSession(storage, "budget-compacted");
             var patch: wire_request.ConfigureCommand = .{};
             try patch.key.set("budget-heuristics");
@@ -739,6 +773,16 @@ test "each Store entry point takes its round budget on its common path" {
             try submitTestMessage(storage, tmp, "budget-two", "budget-two", session.slice(), "later");
             const compaction = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             try std.testing.expectEqual(ModelOperationKind.compaction, try storage.modelOperationKind(compaction));
+            const FloorPreparation = @import("../domain/history_floor.zig").Preparation;
+            const floor_map = try @import("../../os/pages.zig").Mapped(FloorPreparation).map();
+            defer floor_map.unmap();
+            floor_map.value.init(compaction.operation_id);
+            defer floor_map.value.deinit();
+            meter.start();
+            try std.testing.expect(!try storage.advanceHistoryFloor(floor_map.value));
+            meter.stop(.advanceHistoryFloor);
+            while (!try storage.advanceHistoryFloor(floor_map.value)) {}
+            try std.testing.expect(floor_map.value.prepared != null);
             try settleCompactionForTesting(storage, tmp, compaction, &.{.compaction});
             const successor = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             var view: TestingPage = undefined;

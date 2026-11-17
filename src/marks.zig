@@ -23,6 +23,8 @@ pub const Cause = struct {
 };
 
 pub fn cause(code: []const u8, provider: ?Provider) Cause {
+    if (std.mem.eql(u8, code, failure_class.ordered_input_not_supported)) return .{ .words = "This Host cannot send this input yet; no provider request was sent" };
+    if (std.mem.eql(u8, code, failure_class.ordered_input_limit)) return .{ .words = "Input exceeds this Host's request limit; no provider request was sent" };
     if (std.mem.eql(u8, code, "malformed_provider_output")) return .{ .words = "Model reply unreadable", .key = "ctrl+r retries" };
     return switch (failure_class.of(code)) {
         .policy => .{ .words = "Refused by the provider" },
@@ -126,4 +128,14 @@ test "a provider changes only a quota refusal's place, and only when it names on
         }
     }
     try std.testing.expect(seen.eql(.full));
+}
+
+test "ordered input limit is local and has no retry advice" {
+    const local = cause(failure_class.ordered_input_limit, null);
+    try std.testing.expectEqualStrings("Input exceeds this Host's request limit; no provider request was sent", local.words);
+    try std.testing.expect(local.key == null and local.place == null);
+    const unsupported = cause(failure_class.ordered_input_not_supported, null);
+    try std.testing.expectEqualStrings("This Host cannot send this input yet; no provider request was sent", unsupported.words);
+    try std.testing.expect(unsupported.key == null and unsupported.place == null);
+    try std.testing.expect(cause("provider_http_400", null).key != null);
 }

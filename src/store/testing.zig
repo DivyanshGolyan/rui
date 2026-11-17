@@ -144,6 +144,13 @@ pub const TestingPage = struct {
         };
     }
 
+    pub fn nextMessagePart(self: *TestingPage) !?historical_domain.HistoricalInputPart {
+        while (true) return self.page.nextMessagePart() catch |err| {
+            try self.answer(err);
+            continue;
+        };
+    }
+
     pub fn nextToolResult(self: *TestingPage) !?historical_domain.HistoricalToolResult {
         while (true) return self.page.nextToolResult() catch |err| {
             try self.answer(err);
@@ -1029,6 +1036,50 @@ pub fn submitTestMessage(
 }
 
 pub const TestingAnswerPart = struct { encoded: []const u8, decoded: []const u8 };
+
+pub const MessagePart = struct {
+    bytes: []const u8,
+    kind: @import("../InputCapture.zig").Incoming = .text,
+};
+
+pub fn submitTestMessageParts(storage: *Store, tmp: *std.testing.TmpDir, key: []const u8, session: []const u8, parts: []const MessagePart) !void {
+    return submitTestMessagePartsWithSkills(storage, tmp, key, session, parts, null);
+}
+
+pub fn submitTestMessagePartsWithSkills(storage: *Store, tmp: *std.testing.TmpDir, key: []const u8, session: []const u8, parts: []const MessagePart, captured: ?*const @import("domain/skills.zig").MessageCapture) !void {
+    const Capture = @import("../InputCapture.zig");
+    const custody = @import("../content_custody.zig");
+    var used: std.atomic.Value(u64) = .init(0);
+    var capture: Capture = undefined;
+    {
+        const spool = try tmp.dir.createFile(std.testing.io, "test-message-spool", .{ .read = true });
+        errdefer spool.close(std.testing.io);
+        const index = try tmp.dir.createFile(std.testing.io, "test-message-index", .{ .read = true });
+        errdefer index.close(std.testing.io);
+        try tmp.dir.deleteFile(std.testing.io, "test-message-spool");
+        try tmp.dir.deleteFile(std.testing.io, "test-message-index");
+        capture.init(std.testing.io, spool, index, .{ .used = &used, .limit = 4 * 1024 * 1024 });
+    }
+    defer capture.close();
+    for (parts) |part| {
+        try capture.begin(part.kind, part.bytes.len);
+        var at: usize = 0;
+        while (at < part.bytes.len) {
+            var allowance = part.bytes.len - at;
+            at += try capture.append(part.bytes[at..], &allowance, false);
+        }
+        try capture.end();
+    }
+    var command: custody.MessageCommand = .{};
+    try command.key.set(key);
+    try command.session.set(session);
+    const loan = try capture.seal();
+    const reply = if (captured) |skills|
+        try storage.submitMessagePartsCapturedSkillsForTesting(&command, loan, null, skills)
+    else
+        try storage.submitMessageParts(&command, loan, null, .{});
+    try std.testing.expect(reply == .accepted);
+}
 
 pub fn testingPublicProjection(
     storage: *Store,

@@ -883,10 +883,10 @@ pub fn readWorks(a: *ReadAccess, works: []WorkRead) !void {
 
 pub const full_compound_value = rsql.Read(.{
     .compound = true,
-    .sql = "SELECT c.content_id,c.byte_length,c.digest,c.private,c.form FROM message_admission m JOIN content c ON c.content_id=m.content_id WHERE m.session_ref=?1 AND c.form=1 " ++
-        "UNION ALL SELECT c.content_id,c.byte_length,c.digest,c.private,c.form FROM conversation_entry e JOIN content c ON c.content_id=e.content_id WHERE e.session_ref=?1 AND c.form=1 " ++
-        "UNION ALL SELECT c.content_id,c.byte_length,c.digest,c.private,c.form FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id WHERE a.session_ref=?1 AND c.form=1 " ++
-        "UNION ALL SELECT c.content_id,c.byte_length,c.digest,c.private,c.form FROM action_operation a JOIN content c ON c.content_id=a.background_content_id WHERE a.session_ref=?1 AND c.form=1 LIMIT 1",
+    .sql = "SELECT c.content_id,c.byte_length,c.digest,c.private,c.form FROM message_admission m JOIN content c ON c.content_id=m.content_id WHERE m.session_ref=?1 AND c.form<>0 " ++
+        "UNION ALL SELECT c.content_id,c.byte_length,c.digest,c.private,c.form FROM conversation_entry e JOIN content c ON c.content_id=e.content_id WHERE e.session_ref=?1 AND c.form<>0 " ++
+        "UNION ALL SELECT c.content_id,c.byte_length,c.digest,c.private,c.form FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id WHERE a.session_ref=?1 AND c.form<>0 " ++
+        "UNION ALL SELECT c.content_id,c.byte_length,c.digest,c.private,c.form FROM action_operation a JOIN content c ON c.content_id=a.background_content_id WHERE a.session_ref=?1 AND c.form<>0 LIMIT 1",
     .Args = struct { session: []const u8 },
     .Row = struct { content_id: rsql.Positive, byte_length: u64, digest: [32]u8, private: bool, form: u8 },
     .cardinality = .optional,
@@ -1147,19 +1147,21 @@ pub noinline fn readRun(a: *ReadAccess, comptime Ls: anytype, session_ref: []con
         break :blk result;
     };
     var headers: Headers(Watcher) = .{ .watched = watched, .lists = &tags };
-    var lists: RunState(Ls, Watcher) = undefined;
-    inline for (0..Ls.len) |i| lists[i] = .{
+    // Current and revision reads have finished before Full list walks begin.
+    // Reuse their Store-owned scratch while rows stream verified content.
+    const lists = a.store.reportScratch(RunState(Ls, Watcher));
+    inline for (0..Ls.len) |i| lists.*[i] = .{
         .after = .{ .session = session_ref },
-        .status = .{ .previous = if (i == 0) null else &lists[i - 1].status },
+        .status = .{ .previous = if (i == 0) null else &lists.*[i - 1].status },
     };
     var current: usize = 0;
     while (current < Ls.len) {
         var ahead = false;
         inline for (0..Ls.len) |i| if (i == current) {
-            ahead = lists[i].first;
+            ahead = lists.*[i].first;
         };
         inline for (Ls, 0..) |L, i| if (i >= current) {
-            const list = &lists[i];
+            const list = &lists.*[i];
             list.status.queued = false;
             if (!list.status.empty and (i == current or ahead)) {
                 list.status.queued = true;
@@ -1174,10 +1176,10 @@ pub noinline fn readRun(a: *ReadAccess, comptime Ls: anytype, session_ref: []con
                 a.readEach(L.S, list.after, L.S.limit, &list.chunk);
             }
         };
-        a.run() catch |err| return runFailure(a, Ls, Watcher, &lists, current, err);
+        a.run() catch |err| return runFailure(a, Ls, Watcher, lists, current, err);
         var blocked = false;
         inline for (Ls, 0..) |L, i| if (i >= current) {
-            const list = &lists[i];
+            const list = &lists.*[i];
             if (!list.status.queued and !list.status.empty) {
                 blocked = true;
             } else if (blocked or !list.status.previousFinished()) {
