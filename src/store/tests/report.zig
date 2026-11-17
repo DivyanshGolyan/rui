@@ -645,7 +645,7 @@ test "derived work facts are served across all work replies" {
 
 test "served work intents imply admission across permission and control states" {
     try store_testing.forEachEngine(struct {
-        const Scenario = enum { idle, queued, in_flight, retrying, finished, stopped, stopping, stopping_queued, approval, message_decline, mixed };
+        const Scenario = enum { idle, queued, in_flight, retrying, finished, owed, stopped, stopping, stopping_queued, approval, message_decline, mixed };
         const Intent = enum { stop, interrupt, decide };
 
         fn run(case: *store_testing.Case) !void {
@@ -663,8 +663,14 @@ test "served work intents imply admission across permission and control states" 
                         const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
                         if (scenario == .retrying) {
                             try storage.settleModelAttemptFailure(model, .{ .uncorrelated = "provider_temporary_http_429" }, .{ .retryable = .{ .waits_ms = .{ 60_000, 60_000, 60_000 } } }, .{});
-                        } else if (scenario == .finished) {
+                        } else if (scenario == .finished or scenario == .owed) {
                             try store_testing.settleItemsForTesting(&storage, &tmp, model, &.{"{\"type\":\"message\",\"id\":\"answer\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"Done.\"}]}"}, "Done.");
+                            if (scenario == .owed) {
+                                const child = try configureTestSession(&storage, "intent-owed-child");
+                                try store_testing.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ session.slice(), child.slice() });
+                                try submitTestMessage(&storage, &tmp, "intent-owed-file", "intent-owed-message", child.slice(), "child work");
+                                try shared_fixtures.refreshFrontiersForTesting(&storage, &.{ child.slice(), session.slice() });
+                            }
                         } else if (scenario == .stopped) {
                             var stop = try completeSessionStop("intent-prior-stop", session.slice());
                             try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
