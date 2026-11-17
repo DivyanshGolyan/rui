@@ -18,6 +18,10 @@ Git history keeps earlier test specifications and dated results.
 
 The [Session UI contract](docs/contracts/session-ui.md#required-evidence) requires owner-domain tests for memory fitting, update-button states and drawn-target admission, and chat-only footer feedback, including narrow widths. Reverting mutations must fail the relevant assertions. Capture current, available, updating and failed sidebar states and the chat after an update in day and night at 140×40 and 46×30 using verify-rui, before and after. Frames are renderer evidence, not physical-input evidence.
 
+## First wide resume list
+
+Run `zig build test-native -Dtest-filter='resumed wide presentation'` and capture wide-launch, narrow-launch and chat before and after. The Session UI evidence row covers early, late, unavailable and empty live answers; PTY frames are not physical-terminal evidence.
+
 ## List tint padding
 
 `GroupedList row inset is stable for selection hover and plain rows` checks shared row bounds at zero, narrow and wide widths in direct, indexed and no colour. Run the touched list, overview, panel, model-choice and palette owners, and remove the inset as a negative control. Capture before and after list and panel frames in day and night at 140×40 and 46×30 through verify-rui; these are renderer evidence, not physical-terminal evidence.
