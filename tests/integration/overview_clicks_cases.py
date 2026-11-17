@@ -156,7 +156,7 @@ def flat_list():
             screen.wait(lambda frame: "Type a task" in frame and not is_overview(frame), "New Session opens chat")
             listed = back_to_overview(screen, *peers_by_label)
             lines = listed.split("\n")
-            label = lines[max(row_of(listed, peer) for peer in peers_by_label) - 1].split()[1]
+            label = lines[max(row_of(listed, peer) for peer in peers_by_label) - 1].split()[0]
             click_label(screen, listed, label)
             screen.wait(lambda frame: conversation_of(label)(frame) and "peer done" in frame,
                         f"a click opens the last peer {label}")
