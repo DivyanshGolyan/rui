@@ -4577,7 +4577,7 @@ test "chat info opens from the chat line above the input at 140 and 46 columns a
     }
 }
 
-test "chat info hint click and Alt-I share natural panel opening and Escape restores the feed" {
+test "chat footer background click and Alt-I share natural panel opening and Escape restores the feed" {
     for ([_]u16{ 46, 140 }) |width| {
         const held = try HeldFrontend.create();
         defer held.destroy();
@@ -4589,11 +4589,7 @@ test "chat info hint click and Alt-I share natural panel opening and Escape rest
         const ordinary = try held.draw();
         const input = ordinary.children[0].surface.children[1];
         const facts = input.surface.children[1];
-        var info_column: ?i16 = null;
-        for (facts.surface.children) |child| if (child.surface.widget.eql(held.self.chrome.info.widget())) {
-            info_column = @intCast(input.origin.col + facts.origin.col + child.origin.col);
-        };
-        const col = info_column orelse return error.TestUnexpectedResult;
+        const col: i16 = @intCast(input.origin.col + facts.origin.col);
         const row: i16 = @intCast(input.origin.row + facts.origin.row);
         var ctx = held.context();
         defer ctx.cmds.deinit(held.arena.allocator());
@@ -6627,9 +6623,9 @@ test "App Session footer takes list visibility from Root across desktop and phon
         var row: std.Io.Writer.Allocating = .init(arena);
         for (chat_col..case.width) |col| try row.writer.writeAll(screen.readCell(@intCast(col), 29).?.char.grapheme);
         try std.testing.expectEqual(@as(usize, if (case.list) 0 else 1), std.mem.count(u8, row.written(), "‹"));
-        try std.testing.expect(std.mem.indexOf(u8, row.written(), "k7m2qx") != null);
+        try std.testing.expectEqual(!case.list, std.mem.indexOf(u8, row.written(), "k7m2qx") != null);
         try std.testing.expectEqualStrings("─", screen.readCell(chat_col, 28).?.char.grapheme);
-        try std.testing.expect(std.mem.trim(u8, row.written(), " ").len != 0);
+        try std.testing.expectEqual(!case.list, std.mem.trim(u8, row.written(), " ").len != 0);
     }
 }
 
@@ -10311,9 +10307,10 @@ test "App Session composer click recovers submission from every drawn focus targ
             try std.testing.expect(!modalFocus(&held.self));
             try std.testing.expect(held.root.input.layer == .main);
         }
-        for ([_]focus.Target{ .input, .model, .effort, .info }) |target| {
+        for ([_]focus.Target{ .input, .model, .effort }) |target| {
             try std.testing.expect(std.mem.indexOfScalar(focus.Target, visited.slice(), target) != null);
         }
+        try std.testing.expect(std.mem.indexOfScalar(focus.Target, visited.slice(), .info) == null);
         try std.testing.expectEqual(width == 46, std.mem.indexOfScalar(focus.Target, visited.slice(), .back) != null);
         try std.testing.expectEqual(width == 140, std.mem.indexOfScalar(focus.Target, visited.slice(), .list) != null);
     }

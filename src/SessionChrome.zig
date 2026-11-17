@@ -218,14 +218,9 @@ fn drawFooter(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vx
                 children[count] = try footerChip(chip, if (selected) self.facts.selected else self.facts.style, self.facts.method, ctx, @intCast(identity_col), @intCast(width));
                 count += 1;
             }
-        } else if (self.keys.choice == null and width != 0 and identity_col + width <= right_col) {
-            self.info.label = span.text;
-            children[count] = try footerChip(&self.info, self.facts.style, self.facts.method, ctx, @intCast(identity_col), @intCast(width));
-            count += 1;
         }
         identity_col += width;
     }
-    if (self.keys.choice == null) self.info.label = "";
     var col: usize = right_col;
     var first = true;
     for (keys) |key| if (notice == null and key.label.len != 0) {
@@ -368,7 +363,7 @@ test "SessionChrome puts notices in Footer without a state row and preserves nee
         try std.testing.expectEqual(idle.size.height, noticed.size.height);
         const footer = try input.facts.draw(ctx);
         for ("Copied 3 lines", width - "Copied 3 lines".len..) |byte, col| try std.testing.expectEqual(byte, footer.readCell(col, 0).char.grapheme[0]);
-        try std.testing.expectEqual(@as(usize, 3), footer.children.len);
+        try std.testing.expectEqual(@as(usize, 1), footer.children.len);
     }
 
     self.place(&screen, &input, .{ .width = 80 });
@@ -534,7 +529,7 @@ test "Session chrome back control exists only while the shell hides the list" {
         const row = try input.facts.draw(draw);
         if (list_visible) {
             try std.testing.expectEqualStrings("g", row.readCell(1, 0).char.grapheme);
-            try std.testing.expectEqual(@as(usize, 3), row.children.len);
+            try std.testing.expectEqual(@as(usize, 2), row.children.len);
         } else {
             try std.testing.expectEqualStrings("d", row.readCell(3, 0).char.grapheme);
             try std.testing.expectEqualStrings("‹", row.children[0].surface.readCell(0, 0).char.grapheme);
@@ -549,7 +544,7 @@ test "Session chrome back control exists only while the shell hides the list" {
     }
 }
 
-test "SessionChrome model and effort words are independent controls beside info spans" {
+test "SessionChrome model and effort words are independent controls beside the info background" {
     for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |list_visible| for ([_]@import("protocol.zig").SessionArchiveState{ .active, .archiving, .archived }) |archive| for ([_]bool{ false, true }) |asks| {
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
@@ -570,10 +565,10 @@ test "SessionChrome model and effort words are independent controls beside info 
         if (badge) |label| try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text.written(), label));
         try std.testing.expect(std.mem.indexOf(u8, text.written(), "/unarchive") == null);
         var cells: usize = 0;
-        for (footer.children) |child| if (child.surface.widget.eql(self.facts.model.widget()) or child.surface.widget.eql(self.facts.effort.widget()) or child.surface.widget.eql(self.info.widget())) {
+        for (footer.children) |child| if (child.surface.widget.eql(self.facts.model.widget()) or child.surface.widget.eql(self.facts.effort.widget())) {
             for (0..child.surface.size.width) |offset| {
                 const col: i16 = @intCast(child.origin.col + @as(i17, @intCast(offset)));
-                const action: Recorder.Action = if (child.surface.widget.eql(self.facts.model.widget())) .model else if (child.surface.widget.eql(self.facts.effort.widget())) .effort else .status_page;
+                const action: Recorder.Action = if (child.surface.widget.eql(self.facts.model.widget())) .model else .effort;
                 try std.testing.expectEqualStrings(footer.readCell(@intCast(col), 0).char.grapheme, child.surface.readCell(offset, 0).char.grapheme);
                 const before = recorder.clicked.get(action);
                 for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| try @import("testing/app_events.zig").mouse(&ctx, footer, .{ .row = 0, .col = col, .button = .left, .mods = .{}, .type = kind });
@@ -581,11 +576,44 @@ test "SessionChrome model and effort words are independent controls beside info 
                 cells += 1;
             }
         };
-        try std.testing.expect(cells >= "gpt-6-luna".len);
+        try std.testing.expectEqual(@as(usize, self.facts.model.width()) + self.facts.effort.width(), cells);
         try std.testing.expectEqual(@as(usize, 0), recorder.clicked.get(.back));
         if (!list_visible) {
             for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| try @import("testing/app_events.zig").mouse(&ctx, footer, .{ .row = 0, .col = 1, .button = .left, .mods = .{}, .type = kind });
             try std.testing.expectEqual(@as(usize, 1), recorder.clicked.get(.back));
+        }
+    };
+}
+
+test "SessionChrome info background preserves control order without info focus stops" {
+    for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |list_visible| for ([_]bool{ false, true }) |has_effort| for ([_]u8{ 49, 51 }) |left| {
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var recorder: Recorder = .{};
+        var self: Self = .init(recorder.actions());
+        self.list_visible = list_visible;
+        self.facts.identity = .{ .current = .{ .name = "Chat", .model = "model", .effort = if (has_effort) .low else null, .left = left, .asks = true } };
+        const footer = try drawFooter(&self, .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 1 }, .cell_size = .{} });
+        const controls = [_]vxfw.Widget{ self.facts.back.widget(), self.facts.model.widget(), self.facts.effort.widget() };
+        const start: usize = @intFromBool(list_visible);
+        const end: usize = if (has_effort) 3 else 2;
+        try std.testing.expectEqual(end - start, footer.children.len);
+        for (footer.children, controls[start..end]) |child, control| {
+            try std.testing.expect(child.surface.widget.eql(control));
+            try std.testing.expect(!child.surface.widget.eql(self.info.widget()));
+        }
+        var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        defer ctx.cmds.deinit(arena.allocator());
+        for (0..width) |column| {
+            var action: Recorder.Action = .status_page;
+            const col: i32 = @intCast(column);
+            for (footer.children) |child| {
+                if (col < child.origin.col or col >= child.origin.col + child.surface.size.width) continue;
+                action = if (child.surface.widget.eql(self.facts.model.widget())) .model else if (child.surface.widget.eql(self.facts.effort.widget())) .effort else .back;
+            }
+            const before = recorder.clicked.get(action);
+            try clickAt(footer, arena.allocator(), &ctx, 0, @intCast(column));
+            try std.testing.expectEqual(before + 1, recorder.clicked.get(action));
         }
     };
 }
@@ -618,10 +646,10 @@ test "SessionChrome identity chips preserve cells and clicks for every terminal 
             try std.testing.expect(child.origin.col >= 0);
             try std.testing.expect(child.origin.col + child.surface.size.width <= width);
             for (child.surface.buffer, 0..) |cell, col| try std.testing.expect(col + cell.char.width <= child.surface.size.width);
-            if (!child.surface.widget.eql(self.facts.model.widget()) and !child.surface.widget.eql(self.facts.effort.widget()) and !child.surface.widget.eql(self.info.widget())) continue;
+            if (!child.surface.widget.eql(self.facts.model.widget()) and !child.surface.widget.eql(self.facts.effort.widget())) continue;
             for (0..child.surface.size.width) |offset| {
                 const col: i16 = @intCast(child.origin.col + @as(i17, @intCast(offset)));
-                const action: Recorder.Action = if (child.surface.widget.eql(self.facts.model.widget())) .model else if (child.surface.widget.eql(self.facts.effort.widget())) .effort else .status_page;
+                const action: Recorder.Action = if (child.surface.widget.eql(self.facts.model.widget())) .model else .effort;
                 const before = recorder.clicked.get(action);
                 for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| try @import("testing/app_events.zig").mouse(&events, footer, .{ .row = 0, .col = col, .button = .left, .mods = .{}, .type = kind });
                 try std.testing.expectEqual(before + 1, recorder.clicked.get(action));
@@ -642,7 +670,7 @@ test "SessionChrome footer and new-entry chips underline on hover without acting
     defer arena.deinit();
     const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 100, .height = 1 }, .cell_size = .{} };
     const footer = try drawFooter(&self, draw_ctx);
-    try std.testing.expectEqual(@as(usize, 4), footer.children.len);
+    try std.testing.expectEqual(@as(usize, 3), footer.children.len);
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
     for ([_]*Chip{ &self.facts.back, &self.status.key, &self.status.stop, &self.marker }) |chip| {
         try chip.widget().handleEvent(&ctx, .mouse_enter);
