@@ -467,7 +467,7 @@ RULES = (
     (("tests/integration/canonical_failure_integration.py", "build.zig"),
      ("canonical-failure-integration",), ("canonical-failure-integration",), "Canonical failure caller oracle"),
     (("build.zig", "build.zig.zon", "install.sh", "src/fetch_dependencies.sh", "src/build_*", "src/*.patch", ".agents/setup",
-      ".github/actions/setup/action.yml", "screen-emulator/*"),
+      ".github/actions/setup/action.yml", "screen-emulator/*", "tests/ci/build_artifact.py"),
      ("check-full", "admission-debug-integration", "test-full"),
      ("check-full", "admission-debug-integration", "test-full"),
      "Build, dependency or bootstrap inputs"),

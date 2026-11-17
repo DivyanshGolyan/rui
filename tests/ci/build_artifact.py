@@ -57,9 +57,12 @@ def build(targets, part="all"):
     prefix = Path(os.environ["RUNNER_TEMP"]) / "rui-compiled-build"
     if prefix.exists():
         shutil.rmtree(prefix)
-    # Zig async slots also wait for subprocesses; eight avoids serializing the
-    # independent compiles behind those waits on the four-core Linux producer.
-    mode = ["-Dpr-ci=true", "-j8"] if pr_ci() else []
+    # Zig async slots also wait for subprocesses. Give every Linux x86_64
+    # producer the same overlap, including LLVM promotion builds; backend
+    # selection remains confined to pull requests.
+    mode = ["-Dpr-ci=true"] if pr_ci() else []
+    if platform.system() == "Linux" and platform.machine() == "x86_64":
+        mode.append("-j8")
     subprocess.run(["zig", "build", "ci-build", *mode, "-Dci-targets=" + ",".join(targets), "-Dci-part=" + part,
                     "--prefix", str(prefix), "--summary", "all"], check=True)
     return prefix / "bin"
