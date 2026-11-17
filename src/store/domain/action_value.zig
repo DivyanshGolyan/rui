@@ -6,6 +6,7 @@ const command = @import("command.zig");
 const sourced_input = @import("sourced_input.zig");
 const content_string = @import("../../content_string.zig");
 const idempotency_key = @import("../../idempotency_key.zig");
+const transition = @import("../transition.zig");
 
 pub const max_value_bytes = @import("../../action_value_limits.zig").max_value_bytes;
 pub const max_pending = 32;
@@ -31,41 +32,66 @@ const insert = rsql.Write(.{
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
-pub fn publish(a: anytype, handle: []const u8, key: []const u8, bytes: []const u8, faults: @import("../Store.zig").Faults) !Result {
-    var old: replay.Result = null;
-    var row: facts.Result = undefined;
-    var live: action.live_by_handle.Result = null;
-    var imported = content.Import.ofBytes(bytes, false);
-    a.read(replay, .{ .handle = handle, .key = key }, &old);
-    action.liveByHandle(a, handle, &live);
-    content.lookup(a, &imported);
-    try a.run();
-    if (old) |saved| {
-        if (!std.mem.eql(u8, &saved.digest, &imported.digest)) return .{ .refused = .conflict };
-        return .{ .accepted = .{ .action_id = saved.action_id.get(), .ordinal = saved.ordinal.get(), .admission_id = if (saved.admission_id) |id| id.get() else null, .replayed = true } };
+const PublishResult = Result;
+
+pub const Publish = struct {
+    pub const rounds = transition.rounds(.{ .facts = .{.always}, .backlog = .{.always}, .fault = .{.branch} });
+    pub const round_budget = 3;
+    pub const commit: transition.Commit = .transaction;
+    pub const begin: ?rounds.At = .facts;
+    pub const Input = struct { handle: []const u8, key: []const u8, bytes: []const u8 };
+    pub const Result = PublishResult;
+    pub const Ordinary = error{InjectedCommitFailure};
+    pub const Guards = error{};
+    pub const Declined = error{};
+
+    input: Input,
+    old: replay.Result = null,
+    facts: facts.Result = undefined,
+    live: action.live_by_handle.Result = null,
+    imported: content.Import = undefined,
+    key_buffer: [idempotency_key.max_bytes]u8 = undefined,
+    reply: PublishResult = undefined,
+
+    pub fn step(t: *Publish, r: *transition.Round(Publish), ran: ?rounds.At) !transition.Next(Publish) {
+        const at = ran orelse {
+            t.imported = .ofBytes(t.input.bytes, false);
+            r.read(replay, .{ .handle = t.input.handle, .key = t.input.key }, &t.old);
+            action.liveByHandle(r, t.input.handle, &t.live);
+            content.lookup(r, &t.imported);
+            return .{ .round = .facts };
+        };
+        if (at == .fault) return error.InjectedCommitFailure;
+        if (at == .facts) {
+            if (t.old) |saved| {
+                if (!std.mem.eql(u8, &saved.digest, &t.imported.digest)) return .{ .done = .{ .refused = .conflict } };
+                return .{ .done = .{ .accepted = .{ .action_id = saved.action_id.get(), .ordinal = saved.ordinal.get(), .admission_id = if (saved.admission_id) |id| id.get() else null, .replayed = true } } };
+            }
+            const found = t.live orelse return .{ .done = .{ .refused = .unknown_handle } };
+            if (found.stopped) return .{ .done = .{ .refused = .stopped } };
+            if (found.resolved) return .{ .done = .{ .refused = .resolved } };
+            if (t.input.bytes.len > max_value_bytes) return .{ .done = .{ .refused = .too_large } };
+            r.read(facts, .{ .action_id = found.action_id.get() }, &t.facts);
+            return .{ .round = .backlog };
+        }
+        const found = if (t.live) |*live| live else unreachable;
+        if (found.background and t.facts.pending >= max_pending) return .{ .done = .{ .refused = .backlog_full } };
+        const ordinal = t.facts.last_ordinal + 1;
+        const content_id = try content.importBytes(r, &t.imported, t.input.bytes);
+        var admission_id: ?u64 = null;
+        if (found.background) {
+            const command_key = std.fmt.bufPrint(&t.key_buffer, "rui.core/action-value/{d}/{d}", .{ found.action_id.get(), ordinal }) catch unreachable;
+            const digest = content_string.digest(command_key);
+            try command.queueCommand(r, command_key, .message, &found.session.ref, &digest, content_id, null, &.{ .accepted = true });
+            admission_id = try sourced_input.queue(r, &found.session, .{ .action_value = .{ .key = command_key, .action_id = found.action_id.get(), .ordinal = ordinal } }, content_id);
+        }
+        r.write(insert, .{ .action_id = found.action_id.get(), .ordinal = ordinal, .handle = t.input.handle, .key = t.input.key, .content_id = content_id, .admission_id = admission_id });
+        t.reply = .{ .accepted = .{ .action_id = found.action_id.get(), .ordinal = ordinal, .admission_id = admission_id, .replayed = false } };
+        if (r.faults().before_commit) return .{ .round = .fault };
+        return .commit;
     }
-    const found = live orelse return .{ .refused = .unknown_handle };
-    if (found.stopped) return .{ .refused = .stopped };
-    if (found.resolved) return .{ .refused = .resolved };
-    if (bytes.len > max_value_bytes) return .{ .refused = .too_large };
-    a.read(facts, .{ .action_id = found.action_id.get() }, &row);
-    try a.run();
-    if (found.background and row.pending >= max_pending) return .{ .refused = .backlog_full };
-    const ordinal = row.last_ordinal + 1;
-    const content_id = try content.importBytes(a, &imported, bytes);
-    var key_buffer: [idempotency_key.max_bytes]u8 = undefined;
-    var admission_id: ?u64 = null;
-    if (found.background) {
-        const command_key = std.fmt.bufPrint(&key_buffer, "rui.core/action-value/{d}/{d}", .{ found.action_id.get(), ordinal }) catch unreachable;
-        const digest = content_string.digest(command_key);
-        try command.queueCommand(a, command_key, .message, &found.session.ref, &digest, content_id, null, &.{ .accepted = true });
-        admission_id = try sourced_input.queue(a, &found.session, .{ .action_value = .{ .key = command_key, .action_id = found.action_id.get(), .ordinal = ordinal } }, content_id);
+
+    pub fn committed(t: *const Publish) PublishResult {
+        return t.reply;
     }
-    a.write(insert, .{ .action_id = found.action_id.get(), .ordinal = ordinal, .handle = handle, .key = key, .content_id = content_id, .admission_id = admission_id });
-    if (faults.before_commit) {
-        try a.run();
-        return error.InjectedCommitFailure;
-    }
-    try a.commit();
-    return .{ .accepted = .{ .action_id = found.action_id.get(), .ordinal = ordinal, .admission_id = admission_id, .replayed = false } };
-}
+};
