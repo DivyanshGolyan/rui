@@ -100,7 +100,8 @@ jobs:
           V="$PWD/.claude/skills/verify-rui/scripts/verify-rui"
           mkdir -p "$RUNNER_TEMP/screens-build"
           bash src/fetch_screen_dependencies.sh
-          "$V" build --here --out "$RUNNER_TEMP/screens-build/head"
+          export VERIFY_RUI_CACHE="$RUNNER_TEMP/screens-build/cache"
+          "$V" build --here > "$RUNNER_TEMP/screens-build/build.json"
           tar -cf "$RUNNER_TEMP/screens-build.tar" -C "$RUNNER_TEMP" screens-build
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -170,7 +171,8 @@ jobs:
           V="$PWD/.claude/skills/verify-rui/scripts/verify-rui"
           git worktree add --detach "$RUNNER_TEMP/base-source" "$BASE"
           mkdir -p "$RUNNER_TEMP/screens-baseline-build"
-          (cd "$RUNNER_TEMP/base-source"; bash src/fetch_dependencies.sh; bash src/fetch_screen_dependencies.sh; "$V" build --here --out "$RUNNER_TEMP/screens-baseline-build/base")
+          export VERIFY_RUI_CACHE="$RUNNER_TEMP/screens-baseline-build/cache"
+          (cd "$RUNNER_TEMP/base-source"; bash src/fetch_dependencies.sh; bash src/fetch_screen_dependencies.sh; "$V" build --here > "$RUNNER_TEMP/screens-baseline-build/build.json")
           tar -cf "$RUNNER_TEMP/screens-baseline-build.tar" -C "$RUNNER_TEMP" screens-baseline-build
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -204,10 +206,17 @@ jobs:
           set -euo pipefail
           git worktree add --detach "$RUNNER_TEMP/base-source" "$BASE"
           tar -xf "$RUNNER_TEMP/screens-baseline-build.tar" -C "$RUNNER_TEMP"
-          python3 - "$RUNNER_TEMP/screens-baseline-build/base/manifest.json" "$RUNNER_TEMP/base-source" <<'PY_MANIFEST'
-          import json, pathlib, subprocess, sys
-          manifest, source = map(pathlib.Path, sys.argv[1:])
+          python3 - "$RUNNER_TEMP/screens-baseline-build" "$RUNNER_TEMP/base-source" <<'PY_MANIFEST'
+          import json, pathlib, re, subprocess, sys
+          root, source = map(pathlib.Path, sys.argv[1:])
+          build = json.loads((root / "build.json").read_text())
+          build_id = build["sha"]
+          if not re.fullmatch(r"tree-[0-9a-f]{64}", build_id):
+              raise SystemExit("invalid baseline build id")
+          manifest = root / "cache/builds" / build_id / "manifest.json"
           record = json.loads(manifest.read_text())
+          if record != build:
+              raise SystemExit("baseline build manifest differs")
           if pathlib.Path(record['source']) != source:
               raise SystemExit('restored baseline source path differs')
           tree = subprocess.check_output(['git', '-C', str(source), 'rev-parse', 'HEAD^{tree}'], text=True).strip()
@@ -235,7 +244,9 @@ jobs:
         run: |
           set -euo pipefail
           V="$PWD/.claude/skills/verify-rui/scripts/verify-rui"
-          "$V" shots "$RUNNER_TEMP/screens-baseline-build/base" --shard "$SHARD/4" --out "$RUNNER_TEMP/baseline-shard" || test -f "$RUNNER_TEMP/baseline-shard/shots.json"
+          export VERIFY_RUI_CACHE="$RUNNER_TEMP/screens-baseline-build/cache"
+          build_id=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["sha"])' "$RUNNER_TEMP/screens-baseline-build/build.json")
+          "$V" shots "$build_id" --shard "$SHARD/4" --out "$RUNNER_TEMP/baseline-shard" || test -f "$RUNNER_TEMP/baseline-shard/shots.json"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: ${{ always() }}
         with:
@@ -267,16 +278,22 @@ jobs:
           set -euo pipefail
           tar -xf "$RUNNER_TEMP/screens-build.tar" -C "$RUNNER_TEMP"
           python3 - "$RUNNER_TEMP/screens-build" <<'PY_MANIFEST'
-          import json, pathlib, subprocess, sys
+          import json, pathlib, re, subprocess, sys
           root = pathlib.Path(sys.argv[1])
-          for manifest in root.glob('*/manifest.json'):
-              record = json.loads(manifest.read_text())
-              source = pathlib.Path(record['source'])
-              for key in ('binary', 'screen_library'):
-                  path = pathlib.Path(record[key])
-                  if not path.is_file() or not path.is_relative_to(manifest.parent):
-                      raise SystemExit(f'invalid restored {key}: {path}')
-              subprocess.run(['git', '-C', str(source), 'cat-file', '-e', record['tree'] + '^{tree}'], check=True)
+          build = json.loads((root / "build.json").read_text())
+          build_id = build["sha"]
+          if not re.fullmatch(r"tree-[0-9a-f]{64}", build_id):
+              raise SystemExit("invalid candidate build id")
+          manifest = root / "cache/builds" / build_id / "manifest.json"
+          record = json.loads(manifest.read_text())
+          if record != build:
+              raise SystemExit("candidate build manifest differs")
+          source = pathlib.Path(record['source'])
+          for key in ('binary', 'screen_library'):
+              path = pathlib.Path(record[key])
+              if not path.is_file() or not path.is_relative_to(manifest.parent):
+                  raise SystemExit(f'invalid restored {key}: {path}')
+          subprocess.run(['git', '-C', str(source), 'cat-file', '-e', record['tree'] + '^{tree}'], check=True)
           PY_MANIFEST
       - name: Install screenshot renderer
         run: |
@@ -296,7 +313,9 @@ jobs:
           set -euo pipefail
           V="$PWD/.claude/skills/verify-rui/scripts/verify-rui"
           mkdir -p "$RUNNER_TEMP/results"
-          "$V" shots "$RUNNER_TEMP/screens-build/head" --shard "$SHARD/4" --out "$RUNNER_TEMP/results/head" || test -f "$RUNNER_TEMP/results/head/shots.json"
+          export VERIFY_RUI_CACHE="$RUNNER_TEMP/screens-build/cache"
+          build_id=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["sha"])' "$RUNNER_TEMP/screens-build/build.json")
+          "$V" shots "$build_id" --shard "$SHARD/4" --out "$RUNNER_TEMP/results/head" || test -f "$RUNNER_TEMP/results/head/shots.json"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: ${{ always() }}
         with:

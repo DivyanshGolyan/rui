@@ -21,6 +21,41 @@ class ScreensWorkflowTest(unittest.TestCase):
         self.assertIn('tar -xf "$RUNNER_TEMP/screens-build.tar"', workflow)
         self.assertIn("record['tree'] + '^{tree}'", workflow)
 
+    def test_build_manifests_round_trip_through_cache_for_both_shards(self):
+        workflow = WORKFLOW.read_text()
+        root = WORKFLOW.parents[2]
+        tree = subprocess.check_output(['git', 'rev-parse', 'HEAD^{tree}'], cwd=root, text=True).strip()
+        for label in ('candidate', 'baseline'):
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                job = workflow.split('      - name: Restore ' + ('candidate build' if label == 'candidate' else 'base build and source'), 1)[1]
+                script = textwrap.dedent(job.split("<<'PY_MANIFEST'\n", 1)[1].split('          PY_MANIFEST', 1)[0])
+                cache_root = pathlib.Path(tmp)
+                build_id = 'tree-' + 'a' * 64
+                build_dir = cache_root / 'cache/builds' / build_id
+                build_dir.mkdir(parents=True)
+                for name in ('rui', 'screen.so'):
+                    (build_dir / name).write_text('artifact')
+                record = {'sha': build_id, 'tree': tree, 'source': str(root),
+                          'binary': str(build_dir / 'rui'), 'screen_library': str(build_dir / 'screen.so')}
+                printed = cache_root / 'build.json'
+                manifest = build_dir / 'manifest.json'
+                printed.write_text(json.dumps(record))
+                manifest.write_text(json.dumps(record))
+                args = [sys.executable, '-c', script, str(cache_root)]
+                if label == 'baseline':
+                    args.append(str(root))
+                self.assertEqual(subprocess.run(args, capture_output=True).returncode, 0)
+                manifest.unlink()
+                self.assertNotEqual(subprocess.run(args, capture_output=True).returncode, 0)
+                record['sha'] = '../escape'
+                printed.write_text(json.dumps(record))
+                self.assertNotEqual(subprocess.run(args, capture_output=True).returncode, 0)
+        self.assertEqual(workflow.count('"$V" build --here >'), 2)
+        self.assertEqual(workflow.count('"$V" shots "$build_id" --shard'), 2)
+        self.assertNotIn('build --here --out', workflow)
+        for cache in ('screens-build', 'screens-baseline-build'):
+            self.assertEqual(workflow.count('export VERIFY_RUI_CACHE="$RUNNER_TEMP/' + cache + '/cache"'), 2)
+
     def test_write_jobs_are_serialized_and_publisher_uses_default_branch(self):
         workflow = WORKFLOW.read_text()
         publish = workflow.split('  screens:\n', 1)[1].split('  cleanup:\n', 1)[0]
