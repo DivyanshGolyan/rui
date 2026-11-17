@@ -1785,6 +1785,7 @@ fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: protocol
         key: protocol_reply.JsonString(protocol.max_key_bytes),
         session: ?protocol_reply.JsonString(protocol.max_session_bytes) = null,
         configuration: ?CapturedConfiguration = null,
+        preset: ?protocol_reply.JsonString(protocol.max_preset_name_bytes) = null,
         require_model: ?bool = null,
         archived: bool = true,
         pinned: ?bool = null,
@@ -1838,7 +1839,7 @@ fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: protocol
     };
     if ((kind != .configure and kind != .message and fields.configuration != null) or
         (fields.require_model != null and !(kind == .configure or kind == .message and fields.configuration != null)) or
-        (kind != .configure and fields.reload_skills != null) or
+        (kind != .configure and (fields.reload_skills != null or fields.preset != null)) or
         (kind != .session_pin and fields.pinned != null) or
         (kind != .message and (fields.text != null or fields.sender != null or fields.sender_handle != null)) or (kind != .model_interruption and fields.target != null) or
         (kind != .permission_decision and fields.decision != null) or
@@ -5988,4 +5989,33 @@ test "parent relation survives Configure and creating Message capture through na
             }
         }
     }
+}
+
+test "preset Configure capture reopens with sparse settings through native ingress" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(io, .fromMode(0o700));
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    const input: ConfigureInput = .{ .store = root, .session = .create, .preset = .{ .present = true, .value = "restricted" }, .tools = "none", .reasoning_effort = .{ .present = true, .value = null } };
+    var captured = try captureConfigure(io, input, .{ .generated = root }).get();
+    defer captured.close(io);
+    var reopened = try openCaptured(io, .{ .generated = .{ .directory = root, .handle = captured.identity().key.slice() } });
+    defer reopened.close(io);
+    var bytes: [8192]u8 = undefined;
+    const length = try reopened.file.readPositionalAll(io, &bytes, 0);
+    const ingress = try std.testing.allocator.create(@import("wire_request.zig").Ingress);
+    defer std.testing.allocator.destroy(ingress);
+    var retained: ?@import("named_scratch.zig").Owner = null;
+    ingress.init(std.testing.allocator, .{ .io = io, .content_length = length, .scratch_path = root, .request_number = 1, .retained_scratch = &retained });
+    defer ingress.deinit();
+    try ingress.feed(bytes[0..length]);
+    const request = try ingress.finish();
+    defer request.removeTemporaryContent(io) catch unreachable;
+    try std.testing.expectEqualStrings("restricted", request.configure.preset.?.slice());
+    try std.testing.expect(request.configure.configuration.workspace.state == .omitted);
+    try std.testing.expect(request.configure.configuration.tools.state == .value);
+    try std.testing.expectEqualStrings("", request.configure.configuration.tools.names.slice());
+    try std.testing.expect(request.configure.configuration.reasoning_effort.state == .explicit_null);
 }

@@ -863,7 +863,6 @@ test "parent relation reaches only creating command grammars without hiding cano
     try expectValidation(.session_send, &.{ "--to", "k7m2qx", "--parent", "09azvw" }, error.UnknownArgument);
 }
 
-
 test "preset is a Configure option and Start refuses it" {
     var storage: [1024]u8 = undefined;
     const parsed = try testParse(Command.session_configure.definition(), &.{ "--preset", "restricted" }, &storage);
