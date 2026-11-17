@@ -120,7 +120,9 @@ const creation_receipt_read = rsql.Read(.{
     .sql = "SELECT r.provider,r.model,r.reasoning_effort,r.workspace," ++
         "coalesce(" ++ tool_set.namesSql("r.tool_set_id") ++ ",'') AS tools," ++
         "coalesce(" ++ tool_set.namesSql(tool_set.offeredSetSql("r")) ++ ",'') AS loaded_tools," ++
-        "r.permission_mode,r.compaction_trigger,configured.member_count AS tools_count,loaded.member_count AS loaded_count " ++
+        "r.permission_mode,r.compaction_trigger,configured.member_count AS tools_count,loaded.member_count AS loaded_count," ++
+        "(SELECT count(*) FROM tool_set_member member JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id WHERE member.tool_set_id=r.tool_set_id) AS tools_rows," ++
+        "(SELECT count(*) FROM tool_set_member member JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id WHERE member.tool_set_id=" ++ tool_set.offeredSetSql("r") ++ ") AS loaded_rows " ++
         "FROM session_revision r JOIN tool_set configured ON configured.tool_set_id=r.tool_set_id " ++
         "JOIN tool_set loaded ON loaded.tool_set_id=" ++ tool_set.offeredSetSql("r") ++
         " WHERE r.session_ref=?1 AND r.revision=1 AND r.command_key=?2",
@@ -136,6 +138,8 @@ const creation_receipt_read = rsql.Read(.{
         compaction_trigger: ?u64,
         tools_count: u64,
         loaded_count: u64,
+        tools_rows: u64,
+        loaded_rows: u64,
     },
     .cardinality = .optional,
 });
@@ -152,13 +156,17 @@ fn prepareReceipt(row: *creation_receipt_read.Row, reads: *configuration_domain.
         .compaction_trigger = undefined,
         .tools_count = undefined,
         .loaded_count = undefined,
+        .tools_rows = undefined,
+        .loaded_rows = undefined,
     };
 }
 
 noinline fn receiptNames(names: *const Bounded(tool_set.max_names_bytes), count: u64, out: *Bounded(tool_set.max_names_bytes)) !void {
     var sorted: command_input.ToolsField = .{ .state = .value };
-    var each = std.mem.tokenizeScalar(u8, names.slice(), ',');
-    while (each.next()) |name| sorted.insert(name) catch return error.CorruptStore;
+    if (names.len != 0) {
+        var each = std.mem.splitScalar(u8, names.slice(), ',');
+        while (each.next()) |name| sorted.insert(name) catch return error.CorruptStore;
+    }
     if (sorted.count != count) return error.CorruptStore;
     // Receipt lists use commas; the admission representation uses spaces.
     for (sorted.names.bytes[0..sorted.names.len]) |*byte| if (byte.* == ' ') {
@@ -168,6 +176,7 @@ noinline fn receiptNames(names: *const Bounded(tool_set.max_names_bytes), count:
 }
 
 fn creationReceipt(row: *const creation_receipt_read.Row, out: *command_reply.CreationConfiguration) !void {
+    if (row.tools_count != row.tools_rows or row.loaded_count != row.loaded_rows) return error.CorruptStore;
     out.provider = row.provider;
     out.model = row.model.*;
     out.reasoning_effort = row.reasoning_effort;

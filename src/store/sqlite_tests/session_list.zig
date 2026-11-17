@@ -450,3 +450,51 @@ test "creating configuration receipt replay reads independently of Session histo
     try std.testing.expect(few > 0);
     try std.testing.expectEqual(few, try Counter.steps(&storage, &create));
 }
+
+test "creation receipt rejects stored tool names with empty comma segments" {
+    const wire_request = @import("../../wire_request.zig");
+    for ([_]bool{ false, true }) |as_message| {
+        for ([_][]const u8{ ",bad", "bad,", "bad,,name", "bad,name" }) |invalid| for ([_]bool{ false, true }) |forged_count| {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try testingStore(&storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try store_testing.canonicalCwd(std.testing.io, &workspace_buffer);
+            var create = try completeConfiguration("comma-receipt", "", workspace, "model-a");
+            create.configuration.tools = try .of(&.{"bash"});
+            var message: wire_request.MessageCommand = .{ .configuration = create.configuration };
+            try message.key.set("comma-receipt");
+            message.text = try tests.testingBytesContent(&tmp, "comma-receipt-input", "initial");
+            defer message.removeTemporaryContent(std.testing.io) catch unreachable;
+            var receipt: @import("../../creation_receipt.zig").Configuration = undefined;
+            const session = if (as_message) blk: {
+                const result = storage.submitMessageWithModelInto(&message, null, &receipt, .{});
+                try std.testing.expect(result == .accepted);
+                break :blk result.accepted.session;
+            } else blk: {
+                const result = try storage.configureInto(&create, &receipt, .{});
+                try std.testing.expect(result == .accepted);
+                break :blk result.accepted.session;
+            };
+            const record = try store_testing.sqlite_only.queryU64(&storage, "SELECT tool_record_id FROM tool_set_member WHERE tool_set_id=(SELECT tool_set_id FROM session_revision WHERE session_ref=?1 AND revision=1) AND ordinal=0", .{session.slice()});
+            try sqlite.exec(storage.sqliteDatabase(), "PRAGMA ignore_check_constraints=ON");
+            try store_testing.sqlite_only.exec(&storage, "UPDATE tool_record SET name=?1 WHERE tool_record_id=?2", .{ invalid, record });
+            try sqlite.exec(storage.sqliteDatabase(), "PRAGMA ignore_check_constraints=OFF");
+            if (forged_count) {
+                var apparent_count: u64 = 1;
+                for (invalid) |byte| if (byte == ',') {
+                    apparent_count += 1;
+                };
+                try store_testing.sqlite_only.exec(&storage, "UPDATE tool_set SET member_count=?1 WHERE tool_set_id=(SELECT tool_set_id FROM session_revision WHERE session_ref=?2 AND revision=1)", .{ apparent_count, session.slice() });
+            }
+            if (as_message) {
+                try std.testing.expect(storage.submitMessageWithModelInto(&message, null, &receipt, .{}) == .infrastructure_failure);
+            } else {
+                try std.testing.expect((try storage.configureInto(&create, &receipt, .{})) == .infrastructure_failure);
+            }
+            try std.testing.expect(storage.isFenced());
+        };
+    }
+}
