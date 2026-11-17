@@ -130,12 +130,16 @@ class SupportedRangeTest(unittest.TestCase):
 class RunningUpgradeTest(unittest.TestCase):
     def check_activation(self, *, status="ready", instance="candidate-instance", store="/store",
                          pid=12, executable=Path("/candidate/bin/rui"), version="0.69.10000",
-                         output="/store: restarted on 0.69.10000\n", retired=True):
+                         output="/store: restarted on 0.69.10000\n", retired=True,
+                         capacity="1", paused=False, bash=True, providers=None):
         binary = Path("/candidate/bin/rui")
-        previous = {"store": "/store", "instance": "previous-instance"}
+        previous = {"store": "/store", "instance": "previous-instance", "active_capacity": "1", "paused": False,
+                    "capabilities": {"bash": True, "providers": {"codex": "endpoint", "openai": "unserved"}}}
         dialect = Mock()
         dialect.host_status.return_value = status, json.dumps({
-            "store": store, "instance": instance,
+            "store": store, "instance": instance, "active_capacity": capacity, "paused": paused,
+            "capabilities": {"bash": bash, "providers": providers if providers is not None else
+                             {"codex": "endpoint", "openai": "unserved", "chatgpt": "unserved"}},
         })
         seed = SimpleNamespace(pid=11, poll=lambda: 1 if retired else None)
 
@@ -167,6 +171,16 @@ class RunningUpgradeTest(unittest.TestCase):
             {"status": "unavailable"}, {"store": "/another-store"}, {"pid": 11},
             {"executable": Path("/previous/bin/rui")}, {"version": "0.69.1"},
             {"output": "Installed Rui; no restart performed"}, {"retired": False},
+        ):
+            with self.subTest(changes=changes), self.assertRaises(AssertionError):
+                self.check_activation(**changes)
+
+    def test_rejects_changed_serving_facts(self):
+        for changes in (
+            {"capacity": "2"}, {"paused": True}, {"bash": False},
+            {"providers": {"codex": "unserved", "openai": "unserved", "chatgpt": "unserved"}},
+            {"providers": {"codex": "endpoint", "openai": "key_file", "chatgpt": "unserved"}},
+            {"providers": {"codex": "endpoint", "openai": "unserved", "chatgpt": "endpoint"}},
         ):
             with self.subTest(changes=changes), self.assertRaises(AssertionError):
                 self.check_activation(**changes)

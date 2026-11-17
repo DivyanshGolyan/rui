@@ -1,6 +1,7 @@
+//! Upgrade owns the transition, not Host admission or child argv. Both the
+//! precondition and replacement execute the target's public settings/starter.
 const std = @import("std");
 const client = @import("client.zig");
-const HostStartupWait = @import("HostStartupWait.zig");
 const protocol = @import("protocol.zig");
 const protocol_reply = @import("protocol_reply.zig");
 const platform = @import("platform.zig");
@@ -8,151 +9,125 @@ const identity = @import("host_identity.zig");
 const process = @import("upgrade_process.zig");
 const Installation = @import("Installation.zig");
 const candidate = @import("release_candidate.zig");
-const cli_args = @import("cli_args.zig");
-const serve_grammar = @import("serve_grammar.zig");
 const host_start = @import("host_start.zig");
+const secret_value = @import("secret_value.zig");
+const start_report = @import("start_report.zig");
 const product_defaults = @import("product_defaults.zig");
 
 pub const Stage = enum { stopping, awaiting_retirement, starting, verifying };
 pub const Progress = struct {
     context: *anyopaque,
     report: *const fn (*anyopaque, Stage) void,
-
     fn send(self: ?Progress, stage: Stage) void {
         if (self) |value| value.report(value.context, stage);
     }
 };
-
-pub const Limitation = enum {
-    inaccessible,
-    incompatible,
-    ownership_unconfirmed,
-    application_owned,
-    configuration_unavailable,
-};
-
-pub const LaunchOption = struct { name: []const u8, value: ?[]const u8 };
-pub const LaunchSpecification = struct {
-    options: []LaunchOption,
-    values: []u8 = &.{},
-
-    fn deinit(self: *const LaunchSpecification, allocator: std.mem.Allocator) void {
-        allocator.free(self.options);
-        allocator.free(self.values);
-    }
-};
-
-pub const Plan = struct {
-    observed: client.HostControlObservation,
-    snapshot: identity.Snapshot,
-    launch: LaunchSpecification,
-    version: candidate.Version,
-    previous_release: bool,
-};
-
-pub const Observation = union(enum) {
-    absent,
-    managed: Plan,
-    unsupported: Limitation,
-
-    pub fn deinit(self: *Observation, allocator: std.mem.Allocator) void {
-        if (self.* == .managed) {
-            self.managed.launch.deinit(allocator);
-            self.managed.snapshot.deinit(allocator);
-        }
-    }
-};
-
+pub const Limitation = enum { inaccessible, incompatible, ownership_unconfirmed, application_owned, configuration_unavailable, target_capability };
 pub const ActivationOutcome = union(enum) {
     not_needed,
     superseded,
     already_ready: struct { instance: protocol.InstanceId, pid: c_int },
     ready: struct { instance: protocol.InstanceId, pid: c_int },
+    /// Target public status, answering peer release and new instance were
+    /// verified; only the calling client's wire is incompatible.
     client_incompatible: c_int,
     unsupported: Limitation,
     replacement_observed,
     cancelled,
+    refused: struct { stage: enum { checking, starting }, failure: start_report.Failure },
     failed: Stage,
     unconfirmed: Stage,
 };
 
-pub fn observe(allocator: std.mem.Allocator, io: std.Io, home: []const u8, store: []const u8, cancellation: ?*const client.Cancellation) !Observation {
-    try process.check(cancellation);
-    switch (client.hostStatus(io, store)) {
-        .unavailable => return .absent,
-        .owned_unavailable => return .{ .unsupported = .ownership_unconfirmed },
-        .incompatible => {},
-        .access_failure => return .{ .unsupported = .inaccessible },
-        .ready => {},
+// The arena's allocator context must not move when an Observation is returned.
+// Its normalized assignments can contain secrets and are wiped on EVERY exit.
+const Sources = struct {
+    wiping: secret_value.WipingAllocator,
+    arena: std.heap.ArenaAllocator,
+    request: host_start.Spawn,
+
+    fn init(gpa: std.mem.Allocator, argv: []const []const u8) !*Sources {
+        const self = try gpa.create(Sources);
+        self.wiping = .{ .backing = gpa };
+        self.arena = .init(self.wiping.allocator());
+        errdefer self.deinit(gpa);
+        const running = try @import("serve_grammar.zig").runningSources(self.arena.allocator(), argv);
+        if (!running.restartable) return error.UnsupportedHostConfiguration;
+        const dir = running.dir orelse return error.UnsupportedHostConfiguration;
+        if (!std.fs.path.isAbsolute(dir)) return error.UnsupportedHostConfiguration;
+        self.request = .{ .dir = dir, .settings_file = running.settings_file, .assignments = running.assignments };
+        return self;
     }
-    // This replay owner can preserve only default SQLite placement. A moved
-    // Store/interface needs DIR all the way through the new-build starter;
-    // PR6 owns that transition. Refuse before taking a launch snapshot or stop
-    // authority, never substitute wire Store identity for the Host directory.
-    const paths = client.resolveClientPaths(io, store) catch return .{ .unsupported = .inaccessible };
-    const ordinary = if (paths.kind == .sqlite) platform.sqliteClientPaths(io, store) catch null else null;
-    if (replayPlacementRefusal(paths, ordinary)) |reason| return .{ .unsupported = reason };
-    const observed = client.observeHostForUpgrade(io, store, null) catch return .{ .unsupported = .ownership_unconfirmed };
-    var snapshot = identity.snapshot(allocator, observed.pid) catch return .{ .unsupported = .configuration_unavailable };
-    errdefer snapshot.deinit(allocator);
-    if (!std.mem.endsWith(u8, snapshot.executable, "/bin/rui")) {
-        snapshot.deinit(allocator);
-        return .{ .unsupported = .application_owned };
+    fn deinit(self: *Sources, gpa: std.mem.Allocator) void {
+        self.arena.deinit();
+        gpa.destroy(self);
     }
-    var build = try Installation.inspectBuild(allocator, io, home, snapshot.executable[0 .. snapshot.executable.len - "/bin/rui".len], cancellation);
+};
+pub const Plan = struct {
+    observed: client.HostControlObservation,
+    snapshot: identity.Snapshot,
+    sources: *Sources,
+    version: candidate.Version,
+};
+pub const Observation = union(enum) {
+    absent,
+    managed: Plan,
+    unsupported: Limitation,
+    pub fn deinit(self: *Observation, allocator: std.mem.Allocator) void {
+        if (self.* == .managed) {
+            self.managed.sources.deinit(allocator);
+            self.managed.snapshot.deinit(allocator);
+        }
+    }
+};
+
+fn installedVersion(allocator: std.mem.Allocator, io: std.Io, home: []const u8, executable: []const u8, cancellation: ?*const client.Cancellation) !?candidate.Version {
+    if (!std.mem.endsWith(u8, executable, "/bin/rui")) return null;
+    var build = try Installation.inspectBuild(allocator, io, home, executable[0 .. executable.len - "/bin/rui".len], cancellation);
     defer build.deinit(allocator);
-    const version = switch (build) {
-        .released => |released| released.version,
+    return switch (build) {
+        .released => |value| value.version,
         .source => source: {
-            const reported = try process.output(allocator, io, &.{ snapshot.executable, "--version" }, cancellation, 512);
-            defer allocator.free(reported);
-            break :source releaseVersion(reported) orelse {
-                snapshot.deinit(allocator);
-                return .{ .unsupported = .configuration_unavailable };
-            };
+            const result = try process.runWithTimeout(allocator, io, &.{ executable, "--version" }, cancellation, 512, .fromSeconds(5));
+            defer process.dispose(allocator, result);
+            break :source if (result.term.success()) releaseVersion(result.stdout) else null;
         },
-        else => {
-            snapshot.deinit(allocator);
-            return .{ .unsupported = .application_owned };
-        },
+        else => null,
     };
-    if (!restartableEnvironment(snapshot.environment)) {
-        snapshot.deinit(allocator);
-        return .{ .unsupported = .configuration_unavailable };
-    }
-    const serve_help = process.output(allocator, io, &.{ snapshot.executable, "host", "serve", "--help" }, cancellation, 32768) catch |err| {
-        if (err == error.Cancelled) return err;
-        snapshot.deinit(allocator);
-        return .{ .unsupported = .configuration_unavailable };
-    };
-    defer allocator.free(serve_help);
-    const previous_release = std.mem.indexOf(u8, serve_help[0 .. std.mem.indexOfScalar(u8, serve_help, '\n') orelse serve_help.len], "[--set ") == null;
-    var launch = deriveLaunch(allocator, snapshot.argv) catch {
-        snapshot.deinit(allocator);
-        return .{ .unsupported = .configuration_unavailable };
-    };
-    errdefer launch.deinit(allocator);
-    const confirmed = client.observeHostForUpgradeProfile(io, store, observed.profile, null) catch {
-        launch.deinit(allocator);
-        snapshot.deinit(allocator);
-        return .{ .unsupported = .ownership_unconfirmed };
-    };
-    if (!sameHost(observed, confirmed)) {
-        launch.deinit(allocator);
-        snapshot.deinit(allocator);
-        return .{ .unsupported = .ownership_unconfirmed };
-    }
-    return .{ .managed = .{ .observed = observed, .snapshot = snapshot, .launch = launch, .version = version, .previous_release = previous_release } };
 }
 
-/// One eligibility rule for the old replay owner. The ordinary paths are
-/// derived from DIR independently, not from the resolved wire Store identity.
-fn replayPlacementRefusal(actual: platform.Paths, ordinary: ?platform.Paths) ?Limitation {
-    if (actual.kind == .mysql) return .application_owned;
-    const baseline = ordinary orelse return .configuration_unavailable;
-    if (!std.mem.eql(u8, actual.store_identity.slice(), baseline.store_identity.slice()) or
-        !std.mem.eql(u8, actual.socket.slice(), baseline.socket.slice())) return .configuration_unavailable;
-    return null;
+pub fn observe(allocator: std.mem.Allocator, io: std.Io, home: []const u8, directory: []const u8, cancellation: ?*const client.Cancellation) !Observation {
+    try process.check(cancellation);
+    switch (client.hostStatus(io, directory)) {
+        .unavailable => return .absent,
+        .owned_unavailable => return .{ .unsupported = .ownership_unconfirmed },
+        .access_failure => return .{ .unsupported = .inaccessible },
+        .incompatible, .ready => {},
+    }
+    const observed = client.observeHostForUpgrade(io, directory, null) catch return .{ .unsupported = .ownership_unconfirmed };
+    var snapshot = identity.snapshot(allocator, observed.pid) catch return .{ .unsupported = .configuration_unavailable };
+    var owned = true;
+    defer if (owned) snapshot.deinit(allocator);
+    const version = (try installedVersion(allocator, io, home, snapshot.executable, cancellation)) orelse return .{ .unsupported = .application_owned };
+    if (!restartableEnvironment(snapshot.environment)) return .{ .unsupported = .configuration_unavailable };
+    const sources = Sources.init(allocator, snapshot.argv) catch |err| {
+        if (err == error.OutOfMemory) return err;
+        return .{ .unsupported = .configuration_unavailable };
+    };
+    var source_owned = true;
+    defer if (source_owned) sources.deinit(allocator);
+    // The argv spelling can be an absolute alias of the selected Host DIR.
+    // Placement already canonicalizes selectors; compare the same fact here,
+    // without changing settings-file or assignment byte spellings.
+    var directory_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const canonical_directory = platform.canonicalStoreDestination(io, sources.request.dir, &directory_buffer) catch return .{ .unsupported = .ownership_unconfirmed };
+    if (!std.mem.eql(u8, canonical_directory, observed.directory())) return .{ .unsupported = .ownership_unconfirmed };
+    sources.request.dir = try sources.arena.allocator().dupe(u8, canonical_directory);
+    const confirmed = client.observeHostForUpgradeProfile(io, directory, observed.profile, null) catch return .{ .unsupported = .ownership_unconfirmed };
+    if (!sameHost(observed, confirmed) or (identity.generation(observed.pid) catch 0) != snapshot.started) return .{ .unsupported = .ownership_unconfirmed };
+    owned = false;
+    source_owned = false;
+    return .{ .managed = .{ .observed = observed, .snapshot = snapshot, .sources = sources, .version = version } };
 }
 
 fn sameHost(a: client.HostControlObservation, b: client.HostControlObservation) bool {
@@ -189,6 +164,8 @@ fn nowNanos(io: std.Io) i96 {
     return std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
 }
 
+/// Sleeps toward `until` on the awake clock, at most 50 ms at a time, and
+/// answers false without sleeping once `until` has passed.
 fn sleepToward(io: std.Io, until: i96) !bool {
     const remaining = until - nowNanos(io);
     if (remaining <= 0) return false;
@@ -204,92 +181,139 @@ pub fn awaitRetirement(io: std.Io, store: []const u8) !bool {
     return true;
 }
 
-fn deriveLaunch(allocator: std.mem.Allocator, argv: []const []const u8) !LaunchSpecification {
-    if (argv.len < 3 or !std.mem.eql(u8, argv[1], "host") or !std.mem.eql(u8, argv[2], "serve")) return error.UnsupportedHostConfiguration;
-    var scratch = std.heap.ArenaAllocator.init(allocator);
-    defer scratch.deinit();
-    const grammar = comptime cli_args.Command.host_serve.definition();
-    var problem: cli_args.Refusal = undefined;
-    const arguments = serve_grammar.currentArguments(scratch.allocator(), argv[3..]) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        error.InvalidArguments => return error.UnsupportedHostConfiguration,
-    };
-    const parsed = try grammar.parseSyntax(arguments, scratch.allocator(), &problem);
-    try parsed.validateValues(&problem);
-    if (parsed.help or parsed.missing() != null) return error.UnsupportedHostConfiguration;
-    if (parsed.repeat_count == parsed.repeats.len) return error.UnsupportedHostConfiguration;
-    var options: std.ArrayList(LaunchOption) = .empty;
-    errdefer options.deinit(allocator);
-    for (grammar.options) |option| {
-        if (std.mem.eql(u8, option.hex_of orelse option.name, "store")) continue;
-        if (option.hidden and parsed.hasNamed(option.name)) return error.UnsupportedHostConfiguration;
-        if (option.repeated) {
-            for (parsed.allNamed(option.name)) |value| try options.append(allocator, .{ .name = option.name, .value = value });
-        } else if (parsed.hasNamed(option.name)) {
-            try options.append(allocator, .{ .name = option.name, .value = parsed.getNamed(option.name) });
-        }
-    }
-    var size: usize = 0;
-    for (options.items) |option| size += if (option.value) |value| value.len else 0;
-    const values = try allocator.alloc(u8, size);
-    var at: usize = 0;
-    for (options.items) |*option| if (option.value) |value| {
-        @memcpy(values[at..][0..value.len], value);
-        option.value = values[at..][0..value.len];
-        at += value.len;
-    };
-    errdefer allocator.free(values);
-    return .{ .options = try options.toOwnedSlice(allocator), .values = values };
-}
-
-fn admitReplay(init: std.process.Init, options: []const LaunchOption, store: []const u8) !void {
-    var assignments: std.ArrayList([]const u8) = .empty;
-    defer assignments.deinit(init.gpa);
-    var request: host_start.Spawn = .{ .dir = store };
-    for (options) |option| {
-        const value = option.value orelse return error.UnsupportedHostConfiguration;
-        if (std.mem.eql(u8, option.name, "settings")) request.settings_file = value;
-        if (std.mem.eql(u8, option.name, "set")) try assignments.append(init.gpa, value);
-    }
-    request.assignments = assignments.items;
-    if (!try host_start.replayable(init, request)) return error.UnsupportedHostConfiguration;
-}
-
-fn replayOptions(init: std.process.Init, allocator: std.mem.Allocator, plan: *const Plan) ![]LaunchOption {
-    const base: ?[]const u8 = if (plan.previous_release) base: {
-        var document: ?[]const u8 = null;
-        for (plan.launch.options) |option| if (std.mem.eql(u8, option.name, "settings")) {
-            document = option.value;
-        };
-        const names = if (document) |file| host_start.documentNamesProviders(init, file) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return error.UnsupportedHostConfiguration,
-        } else false;
-        break :base serve_grammar.previousProviders(document != null, names);
-    } else null;
-    const options = try allocator.alloc(LaunchOption, plan.launch.options.len + @intFromBool(base != null));
-    const rest = if (base) |set| rest: {
-        options[0] = .{ .name = "set", .value = set };
-        break :rest options[1..];
-    } else options;
-    @memcpy(rest, plan.launch.options);
-    return options;
-}
-
-fn supportedByHelp(specification: *const LaunchSpecification, help: []const u8) bool {
-    const first = help[0 .. std.mem.indexOfScalar(u8, help, '\n') orelse help.len];
-    for (specification.options) |option| {
-        var needle: [128]u8 = undefined;
-        const named = std.fmt.bufPrint(&needle, "[--{s}{s}", .{ option.name, if (option.value != null) " " else "]" }) catch return false;
-        if (std.mem.indexOf(u8, first, named) == null) return false;
-    }
-    return std.mem.indexOf(u8, first, "[--store ") != null and std.mem.indexOf(u8, first, "[--set ") != null;
-}
-
 pub fn releaseVersion(reported: []const u8) ?candidate.Version {
     if (!std.mem.startsWith(u8, reported, "rui ")) return null;
     const end = std.mem.indexOf(u8, reported[4..], " (") orelse return null;
     return candidate.Version.parse(reported[4..][0..end]) catch null;
+}
+
+// Only public command argv are composed here. Host-child argv belong solely to
+// host_start.spawn in the target process; values are never resolved into --set.
+fn arguments(allocator: std.mem.Allocator, binary: []const u8, request: host_start.Spawn, command: enum { check, start, status }) ![]const []const u8 {
+    var argv: std.ArrayList([]const u8) = .empty;
+    try argv.appendSlice(allocator, &.{ binary, "host", switch (command) {
+        .check => "settings",
+        .start => "start",
+        .status => "status",
+    } });
+    if (command == .check) try argv.append(allocator, "--check");
+    try argv.appendSlice(allocator, &.{ "--store", request.dir });
+    if (command != .status) {
+        if (request.settings_file) |file| try argv.appendSlice(allocator, &.{ "--settings", file });
+        for (request.assignments) |value| try argv.appendSlice(allocator, &.{ "--set", value });
+    }
+    return argv.toOwnedSlice(allocator);
+}
+
+fn refusal(allocator: std.mem.Allocator, result: process.Result) !?start_report.Failure {
+    // Public starters write the typed envelope on stdout; permit stderr too,
+    // but never turn arbitrary server/child prose into a typed diagnostic.
+    for ([_][]const u8{ result.stdout, result.stderr }) |bytes| {
+        var start: usize = 0;
+        while (std.mem.indexOfScalarPos(u8, bytes, start, '\n')) |end| {
+            if (try start_report.parseLine(allocator, bytes[start .. end + 1])) |failure| return failure;
+            start = end + 1;
+        }
+    }
+    return null;
+}
+
+fn knownBadTarget(build: Installation.Selection) bool {
+    // Process-witnessed released v0.75.0 accepts stdin lifetime in check then
+    // refuses detached start. A fixed intentional source build is NOT this
+    // artifact, even if its version text is identical. No future cutoff guessed.
+    return build == .released and build.released.version.schema == 75 and build.released.version.patch == 0;
+}
+
+fn stopObserved(io: std.Io, allocator: std.mem.Allocator, plan: *const Plan, context: process.Context) !client.HostStopResult {
+    const directory = plan.sources.request.dir;
+    if (plan.observed.profile.historical()) {
+        const instance = std.fmt.bytesToHex(plan.observed.facts.instance, .lower);
+        const result = try process.runIn(allocator, io, &.{ plan.snapshot.executable, "host", "pause", "--store", directory, "--instance", &instance }, null, 8192, .fromSeconds(product_defaults.host_shutdown_seconds + 5), context);
+        defer process.dispose(allocator, result);
+        if (!result.term.success()) return error.UpgradeChildFailed;
+        return .acknowledged;
+    }
+    var reply: client.ReplyBuffer = .{};
+    return client.stopHost(io, .{ .store = directory, .instance = plan.observed.facts.instance }, &reply);
+}
+
+fn retired(io: std.Io, allocator: std.mem.Allocator, plan: *const Plan) !bool {
+    // Runtime retirement is NOT proof of MySQL GET_LOCK release. Only the
+    // replacement starter's Store acquisition/readiness can establish that.
+    const until = nowNanos(io) + product_defaults.host_shutdown_seconds * std.time.ns_per_s;
+    while (true) {
+        const process_retired = client.upgradeGenerationRetired(allocator, io, plan.snapshot.pid, plan.snapshot.started, until) catch false;
+        if (process_retired) {
+            if (platform.StoreLease.observe(io, plan.sources.request.dir) == .unowned) return true;
+            // A concurrent starter may have acquired the lease after the old
+            // generation retired. Never stop it: start adopts, proof decides.
+            if (client.observeUpgradePeer(allocator, io, plan.sources.request.dir, until)) |value| {
+                var peer = value;
+                defer peer.deinit(allocator);
+                if (peer.pid != plan.snapshot.pid or peer.started != plan.snapshot.started) return true;
+            } else |_| {}
+        }
+        if (!try sleepToward(io, until)) return false;
+    }
+}
+
+fn verify(init: std.process.Init, allocator: std.mem.Allocator, plan: *const Plan, executable: []const u8, version: candidate.Version, context: process.Context) !ActivationOutcome {
+    const until = nowNanos(init.io) + @import("HostStartupWait.zig").readiness_ns;
+    const argv = try arguments(allocator, executable, plan.sources.request, .status);
+    defer allocator.free(argv);
+    while (nowNanos(init.io) < until) {
+        if (client.observeUpgradePeer(allocator, init.io, plan.sources.request.dir, until)) |first| {
+            var before = first;
+            defer before.deinit(allocator);
+            const result = process.runIn(allocator, init.io, argv, null, 8192, .fromNanoseconds(@intCast(@max(1, until - nowNanos(init.io)))), context) catch return .{ .unconfirmed = .verifying };
+            defer process.dispose(allocator, result);
+            if (result.term.success()) {
+                if (try client.parseUpgradeStatus(allocator, result.stdout)) |facts| {
+                    if (client.observeUpgradePeer(allocator, init.io, plan.sources.request.dir, until)) |last| {
+                        var after = last;
+                        defer after.deinit(allocator);
+                        if (sameSnapshot(&before, &after)) {
+                            const actual = (try installedVersion(allocator, init.io, init.environ_map.get("HOME") orelse return .{ .unconfirmed = .verifying }, after.executable, null)) orelse return .{ .unconfirmed = .verifying };
+                            if (replacementMatches(plan, facts, actual, version)) {
+                                const status = client.hostStatus(init.io, plan.sources.request.dir);
+                                const usable = statusAgrees(status, facts);
+                                if (usable) {
+                                    if (client.observeUpgradePeer(allocator, init.io, plan.sources.request.dir, until)) |last_peer| {
+                                        var final_peer = last_peer;
+                                        defer final_peer.deinit(allocator);
+                                        if (sameSnapshot(&after, &final_peer)) return if (status == .incompatible)
+                                            .{ .client_incompatible = final_peer.pid }
+                                        else
+                                            .{ .ready = .{ .instance = facts.instance, .pid = final_peer.pid } };
+                                    } else |_| {}
+                                }
+                            } else {
+                                return .replacement_observed;
+                            }
+                        }
+                    } else |_| {}
+                }
+            }
+        } else |_| {}
+        _ = try sleepToward(init.io, until);
+    }
+    return .{ .unconfirmed = .verifying };
+}
+
+/// Used ONLY after target-public readiness, instance and answering release
+/// proof. An explicit negative final probe must never become success.
+fn statusAgrees(status: protocol_reply.HostStatus, facts: client.ReplacementFacts) bool {
+    return switch (status) {
+        .ready => |ready| std.mem.eql(u8, &ready.instance, &facts.instance) and std.mem.eql(u8, ready.store.slice(), facts.store.slice()) and ready.active_capacity == facts.active_capacity,
+        .incompatible => true,
+        .unavailable, .owned_unavailable, .access_failure => false,
+    };
+}
+
+fn replacementMatches(plan: *const Plan, facts: client.ReplacementFacts, actual: candidate.Version, target: candidate.Version) bool {
+    return actual.order(target) == .eq and !std.mem.eql(u8, &facts.instance, &plan.observed.facts.instance) and
+        std.mem.eql(u8, facts.store.slice(), plan.observed.facts.store.slice()) and facts.active_capacity == plan.observed.facts.active_capacity;
 }
 
 pub fn activate(init: std.process.Init, allocator: std.mem.Allocator, observation: *const Observation, target: []const u8, version: candidate.Version, cancellation: ?*const client.Cancellation, progress: ?Progress) !ActivationOutcome {
@@ -298,449 +322,71 @@ pub fn activate(init: std.process.Init, allocator: std.mem.Allocator, observatio
         .unsupported => |reason| return .{ .unsupported = reason },
         .managed => |*value| value,
     };
-    const io = init.io;
-    const store = plan.observed.facts.store.slice();
     process.check(cancellation) catch return .cancelled;
     if (plan.version.order(version) == .gt) return .superseded;
-    var prepared = PreparedActivation.init(init, allocator, plan, target, cancellation) catch |err| {
+    var wiping: secret_value.WipingAllocator = .{ .backing = allocator };
+    const private = wiping.allocator();
+    var arena: std.heap.ArenaAllocator = .init(private);
+    defer arena.deinit();
+    var environment: std.process.Environ.Map = .init(private);
+    defer environment.deinit();
+    for (plan.snapshot.environment) |entry| {
+        const equal = std.mem.indexOfScalar(u8, entry, '=') orelse return .{ .unsupported = .configuration_unavailable };
+        try environment.put(entry[0..equal], entry[equal + 1 ..]);
+    }
+    const context: process.Context = .{ .environ_map = &environment, .cwd = .{ .path = "/" } };
+    var captured = init;
+    captured.gpa = private;
+    captured.arena = &arena;
+    captured.environ_map = &environment;
+    const path = try std.fmt.allocPrint(arena.allocator(), "{s}/bin/rui", .{target});
+    const executable = try std.Io.Dir.cwd().realPathFileAlloc(init.io, path, arena.allocator());
+    if (std.mem.eql(u8, executable, plan.snapshot.executable)) {
+        const current = client.observeHostForUpgradeProfile(init.io, plan.sources.request.dir, plan.observed.profile, null) catch return .{ .unconfirmed = .verifying };
+        if (!sameHost(current, plan.observed) or (identity.generation(current.pid) catch 0) != plan.snapshot.started) return .replacement_observed;
+        return .{ .already_ready = .{ .instance = current.facts.instance, .pid = current.pid } };
+    }
+    var build = try Installation.inspectBuild(private, init.io, init.environ_map.get("HOME") orelse return error.HomeNotFound, target, cancellation);
+    defer build.deinit(private);
+    if (knownBadTarget(build)) return .{ .unsupported = .target_capability };
+    const request = host_start.restartSources(captured, arena.allocator(), plan.sources.request, plan.version.order(.{ .schema = 75, .patch = 0 }) == .lt, plan.observed.facts.active_capacity) catch |err| {
+        if (err == error.OutOfMemory) return err;
+        return .{ .unsupported = .configuration_unavailable };
+    };
+    const check_argv = try arguments(arena.allocator(), executable, request, .check);
+    const checked = process.runIn(private, init.io, check_argv, cancellation, 8192, .fromSeconds(300), context) catch |err| {
         if (err == error.Cancelled) return .cancelled;
         return .{ .unsupported = .configuration_unavailable };
     };
-    defer prepared.deinit(allocator);
-    if (std.mem.eql(u8, prepared.executable, plan.snapshot.executable)) {
-        const current = client.observeHostProcess(io, store, null) catch return .{ .unconfirmed = .verifying };
-        if (plan.observed.profile != .current or current.pid != plan.observed.pid or !std.mem.eql(u8, &current.ready.instance, &plan.observed.facts.instance)) return .{ .unconfirmed = .verifying };
-        return .{ .already_ready = .{ .instance = current.ready.instance, .pid = current.pid } };
+    defer process.dispose(private, checked);
+    if (!checked.term.success()) {
+        if (try refusal(private, checked)) |failure| return .{ .refused = .{ .stage = .checking, .failure = failure } };
+        return .{ .unsupported = .configuration_unavailable };
     }
     process.check(cancellation) catch return .cancelled;
-    if (client.hostLockState(io, store) != .free) {
-        const current = client.observeHostForUpgradeProfile(io, store, plan.observed.profile, null) catch return .{ .unconfirmed = .stopping };
-        if (!sameHost(plan.observed, current)) return .replacement_observed;
-        var fresh = identity.snapshot(allocator, current.pid) catch return .{ .unconfirmed = .stopping };
-        defer fresh.deinit(allocator);
-        if (!sameSnapshot(&plan.snapshot, &fresh)) return .{ .unsupported = .configuration_unavailable };
-        Progress.send(progress, .stopping);
-        const stopped = stopObserved(io, allocator, plan) catch {
-            if (client.hostLockState(io, store) != .free) {
-                if (client.observeHostForUpgrade(io, store, null)) |replacement| {
-                    if (!sameHost(plan.observed, replacement)) return .replacement_observed;
-                } else |_| {}
-                return .{ .unconfirmed = .stopping };
-            }
-            return startPinned(init, allocator, plan, &prepared, version, progress);
-        };
-        switch (stopped) {
-            .instance_changed => return .replacement_observed,
-            .unavailable => if (client.hostLockState(io, store) != .free) return .{ .unconfirmed = .stopping },
-            .acknowledged => {},
-        }
-        Progress.send(progress, .awaiting_retirement);
-        if (!try awaitRetirement(io, store)) {
-            if (client.observeHostForUpgrade(io, store, null)) |replacement| {
-                if (!sameHost(plan.observed, replacement)) return .replacement_observed;
-            } else |_| {}
-            return .{ .unconfirmed = .awaiting_retirement };
-        }
-    }
-    return startPinned(init, allocator, plan, &prepared, version, progress);
-}
-
-fn stopObserved(io: std.Io, allocator: std.mem.Allocator, plan: *const Plan) !client.HostStopResult {
-    const store = plan.observed.facts.store.slice();
-    if (plan.observed.profile.historical()) {
-        const instance = std.fmt.bytesToHex(plan.observed.facts.instance, .lower);
-        const result = try process.runWithTimeout(allocator, io, &.{ plan.snapshot.executable, "host", "pause", "--store", store, "--instance", &instance }, null, 8192, .fromSeconds(product_defaults.host_shutdown_seconds + 5));
-        defer process.dispose(allocator, result);
-        if (!result.term.success()) return error.UpgradeChildFailed;
-        return .acknowledged;
-    }
-    var reply: client.ReplyBuffer = .{};
-    return client.stopHost(io, .{ .store = store, .instance = plan.observed.facts.instance }, &reply);
-}
-
-const PreparedActivation = struct {
-    executable: [:0]u8,
-    helper: [:0]u8,
-    buffers: ?PrivateLaunch,
-
-    fn init(process_init: std.process.Init, allocator: std.mem.Allocator, plan: *const Plan, target: []const u8, cancellation: ?*const client.Cancellation) !PreparedActivation {
-        try admitReplay(process_init, plan.launch.options, plan.observed.facts.store.slice());
-        const options = try replayOptions(process_init, allocator, plan);
-        defer allocator.free(options);
-        if (plan.observed.profile.historical()) {
-            const stop_help = try process.output(allocator, process_init.io, &.{ plan.snapshot.executable, "host", "pause", "--help" }, cancellation, 32768);
-            defer allocator.free(stop_help);
-            const first = stop_help[0 .. std.mem.indexOfScalar(u8, stop_help, '\n') orelse stop_help.len];
-            if (std.mem.indexOf(u8, first, "[--instance ") == null or std.mem.indexOf(u8, first, "[--store ") == null) return error.UnsupportedHostConfiguration;
-        }
-        const target_path = try std.fmt.allocPrint(allocator, "{s}/bin/rui", .{target});
-        defer allocator.free(target_path);
-        const resolved = try std.Io.Dir.cwd().realPathFileAlloc(process_init.io, target_path, allocator);
-        defer allocator.free(resolved);
-        const executable = try allocator.dupeSentinel(u8, resolved, 0);
-        errdefer allocator.free(executable);
-        const help = try process.output(allocator, process_init.io, &.{ executable, "host", "serve", "--help" }, cancellation, 32768);
-        defer allocator.free(help);
-        if (!supportedByHelp(&plan.launch, help)) return error.UnsupportedHostConfiguration;
-        const helper = try std.process.executablePathAlloc(process_init.io, allocator);
-        errdefer allocator.free(helper);
-        const buffers = try PrivateLaunch.init(allocator, executable, options, plan.observed.facts.store.slice(), plan.observed.facts.active_capacity, plan.snapshot.environment);
-        return .{ .executable = executable, .helper = helper, .buffers = buffers };
-    }
-
-    fn releaseBuffers(self: *PreparedActivation, allocator: std.mem.Allocator) void {
-        if (self.buffers) |*buffers| buffers.deinit(allocator);
-        self.buffers = null;
-    }
-
-    fn deinit(self: *PreparedActivation, allocator: std.mem.Allocator) void {
-        self.releaseBuffers(allocator);
-        allocator.free(self.helper);
-        allocator.free(self.executable);
-    }
-};
-
-extern "c" fn rui_launch_pinned(helper: [*:0]const u8, executable: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, argc: usize, envp: [*:null]const ?[*:0]const u8, startup_read: *c_int, launched_pid: *c_int, launched_started: *c_ulonglong) c_int;
-
-const PrivateLaunch = struct {
-    storage: []u8,
-    pointers: []?[*:0]const u8,
-    argv: [:null]?[*:0]const u8,
-    envp: [:null]?[*:0]const u8,
-
-    fn init(allocator: std.mem.Allocator, executable: []const u8, options: []const LaunchOption, store: []const u8, active_capacity: usize, environment: []const []const u8) !PrivateLaunch {
-        var capacity_buffer: [128]u8 = undefined;
-        const capacity = try host_start.capacityAssignment(active_capacity, &capacity_buffer);
-        const arguments = [_][]const u8{ executable, "host", "serve", "--store", store, "--set", capacity };
-        var argc: usize = arguments.len;
-        var byte_count: usize = 0;
-        for (arguments) |argument| {
-            byte_count = try addSize(byte_count, try addSize(argument.len, 1));
-        }
-        for (options) |option| {
-            argc = try addSize(argc, 1);
-            byte_count = try addSize(byte_count, try addSize(option.name.len, 3));
-            if (option.value) |value| {
-                argc = try addSize(argc, 1);
-                byte_count = try addSize(byte_count, try addSize(value.len, 1));
-            }
-        }
-        for (environment) |entry| {
-            byte_count = try addSize(byte_count, try addSize(entry.len, 1));
-        }
-        const pointer_count = try addSize(try addSize(argc, environment.len), 2);
-        const pointers = try allocator.alloc(?[*:0]const u8, pointer_count);
-        errdefer wipeAllocation(?[*:0]const u8, allocator, pointers);
-        const storage = try allocator.alloc(u8, byte_count);
-        @memset(pointers, null);
-        var result: PrivateLaunch = .{
-            .storage = storage,
-            .pointers = pointers,
-            .argv = pointers[0..argc :null],
-            .envp = pointers[argc + 1 .. pointer_count - 1 :null],
-        };
-        var slot: usize = 0;
-        var offset: usize = 0;
-        for (arguments[0..3]) |argument| result.put(&slot, &offset, "", argument);
-        for (options) |option| {
-            result.put(&slot, &offset, "--", option.name);
-            if (option.value) |value| result.put(&slot, &offset, "", value);
-        }
-        for (arguments[3..]) |argument| result.put(&slot, &offset, "", argument);
-        std.debug.assert(slot == argc);
-        slot += 1;
-        for (environment) |entry| result.put(&slot, &offset, "", entry);
-        std.debug.assert(slot == pointer_count - 1 and offset == storage.len);
-        return result;
-    }
-
-    fn addSize(left: usize, right: usize) error{OutOfMemory}!usize {
-        return std.math.add(usize, left, right) catch error.OutOfMemory;
-    }
-
-    fn put(self: *PrivateLaunch, slot: *usize, offset: *usize, prefix: []const u8, value: []const u8) void {
-        const start = offset.*;
-        @memcpy(self.storage[start..][0..prefix.len], prefix);
-        @memcpy(self.storage[start + prefix.len ..][0..value.len], value);
-        offset.* += prefix.len + value.len;
-        self.storage[offset.*] = 0;
-        self.pointers[slot.*] = self.storage[start..offset.* :0].ptr;
-        offset.* += 1;
-        slot.* += 1;
-    }
-
-    fn wipeAllocation(comptime T: type, allocator: std.mem.Allocator, allocation: []T) void {
-        @import("secret_value.zig").wipeAndFree(allocator, std.mem.sliceAsBytes(allocation), .of(T), @returnAddress());
-    }
-
-    fn deinit(self: *PrivateLaunch, allocator: std.mem.Allocator) void {
-        wipeAllocation(u8, allocator, self.storage);
-        wipeAllocation(?[*:0]const u8, allocator, self.pointers);
-        self.* = undefined;
-    }
-};
-
-fn startPinned(init: std.process.Init, allocator: std.mem.Allocator, plan: *const Plan, prepared: *PreparedActivation, version: candidate.Version, progress: ?Progress) !ActivationOutcome {
-    const io = init.io;
-    const store = plan.observed.facts.store.slice();
-    if (client.hostLockState(io, store) != .free) return .replacement_observed;
-    var startup_read: c_int = -1;
-    var launched_pid: c_int = -1;
-    var launched_started: c_ulonglong = 0;
+    const current = client.observeHostForUpgradeProfile(init.io, request.dir, plan.observed.profile, null) catch return .{ .unconfirmed = .stopping };
+    if (!sameHost(current, plan.observed)) return .replacement_observed;
+    var fresh = identity.snapshot(private, current.pid) catch return .{ .unconfirmed = .stopping };
+    defer fresh.deinit(private);
+    if (!sameSnapshot(&plan.snapshot, &fresh)) return .{ .unsupported = .configuration_unavailable };
+    // EOF already transferred batch custody. After stop, caller cancellation
+    // cannot abandon this or later entries; start and verification are bounded.
+    Progress.send(progress, .stopping);
+    const stopped = stopObserved(init.io, private, plan, context) catch return .{ .unconfirmed = .stopping };
+    if (stopped == .instance_changed) return .replacement_observed;
+    Progress.send(progress, .awaiting_retirement);
+    if (!try retired(init.io, private, plan)) return .{ .unconfirmed = .awaiting_retirement };
     Progress.send(progress, .starting);
-    const buffers = &prepared.buffers.?;
-    const launched = rui_launch_pinned(prepared.helper.ptr, prepared.executable.ptr, buffers.argv.ptr, buffers.argv.len, buffers.envp.ptr, &startup_read, &launched_pid, &launched_started);
-    prepared.releaseBuffers(allocator);
-    defer if (startup_read >= 0) {
-        _ = std.c.close(startup_read);
-    };
-    if (launched != 0 or launched_pid <= 0 or launched_started == 0) return .{ .failed = .starting };
+    process.waitForTestGate(allocator, init.io, init.environ_map.get("RUI_TEST_UPGRADE_BEFORE_START_GATE"), null, .fromSeconds(300)) catch return .{ .unconfirmed = .starting };
+    const start_argv = try arguments(arena.allocator(), executable, request, .start);
+    const started = process.runIn(private, init.io, start_argv, null, 8192, .fromSeconds(300), context) catch return .{ .unconfirmed = .starting };
+    defer process.dispose(private, started);
+    if (!started.term.success()) {
+        if (try refusal(private, started)) |failure| return .{ .refused = .{ .stage = .starting, .failure = failure } };
+        return .{ .failed = .starting };
+    }
     Progress.send(progress, .verifying);
-    var wait = HostStartupWait.init(nowNanos(io));
-    var startup: [8192]u8 = undefined;
-    var used: usize = 0;
-    while (!wait.expired(nowNanos(io))) {
-        if (used < startup.len) {
-            const n = std.c.read(startup_read, startup[used..].ptr, startup.len - used);
-            if (n > 0) used += @intCast(n);
-            if (n == 0 and client.hostLockState(io, store) == .free) return .{ .failed = .starting };
-        }
-        wait.observe(startup[0..used], nowNanos(io));
-        const until = wait.until(nowNanos(io));
-        if (client.observeHostProcessForUpgrade(io, store, until)) |reading| {
-            if (reading.pid() != launched_pid) return .replacement_observed;
-            var snapshot = identity.snapshot(allocator, reading.pid()) catch return .{ .unconfirmed = .verifying };
-            defer snapshot.deinit(allocator);
-            const activation = activationReading(reading, launched_pid, launched_started, &snapshot, prepared.executable, plan.observed.facts.active_capacity);
-            if (activation != .ready and activation != .client_incompatible) return activation;
-            const reported = process.output(allocator, io, &.{ prepared.executable, "--version" }, null, 512) catch return .{ .unconfirmed = .verifying };
-            defer allocator.free(reported);
-            if (releaseVersion(reported)) |actual| {
-                if (actual.order(version) != .eq) return .{ .unconfirmed = .verifying };
-            } else return .{ .unconfirmed = .verifying };
-            return activation;
-        } else |_| {}
-        _ = try sleepToward(io, until);
-    }
-    return .{ .unconfirmed = .verifying };
-}
-
-fn activationReading(reading: client.HostProcessReading, launched_pid: c_int, launched_started: u64, snapshot: *const identity.Snapshot, executable: []const u8, capacity: usize) ActivationOutcome {
-    if (reading.pid() != launched_pid) return .replacement_observed;
-    if (!identity.matchesLaunch(launched_pid, launched_started, snapshot, executable)) return .{ .unconfirmed = .verifying };
-    return switch (reading) {
-        .incompatible => |pid| .{ .client_incompatible = pid },
-        .ready => |observed| if (observed.ready.active_capacity != capacity)
-            .{ .unconfirmed = .verifying }
-        else
-            .{ .ready = .{ .instance = observed.ready.instance, .pid = observed.pid } },
-    };
-}
-
-test "upgrade private launch buffers wipe argv environment and sentinels on every construction exit" {
-    const Capturing = struct {
-        backing: std.mem.Allocator,
-        allocations: usize = 0,
-        frees: usize = 0,
-        allocated_bytes: usize = 0,
-        freed_bytes: usize = 0,
-        dirty_free: bool = false,
-
-        fn allocator(self: *@This()) std.mem.Allocator {
-            return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = std.mem.Allocator.noResize, .remap = std.mem.Allocator.noRemap, .free = free } };
-        }
-
-        fn alloc(raw: *anyopaque, len: usize, alignment: std.mem.Alignment, ret: usize) ?[*]u8 {
-            const self: *@This() = @ptrCast(@alignCast(raw));
-            const memory = self.backing.rawAlloc(len, alignment, ret) orelse return null;
-            @memset(memory[0..len], 0xa5);
-            self.allocations += 1;
-            self.allocated_bytes += len;
-            return memory;
-        }
-
-        fn free(raw: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret: usize) void {
-            const self: *@This() = @ptrCast(@alignCast(raw));
-            if (!std.mem.allEqual(u8, memory, 0)) self.dirty_free = true;
-            self.frees += 1;
-            self.freed_bytes += memory.len;
-            self.backing.rawFree(memory, alignment, ret);
-        }
-
-        fn expectWiped(self: *const @This()) !void {
-            try std.testing.expectEqual(false, self.dirty_free);
-            try std.testing.expectEqual(self.allocations, self.frees);
-            try std.testing.expectEqual(self.allocated_bytes, self.freed_bytes);
-        }
-
-        fn exercise(gpa: std.mem.Allocator, environment: []const []const u8, fail_after_construction: bool) !void {
-            const endpoint = "https://example.test/v1?token=synthetic-launch-only";
-            const options = [_]LaunchOption{
-                .{ .name = "set", .value = endpoint },
-                .{ .name = "synthetic-flag", .value = null },
-                .{ .name = "synthetic-empty", .value = "" },
-            };
-            var buffers = try PrivateLaunch.init(gpa, "/synthetic/bin/rui", &options, "/synthetic/private-store", 17, environment);
-            defer buffers.deinit(gpa);
-            var capacity_buffer: [128]u8 = undefined;
-            const capacity = try host_start.capacityAssignment(17, &capacity_buffer);
-            const expected = [_][]const u8{ "/synthetic/bin/rui", "host", "serve", "--set", endpoint, "--synthetic-flag", "--synthetic-empty", "", "--store", "/synthetic/private-store", "--set", capacity };
-            try std.testing.expectEqual(expected.len, buffers.argv.len);
-            try std.testing.expectEqual(environment.len, buffers.envp.len);
-            for (expected, buffers.argv) |argument, pointer| {
-                try std.testing.expectEqualStrings(argument, std.mem.span(pointer.?));
-                try std.testing.expect(@intFromPtr(pointer.?) >= @intFromPtr(buffers.storage.ptr));
-                try std.testing.expect(@intFromPtr(pointer.?) + argument.len < @intFromPtr(buffers.storage.ptr) + buffers.storage.len);
-            }
-            for (environment, buffers.envp) |entry, pointer| try std.testing.expectEqualStrings(entry, std.mem.span(pointer.?));
-            try std.testing.expect(buffers.argv[buffers.argv.len] == null);
-            try std.testing.expect(buffers.envp[buffers.envp.len] == null);
-            try std.testing.expectEqual(buffers.argv.len + buffers.envp.len + 2, buffers.pointers.len);
-            try std.testing.expect(std.mem.indexOf(u8, buffers.storage, endpoint) != null);
-            if (environment.len > 0) try std.testing.expect(std.mem.indexOf(u8, buffers.storage, environment[0]) != null);
-            if (fail_after_construction) return error.SyntheticLaunchFailure;
-        }
-    };
-    const environment: []const []const u8 = &.{ "RUI_PRIVATE=synthetic-only", "EMPTY=" };
-    for ([_]bool{ false, true }) |arena_backed| {
-        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-        defer arena.deinit();
-        const backing = if (arena_backed) arena.allocator() else std.testing.allocator;
-        for ([_]bool{ false, true }) |fail_after_construction| {
-            for ([_][]const []const u8{ &.{}, environment }) |entries| {
-                var capture: Capturing = .{ .backing = backing };
-                if (fail_after_construction) {
-                    try std.testing.expectError(error.SyntheticLaunchFailure, Capturing.exercise(capture.allocator(), entries, true));
-                } else {
-                    try Capturing.exercise(capture.allocator(), entries, false);
-                }
-                try std.testing.expectEqual(@as(usize, 2), capture.allocations);
-                try capture.expectWiped();
-            }
-        }
-        var successful: Capturing = .{ .backing = backing };
-        try Capturing.exercise(successful.allocator(), environment, false);
-        try successful.expectWiped();
-        for (0..successful.allocations) |fail_index| {
-            var capture: Capturing = .{ .backing = backing };
-            var failing: std.testing.FailingAllocator = .init(capture.allocator(), .{ .fail_index = fail_index });
-            try std.testing.expectError(error.OutOfMemory, Capturing.exercise(failing.allocator(), environment, false));
-            try std.testing.expect(failing.has_induced_failure);
-            try std.testing.expectEqual(fail_index, capture.allocations);
-            try capture.expectWiped();
-        }
-    }
-}
-
-test "upgrade launch identity rejects same PID with a replacement generation" {
-    const snapshot: identity.Snapshot = .{ .pid = 42, .started = 12, .executable = "/pinned/rui", .argv = &.{}, .environment = &.{}, .storage = &.{}, .entries = &.{} };
-    try std.testing.expect(identity.matchesLaunch(42, 12, &snapshot, "/pinned/rui"));
-    try std.testing.expect(!identity.matchesLaunch(42, 11, &snapshot, "/pinned/rui"));
-    try std.testing.expect(!identity.matchesLaunch(42, 0, &snapshot, "/pinned/rui"));
-    try std.testing.expect(!identity.matchesLaunch(43, 12, &snapshot, "/pinned/rui"));
-    try std.testing.expect(!identity.matchesLaunch(42, 12, &snapshot, "/other/rui"));
-}
-
-test "relaunch activation reading requires the pinned launch for either wire" {
-    const good: identity.Snapshot = .{ .pid = 42, .started = 12, .executable = "/pinned/rui", .argv = &.{}, .environment = &.{}, .storage = &.{}, .entries = &.{} };
-    for ([_]bool{ false, true }) |incompatible| {
-        for (0..6) |fault| {
-            var snapshot = good;
-            var reading: client.HostProcessReading = if (incompatible) .{ .incompatible = 42 } else .{ .ready = .{ .pid = 42, .ready = .{
-                .store = .{},
-                .instance = @splat(1),
-                .active_capacity = 17,
-                .started_at = 1,
-                .custody_occupied = 0,
-                .paused = false,
-                .capabilities = .{ .bash = false, .providers = .{ .codex = .unserved, .openai = .unserved, .chatgpt = .unserved } },
-            } } };
-            switch (fault) {
-                0 => {},
-                1 => if (incompatible) {
-                    reading.incompatible = 43;
-                } else {
-                    reading.ready.pid = 43;
-                },
-                2 => snapshot.pid = 43,
-                3 => snapshot.started = 13,
-                4 => snapshot.executable = "/other/rui",
-                5 => if (!incompatible) {
-                    reading.ready.ready.active_capacity = 18;
-                },
-                else => unreachable,
-            }
-            const result = activationReading(reading, 42, 12, &snapshot, "/pinned/rui", 17);
-            const expected: std.meta.Tag(ActivationOutcome) = if (fault == 1) .replacement_observed else if (fault >= 2 and fault <= 4 or (fault == 5 and !incompatible)) .unconfirmed else if (incompatible) .client_incompatible else .ready;
-            try std.testing.expectEqual(expected, std.meta.activeTag(result));
-        }
-    }
-}
-
-test "upgrade lifecycle derives launch semantics before disruption" {
-    const allocator = std.testing.allocator;
-    for ([_][]const []const u8{
-        &.{ "rui", "session", "start" },
-        &.{ "rui", "host", "serve", "--test-observation-fd", "8" },
-        &.{ "rui", "host", "serve", "--unknown-new-option", "value" },
-    }) |args| {
-        if (deriveLaunch(allocator, args)) |*result| {
-            result.deinit(allocator);
-            return error.TestUnexpectedResult;
-        } else |_| {}
-    }
-    var first_buffer: [128]u8 = undefined;
-    var last_buffer: [128]u8 = undefined;
-    const first = try host_start.capacityAssignment(3, &first_buffer);
-    const last = try host_start.capacityAssignment(5, &last_buffer);
-    for ([_][]const u8{ "--store", "--store-hex" }, [_][]const u8{ "/some/store", "2f736f6d652f73746f7265" }) |spelling, value| {
-        var launch = try deriveLaunch(allocator, &.{ "rui", "host", "serve", spelling, value, "--set", first, "--set", last });
-        defer launch.deinit(allocator);
-        try std.testing.expectEqual(@as(usize, 2), launch.options.len);
-        try std.testing.expectEqualStrings("set", launch.options[0].name);
-        try std.testing.expectEqualStrings(first, launch.options[0].value.?);
-        try std.testing.expectEqualStrings("set", launch.options[1].name);
-        try std.testing.expectEqualStrings(last, launch.options[1].value.?);
-        try std.testing.expect(supportedByHelp(&launch, "rui host serve [--store PATH] [--set PATH=VALUE]\n"));
-        try std.testing.expect(!supportedByHelp(&launch, "rui host serve [--store PATH]\n"));
-    }
-    {
-        var launch = try deriveLaunch(allocator, &.{ "rui", "host", "serve", "--store", "/some/store", "--provider", "codex", "--provider", "openai", "--active-capacity", "4" });
-        defer launch.deinit(allocator);
-        const expected = [_][]const u8{ "providers.codex={}", "providers.openai={}", "execution.activeCapacity=4" };
-        try std.testing.expectEqual(expected.len, launch.options.len);
-        for (expected, launch.options) |value, option| {
-            try std.testing.expectEqualStrings("set", option.name);
-            try std.testing.expectEqualStrings(value, option.value.?);
-        }
-        try std.testing.expect(supportedByHelp(&launch, "rui host serve [--store PATH] [--set PATH=VALUE]\n"));
-    }
-    const repeat_limit = @as(cli_args.Parsed, undefined).repeats.len;
-    var full: [3 + 2 * repeat_limit][]const u8 = undefined;
-    @memcpy(full[0..3], &[_][]const u8{ "rui", "host", "serve" });
-    for (0..repeat_limit) |index| {
-        full[3 + 2 * index] = "--set";
-        full[4 + 2 * index] = first;
-    }
-    try std.testing.expectError(error.UnsupportedHostConfiguration, deriveLaunch(allocator, &full));
-    var almost_full = try deriveLaunch(allocator, full[0 .. full.len - 2]);
-    defer almost_full.deinit(allocator);
-    try std.testing.expectEqual(repeat_limit - 1, almost_full.options.len);
-    for ([_][]const u8{"/private/host.json"}) |file| {
-        var launch = try deriveLaunch(allocator, &.{ "rui", "host", "serve", "--settings", file });
-        defer launch.deinit(allocator);
-        try std.testing.expectEqual(@as(usize, 1), launch.options.len);
-        try std.testing.expectEqualStrings("settings", launch.options[0].name);
-        try std.testing.expectEqualStrings(file, launch.options[0].value.?);
-        try std.testing.expect(supportedByHelp(&launch, "rui host serve [--store PATH] [--set PATH=VALUE] [--settings FILE|-]\n"));
-        try std.testing.expect(!supportedByHelp(&launch, "rui host serve [--store PATH] [--set PATH=VALUE]\n"));
-    }
-    try std.testing.expect(!restartableEnvironment(&.{"SSL_CERT_FILE=relative.pem"}));
-    try std.testing.expect(!restartableEnvironment(&.{"SSL_CERT_DIR=/absolute:relative"}));
-    try std.testing.expect(!restartableEnvironment(&.{"DYLD_LIBRARY_PATH=/custom"}));
-    try std.testing.expect(restartableEnvironment(&.{ "HOME=/home/fixture", "SSL_CERT_DIR=/one:/two", "PRIVATE=synthetic-only" }));
-    try std.testing.expect(releaseVersion("rui unreleased (abc)\n") == null);
-    try std.testing.expectEqual(@as(u32, 56), releaseVersion("rui 0.56.4 (abc)\n").?.schema);
+    return verify(init, private, plan, executable, version, context);
 }
 
 test "upgrade lifecycle control cannot equate different wire profiles or instances" {
@@ -769,140 +415,114 @@ test "upgrade lifecycle control cannot equate different wire profiles or instanc
     }
 }
 
-test "upgrade activation refuses cwd-dependent or stdin-bound settings before any Host is touched" {
+test "upgrade public commands preserve semantic sources and Host directory routing" {
     const gpa = std.testing.allocator;
-    var environment: std.process.Environ.Map = .init(gpa);
-    defer environment.deinit();
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
-    const init: std.process.Init = .{ .minimal = .{ .args = .{ .vector = &.{} }, .environ = .empty }, .arena = &arena, .gpa = gpa, .io = std.testing.io, .environ_map = &environment, .preopens = .empty };
-    var tmp = std.testing.tmpDir(.{ .iterate = true });
-    defer tmp.cleanup();
-    var private = try tmp.dir.createDirPathOpen(init.io, "private", .{ .permissions = .fromMode(0o700), .open_options = .{ .iterate = true } });
-    defer private.close(init.io);
-    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const directory = root[0..try private.realPath(init.io, &root)];
-    const path = try std.fmt.allocPrint(arena.allocator(), "{s}/host.json", .{directory});
-    const target = try std.fmt.allocPrint(arena.allocator(), "{s}/no-release", .{directory});
-    var host = try tmp.dir.createDirPathOpen(init.io, "host", .{ .permissions = .fromMode(0o700) });
-    defer host.close(init.io);
-    var host_root: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const host_dir = host_root[0..try host.realPath(init.io, &host_root)];
-    const Case = struct { argv: []const []const u8, document: []const u8, admitted: bool, saved: []const u8 = "{}" };
-    for ([_]Case{
-        .{ .argv = &.{ "rui", "host", "serve", "--settings", "relative/host.json" }, .document = "{}", .admitted = false },
-        .{ .argv = &.{ "rui", "host", "serve", "--settings", "-" }, .document = "{}", .admitted = false },
-        .{ .argv = &.{ "rui", "host", "serve", "--set", "missing-equals" }, .document = "{}", .admitted = false },
-        .{ .argv = &.{ "rui", "host", "serve", "--settings", path }, .document = "{\"network\":{\"caFile\":\"relative.pem\"}}", .admitted = false },
-        .{ .argv = &.{ "rui", "host", "serve", "--settings", path }, .document = "{\"tools\":{\"bash\":{\"path\":\"relative/bash\"}}}", .admitted = false },
-        .{ .argv = &.{ "rui", "host", "serve", "--settings", path }, .document = "{\"interface\":{\"lifetime\":\"stdin\"}}", .admitted = false },
-        .{ .argv = &.{ "rui", "host", "serve", "--settings", path }, .document = "{\"unknown\":true}", .admitted = false },
-        .{ .argv = &.{ "rui", "host", "serve", "--settings", path }, .document = "{\"network\":{\"caFile\":\"/private/ca.pem\"},\"tools\":{\"bash\":{\"path\":\"/bin/bash\"}}}", .admitted = true },
-        .{ .argv = &.{ "rui", "host", "serve", "--settings", path }, .document = "{\"store\":{\"sqlite\":{\"dir\":\"relative/store\"}}}", .admitted = false },
-        .{ .argv = &.{ "rui", "host", "serve", "--settings", path, "--set", "network.caFile=/private/ca.pem" }, .document = "{}", .admitted = true },
-        .{ .argv = &.{ "rui", "host", "serve", "--set", "network.caFile=relative.pem" }, .document = "{}", .admitted = false },
-        .{ .argv = &.{ "rui", "host", "serve", "--set", "presets.review=@relative.json" }, .document = "{}", .admitted = false },
-        .{ .argv = &.{ "rui", "host", "serve" }, .document = "{}", .saved = "{\"tools\":{\"bash\":{\"path\":\"relative/bash\"}}}", .admitted = false },
-        .{ .argv = &.{ "rui", "host", "serve", "--set", "tools.bash.path=/bin/bash" }, .document = "{}", .saved = "{\"tools\":{\"bash\":{\"path\":\"relative/bash\"}}}", .admitted = true },
-    }) |case| {
-        try private.writeFile(init.io, .{ .sub_path = "host.json", .data = case.document });
-        try private.setFilePermissions(init.io, "host.json", .fromMode(0o600), .{});
-        try host.writeFile(init.io, .{ .sub_path = "host.json", .data = case.saved });
-        try host.setFilePermissions(init.io, "host.json", .fromMode(0o600), .{});
-        const launch = deriveLaunch(gpa, case.argv) catch |err| {
-            try std.testing.expect(!case.admitted);
-            try std.testing.expectEqual(error.UnsupportedHostConfiguration, err);
-            continue;
-        };
-        var plan: Plan = undefined;
-        plan.launch = launch;
-        defer plan.launch.deinit(gpa);
-        plan.observed.profile = .current;
-        plan.previous_release = false;
-        plan.observed.facts.store = .{};
-        try plan.observed.facts.store.set(host_dir);
-        const prepared = PreparedActivation.init(init, gpa, &plan, target, null);
-        if (prepared) |*value| {
-            var owned = value.*;
-            owned.deinit(gpa);
-            return error.TestUnexpectedResult;
-        } else |err| try std.testing.expectEqual(if (case.admitted) error.FileNotFound else error.UnsupportedHostConfiguration, err);
-    }
-}
-
-test "upgrade replay keeps the provider set a previous release's Host served" {
-    const gpa = std.testing.allocator;
-    var environment: std.process.Environ.Map = .init(gpa);
-    defer environment.deinit();
-    try environment.put("HOME", "/nonexistent-upgrade-provider-test-home");
-    var arena: std.heap.ArenaAllocator = .init(gpa);
-    defer arena.deinit();
-    const init: std.process.Init = .{ .minimal = .{ .args = .{ .vector = &.{} }, .environ = .empty }, .arena = &arena, .gpa = gpa, .io = std.testing.io, .environ_map = &environment, .preopens = .empty };
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var host = try tmp.dir.createDirPathOpen(init.io, "host", .{ .permissions = .fromMode(0o700) });
-    defer host.close(init.io);
-    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const dir = root[0..try host.realPath(init.io, &root)];
-    const without = try std.fmt.allocPrint(arena.allocator(), "{s}/without.json", .{dir});
-    const with = try std.fmt.allocPrint(arena.allocator(), "{s}/with.json", .{dir});
-    try host.writeFile(init.io, .{ .sub_path = "without.json", .data = "{\"execution\":{\"activeCapacity\":2}}" });
-    try host.writeFile(init.io, .{ .sub_path = "with.json", .data = "{\"providers\":{\"openai\":{}}}" });
-    for ([_][]const u8{ "without.json", "with.json" }) |name| try host.setFilePermissions(init.io, name, .fromMode(0o600), .{});
-    const Served = struct { codex: bool = false, openai: bool = false, chatgpt: bool = false };
-    const Case = struct { argv: []const []const u8, previous: bool, served: Served };
-    for ([_]Case{
-        .{ .argv = &.{ "rui", "host", "serve", "--store", dir }, .previous = true, .served = .{} },
-        .{ .argv = &.{ "rui", "host", "serve", "--store", dir, "--active-capacity", "3" }, .previous = true, .served = .{} },
-        .{ .argv = &.{ "rui", "host", "serve", "--store", dir, "--provider", "codex", "--provider", "chatgpt", "--active-capacity", "3" }, .previous = true, .served = .{ .codex = true, .chatgpt = true } },
-        .{ .argv = &.{ "rui", "host", "serve", "--store", dir, "--provider-endpoint", "http://127.0.0.1:9/responses" }, .previous = true, .served = .{ .codex = true } },
-        .{ .argv = &.{ "rui", "host", "serve", "--store", dir, "--settings", without }, .previous = true, .served = .{ .codex = true, .openai = true, .chatgpt = true } },
-        .{ .argv = &.{ "rui", "host", "serve", "--store", dir, "--settings", without, "--provider", "codex" }, .previous = true, .served = .{ .codex = true, .openai = true, .chatgpt = true } },
-        .{ .argv = &.{ "rui", "host", "serve", "--store", dir, "--settings", with }, .previous = true, .served = .{ .openai = true } },
-        .{ .argv = &.{ "rui", "host", "serve", "--store", dir, "--settings", with, "--provider", "chatgpt" }, .previous = true, .served = .{ .openai = true, .chatgpt = true } },
-        .{ .argv = &.{ "rui", "host", "serve", "--store", dir }, .previous = false, .served = .{ .codex = true } },
-        .{ .argv = &.{ "rui", "host", "serve", "--store", dir, "--settings", without }, .previous = false, .served = .{ .codex = true } },
-        .{ .argv = &.{ "rui", "host", "serve", "--store", dir, "--set", "providers.chatgpt={}" }, .previous = false, .served = .{ .chatgpt = true } },
-    }) |case| {
-        var plan: Plan = undefined;
-        plan.launch = try deriveLaunch(gpa, case.argv);
-        defer plan.launch.deinit(gpa);
-        plan.previous_release = case.previous;
-        try admitReplay(init, plan.launch.options, dir);
-        const options = try replayOptions(init, gpa, &plan);
-        defer gpa.free(options);
-        var args: std.ArrayList([]const u8) = .empty;
-        defer args.deinit(gpa);
-        try args.appendSlice(gpa, &.{ "--store", dir });
-        for (options) |option| {
-            try args.append(gpa, try std.fmt.allocPrint(arena.allocator(), "--{s}", .{option.name}));
-            if (option.value) |value| try args.append(gpa, value);
+    for ([_]host_start.Spawn{
+        .{ .dir = "/host" }, // bare or saved: saved placement stays with DIR
+        .{ .dir = "/host", .settings_file = "/private/settings\xff.json" },
+        .{ .dir = "/host", .assignments = &.{ "providers={}", "execution.activeCapacity=3", "execution.activeCapacity=7" } },
+        .{ .dir = "/host", .settings_file = "-" }, // the target owns typed refusal
+        .{ .dir = "/host", .settings_file = "relative.json" },
+        .{ .dir = "/host", .assignments = &.{"store.sqlite.dir=/moved/data"} },
+        .{ .dir = "/host", .assignments = &.{"interface.dir=/moved/interface"} },
+        .{ .dir = "/host", .assignments = &.{"store.mysql.url=env:PRIVATE_DATABASE"} },
+    }) |request| {
+        inline for (.{ .check, .start, .status }) |command| {
+            const argv = try arguments(arena.allocator(), "/target/bin/rui", request, command);
+            try std.testing.expectEqualStrings("/target/bin/rui", argv[0]);
+            try std.testing.expectEqualStrings("host", argv[1]);
+            const at: usize = if (command == .check) 4 else 3;
+            try std.testing.expectEqualStrings("--store", argv[at]);
+            try std.testing.expectEqualStrings(request.dir, argv[at + 1]);
+            var offset = at + 2;
+            if (command != .status) {
+                if (request.settings_file) |file| {
+                    try std.testing.expectEqualStrings("--settings", argv[offset]);
+                    try std.testing.expectEqualStrings(file, argv[offset + 1]);
+                    offset += 2;
+                }
+                for (request.assignments) |value| {
+                    try std.testing.expectEqualStrings("--set", argv[offset]);
+                    try std.testing.expectEqualStrings(value, argv[offset + 1]);
+                    offset += 2;
+                }
+            }
+            try std.testing.expectEqual(offset, argv.len);
         }
-        var problem: cli_args.Refusal = undefined;
-        const parsed = try cli_args.Command.host_serve.definition().parse(args.items, arena.allocator(), &problem);
-        const settings = try gpa.create(@import("host_settings.zig").Settings);
-        defer gpa.destroy(settings);
-        settings.* = .{};
-        defer settings.deinit();
-        var fixtures: @import("providers.zig").Fixtures = .{};
-        var failure: @import("start_report.zig").Failure = undefined;
-        try host_start.fillAt(init, &parsed, dir, settings, &fixtures, &failure);
-        const entries = settings.providers.entries;
-        try std.testing.expectEqual(case.served, Served{ .codex = entries.codex != null, .openai = entries.openai != null, .chatgpt = entries.chatgpt != null });
     }
 }
 
-test "upgrade replay eligibility covers the complete placement domain before retirement" {
-    var ordinary: platform.Paths = .{};
-    try ordinary.store_identity.set("/host");
-    try ordinary.socket.set("/default.sock");
-    for ([_]bool{ false, true }) |mysql| for ([_]bool{ false, true }) |moved_store| for ([_]bool{ false, true }) |moved_interface| {
-        var actual = ordinary;
-        if (mysql) actual.kind = .mysql;
-        if (moved_store) try actual.store_identity.set("/data");
-        if (moved_interface) try actual.socket.set("/explicit/rui.sock");
-        const expected: ?Limitation = if (mysql) .application_owned else if (moved_store or moved_interface) .configuration_unavailable else null;
-        try std.testing.expectEqual(expected, replayPlacementRefusal(actual, ordinary));
+test "upgrade replacement proof accepts adopted target version but not old instance or guessed readiness" {
+    var plan: Plan = undefined;
+    plan.observed.facts = .{ .store = .{}, .instance = @splat(1), .active_capacity = 3, .started_at = 0, .custody_occupied = 0, .paused = false, .capabilities = .{ .bash = true, .providers = protocol.routesAll(.unserved) } };
+    try plan.observed.facts.store.set("database-wire-identity");
+    const target: candidate.Version = .{ .schema = 76, .patch = 1 };
+    var facts: client.ReplacementFacts = .{ .instance = @splat(2), .store = .{}, .active_capacity = 3 };
+    try facts.store.set("database-wire-identity");
+    try std.testing.expect(replacementMatches(&plan, facts, target, target));
+    var ready = plan.observed.facts;
+    ready.instance = facts.instance;
+    try std.testing.expect(statusAgrees(.{ .ready = ready }, facts));
+    for ([_]protocol_reply.HostStatus{ .unavailable, .owned_unavailable, .access_failure }) |status| try std.testing.expect(!statusAgrees(status, facts));
+    try std.testing.expect(statusAgrees(.incompatible, facts));
+    ready.instance = plan.observed.facts.instance;
+    try std.testing.expect(!statusAgrees(.{ .ready = ready }, facts));
+    ready.instance = facts.instance;
+    ready.active_capacity += 1;
+    try std.testing.expect(!statusAgrees(.{ .ready = ready }, facts));
+
+    facts.instance = @splat(1);
+    try std.testing.expect(!replacementMatches(&plan, facts, target, target));
+    facts.instance = @splat(2);
+    facts.active_capacity = 4;
+    try std.testing.expect(!replacementMatches(&plan, facts, target, target));
+    facts.active_capacity = 3;
+    try std.testing.expect(!replacementMatches(&plan, facts, .{ .schema = 75, .patch = 9 }, target));
+    try facts.store.set("other-store");
+    try std.testing.expect(!replacementMatches(&plan, facts, target, target));
+}
+
+test "upgrade target capability exception is the witnessed release not a future version threshold" {
+    try std.testing.expect(knownBadTarget(.{ .released = .{ .build = "/managed", .version = .{ .schema = 75, .patch = 0 } } }));
+    for ([_]candidate.Version{ .{ .schema = 74, .patch = 0 }, .{ .schema = 75, .patch = 1 }, .{ .schema = 76, .patch = 0 } }) |version| {
+        try std.testing.expect(!knownBadTarget(.{ .released = .{ .build = "/managed", .version = version } }));
+    }
+    try std.testing.expect(!knownBadTarget(.{ .source = "/managed/fixed-source-same-version" }));
+    try std.testing.expect(!restartableEnvironment(&.{"LD_PRELOAD=/custom"}));
+    try std.testing.expect(!restartableEnvironment(&.{"SSL_CERT_FILE=relative.pem"}));
+    try std.testing.expect(restartableEnvironment(&.{ "HOME=/home/fixture", "PRIVATE=secret\xff" }));
+}
+
+test "upgrade running sources wipe on success and every allocation failure" {
+    const Probe = struct {
+        backing: std.mem.Allocator,
+        header: ?[*]u8 = null,
+        stale: bool = false,
+        fn allocator(self: *@This()) std.mem.Allocator {
+            return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = std.mem.Allocator.noResize, .remap = std.mem.Allocator.noRemap, .free = free } };
+        }
+        fn alloc(raw: *anyopaque, len: usize, alignment: std.mem.Alignment, ret: usize) ?[*]u8 {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            const bytes = self.backing.rawAlloc(len, alignment, ret) orelse return null;
+            if (self.header == null) self.header = bytes;
+            return bytes;
+        }
+        fn free(raw: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, ret: usize) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (bytes.ptr != self.header) for (bytes) |byte| {
+                if (byte != 0) self.stale = true;
+            };
+            self.backing.rawFree(bytes, alignment, ret);
+        }
+        fn exercise(gpa: std.mem.Allocator) !void {
+            var probe: @This() = .{ .backing = gpa };
+            defer std.debug.assert(!probe.stale);
+            const source = try Sources.init(probe.allocator(), &.{ "rui", "host", "serve", "--store", "/host", "--provider-endpoint", "https://private-restart-key.test/responses" });
+            defer source.deinit(probe.allocator());
+            try std.testing.expect(source.request.assignments.len > 0);
+        }
     };
-    try std.testing.expectEqual(Limitation.configuration_unavailable, replayPlacementRefusal(ordinary, null).?);
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.exercise, .{});
 }
