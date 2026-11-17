@@ -8,7 +8,7 @@ const skill_suggestions = @import("skill_suggestions.zig");
 
 fn rowText(surface: vxfw.Surface, row: u16, out: []u8) []const u8 {
     var used: usize = 0;
-    for (surface.buffer[@as(usize, row) * surface.size.width ..][0..surface.size.width]) |cell| {
+    for (surface.buffer[@as(usize, row) * surface.size.width + 2 ..][0 .. surface.size.width - 4]) |cell| {
         const grapheme = if (cell.char.grapheme.len == 0) " " else cell.char.grapheme;
         @memcpy(out[used..][0..grapheme.len], grapheme);
         used += grapheme.len;
@@ -38,7 +38,7 @@ test "the Palette draws a /word's skill rows with their descriptions" {
     var text: [160]u8 = undefined;
     try std.testing.expectEqualStrings("/review  Review a change", rowText(surface, 0, &text));
     try std.testing.expectEqual(widget_style.of(palette.caps, .{ .background = .selection }), surface.readCell(0, 0).style);
-    try std.testing.expectEqual(widget_style.of(palette.caps, .{ .bold = true, .background = .selection }), surface.readCell(9, 0).style);
+    try std.testing.expectEqual(widget_style.of(palette.caps, .{ .bold = true, .background = .selection }), surface.readCell(11, 0).style);
     _ = menu.frame(.{ .draft = .{ .bytes = "please /re this", .caret = "please /re".len, .revision = 2, .skills = &reads } });
     const wider = try palette.widget().draw(ctx);
     try std.testing.expectEqual(@as(u16, 3), wider.size.height);
@@ -74,16 +74,16 @@ test "the Palette bolds each row's match, in both its name and its description, 
             const strong = widget_style.of(caps, .{ .bold = true, .background = .ground });
             // `/review-help`: both occurrences of `help` bold, the rest plain.
             for (0.."/review-help".len) |col| {
-                const cell = surface.readCell(@intCast(col), 0);
+                const cell = surface.readCell(@intCast(col + 2), 0);
                 try std.testing.expectEqual(col >= "/review-".len, cell.style.bold);
                 try std.testing.expectEqual(if (cell.style.bold) selected_strong else selected_plain, cell.style);
             }
-            for (0.."Help review".len) |col| try std.testing.expectEqual(if (col < 4) selected_strong else selected_plain, surface.readCell(@intCast(column + col), 0).style);
+            for (0.."Help review".len) |col| try std.testing.expectEqual(if (col < 4) selected_strong else selected_plain, surface.readCell(@intCast(column + 2 + col), 0).style);
             // `/triage`: the name plain, `help` in its description bold.
-            for (0.."/triage".len) |col| try std.testing.expect(!surface.readCell(@intCast(col), 1).style.bold);
+            for (0.."/triage".len) |col| try std.testing.expect(!surface.readCell(@intCast(col + 2), 1).style.bold);
             const at = column + "Ask for ".len;
             for (0..column + "Ask for help sorting".len) |col| {
-                const cell = surface.readCell(@intCast(col), 1);
+                const cell = surface.readCell(@intCast(col + 2), 1);
                 const inside = col >= at and col < at + "help".len;
                 try std.testing.expectEqual(inside, cell.style.bold);
                 if (inside) try std.testing.expectEqual(strong.fg, cell.style.fg);
@@ -136,7 +136,7 @@ test "the Palette maps description matches through normalization and clipping wi
                     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
                     defer arena.deinit();
                     const column = shown.list.descriptionColumn();
-                    const width: u16 = @intCast(column + case.room);
+                    const width: u16 = @intCast(column + case.room + 4);
                     const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 4 }, .cell_size = .{} };
                     const surface = try palette.widget().draw(ctx);
                     try std.testing.expectEqual(@as(u16, 2), surface.size.height);
@@ -147,12 +147,12 @@ test "the Palette maps description matches through normalization and clipping wi
                         const plain = widget_style.of(caps, .{ .background = background });
                         const strong = widget_style.of(caps, .{ .background = background, .bold = true });
                         for (0..width) |col| {
-                            const inside = col >= column + mark_start and col < column + mark_start + mark_len;
+                            const inside = col >= column + 2 + mark_start and col < column + 2 + mark_start + mark_len;
                             try std.testing.expectEqual(if (inside) strong else plain, surface.readCell(@intCast(col), @intCast(row)).style);
                         }
                         var text: std.Io.Writer.Allocating = .init(arena.allocator());
-                        var col: usize = column;
-                        while (col < width) {
+                        var col: usize = column + 2;
+                        while (col < width - 2) {
                             const cell = surface.readCell(@intCast(col), @intCast(row));
                             try text.writer.writeAll(if (cell.char.grapheme.len == 0) " " else cell.char.grapheme);
                             col += @max(1, cell.char.width);

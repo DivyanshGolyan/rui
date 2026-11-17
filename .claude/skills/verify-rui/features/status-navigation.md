@@ -4,7 +4,7 @@ Alt-I or the clickable **alt+i info** hint opens Chat info above the input. Rece
 
 ## Sub-features
 
-- Chat info shows **Effort**, **Permissions**, **Tools**, **Folder** and **Model**. **Context** appears only when an estimate is available; a known zero is shown as zero.
+- Chat info shows **Effort**, **Permissions**, **Allowed tools**, **Folder** and **Model**. **Context** appears only when an estimate is available; a known zero is shown as zero.
 - **Rename**, **Archive** and **Copy last answer** follow a blank separator. Left/Right move between actions when they fit on one row; Up/Down follow them when stacked. Copy feedback reads **Copied**.
 - Folder uses `~` for HOME. A long folder keeps its right end, with an ellipsis on the left; whole trailing folders are kept when they fit.
 - Opening Model adds its matches above the input. Filtering shrinks that list and gives space back to the feed. One info footer sits on the last screen row, below the input and its lower divider.

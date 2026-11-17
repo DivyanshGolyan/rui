@@ -484,6 +484,12 @@ pub const ActionBackgroundInput = struct {
     action_id: u64,
 };
 
+pub const ActionStopInput = struct {
+    store: []const u8,
+    session: []const u8,
+    action_id: u64,
+};
+
 pub const PermissionDecisionInput = struct {
     store: []const u8,
     session: []const u8,
@@ -2049,6 +2055,7 @@ fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: protocol
             .operation = protocol_reply.decimalId(fields.target.?.operation, true) catch return error.InvalidRequestRecord,
         } },
         .action_background => .{ .action_background = protocol_reply.decimalId(fields.action orelse return error.InvalidRequestRecord, false) catch return error.InvalidRequestRecord },
+        .action_stop => .{ .action_stop = protocol_reply.decimalId(fields.action orelse return error.InvalidRequestRecord, false) catch return error.InvalidRequestRecord },
         .permission_decision => .{ .permission_decision = .{
             .action = protocol_reply.decimalId(fields.action orelse return error.InvalidRequestRecord, true) catch return error.InvalidRequestRecord,
             .decision = std.meta.stringToEnum(protocol.PermissionDecision, (fields.decision orelse return error.InvalidRequestRecord).slice()) orelse return error.InvalidRequestRecord,
@@ -2060,7 +2067,7 @@ fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: protocol
         (kind != .session_pin and fields.pinned != null) or
         (kind != .message and (fields.text != null or fields.sender != null or fields.sender_handle != null)) or (kind != .model_interruption and fields.target != null) or
         (kind != .permission_decision and fields.decision != null) or
-        (kind != .permission_decision and kind != .action_background and fields.action != null)) return error.InvalidRequestRecord;
+        (kind != .permission_decision and kind != .action_background and kind != .action_stop and fields.action != null)) return error.InvalidRequestRecord;
     return .{ .saved = saved, .target = target };
 }
 
@@ -2241,6 +2248,16 @@ pub fn captureActionBackground(io: std.Io, input: ActionBackgroundInput, target:
     try protocol_reply.validateIdentityInputs(location.key, input.session);
     if (input.action_id == 0 or input.action_id > std.math.maxInt(i64)) return error.InvalidTarget;
     return runCapture(io, &paths, &location, input.session, .action_background, null, Capture.writeRequest, .{ protocol.action_background_request, .{ paths.store_identity.slice(), location.key, input.session, input.action_id } });
+}
+
+pub fn captureActionStop(io: std.Io, input: ActionStopInput, target: CaptureTarget) !CapturedRecord {
+    const paths = try resolveClientPaths(io, input.store);
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var key_buffer: [36]u8 = undefined;
+    const location = try target.resolve(io, &path_buffer, &key_buffer);
+    try protocol_reply.validateIdentityInputs(location.key, input.session);
+    if (input.action_id == 0 or input.action_id > std.math.maxInt(i64)) return error.InvalidTarget;
+    return runCapture(io, &paths, &location, input.session, .action_stop, null, Capture.writeRequest, .{ protocol.action_stop_request, .{ paths.store_identity.slice(), location.key, input.session, input.action_id } });
 }
 
 fn finishCapture(io: std.Io, capture: *Capture, location: *const CaptureTarget.Location, store: []const u8, session: []const u8, kind: protocol.CommandKind) !CapturedRecord {
@@ -2530,30 +2547,37 @@ const Capture = struct {
         return err;
     }
 
-    fn writeTools(self: *Capture, value: []const u8) !void {
+    fn writeTools(self: *Capture, value: @import("configure_input.zig").ToolInput) !void {
+        var chosen: [protocol.max_tools][]const u8 = undefined;
+        var count: usize = 0;
+        switch (value) {
+            .cli => |text| if (!std.mem.eql(u8, text, "none")) {
+                var names = std.mem.splitScalar(u8, text, ',');
+                while (names.next()) |name| {
+                    if (count == chosen.len) return error.TooManyTools;
+                    chosen[count] = name;
+                    count += 1;
+                }
+            },
+            .names => |names| {
+                if (names.len > chosen.len) return error.TooManyTools;
+                @memcpy(chosen[0..names.len], names);
+                count = names.len;
+            },
+        }
+        for (chosen[0..count]) |name| if (!protocol.validToolName(name)) return error.InvalidToolName;
+        std.mem.sortUnstable([]const u8, chosen[0..count], {}, struct {
+            fn lessThan(_: void, left: []const u8, right: []const u8) bool {
+                return std.mem.order(u8, left, right) == .lt;
+            }
+        }.lessThan);
         try self.write("[");
-        if (!std.mem.eql(u8, value, "none")) {
-            var chosen: [protocol.max_tools][]const u8 = undefined;
-            var count: usize = 0;
-            var names = std.mem.splitScalar(u8, value, ',');
-            while (names.next()) |name| {
-                if (!protocol.validToolName(name)) return error.InvalidToolName;
-                if (count == chosen.len) return error.TooManyTools;
-                chosen[count] = name;
-                count += 1;
+        for (chosen[0..count], 0..) |name, index| {
+            if (index != 0) {
+                if (std.mem.eql(u8, chosen[index - 1], name)) return error.DuplicateToolName;
+                try self.write(",");
             }
-            std.mem.sortUnstable([]const u8, chosen[0..count], {}, struct {
-                fn lessThan(_: void, left: []const u8, right: []const u8) bool {
-                    return std.mem.order(u8, left, right) == .lt;
-                }
-            }.lessThan);
-            for (chosen[0..count], 0..) |name, index| {
-                if (index != 0) {
-                    if (std.mem.eql(u8, chosen[index - 1], name)) return error.DuplicateToolName;
-                    try self.write(",");
-                }
-                try self.writeJsonString(name);
-            }
+            try self.writeJsonString(name);
         }
         try self.write("]");
     }
@@ -3552,6 +3576,7 @@ test "client capture rejects noncanonical Session references before publication"
                 .model_interruption => captureModelInterruption(io, .{ .store = root, .session = session, .turn_id = 1, .operation_id = 1 }, target),
                 .permission_decision => capturePermissionDecision(io, .{ .store = root, .session = session, .action_id = 1 }, target),
                 .action_background => captureActionBackground(io, .{ .store = root, .session = session, .action_id = 1 }, target),
+                .action_stop => captureActionStop(io, .{ .store = root, .session = session, .action_id = 1 }, target),
             };
             if (result) |record| {
                 var unexpected = record;
@@ -3591,7 +3616,7 @@ test "client recovery rejects noncanonical Session references without retransmis
                     .session_pin => ",\"pinned\":true}",
                     .model_interruption => ",\"turn\":\"1\",\"operation\":\"1\"}}",
                     .permission_decision => ",\"action\":\"1\",\"decision\":\"deny\"}",
-                    .action_background => ",\"action\":\"1\"}",
+                    .action_background, .action_stop => ",\"action\":\"1\"}",
                 });
                 const file = try tmp.dir.createFile(io, handle ++ ".json", .{});
                 try file.writeStreamingAll(io, body.slice());
@@ -3626,7 +3651,7 @@ test "capture creating Messages writes configuration and optional model admissio
                 .store = root,
                 .session = .create,
                 .model = .{ .present = true, .value = "custom" },
-                .tools = "none",
+                .tools = .{ .cli = "none" },
                 .permission_mode = .{ .present = true, .value = "ask" },
                 .compaction_trigger = .{ .present = true, .value = "1000" },
                 .reasoning_effort = .{ .present = true, .value = "low" },
@@ -5444,8 +5469,8 @@ test "capture loaded tools uses the tools comma-list grammar" {
         var captured = try captureConfigure(io, .{
             .store = root,
             .session = .create,
-            .tools = "bash,web_search",
-            .loaded_tools = names,
+            .tools = .{ .cli = "bash,web_search" },
+            .loaded_tools = .{ .cli = names },
         }, .{ .generated = root }).get();
         defer captured.close(io);
         var bytes: [2048]u8 = undefined;
@@ -5616,8 +5641,8 @@ test "Session settings client writes every setting and the Host parser preserves
         .provider = .{ .present = true, .value = "openai" },
         .model = .{ .present = true, .value = "gpt-5" },
         .instructions = .{ .state = .value, .path = try std.fmt.bufPrint(&instructions_path, "{s}/instructions.txt", .{root}) },
-        .tools = "bash,find_tools",
-        .loaded_tools = "bash",
+        .tools = .{ .cli = "bash,find_tools" },
+        .loaded_tools = .{ .cli = "bash" },
         .permission_mode = .{ .present = true, .value = "ask" },
         .output_schema = .{ .state = .value, .path = try std.fmt.bufPrint(&schema_path, "{s}/schema.json", .{root}) },
         .compaction_trigger = .{ .present = true, .value = "1000" },
@@ -5849,17 +5874,37 @@ test "upgrade census merges socket hints and retains pathless identified failure
     try std.testing.expect(candidates.items[1].socket == null);
 }
 
-test "upgrade process retirement requires exact generation and complete census not lease release" {
+test "upgrade process retirement covers macOS zombie generations and living cleanup tails" {
     const pid: c_int = 42;
     const generation: u64 = 100;
-    for ([_][]const u8{ "42 S\n80 R\n", "42 Sl+\n80 R\n", "42 T\n80 R\n" }) |living| try std.testing.expect(!try retirementReading(living, pid, generation, generation, generation));
-    try std.testing.expect(try retirementReading("42 Z\n80 R\n", pid, generation, generation, generation));
-    try std.testing.expect(!try retirementReading("42 Z\n80 R\n", pid, generation, null, generation));
-    try std.testing.expect(try retirementReading("42 S\n80 R\n", pid, generation, generation + 1, generation + 1));
-    try std.testing.expect(try retirementReading("80 R\n", pid, generation, null, null));
-    try std.testing.expect(!try retirementReading("80 R\n", pid, generation, generation, generation));
-    try std.testing.expect(!try retirementReading("80 R\n", pid, generation, generation, null));
-    try std.testing.expect(!try retirementReading("80 R\n", pid, generation, null, generation));
+    const Case = struct {
+        name: []const u8,
+        census: []const u8,
+        before: ?u64,
+        after: ?u64,
+        retired: bool,
+    };
+    // These injected observations run on every OS. Darwin's arg=0 query cannot
+    // identify an unreaped zombie; arg=1 retains its start time like /proc does.
+    // A census Z without that identity is deliberately NOT sufficient proof.
+    for ([_]Case{
+        .{ .name = "alive", .census = "42 S\n80 R\n", .before = generation, .after = generation, .retired = false },
+        .{ .name = "living cleanup tail", .census = "42 Sl+\n80 R\n", .before = generation, .after = generation, .retired = false },
+        .{ .name = "stopped but not exited", .census = "42 T\n80 R\n", .before = generation, .after = generation, .retired = false },
+        .{ .name = "old macOS query excludes zombie", .census = "42 Z\n80 R\n", .before = null, .after = null, .retired = false },
+        .{ .name = "macOS query includes exact zombie", .census = "42 Z+\n80 R\n", .before = generation, .after = generation, .retired = true },
+        .{ .name = "zombie generation unavailable before", .census = "42 Z\n80 R\n", .before = null, .after = generation, .retired = false },
+        .{ .name = "zombie generation unavailable after", .census = "42 Z\n80 R\n", .before = generation, .after = null, .retired = false },
+        .{ .name = "PID reused before census", .census = "42 S\n80 R\n", .before = generation + 1, .after = generation + 1, .retired = true },
+        .{ .name = "PID reused across census", .census = "42 S\n80 R\n", .before = generation, .after = generation + 1, .retired = true },
+        .{ .name = "gone", .census = "80 R\n", .before = null, .after = null, .retired = true },
+        .{ .name = "contradictory absence", .census = "80 R\n", .before = generation, .after = generation, .retired = false },
+        .{ .name = "absence contradicts earlier generation", .census = "80 R\n", .before = generation, .after = null, .retired = false },
+        .{ .name = "absence contradicts later generation", .census = "80 R\n", .before = null, .after = generation, .retired = false },
+    }) |case| {
+        errdefer std.debug.print("retirement case: {s}\n", .{case.name});
+        try std.testing.expectEqual(case.retired, try retirementReading(case.census, pid, generation, case.before, case.after));
+    }
     for ([_][]const u8{ "", "42\n", "not-a-pid Z\n", "42 Z extra\n", "42 Z\n42 S\n" }) |malformed| try std.testing.expectError(error.HostProcessSnapshotUnavailable, retirementReading(malformed, pid, generation, generation, generation));
 }
 
@@ -5894,6 +5939,9 @@ test "client upgrade retirement observes a live tail then an unreaped exit" {
     };
     var wait: Wait = .{ .gpa = gpa, .io = io, .pid = pid, .started = started, .until = until.raw.nanoseconds };
     try @import("test_poll").waitUntil(io, until, &wait, Wait.ready);
+    // Still unreaped: Darwin must retain the exact generation for a zombie,
+    // not merely make the census-based decision table pass.
+    try std.testing.expectEqual(started, try @import("host_identity.zig").generation(pid));
     _ = try child.wait(io);
     // PID absence uses the same complete-census proof, not kill(pid, 0).
     try std.testing.expect(try upgradeGenerationRetired(gpa, io, pid, started, @import("test_poll").after(io, .fromSeconds(5)).raw.nanoseconds));
@@ -6246,6 +6294,48 @@ test "read-only capture routing does not eagerly validate a replay body" {
     try std.testing.expectEqualStrings(key.slice(), observed.identity.key.slice());
 }
 
+test "capture semantic tool arrays distinguish singleton none from the CLI sentinel" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(io, .fromMode(0o700));
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    const ToolInput = @import("configure_input.zig").ToolInput;
+    const cases = [_]struct { input: ToolInput, want: []const []const u8 }{
+        .{ .input = .{ .cli = "none" }, .want = &.{} },
+        .{ .input = .{ .names = &.{} }, .want = &.{} },
+        .{ .input = .{ .names = &.{"none"} }, .want = &.{"none"} },
+        .{ .input = .{ .names = &.{ "none", "lookup", "bash" } }, .want = &.{ "bash", "lookup", "none" } },
+        .{ .input = .{ .cli = "none,bash" }, .want = &.{ "bash", "none" } },
+    };
+    for (cases) |case| {
+        var captured = try captureConfigure(io, .{
+            .store = root,
+            .session = .{ .named = "k7m2qx" },
+            .tools = case.input,
+            .loaded_tools = case.input,
+        }, .{ .generated = root }).get();
+        defer captured.close(io);
+        var bytes: [4096]u8 = undefined;
+        const count = try captured.file.readPositionalAll(io, &bytes, 0);
+        const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes[0..count], .{});
+        defer parsed.deinit();
+        const spec = parsed.value.object.get("configuration").?.object;
+        for ([_][]const u8{ "tools", "loadedTools" }) |field| {
+            const names = spec.get(field).?.array.items;
+            try std.testing.expectEqual(case.want.len, names.len);
+            for (case.want, names) |expected, actual| try std.testing.expectEqualStrings(expected, actual.string);
+        }
+    }
+    for ([_]ToolInput{ .{ .cli = "bash,bash" }, .{ .names = &.{ "bash", "bash" } } }) |input| {
+        try std.testing.expectError(error.DuplicateToolName, captureConfigure(io, .{ .store = root, .session = .create, .tools = input }, .{ .generated = root }).get());
+    }
+    for ([_]ToolInput{ .{ .cli = "" }, .{ .names = &.{""} }, .{ .names = &.{"invalid,name"} } }) |input| {
+        try std.testing.expectError(error.InvalidToolName, captureConfigure(io, .{ .store = root, .session = .create, .loaded_tools = input }, .{ .generated = root }).get());
+    }
+}
+
 test "parent relation survives Configure and creating Message capture through native ingress" {
     const host_request = @import("wire_request.zig");
     const io = std.testing.io;
@@ -6263,8 +6353,8 @@ test "parent relation survives Configure and creating Message capture through na
                 .provider = if (explicit_overrides) .{ .present = true, .value = "codex" } else .{},
                 .workspace = if (explicit_overrides) .{ .present = true, .value = root } else .{},
                 .model = .{ .present = true, .value = "unlisted-model" },
-                .tools = "bash,find_tools",
-                .loaded_tools = "bash",
+                .tools = .{ .cli = "bash,find_tools" },
+                .loaded_tools = .{ .cli = "bash" },
                 .permission_mode = .{ .present = true, .value = "ask" },
                 .compaction_trigger = .{ .present = true, .value = "1000" },
                 .reasoning_effort = .{ .present = true, .value = "low" },
@@ -6312,7 +6402,7 @@ test "preset Configure capture reopens with sparse settings through native ingre
     try tmp.dir.setPermissions(io, .fromMode(0o700));
     var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
-    const input: ConfigureInput = .{ .store = root, .session = .create, .preset = .{ .present = true, .value = "restricted" }, .tools = "none", .reasoning_effort = .{ .present = true, .value = null } };
+    const input: ConfigureInput = .{ .store = root, .session = .create, .preset = .{ .present = true, .value = "restricted" }, .tools = .{ .cli = "none" }, .reasoning_effort = .{ .present = true, .value = null } };
     var captured = try captureConfigure(io, input, .{ .generated = root }).get();
     defer captured.close(io);
     var reopened = try openCaptured(io, .{ .generated = .{ .directory = root, .handle = captured.identity().key.slice() } });
@@ -6332,4 +6422,40 @@ test "preset Configure capture reopens with sparse settings through native ingre
     try std.testing.expect(request.configure.configuration.tools.state == .value);
     try std.testing.expectEqualStrings("", request.configure.configuration.tools.names.slice());
     try std.testing.expect(request.configure.configuration.reasoning_effort.state == .explicit_null);
+}
+
+test "Action stop captures preserve target and bytes through generated and explicit recovery" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(io, .fromMode(0o700));
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    for ([_]u64{ 1, 9007199254740993, std.math.maxInt(i64) }) |action_id| {
+        var captured = try captureActionStop(io, .{ .store = root, .session = "k7m2qx", .action_id = action_id }, .{ .generated = root });
+        const identity = captured.saved;
+        var original: [2048]u8 = undefined;
+        const count = try captured.file.readPositionalAll(io, &original, 0);
+        try std.testing.expectEqual(protocol.CommandKind.action_stop, identity.kind);
+        try std.testing.expectEqual(action_id, captured.target.action_stop);
+        captured.close(io);
+        var recovered = try openCaptured(io, .{ .generated = .{ .directory = root, .handle = identity.key.slice() } });
+        try std.testing.expectEqual(action_id, recovered.target.action_stop);
+        try std.testing.expectEqualStrings(identity.key.slice(), recovered.saved.key.slice());
+        try std.testing.expectEqualStrings("k7m2qx", recovered.saved.session.slice());
+        var replayed: [2048]u8 = undefined;
+        const replayed_count = try recovered.file.readPositionalAll(io, &replayed, 0);
+        try std.testing.expectEqualSlices(u8, original[0..count], replayed[0..replayed_count]);
+        recovered.close(io);
+        var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const path = try requestPath(root, identity.key.slice(), &path_buffer);
+        var explicit = try openCaptured(io, .{ .explicit = .{ .store = root, .record = path, .kind = .action_stop } });
+        try std.testing.expectEqual(action_id, explicit.target.action_stop);
+        explicit.close(io);
+        try std.testing.expectEqual(protocol.CommandKind.action_stop, (try inspectCaptured(io, root, identity.key.slice())).kind);
+        try std.testing.expectError(error.RequestBindingMismatch, openCaptured(io, .{ .explicit = .{ .store = root, .record = path, .kind = .action_background } }));
+    }
+    for ([_]u64{ 0, std.math.maxInt(u64) }) |action_id| {
+        try std.testing.expectError(error.InvalidTarget, captureActionStop(io, .{ .store = root, .session = "k7m2qx", .action_id = action_id }, .{ .generated = root }));
+    }
 }

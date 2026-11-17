@@ -289,6 +289,7 @@ noinline fn clientCommand(init: std.process.Init, command: cli_args.Command, par
         .request_list => try requests(init),
         .action_read => try readAction(init, parsed),
         .action_background => try backgroundAction(init, parsed),
+        .action_stop => try requestActionStop(init, parsed),
         .action_inspect => try inspectAction(init, .{ .io = init.io }, parsed.get("store"), parsed.get("session").?, (try parsed.number(u64, "action")).?),
         .action_allow => try decideAction(init, parsed, .allow_once),
         .action_deny => try decideAction(init, parsed, .deny),
@@ -2282,8 +2283,8 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
     }
     if (parsed.get("workspace")) |workspace| input.workspace = .{ .present = true, .value = workspace };
     if (parsed.get("instructions")) |path| input.instructions = .{ .state = .value, .path = path };
-    input.tools = parsed.get("tools");
-    input.loaded_tools = parsed.get("loaded-tools");
+    input.tools = if (parsed.get("tools")) |text| .{ .cli = text } else null;
+    input.loaded_tools = if (parsed.get("loaded-tools")) |text| .{ .cli = text } else null;
     if (parsed.get("permission-mode")) |mode| input.permission_mode = .{ .present = true, .value = mode };
     if (parsed.get("output-schema")) |path| input.output_schema = .{ .state = .value, .path = path };
     if (parsed.has("text-output")) input.output_schema = .{ .state = .explicit_null };
@@ -2555,7 +2556,7 @@ test "chat info inspection takes Session facts from Current and detects changes"
     defer file.close(io);
     const listed = try tmp.dir.createFile(io, "actions", .{ .read = true });
     defer listed.close(io);
-    const report = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"delta\":\"full\",\"since\":null,\"profile\":\"current\",\"archive_state\":\"active\",\"session\":{\"reference\":\"k7m2qx\",\"parent\":null,\"workspace\":\"/home/d/w\",\"provider\":\"openai\",\"model\":\"gpt-6.1-sol\",\"revision\":\"3\",\"tools\":[\"bash\"],\"loaded_tools\":[\"bash\"],\"permission_mode\":\"ask\",\"instructions\":{\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"},\"output_schema\":null,\"reasoning_effort\":\"high\",\"reasoning_effort_override\":\"high\",\"compaction_trigger\":\"1000\",\"context_estimate\":\"310\",\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":\"lane four\",\"created_at\":\"1\"},\"pending_messages\":\"0\",\"work\":{\"state\":{\"kind\":\"finished\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"latest_outcome\":null},\"peers\":{\"from_person_at\":null},\"first_message\":null,\"selected_message\":\"m1\",\"recent_messages\":[{\"turn\":\"1\",\"message\":\"m1\",\"outcome\":\"completed\"}],\"actions\":{\"count\":\"0\",\"unresolved\":[],\"resolved\":[]},\"rejected_calls\":{\"count\":\"0\",\"items\":[]},\"actionable_permissions\":[],\"execution\":{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"0\",\"scratch_used_bytes\":\"0\",\"unavailable\":[\"structured_output\"]}}";
+    const report = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"delta\":\"full\",\"since\":null,\"profile\":\"current\",\"archive_state\":\"active\",\"session\":{\"reference\":\"k7m2qx\",\"parent\":null,\"workspace\":\"/home/d/w\",\"provider\":\"openai\",\"model\":\"gpt-6.1-sol\",\"revision\":\"3\",\"tools\":[\"bash\",\"find_tools\",\"lookup\",\"none\"],\"loaded_tools\":[\"find_tools\",\"none\"],\"permission_mode\":\"ask\",\"instructions\":{\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"},\"output_schema\":null,\"reasoning_effort\":\"high\",\"reasoning_effort_override\":\"high\",\"compaction_trigger\":\"1000\",\"context_estimate\":\"310\",\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":\"lane four\",\"created_at\":\"1\"},\"pending_messages\":\"0\",\"work\":{\"state\":{\"kind\":\"finished\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"latest_outcome\":null},\"peers\":{\"from_person_at\":null},\"first_message\":null,\"selected_message\":\"m1\",\"recent_messages\":[{\"turn\":\"1\",\"message\":\"m1\",\"outcome\":\"completed\"}],\"actions\":{\"count\":\"0\",\"unresolved\":[],\"resolved\":[]},\"rejected_calls\":{\"count\":\"0\",\"items\":[]},\"actionable_permissions\":[],\"execution\":{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"0\",\"scratch_used_bytes\":\"0\",\"unavailable\":[\"structured_output\"]}}";
     try file.writePositionalAll(io, report, 0);
     var reply = try protocol_reply.CurrentReply.decode(io, file, "k7m2qx", .{ .report = .{ .bytes = report.len } });
     const taken = try std.testing.allocator.create([2]status_page.Session);
@@ -2563,6 +2564,8 @@ test "chat info inspection takes Session facts from Current and detects changes"
     taken[0].archive_state = .active;
     taken[1].archive_state = .active;
     try std.testing.expect(try sessionStatus(io, &reply.current, file, &taken[0], null, listed));
+    try std.testing.expectEqualStrings("bash find_tools lookup none", taken[0].tools.names.slice());
+    try std.testing.expectEqualStrings("find_tools none", taken[0].loaded_tools.names.slice());
     try std.testing.expectEqualStrings("lane four", taken[0].label.slice());
     try std.testing.expectEqualStrings("/home/d/w", taken[0].workspace.slice());
     try std.testing.expectEqualStrings("gpt-6.1-sol", taken[0].model.slice());
@@ -2574,6 +2577,9 @@ test "chat info inspection takes Session facts from Current and detects changes"
     try listed.writePositionalAll(io, "kept", 0);
     try std.testing.expect(!try sessionStatus(io, &reply.current, file, &taken[1], &taken[0], listed));
     try std.testing.expectEqual(@as(u64, 4), try listed.length(io));
+    taken[0].loaded_tools = try .of(&.{"find_tools"});
+    try std.testing.expect(try sessionStatus(io, &reply.current, file, &taken[1], &taken[0], listed));
+    taken[0].loaded_tools = taken[1].loaded_tools;
     taken[0].work.recent_count = 0;
     try std.testing.expect(try sessionStatus(io, &reply.current, file, &taken[1], &taken[0], listed));
     try std.testing.expectEqual(@as(u64, 0), try listed.length(io));
@@ -2598,7 +2604,8 @@ fn takeStatus(taken: *status_page.Session, current: *const protocol_reply.Curren
         .ask => .ask,
         .bypass => .bypass,
     };
-    taken.tools = settings.tools.set;
+    taken.tools = settings.tools.names;
+    taken.loaded_tools = settings.loaded_tools.names;
     taken.instructions = settings.instructions.bytes.value != 0;
     taken.compaction_trigger = if (settings.compaction_trigger) |tokens| tokens.value else null;
     taken.compaction_override = settings.compaction_trigger_override != null;
@@ -2690,8 +2697,8 @@ fn openExistingOverview(init: std.process.Init, destination: []const u8, open: ?
 }
 
 pub fn sessionConfigure(init: std.process.Init, read: client.ReadContext, destination: []const u8, reference: []const u8, edit: ChatInfo.Edit) !bool {
-    var tools_buffer: [info_tools_bytes]u8 = undefined;
-    const input = try infoConfiguration(destination, reference, edit, &tools_buffer);
+    var tools_buffer: InfoTools = undefined;
+    const input = try infoConfiguration(destination, reference, &edit, &tools_buffer);
     const parsed: cli_args.Parsed = .{ .definition = cli_args.live_configure };
     var step: ?client.Step = .store;
     return configureCaptured(init, read.requests(), &parsed, .{ .store = destination, .session = reference }, input, &step) catch |err| {
@@ -2701,25 +2708,29 @@ pub fn sessionConfigure(init: std.process.Init, read: client.ReadContext, destin
     };
 }
 
-const info_tools_bytes = blk: {
-    var count: usize = "none".len;
-    for (std.enums.values(@import("built_in_tool.zig").BuiltInTool)) |tool| count += @tagName(tool).len + 1;
-    break :blk count;
+const InfoTools = struct {
+    allowed: [protocol.max_tools][]const u8,
+    loaded: [protocol.max_tools][]const u8,
+
+    fn names(buffer: *[protocol.max_tools][]const u8, field: *const protocol.ToolsField) []const []const u8 {
+        var iterator = field.iterator();
+        var count: usize = 0;
+        while (iterator.next()) |name| {
+            buffer[count] = name;
+            count += 1;
+        }
+        return buffer[0..count];
+    }
 };
 
-fn infoConfiguration(store: []const u8, session: []const u8, edit: ChatInfo.Edit, tools_buffer: *[info_tools_bytes]u8) !configure_input.ConfigureInput {
+fn infoConfiguration(store: []const u8, session: []const u8, edit: *const ChatInfo.Edit, tools_buffer: *InfoTools) !configure_input.ConfigureInput {
     var input: configure_input.ConfigureInput = .{ .store = store, .session = .{ .named = session } };
-    switch (edit) {
+    switch (edit.*) {
         .effort => |effort| input.reasoning_effort = .{ .present = true, .value = if (effort) |level| @tagName(level) else null },
         .permission => |permission| input.permission_mode = .{ .present = true, .value = @tagName(permission) },
-        .tools => |tools| {
-            var out = std.Io.Writer.fixed(tools_buffer);
-            var selected = tools.iterator();
-            while (selected.next()) |tool| {
-                if (out.buffered().len != 0) try out.writeByte(',');
-                try out.writeAll(@tagName(tool));
-            }
-            input.tools = if (out.buffered().len == 0) "none" else out.buffered();
+        .tools => |*tools| {
+            input.tools = .{ .names = InfoTools.names(&tools_buffer.allowed, &tools.allowed) };
+            input.loaded_tools = .{ .names = InfoTools.names(&tools_buffer.loaded, &tools.loaded) };
         },
         .model => |model| {
             try admitModel(model);
@@ -3170,6 +3181,19 @@ fn backgroundAction(init: std.process.Init, parsed: *const cli_args.Parsed) !voi
     try sendCapturedMutation(.{ .io = init.io, .drop_reply = parsed.get("test-drop-reply") }, &captured, .{ .map = init.environ_map }, null, .json);
 }
 
+fn requestActionStop(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
+    var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const input: client.ActionStopInput = .{
+        .store = try selectedStore(init, parsed.get("store"), &selected_buffer),
+        .session = parsed.get("session").?,
+        .action_id = (try parsed.number(u64, "action")).?,
+    };
+    var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const target = try captureTarget(init, parsed, &directory_buffer);
+    var captured = try client.captureActionStop(init.io, input, target);
+    try sendCapturedMutation(.{ .io = init.io, .drop_reply = parsed.get("test-drop-reply") }, &captured, .{ .map = init.environ_map }, null, .json);
+}
+
 fn decideAction(init: std.process.Init, parsed: *const cli_args.Parsed, decision: @FieldType(client.PermissionDecisionInput, "decision")) !void {
     const io = init.io;
     var input = client.PermissionDecisionInput{
@@ -3556,8 +3580,9 @@ fn writeSavedRejection(out: *std.Io.Writer, reply: protocol_reply.MutationReply)
         .model_interruption => "interrupt-model",
         .permission_decision => |target| if (target.decision == .allow_once) "allow" else "deny",
         .action_background => "background",
+        .action_stop => "stop",
     };
-    try caller_error.writeSavedLine(out, savedRejectionCode(answer), .{ .resource = if (reply.target == .permission_decision or reply.target == .action_background) "action" else "session", .operation = operation });
+    try caller_error.writeSavedLine(out, savedRejectionCode(answer), .{ .resource = if (reply.target == .permission_decision or reply.target == .action_background or reply.target == .action_stop) "action" else "session", .operation = operation });
 }
 
 fn reportUnconfirmed(context: protocol_reply.MutationIdentity, replay: client.Replay, err: anyerror) void {
@@ -3626,6 +3651,7 @@ fn presentMutationReply(writer: *std.Io.Writer, reply: protocol_reply.MutationRe
         .model_interruption => |target| try writer.print("target Turn: {d}; Operation: {d}\n", .{ target.turn, target.operation }),
         .permission_decision => |target| try writer.print("target Action: {d}; decision: {s}\n", .{ target.action, @tagName(target.decision) }),
         .action_background => |action| try writer.print("target Action: {d}\n", .{action}),
+        .action_stop => |action| try writer.print("target Action: {d}\n", .{action}),
         else => {},
     }
     const answer = reply.answer catch |err| {
@@ -3656,6 +3682,9 @@ fn presentMutationReply(writer: *std.Io.Writer, reply: protocol_reply.MutationRe
         },
         .session_archive => |value| try writer.print("archived: {}; completion: {s}\n", .{ value.archived, @tagName(value.completion) }),
         .session_pin => |value| try writer.print("pinned: {}\n", .{value.pinned}),
+        .action_stop => |position| {
+            if (position) |p| try writer.print("Resolution position: {d}\n", .{p});
+        },
         .action_background => |selection| try writer.print("Action selection: {s}; position: {d}\n", .{ @tagName(selection.kind), selection.position }),
         .model_interruption, .permission_decision => {},
     };
@@ -3707,6 +3736,7 @@ fn writeMutationJson(writer: *std.Io.Writer, reply: protocol_reply.MutationReply
         .model_interruption => |target| try writer.print(",\"request_target\":{{\"turn\":\"{d}\",\"operation\":\"{d}\"}}", .{ target.turn, target.operation }),
         .permission_decision => |target| try writer.print(",\"request_target\":{{\"action\":\"{d}\",\"decision\":\"{s}\"}}", .{ target.action, @tagName(target.decision) }),
         .action_background => |action| try writer.print(",\"request_target\":{{\"action\":\"{d}\"}}", .{action}),
+        .action_stop => |action| try writer.print(",\"request_target\":{{\"action\":\"{d}\"}}", .{action}),
         else => {},
     }
     const answer = reply.answer catch |err| {
@@ -3727,6 +3757,7 @@ fn writeMutationJson(writer: *std.Io.Writer, reply: protocol_reply.MutationReply
         try std.json.Stringify.value(reply.context.session.slice(), .{}, writer);
     }
     if (reply.target == .permission_decision) try writer.print(",\"action\":\"{d}\",\"decision\":\"{s}\"", .{ reply.target.permission_decision.action, @tagName(reply.target.permission_decision.decision) });
+    if (reply.target == .action_stop) try writer.print(",\"action\":\"{d}\"", .{reply.target.action_stop});
     if (reply.target == .action_background) try writer.print(",\"action\":\"{d}\"", .{reply.target.action_background});
     switch (answer.result) {
         .accepted => |accepted| switch (accepted) {
@@ -3742,6 +3773,10 @@ fn writeMutationJson(writer: *std.Io.Writer, reply: protocol_reply.MutationReply
             },
             .session_archive => |value| try writer.print(",\"archived\":{}", .{value.archived}),
             .session_pin => |value| try writer.print(",\"pinned\":{}", .{value.pinned}),
+            .action_stop => |position| {
+                try writer.writeAll(",\"resolution_position\":");
+                if (position) |p| try writer.print("\"{d}\"", .{p}) else try writer.writeAll("null");
+            },
             .action_background => |selection| try writer.print(",\"action_selection\":{{\"kind\":\"{s}\",\"position\":\"{d}\"}}", .{ @tagName(selection.kind), selection.position }),
             .model_interruption, .permission_decision => {},
         },
@@ -4344,7 +4379,7 @@ test "fresh instruction validation renders both source and stdin conflict refusa
 }
 
 const LaunchFixture = struct {
-    const Scenario = enum { success, os_error, refusal, timeout, invalid_url, missing_key, already_ready, closed, full, identity, competitor, incompatible, access, interrupted, migration_success, migration_timeout, migration_both, migration_eof, migration_final };
+    const Scenario = enum { success, os_error, refusal, timeout, invalid_url, missing_key, already_ready, closed, full, identity, competitor, competitor_pending, competitor_absent, competitor_died, incompatible, access, interrupted, migration_success, migration_timeout, migration_both, migration_eof, migration_final };
     scenario: Scenario,
     launches: usize = 0,
     observations: usize = 0,
@@ -4393,11 +4428,12 @@ const LaunchFixture = struct {
         if (self.scenario == .access) return .access_failure;
         const ready = self.scenario == .already_ready or (self.launches != 0 and switch (self.scenario) {
             .success, .invalid_url, .missing_key, .competitor, .migration_final => true,
+            .competitor_pending => self.reads >= 2,
             .migration_success => self.reads >= 21,
             .migration_both => self.reads >= 2,
             else => false,
         });
-        if (!ready) return .unavailable;
+        if (!ready) return if (self.scenario == .competitor_died and self.launches != 0 and self.reads == 1) .owned_unavailable else .unavailable;
         var store = paths.store_identity;
         if (self.store_identity) |value| store.set(value) catch unreachable;
         return .{ .ready = .{ .store = store, .instance = @splat(1), .active_capacity = 4, .started_at = 1, .custody_occupied = 0, .paused = false, .capabilities = .{ .bash = true, .providers = .{ .codex = .chatgpt_device, .openai = if (self.openai and (self.launches != 0 or self.scenario == .already_ready)) .key_file else .unserved, .chatgpt = if (self.chatgpt) .chatgpt_plan else .unserved } } } };
@@ -4435,7 +4471,7 @@ const LaunchFixture = struct {
             if (self.delay_refusal) return -1;
             if (self.report_reads != 1) return 0;
             const failure: ?start_report.Failure = switch (self.scenario) {
-                .competitor => .init(.store_locked, "another Host owns this Store"),
+                .competitor, .competitor_pending, .competitor_absent, .competitor_died => .init(.store_locked, "another Host owns this Store"),
                 else => null,
             };
             if (failure) |value| {
@@ -4479,7 +4515,7 @@ const LaunchFixture = struct {
         const text = switch (self.scenario) {
             .refusal => if (self.reads == 1) refusal else "",
             .identity => if (self.reads == 1) identity else "",
-            .competitor => if (self.reads == 1) competitor else "",
+            .competitor, .competitor_pending, .competitor_absent, .competitor_died => if (self.reads == 1) competitor else "",
             .invalid_url => if (self.reads == 2) invalid_base_url ++ "; this Host starts without OpenAI.\n" else "",
             .success, .missing_key => if (self.reads == 2) note else "",
             else => "",
@@ -4508,7 +4544,9 @@ const LaunchFixture = struct {
 };
 
 test "Host launch owner returns one result for terminal and screen across its whole outcome domain" {
-    const Case = struct { scenario: LaunchFixture.Scenario, kind: ?Overview.HostLaunch.Failure.Kind = null, err: ?anyerror = null, words: []const u8 = "", terminal: []const u8 = "", success: bool = false };
+    const saved_status = exit_status;
+    defer exit_status = saved_status;
+    const Case = struct { scenario: LaunchFixture.Scenario, kind: ?Overview.HostLaunch.Failure.Kind = null, err: ?anyerror = null, words: []const u8 = "", terminal: []const u8 = "", success: bool = false, typed: bool = false };
     const cases = [_]Case{
         .{ .scenario = .success, .success = true, .terminal = LaunchFixture.note },
         .{ .scenario = .migration_success, .success = true, .terminal = LaunchFixture.migrating },
@@ -4526,6 +4564,9 @@ test "Host launch owner returns one result for terminal and screen across its wh
         .{ .scenario = .full, .kind = .startup_full, .err = error.HostReadinessUnconfirmed, .words = "start unconfirmed", .terminal = "Startup output reached 8 KiB" },
         .{ .scenario = .identity, .kind = .store_identity, .err = error.StoreIdentityMismatch, .words = "not the same Store", .terminal = LaunchFixture.identity },
         .{ .scenario = .competitor, .success = true },
+        .{ .scenario = .competitor_pending, .success = true },
+        .{ .scenario = .competitor_absent, .kind = .child_refused, .err = error.HostStartupFailed, .words = "refused to start", .terminal = "another Host owns this Store", .typed = true },
+        .{ .scenario = .competitor_died, .kind = .child_refused, .err = error.HostStartupFailed, .words = "refused to start", .terminal = "another Host owns this Store", .typed = true },
         .{ .scenario = .incompatible, .kind = .incompatible, .err = error.IncompatibleHost, .words = "different Rui version", .terminal = "does not speak this rui's protocol" },
         .{ .scenario = .access, .kind = .store_access, .err = error.StoreAccessFailed, .words = "can't read Store" },
         .{ .scenario = .interrupted, .kind = .interrupted, .err = error.Cancelled, .words = "start interrupted" },
@@ -4576,6 +4617,19 @@ test "Host launch owner returns one result for terminal and screen across its wh
                     var result: HostLaunchResult = .failed(.setup, error.HostLaunchFailed);
                     startHost(init, store, &.{"tools.bash.timeoutMs=1000"}, &readiness, fixture.ops(), null, &result);
                     summary = result.summary();
+                    if (case.typed) {
+                        try std.testing.expectEqual(.store_locked, result.outcome.failed.refusal.?.code);
+                        try std.testing.expectEqual(.store_locked, result.outcome.failed.cause.refusal_code.?);
+                        try std.testing.expectEqualStrings("another Host owns this Store", result.outcome.failed.refusal.?.message.slice());
+                        try std.testing.expect(fixture.clock >= HostStartupWait.readiness_ns);
+                        try std.testing.expectEqual(fixture.reads + 1, fixture.observations);
+                    }
+                    if (case.scenario == .competitor_pending) {
+                        try std.testing.expect(result.outcome == .ready);
+                        try std.testing.expect(result.outcome.ready.adopted);
+                        try std.testing.expect(fixture.pauses > 0);
+                        try std.testing.expectEqual(fixture.reads, fixture.observations);
+                    }
                     if (fixture.migrated_deadline != null) {
                         try std.testing.expect(result.wait.?.phase == .migrated);
                         try std.testing.expectEqual(fixture.migrated_deadline.?, result.wait.?.phase.migrated);
@@ -4615,16 +4669,17 @@ test "Host launch owner returns one result for terminal and screen across its wh
         const diagnostic_length = try stderr_file.readPositionalAll(io, &diagnostics, 0);
         const text = diagnostics[0..diagnostic_length];
         if (surface == .terminal or surface == .quiet) {
-            try std.testing.expectEqual(case.err, terminal_error);
-            try std.testing.expectEqual(case.success and surface == .terminal, out_length != 0);
+            const expected_error: ?anyerror = if (case.typed) error.Reported else case.err;
+            try std.testing.expectEqual(expected_error, terminal_error);
+            try std.testing.expectEqual(case.typed or (case.success and surface == .terminal), out_length != 0);
             if (case.success) {
                 if (surface == .terminal) try std.testing.expect(std.mem.indexOf(u8, out[0..out_length], "\"status\":\"ready\"") != null);
-                try std.testing.expectEqual(case.scenario == .already_ready or case.scenario == .competitor, std.mem.indexOf(u8, text, "running Host keeps its settings") != null);
+                try std.testing.expectEqual(case.scenario == .already_ready or case.scenario == .competitor or case.scenario == .competitor_pending, std.mem.indexOf(u8, text, "running Host keeps its settings") != null);
             }
             if (case.terminal.len != 0) try std.testing.expect(std.mem.indexOf(u8, text, case.terminal) != null);
             if (fixture.migration_announced or case.scenario == .migration_final) try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, HostStartupWait.migrating_tag));
             if (fixture.migrated_deadline != null) try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, HostStartupWait.migrated_tag));
-            if (case.scenario == .competitor) try std.testing.expect(std.mem.indexOf(u8, text, "store_locked") == null);
+            if (case.scenario == .competitor or case.scenario == .competitor_pending) try std.testing.expect(std.mem.indexOf(u8, text, "store_locked") == null);
             if (case.scenario == .already_ready or case.scenario == .missing_key) try std.testing.expect(std.mem.indexOf(u8, text, invalid_base_url) == null);
         } else {
             try std.testing.expectEqual(@as(usize, 0), out_length);
@@ -5106,31 +5161,39 @@ test "archive mutation presentation preserves requested intent and pending settl
 }
 
 test "chat info edits produce sparse typed Session configuration without slash parsing" {
-    var tools_buffer: [info_tools_bytes]u8 = undefined;
-    const effort = try infoConfiguration("/store", "k7m2qx", .{ .effort = .high }, &tools_buffer);
+    var tools_buffer: InfoTools = undefined;
+    const effort = try infoConfiguration("/store", "k7m2qx", &.{ .effort = .high }, &tools_buffer);
     try std.testing.expectEqualStrings("/store", effort.store);
     try std.testing.expectEqualStrings("k7m2qx", effort.session.named);
     try std.testing.expect(effort.reasoning_effort.present);
     try std.testing.expectEqualStrings("high", effort.reasoning_effort.value.?);
-    const reset = try infoConfiguration("/store", "k7m2qx", .{ .effort = null }, &tools_buffer);
+    const reset = try infoConfiguration("/store", "k7m2qx", &.{ .effort = null }, &tools_buffer);
     try std.testing.expect(reset.reasoning_effort.present and reset.reasoning_effort.value == null);
     for ([_]@FieldType(status_page.Session, "permission"){ .ask, .bypass }) |mode| {
-        const permission = try infoConfiguration("/store", "k7m2qx", .{ .permission = mode }, &tools_buffer);
+        const permission = try infoConfiguration("/store", "k7m2qx", &.{ .permission = mode }, &tools_buffer);
         try std.testing.expect(permission.permission_mode.present);
         try std.testing.expectEqualStrings(@tagName(mode), permission.permission_mode.value);
         try std.testing.expect(!permission.model.present and !permission.provider.present and !permission.workspace.present and !permission.label.present and !permission.reasoning_effort.present);
     }
-    const none = try infoConfiguration("/store", "k7m2qx", .{ .tools = .{} }, &tools_buffer);
-    try std.testing.expectEqualStrings("none", none.tools.?);
-    const selected = try infoConfiguration("/store", "k7m2qx", .{ .tools = .initMany(&.{ .bash, .skill, .web_search }) }, &tools_buffer);
-    try std.testing.expectEqualStrings("bash,skill,web_search", selected.tools.?);
-    const model = try infoConfiguration("/store", "k7m2qx", .{ .model = "future-chat" }, &tools_buffer);
+    const none = try infoConfiguration("/store", "k7m2qx", &.{ .tools = .{} }, &tools_buffer);
+    try std.testing.expectEqual(@as(usize, 0), none.tools.?.names.len);
+    try std.testing.expectEqual(@as(usize, 0), none.loaded_tools.?.names.len);
+    const selected_edit: ChatInfo.Edit = .{ .tools = .{ .allowed = try protocol.ToolsField.of(&.{ "bash", "skill", "web_search" }) } };
+    const selected = try infoConfiguration("/store", "k7m2qx", &selected_edit, &tools_buffer);
+    try std.testing.expectEqualStrings("bash", selected.tools.?.names[0]);
+    try std.testing.expectEqualStrings("skill", selected.tools.?.names[1]);
+    try std.testing.expectEqualStrings("web_search", selected.tools.?.names[2]);
+    const mcp_edit: ChatInfo.Edit = .{ .tools = .{ .allowed = try .of(&.{"none"}), .loaded = try .of(&.{"none"}) } };
+    const mcp = try infoConfiguration("/store", "k7m2qx", &mcp_edit, &tools_buffer);
+    try std.testing.expectEqualStrings("none", mcp.tools.?.names[0]);
+    try std.testing.expectEqualStrings("none", mcp.loaded_tools.?.names[0]);
+    const model = try infoConfiguration("/store", "k7m2qx", &.{ .model = "future-chat" }, &tools_buffer);
     try std.testing.expect(model.model.present and !model.provider.present);
     try std.testing.expectEqualStrings("future-chat", model.model.value);
-    const label = try infoConfiguration("/store", "k7m2qx", .{ .label = "lane \"four\"" }, &tools_buffer);
+    const label = try infoConfiguration("/store", "k7m2qx", &.{ .label = "lane \"four\"" }, &tools_buffer);
     try std.testing.expect(label.label.present);
     try std.testing.expectEqualStrings("lane \"four\"", label.label.value.?);
-    const clear = try infoConfiguration("/store", "k7m2qx", .{ .label = "" }, &tools_buffer);
+    const clear = try infoConfiguration("/store", "k7m2qx", &.{ .label = "" }, &tools_buffer);
     try std.testing.expect(clear.label.present and clear.label.value == null);
 }
 

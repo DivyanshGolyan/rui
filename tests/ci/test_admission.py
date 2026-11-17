@@ -361,7 +361,7 @@ class AdmissionTest(unittest.TestCase):
             checkouts = re.findall(r'(?ms)^      - uses: actions/checkout@.*?(?=^      - |\Z)', body)
             for checkout in checkouts:
                 with self.subTest(job=name):
-                    expected = '${{ github.sha }}' if name in ('plan', 'policy') else '${{ needs.plan.outputs.candidate_ref }}'
+                    expected = '${{ github.sha }}' if name in ('plan', 'policy', 'mac_runner') else '${{ needs.plan.outputs.candidate_ref }}'
                     self.assertIn('ref: ' + expected, checkout)
         self.assertIn('candidate_ref: ${{ steps.select.outputs.candidate_ref }}', job(text, 'plan'))
         self.assertIn('CANDIDATE_REF: ${{ github.sha }}', job(text, 'plan'))

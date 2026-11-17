@@ -1,6 +1,7 @@
 const std = @import("std");
 const model_catalog = @import("model_catalog.zig");
 const session_settings = @import("session_settings.zig");
+const tool_name = @import("tool_name.zig");
 const protocol = @import("protocol.zig");
 const command_spec = @import("command_spec.zig");
 const wire_request = @import("wire_request.zig");
@@ -111,6 +112,7 @@ pub const routes = [_]Route{
     commandRoute(.model_interruption),
     commandRoute(.permission_decision),
     commandRoute(.action_background),
+    commandRoute(.action_stop),
     .{
         .path = "/v1/read-action",
         .kind = .read_action,
@@ -323,21 +325,28 @@ const TokenCount = struct {
 
 const Tool = protocol.BuiltInTool;
 
-const ToolNameList = struct {
-    pub fn openapi_inline(d: *Document) !Value {
-        return d.object(.{
-            .type = Value{ .string = "array" },
-            .items = try toolName(d),
-            .maxItems = Value{ .integer = protocol.max_tools },
-            .uniqueItems = Value{ .bool = true },
-            .@"x-rui-max-bytes" = Value{ .integer = protocol.max_tool_list_name_bytes },
-            .description = Value{ .string = "None repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers." },
-        });
-    }
-    pub fn openapi_example(out: *std.Io.Writer) !void {
-        try out.print("[\"{s}\"]", .{@tagName(std.meta.tags(Tool)[0])});
-    }
-};
+const ToolNameList = ToolNameListOf(false);
+
+fn ToolNameListOf(comptime offered: bool) type {
+    return struct {
+        pub fn openapi_inline(d: *Document) !Value {
+            return d.object(.{
+                .type = Value{ .string = "array" },
+                .items = try toolName(d),
+                .maxItems = Value{ .integer = if (offered) tool_name.max_offered_tools else protocol.max_tools },
+                .uniqueItems = Value{ .bool = true },
+                .@"x-rui-max-bytes" = Value{ .integer = if (offered) tool_name.max_offered_list_name_bytes else protocol.max_tool_list_name_bytes },
+                .description = Value{ .string = if (offered)
+                    "None repeated; the names' bytes total at most x-rui-max-bytes. The effective tool offer frozen at this Operation's admission."
+                else
+                    "None repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers." },
+            });
+        }
+        pub fn openapi_example(out: *std.Io.Writer) !void {
+            try out.print("[\"{s}\"]", .{@tagName(std.meta.tags(Tool)[0])});
+        }
+    };
+}
 
 fn toolName(d: *Document) !Value {
     return d.object(.{
@@ -565,6 +574,7 @@ pub const Document = struct {
         if (@hasDecl(T, "openapi_inline")) return T.openapi_inline(d);
         if (@hasDecl(T, "openapi_list")) return d.object(.{ .type = Value{ .string = "array" }, .items = try d.typeRef(T.openapi_list) });
         if (@hasDecl(T, "openapi_tools")) return ToolNameList.openapi_inline(d);
+        if (@hasDecl(T, "openapi_offered_tools")) return ToolNameListOf(true).openapi_inline(d);
         if (@hasDecl(T, "openapi_tool_name")) return toolName(d);
         if (@hasDecl(T, "openapi_content")) return Content.openapi_inline(d);
         const name = comptime componentName(T);
@@ -1180,6 +1190,35 @@ test "openapi.json is what the wire types emit" {
     }
 }
 
+test "Full frozen offers have their own limits while Current and revision settings keep configuration limits" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var document: Document = .init(arena.allocator());
+    _ = try document.build();
+    const current = document.schemas.get("domainreportCurrentJsonSettings").?.object.get("properties").?.object;
+    const revision = document.schemas.get("domainreport_full_shapeFullRevision").?.object.get("properties").?.object;
+    const operation = document.schemas.get("domainreport_full_shapeFullOperation").?.object.get("properties").?.object;
+    const offered = operation.get("offered_tools").?;
+    try std.testing.expectEqual(@as(i64, tool_name.max_offered_tools), offered.object.get("maxItems").?.integer);
+    try std.testing.expectEqual(@as(i64, tool_name.max_offered_list_name_bytes), offered.object.get("x-rui-max-bytes").?.integer);
+    var sample: [tool_name.max_offered_tools + 1]Value = undefined;
+    for (&sample, 0..) |*value, index| value.* = .{ .string = try std.fmt.allocPrint(document.arena, "tool{d}", .{index}) };
+    const configured_names = try document.array(sample[0..tool_name.max_tools]);
+    const offered_names = try document.array(sample[0..tool_name.max_offered_tools]);
+    const too_many = try document.array(&sample);
+    try std.testing.expect(conforms(document.schemas, offered, offered_names));
+    try std.testing.expect(!conforms(document.schemas, offered, too_many));
+    for ([_]ObjectMap{ current, revision }) |settings| {
+        for ([_][]const u8{ "tools", "loaded_tools" }) |field| {
+            const schema = settings.get(field).?;
+            try std.testing.expectEqual(@as(i64, protocol.max_tools), schema.object.get("maxItems").?.integer);
+            try std.testing.expectEqual(@as(i64, protocol.max_tool_list_name_bytes), schema.object.get("x-rui-max-bytes").?.integer);
+            try std.testing.expect(conforms(document.schemas, schema, configured_names));
+            try std.testing.expect(!conforms(document.schemas, schema, offered_names));
+        }
+    }
+}
+
 test "openapi requests use one object except exclusive targets" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -1728,7 +1767,7 @@ test "statuses, media types and required headers match what the Host sends" {
     var document: Document = .init(arena.allocator());
     const built = try document.build();
     const paths = built.object.get("paths").?.object;
-    const mutations = [_]protocol.CommandKind{ .configure, .message, .session_stop, .session_archive, .session_pin, .model_interruption, .permission_decision, .action_background };
+    const mutations = [_]protocol.CommandKind{ .configure, .message, .session_stop, .session_archive, .session_pin, .model_interruption, .permission_decision, .action_background, .action_stop };
     for (mutations) |kind| {
         const responses = paths.get(kind.route()).?.object.get("post").?.object.get("responses").?.object;
         try std.testing.expect(responses.contains("409"));

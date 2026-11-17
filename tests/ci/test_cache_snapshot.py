@@ -352,6 +352,99 @@ class SnapshotTest(unittest.TestCase):
                 self.audit()
             path.unlink()
 
+    def test_empty_manifest_placeholders_are_retained_without_decoder_roots(self):
+        placeholders = []
+        for root in self.roots:
+            path = root / "h" / ("c" * 32)
+            path.touch()
+            placeholders.append(path)
+        # The official decoder must never give an empty placeholder an owner.
+        # The mock has no output mapping for these paths, so decoding fails.
+        report = self.audit()
+        self.assertEqual(report["unfinalized_manifests"], list(map(str, placeholders)))
+        self.assertEqual(report["manifests"], 1)
+        decoded = [path for call in self.mock_cat.call_args_list for path in call.args[0][2:]]
+        self.assertEqual(decoded, [str(self.roots[0] / "h" / ("a" * 32))])
+        self.assertTrue(all(path.read_bytes() == b"" for path in placeholders))
+
+    def test_empty_placeholder_cannot_prove_cli_ownership_or_current_provenance(self):
+        prefix = self.current_prefix()
+        obsolete = self.executable("c" * 32)
+        with (obsolete / "rui-debug-check").open("ab") as stream:
+            stream.write(b"obsolete revision")
+        placeholder = self.roots[0] / "h" / ("d" * 32)
+        placeholder.touch()
+        report = snapshot.audit(*self.roots, prefixes=[prefix])
+        self.assertIn(str(obsolete), report["unknown"])
+        self.assertEqual(report["removable"], [])
+        active_owner = self.roots[0] / "h" / f"{180:032x}"
+        active_owner.write_bytes(b"")
+        with self.assertRaisesRegex(snapshot.SnapshotError, "current CLI is absent from manifest roots"):
+            snapshot.audit(*self.roots, prefixes=[prefix])
+
+    def test_colliding_complete_and_empty_manifests_do_not_fabricate_local_owners(self):
+        prefix = self.current_prefix()
+        for index, local_complete in enumerate((False, True), 210):
+            digest = f"{index:032x}"
+            seed = f"{index + 100:032x}"
+            directory = self.executable(digest)
+            with (directory / "rui-debug-check").open("ab") as stream:
+                stream.write(b"obsolete revision")
+            complete_root, empty_root = self.roots if local_complete else self.roots[::-1]
+            self.add_manifest(complete_root, seed, digest)
+            empty = empty_root / "h" / seed
+            empty.touch()
+            report = snapshot.compact(*self.roots, prefixes=[prefix])
+            self.assertEqual(empty.read_bytes(), b"")
+            self.assertEqual(directory.exists(), not local_complete)
+            if local_complete:
+                self.assertIn(str(directory), [item["path"] for item in report["removable"]])
+                self.assertFalse((complete_root / "h" / seed).exists())
+            else:
+                self.assertIn(str(directory), report["unknown"])
+                self.assertTrue((complete_root / "h" / seed).exists())
+
+    def test_empty_unknown_manifest_entries_still_block_the_plan(self):
+        for kind in ("symlink", "directory", "nonhex"):
+            with self.subTest(kind=kind):
+                path = self.roots[1] / "h" / ("unknown" if kind == "nonhex" else "d" * 32)
+                if kind == "symlink":
+                    target = self.root / "empty"
+                    target.touch()
+                    path.symlink_to(target)
+                elif kind == "directory":
+                    path.mkdir()
+                else:
+                    path.touch()
+                with self.assertRaises(snapshot.SnapshotError):
+                    self.audit()
+                path.rmdir() if path.is_dir() else path.unlink()
+
+    def test_all_empty_manifests_still_skip_without_a_complete_inventory(self):
+        (self.roots[0] / "h" / ("a" * 32)).write_bytes(b"")
+        with self.assertRaisesRegex(snapshot.SnapshotError, "no complete manifests"):
+            self.audit()
+        self.mock_cat.assert_not_called()
+
+    def test_empty_placeholder_mutation_during_decode_blocks_the_plan(self):
+        for kind in ("filled", "finalized", "removed", "new"):
+            with self.subTest(kind=kind):
+                path = self.roots[1] / "h" / ("d" * 32)
+                if kind != "new":
+                    path.touch()
+                def mutate(command, **kwargs):
+                    decoded = self.decode(command, **kwargs)
+                    if kind == "removed":
+                        path.unlink()
+                    else:
+                        path.write_bytes(b"\0" if kind == "finalized" else b"" if kind == "new" else b"changed")
+                    return decoded
+                self.mock_cat.side_effect = mutate
+                with self.assertRaises(snapshot.SnapshotError):
+                    self.audit()
+                if path.exists():
+                    path.unlink()
+
     def test_whole_output_namespace_reference_blocks_a_plan(self):
         self.add_manifest(self.roots[0], "d" * 32, "e" * 32, [".zig-cache/o"])
         with self.assertRaises(snapshot.SnapshotError):
@@ -409,7 +502,7 @@ class PublicationTest(unittest.TestCase):
         self.env = dict(GITHUB_REF="refs/heads/main", GITHUB_EVENT_NAME="workflow_dispatch",
                         RUNNER_OS="Linux", RUNNER_ARCH="X64", SETUP_OUTCOME="success",
                         WORK_OUTCOME="success", RUNNER_TEMP=str(self.root), GITHUB_RUN_ID="42",
-                        GITHUB_RUN_ATTEMPT="2", RUI_CACHE_BUILD_KEY="rui-build-v3-Linux-X64-0.17.1-"
+                        GITHUB_RUN_ATTEMPT="2", RUI_CACHE_BUILD_KEY="rui-build-v4-Linux-X64-0.17.1-"
                         + "a" * 64 + "-compiled." + "b" * 64 + "-" + "c" * 64)
         self.inputs = dict(format=5, pr_ci=False, part="rest", targets=["check-full"], tree="tree",
                            system="Linux", machine="x86_64", compiler="compiler")
@@ -438,6 +531,51 @@ class PublicationTest(unittest.TestCase):
                         self.write()
                         self.assertEqual(snapshot.publication_prefix(self.env), self.root / "rui-compiled-build/bin")
 
+    def test_complete_partial_by_work_outcome_uses_one_compaction_policy(self):
+        original = self.env["RUI_CACHE_BUILD_KEY"]
+        for partial in (False, True):
+            for outcome in ("success", "failure", "cancelled"):
+                for successful in ("true", "false"):
+                    with self.subTest(partial=partial, outcome=outcome, job_success=successful):
+                        env = dict(self.env, WORK_OUTCOME=outcome, JOB_SUCCESS=successful)
+                        key = original + ("-partial-42-2" if partial else "")
+                        with patch.object(snapshot, "compact", return_value=dict(
+                                removable=[], removable_bytes=0, invalidated_manifests=0)) as compact:
+                            if not partial and outcome == "success":
+                                report = snapshot.publication_report(env, key, "local", "global")
+                                self.assertEqual(report["key"], original)
+                                self.assertEqual(report["invalidated_manifests"], 0)
+                                compact.assert_called_once_with("local", "global", prefixes=[
+                                    self.root / "rui-compiled-build/bin"])
+                            else:
+                                with self.assertRaises(snapshot.SnapshotError):
+                                    snapshot.publication_report(env, key, "local", "global")
+                                compact.assert_not_called()
+
+    def test_target_key_cannot_bypass_compaction_with_missing_or_mismatched_environment(self):
+        key = self.env["RUI_CACHE_BUILD_KEY"]
+        for changes in ({"RUI_CACHE_BUILD_KEY": ""}, {"RUNNER_OS": "macOS"},
+                        {"RUNNER_ARCH": "ARM64"}, {"SETUP_OUTCOME": "failure"}):
+            with self.subTest(changes=changes), patch.object(snapshot, "compact") as compact:
+                with self.assertRaises(snapshot.SnapshotError):
+                    snapshot.publication_report(dict(self.env, **changes), key, "local", "global")
+                compact.assert_not_called()
+        with patch.object(snapshot, "compact", side_effect=snapshot.SnapshotError("audit failed")):
+            with self.assertRaisesRegex(snapshot.SnapshotError, "audit failed"):
+                snapshot.publication_report(self.env, key, "local", "global")
+
+    def test_other_platform_and_partition_candidates_keep_their_partial_policy(self):
+        key = self.env["RUI_CACHE_BUILD_KEY"]
+        for other in (key.replace("Linux-X64", "macOS-ARM64"),
+                      key.replace("-compiled.", "-compiled-unit."),
+                      key.replace("-compiled.", "-baseline."),
+                      key.replace("-compiled.", "-typecheck.")):
+            for partial in ("", "-partial-42-2"):
+                with self.subTest(key=other, partial=partial), patch.object(snapshot, "compact") as compact:
+                    self.assertEqual(snapshot.publication_report({}, other + partial, "local", "global"),
+                                     dict(key=other + partial))
+                    compact.assert_not_called()
+
     def test_nonpublishers_failed_work_partitions_and_exact_hits_do_not_compact(self):
         cases = (("GITHUB_REF", "refs/pull/1/merge"), ("GITHUB_REF", "refs/heads/feature"),
                  ("GITHUB_EVENT_NAME", "pull_request"), ("GITHUB_EVENT_NAME", "pull_request_target"),
@@ -447,7 +585,8 @@ class PublicationTest(unittest.TestCase):
                  ("RUI_CACHE_BUILD_KEY", self.env["RUI_CACHE_BUILD_KEY"].replace("-compiled.", "-compiled-unit.")),
                  ("RUI_CACHE_BUILD_KEY", self.env["RUI_CACHE_BUILD_KEY"].replace("-compiled.", "-baseline.")),
                  ("RUI_CACHE_BUILD_KEY", self.env["RUI_CACHE_BUILD_KEY"] + "-partial-42-1"),
-                 ("RUI_CACHE_BUILD_KEY", self.env["RUI_CACHE_BUILD_KEY"].replace("v3", "v2")))
+                 ("RUI_CACHE_BUILD_KEY", self.env["RUI_CACHE_BUILD_KEY"].replace("v4", "v3")),
+                 ("RUI_CACHE_BUILD_KEY", self.env["RUI_CACHE_BUILD_KEY"].replace("v4", "v2")))
         for field, value in cases:
             with self.subTest(field=field, value=value):
                 env = dict(self.env, **{field: value})

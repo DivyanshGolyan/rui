@@ -69,9 +69,37 @@ test("status requests the Current profile and maps reported facts and parent los
 		};
 		assert.deepEqual(await new Session(link, 'session"\n').status(), {
 			archiveState, state: "idle", since: "9007199254740993", turn: null, operation: null, pendingMessages: "9007199254740993",
-			parent, label: "Review", model: "model-a", effort: "high", tools: ["bash"], permissionMode: "ask", latestOutcome,
+			parent, label: "Review", model: "model-a", effort: "high", tools: ["bash"], loadedTools: ["bash"], permissionMode: "ask", latestOutcome,
 		});
 	}
+});
+
+test("status preserves configured and loaded tool intent from each Current report", async () => {
+	const configurations = [
+		{ tools: ["bash", "find_tools", "lookup", "none"], loaded_tools: ["find_tools", "none"] },
+		{ tools: ["bash", "find_tools", "lookup", "none"], loaded_tools: ["find_tools", "lookup", "none"] },
+		{ tools: ["bash", "find_tools"], loaded_tools: ["find_tools"] },
+		{ tools: ["bash"], loaded_tools: ["bash"] },
+		{ tools: [], loaded_tools: [] },
+	];
+	let reads = 0;
+	const session = new Session({
+		async exchange(path) {
+			assert.equal(path, "/v1/inspect-session");
+			const configuration = configurations[reads++];
+			assert.ok(configuration);
+			const current = report(idleWork);
+			Object.assign(current.session, configuration);
+			return Buffer.from(JSON.stringify(current));
+		},
+	}, "abc123");
+	for (const configuration of configurations) {
+		const status = await session.status();
+		const loadedTools: string[] = status.loadedTools;
+		assert.deepEqual(loadedTools, configuration.loaded_tools);
+		assert.deepEqual(status.tools, configuration.tools);
+	}
+	assert.equal(reads, configurations.length);
 });
 
 test("status reports a missing Session as a request error", async () => {
@@ -257,4 +285,31 @@ test("Action promotion reports capacity refusal and changed-key conflicts", asyn
 		await assert.rejects(new Session(link, "session").backgroundAction("1"), (error: unknown) =>
 			error instanceof RuiRequestError && error.type === status && error.code === code);
 	}
+});
+
+test("stop Action sends the selected Session, Action and recoverable request key", async () => {
+	const link: Link = {
+		async exchange(path, build) {
+			assert.equal(path, "/v1/control/action-stop");
+			assert.deepEqual(JSON.parse(build("store")), {
+				version: WIRE_VERSION, kind: "action_stop", store: "store",
+				key: "stop-request", session: "session", action: "42",
+			});
+			return Buffer.from(JSON.stringify({ answer: { status: "accepted", action: "42", resolution_position: null } }));
+		},
+	};
+	assert.equal(await new Session(link, "session").stopAction("42", { idempotencyKey: "stop-request" }), null);
+});
+
+test("stop Action reports refusal and request key conflicts", async () => {
+	for (const [status, code] of [["rejected", "unknown_action"], ["rejected", "target_mismatch"], ["conflict", "idempotency_key_conflict"]]) {
+		const link: Link = { exchange: async () => Buffer.from(JSON.stringify({ answer: { status, code } })) };
+		await assert.rejects(new Session(link, "session").stopAction("1", { idempotencyKey: "stop-request" }), (error: unknown) =>
+			error instanceof RuiRequestError && error.type === status && error.code === code);
+	}
+});
+
+test("stop Action preserves the existing Resolution position", async () => {
+    const link: Link = { exchange: async () => Buffer.from(JSON.stringify({ answer: { status: "accepted", action: "42", resolution_position: "9007199254740993" } })) };
+    assert.equal(await new Session(link, "session").stopAction("42"), "9007199254740993");
 });

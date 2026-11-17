@@ -71,7 +71,8 @@ class Screen:
 
 class World:
 
-    def __init__(self, prefix, responses_by_input=None, *, active_capacity=1, host_factory=None):
+    def __init__(self, prefix, responses_by_input=None, *, active_capacity=1, host_factory=None,
+                 host_options=(), store_setup=None):
         self.root = self.endpoint = self.host = None
         try:
             self.root = screen_fixture_root(f"rui-overview-{prefix}.")
@@ -83,11 +84,13 @@ class World:
             self.workspace.mkdir()
             self.env = {key: value for key, value in os.environ.items() if key != "NO_COLOR"}
             self.env.update(HOME=str(self.home), TERM="xterm-256color", COLORTERM="truecolor")
+            if store_setup is not None:
+                store_setup(self)
             self.endpoint = fixture.SuccessEndpoint([], responses_by_input or {})
             threading.Thread(target=self.endpoint.serve_forever, daemon=True).start()
             start_host = host_factory or fixture.start_host
             self.host = start_host(self.store, f"http://127.0.0.1:{self.endpoint.server_port}/responses",
-                                   active_capacity=active_capacity)
+                                   *host_options, active_capacity=active_capacity)
             self.run("defaults", "configure", "--store", self.store, "--provider", "codex", "--model", "gpt-6-luna")
         except BaseException:
             self.close()

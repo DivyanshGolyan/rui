@@ -135,3 +135,19 @@ The newest three successful ordinary PR producers after #1601, collected at 2026
 | Fresh three-job median | 258 | 267 | 528 | 7,313,055,640 | 223.486 / 30.283 / 198.073 |
 
 Two observations are attempts from the same PR; workloads and runners differ, and two parent workflows failed outside these successful producers. This is an observational pre-compaction baseline, with no speedup inference. Full keys, target/part lists, REST timestamps, raw logs, 50 passing extraction/selection checks and checksums are retained under `/mnt/project-files/ci-speed-1116/linux-build-1599-measurements/part2-before/`.
+
+
+### First main publication and qualification preflight
+
+After #1618 auto-merged, [main run 44053736418, job 133937839403](https://github.com/DivyanshGolyan/rui/actions/runs/44053736418/job/133937839403) passed with setup 378 s, compile 326 s and job 856 s. It restored a 7,633,162,867-byte v2 archive, then saved a 7,716,570,173-byte v3 archive. Compaction **skipped** with `manifest has no final sentinel`: no bytes were removed and no reduction is established. The save took 129.188 s; restore took 334.051 s (118.503 s download, 215.136 s extraction). The compiler hit. This is a publication witness, not a compacted-cache result.
+
+Pinned `std.Build.Cache.Manifest.checkLocked` treats a zero-byte h file as never finalized and returns an incomplete-manifest miss. `finalize` appends the final sentinel only when writing a complete manifest. The restored diagnostic inventory contains such ordinary zero-length placeholders. They must be preserved and checked for mutation, but cannot be decoded as complete artifact owners. In contrast, a one-byte NUL manifest is complete with zero inputs. Nonempty invalid manifests still block compaction. The corrected publication policy uses v4 with legacy restore fallback because the untrimmed v3 exact key is immutable.
+
+The earlier [qualification dispatch 44050257637](https://github.com/DivyanshGolyan/rui/actions/runs/44050257637/job/133926218927) passed its 147-step initial LLVM producer (setup 333 s, traced compile 526 s), then failed checkpointing Ghostty's relative shared-library aliases. Its uploaded summary has zero comparison pairs: no audit, candidate compaction or parity build ran. Contained relative file aliases need identity/target guards and literal-link backup; escaping, broken, cyclic, absolute and directory aliases remain unsupported. The follow-up prints full errors and pair differences in the job log. Neither preflight failure demonstrates additional compilation from a compacted snapshot; real paired reuse and size qualification remains required.
+
+
+### Prevent untrimmed partial publication
+
+Cancelled main run 44066182953 saved an 8,039,900,746-byte v4 partial without a compaction plan, after maintenance had published a compacted 3,636,509,265-byte complete snapshot. Three ordinary PR producers then restored the larger partial. Successful main run 44068796620 later published a compacted 3,811,501,175-byte complete snapshot.
+
+Final key selection now passes every build candidate through the existing Python compaction owner. Native Linux `compiled` candidates require successful complete main compilation, its current producer receipt and successful compaction before receiving a save key. A failed or cancelled compile cannot establish that output set, so its partial candidate is withheld. A failed or skipped compaction also withholds a complete candidate. Verified compiler, package and build-runner saves retain their own eligibility, and other platforms/partitions retain partial warming. No key migration or change to the build graph is needed.

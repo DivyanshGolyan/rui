@@ -663,7 +663,7 @@ const NativePromotion = struct {
         var row: Query.Result = undefined;
         access.read(Query, .{ .session = session, .covered = covered, .frontier = 0, .results = 0 }, &row);
         try entry.finish(store_core.Ordinary.none, access.run());
-        return row.uncovered_bytes;
+        return row.uncovered_bytes orelse return error.TestUnexpectedResult;
     }
 
     fn propose(storage: *Store, tmp: *std.testing.TmpDir, session: []const u8) !u64 {
@@ -760,7 +760,7 @@ test "historical fixture rewinds refuse retained pin background and stop facts b
                             try settleTwoActionsForTesting(&storage, &tmp, model, "rewind-action-calls");
                             const first = try store_testing.queryU64(&storage, "SELECT min(action_id) FROM action_operation", .{});
                             const second = try store_testing.queryU64(&storage, "SELECT max(action_id) FROM action_operation", .{});
-                            try store_testing.exec(&storage, "INSERT INTO action_stop(source_action_id,target_action_id) VALUES(?1,?2)", .{ first, second });
+                            try store_testing.exec(&storage, "INSERT INTO action_stop(stop_key,source_action_id,target_action_id) VALUES(?1,?2,?3)", .{ "fixture", first, second });
                         },
                         .stop_cutoff => {
                             _ = try NativePromotion.propose(&storage, &tmp, session.slice());
@@ -1572,7 +1572,7 @@ test "interrupt regression: a new Message declines pending approvals through the
                 if (entry.kind != .tool_results) continue;
                 while (try page.nextToolResult()) |result| {
                     var reader: store_testing.TestingReader = undefined;
-                    try page.openContent(result.output, &reader);
+                    try page.openContent(result.output.?, &reader);
                     defer reader.close();
                     var bytes: [256]u8 = undefined;
                     const length = try reader.read(0, &bytes);
@@ -1724,6 +1724,56 @@ test "interrupt regression: Message promotion watches running calls and ignores 
                     },
                     else => unreachable,
                 }
+            }
+        }
+    }.run);
+}
+
+test "compound Action Resolution read verifies the whole value before declining parts" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            const Damage = enum { none, missing_last, extra_part, wrong_identity, nested_value, private_part, manifest_bytes };
+            for (std.enums.values(Damage)) |damage| {
+                errdefer std.debug.print("compound Resolution damage {s} failed\n", .{@tagName(damage)});
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                const session = try store_testing.configureTestSession(&storage, "resolution-corruption-config");
+                try submitTestMessage(&storage, &tmp, "resolution-corruption-input", "resolution-corruption-message", session.slice(), "run");
+                const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                try settleTwoActionsForTesting(&storage, &tmp, model, "resolution-corruption-calls");
+                const binding = (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 30_000, .{})).?.permit.binding;
+                // The final row is beyond the Cursor's first relational page.
+                var text: [17][24]u8 = undefined;
+                var parts: [17]store_testing.MessagePart = undefined;
+                for (&parts, &text, 0..) |*part, *buffer, ordinal|
+                    part.* = .{ .bytes = try std.fmt.bufPrint(buffer, "resolution part {d}", .{ordinal}) };
+                try store_testing.settleTestActionParts(&storage, &tmp, binding, &parts);
+                const value = try store_testing.queryU64(&storage, "SELECT resolution_content_id FROM action_operation WHERE action_id=?1", .{binding.action_id});
+                switch (damage) {
+                    .none => {},
+                    .missing_last => try store_testing.exec(&storage, "DELETE FROM content_part WHERE content_id=?1 AND ordinal=16", .{value}),
+                    .extra_part => try store_testing.exec(&storage, "INSERT INTO content_part(content_id,ordinal,part_content_id) SELECT content_id,17,part_content_id FROM content_part WHERE content_id=?1 AND ordinal=0", .{value}),
+                    .wrong_identity => {
+                        const first = try store_testing.queryU64(&storage, "SELECT part_content_id FROM content_part WHERE content_id=?1 AND ordinal=0", .{value});
+                        try store_testing.exec(&storage, "UPDATE content_part SET part_content_id=?2 WHERE content_id=?1 AND ordinal=16", .{ value, first });
+                    },
+                    .nested_value => {
+                        try store_testing.submitTestMessageParts(&storage, &tmp, "resolution-nested", session.slice(), &.{ .{ .bytes = "nested first" }, .{ .bytes = "nested last" } });
+                        const nested = try store_testing.queryU64(&storage, "SELECT primary_content_id FROM core_command WHERE command_key='resolution-nested'", .{});
+                        try store_testing.exec(&storage, "UPDATE content_part SET part_content_id=?2 WHERE content_id=?1 AND ordinal=16", .{ value, nested });
+                    },
+                    .private_part => {
+                        const last = try store_testing.queryU64(&storage, "SELECT part_content_id FROM content_part WHERE content_id=?1 AND ordinal=16", .{value});
+                        try store_testing.exec(&storage, "UPDATE content SET private=1 WHERE content_id=?1", .{last});
+                    },
+                    .manifest_bytes => try store_testing.zeroContent(&storage, "SELECT resolution_content_id FROM action_operation WHERE resolution_code IS NOT NULL"),
+                }
+                var result: @import("../../action_read.zig").Read = undefined;
+                try std.testing.expectError(if (damage == .none) error.InputPartsNotSupported else error.CorruptStore, storage.readAction(&.{ .session = session, .action_id = binding.action_id }, &result));
+                try std.testing.expectEqual(damage != .none, storage.isFenced());
             }
         }
     }.run);

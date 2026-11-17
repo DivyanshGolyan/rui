@@ -71,6 +71,7 @@ def manifests(roots):
     # writes as well: validation and cache-cat must inspect the same bytes.
     files = []
     paths = []
+    unfinalized = []
     contents = {}
     listings = {}
     cache_namespaces(roots)
@@ -85,8 +86,17 @@ def manifests(roots):
             if not HEX.fullmatch(path.name) or not path.is_file() or path.is_symlink():
                 raise SnapshotError(f"unknown manifest entry: {path}")
             raw = path.read_bytes()
-            paths.extend(records(raw))
             contents[path] = raw
+            # Cache.Manifest.checkLocked treats size zero as never finalized,
+            # not a complete hit. Keep the placeholder, but it owns no inputs
+            # or outputs. Nonempty malformed streams still block the audit.
+            if not raw:
+                unfinalized.append(str(path))
+                continue
+            try:
+                paths.extend(records(raw))
+            except SnapshotError as error:
+                raise SnapshotError(f"{path}: {error}") from error
             files.append(path)
     if not files:
         raise SnapshotError("no complete manifests")
@@ -127,7 +137,7 @@ def manifests(roots):
             references.update(REFERENCE.findall(spelling))
             if spelling == "o" or spelling.endswith("/o"):
                 raise SnapshotError("manifest references a whole output namespace")
-    return hashes, references, owners, len(files), len(paths)
+    return hashes, references, owners, len(files), len(paths), unfinalized
 
 
 def obsolete_cli(directory, products=PRODUCTS):
@@ -207,7 +217,7 @@ def protected_outputs(local, prefixes, manifest_roots):
 
 def audit(local, global_cache, *, prefixes=()):
     roots = [Path(local), Path(global_cache)]
-    outputs, references, owners, manifest_count, input_count = manifests(roots)
+    outputs, references, owners, manifest_count, input_count, unfinalized = manifests(roots)
     live = outputs | references
     protected, products = protected_outputs(roots[0], prefixes, live) if prefixes else (set(), PRODUCTS)
     # Revision-specific generated options give old CLI compiles distinct input
@@ -215,7 +225,8 @@ def audit(local, global_cache, *, prefixes=()):
     # ALL input references, nested/unknown output classes, and the actual
     # installed current executables; only this explicit CLI class may expire.
     cli_live = references | protected if prefixes else live
-    report = dict(manifests=manifest_count, inputs=input_count, retained_hashes=len(live),
+    report = dict(manifests=manifest_count, inputs=input_count, unfinalized_manifests=unfinalized,
+                  retained_hashes=len(live),
                   protected_hashes=sorted(protected), eligible_products=sorted(products),
                   removable_bytes=0, removable=[], retained_cli=[], unknown=[])
     for directory in sorted((roots[0] / "o").iterdir()):
@@ -284,8 +295,8 @@ def publication_prefix(env):
     if env.get("SETUP_OUTCOME") != "success" or env.get("WORK_OUTCOME") != "success":
         raise SnapshotError("setup and complete compilation must succeed")
     key = env.get("RUI_CACHE_BUILD_KEY", "")
-    if not re.fullmatch(r"rui-build-v3-Linux-X64-0\.17\.1-[a-f0-9]{64}-compiled\.[a-f0-9]{64}-[a-f0-9]{64}", key):
-        raise SnapshotError("no missing exact Linux compiled v3 publication key")
+    if not re.fullmatch(r"rui-build-v4-Linux-X64-0\.17\.1-[a-f0-9]{64}-compiled\.[a-f0-9]{64}-[a-f0-9]{64}", key):
+        raise SnapshotError("no missing exact Linux compiled v4 publication key")
     import build_artifact
     temporary = Path(env["RUNNER_TEMP"])
     receipt = json.loads((temporary / "rui-compiled" / "compiled.json").read_text())
@@ -309,15 +320,38 @@ def publication_prefix(env):
     return temporary / "rui-compiled-build" / "bin"
 
 
+def publication_report(env, key, local, global_cache, *, prefixes=()):
+    """Every build candidate passes this owner before receiving its save key."""
+    original = env.get("RUI_CACHE_BUILD_KEY", "")
+    compiled = r"rui-build-v4-Linux-X64-[^-]+-[^-]+-compiled\."
+    if not any(re.match(compiled, value) for value in (original, key)):
+        return dict(key=key)
+    # A failed/cancelled compile has no authoritative current output set. Never
+    # publish its whole restored cache under a newer partial fallback key.
+    if key != original:
+        raise SnapshotError("Linux compiled partial publication requires successful complete compaction")
+    prefix = publication_prefix(env)
+    if prefixes and list(prefixes) != [prefix]:
+        raise SnapshotError("publisher uses only its current producer prefix")
+    report = compact(local, global_cache, prefixes=[prefix])
+    report["key"] = key
+    return report
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--local", type=Path, default=Path(".zig-cache"))
     parser.add_argument("--global-cache", type=Path, default=Path.home() / ".cache/zig")
     parser.add_argument("--protect-prefix", type=Path, action="append", default=[])
-    parser.add_argument("--prune", action="store_true")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--prune", action="store_true")
+    mode.add_argument("--publication-key", help="prepare this candidate or return an empty save key")
     args = parser.parse_args()
     try:
-        if args.prune:
+        if args.publication_key is not None:
+            report = publication_report(os.environ, args.publication_key, args.local, args.global_cache,
+                                        prefixes=args.protect_prefix)
+        elif args.prune:
             prefix = publication_prefix(os.environ)
             if args.protect_prefix and args.protect_prefix != [prefix]:
                 raise SnapshotError("publisher uses only its current producer prefix")
@@ -326,6 +360,8 @@ def main():
             report = audit(args.local, args.global_cache, prefixes=args.protect_prefix)
     except (SnapshotError, OSError, KeyError, json.JSONDecodeError, subprocess.CalledProcessError) as error:
         report = dict(skipped=str(error), removable=[], removable_bytes=0)
+        if args.publication_key is not None:
+            report["key"] = ""
     print(json.dumps(report, sort_keys=True))
 
 

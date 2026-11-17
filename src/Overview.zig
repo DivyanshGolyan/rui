@@ -859,14 +859,14 @@ const SessionRows = struct {
 
     fn count(raw: *const anyopaque, first: u32) u32 {
         const self: *const SessionRows = @ptrCast(@alignCast(raw));
-        return @intCast(view.sessionsFrom(self.state, first));
+        return @intCast(view.Lines.sessionsFrom(self.state, first));
     }
 
-    fn above(count_: u32, arena: std.mem.Allocator) std.mem.Allocator.Error!@import("widgets/List.zig").Line {
+    fn above(count_: u32, arena: std.mem.Allocator) std.mem.Allocator.Error!@import("widgets/List.zig").List(u32).Line {
         return try arena.dupe(vaxis.Segment, &.{.{ .text = try std.fmt.allocPrint(arena, "↑ {d} more", .{count_}) }});
     }
 
-    fn below(count_: u32, arena: std.mem.Allocator) std.mem.Allocator.Error!@import("widgets/List.zig").Line {
+    fn below(count_: u32, arena: std.mem.Allocator) std.mem.Allocator.Error!@import("widgets/List.zig").List(u32).Line {
         const segments = try arena.alloc(vaxis.Segment, 1);
         segments[0] = .{ .text = try std.fmt.allocPrint(arena, "↓ {d} more", .{count_}) };
         return segments;
@@ -874,9 +874,8 @@ const SessionRows = struct {
 
     fn row(raw: *const anyopaque, index: usize, arena: std.mem.Allocator) std.mem.Allocator.Error!GroupedList.Row {
         const self: *const SessionRows = @ptrCast(@alignCast(raw));
-        const item = view.listItem(self.state, index).?;
-        const built = try view.listSegments(arena, self.state, item, self.width, self.caps, self.frame);
-        return .{ .segments = built.segments, .heading = built.heading, .target = view.clickOf(self.state, item), .alternate_target = view.pinClickOf(self.state, item) };
+        const built = (try view.Lines.at(arena, self.state, index, self.width, self.caps, self.frame)).?;
+        return .{ .segments = built.segments, .heading = built.heading, .target = built.target, .alternate_target = built.alternate };
     }
 };
 
@@ -968,10 +967,10 @@ fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: AppScreen.Overview.Part) s
     const awake_ms = self.animationMs();
     const frame = awake_ms / view.spin_interval_ms;
     const rows = try ctx.arena.create(SessionRows);
-    rows.* = .{ .state = &self.state, .width = size.width, .caps = self.caps, .frame = frame };
-    self.app_sessions.selected = if (view.focusedLine(&self.state, self.root.input.listFocused() or self.root.session == null)) |line| @intCast(line) else null;
+    rows.* = .{ .state = &self.state, .width = @import("widgets/RowInset.zig").contentWidth(size.width), .caps = self.caps, .frame = frame };
+    self.app_sessions.selected = if (view.Lines.highlighted(&self.state, self.root.input.listFocused() or self.root.session == null)) |line| @intCast(line) else null;
     self.app_sessions.selection_background = if (self.root.session != null and !self.root.input.listFocused()) .bar else .selection;
-    self.app_sessions.rows = .{ .userdata = rows, .count = @intCast(view.listLength(&self.state)), .rowFn = SessionRows.row, .countFromFn = SessionRows.count };
+    self.app_sessions.rows = .{ .userdata = rows, .count = @intCast(view.Lines.count(&self.state)), .rowFn = SessionRows.row, .countFromFn = SessionRows.count };
     self.app_sessions.aboveFn = SessionRows.above;
     self.app_sessions.belowFn = SessionRows.below;
     self.app_settings_line.selected = self.root.input.area == .settings_row or (self.root.input.listFocused() and self.state.selected == .settings);
@@ -1952,8 +1951,8 @@ const fake_operations: Operations = .{
                 .provider = if (settings.provider.present) Seen.bounded(settings.provider.value) else null,
                 .model = if (settings.model.present) Seen.bounded(settings.model.value) else null,
                 .permission_mode = Seen.bounded(settings.permission_mode.value),
-                .tools = if (settings.tools) |tools| protocol.Bounded(protocol.max_tool_names_bytes).from(tools) catch unreachable else null,
-                .loaded_tools = if (settings.loaded_tools) |loaded| protocol.Bounded(protocol.max_tool_names_bytes).from(loaded) catch unreachable else null,
+                .tools = if (settings.tools) |tools| protocol.Bounded(protocol.max_tool_names_bytes).from(tools.cli) catch unreachable else null,
+                .loaded_tools = if (settings.loaded_tools) |loaded| protocol.Bounded(protocol.max_tool_names_bytes).from(loaded.cli) catch unreachable else null,
                 .label = if (settings.label.value) |label| Seen.bounded(label) else null,
                 .reasoning_effort = if (settings.reasoning_effort.present) Seen.bounded(settings.reasoning_effort.value orelse "") else null,
             };
@@ -2212,7 +2211,7 @@ test "pin separator is ground and inert beside selected controls or Sessions at 
         overview.state.selected = selection;
         var shown = try rig.shown(width, 30);
         defer shown.deinit();
-        try std.testing.expect(std.mem.startsWith(u8, try shown.line(0), " + New Session"));
+        try std.testing.expect(std.mem.startsWith(u8, try shown.line(0), "   + New Session"));
         try std.testing.expect(std.mem.indexOf(u8, try shown.line(1), "Archived") != null);
         try std.testing.expectEqual(selection == .new_session, std.meta.eql(highlight, shown.screen.readCell(1, 0).?.style.bg));
         for (0..30) |col| {
@@ -2522,21 +2521,21 @@ test "only your working Session's mark spins, at the frame's step, and without c
     defer arena.deinit();
     var spinning: usize = 0;
     var line: usize = 0;
-    while (view.listItem(&overview.state, line)) |item| : (line += 1) {
-        const at_two = try view.listSegments(arena.allocator(), &overview.state, item, 80, overview.caps, 2);
-        const at_three = try view.listSegments(arena.allocator(), &overview.state, item, 80, overview.caps, 3);
+    while (line < view.Lines.count(&overview.state)) : (line += 1) {
+        const at_two = (try view.Lines.at(arena.allocator(), &overview.state, line, 80, overview.caps, 2)).?;
+        const at_three = (try view.Lines.at(arena.allocator(), &overview.state, line, 80, overview.caps, 3)).?;
         try std.testing.expectEqual(at_two.segments.len, at_three.segments.len);
         for (at_two.segments, at_three.segments) |two, three| if (!std.mem.eql(u8, two.text, three.text)) {
             try std.testing.expectEqualStrings(view.spinner[2], two.text);
             try std.testing.expectEqualStrings(view.spinner[3], three.text);
-            try std.testing.expect(view.markSpins(&overview.state, item, overview.caps));
+            try std.testing.expect(view.Lines.spins(&overview.state, line, overview.caps));
             spinning += 1;
         };
     }
     try std.testing.expectEqual(@as(usize, 1), spinning);
     overview.caps = .{ .depth = .none };
     line = 0;
-    while (view.listItem(&overview.state, line)) |item| : (line += 1) try std.testing.expect(!view.markSpins(&overview.state, item, overview.caps));
+    while (line < view.Lines.count(&overview.state)) : (line += 1) try std.testing.expect(!view.Lines.spins(&overview.state, line, overview.caps));
 }
 
 test "idle overview polls real Host reads without requesting unchanged frames" {
@@ -3326,14 +3325,14 @@ test "Host line and Settings tail show together without overlap at wide and narr
         const at = view.layout(&overview.state);
         const text = try shown.text();
         try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, "Host stopped ·"));
-        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, "   Settings"));
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, "     Settings"));
         try std.testing.expectEqual(at.list.end, at.settings.start);
         try std.testing.expectEqual(@as(u16, 3), at.settings.len());
         try std.testing.expectEqual(at.settings.end, at.host.start);
         try std.testing.expectEqual(@as(u16, 1), at.host.len());
         try std.testing.expectEqual(at.host.end, at.input);
         try std.testing.expect(std.mem.startsWith(u8, try shown.line(at.settings.start), "─"));
-        try std.testing.expect(std.mem.startsWith(u8, try shown.line(at.settings.start + 1), "   Settings"));
+        try std.testing.expect(std.mem.startsWith(u8, try shown.line(at.settings.start + 1), "     Settings"));
         try std.testing.expectEqualStrings(@import("transport_options").version, std.mem.trim(u8, try shown.line(at.settings.start + 2), " "));
         try std.testing.expect(std.mem.startsWith(u8, try shown.line(at.host.start), "■ Host stopped ·"));
         try std.testing.expect(std.mem.indexOf(u8, try shown.line(at.input), "enter open") == null);
@@ -4772,7 +4771,7 @@ test "App overview list stays live beside a focused child and wheels stay in the
     const draw: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 4 }, .cell_size = .{} };
     const frame = try overview.root.widget().draw(draw);
     const selected = overview.app_sessions.selected.?;
-    const target = view.clickOf(&overview.state, view.listItem(&overview.state, selected).?).?;
+    const target = (try view.Lines.at(arena.allocator(), &overview.state, selected, 40, overview.caps, 0)).?.target.?;
     try std.testing.expectEqualStrings("k7m2qx", &target.open);
     try std.testing.expectEqualStrings("b4n8wd", &overview.state.selected.session);
     const before = overview.app_sessions.list.scroll;
@@ -5445,7 +5444,7 @@ test "pinned New Session remains above the end marker and responds to clicks and
         for (0..2) |_| {
             var shown = try rig.shown(width, 9);
             defer shown.deinit();
-            try std.testing.expect(std.mem.startsWith(u8, try shown.line(0), " + New Session"));
+            try std.testing.expect(std.mem.startsWith(u8, try shown.line(0), "   + New Session"));
             try std.testing.expect(std.mem.indexOf(u8, try shown.line(1), "Archived") != null);
             try std.testing.expect(std.mem.indexOf(u8, try shown.line(2), "↑") != null);
             const span = for (rig.overview.app_sessions.shown_at) |span| {
@@ -5493,7 +5492,7 @@ test "chat sidebar and overview share pinned New Session and Archived controls" 
         try std.testing.expectEqual(width == 140, std.mem.indexOf(u8, text, "Archived") != null);
         if (width == 140) {
             const line = rig.overview.app_sessions.selected.?;
-            const target = view.clickOf(&rig.overview.state, view.listItem(&rig.overview.state, line).?).?;
+            const target = (try view.Lines.at(shown.arena.allocator(), &rig.overview.state, line, 40, rig.overview.caps, 0)).?.target.?;
             try std.testing.expectEqualStrings(&selected, &target.open);
         }
     }
@@ -5504,7 +5503,7 @@ test "chat sidebar and overview share pinned New Session and Archived controls" 
     for ([_]u16{ 46, 140 }) |width| {
         var shown = try rig.shown(width, 20);
         defer shown.deinit();
-        try std.testing.expect(std.mem.startsWith(u8, try shown.line(0), " + New Session"));
+        try std.testing.expect(std.mem.startsWith(u8, try shown.line(0), "   + New Session"));
         try std.testing.expect(std.mem.indexOf(u8, try shown.line(1), "Archived") != null);
     }
 }
@@ -5567,7 +5566,7 @@ test "chat pinned controls preserve late-listed Sessions and the physical last-r
     for ([_]u16{ 140, 46 }) |width| {
         var shown = try rig.shown(width, 30);
         defer shown.deinit();
-        try std.testing.expect(std.mem.startsWith(u8, try shown.line(0), " + New Session"));
+        try std.testing.expect(std.mem.startsWith(u8, try shown.line(0), "   + New Session"));
         try std.testing.expect(std.mem.indexOf(u8, try shown.line(1), "Archived") != null);
         try std.testing.expect(std.mem.indexOf(u8, try shown.line(2), "Fix the flaky test") != null);
     }
@@ -5584,7 +5583,7 @@ test "pinned New Session wins the last header row over a provider band" {
         try std.testing.expect(view.band(state) != null);
         var shown = try rig.shown(width, 2);
         defer shown.deinit();
-        try std.testing.expect(std.mem.startsWith(u8, try shown.line(0), " + New Session"));
+        try std.testing.expect(std.mem.startsWith(u8, try shown.line(0), "   + New Session"));
         try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "Archived") == null);
     }
 }
@@ -6020,7 +6019,7 @@ test "Overview mouse Settings hover persists across frames and never changes sel
     var plain = try rig.shown(80, 24);
     defer plain.deinit();
     const row: u16 = for (0..24) |y| {
-        if (std.mem.startsWith(u8, try plain.line(@intCast(y)), "   Settings")) break @intCast(y);
+        if (std.mem.startsWith(u8, try plain.line(@intCast(y)), "     Settings")) break @intCast(y);
     } else return error.TestExpectedSettingsRow;
     const selection = rig.overview.state.selected;
     var ctx = rig.context();
@@ -6959,7 +6958,7 @@ const EmptySessionOwner = struct {
         const overview = self.rig.overview;
         try self.expectVisible(&.{reference});
         try std.testing.expectEqual(reference, overview.state.conversing.?);
-        try std.testing.expectEqual(@as(?usize, 0), view.selectedLine(&overview.state));
+        try std.testing.expectEqual(@as(?usize, 0), view.Lines.named(&overview.state));
         for ([_]u16{ 46, 140 }) |width| {
             var shown = try self.rig.shown(width, 24);
             defer shown.deinit();
@@ -6978,7 +6977,7 @@ const EmptySessionOwner = struct {
             try std.testing.expect(std.mem.indexOf(u8, text.written(), &reference) == null);
             try std.testing.expectEqual(@as(?u32, 0), overview.app_sessions.selected);
             var bold_name = false;
-            for (try view.rowSegments(shown.arena.allocator(), &overview.state, 0, columns, overview.caps, 0)) |segment| {
+            for ((try view.Lines.at(shown.arena.allocator(), &overview.state, 0, columns, overview.caps, 0)).?.segments) |segment| {
                 if (std.mem.indexOf(u8, segment.text, name) != null) bold_name = segment.style.bold;
             }
             try std.testing.expect(bold_name);
@@ -7315,7 +7314,7 @@ test "App list selection consumes the core projection through arrivals covered S
                 var shown = try rig.shown(width, 24);
                 defer shown.deinit();
                 if (!overview.root.listVisible()) _ = try overview.listWidget().draw(.{ .arena = shown.arena.allocator(), .cell_arena = shown.arena.allocator(), .min = .{}, .max = .{ .width = Root.list_width, .height = 24 }, .cell_size = .{} });
-                const expected: ?u32 = if (view.focusedLine(&overview.state, overview.root.input.listFocused() or overview.root.session == null)) |line| @intCast(line) else null;
+                const expected: ?u32 = if (view.Lines.highlighted(&overview.state, overview.root.input.listFocused() or overview.root.session == null)) |line| @intCast(line) else null;
                 try std.testing.expectEqual(expected, overview.app_sessions.selected);
             }
         }
@@ -7329,7 +7328,7 @@ test "App list selection consumes the core projection through arrivals covered S
     try std.testing.expect(try rig.press("\x1b[H\r") == null);
     try std.testing.expect(try rig.settle() == null);
     const first = overview.app_session.?.session;
-    try std.testing.expect(view.selectedLine(&overview.state) == null);
+    try std.testing.expect(view.Lines.named(&overview.state) == null);
     try Check.draw(rig);
     try fixture.readCurrent();
     try Check.draw(rig);
@@ -7619,7 +7618,7 @@ test "Overview Settings live memory frame uses quiet role in day and night" {
         var shown = try rig.shown(80, 24);
         defer shown.deinit();
         const row: u16 = for (0..24) |y| {
-            if (std.mem.startsWith(u8, try shown.line(@intCast(y)), "   Settings")) break @intCast(y);
+            if (std.mem.startsWith(u8, try shown.line(@intCast(y)), "     Settings")) break @intCast(y);
         } else return error.TestExpectedSettingsRow;
         const text = try shown.line(row + 1);
         const memory = std.mem.indexOf(u8, text, "38 MB") orelse return error.TestExpectedMemory;
@@ -7951,7 +7950,7 @@ test "background discovery reaches the production version widget without request
         defer shown.deinit();
         try std.testing.expectEqualDeep(overview.state.upgrade.available, overview.app_settings_line.available);
         const settings_row: u16 = for (0..24) |row| {
-            if (std.mem.startsWith(u8, try shown.line(@intCast(row)), "   Settings")) break @intCast(row);
+            if (std.mem.startsWith(u8, try shown.line(@intCast(row)), "     Settings")) break @intCast(row);
         } else return error.TestExpectedSettingsRow;
         const bottom = try shown.line(settings_row + 1);
         try std.testing.expectEqual(offers_update, std.mem.indexOf(u8, bottom, "Update to 0.999.2") != null);
@@ -8339,7 +8338,7 @@ test "narrow empty chat exit retains every list row through spinner repaints and
             try std.testing.expect(ctx.redraw);
             stage = "spinner paint";
             try Frames.paint(rig, &vx, &output.writer, size);
-            const glyph = vx.screen_last.readCell(1, 3).?.char.grapheme;
+            const glyph = vx.screen_last.readCell(3, 3).?.char.grapheme;
             if (previous.len != 0 and !std.mem.eql(u8, previous.slice(), glyph)) changed = true;
             try previous.set(glyph);
         }

@@ -7,6 +7,7 @@ const overview = @import("overview_view.zig");
 const Self = @This();
 const Hover = @import("widgets/Hover.zig");
 const widget_style = @import("widget_style.zig");
+const RowInset = @import("widgets/RowInset.zig");
 
 menu: *slash_menu.Menu,
 caps: overview.Caps = .{ .width = .unicode },
@@ -109,13 +110,14 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         if (hovered) style = Hover.look(style, self.hover_style);
         const start = @as(usize, @intCast(rect.row)) * width + @as(usize, @intCast(rect.col));
         if (selected or hovered) @memset(surface.buffer[start..][0..rect.width], .{ .style = style });
-        const line = body.child(.{ .y_off = @intCast(index - first), .height = 1 });
+        const bounds = RowInset.bounds(rect.width);
+        const line = body.child(.{ .x_off = @intCast(bounds.start), .y_off = @intCast(index - first), .width = bounds.width(), .height = 1 });
         var matched = if (selected) selected_matched else self.matched;
         if (hovered) matched = Hover.look(matched, self.hover_style);
         printMarked(line, entry.shown, entry.matches.name, style, matched);
-        if (column < rect.width) {
+        if (column < bounds.width()) {
             const source_span: ?overview.ByteSpan = if (entry.matches.description) |mark| .{ .start = mark.start, .len = mark.len } else null;
-            const fitted = try overview.fittedMarked(ctx.arena, self.caps, entry.description, rect.width - column, .head, source_span);
+            const fitted = try overview.fittedMarked(ctx.arena, self.caps, entry.description, bounds.width() - column, .head, source_span);
             const span: ?commands.Span = if (fitted.span) |mark| .{ .start = mark.start, .len = mark.len } else null;
             printMarked(line.child(.{ .x_off = @intCast(column) }), fitted.piece.bytes, span, style, matched);
         }
@@ -175,7 +177,7 @@ test "Palette keeps the selected command visible at one row and hides closed or 
         @memcpy(text[used..][0..cell.char.grapheme.len], cell.char.grapheme);
         used += cell.char.grapheme.len;
     }
-    try std.testing.expect(std.mem.startsWith(u8, text[0..used], shown.list.entries[shown.highlight].shown));
+    try std.testing.expect(std.mem.startsWith(u8, text[0..used], "  ") and std.mem.startsWith(u8, text[2..used], shown.list.entries[shown.highlight].shown));
     const clipped = try palette.widget().draw(ctx.withConstraints(.{}, .{ .width = 2, .height = 1 }));
     try std.testing.expectEqual(@as(usize, 0), clipped.buffer.len);
     try std.testing.expectEqual(.hidden, shown.seen);
@@ -280,7 +282,7 @@ test "Palette selection uses the shared ink wash for plain and matching cells in
                 palette.hover.point = .{ .col = 2, .row = pointed };
                 const surface = try palette.widget().draw(ctx);
                 for (0..80) |col| {
-                    const marked = (col >= 1 and col < 4) or (col >= column and col < column + 2);
+                    const marked = (col >= 3 and col < 6) or (col >= column + 2 and col < column + 4);
                     try std.testing.expectEqual(if (marked) strong else plain, surface.readCell(@intCast(col), 0).style);
                 }
                 try std.testing.expectEqual(depth == .none, surface.readCell(2, 0).style.reverse);
@@ -307,7 +309,7 @@ test "Palette renders every chat command and description in the same normal styl
         for (case[1], 0..) |expected, row| {
             var text: [256]u8 = undefined;
             var used: usize = 0;
-            for (surface.buffer[row * 80 ..][0..80]) |cell| {
+            for (surface.buffer[row * 80 + 2 ..][0..76]) |cell| {
                 @memcpy(text[used..][0..cell.char.grapheme.len], cell.char.grapheme);
                 used += cell.char.grapheme.len;
             }
@@ -317,7 +319,7 @@ test "Palette renders every chat command and description in the same normal styl
             try std.testing.expect(std.mem.indexOf(u8, line, shown.list.entries[row].description[0..@min(20, shown.list.entries[row].description.len)]) != null);
             if (shown.list.entries[row].description.len != 0) {
                 try std.testing.expect(!surface.readCell(0, @intCast(row)).style.dim);
-                try std.testing.expectEqual(surface.readCell(0, @intCast(row)).style, surface.readCell(@intCast(shown.list.descriptionColumn()), @intCast(row)).style);
+                try std.testing.expectEqual(surface.readCell(0, @intCast(row)).style, surface.readCell(@intCast(shown.list.descriptionColumn() + 2), @intCast(row)).style);
             }
         }
     }
@@ -340,19 +342,19 @@ test "Palette description clipping ends with the list row ellipsis at every widt
                 const surface = try palette.widget().draw(ctx);
                 try std.testing.expect(surface.size.width <= width);
                 const column = shown.list.descriptionColumn();
-                const room = width -| column;
+                const room = width -| 4 -| column;
                 if (room == 0) continue;
                 const clipped = description.len > room;
                 const kept = @min(description.len, room - @intFromBool(clipped));
                 for (0..2) |row| {
                     for (description[0..kept], 0..) |byte, index| {
-                        const cell = surface.readCell(@intCast(column + index), @intCast(row));
+                        const cell = surface.readCell(@intCast(column + 2 + index), @intCast(row));
                         try std.testing.expectEqualStrings(&.{byte}, cell.char.grapheme);
                         try std.testing.expect(!cell.style.dim);
                         try std.testing.expectEqual(if (row == selected) widget_style.of(palette.caps, .{ .background = .selection }) else palette.style, cell.style);
                     }
                     if (clipped) {
-                        const cell = surface.readCell(@intCast(width - 1), @intCast(row));
+                        const cell = surface.readCell(@intCast(width - 3), @intCast(row));
                         try std.testing.expectEqualStrings(if (unicode) "…" else ".", cell.char.grapheme);
                         try std.testing.expect(!cell.style.dim);
                         try std.testing.expectEqual(if (row == selected) widget_style.of(palette.caps, .{ .background = .selection }) else palette.style, cell.style);
@@ -384,22 +386,22 @@ test "Palette description fitting keeps whole wide and combining clusters" {
             shown.list.entries[0].description = case.text;
             if (case.query) |query| shown.list.entries[0].matches = @import("skill_completion.zig").match(query, "archive", case.text).?.spans;
             const column = shown.list.descriptionColumn();
-            const width: u16 = @intCast(column + case.room);
+            const width: u16 = @intCast(column + case.room + 4);
             var palette: Self = .{ .menu = &menu, .caps = .{ .unicode = case.unicode, .width = method } };
             var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
             defer arena.deinit();
             const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 1 }, .cell_size = .{} };
             const surface = try palette.widget().draw(ctx);
             var text: std.Io.Writer.Allocating = .init(arena.allocator());
-            var col = column;
-            while (col < width) {
+            var col = column + 2;
+            while (col < width - 2) {
                 const cell = surface.readCell(@intCast(col), 0);
                 try std.testing.expect(col + cell.char.width <= width);
                 try text.writer.writeAll(cell.char.grapheme);
                 col += @max(1, cell.char.width);
             }
             try std.testing.expectEqualStrings(case.expected, std.mem.trimEnd(u8, text.written(), " "));
-            if (case.query != null) try std.testing.expectEqual(case.bold, surface.readCell(@intCast(column), 0).style.bold);
+            if (case.query != null) try std.testing.expectEqual(case.bold, surface.readCell(@intCast(column + 2), 0).style.bold);
         }
     }
 }
@@ -452,7 +454,7 @@ test "Palette panel keeps every selected row visible across tiny bounds budgets 
                         try std.testing.expectEqual(vaxis.Color.default, cell.style.fg);
                         try std.testing.expectEqual(vaxis.Color.default, cell.style.bg);
                     }
-                    try std.testing.expectEqualStrings("/", surface.readCell(inset, @intCast(row)).char.grapheme);
+                    if (width - 2 * inset >= 5) try std.testing.expectEqualStrings("/", surface.readCell(inset + 2, @intCast(row)).char.grapheme);
                     for (palette.hover.targets, 0..) |rect, index| {
                         try std.testing.expectEqual(@as(i17, @intCast(top + index)), rect.row);
                         try std.testing.expectEqual(inset, rect.col);

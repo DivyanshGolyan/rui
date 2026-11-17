@@ -22,6 +22,10 @@ The [Session UI contract](docs/contracts/session-ui.md#required-evidence) requir
 
 The [Session UI contract](docs/contracts/session-ui.md#required-evidence) requires shared placement evidence for the command list, chat info and Settings inside the input rules, plain unboxed backgrounds and the usual selection bar, compact command overflow and matching `esc` footers. The `panels-command-list`, `panels-chat-info` and `panels-settings` verify-rui recipes cover night at 140×40 and 46×30. Run the affected native owner tests, including the consent/panel adoption and focus domain and the single-list Settings layout domain, the panel integration group and verify-rui recipe unit/map tests. Frame recipes are required capture inputs, not a claim that frames have been captured.
 
+## List tint padding
+
+`GroupedList row inset is stable for selection hover and plain rows` checks shared row bounds at zero, narrow and wide widths in direct, indexed and no colour. Run the touched list, overview, panel, model-choice and palette owners, and remove the inset as a negative control. Capture before and after list and panel frames in day and night at 140×40 and 46×30 through verify-rui; these are renderer evidence, not physical-terminal evidence.
+
 ## Contract index
 
 ARCHITECTURE owns behavior; tests own cases.

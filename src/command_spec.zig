@@ -9,6 +9,7 @@ pub const CommandKind = enum {
     permission_decision,
     session_pin,
     action_background,
+    action_stop,
 
     pub fn route(self: CommandKind) []const u8 {
         return switch (self) {
@@ -126,6 +127,19 @@ const ActionObservation = struct {
         return Shapes(.{shapes(Wire).values[1]});
     }
 
+    pub fn rejected(comptime Wire: type) type {
+        return Shapes(.{shapes(Wire).values[0]});
+    }
+};
+
+const StopObservation = struct {
+    pub fn shapes(comptime Wire: type) type {
+        const o = Wire.command_observation_reply;
+        return Shapes(.{ o.action_target, o.action_target ++ o.action_stop });
+    }
+    pub fn accepted(comptime Wire: type) type {
+        return Shapes(.{shapes(Wire).values[1]});
+    }
     pub fn rejected(comptime Wire: type) type {
         return Shapes(.{shapes(Wire).values[0]});
     }
@@ -291,6 +305,15 @@ pub fn spec(comptime kind: CommandKind) Spec {
             .Request = Request("action_background_request", null),
             .Observation = ActionObservation,
         },
+        .action_stop => .{
+            .subject_type = "action_stop",
+            .fence_message = "Action stop save",
+            .route = "/v1/control/action-stop",
+            .reply_type = "action_stop_reply",
+            .summary = "Selects one owned Action for stop, preserving an existing Resolution. Read completion with read-action. Retried by its key.",
+            .Request = Request("action_stop_request", null),
+            .Observation = StopObservation,
+        },
     };
 }
 
@@ -305,6 +328,7 @@ test "command_spec covers every kind and preserves routes and request limits" {
         .{ "/v1/control/permission-decision", "permission_decision_reply", protocol.shapeBytes(protocol.permission_decision_request), "permission decision save" },
         .{ "/v1/control/session-pin", "session_pin_reply", protocol.shapeBytes(protocol.session_pin_request.all), "Session pin save" },
         .{ "/v1/control/action-background", "action_background_reply", protocol.shapeBytes(protocol.action_background_request), "Action background save" },
+        .{ "/v1/control/action-stop", "action_stop_reply", protocol.shapeBytes(protocol.action_stop_request), "Action stop save" },
     };
     inline for (comptime std.meta.tags(CommandKind), expected, 0..) |kind, original, index| {
         const facts = comptime spec(kind);
@@ -324,6 +348,7 @@ test "command_spec resolves every subject from injected types" {
         pub const model_interruption = struct { turn: u64 };
         pub const permission_decision = struct { decision: bool };
         pub const action_background = struct { action: u64 };
+        pub const action_stop = struct { action: u64 };
     };
     const expected = .{
         []const u8,
@@ -334,6 +359,7 @@ test "command_spec resolves every subject from injected types" {
         Subjects.permission_decision,
         []const u8,
         Subjects.action_background,
+        Subjects.action_stop,
     };
     inline for (comptime std.meta.tags(CommandKind), expected) |kind, Expected| {
         try std.testing.expect(spec(kind).Subject(Subjects) == Expected);

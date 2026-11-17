@@ -10,7 +10,10 @@ pub const max_list_name_bytes = 4096;
 pub const max_names_bytes = max_list_name_bytes + max_tools - 1;
 pub const max_offered_names_bytes = max_names_bytes + 1 + "stop_action".len;
 
+pub const max_offered_list_name_bytes = max_list_name_bytes + "stop_action".len;
+
 pub const max_names_json_bytes = 2 + max_list_name_bytes + 2 * max_tools + max_tools - 1;
+pub const max_offered_names_json_bytes = 2 + max_offered_list_name_bytes + 2 * max_offered_tools + max_offered_tools - 1;
 
 pub fn valid(name: []const u8) bool {
     if (name.len == 0 or name.len > max_bytes) return false;
