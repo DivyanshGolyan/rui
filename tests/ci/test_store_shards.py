@@ -158,8 +158,10 @@ class LauncherTest(unittest.TestCase):
                 pipe.write('restore global settings')
         thread = threading.Thread(target=release)
         thread.start()
+        environ = dict(os.environ)
+        environ.pop(shards.live_engines.MYSQL_RECORD, None)
         with patch('builtins.print'):
-            self.assertEqual(shards.run(self.binary, [], 5, 'run', os.environ), 0)
+            self.assertEqual(shards.run(self.binary, [], 5, 'run', environ), 0)
         thread.join(timeout=3)
         self.assertFalse(thread.is_alive())
 
