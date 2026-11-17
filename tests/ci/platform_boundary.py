@@ -23,8 +23,20 @@ import build_files
 ROOT = Path(__file__).resolve().parents[2]
 
 MAC_PATHS = (
-    "src/client.zig",
-    "src/os/*", "tests/integration/os_semantics.py",
+    "src/os/*", "src/cli.zig", "src/client.zig", "src/platform.zig", "src/HostLifecycle.zig",
+    "src/host_coordinator.zig", "src/host_restart_all.zig", "src/host_start.zig", "src/host_identity.zig",
+    "src/upgrade.zig", "src/upgrade_process.zig",
+    "tests/integration/upgrade_integration.py", "src/store/mysql_testing.zig",
+    "tests/integration/activity_integration.py", "tests/integration/bash_fixture.py",
+    "tests/integration/codex_credential_integration.py", "tests/integration/codex_integration.py",
+    "tests/integration/conversation_page_fixture.py", "tests/integration/host_launch_exit_test.py",
+    "tests/integration/host_launch_fixture.py", "tests/integration/host_launch_integration.py",
+    "tests/integration/host_status_integration.py", "tests/integration/host_stop_integration.py",
+    "tests/integration/live_engines.py", "tests/integration/proc_sample.py",
+    "tests/integration/server_delivery_integration.py", "tests/integration/session_list_fixture.py",
+    "tests/integration/settings_integration.py", "tests/integration/settings_mysql_integration.py",
+    "tests/integration/terminal_process_test.py", "tests/integration/transport_h2_cases.py",
+    "tests/integration/os_semantics.py",
     "tests/integration/terminal_process.py", "tests/integration/terminal_leader.py",
     "tests/integration/terminal_restoration_cases.py",
     "src/h2/*",
@@ -37,12 +49,14 @@ MAC_PATHS = (
 
 SCANNED = ("src/*.zig", "tests/integration/*.zig", "tests/integration/*.py", "tests/integration/*.sh", "clients/ts/test/*.ts")
 
+# Process table observation and Store lease release on process exit also differ
+# across kernels. Consumers of the retirement observation belong to Mac paths.
 # Darwin differs on these: shutdown of a closed or listening socket returns
 # ENOTCONN, a full backlog refuses connect, kill(-pgid) of a zombie group is
 # EPERM (so only a negative pid counts), and descriptor limits have a
 # separate kernel ceiling. getpeername can return EINVAL after a reset on
 # Darwin; the socket owner rereads SO_ERROR (#1106).
-DIVERGENT_SYSCALLS = ("shutdown", "kill", "listen", "setrlimit", "getpeername")
+DIVERGENT_SYSCALLS = ("shutdown", "kill", "listen", "setrlimit", "getpeername", "flock")
 SYSCALL_NAMESPACES = ("c", "posix", "system")
 PYTHON_PLATFORM = (("sys", "platform"), ("platform", "system"), ("os", "uname"))
 
@@ -80,9 +94,38 @@ def build_violations(source, name="build.zig"):
 def zig_sites(source):
     tokens = [m.group() for m in ZIG_TOKEN.finditer(source) if not m.group().startswith(("//", "\\\\"))]
     sites = 0
+    lifecycle_calls = {
+        'HostLifecycle.zig': {"observe", "activate", "awaitRetirement"},
+        'host_coordinator.zig': {"restart", "restartAll", "run"},
+        'host_restart_all.zig': {"discover", "restart", "run"},
+        'host_identity.zig': {"generation", "peer", "snapshot"},
+        'host_start.zig': {"spawn"},
+    }
+    def module_name(token):
+        return token[1:-1].rsplit("/", 1)[-1] if token.startswith('"') and token.endswith('"') else ""
+
+    lifecycle_aliases = {tokens[i + 1]: lifecycle_calls[module_name(tokens[i + 5])]
+                         for i in range(len(tokens) - 7)
+                         if tokens[i] == "const" and tokens[i + 2:i + 5] == ["=", "@import", "("]
+                         and module_name(tokens[i + 5]) in lifecycle_calls and tokens[i + 6:i + 8] == [")", ";"]}
     for i, token in enumerate(tokens):
         following = tokens[i + 1:i + 3]
-        if token == "builtin" and following == [".", "os"]:
+        if token == '"/bin/ps"' or token.startswith(('"/proc/', '"/proc"')):
+            sites += 1
+        elif token in ("rui_launch_detached_reported", "rui_process_generation", "rui_process_snapshot"):
+            sites += 1
+        elif (token in lifecycle_aliases and following[:1] == ["."]
+              and following[1] in lifecycle_aliases[token]):
+            sites += 1
+        elif (token == "@import" and i + 5 < len(tokens) and tokens[i + 1] == "("
+              and module_name(tokens[i + 2]) in lifecycle_calls and tokens[i + 3:i + 5] == [")", "."]
+              and tokens[i + 5] in lifecycle_calls[module_name(tokens[i + 2])]):
+            sites += 1
+        elif token == "StoreLease" and following == [".", "observe"]:
+            sites += 1
+        elif token == "upgradeGenerationRetired" and following[:1] == ["("]:
+            sites += 1
+        elif token == "builtin" and following == [".", "os"]:
             sites += 1
         elif token == "@import" and tokens[i + 1:i + 6] == ["(", '"builtin"', ")", ".", "os"]:
             sites += 1
@@ -90,7 +133,8 @@ def zig_sites(source):
             sites += 1
         elif (token in SYSCALL_NAMESPACES and following[:1] == ["."] and following[1:] and following[1] in DIVERGENT_SYSCALLS
               and (following[1] != "kill" or tokens[i + 3:i + 5] == ["(", "-"])
-              and (i == 0 or tokens[i - 1] != "." or tokens[i - 2:i] == ["std", "."])):
+              and (i == 0 or tokens[i - 1] != "." or tokens[i - 2:i] == ["std", "."]
+                   or tokens[i - 4:i] == ["std", ".", "posix", "."])):
             sites += 1
     return sites
 
@@ -104,7 +148,36 @@ def python_sites(source):
                    if (tokens[i], tokens[i + 2]) in PYTHON_PLATFORM and tokens[i + 1] == "."
                    and (i == 0 or tokens[i - 1] != "."))
     sockets = unix_socket_sites(tokens)
-    return trust + platform + sockets
+    tree = ast.parse(source)
+    fcntl_modules = {"fcntl"} | {alias.asname or alias.name for node in ast.walk(tree)
+                     if isinstance(node, ast.Import) for alias in node.names if alias.name == "fcntl"}
+    flock_names = {alias.asname or alias.name for node in ast.walk(tree)
+                   if isinstance(node, ast.ImportFrom) and node.module == "fcntl"
+                   for alias in node.names if alias.name == "flock"}
+    subprocess_modules = {"subprocess"} | {alias.asname or alias.name for node in ast.walk(tree)
+                          if isinstance(node, ast.Import) for alias in node.names if alias.name == "subprocess"}
+    subprocess_names = {alias.asname or alias.name for node in ast.walk(tree)
+                        if isinstance(node, ast.ImportFrom) and node.module == "subprocess"
+                        for alias in node.names if alias.name in {"run", "Popen", "call", "check_call", "check_output"}}
+    process_sites = 0
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) and (node.value == "/proc" or node.value.startswith("/proc/")):
+            process_sites += 1
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if ((isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name)
+             and func.value.id in fcntl_modules and func.attr == "flock")
+                or isinstance(func, ast.Name) and func.id in flock_names):
+            process_sites += 1
+        is_subprocess = ((isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name)
+                          and func.value.id in subprocess_modules and func.attr in {"run", "Popen", "call", "check_call", "check_output"})
+                         or isinstance(func, ast.Name) and func.id in subprocess_names)
+        argv = node.args[0] if node.args else next((kw.value for kw in node.keywords if kw.arg == "args"), None)
+        if (is_subprocess and isinstance(argv, (ast.List, ast.Tuple)) and argv.elts
+                and isinstance(argv.elts[0], ast.Constant) and argv.elts[0].value in {"ps", "/bin/ps", "/usr/bin/ps"}):
+            process_sites += 1
+    return trust + platform + sockets + process_sites
 
 
 def unix_socket_sites(tokens):
@@ -184,8 +257,8 @@ def sites(root=ROOT):
 
 
 def violations(found):
-    return [f"{path}: {count} platform sites outside src/os/ and tests/integration/os_semantics.py. "
-            "Move them there; use os_semantics.unix_stream() for fixture Unix sockets; "
+    return [f"{path}: {count} platform sites outside Mac paths. "
+            "Move them to an appropriate Mac owner; use os_semantics.unix_stream() for fixture Unix sockets; "
             "see tests/ci/platform_boundary.py" for path, count in sorted(found.items())]
 
 
