@@ -23,7 +23,7 @@ pub const Failure = enum { download, release, other };
 
 pub const Ended = union(enum) {
     up_to_date: Version,
-    superseded,
+    superseded: Version,
     refused: Refusal,
     cancelled,
     failed: Failure,
@@ -88,8 +88,8 @@ pub fn control(current: []const u8, available: ?Version, run: ?Run, buffer: *[ma
             .failed => |why| return failedControl(failure_words.get(why), buffer),
             .refused => |why| return failedControl(refusals.get(why), buffer),
             .upgraded => |done| selected = done.version,
-            .incompatible, .up_to_date => |version| selected = version,
-            .cancelled, .superseded => {},
+            .incompatible, .up_to_date, .superseded => |version| selected = version,
+            .cancelled => {},
         }
     }
     if (available) |version| {
@@ -222,7 +222,7 @@ test "how a run ended: a notice, or held until another Upgrade when the client c
     const v: Version = .{ .schema = 60, .patch = 1 };
     for ([_]struct { Ended, []const u8, Tone, Lasts }{
         .{ .{ .up_to_date = .{ .schema = 59, .patch = 7 } }, "Rui is up to date (0.59.7)", .normal, .notice },
-        .{ .superseded, "A newer Rui is already installed; nothing changed", .normal, .notice },
+        .{ .{ .superseded = .{ .schema = 61, .patch = 0 } }, "A newer Rui is already installed; nothing changed", .normal, .notice },
         .{ .{ .refused = .first_install }, "Can't upgrade here: no managed install · run rui upgrade in a shell for details", .attention, .notice },
         .{ .{ .refused = .source_build }, "Can't upgrade here: a source build · run rui upgrade in a shell for details", .attention, .notice },
         .{ .{ .refused = .unknown_build }, "Can't upgrade here: an unknown build · run rui upgrade in a shell for details", .attention, .notice },
@@ -303,7 +303,7 @@ test "Upgrade settings field reports state without shell instructions" {
     }) |case| try std.testing.expectEqualStrings(case[1], fieldTail(.{ .ended = .{ .how = .{ .failed = case[0] }, .outcome = .unchanged } }, &buffer));
     const endings = [_]Ended{
         .{ .up_to_date = .{ .schema = 60, .patch = 0 } },
-        .superseded,
+        .{ .superseded = .{ .schema = 61, .patch = 0 } },
         .{ .refused = .first_install },
         .{ .refused = .source_build },
         .{ .refused = .unknown_build },
@@ -344,7 +344,7 @@ test "relaunch ending preserves every failure reason without a success line" {
 test "update control spans every run outcome and available state" {
     var buffer: [max_line_bytes]u8 = undefined;
     const version: Version = .{ .schema = 76, .patch = 0 };
-    const outcomes = [_]Ended{ .{ .up_to_date = version }, .superseded, .{ .refused = .source_build }, .cancelled, .{ .failed = .download }, .{ .upgraded = .{ .version = version, .restarted = true } }, .{ .incompatible = version } };
+    const outcomes = [_]Ended{ .{ .up_to_date = version }, .{ .superseded = version }, .{ .refused = .source_build }, .cancelled, .{ .failed = .download }, .{ .upgraded = .{ .version = version, .restarted = true } }, .{ .incompatible = version } };
     for ([_]?Version{ null, version }) |available| for (std.enums.values(Script)) |script| {
         const idle = control("0.75.1", available, null, &buffer, script);
         try std.testing.expectEqualStrings(if (available != null) "Update to 0.76.0" else "0.75.1", idle.text);
@@ -362,27 +362,36 @@ test "update control spans every run outcome and available state" {
                     try std.testing.expectEqualStrings(if (how == .failed) "Update failed: Couldn't reach GitHub" else "Update failed: a source build", ended.text);
                     try std.testing.expect(ended.tone == .warning);
                 },
-                .upgraded, .up_to_date, .incompatible => {
+                .upgraded, .up_to_date, .incompatible, .superseded => {
                     try std.testing.expectEqualStrings("0.76.0", ended.text);
                     try std.testing.expect(ended.tone == .quiet);
                 },
-                .cancelled, .superseded => try std.testing.expectEqualStrings(if (available != null) "Update to 0.76.0" else "0.75.1", ended.text),
+                .cancelled => try std.testing.expectEqualStrings(if (available != null) "Update to 0.76.0" else "0.75.1", ended.text),
             }
         }
     };
 }
 
-test "completed update control retains selected version until a newer release is available" {
+test "completed update control retains selected receipt version until a newer release is available" {
     var buffer: [max_line_bytes]u8 = undefined;
-    for ([_]Version{ .{ .schema = 75, .patch = 9 }, .{ .schema = 76, .patch = 0 }, .{ .schema = 76, .patch = 1 }, .{ .schema = 77, .patch = 0 } }, 0..) |available, index| {
-        const shown = control("0.75.1", available, .{ .ended = .{ .how = .{ .upgraded = .{ .version = .{ .schema = 76, .patch = 0 }, .restarted = true } }, .outcome = .compatible } }, &buffer, .unicode);
+    const selected: Version = .{ .schema = 76, .patch = 0 };
+    const endings = [_]Ended{
+        .{ .up_to_date = selected },
+        .{ .superseded = selected },
+        .{ .upgraded = .{ .version = selected, .restarted = true } },
+        .{ .incompatible = selected },
+    };
+    const releases = [_]?Version{ null, .{ .schema = 75, .patch = 9 }, selected, .{ .schema = 76, .patch = 1 }, .{ .schema = 77, .patch = 0 } };
+    for (endings) |how| for (std.enums.values(Outcome)) |outcome| for (std.enums.values(Script)) |script| for (releases, 0..) |available, index| {
+        const shown = control("0.75.1", available, .{ .ended = .{ .how = how, .outcome = outcome } }, &buffer, script);
         try std.testing.expectEqualStrings(switch (index) {
-            0, 1 => "0.76.0",
-            2 => "Update to 0.76.1",
+            0, 1, 2 => "0.76.0",
+            3 => "Update to 0.76.1",
             else => "Update to 0.77.0",
         }, shown.text);
-        try std.testing.expectEqual(index >= 2, shown.tone == .link);
-    }
+        try std.testing.expectEqual(index >= 3, shown.tone == .link);
+        try std.testing.expect(shown.enabled);
+    };
 }
 
 test "failed update controls preserve owner reasons and fit to retry across widths" {

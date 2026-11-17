@@ -3363,8 +3363,8 @@ test "conversation footer domain carries chat notices but never upgrade status" 
     defer state.deinit();
     const version: upgrade_status.Version = .{ .schema = 60, .patch = 0 };
     const endings = [_]upgrade_status.Ended{
-        .{ .up_to_date = version },    .superseded,              .cancelled,
-        .{ .refused = .source_build }, .{ .failed = .download }, .{ .upgraded = .{ .version = version, .restarted = true } },
+        .{ .up_to_date = version },    .{ .superseded = version }, .cancelled,
+        .{ .refused = .source_build }, .{ .failed = .download },   .{ .upgraded = .{ .version = version, .restarted = true } },
         .{ .incompatible = version },
     };
     const runs = [_]?upgrade_status.Run{
@@ -5321,7 +5321,7 @@ test "every place an Upgrade run can stand decides the hold, Esc and another Upg
         .{ .run = .{ .installing = .{ .found = found, .step = .restarting } }, .going = true, .escape = false },
         .{ .run = .cancelling, .going = true, .escape = true },
         .{ .run = .{ .ended = .{ .how = .cancelled, .outcome = .unchanged } }, .going = false, .escape = false },
-        .{ .run = .{ .ended = .{ .how = .superseded, .outcome = .unchanged } }, .going = false, .escape = false },
+        .{ .run = .{ .ended = .{ .how = .{ .superseded = upgrade_status.Version{ .schema = 60, .patch = 0 } }, .outcome = .unchanged } }, .going = false, .escape = false },
         .{ .run = .{ .ended = .{ .how = .{ .incompatible = upgrade_status.Version{ .schema = 60, .patch = 0 } }, .outcome = .incompatible } }, .going = false, .escape = false },
     };
     for (cases) |case| {

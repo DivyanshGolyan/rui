@@ -7778,7 +7778,7 @@ test "upgrade attempt presentation domain ends synthetic pause and publishing wi
         .{ .installing = .{ .found = found, .step = .restarting } },
         .cancelling,
         .{ .ended = .{ .how = .{ .up_to_date = target }, .outcome = .unchanged } },
-        .{ .ended = .{ .how = .superseded, .outcome = .compatible } },
+        .{ .ended = .{ .how = .{ .superseded = target }, .outcome = .compatible } },
         .{ .ended = .{ .how = .{ .refused = .source_build }, .outcome = .unchanged } },
         .{ .ended = .{ .how = .cancelled, .outcome = .unchanged } },
         .{ .ended = .{ .how = .{ .failed = .download }, .outcome = .unchanged } },

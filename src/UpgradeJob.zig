@@ -211,7 +211,7 @@ fn ending(self: *const Self) upgrade_status.Ended {
         if (!upgrade.compatible(result)) return .{ .incompatible = target };
         const restarted = result.hosts.totals().restarted != 0;
         if (result.installation == .unchanged and !restarted) {
-            if (selected.order(checked.candidate.version) == .gt) return .superseded;
+            if (selected.order(checked.candidate.version) == .gt) return .{ .superseded = target };
             return .{ .up_to_date = target };
         }
         return .{ .upgraded = .{ .version = target, .restarted = restarted } };
@@ -551,7 +551,7 @@ test "how a run ends, as the status bar names it" {
         .{ .job = .{ .operation = .install, .result = .{ .installation = unchanged, .hosts = .{ .version = .{ .schema = 1, .patch = 2 }, .entries = @constCast(&[_]@import("host_restart_all.zig").Entry{.{ .socket = "", .store = "", .state = .{ .outcome = .not_needed } }}) }, .store = "" } }, .ended = .{ .up_to_date = v }, .outcome = .compatible },
         .{ .job = .{ .operation = .install, .result = .{ .installation = unchanged, .hosts = .{ .version = .{ .schema = 1, .patch = 2 }, .entries = @constCast(&[_]@import("host_restart_all.zig").Entry{.{ .socket = "", .store = "", .state = .{ .outcome = already_ready } }}) }, .store = "" } }, .ended = .{ .up_to_date = v }, .outcome = .compatible },
         .{ .job = .{ .operation = .install, .result = .{ .installation = unchanged, .hosts = .{ .version = .{ .schema = 1, .patch = 2 }, .entries = @constCast(&[_]@import("host_restart_all.zig").Entry{.{ .socket = "", .store = "", .state = .{ .outcome = ready } }}) }, .store = "" } }, .ended = .{ .upgraded = .{ .version = v, .restarted = true } }, .outcome = .compatible },
-        .{ .job = .{ .operation = .install, .result = .{ .installation = .{ .unchanged = .{ .operation_build = "/b", .selected_after = "/b", .selected_version = .{ .schema = 60, .patch = 2 } } }, .hosts = .{ .version = .{ .schema = 60, .patch = 2 }, .entries = @constCast(&[_]@import("host_restart_all.zig").Entry{.{ .socket = "", .store = "", .state = .{ .outcome = .superseded } }}) }, .store = "" } }, .ended = .superseded, .outcome = .compatible },
+        .{ .job = .{ .operation = .install, .result = .{ .installation = .{ .unchanged = .{ .operation_build = "/b", .selected_after = "/b", .selected_version = .{ .schema = 60, .patch = 2 } } }, .hosts = .{ .version = .{ .schema = 60, .patch = 2 }, .entries = @constCast(&[_]@import("host_restart_all.zig").Entry{.{ .socket = "", .store = "", .state = .{ .outcome = .superseded } }}) }, .store = "" } }, .ended = .{ .superseded = .{ .schema = 60, .patch = 2 } }, .outcome = .compatible },
         .{ .job = .{ .operation = .install, .result = .{ .installation = installed, .hosts = .{ .version = .{ .schema = 1, .patch = 2 }, .entries = @constCast(&[_]@import("host_restart_all.zig").Entry{.{ .socket = "", .store = "", .state = .{ .outcome = .{ .client_incompatible = 123 } } }}) }, .store = "" } }, .ended = .{ .incompatible = v }, .outcome = .incompatible },
         .{ .job = .{ .operation = .install, .result = .{ .installation = installed, .hosts = .{ .version = .{ .schema = 1, .patch = 2 }, .entries = @constCast(&[_]@import("host_restart_all.zig").Entry{.{ .socket = "", .store = "", .state = .{ .outcome = .{ .unconfirmed = .verifying } } }}) }, .store = "" } }, .ended = .{ .incompatible = v }, .outcome = .incompatible },
         .{ .job = .{ .operation = .install, .result = .{ .installation = unchanged, .hosts = .{ .version = .{ .schema = 1, .patch = 2 }, .entries = @constCast(&[_]@import("host_restart_all.zig").Entry{.{ .socket = "", .store = "", .state = .{ .outcome = .replacement_observed } }}) }, .store = "" } }, .ended = .{ .incompatible = v }, .outcome = .incompatible },
@@ -601,7 +601,7 @@ test "a newer build already selected installs quietly: no older release found, t
     try std.testing.expectEqual(upgrade_status.Run.checking, job.status());
     job.result = .{ .installation = .{ .unchanged = .{ .operation_build = "/b", .selected_after = "/b", .selected_version = .{ .schema = 60, .patch = 2 } } }, .hosts = .{ .version = .{ .schema = 60, .patch = 2 }, .entries = @constCast(&[_]@import("host_restart_all.zig").Entry{.{ .socket = "", .store = "", .state = .{ .outcome = .superseded } }}) }, .store = "" };
     job.finish();
-    try std.testing.expectEqualDeep(upgrade_status.Run{ .ended = .{ .how = .superseded, .outcome = .compatible } }, job.status());
+    try std.testing.expectEqualDeep(upgrade_status.Run{ .ended = .{ .how = .{ .superseded = .{ .schema = 60, .patch = 2 } }, .outcome = .compatible } }, job.status());
     job.result = null;
     job.checked = null;
 }
@@ -694,45 +694,65 @@ test "Upgrade status derives every version from the publication target across ca
         .selected_after = "/pinned/target",
         .selected_version = target,
     };
-    const outcomes = [_]HostLifecycle.ActivationOutcome{
+    const outcomes = [_]?HostLifecycle.ActivationOutcome{
+        null,
+        .not_needed,
+        .superseded,
+        .cancelled,
         .{ .ready = .{ .instance = @splat(1), .pid = 42 } },
         .{ .already_ready = .{ .instance = @splat(2), .pid = 43 } },
         .{ .client_incompatible = 44 },
         .{ .unconfirmed = .verifying },
+        .{ .unsupported = .incompatible },
+        .replacement_observed,
+        .{ .failed = .starting },
+        .{ .refused = .{ .stage = .checking, .failure = @import("start_report.zig").Failure.init(.settings_invalid, "typed refusal") } },
     };
     for ([_]release.Version{ .{ .schema = 60, .patch = 9 }, target, .{ .schema = 62, .patch = 0 } }) |candidate| {
         for ([_]bool{ false, true }) |installed| {
             for (outcomes) |activation| {
-                var entries = [_]restart_all.Entry{.{ .socket = "/socket", .store = "/store", .state = .{ .outcome = activation } }};
+                var entries = [_]restart_all.Entry{.{ .socket = "/socket", .directory = "/store", .store = "opaque-store-identity", .state = .{ .outcome = activation orelse .not_needed } }};
+                const host_entries: []restart_all.Entry = if (activation == null) entries[0..0] else &entries;
                 var job: Self = .{ .started = true, .operation = .install, .checked = news_check };
                 job.checked.?.candidate.version = candidate;
                 job.checked.?.selected.released.version = if (installed) .{ .schema = 1, .patch = 0 } else target;
-                job.checked.?.hosts.entries = &entries;
+                job.checked.?.hosts.entries = host_entries;
                 const preparing = job.status();
-                try std.testing.expectEqualDeep(upgrade_status.Run{ .installing = .{ .found = .{ .host = .{ .running = 1 } } } }, preparing);
+                const already_current = !installed and target.order(candidate) != .lt and activation == null;
                 var buffer: [upgrade_status.max_line_bytes]u8 = undefined;
-                try std.testing.expectEqualStrings("Preparing Upgrade · restarts every eligible Host (1 found) · esc cancels", upgrade_status.line(preparing, &buffer, .unicode).text);
-                try std.testing.expectEqualStrings(" · preparing Upgrade…", upgrade_status.fieldTail(preparing, &buffer));
+                if (already_current) {
+                    try std.testing.expectEqual(upgrade_status.Run.checking, preparing);
+                    try std.testing.expectEqualStrings("Checking for updates…", upgrade_status.line(preparing, &buffer, .unicode).text);
+                    try std.testing.expectEqualStrings(" · checking for updates…", upgrade_status.fieldTail(preparing, &buffer));
+                } else {
+                    try std.testing.expectEqualDeep(upgrade_status.Run{ .installing = .{ .found = .{ .host = if (activation == null) .none else .{ .running = 1 } } } }, preparing);
+                    try std.testing.expectEqualStrings(if (activation == null) "Preparing Upgrade · no Hosts running · esc cancels" else "Preparing Upgrade · restarts every eligible Host (1 found) · esc cancels", upgrade_status.line(preparing, &buffer, .unicode).text);
+                    try std.testing.expectEqualStrings(" · preparing Upgrade…", upgrade_status.fieldTail(preparing, &buffer));
+                }
 
                 job.result = .{
                     .installation = if (installed) .{ .installed = receipt } else .{ .unchanged = receipt },
-                    .hosts = .{ .entries = &entries },
+                    .hosts = .{ .entries = host_entries },
                     .store = "/store",
                 };
                 job.finish();
-                const restarted = activation == .ready;
-                const incompatible = activation == .client_incompatible or activation == .unconfirmed;
+                const restarted = if (activation) |outcome| outcome == .ready else false;
+                const incompatible = if (activation) |outcome| outcome == .client_incompatible or outcome == .unconfirmed or outcome == .replacement_observed or outcome == .failed or outcome == .refused else false;
                 const superseded = !installed and !restarted and !incompatible and target.order(candidate) == .gt;
                 const ended: upgrade_status.Ended = if (incompatible)
                     .{ .incompatible = version(target) }
                 else if (superseded)
-                    .superseded
+                    .{ .superseded = version(target) }
                 else if (!installed and !restarted)
                     .{ .up_to_date = version(target) }
                 else
                     .{ .upgraded = .{ .version = version(target), .restarted = restarted } };
                 const run = job.status();
                 try std.testing.expectEqualDeep(ended, run.ended.how);
+                const control = upgrade_status.control("0.1.0", null, run, &buffer, .unicode);
+                try std.testing.expectEqualStrings("0.61.2", control.text);
+                try std.testing.expectEqual(.quiet, control.tone);
+                try std.testing.expect(control.enabled);
                 const line = upgrade_status.line(run, &buffer, .unicode).text;
                 try std.testing.expectEqualStrings(if (incompatible)
                     "Rui 0.61.2 installed · restart rui to continue · your draft is kept until you leave"
