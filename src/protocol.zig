@@ -2187,7 +2187,9 @@ pub const command_observation_reply = struct {
     pub const completed = .{",\"result\":{\"status\":\"completed\",\"text\":"} ++ content_reference_shape ++ .{"}"};
     pub const cancelled = .{ ",\"result\":{\"status\":\"cancelled\",\"code\":", Hole{ .string = max_code_bytes }, "}" };
     pub const failed = .{ ",\"result\":{\"status\":\"failed\",\"code\":", Hole{ .string = max_code_bytes }, "}" };
-    pub const work = .{ ",\"work\":{\"state\":", Hole{ .json = WorkStateJson }, ",\"first_action\":", Hole.optional_id } ++ SessionWork.extra_fields ++ .{"}"};
+    pub const work_base = .{ ",\"work\":{\"state\":", Hole{ .json = WorkStateJson }, ",\"first_action\":", Hole.optional_id };
+    // The observation reservation adds the exact same bounded derived fields as every work reply.
+    pub const work = work_base ++ SessionWork.extra_fields ++ .{"}"};
     pub const recovery = .{ ",\"recovery\":", Hole{ .json = MessageRecoveryJson } };
 
     const queued_state = .{",\"state\":\"queued\""};
