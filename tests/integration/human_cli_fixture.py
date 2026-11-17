@@ -137,22 +137,32 @@ def chat_content_row(row):
     return row.removeprefix(" ")
 
 
+def pane_content(row):
+    if row.startswith((" ›", " >")):
+        return row
+    rule = re.match(r"^[─-]{2,}[┼┤+]", row)
+    if rule:
+        return row[rule.end():]
+    divider = row.find("│")
+    if len(row) > 40 and row[40] == "|" and (divider < 0 or divider > 40):
+        divider = 40
+    if divider >= 0:
+        return row[divider + 1:]
+    return row
+
+
 def conversation_text(frame):
-    return "\n".join(chat_content_row(row.partition("│")[2] if "│" in row else row)
-                     for row in frame.split("\n"))
+    return "\n".join(chat_content_row(pane_content(row)) for row in frame.split("\n"))
 
 
 def composer_line(screen, y):
     lines = screen.split("\n")
-    line = lines[y] if y < len(lines) else ""
-    if not line.startswith((" ›", " >")) and "│" in line:
-        line = line.partition("│")[2]
-    return line
+    return pane_content(lines[y]) if y < len(lines) else ""
 
 
 def composer_bounds(screen):
     rules = [index for index in range(len(screen.split("\n")))
-             if set(composer_line(screen, index)) == {"─"}]
+             if set(composer_line(screen, index)) in ({"─"}, {"-"})]
     return tuple(rules[-2:]) if len(rules) >= 2 else None
 
 
@@ -206,7 +216,8 @@ def overview_title(frame):
 
 def overview_frame(master, accept, keys=b"", timeout=15, *, ready=True):
     return keyed_frame(master, keys, lambda screen, x, y: accept(screen) and overview_title(screen)
-                       and not re.search(r"(?m)(?:^|│)\s*[›>](?: |$)", screen), timeout)
+                       and not any(re.match(r"\s*[›>](?: |$)", pane_content(row))
+                                   for row in screen.split("\n")), timeout)
 
 
 def open_new_chat(master, timeout=15):
@@ -221,7 +232,7 @@ def panel_frame(master, accept, keys=b"", timeout=15):
 
 def assert_chat_info_layout(screen, *, context=None):
     rows = screen.split("\n")
-    contents = [row.rpartition("│")[2] if "│" in row else row for row in rows]
+    contents = [pane_content(row) for row in rows]
     footers = [index for index, row in enumerate(contents) if " · info" in row]
     assert footers == [len(rows) - 1], ("one info footer at the bottom", screen)
     assert "alt+i info" not in screen, ("live chat footer must be substituted", screen)
@@ -237,7 +248,7 @@ def assert_chat_info_layout(screen, *, context=None):
 
 
 def chat_info_geometry(screen):
-    content = [row.rpartition("│")[2] if "│" in row else row for row in screen.split("\n")]
+    content = [pane_content(row) for row in screen.split("\n")]
     effort = next(index for index, row in enumerate(content) if row.startswith("   Effort"))
     composer = next(index for index, row in enumerate(content) if row.rstrip() in (" ›", " >") or row.startswith((" › ", " > ")))
     actions = [index for index, row in enumerate(content)
@@ -280,7 +291,7 @@ def app_settings_open(master):
 
 
 def model_choice_details(screen):
-    rows = [row.rpartition("│")[2] if "│" in row else row for row in screen.split("\n")]
+    rows = [pane_content(row) for row in screen.split("\n")]
     field = next((index for index, row in enumerate(rows) if row.startswith("   Model")), None)
     matches = []
     more = None

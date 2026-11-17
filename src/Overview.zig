@@ -2617,7 +2617,7 @@ test "the overview asks for frames only while a spinning mark is on screen" {
     };
     try std.testing.expect(try Frames.after(rig, 24));
     _ = try rig.press("\x1b[F\x1b[A");
-    try std.testing.expect(!try Frames.after(rig, 9));
+    try std.testing.expect(!try Frames.after(rig, 7));
     try std.testing.expect(try Frames.after(rig, 24));
     var ctx = rig.context();
     defer ctx.cmds.deinit(std.testing.allocator);
@@ -4077,8 +4077,8 @@ test "Shift-Up and Shift-Down select the row above and below after ignored input
     }
 }
 
-fn statusRowsShown(shown: *Shown, first: u16, height: u16) ![]const []const u8 {
-    const rows = try shown.arena.allocator().alloc([]const u8, height - 1 - first);
+fn statusRowsShown(shown: *Shown, first: u16, end: u16) ![]const []const u8 {
+    const rows = try shown.arena.allocator().alloc([]const u8, end - first);
     for (rows, first..) |*row, at| row.* = std.mem.trim(u8, try shown.line(@intCast(at)), " ");
     return rows;
 }
@@ -4108,14 +4108,17 @@ test "Footer notice domain uses production clipping sanitization and colour" {
         var shown = try rig.shown(width, 24);
         defer shown.deinit();
         const visible = case.displayed[0..@min(case.displayed.len, width)];
-        const footer = try shown.line(23);
+        const footer_row = view.layout(&rig.overview.state).settings.start - 1;
+        const footer = try shown.line(footer_row);
+        try std.testing.expectEqual(@as(u16, 22), footer_row + 1);
+        try std.testing.expectEqualStrings("─", shown.screen.readCell(0, footer_row + 1).?.char.grapheme);
         try std.testing.expectEqualStrings(visible, footer[footer.len - @min(footer.len, visible.len) ..]);
         try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, try shown.text(), visible));
-        try std.testing.expectEqual(@as(usize, 0), (try statusRowsShown(&shown, view.layout(&rig.overview.state).input, 24)).len);
+        try std.testing.expectEqual(@as(usize, 0), (try statusRowsShown(&shown, view.layout(&rig.overview.state).input, footer_row)).len);
         try std.testing.expect(std.mem.indexOf(u8, footer, "enter open") == null);
         const style = @import("widget_style.zig").of(rig.overview.caps, .{ .colour = colour });
         for (visible, width - visible.len..width) |byte, col| {
-            const cell = shown.screen.readCell(@intCast(col), 23).?;
+            const cell = shown.screen.readCell(@intCast(col), footer_row).?;
             try std.testing.expectEqualStrings(&.{byte}, cell.char.grapheme);
             try std.testing.expectEqual(style, cell.style);
         }
@@ -4143,8 +4146,10 @@ test "Footer notices fit or truncate on the right without adding rows; persisten
         for ([_]u16{ 46, 80, 140 }) |width| {
             var shown = try rig.shown(width, 24);
             defer shown.deinit();
-            const rows = try statusRowsShown(&shown, view.layout(&rig.overview.state).input, 24);
-            const footer = try shown.line(23);
+            const at = view.layout(&rig.overview.state);
+            const footer_row = at.settings.start - @as(u16, @intFromBool(case.notice != null));
+            const rows = try statusRowsShown(&shown, at.input, footer_row);
+            const footer = try shown.line(if (case.notice != null) footer_row else at.settings.start);
             if (case.notice != null) {
                 try std.testing.expectEqual(@as(usize, 0), rows.len);
                 const visible = case.displayed[0..@min(case.displayed.len, width)];
@@ -5405,7 +5410,7 @@ test "pinned New Session remains above the end marker and responds to clicks and
         _ = try rig.press("\x1b[F\x1b[A");
         const selected = rig.overview.state.selected.session;
         for (0..2) |_| {
-            var shown = try rig.shown(width, 9);
+            var shown = try rig.shown(width, 7);
             defer shown.deinit();
             try std.testing.expect(std.mem.startsWith(u8, try shown.line(0), "   + New Session"));
             try std.testing.expect(std.mem.indexOf(u8, try shown.line(1), "Archived") != null);
@@ -5415,12 +5420,12 @@ test "pinned New Session remains above the end marker and responds to clicks and
             } else return error.SelectedSessionMissing;
             try std.testing.expectEqual(@as(u16, 1), span.height);
         }
-        try std.testing.expect(try rig.click(3, 0, width, 9) == null);
+        try std.testing.expect(try rig.click(3, 0, width, 7) == null);
         try std.testing.expectEqual(view.Selection.new_session, rig.overview.state.selected);
         try std.testing.expectEqual(@as(usize, 0), Seen.now.conversations);
         try std.testing.expect(try rig.press("\r") == null);
         try std.testing.expectEqual(@as(usize, 0), Seen.now.conversations);
-        try std.testing.expect(try rig.click(3, 0, width, 9) == null);
+        try std.testing.expect(try rig.click(3, 0, width, 7) == null);
         try std.testing.expect(rig.overview.state.creating());
         try std.testing.expect(try rig.settle() == null);
         try std.testing.expectEqual(@as(usize, 1), Seen.now.creates);

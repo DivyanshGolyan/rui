@@ -78,6 +78,39 @@ class TerminalProcessTest(unittest.TestCase):
         self.assertEqual(conversation_text("list│ › line1    01:23\nlist│   line2\n    │ edited 2"),
                          "› line1    01:23\n  line2\nedited 2")
 
+    def test_composer_rules_follow_rendered_junctions(self):
+        from human_cli_fixture import composer_bounds, composer_line, chat_footer_row, footer_click, pane_content
+
+        for horizontal, vertical, crossing, ending, prompt in (("─", "│", "┼", "┤", "›"),
+                                                                  ("-", "|", "+", "+", ">")):
+            with self.subTest(horizontal=horizontal):
+                left = " " * 40
+                screen = "\n".join((horizontal * 40 + ending + " " * 20,
+                                    left + vertical + horizontal * 30,
+                                    left + vertical + " " + prompt + " literal │ and +",
+                                    horizontal * 40 + crossing + horizontal * 30,
+                                    left + vertical + " model · low"))
+                self.assertEqual(composer_bounds(screen), (1, 3))
+                self.assertEqual(composer_line(screen, 2), " " + prompt + " literal │ and +")
+                self.assertEqual(chat_footer_row(screen), 4)
+                self.assertEqual(footer_click(screen, marker="model"), b"\x1b[<0;43;5M\x1b[<0;43;5m")
+                self.assertEqual(pane_content(horizontal * 40 + ending + " " * 20), " " * 20)
+                self.assertIsNone(composer_bounds("\n".join((horizontal * 40 + ending + " " * 20,
+                                                              left + vertical + horizontal * 30))))
+                narrow = "\n".join((horizontal * 46, " " + prompt + " literal │ and +",
+                                     horizontal * 46, " model · low"))
+                self.assertEqual(composer_bounds(narrow), (0, 2))
+                self.assertEqual(composer_line(narrow, 1), " " + prompt + " literal │ and +")
+                self.assertEqual(chat_footer_row(narrow), 3)
+                self.assertIsNone(composer_bounds(horizontal * 20 + "x\n" + horizontal * 20))
+
+    def test_conversation_keeps_junction_characters_in_chat_text(self):
+        from human_cli_fixture import conversation_text
+
+        self.assertEqual(conversation_text("list│ message │ ┼ ┤ +\n › literal │ +"),
+                         "message │ ┼ ┤ +\n› literal │ +")
+        self.assertEqual(conversation_text(" " * 40 + "| message + |"), "message + |")
+
     def test_draft_oracle_matches_empty_placeholder_without_losing_text_or_caret(self):
         from types import SimpleNamespace
         import unicodedata
@@ -169,6 +202,7 @@ class TerminalProcessTest(unittest.TestCase):
         self.assertTrue(predicate(listed, 0, 0))
         self.assertFalse(predicate(listed.replace("Settings", ""), 0, 0))
         self.assertFalse(predicate(listed + "\n › Type a task", 3, 3))
+        self.assertFalse(predicate(listed + "\n" + " " * 40 + "| > Type a task", 43, 2))
         self.assertFalse(predicate(" › Type a task\ngpt-6-luna", 3, 0))
 
     def test_overview_retained_notice_requires_explicit_relaxation_and_complete_list(self):
