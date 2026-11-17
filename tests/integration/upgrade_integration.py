@@ -256,8 +256,8 @@ class Case:
         (build / "THIRD_PARTY_NOTICES.md").write_text("Synthetic fixture build\n")
         return build
 
-    def select(self, build):
-        self.run("--publish-install", self.home, build, "released-install")
+    def select(self, build, *, source=False):
+        self.run("--publish-install", self.home, build, "intentional-source" if source else "released-install")
         assert self.link.resolve() == build / "bin/rui"
         self.original = self.link.resolve()
 
@@ -698,7 +698,9 @@ def frozen_upgrade_cases(root, binary, releases):
                 assert json.loads(source.read_text()) == admitted_c
                 # A subsequent deliberate restart rereads C as NEW intent;
                 # neither the original A nor consumed checked B is a registry.
-                c.select(c.build("next-intent-target"))
+                next_target = c.build("next-intent-target")
+                (next_target / "revision").write_text("frozen-next-admission-source\n")
+                c.select(next_target, source=True)
                 next_output = c.run("host", "restart", "--all", timeout=60)
                 assert "1 restarted" in next_output, next_output
                 next_status = c.status()
