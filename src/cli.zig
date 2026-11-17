@@ -4344,7 +4344,7 @@ test "fresh instruction validation renders both source and stdin conflict refusa
 }
 
 const LaunchFixture = struct {
-    const Scenario = enum { success, os_error, refusal, timeout, invalid_url, missing_key, already_ready, closed, full, identity, competitor, incompatible, access, interrupted, migration_success, migration_timeout, migration_both, migration_eof, migration_final };
+    const Scenario = enum { success, os_error, refusal, timeout, invalid_url, missing_key, already_ready, closed, full, identity, competitor, competitor_pending, competitor_absent, competitor_died, incompatible, access, interrupted, migration_success, migration_timeout, migration_both, migration_eof, migration_final };
     scenario: Scenario,
     launches: usize = 0,
     observations: usize = 0,
@@ -4393,11 +4393,12 @@ const LaunchFixture = struct {
         if (self.scenario == .access) return .access_failure;
         const ready = self.scenario == .already_ready or (self.launches != 0 and switch (self.scenario) {
             .success, .invalid_url, .missing_key, .competitor, .migration_final => true,
+            .competitor_pending => self.reads >= 2,
             .migration_success => self.reads >= 21,
             .migration_both => self.reads >= 2,
             else => false,
         });
-        if (!ready) return .unavailable;
+        if (!ready) return if (self.scenario == .competitor_died and self.launches != 0 and self.reads == 1) .owned_unavailable else .unavailable;
         var store = paths.store_identity;
         if (self.store_identity) |value| store.set(value) catch unreachable;
         return .{ .ready = .{ .store = store, .instance = @splat(1), .active_capacity = 4, .started_at = 1, .custody_occupied = 0, .paused = false, .capabilities = .{ .bash = true, .providers = .{ .codex = .chatgpt_device, .openai = if (self.openai and (self.launches != 0 or self.scenario == .already_ready)) .key_file else .unserved, .chatgpt = if (self.chatgpt) .chatgpt_plan else .unserved } } } };
@@ -4435,7 +4436,7 @@ const LaunchFixture = struct {
             if (self.delay_refusal) return -1;
             if (self.report_reads != 1) return 0;
             const failure: ?start_report.Failure = switch (self.scenario) {
-                .competitor => .init(.store_locked, "another Host owns this Store"),
+                .competitor, .competitor_pending, .competitor_absent, .competitor_died => .init(.store_locked, "another Host owns this Store"),
                 else => null,
             };
             if (failure) |value| {
@@ -4479,7 +4480,7 @@ const LaunchFixture = struct {
         const text = switch (self.scenario) {
             .refusal => if (self.reads == 1) refusal else "",
             .identity => if (self.reads == 1) identity else "",
-            .competitor => if (self.reads == 1) competitor else "",
+            .competitor, .competitor_pending, .competitor_absent, .competitor_died => if (self.reads == 1) competitor else "",
             .invalid_url => if (self.reads == 2) invalid_base_url ++ "; this Host starts without OpenAI.\n" else "",
             .success, .missing_key => if (self.reads == 2) note else "",
             else => "",
@@ -4508,7 +4509,9 @@ const LaunchFixture = struct {
 };
 
 test "Host launch owner returns one result for terminal and screen across its whole outcome domain" {
-    const Case = struct { scenario: LaunchFixture.Scenario, kind: ?Overview.HostLaunch.Failure.Kind = null, err: ?anyerror = null, words: []const u8 = "", terminal: []const u8 = "", success: bool = false };
+    const saved_status = exit_status;
+    defer exit_status = saved_status;
+    const Case = struct { scenario: LaunchFixture.Scenario, kind: ?Overview.HostLaunch.Failure.Kind = null, err: ?anyerror = null, words: []const u8 = "", terminal: []const u8 = "", success: bool = false, typed: bool = false };
     const cases = [_]Case{
         .{ .scenario = .success, .success = true, .terminal = LaunchFixture.note },
         .{ .scenario = .migration_success, .success = true, .terminal = LaunchFixture.migrating },
@@ -4526,6 +4529,9 @@ test "Host launch owner returns one result for terminal and screen across its wh
         .{ .scenario = .full, .kind = .startup_full, .err = error.HostReadinessUnconfirmed, .words = "start unconfirmed", .terminal = "Startup output reached 8 KiB" },
         .{ .scenario = .identity, .kind = .store_identity, .err = error.StoreIdentityMismatch, .words = "not the same Store", .terminal = LaunchFixture.identity },
         .{ .scenario = .competitor, .success = true },
+        .{ .scenario = .competitor_pending, .success = true },
+        .{ .scenario = .competitor_absent, .kind = .child_refused, .err = error.HostStartupFailed, .words = "refused to start", .terminal = "another Host owns this Store", .typed = true },
+        .{ .scenario = .competitor_died, .kind = .child_refused, .err = error.HostStartupFailed, .words = "refused to start", .terminal = "another Host owns this Store", .typed = true },
         .{ .scenario = .incompatible, .kind = .incompatible, .err = error.IncompatibleHost, .words = "different Rui version", .terminal = "does not speak this rui's protocol" },
         .{ .scenario = .access, .kind = .store_access, .err = error.StoreAccessFailed, .words = "can't read Store" },
         .{ .scenario = .interrupted, .kind = .interrupted, .err = error.Cancelled, .words = "start interrupted" },
@@ -4576,6 +4582,19 @@ test "Host launch owner returns one result for terminal and screen across its wh
                     var result: HostLaunchResult = .failed(.setup, error.HostLaunchFailed);
                     startHost(init, store, &.{"tools.bash.timeoutMs=1000"}, &readiness, fixture.ops(), null, &result);
                     summary = result.summary();
+                    if (case.typed) {
+                        try std.testing.expectEqual(.store_locked, result.outcome.failed.refusal.?.code);
+                        try std.testing.expectEqual(.store_locked, result.outcome.failed.cause.refusal_code.?);
+                        try std.testing.expectEqualStrings("another Host owns this Store", result.outcome.failed.refusal.?.message.slice());
+                        try std.testing.expect(fixture.clock >= HostStartupWait.readiness_ns);
+                        try std.testing.expectEqual(fixture.reads + 1, fixture.observations);
+                    }
+                    if (case.scenario == .competitor_pending) {
+                        try std.testing.expect(result.outcome == .ready);
+                        try std.testing.expect(result.outcome.ready.adopted);
+                        try std.testing.expect(fixture.pauses > 0);
+                        try std.testing.expectEqual(fixture.reads, fixture.observations);
+                    }
                     if (fixture.migrated_deadline != null) {
                         try std.testing.expect(result.wait.?.phase == .migrated);
                         try std.testing.expectEqual(fixture.migrated_deadline.?, result.wait.?.phase.migrated);
@@ -4615,16 +4634,17 @@ test "Host launch owner returns one result for terminal and screen across its wh
         const diagnostic_length = try stderr_file.readPositionalAll(io, &diagnostics, 0);
         const text = diagnostics[0..diagnostic_length];
         if (surface == .terminal or surface == .quiet) {
-            try std.testing.expectEqual(case.err, terminal_error);
-            try std.testing.expectEqual(case.success and surface == .terminal, out_length != 0);
+            const expected_error: ?anyerror = if (case.typed) error.Reported else case.err;
+            try std.testing.expectEqual(expected_error, terminal_error);
+            try std.testing.expectEqual(case.typed or (case.success and surface == .terminal), out_length != 0);
             if (case.success) {
                 if (surface == .terminal) try std.testing.expect(std.mem.indexOf(u8, out[0..out_length], "\"status\":\"ready\"") != null);
-                try std.testing.expectEqual(case.scenario == .already_ready or case.scenario == .competitor, std.mem.indexOf(u8, text, "running Host keeps its settings") != null);
+                try std.testing.expectEqual(case.scenario == .already_ready or case.scenario == .competitor or case.scenario == .competitor_pending, std.mem.indexOf(u8, text, "running Host keeps its settings") != null);
             }
             if (case.terminal.len != 0) try std.testing.expect(std.mem.indexOf(u8, text, case.terminal) != null);
             if (fixture.migration_announced or case.scenario == .migration_final) try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, HostStartupWait.migrating_tag));
             if (fixture.migrated_deadline != null) try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, HostStartupWait.migrated_tag));
-            if (case.scenario == .competitor) try std.testing.expect(std.mem.indexOf(u8, text, "store_locked") == null);
+            if (case.scenario == .competitor or case.scenario == .competitor_pending) try std.testing.expect(std.mem.indexOf(u8, text, "store_locked") == null);
             if (case.scenario == .already_ready or case.scenario == .missing_key) try std.testing.expect(std.mem.indexOf(u8, text, invalid_base_url) == null);
         } else {
             try std.testing.expectEqual(@as(usize, 0), out_length);

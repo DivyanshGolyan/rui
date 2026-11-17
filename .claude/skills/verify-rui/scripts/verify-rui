@@ -2284,15 +2284,18 @@ def validate_scenario(data, sizes=None):
         require(isinstance(state.get("open"), str) and (state["open"] == "overview" or state["open"] in labels), f"{name}: unknown cast label in open: {state.get('open')}")
         steps = state.get("steps")
         require(isinstance(steps, list), f"{name}: steps must be a list")
+        suspended = False
         for step in steps:
             require(isinstance(step, dict), f"{name}: step must be an object")
-            actions = set(step) - {"timeout", "repaint", "min_columns"}
+            actions = set(step) - {"timeout", "repaint", "min_columns", "empty_composer"}
             require(len(actions) == 1 and actions <= {"text", "keys", "wait", "gone", "sleep", "send", "host", "mouse", "exited", "birth", "select_row"}, f"{name}: unknown or ambiguous step {step}")
             action = next(iter(actions))
             require("repaint" not in step or action == "mouse" and type(step["repaint"]) is bool, f"{name}: invalid repaint (mouse boolean only)")
             require("min_columns" not in step or action in ("wait", "gone")
                     and type(step["min_columns"]) is int and step["min_columns"] > 0,
                     f"{name}: invalid min_columns (positive integer for wait/gone only)")
+            require("empty_composer" not in step or action == "wait" and type(step["empty_composer"]) is bool,
+                    f"{name}: invalid empty_composer (wait boolean only)")
             value = step[action]
             require("timeout" not in step or action in ("wait", "gone", "exited") and duration(step["timeout"]), f"{name}: invalid timeout")
             if action == "select_row":
@@ -2326,7 +2329,11 @@ def validate_scenario(data, sizes=None):
             elif action == "sleep":
                 require(duration(value), f"{name}: invalid sleep")
             elif action == "host":
-                require(value in ("pause", "start"), f"{name}: invalid host action")
+                require(value in ("pause", "start", "suspend", "resume"), f"{name}: invalid host action")
+                require(value != "suspend" or not suspended, f"{name}: Host already suspended")
+                require(value != "resume" or suspended, f"{name}: Host is not suspended")
+                require(value not in ("pause", "start") or not suspended, f"{name}: resume Host before pause/start")
+                suspended = value == "suspend" if value in ("suspend", "resume") else suspended
             else:
                 require(isinstance(value, dict) and isinstance(value.get("to"), str) and value["to"] in labels and isinstance(value.get("text"), str)
                         and type(value.get("wait", True)) is bool, f"{name}: invalid send or unknown cast label")
@@ -2685,9 +2692,44 @@ class FrameTerminal:
         self.process.output.check()
 
 
-def frame_wait(run, terminal, text, absent=False, timeout=20, allow_exit=False):
-    terminal.wait(lambda c: (text in c.completed) != absent,
+def frame_wait(run, terminal, text, absent=False, timeout=20, allow_exit=False, empty_composer=False):
+    def ready(capture):
+        if (text in capture.completed) == absent:
+            return False
+        if not empty_composer:
+            return True
+        lines = capture.completed.split("\n")
+        x, y = capture.frame.cursor
+        if y >= len(lines):
+            return False
+        line = lines[y].rsplit("│", 1)[-1].strip()
+        return capture.frame.visible and line == "›"
+    terminal.wait(ready,
                   f"{'absence of ' if absent else ''}{text!r}", timeout, allow_exit)
+
+
+def frame_host_suspension(run, suspend):
+    held = getattr(run, "frame_suspended_host", None)
+    if suspend:
+        if held is not None:
+            raise FrameFailure("this frame already suspended its Host")
+        hosts = [record for record in run.owned() if record["kind"] == "host"
+                 and (current := process_start(record["pid"])) is not None
+                 and current[0] == record["lstart"]]
+        if len(hosts) != 1:
+            raise FrameFailure(f"expected one live owned Host, found {len(hosts)}")
+        held = hosts[0]
+    elif held is None:
+        return
+    current = process_start(held["pid"])
+    if current is None or current[0] != held["lstart"]:
+        raise FrameFailure("the suspended Host is no longer the owned process")
+    signum = signal.SIGSTOP if suspend else signal.SIGCONT
+    os.kill(held["pid"], signum)
+    run.frame_suspended_host = held if suspend else None
+    append_jsonl(run.evidence / "injections.jsonl", {
+        "t_ns": now_ns(), "wall": wall(), "via": "kill", "target": "host",
+        "pid": held["pid"], "lstart": held["lstart"], "signal": "STOP" if suspend else "CONT"})
 
 
 def frame_steps(run, terminal, steps, exiting=False):
@@ -2710,7 +2752,8 @@ def frame_steps(run, terminal, steps, exiting=False):
                 print(f"skip {action} {step[action]!r}: {terminal.frame.columns} columns < {step['min_columns']}",
                       file=sys.stderr)
                 continue
-            frame_wait(run, terminal, step[action], action == "gone", step.get("timeout", 20), exiting)
+            frame_wait(run, terminal, step[action], action == "gone", step.get("timeout", 20), exiting,
+                       **({"empty_composer": step["empty_composer"]} if "empty_composer" in step else {}))
         elif "exited" in step:
             terminal.wait(lambda _c: terminal.collected, "Rui exit", step.get("timeout", 20), allow_exit=True)
             if terminal.status != step["exited"]:
@@ -2739,6 +2782,8 @@ def frame_steps(run, terminal, steps, exiting=False):
             sid = run.sid(message["to"])
             result = run.rui_cmd("session", "send", "--store", run.store, "--to", sid, input=message["text"])
             frame_request(run, result, "answered" if message.get("wait", True) else "pending", sid)
+        elif step["host"] in ("suspend", "resume"):
+            frame_host_suspension(run, step["host"] == "suspend")
         elif step["host"] == "pause":
             frame_command(run.rui_cmd("host", "pause", "--store", run.store), "pause Host")
         else:
@@ -3322,36 +3367,41 @@ def run_frames(args):
                                 record.update(ok=False, status="failed", reason=record["reason"] or f"native retry journey: {error}")
                             print(f"verify-rui: {state['name']}: native retry journey failed: {error}", file=sys.stderr)
             finally:
-                if opened:
+                try:
                     try:
-                        try:
-                            frame_finish_held_upgrade(run, target, upgrade_fixture)
-                        finally:
-                            target.close()
+                        frame_host_suspension(run, False)
+                    finally:
+                        if opened:
+                            try:
+                                try:
+                                    frame_finish_held_upgrade(run, target, upgrade_fixture)
+                                finally:
+                                    target.close()
+                            except (Exception, SystemExit) as error:
+                                if is_selected:
+                                    failed = True
+                                    # Disposal can discover an error after the last
+                                    # capture. Keep its files, but never publish ok.
+                                    for record in records[first_record:]:
+                                        record.update(ok=False, status="failed", reason=record["reason"] or str(error))
+                                    print(f"verify-rui: {state['name']}: disposal failed: {error}", file=sys.stderr)
+                                else:
+                                    print(f"verify-rui: warning: {state['name']}: disposal failed: {error} "
+                                          "(not selected; its failure does not fail this run)", file=sys.stderr)
+                finally:
+                    try:
+                        upgrade_scope.close()
                     except (Exception, SystemExit) as error:
                         if is_selected:
                             failed = True
-                            # Disposal can discover an error after the last
-                            # capture. Keep its files, but never publish ok.
                             for record in records[first_record:]:
                                 record.update(ok=False, status="failed", reason=record["reason"] or str(error))
-                            print(f"verify-rui: {state['name']}: disposal failed: {error}", file=sys.stderr)
-                        else:
-                            print(f"verify-rui: warning: {state['name']}: disposal failed: {error} "
-                                  "(not selected; its failure does not fail this run)", file=sys.stderr)
-                try:
-                    upgrade_scope.close()
-                except (Exception, SystemExit) as error:
-                    if is_selected:
-                        failed = True
-                        for record in records[first_record:]:
-                            record.update(ok=False, status="failed", reason=record["reason"] or str(error))
-                    print(f"verify-rui: {state['name']}: upgrade disposal failed: {error}", file=sys.stderr)
-                    if is_selected:
-                        frames_index(out, records, False)
-                    raise SystemExit(1)
-                finally:
-                    run = parent_run
+                        print(f"verify-rui: {state['name']}: upgrade disposal failed: {error}", file=sys.stderr)
+                        if is_selected:
+                            frames_index(out, records, False)
+                        raise SystemExit(1)
+                    finally:
+                        run = parent_run
                 if is_selected:
                     frames_index(out, records, False)
         if not args.no_png:

@@ -57,7 +57,7 @@ class NavigationTests(unittest.TestCase):
         with patch.object(sys, "argv", [sys.argv[0], sys.executable]):
             from human_cli_fixture import composer_bounds, footer_click
             from session_chrome_cases import composing, feed_bottom, status, transcript_rows
-        for persistent in ([], ["Sending…"], ["held line 1", "held line 2", "held line 3"]):
+        for persistent in ([], ["Opening…"], ["held line 1", "held line 2", "held line 3"]):
             for draft in ("", "kept draft"):
                 for split in (False, True):
                     for right in ("alt+i info", "! Unknown command /nosuch"):

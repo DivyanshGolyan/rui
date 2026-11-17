@@ -429,6 +429,106 @@ class FramesTest(unittest.TestCase):
                     self.assertEqual(payload["spec"]["permissionMode"], "ask")
                     self.assertTrue((run.evidence / "creator-births.jsonl").is_file())
 
+    def test_host_suspension_validates_actions_and_lifetime(self):
+        for steps in ([{"host": "suspend"}], [{"host": "suspend"}, {"host": "resume"}],
+                      [{"host": "suspend"}, {"host": "resume"}, {"host": "pause"}]):
+            data = self.scenario()
+            data["states"][0].update(steps=steps, expect=[])
+            self.helper["validate_scenario"](data)
+        for steps in ([{"host": "resume"}], [{"host": "suspend"}, {"host": "suspend"}],
+                      [{"host": "suspend"}, {"host": "pause"}], [{"host": "suspend"}, {"host": "start"}]):
+            data = self.scenario()
+            data["states"][0].update(steps=steps, expect=[])
+            with self.assertRaisesRegex(ValueError, "Host"):
+                self.helper["validate_scenario"](data)
+
+    def test_host_suspension_signals_only_the_verified_owned_process_and_logs_it(self):
+        control = self.helper["frame_host_suspension"]
+        host = {"kind": "host", "pid": 123, "lstart": "owned start"}
+        run = types.SimpleNamespace(owned=lambda: [host], evidence=Path("/evidence"))
+        with patch.dict(control.__globals__, {"process_start": lambda _pid: ("owned start", "rui host serve"),
+                "append_jsonl": unittest.mock.Mock()}), patch.object(os, "kill") as kill:
+            log = control.__globals__["append_jsonl"]
+            control(run, True)
+            with self.assertRaisesRegex(self.helper["FrameFailure"], "already suspended"):
+                control(run, True)
+            control(run, False)
+            control(run, False)
+            self.assertEqual(kill.call_args_list, [unittest.mock.call(123, self.helper["signal"].SIGSTOP),
+                                                  unittest.mock.call(123, self.helper["signal"].SIGCONT)])
+            self.assertEqual([call.args[1]["signal"] for call in log.call_args_list], ["STOP", "CONT"])
+            self.assertIsNone(run.frame_suspended_host)
+        for owned, current in (([], None), ([host], None), ([host], ("reused PID", "other")),
+                               ([host, {**host, "pid": 124}], ("owned start", "rui host serve"))):
+            with self.subTest(owned=owned, current=current):
+                run = types.SimpleNamespace(owned=lambda: owned, evidence=Path("/evidence"))
+                with patch.dict(control.__globals__, {"process_start": lambda _pid: current}), \
+                        patch.object(os, "kill") as kill, self.assertRaises(self.helper["FrameFailure"]):
+                    control(run, True)
+                kill.assert_not_called()
+        run = types.SimpleNamespace(frame_suspended_host=host, evidence=Path("/evidence"))
+        with patch.dict(control.__globals__, {"process_start": lambda _pid: ("reused PID", "other")}), \
+                patch.object(os, "kill") as kill, self.assertRaises(self.helper["FrameFailure"]):
+            control(run, False)
+        kill.assert_not_called()
+
+    def test_host_suspension_retains_cleanup_authority_when_logging_or_resume_fails(self):
+        control = self.helper["frame_host_suspension"]
+        host = {"kind": "host", "pid": 123, "lstart": "owned start"}
+        run = types.SimpleNamespace(owned=lambda: [host], evidence=Path("/evidence"))
+        with patch.dict(control.__globals__, {"process_start": lambda _pid: ("owned start", "rui host serve"),
+                "append_jsonl": unittest.mock.Mock(side_effect=OSError("log unavailable"))}), \
+                patch.object(os, "kill") as kill:
+            with self.assertRaisesRegex(OSError, "log unavailable"):
+                control(run, True)
+            self.assertEqual(run.frame_suspended_host, host)
+            with self.assertRaisesRegex(OSError, "log unavailable"):
+                control(run, False)
+            self.assertIsNone(run.frame_suspended_host)
+            self.assertEqual(kill.call_count, 2)
+        run.frame_suspended_host = host
+        with patch.dict(control.__globals__, {"process_start": lambda _pid: ("owned start", "rui host serve")}), \
+                patch.object(os, "kill", side_effect=PermissionError("no resume")):
+            with self.assertRaisesRegex(PermissionError, "no resume"):
+                control(run, False)
+            self.assertEqual(run.frame_suspended_host, host)
+
+    def test_frame_state_resumes_owned_host_on_success_and_capture_or_step_failure(self):
+        command = self.helper["cmd_frames"]
+        scenario = {"sizes": ["140x40"], "states": [{"name": name, "open": "overview", "steps": []} for name in ("empty", "chat")]}
+        for capture_ok, failing in ((True, None), (False, None), (True, "chat")):
+            with self.subTest(capture_ok=capture_ok, failing=failing):
+                resume = unittest.mock.Mock()
+                with patch.dict(command.__globals__, {"frame_host_suspension": resume}), \
+                        contextlib.redirect_stderr(io.StringIO()):
+                    if capture_ok and failing is None:
+                        calls, _records = self.run_frames_scenario(scenario)
+                        self.assertIn(("close",), calls)
+                    else:
+                        with self.assertRaises(SystemExit):
+                            self.run_frames_scenario(scenario, capture_ok=capture_ok, failing_state=failing)
+                self.assertEqual(resume.call_count, 2)
+                self.assertTrue(all(call.args[1] is False for call in resume.call_args_list))
+
+    def test_empty_composer_wait_rejects_pre_enter_draft_and_accepts_feed_message(self):
+        wait = self.helper["frame_wait"]
+        samples = [committed("› witness"), committed("› witness\n›"), committed("› witness\n›")]
+        samples[0] = samples[0]._replace(cursor=Cursor(9, 0), visible=True)
+        samples[1] = samples[1]._replace(cursor=Cursor(2, 1), visible=True)
+        samples[2] = samples[2]._replace(cursor=Cursor(2, 1), visible=False)
+        outcomes = []
+        terminal = types.SimpleNamespace(wait=lambda predicate, *_args: outcomes.extend(
+            predicate(types.SimpleNamespace(completed=frame.text, frame=frame)) for frame in samples))
+        wait(None, terminal, "witness", empty_composer=True)
+        self.assertEqual(outcomes, [False, True, False])
+        data = self.scenario()
+        data["states"][0].update(steps=[{"wait": "witness", "empty_composer": True}])
+        self.helper["validate_scenario"](data)
+        for step in ({"gone": "witness", "empty_composer": True}, {"wait": "witness", "empty_composer": 1}):
+            data["states"][0].update(steps=[step], expect=[])
+            with self.assertRaisesRegex(ValueError, "empty_composer"):
+                self.helper["validate_scenario"](data)
+
     def test_dim_expectations_validate_and_assert_saved_cells_not_text_alone(self):
         for value in (None, {}, [{"text": "", "dim": True}], [{"text": "Row", "dim": 1}],
                       [{"text": "Row", "dim": True, "min_columns": False}],

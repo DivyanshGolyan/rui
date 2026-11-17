@@ -907,8 +907,7 @@ const SessionRows = struct {
 };
 
 fn rich(ctx: vxfw.DrawContext, caps: view.Caps, segments: []const view.Segment) !vxfw.Widget {
-    const spans = try ctx.arena.alloc(vaxis.Segment, segments.len);
-    for (segments, spans) |segment, *span| span.* = .{ .text = segment.text, .style = @import("widget_style.zig").of(caps, segment.style) };
+    const spans = try @import("widget_style.zig").segments(ctx.arena, caps, segments, null);
     const text = try ctx.arena.create(vxfw.RichText);
     text.* = .{ .text = spans, .softwrap = false, .width_basis = .parent };
     return text.widget();
@@ -7015,7 +7014,6 @@ const EmptySessionOwner = struct {
             try std.testing.expectEqual(@as(usize, if (std.mem.eql(u8, name, "New Session")) 2 else 1), std.mem.count(u8, text.written(), name));
             try std.testing.expect(std.mem.indexOf(u8, text.written(), &reference) == null);
             try std.testing.expectEqual(@as(?u32, 0), overview.app_sessions.selected);
-            try std.testing.expect((try view.listSegments(shown.arena.allocator(), &overview.state, .{ .row = 0 }, columns, overview.caps, 0)).selected);
             var bold_name = false;
             for (try view.rowSegments(shown.arena.allocator(), &overview.state, 0, columns, overview.caps, 0)) |segment| {
                 if (std.mem.indexOf(u8, segment.text, name) != null) bold_name = segment.style.bold;

@@ -9,6 +9,7 @@ import threading
 import time
 
 import model_fixture as fixture
+import canonical_fixture
 from host_process import dispose_all, screen_fixture_root, stop_process
 from human_cli_fixture import (
     admit,
@@ -202,13 +203,20 @@ def activity_case():
                 os.write(master, f"WAITING-{index}\nsecond line {index}\r".encode())
                 count = f"{index + 1} · " if index else ""
                 waiting = chrome.frame(master, b"", lambda screen, count=count, index=index:
-                    f"◌ {count}WAITING-{index}" in screen and composing(screen, ""))
+                    f"◌ {count}WAITING-{index}" in screen and composing(screen, "")
+                    and all(screen.count(f"› WAITING-{i}") == 1
+                        and screen.count(f"second line {i}") == 1 for i in range(index + 1)))
+                assert "Sending" not in waiting, waiting
             bottom = feed_bottom(waiting)
             tail = transcript_rows(waiting)[bottom - 2:bottom]
             assert [line for line in transcript_rows(waiting)[:bottom] if line.startswith(("⠹", "◌"))] == tail, waiting
             assert tail[-2].startswith("⠹ Held call · ") and tail[-1] == "◌ 3 · WAITING-2", waiting
             assert transcript_rows(waiting)[bottom - 1] == "◌ 3 · WAITING-2" and not rows(waiting)[bottom].strip(), waiting
-            assert "second line" not in waiting and "queued" not in waiting.lower(), waiting
+            assert "queued" not in waiting.lower(), waiting
+            for index in range(3):
+                assert waiting.count(f"› WAITING-{index}") == 1, waiting
+                assert waiting.count(f"second line {index}") == 1, waiting
+            assert waiting.index("› WAITING-0") < waiting.index("› WAITING-1") < waiting.index("› WAITING-2"), waiting
             assert footer(waiting).endswith("ctrl+x stop"), waiting
             (chrome.workspace / "release").write_text("")
             done = chrome.frame(master, b"", lambda screen: "HELD-DONE" in screen
@@ -216,34 +224,94 @@ def activity_case():
             assert footer(done).strip().startswith("‹ ") and "ctrl+x stop" not in footer(done), done
             order = [done.count(f"› WAITING-{i}") for i in range(3)]
             assert order == [1, 1, 1], done
+            assert [done.count(f"second line {i}") for i in range(3)] == [1, 1, 1], done
             assert done.index("› WAITING-0") < done.index("› WAITING-1") < done.index("› WAITING-2"), done
             chrome.leave(master, caller)
         finally:
             release.set()
             (chrome.workspace / "release").write_text("")
-    print("session chrome: the running call and its clock, ◌ 3 · the newest waiting Message, ctrl+x stop; each Message its row once after", flush=True)
+    print("session chrome: the running call and its clock, ◌ 3 · the newest waiting Message, ctrl+x stop; full waiting Messages stay visible once before and after completion", flush=True)
 
 
 def send_state_case():
     with Chrome("rui-chrome-send.", [fixture.sse_answer("sent", "r", "m", "SENT-ANSWER")[0]]) as chrome:
         session = chrome.session()
         master, caller, _ = chrome.open(session, lambda screen: True)
-        os.write(master, b"SEND-ME")
-        chrome.frame(master, b"", lambda screen: composing(screen, "SEND-ME"))
-        frames = frames_until(master, b"\r", lambda screen: "SENT-ANSWER" in screen)
-        cleared = [frame for frame in frames if composing(frame, "")]
-        assert cleared, frames
-        assert status(cleared[0]) == "Sending…", cleared[0]
-        seen = set()
-        for frame in cleared:
-            last, shown = status(frame), "\n".join(transcript_rows(frame))
-            seen.add(last)
-            if "› SEND-ME" in shown:
-                break
-            assert last in ("Sending…", ""), ("the status bar said something else", frame)
-        assert {"Sending…"} <= seen, seen
-        chrome.leave(master, caller)
-    print("session chrome: Enter's clearing frame says Sending…, and nothing says Sent before the Message's row shows", flush=True)
+        held, release = threading.Event(), threading.Event()
+
+        def hold_admission(record):
+            held.set()
+            assert release.wait(15), "Message admission gate was not released"
+            return True
+
+        proxy = canonical_fixture.ReplyProxy(chrome.host, "/v1/message", lambda response: response,
+            before_forward=hold_admission)
+        try:
+            os.write(master, b"SEND-ME")
+            chrome.frame(master, b"", lambda screen: composing(screen, "SEND-ME"))
+            frames = frames_until(master, b"\r", lambda screen:
+                composing(screen, "") and "› SEND-ME" in "\n".join(transcript_rows(screen)))
+            fixture.wait_for(held.is_set, "Message held before Host admission")
+            cleared = [frame for frame in frames if composing(frame, "")]
+            assert cleared, frames
+            for frame in cleared:
+                assert "Sending" not in frame, frame
+                assert "\n".join(transcript_rows(frame)).count("› SEND-ME") == 1, frame
+                assert "SENT-ANSWER" not in frame, frame
+            release.set()
+            frames += frames_until(master, b"", lambda screen: "SENT-ANSWER" in screen)
+            for frame in frames:
+                assert "Sending" not in frame, frame
+                assert "\n".join(transcript_rows(frame)).count("› SEND-ME") <= 1, frame
+            assert "\n".join(transcript_rows(frames[-1])).count("› SEND-ME") == 1, frames[-1]
+            assert len(proxy.mutations) == 1, proxy.mutations
+            chrome.leave(master, caller)
+        finally:
+            release.set()
+            proxy.close()
+    print("session chrome: Enter immediately shows one sent Message before admission; no Sending state or admission duplicate", flush=True)
+
+
+def send_recovery_case():
+    with Chrome("rui-chrome-send-recovery.", [fixture.sse_answer("recovered", "r", "m", "RECOVERED-ANSWER")[0]]) as chrome:
+        session = chrome.session()
+        master, caller, _ = chrome.open(session, lambda screen: True)
+        attempts = []
+
+        def drop_first(record):
+            attempts.append(record)
+            return len(attempts) != 1
+
+        proxy = canonical_fixture.ReplyProxy(chrome.host, "/v1/message", lambda response: response,
+            before_forward=drop_first)
+        try:
+            note = "Not confirmed · ctrl+r retries original"
+            failed = chrome.frame(master, b"RECOVER-ME\r", lambda screen: note in screen)
+            transcript = "\n".join(transcript_rows(failed))
+            assert transcript.count("› RECOVER-ME") == 1 and transcript.count(note) == 1, failed
+            assert transcript.index("› RECOVER-ME") < transcript.index(note), failed
+            assert note not in footer(failed) and note not in status(failed), failed
+            assert "Sending" not in failed and composing(failed, ""), failed
+            original = attempts[0]
+            key = json.loads(original)["key"]
+            record = chrome.home / ".config/rui/requests" / f"{key}.json"
+            saved = record.read_bytes()
+            assert json.loads(saved)["text"]["value"] == "RECOVER-ME", saved
+            chrome.frame(master, b"NEXT-DRAFT", lambda screen: composing(screen, "NEXT-DRAFT"))
+            frames = frames_until(master, b"\x12", lambda screen:
+                "RECOVERED-ANSWER" in screen and composing(screen, "NEXT-DRAFT") and note not in screen)
+            assert attempts == [original, original], attempts
+            assert proxy.mutations == [("/v1/message", original), ("/v1/message", original)], proxy.mutations
+            assert record.read_bytes() == saved, "recovery changed the original saved Message"
+            assert json.loads(run(chrome.home, "request", "inspect", key))["observation"]["status"] == "accepted"
+            for frame in frames:
+                assert "Sending" not in frame, frame
+                assert "\n".join(transcript_rows(frame)).count("› RECOVER-ME") <= 1, frame
+            assert "\n".join(transcript_rows(frames[-1])).count("› RECOVER-ME") == 1, frames[-1]
+            chrome.leave(master, caller)
+        finally:
+            proxy.close()
+    print("session chrome: unconfirmed note stays with its Message; Ctrl-R recovers identical saved bytes/key once without losing the next draft", flush=True)
 
 
 def scroll_marker_case():
@@ -613,6 +681,7 @@ def notice_case():
 
 def main():
     send_state_case()
+    send_recovery_case()
     activity_case()
     scroll_marker_case()
     pages_case()
