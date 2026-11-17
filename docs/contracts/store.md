@@ -68,7 +68,7 @@ Unpin and archive intent clear that pointer with a typed Session-head update, re
 The SQLite step preserves all Commands and their references while widening the kind CHECK.
 The operator-run MySQL step resolves the exact old kind CHECK in the current database catalog, because its generated name can differ between fresh and previously migrated Stores.
 An absent or ambiguous match refuses before DDL; unrelated checks and foreign keys remain unchanged.
-The step to 79 adds canonical `session_group` and `session_group_member` facts and the group Command kind.
+The step to 80 adds canonical `session_group` and `session_group_member` facts and the group Command kind.
 A group stores its positive ID, unique name, collapse state, revision, and optional automatic-topic or family anchor.
 Each Session stores one nullable membership, manual-choice flag, birth creator, and automatic-evaluation flag.
 The migration makes a family for each existing top-level parent tree that has children; unrelated roots remain ungrouped.
@@ -287,6 +287,14 @@ Large incremental imports must not retain payload-sized dirty-page memory.
 Verify effective spill/cache/heap enforcement, not merely setter success.
 Use the exclusive WAL and `FULL` sync of [Store durability](#store-durability), mmap off, file-backed temporary work, immediate `busy_timeout=0`, foreign keys, defensive/untrusted-schema configuration and disabled unused attachment/extension/trigger/worker features.
 Required features need concrete consumers.
+
+#### Compound Content values
+
+A value-holding owner names one Content row. Its form is bytes or parts; existing rows and every value containing exactly one Text part use bytes, with their existing identity and semantic digest. A parts value is public and holds one to 1,500 ordered Text or Image parts, except that a single Text is never a parts value. Each part names ordinary public bytes Content. A saved refusal retains its original input as primary content and any diagnostic as secondary content; legacy refusals whose input was not retained leave it unavailable.
+
+The parts payload is the canonical manifest: each entry contains its kind, byte length, digest and kind metadata, followed by the entry count. Its identity uses the `rui/input-parts/v1` domain and is the existing ordered input digest. The id-only `content_part` index holds each part alive with foreign keys; the manifest alone owns ordering, kind, metadata and count. Saving looks up the manifest first and owns all parts and index writes in the producer's transaction. A Cursor certifies the manifest digest and canonical decoding, contiguous index ordinals, and each part's public byte form, length and digest before yielding any part. Inconsistency fences the Store.
+
+Readers that cannot project parts verify the complete value before returning `InputPartsNotSupported`. Public byte identity and metadata routes return `ContentIsParts` for a parts value. Until request lowering accounts for images, context size counts the manifest bytes, and parts values do not reach providers. This representation keeps existing owner references and byte accounting, avoids per-Message association reads on text, and keeps kind metadata out of SQL; a new kind extends the manifest codec rather than the schema.
 
 #### Canonical content reads and retention
 

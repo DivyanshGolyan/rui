@@ -16,7 +16,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631;
-pub const schema_version: u32 = 79;
+pub const schema_version: u32 = 80;
 
 pub const IdentityMismatch = struct {
     saved_selector: Bounded(store_path.max_bytes) = .{},
@@ -57,7 +57,8 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 76, .digest = 0x0d2cb1706af6379c },
     .{ .schema_version = 77, .digest = 0x180d1a249b979d56 },
     .{ .schema_version = 78, .digest = 0xa3f9fee49afacee2 },
-    .{ .schema_version = 79, .digest = 0xf16771a0a212a25b },
+    .{ .schema_version = 79, .digest = 0x73f89feb47e61ded },
+    .{ .schema_version = 80, .digest = 0x84170fe20b45e5e2 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -713,10 +714,25 @@ pub const migrations = [_]Migration{
     .{
         .from = 78,
         .sqlite = &.{
-            "ALTER TABLE core_command RENAME TO core_command_before_79",
+            "ALTER TABLE content ADD COLUMN form INTEGER NOT NULL DEFAULT 0 CHECK(form IN (0,1) AND (form=0 OR private=0))",
+            "CREATE TABLE content_part(\n content_id INTEGER NOT NULL REFERENCES content(content_id),\n ordinal INTEGER NOT NULL CHECK(ordinal>=0),\n part_content_id INTEGER NOT NULL REFERENCES content(content_id),\n PRIMARY KEY(content_id,ordinal),\n CHECK(part_content_id<>content_id)\n) STRICT, WITHOUT ROWID",
+            "CREATE INDEX content_part_by_part ON content_part(part_content_id)",
+            "UPDATE core_command SET secondary_content_id=primary_content_id,primary_content_id=NULL WHERE kind=2 AND accepted=0",
+        },
+        .mysql = &.{
+            "ALTER TABLE content ADD COLUMN form BIGINT NOT NULL DEFAULT 0, ADD CHECK(form IN (0,1) AND (form=0 OR private=0))",
+            "CREATE TABLE content_part(\n content_id BIGINT NOT NULL,\n ordinal BIGINT NOT NULL,\n part_content_id BIGINT NOT NULL,\n PRIMARY KEY(content_id,ordinal),\n FOREIGN KEY(content_id) REFERENCES content(content_id),\n FOREIGN KEY(part_content_id) REFERENCES content(content_id),\n CHECK(ordinal>=0),\n CHECK(part_content_id<>content_id)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
+            "CREATE INDEX content_part_by_part ON content_part(part_content_id)",
+            "UPDATE core_command SET secondary_content_id=primary_content_id,primary_content_id=NULL WHERE kind=2 AND accepted=0",
+        },
+    },
+    .{
+        .from = 79,
+        .sqlite = &.{
+            "ALTER TABLE core_command RENAME TO core_command_before_80",
             "CREATE TABLE core_command(\n command_key TEXT NOT NULL UNIQUE CHECK(length(CAST(command_key AS BLOB))<=128),\n kind INTEGER NOT NULL CHECK(kind BETWEEN 1 AND 9),\n target TEXT NOT NULL CHECK(length(CAST(target AS BLOB))<=128),\n input_digest BLOB NOT NULL CHECK(length(input_digest)=32),\n primary_content_id INTEGER REFERENCES content(content_id),\n secondary_content_id INTEGER REFERENCES content(content_id),\n accepted INTEGER NOT NULL CHECK(accepted IN (0,1)),\n code TEXT NOT NULL CHECK(length(CAST(code AS BLOB))<=96),\n revision INTEGER NOT NULL CHECK(revision>=0),\n created INTEGER NOT NULL CHECK(created IN (0,1)),\n command_seq INTEGER PRIMARY KEY NOT NULL CHECK(command_seq>0)\n) STRICT",
-            "INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq) SELECT command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq FROM core_command_before_79",
-            "DROP TABLE core_command_before_79",
+            "INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq) SELECT command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq FROM core_command_before_80",
+            "DROP TABLE core_command_before_80",
             "CREATE INDEX core_command_target_order ON core_command(target,kind,command_seq)",
             "CREATE TABLE session_group(\n group_id INTEGER PRIMARY KEY NOT NULL CHECK(group_id>0),\n name TEXT NOT NULL UNIQUE CHECK(length(CAST(name AS BLOB)) BETWEEN 1 AND 100),\n collapsed INTEGER NOT NULL CHECK(collapsed IN (0,1)),\n revision INTEGER NOT NULL CHECK(revision>0),\n automatic_anchor BLOB UNIQUE CHECK(automatic_anchor IS NULL OR length(automatic_anchor)=32)\n) STRICT",
             "CREATE TABLE session_group_member(\n session_ref TEXT PRIMARY KEY NOT NULL REFERENCES session(session_ref),\n group_id INTEGER REFERENCES session_group(group_id),\n manual INTEGER NOT NULL CHECK(manual IN (0,1)),\n creator_ref TEXT REFERENCES session(session_ref),\n evaluated INTEGER NOT NULL CHECK(evaluated IN (0,1)),\n CHECK(creator_ref IS NULL OR creator_ref<>session_ref)\n) STRICT, WITHOUT ROWID",
@@ -851,6 +867,7 @@ pub const Column = struct {
     read_by: ReadBy = .recipient,
     engines: Engines = .all,
     sqlite_added: bool = false,
+    holds: enum { bytes, value } = .bytes,
 };
 
 pub const Engines = enum {
@@ -991,6 +1008,7 @@ pub const tables = [_]Table{
             .{ .name = "byte_length", .type = .int, .check = "byte_length>=0 AND byte_length<=1073737728" },
             .{ .name = "private", .type = .flag },
             .{ .name = "payload", .type = .{ .bytes = null }, .check = "length(payload)=byte_length", .engines = .sqlite },
+            .{ .name = "form", .type = .int, .default = "0", .check = "form IN (0,1) AND (form=0 OR private=0)", .sqlite_added = true },
         },
         .primary_key = &.{"content_id"},
         .uniques = &.{&.{ "digest", "byte_length", "private" }},
@@ -1005,6 +1023,18 @@ pub const tables = [_]Table{
         .primary_key = &.{ "content_id", "chunk_index" },
         .foreign_keys = &.{references("content_id", "content", content_reference)},
         .engines = .mysql,
+    },
+    .{
+        .name = "content_part",
+        .columns = &.{
+            .{ .name = "content_id", .type = .int },
+            .{ .name = "ordinal", .type = .int, .check = "ordinal>=0" },
+            .{ .name = "part_content_id", .type = .int },
+        },
+        .primary_key = &.{ "content_id", "ordinal" },
+        .foreign_keys = &.{ references("content_id", "content", content_reference), references("part_content_id", "content", content_reference) },
+        .checks = &.{"part_content_id<>content_id"},
+        .without_rowid = true,
     },
     .{
         .name = "tool_record",
@@ -1130,7 +1160,7 @@ pub const tables = [_]Table{
             .{ .name = "kind", .type = .int, .check = "kind BETWEEN 1 AND 9" },
             .{ .name = "target", .type = .{ .text = .{ .max = 128 } } },
             .{ .name = "input_digest", .type = .{ .bytes = .{ .min = 32, .max = 32 } } },
-            .{ .name = "primary_content_id", .type = .int, .nullable = true },
+            .{ .name = "primary_content_id", .type = .int, .nullable = true, .holds = .value },
             .{ .name = "secondary_content_id", .type = .int, .nullable = true },
             .{ .name = "accepted", .type = .flag },
             .{ .name = "code", .type = .{ .text = .{ .max = 96 } } },
@@ -1207,7 +1237,7 @@ pub const tables = [_]Table{
             .{ .name = "admission_id", .type = .int, .check = "admission_id>0", .read_by = .both },
             .{ .name = "session_ref", .type = .{ .text = null }, .read_by = .both },
             .{ .name = "command_key", .type = .{ .text = null }, .read_by = .both },
-            .{ .name = "content_id", .type = .int, .read_by = .both },
+            .{ .name = "content_id", .type = .int, .read_by = .both, .holds = .value },
             .{ .name = "admission_position", .type = .int, .nullable = true, .check = "admission_position>0" },
             .{ .name = "turn_id", .type = .int, .nullable = true },
             .{ .name = "admitted_at", .type = .int, .check = "admitted_at>0", .read_by = .both },
@@ -1521,7 +1551,7 @@ pub const tables = [_]Table{
             .{ .name = "source_skill_position", .type = .int, .nullable = true },
             .{ .name = "source_operation_id", .type = .int, .nullable = true },
             .{ .name = "source_item_ordinal", .type = .int, .nullable = true, .check = "source_item_ordinal IS NULL OR source_item_ordinal>=0" },
-            .{ .name = "content_id", .type = .int },
+            .{ .name = "content_id", .type = .int, .holds = .value },
             .{ .name = "recorded_at", .type = .int, .check = "recorded_at>0" },
         },
         .primary_key = &.{ "session_ref", "entry_ordinal" },
@@ -1648,13 +1678,13 @@ pub const tables = [_]Table{
                 .type = .{ .tag = &.{ "denied", "cancelled", "succeeded", "failed", "timed_out", "indeterminate", "storage_failed", "spawn_failed", "infrastructure_shutdown" } },
                 .nullable = true,
             },
-            .{ .name = "resolution_content_id", .type = .int, .nullable = true },
+            .{ .name = "resolution_content_id", .type = .int, .nullable = true, .holds = .value },
             .{ .name = "acceptance_position", .type = .int, .nullable = true, .check = "acceptance_position IS NULL OR acceptance_position>0" },
             .{ .name = "attempt_at", .type = .int, .nullable = true, .check = "attempt_at IS NULL OR attempt_at>0" },
             .{ .name = "decided_at", .type = .int, .nullable = true, .check = "decided_at IS NULL OR decided_at>0" },
             .{ .name = "resolved_at", .type = .int, .nullable = true, .check = "resolved_at IS NULL OR resolved_at>0" },
             .{ .name = "approval_position", .type = .int, .nullable = true, .check = "approval_position IS NULL OR approval_position>0" },
-            .{ .name = "background_content_id", .type = .int, .nullable = true, .sqlite_added = true },
+            .{ .name = "background_content_id", .type = .int, .nullable = true, .sqlite_added = true, .holds = .value },
             .{ .name = "background_position", .type = .int, .nullable = true, .check = "(background_content_id IS NULL AND background_position IS NULL) OR (background_content_id IS NOT NULL AND background_position IS NOT NULL AND background_position>0 AND (acceptance_position IS NULL OR background_position<acceptance_position))", .sqlite_added = true },
             .{ .name = "background_at", .type = .int, .nullable = true, .check = "(background_position IS NULL AND background_at IS NULL) OR (background_position IS NOT NULL AND background_at IS NOT NULL AND background_at>0)", .sqlite_added = true },
         },
@@ -1725,6 +1755,7 @@ pub const tables = [_]Table{
 
 pub const indexes = [_]Index{
     .{ .name = "action_stop_target", .table = "action_stop", .columns = &.{"target_action_id"} },
+    .{ .name = "content_part_by_part", .table = "content_part", .columns = &.{"part_content_id"} },
     .{ .name = "session_obligation_parent", .table = "session", .columns = &.{ "parent_ref", "obligation_since", "session_ref" }, .where = "obligation_since IS NOT NULL" },
     .{ .name = "session_forward_owed_message", .table = "session_forward", .columns = &.{ "target_ref", "message_delivered" } },
     .{ .name = "session_workspace_list", .table = "session", .columns = &.{ "workspace_digest", "created_seq" } },
@@ -3283,7 +3314,7 @@ test "model call timing format 68 migration preserves format 67 resolutions with
 }
 
 test "session group migration creates canonical objects for both dialects" {
-    const step = migrations[78 - migration_baseline];
+    const step = migrations[79 - migration_baseline];
     inline for (.{ rsql.Dialect.sqlite, rsql.Dialect.mysql }) |dialect| {
         const expected = comptime objects(dialect);
         const statements = if (dialect == .sqlite) step.sqlite else step.mysql;
@@ -3317,14 +3348,14 @@ test "session group migration backfills parent trees and leaves unrelated roots 
         try sqlite.exec(db, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
         try sqlite.exec(db, @embedFile("migration_baseline_rows.sql"));
         for (migrations) |step| {
-            if (step.from == 78) break;
+            if (step.from == 79) break;
             for (step.sqlite) |statement| try sqlite.exec(db, statement);
         }
         try sqlite.exec(db, "UPDATE message_admission SET source_action_id=1 WHERE session_ref='brhkcj'");
         try sqlite.exec(db, "INSERT INTO action_stop(source_action_id,target_action_id) VALUES(2,1)");
         if (depth >= 1) try sqlite.exec(db, "UPDATE session SET parent_ref='d8mv7p' WHERE session_ref='brhkcj'");
         if (depth == 2) try sqlite.exec(db, "UPDATE session SET parent_ref='brhkcj' WHERE session_ref='rhvzwc'");
-        for (migrations[78 - migration_baseline].sqlite) |statement| try sqlite.exec(db, statement);
+        for (migrations[79 - migration_baseline].sqlite) |statement| try sqlite.exec(db, statement);
         try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(db, "SELECT count(*) FROM message_admission WHERE session_ref='brhkcj' AND source_action_id=1"));
         try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(db, "SELECT count(*) FROM action_stop WHERE source_action_id=2 AND target_action_id=1"));
         try std.testing.expectEqual(@as(u32, 3), try sqlite.pragmaInt(db, "SELECT count(*) FROM session_group_member"));

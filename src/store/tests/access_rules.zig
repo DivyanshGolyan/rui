@@ -47,6 +47,7 @@ test "Store entry points queue and fence only through canonical access" {
         @embedFile("../domain/command.zig"),
         @embedFile("../domain/configuration.zig"),
         @embedFile("../domain/content.zig"),
+        @embedFile("../domain/content_parts.zig"),
         @embedFile("../domain/find_tools.zig"),
         @embedFile("../domain/historical.zig"),
         @embedFile("../domain/history_floor.zig"),

@@ -2,6 +2,7 @@ const std = @import("std");
 const command_reply = @import("../../command_reply.zig");
 const conversation_read = @import("../../conversation_read.zig");
 const content_string = @import("../../content_string.zig");
+const parts = @import("../../input_parts.zig");
 const content_custody = @import("../../content_custody.zig");
 const store_core = @import("../Store.zig");
 const Store = store_core.Store;
@@ -12,6 +13,23 @@ const Faults = store_core.Faults;
 const Ordinary = store_core.Ordinary;
 
 pub const ContentReference = command_reply.ContentReference;
+
+pub const Value = struct {
+    content_id: u64,
+    reference: parts.Reference,
+
+    pub fn of(content_id: u64, form: u64, length: u64, digest: [32]u8) error{CorruptStore}!Value {
+        const reference: ContentReference = .{ .length = length, .digest = digest };
+        return .{ .content_id = content_id, .reference = switch (try parts.Form.decode(form)) {
+            .bytes => .{ .bytes = reference },
+            .parts => .{ .parts = reference },
+        } };
+    }
+};
+
+pub fn valueColumnsSql(comptime alias: []const u8, comptime prefix: []const u8) []const u8 {
+    return alias ++ ".form AS " ++ prefix ++ "_form," ++ alias ++ ".byte_length AS " ++ prefix ++ "_length," ++ alias ++ ".digest AS " ++ prefix ++ "_digest";
+}
 
 pub const ContentLocation = struct {
     store: *Store,
@@ -156,6 +174,7 @@ pub const ContentReader = struct {
     }
 };
 
+// Bytes and parts have separate digest domains, so identity lookup needs no form filter.
 pub const lookup_content = rsql.Read(.{
     .sql = "SELECT content_id FROM content WHERE digest=?1 AND byte_length=?2 AND private=?3",
     .Args = struct { digest: [32]u8, length: u64, private: bool },
@@ -164,8 +183,8 @@ pub const lookup_content = rsql.Read(.{
 });
 
 const insert_content = rsql.Write(.{
-    .sql = "INSERT INTO content(content_id,digest,byte_length,payload,private) VALUES(?1,?2,?3,zeroblob(?3),?4)",
-    .Args = struct { content_id: u64, digest: [32]u8, length: u64, private: bool },
+    .sql = "INSERT INTO content(content_id,digest,byte_length,payload,private,form) VALUES(?1,?2,?3,zeroblob(?3),?4,?5)",
+    .Args = struct { content_id: u64, digest: [32]u8, length: u64, private: bool, form: u8 },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
@@ -173,6 +192,7 @@ pub const Import = struct {
     digest: [32]u8,
     length: u64,
     private: bool,
+    form: parts.Form = .bytes,
     found: lookup_content.Result = null,
 
     pub fn ofBytes(bytes: []const u8, private: bool) Import {
@@ -228,7 +248,9 @@ pub fn importSlot(a: anytype, value: *Import) !ContentSlot {
 }
 
 fn acquireSlot(a: anytype, value: *Import, policy: enum { tracked, sequential }) !ContentSlot {
-    if (policy == .tracked) adoptInserted(a, value);
+    // Earlier imports in this transaction may have inserted this identity
+    // after its lookup, including before a sequential captured part.
+    adoptInserted(a, value);
     if (value.found) |row| return .{ .id = @intCast(row.content_id.get()), .existing = true };
     const id = try insertRow(a, value);
     if (policy == .tracked) a.recordInserted(&value.digest, value.length, value.private, id);
@@ -238,7 +260,7 @@ fn acquireSlot(a: anytype, value: *Import, policy: enum { tracked, sequential })
 
 pub fn insertRow(a: anytype, value: *const Import) !u64 {
     const id = try a.identity(.content_id);
-    a.write(insert_content, .{ .content_id = id, .digest = value.digest, .length = value.length, .private = value.private });
+    a.write(insert_content, .{ .content_id = id, .digest = value.digest, .length = value.length, .private = value.private, .form = @backingInt(value.form) });
     a.recordContentRow(id);
     return id;
 }
@@ -257,7 +279,7 @@ pub fn openContentIdentity(self: *Store, reference: ContentReference, private: b
 fn openContentIdentityHeld(self: *Store, reference: ContentReference, private: bool) !ContentLocation {
     const entry = try store_core.enter(self, .none);
     defer entry.release();
-    const id = try entry.finish(Ordinary.none, readContentId(&entry, reference, private));
+    const id = try entry.finish(error{ContentIsParts}, readContentId(&entry, reference, private));
     return .{ .store = self, .reference = reference, .content_id = id };
 }
 
@@ -267,11 +289,27 @@ noinline fn readContentId(entry: *const store_core.Entry, reference: ContentRefe
     return contentIdOf(&a, reference, private);
 }
 
+const lookup_public = rsql.Read(.{
+    .sql = "SELECT content_id,form FROM content WHERE @same(digest,?1) AND @same(byte_length,?2) AND @same(private,?3)",
+    .Args = struct { digest: [32]u8, length: u64, private: bool },
+    .Row = struct { content_id: rsql.Positive, form: u8 },
+    .cardinality = .each,
+});
+
 pub fn contentIdOf(a: anytype, reference: ContentReference, private: bool) !i64 {
-    var found: lookup_content.Result = undefined;
-    a.read(lookup_content, .{ .digest = reference.digest, .length = reference.length, .private = private }, &found);
+    // The Content identity key is unique; there cannot be a second matching row.
+    const First = struct {
+        row: ?lookup_public.Row = null,
+        pub fn visit(self: *@This(), row: *const lookup_public.Row) bool {
+            self.row = row.*;
+            return false;
+        }
+    };
+    var found: First = .{};
+    a.readEach(lookup_public, .{ .digest = reference.digest, .length = reference.length, .private = private }, 1, &found);
     try store_access.runAs(a, error.CorruptStore);
-    const row = found orelse return error.CorruptStore;
+    const row = found.row orelse return error.CorruptStore;
+    if (try parts.Form.decode(row.form) == .parts) return error.ContentIsParts;
     return @intCast(row.content_id.get());
 }
 
@@ -373,9 +411,9 @@ fn importRangeSlot(a: anytype, io: std.Io, range: content_custody.Range, slot: C
 pub const ContentMetadata = struct { length: u64, digest: [32]u8, private: bool };
 
 pub const content_metadata = rsql.Read(.{
-    .sql = "SELECT byte_length,digest,private FROM content WHERE content_id=?1",
+    .sql = "SELECT byte_length,digest,private,form FROM content WHERE content_id=?1",
     .Args = struct { content_id: u64 },
-    .Row = struct { byte_length: u64, digest: [32]u8, private: bool },
+    .Row = struct { byte_length: u64, digest: [32]u8, private: bool, form: u8 = 0 },
     .cardinality = .one,
 });
 
@@ -383,8 +421,9 @@ pub fn metadataOf(row: *const content_metadata.Row) ContentMetadata {
     return .{ .length = row.byte_length, .digest = row.digest, .private = row.private };
 }
 
-pub fn publicMetadata(row: *const content_metadata.Row) error{CorruptStore}!ContentMetadata {
+pub fn publicMetadata(row: *const content_metadata.Row) error{ CorruptStore, ContentIsParts }!ContentMetadata {
     if (row.private) return error.CorruptStore;
+    if (try parts.Form.decode(row.form) == .parts) return error.ContentIsParts;
     return metadataOf(row);
 }
 

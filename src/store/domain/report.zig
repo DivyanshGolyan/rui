@@ -250,7 +250,7 @@ pub const person_message = rsql.Read(.{
 });
 
 pub const first_message_columns = "m.admission_id AS first_admission,m.admission_position AS first_position,m.admitted_at AS first_admitted_at," ++
-    "m.sender_session_ref AS first_sender,first_content.byte_length AS first_length,first_content.digest AS first_digest,first_content.private AS first_private";
+    "m.sender_session_ref AS first_sender,first_content.byte_length AS first_length,first_content.digest AS first_digest,first_content.private AS first_private,first_content.form AS first_form";
 
 pub const first_content_join = "JOIN content first_content ON first_content.content_id=m.content_id";
 
@@ -262,6 +262,7 @@ const FirstMessageColumns = struct {
     first_length: ?u64,
     first_digest: ?[32]u8,
     first_private: ?bool,
+    first_form: ?u8,
 };
 
 pub const first_message = rsql.Read(.{
@@ -291,9 +292,10 @@ pub fn sortedToolNames(names: ?[]const u8, sorted: *[tool_defs.max_tools][]const
     return sorted[0..count];
 }
 
-pub fn firstMessage(row: anytype, first: u64) error{CorruptStore}!?session_list.FirstMessage {
+pub fn firstMessage(row: anytype, first: u64) error{ CorruptStore, InputPartsNotSupported }!?session_list.FirstMessage {
     if (first == 0) return null;
     if (row.first_private orelse return error.CorruptStore) return error.CorruptStore;
+    if (try @import("../../input_parts.zig").Form.decode(row.first_form orelse return error.CorruptStore) == .parts) return error.InputPartsNotSupported;
     return .{
         .position = (row.first_position orelse return error.CorruptStore).get(),
         .admission = (row.first_admission orelse return error.CorruptStore).get(),
@@ -302,6 +304,22 @@ pub fn firstMessage(row: anytype, first: u64) error{CorruptStore}!?session_list.
         .length = row.first_length orelse return error.CorruptStore,
         .digest = row.first_digest orelse return error.CorruptStore,
     };
+}
+
+const first_message_value = rsql.Read(.{
+    .sql = "SELECT content_id FROM message_admission WHERE admission_id=?1",
+    .Args = struct { admission: u64 },
+    .Row = struct { content_id: rsql.Positive },
+    .cardinality = .one,
+});
+
+pub fn verifyFirstMessage(a: *ReadAccess, row: anytype) !void {
+    var found: first_message_value.Result = undefined;
+    a.read(first_message_value, .{ .admission = (row.first_admission orelse return error.CorruptStore).get() }, &found);
+    try store_access.runAs(a, error.CorruptStore);
+    const value = try content_domain.Value.of(found.content_id.get(), row.first_form orelse return error.CorruptStore, row.first_length orelse return error.CorruptStore, row.first_digest orelse return error.CorruptStore);
+    if (value.reference != .parts) return error.CorruptStore;
+    try @import("content_parts.zig").verify(a, value);
 }
 
 const active_proposers_sql = "FROM turn active @index(turn_one_active_per_session) " ++
@@ -861,6 +879,23 @@ pub fn readWorks(a: *ReadAccess, works: []WorkRead) !void {
         try runReport(a);
         for (works) |*w| try w.advance();
     }
+}
+
+pub const full_compound_value = rsql.Read(.{
+    .compound = true,
+    .sql = "SELECT c.content_id,c.byte_length,c.digest,c.private,c.form FROM message_admission m JOIN content c ON c.content_id=m.content_id WHERE m.session_ref=?1 AND c.form=1 " ++
+        "UNION ALL SELECT c.content_id,c.byte_length,c.digest,c.private,c.form FROM conversation_entry e JOIN content c ON c.content_id=e.content_id WHERE e.session_ref=?1 AND c.form=1 " ++
+        "UNION ALL SELECT c.content_id,c.byte_length,c.digest,c.private,c.form FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id WHERE a.session_ref=?1 AND c.form=1 " ++
+        "UNION ALL SELECT c.content_id,c.byte_length,c.digest,c.private,c.form FROM action_operation a JOIN content c ON c.content_id=a.background_content_id WHERE a.session_ref=?1 AND c.form=1 LIMIT 1",
+    .Args = struct { session: []const u8 },
+    .Row = struct { content_id: rsql.Positive, byte_length: u64, digest: [32]u8, private: bool, form: u8 },
+    .cardinality = .optional,
+});
+
+pub fn verifyFullCompound(a: *ReadAccess, row: full_compound_value.Row) !void {
+    const metadata: content_domain.content_metadata.Row = .{ .byte_length = row.byte_length, .digest = row.digest, .private = row.private, .form = row.form };
+    _ = try @import("content_parts.zig").publicMetadata(a, row.content_id.get(), &metadata);
+    return error.CorruptStore;
 }
 
 pub fn readFull(a: *ReadAccess, session_ref: []const u8, watched: anytype) !void {
