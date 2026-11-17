@@ -2894,9 +2894,14 @@ def frame_upgrade_run(run, state, build):
 
 
 def frame_upgrade_viewport(run, terminal, state):
-    if state.get("upgrade") and state["upgrade"] != "chat" and terminal.frame.columns < 100:
-        if "Settings" not in terminal.capture.completed:
-            frame_steps(run, terminal, [{"keys": ["Esc"]}, {"wait": "Settings"}])
+    if not state.get("upgrade") or state["upgrade"] == "chat":
+        return
+    if terminal.frame.columns >= 100:
+        if terminal.frame.visible:
+            frame_steps(run, terminal, [{"keys": ["Left"]}])
+            terminal.wait(lambda c: c.frame is not None and not c.frame.visible, "native list focus hid the input cursor")
+    elif "Settings" not in terminal.capture.completed:
+        frame_steps(run, terminal, [{"keys": ["Esc"]}, {"wait": "Settings"}])
 
 
 def frame_failure_settled(terminal, before):
@@ -3118,6 +3123,7 @@ def run_frames(args):
                 frame_drive_upgrade(run, target, state, upgrade_fixture)
                 exiting = frame_steps(run, target, steps, exiting=bool(stopped_marker))
                 if launch_size != state_sizes[0]:
+                    frame_upgrade_viewport(run, target, state)
                     target.resize(state_sizes[0])
                 frame_upgrade_viewport(run, target, state)
                 frame_ready(target, state, allow_exit=exiting, sessions=run.meta.get("sessions", {}))
@@ -3144,6 +3150,7 @@ def run_frames(args):
                             if index > 0:
                                 if target is None:
                                     raise FrameFailure("terminal did not launch")
+                                frame_upgrade_viewport(run, target, state)
                                 target.resize(size)
                                 frame_upgrade_viewport(run, target, state)
                                 frame_ready(target, state, allow_exit=exiting, sessions=run.meta.get("sessions", {}))

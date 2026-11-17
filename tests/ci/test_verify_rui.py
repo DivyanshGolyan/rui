@@ -1537,7 +1537,7 @@ while True:
                 def __init__(self, _run, state, size):
                     self.state = state
                     self.status = None
-                    self.frame = types.SimpleNamespace(columns=size[0])
+                    self.frame = types.SimpleNamespace(columns=size[0], visible=False)
                     calls.append(("open", state["name"], size, state.get("theme", "night")))
 
                 def wait(self, predicate, _description, *, allow_exit=False):
@@ -2667,7 +2667,7 @@ class UpgradeFramesTest(unittest.TestCase):
     def test_narrow_upgrade_resize_reveals_the_list_without_closing_chat_specimens(self):
         reveal = self.helper["frame_upgrade_viewport"]
         calls = []
-        terminal = types.SimpleNamespace(frame=types.SimpleNamespace(columns=46),
+        terminal = types.SimpleNamespace(frame=types.SimpleNamespace(columns=46, visible=False),
                                          capture=types.SimpleNamespace(completed="Type a task"))
         with patch.dict(reveal.__globals__, {"frame_steps": lambda _run, _terminal, steps: calls.extend(steps)}):
             reveal(None, terminal, {"upgrade": "updating"})
@@ -2680,6 +2680,29 @@ class UpgradeFramesTest(unittest.TestCase):
             terminal.capture.completed = "Type a task"
             reveal(None, terminal, {"upgrade": "available"})
             self.assertEqual(calls, [])
+
+    def test_wide_upgrade_viewport_moves_visible_cursor_to_native_list_focus(self):
+        reveal = self.helper["frame_upgrade_viewport"]
+        events = []
+        frame = types.SimpleNamespace(columns=140, visible=True)
+        terminal = types.SimpleNamespace(frame=frame)
+        def steps(_run, _terminal, actions):
+            self.assertEqual(actions, [{"keys": ["Left"]}])
+            events.append("Left")
+            frame.visible = False
+        def wait(predicate, description):
+            self.assertTrue(predicate(types.SimpleNamespace(frame=frame)))
+            self.assertIn("input cursor", description)
+            events.append("committed hidden cursor")
+        terminal.wait = wait
+        with patch.dict(reveal.__globals__, {"frame_steps": steps}):
+            reveal(None, terminal, {"upgrade": "updating", "comparison_side": "before"})
+            self.assertEqual(events, ["Left", "committed hidden cursor"])
+            events.clear()
+            reveal(None, terminal, {"upgrade": "updating"})
+            frame.visible = True
+            reveal(None, terminal, {"upgrade": "chat"})
+            self.assertEqual(events, [])
 
     def test_split_sidebar_rows_bound_their_exact_version_before_chat_content(self):
         scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
