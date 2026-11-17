@@ -1,3 +1,11 @@
+from contextlib import ExitStack, contextmanager
+import fcntl
+import hashlib
+import os
+from pathlib import Path
+import tempfile
+import time
+
 
 REQUIRE = "RUI_TEST_REQUIRE_ENGINES"
 MYSQL_SOCKET = "RUI_TEST_MYSQL_SOCKET"
@@ -45,3 +53,37 @@ def verify_mysql(environ):
     if counts.get("conformance", 0) == 0:
         return f"{path} counts no passed conformance test: the MySQL Store gate did not run or failed"
     return None
+
+
+@contextmanager
+def mysql_lease(environ, *, exclusive=False, timeout=1200, stop=None):
+    from host_process import wait_for
+    socket = environ.get(MYSQL_SOCKET)
+    if not socket:
+        yield None
+        return
+    key = hashlib.sha256(os.path.realpath(socket).encode()).hexdigest()
+    path = Path(tempfile.gettempdir()) / f"rui-unit-mysql-{key}.lock"
+    deadline = time.monotonic() + timeout
+    with ExitStack() as cleanup:
+        def open_lock(path, mode, description):
+            descriptor = os.open(path, os.O_CREAT | os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+            cleanup.callback(os.close, descriptor)
+            def acquire():
+                if stop is not None and stop.is_set():
+                    raise InterruptedError("unit root interrupted while waiting for MySQL")
+                try:
+                    fcntl.flock(descriptor, mode | fcntl.LOCK_NB)
+                    return True
+                except BlockingIOError:
+                    return False
+            wait_for(acquire, description, deadline=deadline, interval=.01)
+            return descriptor
+        if exclusive:
+            # Portable EX-to-SH conversion can briefly drop the main lock. Keep
+            # other writers out until the entire downgraded cohort has finished.
+            open_lock(path.with_suffix(".writer.lock"), fcntl.LOCK_EX, "MySQL fixture writer turn")
+        descriptor = open_lock(path, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH,
+                               "exclusive MySQL fixture phase" if exclusive else "shared MySQL fixture phase")
+        yield descriptor
+        # ExitStack closes the main lock before releasing the writer turn.

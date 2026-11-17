@@ -48,7 +48,7 @@ pub fn begin(self: *InputCapture, kind: Incoming, length: u64) !void {
     std.debug.assert(self.resources != null and self.state == .building and self.pending == null);
     errdefer self.state = .failed;
     if (length > content_string.max_bytes) return error.ContentTooLarge;
-    if (self.count == std.math.maxInt(u32)) return error.TooManyInputParts;
+    if (self.count >= parts.max_parts) return error.TooManyInputParts;
     _ = std.math.add(u64, self.length, length) catch return error.ContentTooLarge;
     const validator: @FieldType(Pending, "kind") = switch (kind) {
         .text => .{ .text = .{} },
@@ -304,9 +304,9 @@ test "input capture metadata grows on disk rather than in per-part arrays" {
     defer tmp.cleanup();
     var used = std.atomic.Value(u64).init(0);
     var capture: InputCapture = undefined;
-    try testCapture(&capture, tmp.dir, .{ .used = &used, .limit = 2048 * parts.Record.byte_length });
+    try testCapture(&capture, tmp.dir, .{ .used = &used, .limit = parts.max_parts * parts.Record.byte_length });
     defer capture.close();
-    for (0..2048) |_| {
+    for (0..parts.max_parts) |_| {
         try capture.begin(.text, 0);
         try capture.end();
     }
@@ -316,8 +316,8 @@ test "input capture metadata grows on disk rather than in per-part arrays" {
         try std.testing.expectEqual(@as(u64, 0), part.range.length);
         count += 1;
     }
-    try std.testing.expectEqual(@as(usize, 2048), count);
-    try std.testing.expectEqual(@as(u64, 2048 * parts.Record.byte_length), used.load(.acquire));
+    try std.testing.expectEqual(@as(usize, parts.max_parts), count);
+    try std.testing.expectEqual(@as(u64, parts.max_parts * parts.Record.byte_length), used.load(.acquire));
     capture.close();
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
 }
@@ -460,4 +460,21 @@ test "input cursor verifies its whole certificate before returning the last part
         capture.close();
         try std.testing.expectEqual(@as(u64, 53), used.load(.acquire));
     }
+}
+
+test "input capture refuses a part beyond the maximum at begin" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var used = std.atomic.Value(u64).init(0);
+    var capture: InputCapture = undefined;
+    try testCapture(&capture, tmp.dir, .{ .used = &used, .limit = (parts.max_parts + 1) * parts.Record.byte_length });
+    defer capture.close();
+    for (0..parts.max_parts) |_| {
+        try capture.begin(.text, 0);
+        try capture.end();
+    }
+    const charged = used.load(.monotonic);
+    try std.testing.expectError(error.TooManyInputParts, capture.begin(.text, 0));
+    try std.testing.expectEqual(charged, used.load(.monotonic));
+    try std.testing.expectEqual(@as(u32, parts.max_parts), capture.count);
 }

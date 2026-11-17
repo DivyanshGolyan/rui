@@ -71,7 +71,7 @@ class MetadataTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "failed "):
                 names.query(script)
             write("import sys\nsys.stdout.buffer.write(b'x' * 100)\n")
-            with patch.object(names, "MAX_BYTES", 32), self.assertRaisesRegex(ValueError, "size limit"):
+            with patch.object(names.metadata, "MAX_BYTES", 32), self.assertRaisesRegex(ValueError, "size limit"):
                 names.query(script)
 
     def test_cli_compare_and_dump(self):
@@ -105,7 +105,7 @@ class CompilerProbe(unittest.TestCase):
             generator = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(generator)
             (root / "runner.zig").write_text(generator.generate((Path(lib) / "compiler/test_runner.zig").read_text()))
-            (root / "partition.zig").write_text('const std = @import("std"); pub const Root = enum { aggregate, alpha, beta }; pub fn owner(n: []const u8) Root { if (std.mem.startsWith(u8,n,"alpha.")) return .alpha; if (std.mem.startsWith(u8,n,"nested.beta.")) return .beta; return .aggregate; }')
+            (root / "partition.zig").write_text('const std = @import("std"); pub const Timing = struct { name: []const u8, seconds: f64 }; pub const Root = enum { aggregate, alpha, beta }; pub fn owner(n: []const u8) Root { if (std.mem.startsWith(u8,n,"alpha.")) return .alpha; if (std.mem.startsWith(u8,n,"nested.beta.")) return .beta; return .aggregate; }')
             baseline = root / "before"
             subprocess.run([zig, "test", str(root / "aggregate.zig"), "--test-no-exec", "-fno-llvm", f"-femit-bin={baseline}"], check=True, timeout=60)
             aggregate = root / "aggregate.zig"
@@ -115,7 +115,7 @@ class CompilerProbe(unittest.TestCase):
             after = []
             for index, prefixes in enumerate((("aggregate.test.", "hidden.test."), ("alpha.test.", "alpha.Inner.test."), ("nested.beta.test.",))):
                 options = root / f"options{index}.zig"
-                options.write_text(f"pub const root: usize = {index};")
+                options.write_text(f"pub const root: usize = {index}; pub const sharded = false;")
                 binary = root / f"after{index}"
                 filters = [argument for prefix in prefixes for argument in ("--test-filter", prefix)]
                 subprocess.run([zig, "test", "--test-no-exec", "-fno-llvm", *filters,

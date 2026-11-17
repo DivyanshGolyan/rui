@@ -239,6 +239,7 @@ test "Current, activity pages and Message progress report one work through an ap
             const session = try configureTestSessionAsk(&storage, "mixed-config");
             try submitTestMessage(&storage, &tmp, "mixed-file", "mixed-message", session.slice(), "propose");
             const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try submitTestMessage(&storage, &tmp, "mixed-queued-file", "mixed-queued", session.slice(), "wait behind approval");
             try settleTwoActionsForTesting(&storage, &tmp, binding, "mixed-metadata");
             const before = try testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024);
             defer std.testing.allocator.free(before);
@@ -251,7 +252,6 @@ test "Current, activity pages and Message progress report one work through an ap
             var rounds = storage.testing_content_work.rounds;
             try std.testing.expectEqual(protocol.MessageProgressStatus.waiting_for_permission, (try store_testing.observeCommandForTesting(&storage, "mixed-message")).kind.message.?.work.?.state.progress().?);
             try std.testing.expectEqual(rounds + 1, storage.testing_content_work.rounds);
-            try submitTestMessage(&storage, &tmp, "mixed-queued-file", "mixed-queued", session.slice(), "wait behind approval");
             rounds = storage.testing_content_work.rounds;
             const queued = try store_testing.observeCommandForTesting(&storage, "mixed-queued");
             try std.testing.expectEqual(rounds + 1, storage.testing_content_work.rounds);

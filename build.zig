@@ -347,7 +347,7 @@ pub fn build(b: *std.Build) void {
 
     const ts_client = b.addSystemCommand(&.{"python3"});
     ts_client.addFileArg(b.path("tests/integration/host_process.py"));
-    ts_client.addArgs(&.{ "exec", "env" });
+    ts_client.addArgs(&.{ "exec-mysql", "env" });
     ts_client.addPrefixedFileArg("RUI_BINARY=", ci.path(release_safe));
     ts_client.addPrefixedFileArg("RUI_TEST_MYSQL_ADMIN=", ci.path(mysql_launch_admin));
     ts_client.addArgs(&.{ "node", "--experimental-strip-types", "--test", "--test-concurrency=1", "test/*.test.ts" });
@@ -363,6 +363,7 @@ pub fn build(b: *std.Build) void {
 
     const human_cli = screen_module.screenCommand(b, screen, &.{});
     human_cli.addPrefixedFileArg("RUI_TEST_TERMINAL_NOTICE=", ci.path(terminal_notice));
+    human_cli.addPrefixedFileArg("RUI_TEST_MYSQL_ADMIN=", ci.path(mysql_launch_admin));
     human_cli.addArg("python3");
     human_cli.addFileArg(b.path("tests/integration/human_cli_integration.py"));
     human_cli.addFileArg(ci.path(release_safe));

@@ -22,7 +22,6 @@ from preset_creation_cases import preset_creation
 
 
 def main():
-    host_process.enter()
     socket = os.environ.get(live_engines.MYSQL_SOCKET)
     password = os.environ.get(live_engines.MYSQL_ROOT_PASSWORD)
     if not socket or not password:
@@ -334,5 +333,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
-    store_rounds_cases.run(*(str(pathlib.Path(arg).resolve()) for arg in sys.argv[1:3]))
+    host_process.enter()
+    with live_engines.mysql_lease(os.environ):
+        main()
+        store_rounds_cases.run(*(str(pathlib.Path(arg).resolve()) for arg in sys.argv[1:3]))

@@ -1,8 +1,10 @@
 import os
+import fcntl
 from pathlib import Path
 import re
 import sys
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -34,7 +36,7 @@ class LauncherTest(unittest.TestCase):
         launch = [line for line in (ROOT / "tests/integration/check.sh").read_text().splitlines()
                   if 'run_case execution native ' in line]
         self.assertEqual(len(launch), 1, launch)
-        self.assertIn('--unit-roots "$test_binary" "$@"', launch[0])
+        self.assertIn('store_shards.py" "$unit_mode" "$test_binary" --timeout 1200', launch[0])
         self.assertIn('"$directory/host_process.py" exec', launch[0])
 
     def test_the_fixture_boundary_keeps_every_live_engine_variable(self):
@@ -45,6 +47,133 @@ class LauncherTest(unittest.TestCase):
             kept = dict(os.environ)
         self.assertEqual({name: kept.get(name) for name in environ}, environ)
         self.assertNotIn("RUI_UNRELATED", kept)
+
+
+class LeaseTest(unittest.TestCase):
+    def test_exclusive_phase_blocks_other_process_descriptions_until_downgrade(self):
+        with tempfile.TemporaryDirectory() as directory:
+            environ = {live_engines.MYSQL_SOCKET: str(Path(directory) / "server.sock")}
+            with live_engines.mysql_lease(environ, exclusive=True) as writer:
+                # Independent open descriptions see the same server lock, even
+                # through a symlink spelling of its socket directory.
+                import hashlib
+                key = hashlib.sha256(os.path.realpath(environ[live_engines.MYSQL_SOCKET]).encode()).hexdigest()
+                path = Path(tempfile.gettempdir()) / f"rui-unit-mysql-{key}.lock"
+                with path.open() as other:
+                    with self.assertRaises(BlockingIOError):
+                        fcntl.flock(other, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                    fcntl.flock(writer, fcntl.LOCK_SH)
+                    fcntl.flock(other, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                    with self.assertRaises(BlockingIOError):
+                        fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with live_engines.mysql_lease(environ, exclusive=True, timeout=.1):
+                pass
+
+    def test_competing_writer_cannot_enter_a_nonatomic_downgrade_gap(self):
+        class ProbeComplete(Exception):
+            pass
+        with tempfile.TemporaryDirectory() as directory:
+            environ = {live_engines.MYSQL_SOCKET: str(Path(directory) / "server.sock")}
+            flock = fcntl.flock
+            with live_engines.mysql_lease(environ, exclusive=True) as writer:
+                def probe(observe, description, **kwargs):
+                    # An independent open description represents the other
+                    # cohort. Observe its real nonblocking acquisition once.
+                    self.assertFalse(observe(), "competing writer entered the non-atomic downgrade gap")
+                    raise ProbeComplete
+                def convert(descriptor, operation):
+                    if descriptor == writer and operation == fcntl.LOCK_SH:
+                        # flock permits this unlock/relock implementation. The
+                        # first ordinary test is active during the whole gap.
+                        flock(writer, fcntl.LOCK_UN)
+                        try:
+                            with patch.object(host_process, "wait_for", side_effect=probe):
+                                with self.assertRaises(ProbeComplete):
+                                    with live_engines.mysql_lease(environ, exclusive=True):
+                                        self.fail("competing writer reached its exclusive phase")
+                        finally:
+                            flock(writer, fcntl.LOCK_SH)
+                    else:
+                        flock(descriptor, operation)
+                with patch.object(fcntl, "flock", side_effect=convert):
+                    fcntl.flock(writer, fcntl.LOCK_SH)
+                # The writer turn protects only competing exclusive cohorts;
+                # ordinary readers still overlap after the downgrade.
+                with live_engines.mysql_lease(environ) as reader:
+                    self.assertNotEqual(reader, writer)
+            with live_engines.mysql_lease(environ, exclusive=True):
+                pass
+
+    def test_both_acquisitions_share_one_deadline_and_close_in_reverse_order(self):
+        with tempfile.TemporaryDirectory() as directory:
+            environ = {live_engines.MYSQL_SOCKET: str(Path(directory) / "server.sock")}
+            opened, closed, deadlines = [], [], []
+            open_descriptor, close_descriptor = os.open, os.close
+            clock = [10.0]
+            def record_open(*args, **kwargs):
+                descriptor = open_descriptor(*args, **kwargs)
+                opened.append(descriptor)
+                return descriptor
+            def record_close(descriptor):
+                closed.append(descriptor)
+                close_descriptor(descriptor)
+            def acquire(observe, description, *, deadline, **kwargs):
+                deadlines.append(deadline)
+                self.assertTrue(observe())
+                clock[0] += 2
+            with patch.object(live_engines.time, "monotonic", side_effect=lambda: clock[0]), \
+                    patch.object(host_process, "wait_for", side_effect=acquire), \
+                    patch.object(os, "open", side_effect=record_open), \
+                    patch.object(os, "close", side_effect=record_close):
+                with live_engines.mysql_lease(environ, exclusive=True, timeout=5) as descriptor:
+                    self.assertEqual(descriptor, opened[-1])
+            self.assertEqual(deadlines, [15.0, 15.0])
+            self.assertEqual(len(opened), 2)
+            self.assertEqual(closed, list(reversed(opened)))
+
+    def test_cancellation_at_either_acquisition_closes_all_descriptors(self):
+        for interrupted_acquisition in (1, 2):
+            with self.subTest(acquisition=interrupted_acquisition), tempfile.TemporaryDirectory() as directory:
+                environ = {live_engines.MYSQL_SOCKET: str(Path(directory) / "server.sock")}
+                stop = threading.Event()
+                calls = 0
+                open_descriptor = os.open
+                opened = []
+                def record_open(*args, **kwargs):
+                    descriptor = open_descriptor(*args, **kwargs)
+                    opened.append(descriptor)
+                    return descriptor
+                def acquire(observe, description, **kwargs):
+                    nonlocal calls
+                    calls += 1
+                    if calls == interrupted_acquisition:
+                        stop.set()
+                    self.assertTrue(observe())
+                with patch.object(host_process, "wait_for", side_effect=acquire), \
+                        patch.object(os, "open", side_effect=record_open):
+                    with self.assertRaises(InterruptedError):
+                        with live_engines.mysql_lease(environ, exclusive=True, stop=stop):
+                            self.fail("cancelled MySQL lease was yielded")
+                self.assertEqual(len(opened), interrupted_acquisition)
+                for descriptor in opened:
+                    with self.assertRaises(OSError):
+                        os.fstat(descriptor)
+                # A cancelled owner leaves neither lease held.
+                with live_engines.mysql_lease(environ, exclusive=True, timeout=.1):
+                    pass
+
+    def test_every_external_consumer_holds_the_shared_lease(self):
+        for filename in ("host_status_integration.py", "settings_mysql_integration.py"):
+            source = (ROOT / "tests/integration" / filename).read_text()
+            self.assertIn("with live_engines.mysql_lease(os.environ):", source)
+
+    def test_typescript_uses_the_shared_mysql_exec_boundary(self):
+        import build_files
+        self.assertIn('ts_client.addArgs(&.{ "exec-mysql", "env" });', build_files.source())
+
+    def test_no_server_needs_no_lease(self):
+        with live_engines.mysql_lease({}) as descriptor:
+            self.assertIsNone(descriptor)
 
 
 class NamesTest(unittest.TestCase):

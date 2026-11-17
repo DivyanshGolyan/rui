@@ -64,8 +64,8 @@ test "complete call outcomes continue once in call order ahead of pending input"
         .{ .item_id = "result-item-2", .name = "bash", .encoded_call_id = "result-call-2", .decoded_call_id = "result-call-2", .encoded_arguments = "{", .decoded_arguments = "{" },
         .{ .item_id = "result-item-3", .name = "bash", .encoded_call_id = "result-call-3", .decoded_call_id = "result-call-3", .encoded_arguments = "{\\\"description\\\":\\\"Run third command\\\",\\\"cmd\\\":\\\"three\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"description\":\"Run third command\",\"cmd\":\"three\",\"timeout_ms\":null}" },
     };
-    try settleCallsForTesting(&storage, &tmp, first_binding, "result-metadata", &calls);
     try submitTestMessage(&storage, &tmp, "result-second", "result-second", session.slice(), "second");
+    try settleCallsForTesting(&storage, &tmp, first_binding, "result-metadata", &calls);
     try std.testing.expect((try storage.admitNextModelAttempt(.{})) == null);
 
     const first_action_id = try store_testing.sqlite_only.queryU64(&storage, "SELECT min(action_id) FROM action_operation", .{});

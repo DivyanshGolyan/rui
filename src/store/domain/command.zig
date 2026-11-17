@@ -27,6 +27,7 @@ const Store = store_core.Store;
 const action_domain = @import("action.zig");
 const configuration_domain = @import("configuration.zig");
 const content_domain = @import("content.zig");
+const content_parts = @import("content_parts.zig");
 const reads_domain = @import("reads.zig");
 const report_domain = @import("report.zig");
 const store_schema = @import("../schema.zig");
@@ -188,6 +189,7 @@ pub const SubmitMessage = struct {
         .catalog = .{.branch},
         .text = .{.branch},
         .failure = .{.branch},
+        .input = .{.paged},
         .skill = .{.paged},
     });
     pub const round_budget = 2;
@@ -202,6 +204,7 @@ pub const SubmitMessage = struct {
         committed: ?MessageCommitted,
         initial_skills: ?*const skills_domain.Initial,
         captured: ?*const skills_domain.MessageCapture,
+        parts_saving: ?*content_parts.Saving = null,
         reply: *MessageReply,
     };
     pub const Result = void;
@@ -224,6 +227,8 @@ pub const SubmitMessage = struct {
         skills: skills_domain.SavingBound,
     } = undefined,
     admission_id: u64 = 0,
+    pending: enum { accepted, rejected } = .accepted,
+    refusal_diagnostic: ?u64 = null,
 
     pub fn step(t: *SubmitMessage, r: *transition.Round(SubmitMessage), ran: ?rounds.At) !transition.Next(SubmitMessage) {
         const at = ran orelse return t.start(r);
@@ -245,6 +250,7 @@ pub const SubmitMessage = struct {
                 return t.admit(r, applied);
             },
             .failure => return t.rejectDiagnosed(r),
+            .input => return t.continueInput(r),
             .skill => return t.saveSkill(r),
         }
     }
@@ -262,20 +268,25 @@ pub const SubmitMessage = struct {
         return if (t.input.command.configuration != null) &t.creation.message else &t.plain;
     }
 
-    noinline fn start(t: *SubmitMessage, r: *transition.Round(SubmitMessage)) transition.Next(SubmitMessage) {
+    noinline fn start(t: *SubmitMessage, r: *transition.Round(SubmitMessage)) !transition.Next(SubmitMessage) {
         const command = t.input.command;
         if (command.configuration != null) {
             t.creation = r.configurationReads();
             t.creation.* = .{ .next = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } } };
         }
         const message = t.reads();
-        message.* = .{ .digest = command.semanticDigest(), .text = content_domain.sealedIdentity(&command.text) };
+        if (t.input.parts_saving) |saving| saving.restart();
+        const identity = if (t.input.parts_saving) |saving| saving.reference.identity() else null;
+        message.* = .{ .digest = if (t.input.parts_saving) |saving| command.semanticDigestForInput(saving.reference) else command.semanticDigest(), .text = if (identity) |value| .{ .digest = value.digest, .length = value.length, .private = false } else content_domain.sealedIdentity(&command.text) };
+        if (t.input.parts_saving) |saving| {
+            if (try saving.step(r, t.input.io, r.faults()) != .round) return error.ContentChanged;
+        }
         readMessage(r, t.input.selector, command, message);
         if (command.configuration) |*configuration| {
             configuration_domain.prepareConfiguration(r, t.input.tools.host_tool_set, "", configuration, t.creation);
         } else {
             readTarget(r, command.session.slice(), &t.target);
-            content_domain.lookup(r, &message.text);
+            if (t.input.parts_saving == null) content_domain.lookup(r, &message.text);
         }
         return .{ .round = .facts };
     }
@@ -286,7 +297,7 @@ pub const SubmitMessage = struct {
         switch (try classify(message_admission.Rejection, &message.saved, .message, command.session.slice(), &message.digest)) {
             .fresh => {},
             .conflict => return t.done(.conflict),
-            .rejected => |code| return t.done(.{ .rejected = .{ .replayed = true, .code = code, .content = .{ .length = command.text.length, .digest = command.text.digest } } }),
+            .rejected => |code| return t.done(.{ .rejected = .{ .replayed = true, .code = code, .content = if (t.input.parts_saving) |saving| saving.reference.identity() else .{ .length = command.text.length, .digest = command.text.digest } } }),
             .accepted => |existing| {
                 _ = existing.primary_content_id orelse return error.CorruptStore;
                 t.later = .{ .replay = undefined };
@@ -395,6 +406,10 @@ pub const SubmitMessage = struct {
             } },
             .accepted => {},
         }
+        if (t.input.parts_saving != null) {
+            t.head = t.creation.applied.head;
+            return t.admit(r, &t.creation.applied);
+        }
         content_domain.lookup(r, &t.creation.message.text);
         return .{ .round = .text };
     }
@@ -408,11 +423,33 @@ pub const SubmitMessage = struct {
     }
 
     fn reject(t: *SubmitMessage, r: *transition.Round(SubmitMessage), outcome_id: ?u64) !transition.Next(SubmitMessage) {
+        t.refusal_diagnostic = outcome_id;
+        t.pending = .rejected;
+        if (t.input.parts_saving != null) return t.continueInput(r);
+        if (t.input.command.configuration != null) {
+            content_domain.lookup(r, &t.reads().text);
+            return .{ .round = .input };
+        }
+        return t.finishRefusal(r, try content_parts.Saving.saveSealed(r, t.input.io, &t.reads().text, &t.input.command.text, r.faults()));
+    }
+
+    fn continueInput(t: *SubmitMessage, r: *transition.Round(SubmitMessage)) !transition.Next(SubmitMessage) {
+        if (t.input.parts_saving) |saving| {
+            return switch (try saving.step(r, t.input.io, r.faults())) {
+                .round => .{ .round = .input },
+                .saved => |saved| if (t.pending == .rejected) try t.finishRefusal(r, saved.content_id) else try t.admitSaved(r, saved.content_id),
+            };
+        }
+        std.debug.assert(t.pending == .rejected);
+        return t.finishRefusal(r, try content_parts.Saving.saveSealed(r, t.input.io, &t.reads().text, &t.input.command.text, r.faults()));
+    }
+
+    fn finishRefusal(t: *SubmitMessage, r: *transition.Round(SubmitMessage), content_id: u64) !transition.Next(SubmitMessage) {
         const command = t.input.command;
         const message = t.reads();
         t.answer = .{ .accepted = false };
         try t.answer.code.set(@tagName(t.rejection));
-        try queueCommand(r, command.key.slice(), .message, command.session.slice(), &message.digest, outcome_id, null, &t.answer);
+        try queueCommand(r, command.key.slice(), .message, command.session.slice(), &message.digest, content_id, t.refusal_diagnostic, &t.answer);
         if (command.sender != null and t.sender_valid) {
             const sender = message.sender.?.session;
             r.write(reject_sent, .{ .key = command.key.slice(), .sender = sender, .position = try (try r.positions(sender)).take(1) });
@@ -421,14 +458,19 @@ pub const SubmitMessage = struct {
         return .commit;
     }
 
-    noinline fn admit(
-        t: *SubmitMessage,
-        r: *transition.Round(SubmitMessage),
-        configured: ?*const configuration_domain.Applied,
-    ) !transition.Next(SubmitMessage) {
+    noinline fn admit(t: *SubmitMessage, r: *transition.Round(SubmitMessage), configured: ?*const configuration_domain.Applied) !transition.Next(SubmitMessage) {
+        _ = configured;
+        t.pending = .accepted;
+        if (t.input.parts_saving != null) return t.continueInput(r);
+        const command = t.input.command;
+        const text_id = try content_parts.Saving.saveSealed(r, t.input.io, &t.reads().text, &command.text, r.faults());
+        return t.admitSaved(r, text_id);
+    }
+
+    noinline fn admitSaved(t: *SubmitMessage, r: *transition.Round(SubmitMessage), text_id: u64) !transition.Next(SubmitMessage) {
         const command = t.input.command;
         const message = t.reads();
-        const text_id = try content_domain.importSealed(r, t.input.io, &command.text, &message.text, r.faults());
+        const configured: ?*const configuration_domain.Applied = if (command.configuration != null) &t.creation.applied else null;
         t.answer = .{ .accepted = true };
         const admission_id = if (command.sender != null)
             try admitFromSession(r, &message.sender.?.session, &t.head, command.key.slice(), text_id, &message.digest, configured, &t.answer)
@@ -460,7 +502,7 @@ pub const SubmitMessage = struct {
     pub fn committed(t: *SubmitMessage) Result {
         const command = t.input.command;
         if (t.admission_id == 0) {
-            t.input.reply.* = .{ .rejected = .{ .replayed = false, .code = t.rejection, .content = .{ .length = command.text.length, .digest = command.text.digest } } };
+            t.input.reply.* = .{ .rejected = .{ .replayed = false, .code = t.rejection, .content = if (t.input.parts_saving) |saving| saving.reference.identity() else .{ .length = command.text.length, .digest = command.text.digest } } };
             return;
         }
         const message = t.reads();
@@ -542,7 +584,7 @@ pub const DeliverAgentMessage = struct {
                 if (!t.delivered) return t.resolve(r);
                 const receiver = &t.receiver.?;
                 if (receiver.archive_state == .archived) r.write(clear_archive, .{ .session = receiver.session });
-                const text_id = try content_domain.importBytes(r, &t.message, t.input.text);
+                const text_id = try content_parts.Saving.saveBytes(r, &t.message, t.input.text, r.faults());
                 const digest = sentDigest("rui/core/message_agent/v1", &content_string.digest(t.input.text));
                 const admission_id = try admitFromSession(r, &t.facts.?.session, &receiver.session, t.key, text_id, &digest, null, &.{ .accepted = true });
                 t.skills = .{ .admission_id = admission_id, .bound = boundOf(t.input.captured) };
@@ -600,7 +642,7 @@ fn childEndingKey(buffer: *[idempotency_key.max_bytes]u8, turn_id: u64) []const 
 }
 
 const owed_ending_facts = rsql.Read(.{
-    .sql = "SELECT child.session_ref,child.workspace_key,child.next_position,child.parent_ref AS parent,t.outcome_code,t.outcome_content_id,c.digest,CASE WHEN t.outcome_content_id IS NOT NULL AND t.outcome_code<>'completed' THEN @payload(c) ELSE NULL END AS report," ++
+    .sql = "SELECT child.session_ref,child.workspace_key,child.next_position,child.parent_ref AS parent,t.outcome_code,t.outcome_content_id,c.digest,c.byte_length,CASE WHEN t.outcome_content_id IS NOT NULL AND t.outcome_code<>'completed' THEN @payload(c) ELSE NULL END AS report," ++
         action_domain.ending_stop_sql ++ " FROM session_forward e JOIN turn t ON t.turn_id=e.source_id " ++
         "JOIN session child ON child.session_ref=t.session_ref LEFT JOIN content c ON c.content_id=t.outcome_content_id WHERE e.source_id=?1 AND e.message_delivered=0",
     .Args = struct { turn_id: u64 },
@@ -610,6 +652,7 @@ const owed_ending_facts = rsql.Read(.{
         outcome_code: Bounded(outcome_code.max_bytes),
         outcome_content_id: ?rsql.Positive,
         digest: ?[32]u8,
+        byte_length: ?u64,
         report: ?Bounded(outcome_code.max_report_bytes),
         stopped: bool,
         quiet: bool,
@@ -671,8 +714,8 @@ pub const DeliverChildEnding = struct {
                 t.outcome = try TurnOutcome.decode(found.outcome_code.slice(), if (found.outcome_content_id) |id| @intCast(id.get()) else null);
                 t.text = endingText(&t.input.ending.text_buffer, t.outcome.ending(found.stopped), if (found.report) |*report| report.slice() else null);
                 readTarget(r, found.parent.slice(), &t.receiver);
-                t.message = .ofBytes(t.text, false);
-                if (t.outcome != .completed) content_domain.lookup(r, &t.message);
+                t.message = if (t.outcome == .completed) .{ .length = found.byte_length orelse return error.CorruptStore, .digest = found.digest orelse return error.CorruptStore, .private = false } else .ofBytes(t.text, false);
+                content_domain.lookup(r, &t.message);
                 return .{ .round = .parent };
             },
             .parent => {
@@ -681,8 +724,8 @@ pub const DeliverChildEnding = struct {
                 if (parent.archive_state != .active) return finish(r);
                 const found = &t.input.ending.owed.?;
                 const content_id: u64, const content_digest: [32]u8 = switch (t.outcome) {
-                    .completed => |answer| .{ @intCast(answer), found.digest orelse return error.CorruptStore },
-                    else => .{ try content_domain.importBytes(r, &t.message, t.text), content_string.digest(t.text) },
+                    .completed => |answer| .{ try content_parts.Saving.saveRetained(&t.message, @intCast(answer), r.faults()), found.digest orelse return error.CorruptStore },
+                    else => .{ try content_parts.Saving.saveBytes(r, &t.message, t.text, r.faults()), content_string.digest(t.text) },
                 };
                 const digest = sentDigest("rui/core/child_ending/v1", &content_digest);
                 const admission_id = try admitFromSession(r, &found.child, &parent.session, t.key, content_id, &digest, null, &.{ .accepted = true });
@@ -873,7 +916,7 @@ pub const StartAgent = struct {
         content_domain.foundPair(&t.rows, &t.message, &t.outcome);
         if (r.faults().content_import) return error.InjectedContentImportFailure;
         const task = t.input.task;
-        const text_id = try content_domain.importBytes(r, &t.message, task);
+        const text_id = try content_parts.Saving.saveBytes(r, &t.message, task, r.faults());
         const digest = sentDigest("rui/core/start_agent/v1", &content_string.digest(task));
         t.answer = .{ .accepted = true, .revision = applied.revision, .created = true };
         t.admission_id = try admitFromSession(r, &t.facts.?.session, &applied.head, t.key, text_id, &digest, applied, &t.answer);
@@ -1948,11 +1991,12 @@ pub const InterruptModel = struct {
 
 const decision_action = rsql.Read(.{
     .sql = "SELECT s.session_ref,s.workspace_key,s.next_position,a.authorized,a.background_position IS NOT NULL AS background," ++ action_domain.actionStoppedSql("a", "operation") ++ " AS stopped,a.resolution_code IS NULL AS unresolved,(t.outcome_code IS NULL OR a.background_position IS NOT NULL) AS turn_open,t.turn_id," ++
-        "EXISTS(SELECT 1 FROM session_forward f WHERE f.target_ref=?2 AND f.kind=1 AND f.source_id=a.action_id AND f.position IS NOT NULL) AS forwarded " ++
+        "EXISTS(SELECT 1 FROM session_forward f WHERE f.target_ref=?2 AND f.kind=1 AND f.source_id=a.action_id AND f.position IS NOT NULL) AS forwarded," ++
+        action_domain.messageDeclinesApprovalSql("a") ++ " AS message_decline " ++
         "FROM action_operation a JOIN session s ON s.session_ref=a.session_ref " ++
         "JOIN model_operation operation ON operation.operation_id=a.parent_operation_id JOIN turn t ON t.turn_id=operation.turn_id WHERE a.action_id=?1",
     .Args = struct { action_id: u64, target: []const u8 },
-    .Row = struct { session: rsql.SessionHead, authorized: bool, background: bool, stopped: bool, unresolved: bool, turn_open: bool, turn_id: rsql.Positive, forwarded: bool },
+    .Row = struct { session: rsql.SessionHead, authorized: bool, background: bool, stopped: bool, unresolved: bool, turn_open: bool, turn_id: rsql.Positive, forwarded: bool, message_decline: bool },
     .cardinality = .optional,
 });
 
@@ -1986,13 +2030,14 @@ fn decisionRejection(
     command: *const command_input.PermissionDecisionCommand,
     target: target_session.Result,
     action: decision_action.Result,
+    automatic: bool,
 ) ?mutation_answer.PermissionDecisionRejection {
     if (!session_id.valid(command.session.slice())) return .invalid_session_reference;
     if (!validId(command.action_id)) return .invalid_target;
     if (target == null) return .unknown_session;
     const found = action orelse return .unknown_action;
     if (!std.mem.eql(u8, &found.session.ref, command.session.slice()) and !found.forwarded) return .target_mismatch;
-    if (found.authorized or !found.unresolved or !found.turn_open) return .action_not_pending;
+    if (found.authorized or !found.unresolved or !found.turn_open or (found.message_decline and !automatic)) return .action_not_pending;
     return null;
 }
 
@@ -2001,7 +2046,7 @@ pub const DecidePermission = struct {
     pub const round_budget = 2;
     pub const commit: transition.Commit = .transaction;
     pub const begin: ?rounds.At = .facts;
-    pub const Input = struct { command: *const command_input.PermissionDecisionCommand };
+    pub const Input = struct { command: *const command_input.PermissionDecisionCommand, denial_reason: ?[]const u8 = null };
     pub const Result = PermissionDecisionReply;
     pub const Ordinary = store_core.Ordinary.none;
     pub const Guards = error{ActionSelectionChanged};
@@ -2029,7 +2074,10 @@ pub const DecidePermission = struct {
                 readTarget(r, session, &t.target);
                 if (session_id.valid(session)) r.read(decision_action, .{ .action_id = command.action_id, .target = session }, &t.action);
             }
-            if (command.decision == .deny) content_domain.lookup(r, &t.content);
+            if (command.decision == .deny) {
+                if (t.input.denial_reason) |reason| t.content = .ofBytes(reason, false);
+                content_domain.lookup(r, &t.content);
+            }
             return .{ .round = .facts };
         }
         switch (try classify(mutation_answer.PermissionDecisionRejection, &t.saved, .permission_decision, session, &t.digest)) {
@@ -2039,7 +2087,7 @@ pub const DecidePermission = struct {
             .rejected => |code| return .{ .done = .{ .rejected = .{ .replayed = true, .code = code } } },
         }
 
-        t.rejection = decisionRejection(command, t.target, t.action);
+        t.rejection = decisionRejection(command, t.target, t.action, t.input.denial_reason != null);
         t.answer = .{ .accepted = t.rejection == null };
         if (t.rejection) |code| try t.answer.code.set(@tagName(code));
         try queueCommand(r, command.key.slice(), .permission_decision, session, &t.digest, null, null, &t.answer);
@@ -2052,7 +2100,7 @@ pub const DecidePermission = struct {
                 .deny => {
                     if (r.faults().content_import) return error.InjectedContentImportFailure;
                     const positions = try r.positions(head);
-                    const content_id = try content_domain.importBytes(r, &t.content, denial_text);
+                    const content_id = try content_domain.importBytes(r, &t.content, t.input.denial_reason orelse denial_text);
                     r.write(deny_action, .{ .action_id = command.action_id, .content_id = content_id, .position = try positions.take(1), .session = head });
                     try t.final_input.admit(r, &found.session, command.action_id, content_id, .{ .background = found.background, .stopped = found.stopped });
                     turn_domain.queueContinuation(r, found.turn_id.get(), head);
@@ -2224,7 +2272,7 @@ const message_observation = rsql.Read(.{
         "SELECT stopped.command_key FROM session_stop stopped JOIN core_command stop_command " ++
         "ON stop_command.command_key=stopped.command_key WHERE stopped.session_ref=m.session_ref " ++
         "AND m.admission_id<=stopped.admission_cutoff ORDER BY stop_command.command_seq LIMIT 1) END AS excluding_stop," ++
-        "input.byte_length AS input_length,input.digest AS input_digest,answer.byte_length AS answer_length,answer.digest AS answer_digest," ++
+        "input.byte_length AS input_length,input.digest AS input_digest,input.private AS input_private,input.form AS input_form,answer.byte_length AS answer_length,answer.digest AS answer_digest," ++
         "s.created_at,m.admitted_at,EXISTS(SELECT 1 FROM action_operation a @index(action_operation_indeterminate) WHERE " ++ recovery_range_sql ++ ") AS has_recovery " ++
         "FROM message_admission m JOIN content input ON input.content_id=m.content_id JOIN session s ON s.session_ref=m.session_ref " ++
         "LEFT JOIN turn t ON t.turn_id=m.turn_id " ++
@@ -2245,6 +2293,8 @@ const message_observation = rsql.Read(.{
         excluding_stop: ?Bounded(128),
         input_length: u64,
         input_digest: [32]u8,
+        input_private: bool,
+        input_form: u8,
         answer_length: ?u64,
         answer_digest: ?[32]u8,
         created_at: rsql.Positive,
@@ -2282,10 +2332,20 @@ pub fn observeCommand(a: anytype, key: []const u8, observation: *CommandObservat
         .configure => observation.kind = .{ .configure = .{ .revision = command.revision, .created = command.created } },
         .message => {
             observation.kind = .{ .message = null };
-            if (!command.accepted) return;
+            if (!command.accepted) {
+                if (command.primary_content_id) |id| {
+                    var metadata: content_domain.content_metadata.Row = undefined;
+                    a.read(content_domain.content_metadata, .{ .content_id = @intCast(id) }, &metadata);
+                    try store_access.runAs(a, error.CorruptStore);
+                    _ = try content_parts.publicMetadata(a, @intCast(id), &metadata);
+                }
+                return;
+            }
             const row = message orelse return error.CorruptStore;
             const content_id = command.primary_content_id orelse return error.CorruptStore;
             if (!row.session_ref.eql(command.target.slice()) or row.content_id.get() != content_id) return error.CorruptStore;
+            const metadata: content_domain.content_metadata.Row = .{ .byte_length = row.input_length, .digest = row.input_digest, .private = row.input_private, .form = row.input_form };
+            _ = try content_parts.publicMetadata(a, row.content_id.get(), &metadata);
             const queue = try messageQueue(&row);
             observation.kind.message = .{ .content = .{ .length = row.input_length, .digest = row.input_digest }, .queue = queue, .admitted_at = row.admitted_at.get() };
             if (row.has_recovery) try readRecovery(a, key, &observation.kind.message.?.recovery);
@@ -2420,9 +2480,9 @@ const message_result = rsql.Read(.{
         "FROM core_command command JOIN message_admission m ON m.command_key=command.command_key " ++
         "LEFT JOIN turn t ON t.turn_id=m.turn_id LEFT JOIN content answer ON answer.content_id=t.outcome_content_id " ++
         "WHERE command.command_key=?1 AND command.kind=2 AND command.accepted=1 UNION ALL " ++
-        "SELECT NULL,command.primary_content_id,0,outcome.byte_length,outcome.digest,outcome.private,1 " ++
-        "FROM core_command command LEFT JOIN content outcome ON outcome.content_id=command.primary_content_id " ++
-        "WHERE command.command_key=?1 AND command.primary_content_id IS NOT NULL AND " ++
+        "SELECT NULL,CASE WHEN command.kind=2 THEN command.secondary_content_id ELSE command.primary_content_id END,0,outcome.byte_length,outcome.digest,outcome.private,1 " ++
+        "FROM core_command command LEFT JOIN content outcome ON outcome.content_id=CASE WHEN command.kind=2 THEN command.secondary_content_id ELSE command.primary_content_id END " ++
+        "WHERE command.command_key=?1 AND (CASE WHEN command.kind=2 THEN command.secondary_content_id ELSE command.primary_content_id END) IS NOT NULL AND " ++
         "(command.accepted=0 OR (command.kind=1 AND command.code IN ('skills_reloaded','skills_unchanged')))",
     .Args = struct { key: []const u8 },
     .Row = struct {
