@@ -320,15 +320,38 @@ def publication_prefix(env):
     return temporary / "rui-compiled-build" / "bin"
 
 
+def publication_report(env, key, local, global_cache, *, prefixes=()):
+    """Every build candidate passes this owner before receiving its save key."""
+    original = env.get("RUI_CACHE_BUILD_KEY", "")
+    compiled = r"rui-build-v4-Linux-X64-[^-]+-[^-]+-compiled\."
+    if not any(re.match(compiled, value) for value in (original, key)):
+        return dict(key=key)
+    # A failed/cancelled compile has no authoritative current output set. Never
+    # publish its whole restored cache under a newer partial fallback key.
+    if key != original:
+        raise SnapshotError("Linux compiled partial publication requires successful complete compaction")
+    prefix = publication_prefix(env)
+    if prefixes and list(prefixes) != [prefix]:
+        raise SnapshotError("publisher uses only its current producer prefix")
+    report = compact(local, global_cache, prefixes=[prefix])
+    report["key"] = key
+    return report
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--local", type=Path, default=Path(".zig-cache"))
     parser.add_argument("--global-cache", type=Path, default=Path.home() / ".cache/zig")
     parser.add_argument("--protect-prefix", type=Path, action="append", default=[])
-    parser.add_argument("--prune", action="store_true")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--prune", action="store_true")
+    mode.add_argument("--publication-key", help="prepare this candidate or return an empty save key")
     args = parser.parse_args()
     try:
-        if args.prune:
+        if args.publication_key is not None:
+            report = publication_report(os.environ, args.publication_key, args.local, args.global_cache,
+                                        prefixes=args.protect_prefix)
+        elif args.prune:
             prefix = publication_prefix(os.environ)
             if args.protect_prefix and args.protect_prefix != [prefix]:
                 raise SnapshotError("publisher uses only its current producer prefix")
@@ -337,6 +360,8 @@ def main():
             report = audit(args.local, args.global_cache, prefixes=args.protect_prefix)
     except (SnapshotError, OSError, KeyError, json.JSONDecodeError, subprocess.CalledProcessError) as error:
         report = dict(skipped=str(error), removable=[], removable_bytes=0)
+        if args.publication_key is not None:
+            report["key"] = ""
     print(json.dumps(report, sort_keys=True))
 
 

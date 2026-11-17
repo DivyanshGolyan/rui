@@ -1694,14 +1694,11 @@ fi
             path = lambda body: re.search(r'(?ms)^        path: (.*?)(?=^        key:)', body).group(1)
             self.assertEqual(path(restore), path(save))
         self.assertIn("node .github/actions/setup/caches/save-keys.cjs", setup)
-        compaction = setup.index('run: python3 -B tests/ci/cache_snapshot.py --prune')
-        self.assertLess(setup.index('id: save-keys'), compaction)
-        self.assertLess(compaction, setup.index('key: ${{ steps.save-keys.outputs.build-key }}'))
-        compact_step = setup[setup.rfind('    - name:', 0, compaction):compaction]
-        for guard in ("inputs.save-only == 'true'", "inputs.work-outcome == 'success'",
-                      "runner.os == 'Linux'", "runner.arch == 'X64'",
-                      "steps.save-keys.outputs.build-key != ''"):
-            self.assertIn(guard, compact_step)
+        self.assertNotIn('cache_snapshot.py --prune', setup)
+        self.assertLess(setup.index('id: save-keys'), setup.index('key: ${{ steps.save-keys.outputs.build-key }}'))
+        publication = Path('.github/actions/setup/caches/save-keys.cjs').read_text()
+        self.assertIn("'tests/ci/cache_snapshot.py', '--publication-key', key", publication)
+        self.assertIn('Object.entries(publicationKeys(env))', publication)
 
     def test_ci_test_methods_cannot_silently_replace_another_check(self):
         for path in Path('tests/ci').glob('test_*.py'):
