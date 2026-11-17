@@ -240,9 +240,13 @@ jobs:
           du -a -b .zig-cache "$HOME/.cache/zig" zig-pkg screen-emulator/zig-pkg > "$RUNNER_TEMP/rui-cache-profile/before.tsv"
           command -v strace
           python3 - <<'PY'
-          import os, pathlib, subprocess
-          paths = [str(p) for root in (pathlib.Path('.zig-cache/h'), pathlib.Path.home() / '.cache/zig/h')
+          import json, os, pathlib, subprocess
+          files = [p for root in (pathlib.Path('.zig-cache/h'), pathlib.Path.home() / '.cache/zig/h')
                    for p in sorted(root.glob('*')) if len(p.name) == 32 and p.is_file()]
+          empty = [str(p) for p in files if p.stat().st_size == 0]
+          pathlib.Path(os.environ['RUNNER_TEMP'], 'rui-cache-profile', 'unfinalized-manifests.json').write_text(json.dumps(empty))
+          empty_set = set(empty)
+          paths = [str(p) for p in files if str(p) not in empty_set]
           with open(os.environ['RUNNER_TEMP'] + '/rui-cache-profile/manifests.zon', 'w') as out:
               for i in range(0, len(paths), 128):
                   subprocess.run(['zig', 'cache-cat', *paths[i:i+128]], stdout=out, check=True)

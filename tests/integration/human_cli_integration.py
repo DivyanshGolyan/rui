@@ -1363,8 +1363,8 @@ def renderer_cases():
         master, writer = os.pipe()
         try:
             tty = Terminal(master, None, None)
-            os.write(writer, terminal_frame([" + New Session │", "  edited 2      │ edited 1", "                │ ⠹ Waiting"])
-                + terminal_frame([" + New Session │", "  edited 2      │ edited 2", "                │ ›"]))
+            os.write(writer, terminal_frame(["   + New Session │", "    edited 2      │ edited 1", "                  │ ⠹ Waiting"])
+                + terminal_frame(["   + New Session │", "    edited 2      │ edited 2", "                  │ ›"]))
             observed = tty.wait("edited 2", after=0)
             assert "\nedited 2" in conversation_text(observed), observed
         finally:
