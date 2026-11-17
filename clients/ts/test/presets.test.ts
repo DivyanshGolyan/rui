@@ -37,6 +37,7 @@ test("connect presets seed creation, overrides win and edited presets replay by 
 		const saved = await inspect(rui, base.id);
 		assert.equal(saved.model, spec.model);
 		assert.equal(saved.reasoning_effort, "low");
+		assert.equal(saved.reasoning_effort_override, "low");
 		assert.equal(saved.compaction_trigger_override, "100000");
 		assert.deepEqual(saved.tools, ["start_agent"]);
 		assert.equal(saved.permission_mode, "ask");
@@ -48,7 +49,8 @@ test("connect presets seed creation, overrides win and edited presets replay by 
 		assert.equal(changed.model, "override-model");
 		assert.equal(changed.provider, "openai");
 		assert.equal(changed.workspace, root);
-		assert.equal(changed.reasoning_effort, null);
+		assert.equal(changed.reasoning_effort, "low");
+		assert.equal(changed.reasoning_effort_override, "low");
 		assert.equal(changed.compaction_trigger_override, "2000");
 		assert.deepEqual(changed.tools, []);
 		assert.equal(changed.permission_mode, "bypass");
