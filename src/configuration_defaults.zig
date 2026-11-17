@@ -68,6 +68,12 @@ pub const Request = struct {
     permission_mode: *const Choice,
     reasoning_effort: *const Choice,
     compaction_trigger: *const Tokens,
+    preferences: Preferences = .{},
+};
+
+pub const Preferences = struct {
+    reasoning_effort: ?[]const u8 = null,
+    permission_mode: ?[]const u8 = null,
 };
 
 pub const Resolved = struct {
@@ -83,7 +89,7 @@ pub const Resolved = struct {
 /// for both creation and updates. Explicit values retain their exact spelling.
 pub fn resolve(facts: []const catalog.Entry, request: Request) Resolved {
     var out: Resolved = .{
-        .parent_refusal = if (request.creating) (if (request.parent) |parent| checkParent(parent, request.tools, request.permission_mode) else null) else null,
+        .parent_refusal = null,
         .tools = request.tools,
         .loaded_tools = request.loaded_tools,
         .permission_mode = request.permission_mode.*,
@@ -94,9 +100,22 @@ pub fn resolve(facts: []const catalog.Entry, request: Request) Resolved {
         out.tools = creationTools(request.tools);
         if (request.tools.state == .omitted and request.loaded_tools.state == .omitted) out.loaded_tools = &product_loaded;
         out.permission_mode = creationPermission(request.permission_mode).*;
+        if (request.permission_mode.state == .omitted) if (request.preferences.permission_mode) |saved| {
+            if (std.meta.stringToEnum(@import("cli_value.zig").PermissionMode, saved)) |mode| {
+                if (request.parent == null or request.parent.?.permission_mode != .ask or mode == .ask) {
+                    out.permission_mode = choice(.value, saved);
+                }
+            }
+        };
+        if (request.parent) |parent| out.parent_refusal = checkParent(parent, request.tools, &out.permission_mode);
     }
     if (request.reasoning_effort.state == .explicit_null or (request.creating and request.reasoning_effort.state == .omitted)) {
-        if (startEffort(facts, request.model)) |effort| {
+        const saved_effort = if (request.creating and request.reasoning_effort.state == .omitted)
+            if (request.preferences.reasoning_effort) |saved| std.meta.stringToEnum(catalog.ReasoningEffort, saved) else null
+        else
+            null;
+        const effort_or_default = capability.startEffort(facts, saved_effort, request.model) orelse startEffort(facts, request.model);
+        if (effort_or_default) |effort| {
             out.reasoning_effort.state = .value;
             out.reasoning_effort.value.set(@tagName(effort)) catch unreachable;
         } else {
@@ -388,4 +407,72 @@ test "parent creation uses inherited provider for omitted compaction regardless 
         try std.testing.expect(resolved.parent_refusal == null);
         try std.testing.expectEqualStrings("244800", resolved.compaction_trigger.value.slice());
     }
+}
+
+test "creation preferences obey explicit intent and admission over the model and parent domains" {
+    const tools = try input.ToolsField.of(&.{});
+    const compact = tokenField(.omitted, "");
+    const states = [_]input.FieldState{ .omitted, .value, .explicit_null };
+    const saved_modes = [_]?[]const u8{ null, "ask", "bypass", "invalid", "" };
+    const saved_efforts = [_]?[]const u8{ null, "none", "low", "medium", "high", "xhigh", "max", "invalid", "" };
+    const parents = [_]?Parent{ null, .{ .tools = "", .permission_mode = .ask }, .{ .tools = "", .permission_mode = .bypass } };
+    try std.testing.expectEqual(std.enums.values(catalog.ReasoningEffort).len + 3, saved_efforts.len);
+    try std.testing.expectEqual(std.enums.values(@import("cli_value.zig").PermissionMode).len + 3, saved_modes.len);
+    for (0..catalog.shipped.len + 1) |index| {
+        const row = if (index < catalog.shipped.len) &catalog.shipped[index] else null;
+        const model = if (row) |r| r.id else "unlisted-model";
+        for (std.enums.values(Provider)) |provider| for (parents) |parent| for (states) |mode_state| for (states) |effort_state| {
+            const mode = choice(mode_state, "ask");
+            const effort = choice(effort_state, "high");
+            const base: Request = .{ .creating = true, .parent = parent, .provider = provider, .model = model, .tools = &tools, .loaded_tools = &tools, .permission_mode = &mode, .reasoning_effort = &effort, .compaction_trigger = &compact };
+            const fallback = resolve(catalog.shipped, base);
+            for (saved_modes) |saved_mode| for (saved_efforts) |saved_effort| {
+                var request = base;
+                request.preferences = .{ .permission_mode = saved_mode, .reasoning_effort = saved_effort };
+                const actual = resolve(catalog.shipped, request);
+                var expected_mode = fallback.permission_mode;
+                if (mode_state == .omitted) if (saved_mode) |saved| {
+                    if (std.mem.eql(u8, saved, "ask") or (std.mem.eql(u8, saved, "bypass") and (parent == null or parent.?.permission_mode == .bypass))) expected_mode = choice(.value, saved);
+                };
+                try std.testing.expectEqual(expected_mode.state, actual.permission_mode.state);
+                try std.testing.expectEqualStrings(expected_mode.value.slice(), actual.permission_mode.value.slice());
+                const refused = parent != null and parent.?.permission_mode == .ask and expected_mode.state == .value and !expected_mode.value.eql("ask");
+                try std.testing.expectEqual(refused, actual.parent_refusal != null);
+                var expected_effort = fallback.reasoning_effort;
+                if (effort_state == .omitted) if (saved_effort) |saved| {
+                    if (std.meta.stringToEnum(catalog.ReasoningEffort, saved)) |parsed| {
+                        if (row == null or row.?.efforts.contains(parsed)) expected_effort = choice(.value, saved);
+                    }
+                };
+                try std.testing.expectEqual(expected_effort.state, actual.reasoning_effort.state);
+                try std.testing.expectEqualStrings(expected_effort.value.slice(), actual.reasoning_effort.value.slice());
+                request.creating = false;
+                const update = resolve(catalog.shipped, request);
+                request.preferences = .{};
+                const update_without = resolve(catalog.shipped, request);
+                try std.testing.expectEqual(update_without.permission_mode.state, update.permission_mode.state);
+                try std.testing.expectEqualStrings(update_without.permission_mode.value.slice(), update.permission_mode.value.slice());
+                try std.testing.expectEqual(update_without.reasoning_effort.state, update.reasoning_effort.state);
+                try std.testing.expectEqualStrings(update_without.reasoning_effort.value.slice(), update.reasoning_effort.value.slice());
+            };
+        };
+    }
+}
+
+test "creation preferences use the selected Host catalog rather than shipped facts" {
+    const tools = try input.ToolsField.of(&.{});
+    const omitted = choice(.omitted, "");
+    const compact = tokenField(.omitted, "");
+    var selected = catalog.shipped[0];
+    selected.id = "custom-model";
+    const request: Request = .{ .creating = true, .provider = .openai, .model = "custom-model", .tools = &tools, .loaded_tools = &tools, .permission_mode = &omitted, .reasoning_effort = &omitted, .compaction_trigger = &compact, .preferences = .{ .reasoning_effort = "max" } };
+    selected.efforts = .initMany(&.{ .low, .max });
+    const accepted = resolve(&.{selected}, request);
+    try std.testing.expectEqualStrings("max", accepted.reasoning_effort.value.slice());
+    selected.efforts = .initOne(.low);
+    const ignored = resolve(&.{selected}, request);
+    try std.testing.expectEqualStrings("low", ignored.reasoning_effort.value.slice());
+    selected.efforts = .empty;
+    const no_effort = resolve(&.{selected}, request);
+    try std.testing.expectEqual(input.FieldState.explicit_null, no_effort.reasoning_effort.state);
 }

@@ -362,9 +362,13 @@ fn configurationShape(comptime name: []const u8) type {
     };
 }
 
+const PreferencesShape = struct {
+    pub const openapi_shape = .{ "{", Optional(.{ "\"reasoning_effort\":\"", Hole{ .tag = protocol.ReasoningEffort }, "\"" }), Optional(.{ ",\"permission_mode\":\"", Hole{ .tag = protocol.PermissionMode }, "\"" }), "}" };
+};
+
 fn configurationMembers(comptime index: usize) type {
     if (index == session_settings.spec_entries.len) return struct {
-        const shape = .{"}"};
+        const shape = .{ Optional(.{ ",\"preferences\":", PreferencesShape }), "}" };
     };
     const entry = session_settings.spec_entries[index];
     const value = switch (entry.kind) {

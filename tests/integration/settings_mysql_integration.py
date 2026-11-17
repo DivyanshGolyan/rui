@@ -20,6 +20,7 @@ from request_routing_cases import capture_routing
 from attached_creation_cases import attached_creation
 from preset_creation_cases import preset_creation
 from empty_creation_cases import empty_creation
+from preferences_bridge_cases import preferences_bridge
 
 
 def main():
@@ -304,6 +305,8 @@ def main():
         lines = out.decode().splitlines()
         assert len(lines) == 2 and lines[0].startswith("ready ") and json.loads(lines[1])["rui_start_error"]["code"] == "store_fenced", \
             f"missing named store_fenced exit: stdout={out!r} stderr={err[-4000:]!r}"
+        preferences_bridge(rui, root / "preferences-bridge", good["store"], os.environ)
+        released()
         print("MySQL settings document: readiness, Session round trip, stable id, selector repair and refusal, private credentials, mysql_login, mysql_unreachable, store_locked, stdin close, store_fenced")
     finally:
         primary = sys.exception()

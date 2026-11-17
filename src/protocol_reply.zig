@@ -866,53 +866,6 @@ pub const ReportReply = union(enum) {
     command: CommandReply,
 };
 
-/// The creating command's immutable settings, decoded from Full revision history.
-pub const CreationRevision = struct {
-    const field = @import("wire_field.zig");
-    revision: field.JsonString(20),
-    command_key: field.JsonString(protocol.max_key_bytes),
-    provider: field.JsonEnum(protocol.Provider),
-    model: field.JsonString(protocol.max_model_bytes),
-    reasoning_effort: ?field.JsonEnum(protocol.ReasoningEffort),
-};
-
-const CreationRevisions = struct {
-    first: ?CreationRevision = null,
-
-    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !CreationRevisions {
-        if (try source.next() != .array_begin) return error.UnexpectedToken;
-        var result: CreationRevisions = .{};
-        while (try source.peekNextTokenType() != .array_end) {
-            const revision = try std.json.innerParse(CreationRevision, allocator, source, options);
-            if (revision.revision.eql("1")) {
-                if (result.first != null) return error.DuplicateField;
-                result.first = revision;
-            }
-        }
-        _ = try source.next();
-        return result;
-    }
-};
-
-pub fn decodeCreationRevision(allocator: std.mem.Allocator, source: anytype, session: []const u8, key: []const u8) !CreationRevision {
-    const field = @import("wire_field.zig");
-    const Wire = struct {
-        version: field.JsonString(16),
-        type: field.JsonEnum(enum { session_report }),
-        profile: field.JsonEnum(enum { full }),
-        session: struct { reference: field.JsonString(protocol.session_id_bytes) },
-        full: struct { session_revisions: CreationRevisions },
-    };
-    const report = std.json.parseFromTokenSourceLeaky(Wire, allocator, source, .{ .ignore_unknown_fields = true }) catch |err| switch (err) {
-        error.DuplicateField => return error.InvalidObservation,
-        else => return err,
-    };
-    if (!report.version.eql(protocol.wire_version) or !report.session.reference.eql(session)) return error.InvalidObservation;
-    const first = report.full.session_revisions.first orelse return error.InvalidObservation;
-    if (!first.command_key.eql(key) or !model_catalog.validModelSyntax(first.model.slice())) return error.InvalidObservation;
-    return first;
-}
-
 pub const CurrentReply = union(enum) {
     unconfigured,
     current: Current,
@@ -4240,43 +4193,4 @@ test "derived observation payloads cover caller fields" {
             try std.testing.expect(owned);
         }
     }
-}
-
-test "session start settings stay bound to creation through later revisions and replay" {
-    const prefix = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"profile\":\"full\",\"session\":{\"reference\":\"k7m2qx\",\"model\":\"changed\"},\"full\":{\"session_revisions\":[";
-    const first = "{\"revision\":\"1\",\"command_key\":\"start-key\",\"provider\":\"codex\",\"model\":\"initial\",\"reasoning_effort\":\"low\",\"instructions\":{\"text\":\"ignored\"}}";
-    const later = "{\"revision\":\"2\",\"command_key\":\"update-key\",\"provider\":\"codex\",\"model\":\"changed\",\"reasoning_effort\":\"high\"}";
-    const suffix = "],\"messages\":[]}}";
-    const full = prefix ++ first ++ "," ++ later ++ suffix;
-    var scanner = std.json.Scanner.initCompleteInput(std.testing.allocator, full);
-    defer scanner.deinit();
-    const created = try decodeCreationRevision(std.testing.allocator, &scanner, "k7m2qx", "start-key");
-    try std.testing.expectEqualStrings("initial", created.model.slice());
-    try std.testing.expectEqual(protocol.ReasoningEffort.low, created.reasoning_effort.?.value);
-    inline for (.{ prefix ++ later ++ suffix, prefix ++ first ++ "," ++ first ++ suffix }) |invalid| {
-        var source = std.json.Scanner.initCompleteInput(std.testing.allocator, invalid);
-        defer source.deinit();
-        try std.testing.expectError(error.InvalidObservation, decodeCreationRevision(std.testing.allocator, &source, "k7m2qx", "start-key"));
-    }
-    inline for (.{ .{ "other1", "start-key" }, .{ "k7m2qx", "wrong-key" } }) |identity| {
-        var source = std.json.Scanner.initCompleteInput(std.testing.allocator, full);
-        defer source.deinit();
-        try std.testing.expectError(error.InvalidObservation, decodeCreationRevision(std.testing.allocator, &source, identity[0], identity[1]));
-    }
-}
-
-test "session start creation settings stream past large historical content with bounded scratch" {
-    var full: std.Io.Writer.Allocating = .init(std.testing.allocator);
-    defer full.deinit();
-    try full.writer.writeAll("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"profile\":\"full\",\"session\":{\"reference\":\"k7m2qx\"},\"full\":{\"session_revisions\":[{\"revision\":\"1\",\"command_key\":\"start-key\",\"provider\":\"codex\",\"model\":\"initial\",\"reasoning_effort\":null,\"instructions\":{\"text\":\"");
-    try full.writer.splatByteAll('x', 128 * 1024);
-    try full.writer.writeAll("\"}}],\"messages\":[]}}");
-    var input = std.Io.Reader.fixed(full.written());
-    var storage: [protocol.content_window_bytes]u8 = undefined;
-    var fixed = std.heap.FixedBufferAllocator.init(&storage);
-    var reader = std.json.Reader.init(fixed.allocator(), &input);
-    defer reader.deinit();
-    const created = try decodeCreationRevision(fixed.allocator(), &reader, "k7m2qx", "start-key");
-    try std.testing.expectEqualStrings("initial", created.model.slice());
-    try std.testing.expect(created.reasoning_effort == null);
 }

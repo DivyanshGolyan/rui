@@ -12,6 +12,7 @@ const fields = [
 	["permissionMode", "ask", "ask"],
 	["effort", "low", "low"],
 	["compactAt", 100000, 100000],
+	["preferences", { reasoningEffort: "high", permissionMode: "ask" }, { reasoning_effort: "high", permission_mode: "ask" }],
 ] as const;
 
 test("creation sends only chosen settings for every omitted and explicit field combination", async () => {
@@ -93,4 +94,15 @@ test("child creation forwards the parent without inventing a Workspace or provid
 		});
 		await sessions.create(spec, { idempotencyKey: "chosen:parent" });
 	}
+});
+
+
+test("creation preserves an empty preferences object", async () => {
+	const sessions = new Sessions({
+		async exchange(_path, build) {
+			assert.deepEqual(JSON.parse(build("/store")).configuration, { workspace: "/caller", preferences: {} });
+			return Buffer.from(JSON.stringify({ answer: { status: "accepted", session: "abc123" } }));
+		},
+	});
+	await sessions.create({ workspace: "/caller", preferences: {} }, { idempotencyKey: "chosen:preferences" });
 });

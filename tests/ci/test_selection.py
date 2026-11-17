@@ -1427,10 +1427,11 @@ class SelectionTest(unittest.TestCase):
             self.assertTrue(setup_requirements([target])["node"], target)
 
     def test_creation_parity_helper_selects_both_engine_fixtures_and_screen(self):
-        targets = select(["clients/ts/test/fixtures/empty-creation.ts"], "review", AVAILABLE)["targets"]
-        self.assertTrue(covers("settings-integration", targets), targets)
-        self.assertTrue(setup_requirements(targets)["screen"])
-        self.assertTrue(setup_requirements(targets)["node"])
+        for fixture in ("empty-creation.ts", "preferences-bridge.ts"):
+            targets = select(["clients/ts/test/fixtures/" + fixture], "review", AVAILABLE)["targets"]
+            self.assertTrue(covers("settings-integration", targets), (fixture, targets))
+            self.assertTrue(setup_requirements(targets)["screen"], fixture)
+            self.assertTrue(setup_requirements(targets)["node"], fixture)
 
     def test_setup_installs_fixture_packages_for_any_target(self):
         self.assertEqual(setup_requirements([]), {"go": False, "node": False, "python": False, "screen": False, "tmux": False})

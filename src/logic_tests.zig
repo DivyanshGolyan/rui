@@ -32,7 +32,6 @@ const cores = .{
     .{ "cli_grammar.zig", @import("cli_grammar.zig") },
     .{ "cli_option_names.zig", @import("cli_option_names.zig") },
     .{ "cli_value.zig", @import("cli_value.zig") },
-    .{ "client_defaults.zig", @import("client_defaults.zig") },
     .{ "codec_abi.zig", @import("codec_abi.zig") },
     .{ "codecs/json.zig", @import("codecs/json.zig") },
     .{ "codecs/responses.zig", @import("codecs/responses.zig") },

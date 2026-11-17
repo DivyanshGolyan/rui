@@ -51,8 +51,8 @@ pub const Answer = struct {
     input: ?ContentReference = null,
     result: union(enum) {
         accepted: union(enum) {
-            configure: struct { revision: u64, created: bool, skills: ?SkillsReloadStatus = null },
-            message: struct { admission: u64 },
+            configure: struct { revision: u64, created: bool, skills: ?SkillsReloadStatus = null, configuration: ?@import("creation_receipt.zig").Configuration = null },
+            message: struct { admission: u64, configuration: ?@import("creation_receipt.zig").Configuration = null },
             session_stop: struct { turn: ?u64, admission_cutoff: u64, completion: SessionStopCompletion },
             session_archive: SessionArchiveObservation,
             session_pin: SessionPinObservation,
@@ -94,7 +94,7 @@ pub fn decode(comptime protocol: type, comptime command_reply: type, allocator: 
     switch (target) {
         inline else => |_, kind| {
             const Reply = command_spec.spec(kind).Reply(protocol);
-            inline for (.{ "accepted", "accepted_skills", "rejected", "conflict" }) |name| {
+            inline for (.{ "accepted_create", "accepted", "accepted_skills", "rejected", "conflict" }) |name| {
                 if (comptime !@hasDecl(Reply, name)) continue;
                 const accepted = comptime std.mem.startsWith(u8, name, "accepted");
                 const conflict = comptime std.mem.eql(u8, name, "conflict");
@@ -109,6 +109,10 @@ pub fn decode(comptime protocol: type, comptime command_reply: type, allocator: 
                         if (err == error.RequestBindingMismatch) return error.RequestBindingMismatch;
                         break :candidate;
                     };
+                    if (comptime accepted and (kind == .configure or kind == .message)) {
+                        const wants_creation = if (comptime kind == .configure) session.len == 0 else target.message.creates_session;
+                        if (@hasField(@TypeOf(partial.value.answer), "configuration") != wants_creation) break :candidate;
+                    }
                     try bind(kind, accepted, partial, session, target, resolved_session);
                     if (!partial.value.answer.status.eql(if (accepted) "accepted" else if (conflict) "conflict" else "rejected")) break :candidate;
                     if (partial.deferred_error) |err| {
@@ -135,6 +139,9 @@ fn DecodePolicy(comptime kind: CommandKind) type {
             return depth == 1 or (depth == 2 and std.mem.startsWith(u8, path, ".answer.")) or std.mem.eql(u8, path, ".execution.reason");
         }
         pub fn Override(comptime path: []const u8) ?type {
+            if (std.mem.eql(u8, path, ".answer.configuration.provider")) return wire_field.JsonEnum(@import("provider_name.zig").Provider);
+            if (std.mem.eql(u8, path, ".answer.configuration.reasoning_effort")) return ?wire_field.JsonEnum(@import("model_catalog.zig").ReasoningEffort);
+            if (std.mem.eql(u8, path, ".answer.configuration.permission_mode")) return wire_field.JsonEnum(@import("cli_value.zig").PermissionMode);
             if (std.mem.eql(u8, path, ".answer.skills")) return wire_field.JsonEnum(SkillsReloadStatus);
             if (std.mem.eql(u8, path, ".answer.action_selection.kind")) return wire_field.JsonEnum(@FieldType(@import("action_control.zig").Selection, "kind"));
             if (std.mem.eql(u8, path, ".answer.replayed") or std.mem.eql(u8, path, ".answer.created")) return bool;
@@ -207,6 +214,25 @@ fn require(partial: anytype, comptime path: []const u8) Error!void {
     if (!partial.has(path)) return error.InvalidResponse;
 }
 
+fn creationConfiguration(partial: anytype) Error!?@import("creation_receipt.zig").Configuration {
+    const answer = partial.value.answer;
+    return if (@hasField(@TypeOf(answer), "configuration")) config: {
+        try require(partial, ".answer.configuration");
+        const c = answer.configuration;
+        if (!@import("model_catalog.zig").validModelSyntax(c.model.slice())) return error.InvalidResponse;
+        break :config .{
+            .provider = c.provider.value,
+            .model = c.model.value,
+            .reasoning_effort = if (c.reasoning_effort) |effort| effort.value else null,
+            .workspace = c.workspace.value,
+            .tools = c.tools.value,
+            .loaded_tools = c.loaded_tools.value,
+            .permission_mode = c.permission_mode.value,
+            .compaction_trigger = if (c.compaction_trigger) |trigger| try decimalId(trigger, false) else null,
+        };
+    } else null;
+}
+
 fn decide(comptime kind: CommandKind, comptime accepted: bool, comptime conflict: bool, partial: anytype, target: Target) Error!Answer {
     const wire = partial.value;
     const answer = wire.answer;
@@ -246,14 +272,18 @@ fn decide(comptime kind: CommandKind, comptime accepted: bool, comptime conflict
                 if (answer.created) return error.InvalidResponse;
                 break :skills answer.skills.value;
             } else null;
-            break :blk .{ .configure = .{ .revision = try decimalId(answer.revision, false), .created = answer.created, .skills = skills } };
+            const configuration = try creationConfiguration(partial);
+            if (answer.created != (configuration != null)) return error.InvalidResponse;
+            break :blk .{ .configure = .{ .revision = try decimalId(answer.revision, false), .created = answer.created, .skills = skills, .configuration = configuration } };
         },
         .message => blk: {
             try require(partial, ".answer.admission");
             const admission = try decimalId(answer.admission, false);
             try require(partial, ".queue");
             if (!wire.queue.status.eql("queued") or try decimalId(wire.queue.admission, false) != admission) return error.InvalidResponse;
-            break :blk .{ .message = .{ .admission = admission } };
+            const configuration = try creationConfiguration(partial);
+            if (target.message.creates_session != (configuration != null)) return error.InvalidResponse;
+            break :blk .{ .message = .{ .admission = admission, .configuration = configuration } };
         },
         .session_stop => blk: {
             try require(partial, ".answer.selection");
@@ -437,7 +467,7 @@ test "skills reload reply facts apply only to accepted existing Configure mutati
             const body = try std.fmt.bufPrint(&buffer, "{{\"version\":\"{s}\",\"type\":\"configuration_reply\",\"answer\":{{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"revision\":\"31\",\"created\":{s}{s}}}{s}}}", .{ current, created, reload.bytes, cases[0].accepted_tail });
             const creating = std.mem.eql(u8, created, "true");
             const reply = decodeForTest(@import("protocol.zig"), @import("command_reply.zig"), 200, body, if (creating) "" else "k7m2qx", .configure);
-            if (creating and reload.expected != null) {
+            if (creating) {
                 try std.testing.expectError(error.InvalidResponse, reply.answer);
             } else {
                 const answer = try reply.answer;
@@ -586,4 +616,26 @@ test "mutation rejection preserves an empty original creation target" {
     const answer = try decodeForTest(@import("protocol.zig"), @import("command_reply.zig"), 200, body, "", .configure).answer;
     try std.testing.expect(answer.replayed);
     try std.testing.expectEqualStrings("invalid_configuration", answer.result.rejected.slice());
+}
+
+test "creation replies bind bounded immutable settings to creating requests" {
+    const protocol = @import("protocol.zig");
+    const command_reply = @import("command_reply.zig");
+    const config = ",\"configuration\":{\"provider\":\"codex\",\"model\":\"gpt-5.5\",\"reasoning_effort\":\"high\",\"workspace\":\"/workspace\",\"tools\":[\"bash\"],\"loaded_tools\":[\"bash\"],\"permission_mode\":\"ask\",\"compaction_trigger\":\"100\"}";
+    const message_head = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"message_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":true,\"session\":\"k7m2qx\",\"admission\":\"7\"";
+    const message_tail = "},\"input\":{\"type\":\"text\",\"bytes\":\"3\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"},\"queue\":{\"status\":\"queued\",\"admission\":\"7\"},\"execution\":{\"status\":\"queued\"}}";
+    const target: Target = .{ .message = .{ .bytes = 3, .digest = @splat(0), .creates_session = true } };
+    const result = decodeForTest(protocol, command_reply, 200, message_head ++ config ++ message_tail, "", target);
+    const receipt = (try result.answer).result.accepted.message.configuration.?;
+    try std.testing.expectEqualStrings("gpt-5.5", receipt.model.slice());
+    try std.testing.expectEqualStrings("bash", receipt.tools.slice());
+    try std.testing.expectEqual(@as(?u64, 100), receipt.compaction_trigger);
+    try std.testing.expectError(error.InvalidResponse, decodeForTest(protocol, command_reply, 200, message_head ++ message_tail, "", target).answer);
+    const malformed = ",\"configuration\":{\"provider\":\"codex\",\"model\":\"bad model\",\"reasoning_effort\":null,\"workspace\":\"/workspace\",\"tools\":[],\"loaded_tools\":[],\"permission_mode\":\"ask\",\"compaction_trigger\":null}";
+    try std.testing.expectError(error.InvalidResponse, decodeForTest(protocol, command_reply, 200, message_head ++ malformed ++ message_tail, "", target).answer);
+    const send: Target = .{ .message = .{ .bytes = 3, .digest = @splat(0) } };
+    try std.testing.expectError(error.InvalidResponse, decodeForTest(protocol, command_reply, 200, message_head ++ config ++ message_tail, "k7m2qx", send).answer);
+    const configure = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"configuration_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"revision\":\"1\",\"created\":true" ++ config ++ "},\"execution\":{\"status\":\"unavailable\",\"reason\":\"direct_reply_does_not_wait_for_model_processing\"}}";
+    const configured = decodeForTest(protocol, command_reply, 200, configure, "", .configure);
+    try std.testing.expectEqualStrings("/workspace", (try configured.answer).result.accepted.configure.configuration.?.workspace.slice());
 }

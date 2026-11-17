@@ -1,4 +1,4 @@
-"""Public CLI creation receipts retain revision one across edits and report failures."""
+"""Public CLI creation receipts retain initial settings across edits and lost replies."""
 import json
 import os
 import pathlib
@@ -34,18 +34,18 @@ def main():
         def value(*args):
             return json.loads(invoke(*args).stdout)
 
-        def before_report(record):
-            request = json.loads(record)
-            if request.get("profile") == "full" and not held.is_set():
-                requested.update(request)
+        def hold_create_response(response):
+            head, body = response.split(b"\r\n\r\n", 1)
+            answer = json.loads(body)["answer"]
+            if answer["status"] == "accepted" and not held.is_set():
+                requested.update(answer)
                 held.set()
-                assert release.wait(15), "the concurrent configuration did not release the receipt report"
-            return True
+                assert release.wait(15), "the concurrent configuration did not release the create answer"
+            return response
 
         try:
             host = fixture.start_host(store, None)
-            proxy = canonical_fixture.ReplyProxy(host, "/v1/inspect-session", lambda response: response,
-                                                 before_forward=before_report)
+            proxy = canonical_fixture.ReplyProxy(host, "/v1/message", hold_create_response)
             record = root / "original.json"
             args = ["session", "start", "--store", store, "--provider", "codex",
                     "--model", DEFAULTS.recommended_model, "--workspace", workspace,
@@ -56,7 +56,7 @@ def main():
                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             caller.stdin.write(task)
             host_process.close_stdin(caller)
-            host_process.wait_for(held.is_set, "the start receipt read after accepted Message admission", timeout=15)
+            host_process.wait_for(held.is_set, "the accepted Message reply", timeout=15)
             session = requested["session"]
             changed = value("session", "configure", "--store", store, "--session", session,
                             "--model", "gpt-5.5", "--reasoning-effort", "high")
@@ -84,22 +84,37 @@ def main():
             assert messages == [original, original], messages
             proxy.close()
             proxy = canonical_fixture.ReplyProxy(host, "/v1/inspect-session")
-            failure_record = root / "report-failure.json"
-            failure_args = args[:-4] + ["--record", failure_record, "--key", "receipt-report-failure"]
-            for replay in (False, True):
-                replay_args = failure_args[:-4] + ["--record", root / ("report-failure-replay.json" if replay else "report-failure.json"),
-                                                   "--key", "receipt-report-failure"]
-                failed = subprocess.run([str(fixture.RUI), *map(str, replay_args)], env=environment,
-                                        cwd=workspace, input=task, text=True, capture_output=True, timeout=20)
-                assert failed.returncode != 0, failed
-                known = json.loads(failed.stdout)
-                assert known["answer"]["status"] == "accepted" and known["answer"]["replayed"] is replay, known
-                assert known["context"]["key"] == "receipt-report-failure" and known["context"]["session"], known
-                assert "configuration" not in known and "canonical_store_failure" in failed.stderr, failed
+            failure_record = root / "lost-reply.json"
+            lost = subprocess.run([str(fixture.RUI), *map(str, args[:-4]), "--record", str(failure_record),
+                                   "--key", "receipt-lost", "--test-drop-reply", "after-commit"],
+                                  env=environment, cwd=workspace, input=task, text=True,
+                                  capture_output=True, timeout=20)
+            assert lost.returncode != 0, lost
             recovered = value("request", "recover", "--store", store, "--record", failure_record,
                               "--kind", "message")
-            assert recovered["answer"]["replayed"] and recovered["context"] == known["context"], recovered
-            print("session start receipt: concurrent edit, immutable replay and accepted identity after report failure passed", flush=True)
+            assert recovered["answer"]["replayed"] and recovered["context"]["session"], recovered
+            assert recovered["answer"]["configuration"]["model"] == DEFAULTS.recommended_model, recovered
+            assert not proxy.exchanges, proxy.exchanges
+
+            configure_record = root / "lost-configure.json"
+            lost_configure = subprocess.run(
+                [str(fixture.RUI), "session", "configure", "--store", str(store),
+                 "--provider", "codex", "--model", DEFAULTS.recommended_model,
+                 "--workspace", str(workspace), "--record", str(configure_record),
+                 "--key", "receipt-configure-lost", "--test-drop-reply", "after-commit"],
+                env=environment, cwd=workspace, text=True, capture_output=True, timeout=20)
+            assert lost_configure.returncode != 0, lost_configure
+            observation = value("request", "inspect", "--store", store, "--key", "receipt-configure-lost")
+            configured_session = observation["observation"]["target"]
+            value("session", "configure", "--store", store, "--session", configured_session,
+                  "--model", "gpt-5.5", "--reasoning-effort", "high")
+            recovered_configure = value("request", "recover", "--store", store, "--record", configure_record,
+                                        "--kind", "configure")
+            assert recovered_configure["context"]["session"] == configured_session, recovered_configure
+            assert recovered_configure["answer"]["replayed"], recovered_configure
+            assert recovered_configure["answer"]["configuration"]["model"] == DEFAULTS.recommended_model, recovered_configure
+            assert not proxy.exchanges, proxy.exchanges
+            print("session creation receipts: immutable replay and lost-reply recovery passed", flush=True)
         finally:
             host_process.dispose_all(release.set,
                 lambda: host_process.stop_process(caller, timeout=5) if caller is not None else None,

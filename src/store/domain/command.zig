@@ -116,6 +116,72 @@ const message_replay = rsql.Read(.{
     .cardinality = .one,
 });
 
+const creation_receipt_read = rsql.Read(.{
+    .sql = "SELECT r.provider,r.model,r.reasoning_effort,r.workspace," ++
+        "coalesce(" ++ tool_set.namesSql("r.tool_set_id") ++ ",'') AS tools," ++
+        "coalesce(" ++ tool_set.namesSql(tool_set.offeredSetSql("r")) ++ ",'') AS loaded_tools," ++
+        "r.permission_mode,r.compaction_trigger,configured.member_count AS tools_count,loaded.member_count AS loaded_count " ++
+        "FROM session_revision r JOIN tool_set configured ON configured.tool_set_id=r.tool_set_id " ++
+        "JOIN tool_set loaded ON loaded.tool_set_id=" ++ tool_set.offeredSetSql("r") ++
+        " WHERE r.session_ref=?1 AND r.revision=1 AND r.command_key=?2",
+    .Args = struct { session: []const u8, key: []const u8 },
+    .Row = struct {
+        provider: provider_name.Provider,
+        model: *Bounded(@import("../../model_capability.zig").max_model_bytes),
+        reasoning_effort: ?@import("../../model_capability.zig").ReasoningEffort,
+        workspace: *Bounded(workspace_path.max_bytes),
+        tools: *Bounded(tool_set.max_names_bytes),
+        loaded_tools: *Bounded(tool_set.max_names_bytes),
+        permission_mode: u8,
+        compaction_trigger: ?u64,
+        tools_count: u64,
+        loaded_count: u64,
+    },
+    .cardinality = .optional,
+});
+
+fn prepareReceipt(row: *creation_receipt_read.Row, reads: *configuration_domain.ConfigurationReads) void {
+    row.* = .{
+        .provider = undefined,
+        .model = &reads.next.model,
+        .reasoning_effort = undefined,
+        .workspace = &reads.next.workspace,
+        .tools = &reads.saved_tools.names,
+        .loaded_tools = &reads.saved_loaded.names,
+        .permission_mode = undefined,
+        .compaction_trigger = undefined,
+        .tools_count = undefined,
+        .loaded_count = undefined,
+    };
+}
+
+fn receiptNames(names: *const Bounded(tool_set.max_names_bytes), count: u64) !Bounded(tool_set.max_names_bytes) {
+    var sorted: command_input.ToolsField = .{ .state = .value };
+    var each = std.mem.tokenizeScalar(u8, names.slice(), ',');
+    while (each.next()) |name| sorted.insert(name) catch return error.CorruptStore;
+    if (sorted.count != count) return error.CorruptStore;
+    // Receipt lists use commas; the admission representation uses spaces.
+    for (sorted.names.bytes[0..sorted.names.len]) |*byte| if (byte.* == ' ') {
+        byte.* = ',';
+    };
+    return sorted.names;
+}
+
+fn creationReceipt(row: *const creation_receipt_read.Row) !command_reply.CreationConfiguration {
+    return .{
+        .provider = row.provider,
+        .model = row.model.*,
+        .reasoning_effort = row.reasoning_effort,
+        .workspace = row.workspace.*,
+        .tools = try receiptNames(row.tools, row.tools_count),
+        .loaded_tools = try receiptNames(row.loaded_tools, row.loaded_count),
+        .permission_mode = try configuration_domain.permissionMode(row.permission_mode),
+        // Before creation defaults were frozen in revision 1, a NULL trigger used
+        // the historical 128000-token window at 90 percent.
+        .compaction_trigger = row.compaction_trigger orelse 115200,
+    };
+}
+
 fn admitFromSession(
     a: anytype,
     sender: *const rsql.SessionHead,
@@ -193,6 +259,7 @@ pub const SubmitMessage = struct {
         .failure = .{.branch},
         .input = .{.paged},
         .skill = .{.paged},
+        .receipt = .{.branch},
     });
     pub const round_budget = 2;
     pub const commit: transition.Commit = .transaction;
@@ -215,7 +282,7 @@ pub const SubmitMessage = struct {
     pub const Declined = error{};
 
     input: Input,
-    plain: MessageReads = undefined,
+    scratch: union { plain: MessageReads, receipt: creation_receipt_read.Row } = undefined,
     target: target_session.Result = null,
     creation: *configuration_domain.ConfigurationReads = undefined,
     sender_valid: bool = false,
@@ -229,6 +296,7 @@ pub const SubmitMessage = struct {
         skills: skills_domain.SavingBound,
     } = undefined,
     admission_id: u64 = 0,
+    receipt_found: store_access.Found = .missing,
     pending: enum { accepted, rejected } = .accepted,
     refusal_diagnostic: ?u64 = null,
 
@@ -237,6 +305,11 @@ pub const SubmitMessage = struct {
         switch (at) {
             .facts => return t.decide(r),
             .replay => return t.replayed(),
+            .receipt => {
+                if (!t.receipt_found.get()) return error.CorruptStore;
+                _ = try creationReceipt(&t.scratch.receipt);
+                return .commit;
+            },
             .model, .saved_tools, .saved_loaded, .loaded_source, .loaded => {
                 if (try t.validate(r, switch (at) {
                     inline .model, .saved_tools, .saved_loaded, .loaded_source, .loaded => |tag| @field(configuration_domain.ValidationRound, @tagName(tag)),
@@ -267,7 +340,7 @@ pub const SubmitMessage = struct {
     }
 
     fn reads(t: *SubmitMessage) *MessageReads {
-        return if (t.input.command.configuration != null) &t.creation.message else &t.plain;
+        return if (t.input.command.configuration != null) &t.creation.message else &t.scratch.plain;
     }
 
     noinline fn start(t: *SubmitMessage, r: *transition.Round(SubmitMessage)) !transition.Next(SubmitMessage) {
@@ -276,6 +349,7 @@ pub const SubmitMessage = struct {
             t.creation = r.configurationReads();
             t.creation.* = .{ .next = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } } };
         }
+        if (command.configuration == null) t.scratch = .{ .plain = undefined };
         const message = t.reads();
         if (t.input.parts_saving) |saving| saving.restart();
         const identity = if (t.input.parts_saving) |saving| saving.reference.identity() else null;
@@ -304,6 +378,11 @@ pub const SubmitMessage = struct {
                 _ = existing.primary_content_id orelse return error.CorruptStore;
                 t.later = .{ .replay = undefined };
                 r.read(message_replay, .{ .key = command.key.slice() }, &t.later.replay);
+                if (command.configuration != null) {
+                    t.scratch = .{ .receipt = undefined };
+                    prepareReceipt(&t.scratch.receipt, t.creation);
+                    r.readInto(creation_receipt_read, .{ .session = message.saved.?.target.slice(), .key = command.key.slice() }, &t.scratch.receipt, &t.receipt_found);
+                }
                 return .{ .round = .replay };
             },
         }
@@ -340,11 +419,13 @@ pub const SubmitMessage = struct {
             .accepted => |existing| existing,
             else => unreachable,
         };
+        if (command.configuration != null and !t.receipt_found.get()) return error.CorruptStore;
         const row = &t.later.replay;
         if (row.content_id.get() != existing.primary_content_id.? or !existing.target.eql(row.session_ref.slice())) return error.CorruptStore;
         return t.done(.{ .accepted = .{
             .replayed = true,
             .admission_id = row.admission_id.get(),
+            .configuration = if (command.configuration != null) try creationReceipt(&t.scratch.receipt) else null,
             .content = .{ .length = row.length, .digest = row.digest },
             .session = existing.target,
         } });
@@ -488,6 +569,12 @@ pub const SubmitMessage = struct {
     fn saveSkills(t: *SubmitMessage, r: *transition.Round(SubmitMessage)) !transition.Next(SubmitMessage) {
         if (t.later.skills.lookupNext(r)) return .{ .round = .skill };
         if (r.faults().before_commit) return error.InjectedCommitFailure;
+        if (t.input.command.configuration != null) {
+            t.scratch = .{ .receipt = undefined };
+            prepareReceipt(&t.scratch.receipt, t.creation);
+            r.readInto(creation_receipt_read, .{ .session = t.creation.applied.session.slice(), .key = t.input.command.key.slice() }, &t.scratch.receipt, &t.receipt_found);
+            return .{ .round = .receipt };
+        }
         return .commit;
     }
 
@@ -512,6 +599,7 @@ pub const SubmitMessage = struct {
             .accepted = .{
                 .replayed = false,
                 .admission_id = t.admission_id,
+                .configuration = if (command.configuration != null) creationReceipt(&t.scratch.receipt) catch unreachable else null,
                 .content = .{ .length = message.text.length, .digest = message.text.digest },
                 .session = if (command.configuration != null) t.creation.applied.session else command.session,
             },
@@ -973,6 +1061,7 @@ pub const Configure = struct {
         .skills_append = .{.branch},
         .outcome = .{.branch},
         .failure = .{.branch},
+        .receipt = .{.branch},
     });
     pub const round_budget = 2;
     pub const commit: transition.Commit = .transaction;
@@ -996,6 +1085,9 @@ pub const Configure = struct {
 
     input: Input,
     reads: *configuration_domain.ConfigurationReads = undefined,
+    receipt: creation_receipt_read.Row = undefined,
+    receipt_found: store_access.Found = .missing,
+    replay_receipt: bool = false,
     rejection: ?configuration_admission.Rejection = null,
     reloaded: ?skills_domain.Result = null,
     outcome: content_domain.Import = undefined,
@@ -1011,6 +1103,12 @@ pub const Configure = struct {
         const at = ran orelse return t.start(r);
         switch (at) {
             .facts => return t.decide(r),
+            .receipt => {
+                if (!t.receipt_found.get()) return error.CorruptStore;
+                if (t.replay_receipt) return t.finishReplay();
+                _ = try creationReceipt(&t.receipt);
+                return .commit;
+            },
             .model, .saved_tools, .saved_loaded, .loaded_source, .loaded => return t.validate(r, switch (at) {
                 inline .model, .saved_tools, .saved_loaded, .loaded_source, .loaded => |tag| @field(configuration_domain.ValidationRound, @tagName(tag)),
                 else => unreachable,
@@ -1042,13 +1140,15 @@ pub const Configure = struct {
         switch (try classify(configuration_admission.Rejection, saved, .configure, command.session.slice(), &reads.command_digest)) {
             .fresh => {},
             .conflict => return t.done(.conflict),
-            .accepted => |existing| return t.done(.{ .accepted = .{
-                .replayed = true,
-                .revision = existing.revision,
-                .created = existing.created,
-                .skills = if (command.reload_skills) (if (existing.code.eql("skills_reloaded")) .reloaded else if (existing.code.eql("skills_unchanged")) .unchanged else return error.CorruptStore) else null,
-                .session = existing.target,
-            } }),
+            .accepted => |existing| {
+                if (existing.created) {
+                    t.replay_receipt = true;
+                    prepareReceipt(&t.receipt, t.reads);
+                    r.readInto(creation_receipt_read, .{ .session = reads.saved_command.?.target.slice(), .key = command.key.slice() }, &t.receipt, &t.receipt_found);
+                    return .{ .round = .receipt };
+                }
+                return t.finishReplay();
+            },
             .rejected => |code| return t.done(.{ .rejected = .{ .replayed = true, .code = code } }),
         }
         if (t.input.preset) |decision| if (decision.rejection) |code| switch (code) {
@@ -1059,6 +1159,22 @@ pub const Configure = struct {
         if (command.reload_skills) return t.startReload(r);
         t.later = .{ .saved = undefined };
         return t.validate(r, null);
+    }
+
+    fn finishReplay(t: *Configure) !transition.Next(Configure) {
+        const command = t.input.command;
+        const existing = switch (try classify(configuration_admission.Rejection, &t.reads.saved_command, .configure, command.session.slice(), &t.reads.command_digest)) {
+            .accepted => |value| value,
+            else => unreachable,
+        };
+        return t.done(.{ .accepted = .{
+            .replayed = true,
+            .revision = existing.revision,
+            .created = existing.created,
+            .configuration = if (existing.created) try creationReceipt(&t.receipt) else null,
+            .skills = if (command.reload_skills) (if (existing.code.eql("skills_reloaded")) .reloaded else if (existing.code.eql("skills_unchanged")) .unchanged else return error.CorruptStore) else null,
+            .session = existing.target,
+        } });
     }
 
     fn done(t: *Configure, reply: configuration_domain.ConfigureReply) transition.Next(Configure) {
@@ -1100,6 +1216,11 @@ pub const Configure = struct {
         reads.command_answer = .{ .accepted = true, .revision = applied.revision, .created = command.session.len == 0 };
         try configuration_domain.queueConfiguredCommand(r, applied, command.key.slice(), .configure, &reads.command_digest, applied.instructions_id, applied.output_schema_id, &reads.command_answer);
         if (r.faults().before_commit) return error.InjectedCommitFailure;
+        if (command.session.len == 0) {
+            prepareReceipt(&t.receipt, t.reads);
+            r.readInto(creation_receipt_read, .{ .session = applied.session.slice(), .key = command.key.slice() }, &t.receipt, &t.receipt_found);
+            return .{ .round = .receipt };
+        }
         return .commit;
     }
 
@@ -1108,9 +1229,9 @@ pub const Configure = struct {
         const reads = t.reads;
         if (configuration_domain.targetRejection(command.session.slice())) |code| return t.refuse(r, code, null);
         if (command.session.len == 0 or !reads.found.get()) return t.refuse(r, .unknown_session, null);
-        var invalid = command.preset != null or command.require_model;
-        inline for (@typeInfo(content_custody.Configuration).@"struct".field_names) |field| {
-            if (@field(command.configuration, field).state != .omitted) invalid = true;
+        var invalid = command.preset != null or command.require_model or command.configuration.preferences != null;
+        inline for (@import("../../session_settings.zig").spec_entries) |entry| {
+            if (@field(command.configuration, entry.field).state != .omitted) invalid = true;
         }
         if (invalid) return t.refuse(r, .incomplete_initial_configuration, null);
         const captured = t.input.reload_capture orelse return t.refuse(r, .skills_unavailable, null);
@@ -1189,7 +1310,7 @@ pub const Configure = struct {
         else if (t.reloaded) |result|
             .{ .accepted = .{ .replayed = false, .revision = t.reads.next.revision, .created = false, .session = command.session, .skills = result.reload_status } }
         else
-            .{ .accepted = .{ .replayed = false, .revision = t.reads.applied.revision, .created = command.session.len == 0, .session = t.reads.applied.session } };
+            .{ .accepted = .{ .replayed = false, .revision = t.reads.applied.revision, .created = command.session.len == 0, .configuration = if (command.session.len == 0) creationReceipt(&t.receipt) catch unreachable else null, .session = t.reads.applied.session } };
     }
 
     pub fn deinit(t: *Configure) void {

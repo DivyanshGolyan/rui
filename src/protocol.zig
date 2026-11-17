@@ -903,6 +903,7 @@ fn ParserOf(comptime Custody: type) type {
             while (try members.next(self, &key)) {
                 const field = try specField(&key, &seen);
                 switch (field) {
+                    .preferences => try self.skipValue(),
                     inline else => |tag| {
                         const entry = session_settings.spec_entries[@backingInt(tag)];
                         if (entry.kind == .content) {
@@ -1056,6 +1057,11 @@ fn ParserOf(comptime Custody: type) type {
                     return field;
                 }
             }
+            if (key.eql("preferences")) {
+                if (seen.contains(.preferences)) return error.UnexpectedField;
+                seen.insert(.preferences);
+                return .preferences;
+            }
             return error.UnexpectedField;
         }
 
@@ -1066,6 +1072,10 @@ fn ParserOf(comptime Custody: type) type {
             while (try members.next(self, &self.spec_field)) {
                 const field = try specField(&self.spec_field, &seen);
                 switch (field) {
+                    .preferences => {
+                        out.preferences = .{};
+                        try self.parsePreferences(&out.preferences.?);
+                    },
                     inline else => |tag| {
                         const entry = session_settings.spec_entries[@backingInt(tag)];
                         const name = entry.field;
@@ -1084,6 +1094,21 @@ fn ParserOf(comptime Custody: type) type {
                         }
                     },
                 }
+            }
+        }
+
+        fn parsePreferences(self: *Parser, out: *@import("command_input.zig").Preferences) !void {
+            try self.expectByte('{');
+            var members: Members = .{};
+            const Field = enum { reasoning_effort, permission_mode };
+            var seen = std.enums.EnumSet(Field).empty;
+            while (try self.nextField(Field, &members, &seen)) |field| {
+                const value = switch (field) {
+                    .reasoning_effort => &out.reasoning_effort,
+                    .permission_mode => &out.permission_mode,
+                };
+                value.state = .value;
+                try self.readSmallString(&value.value);
             }
         }
 
@@ -2062,14 +2087,17 @@ pub fn jsonListBytes(comptime count: usize, comptime item_bytes: usize) usize {
 
 pub const content_reference_shape = .{ "{\"type\":\"text\",\"bytes\":\"", Hole.decimal, "\",\"sha256\":\"", Hole{ .hex = 32 }, "\"}" };
 
+pub const creation_configuration_shape = .{ ",\"configuration\":{\"provider\":\"", Hole{ .tag = Provider }, "\",\"model\":", Hole{ .string = max_model_bytes }, ",\"reasoning_effort\":", Hole{ .optional_tag = ReasoningEffort }, ",\"workspace\":", Hole{ .string = max_workspace_bytes }, ",\"tools\":", Hole{ .json = @import("creation_receipt_wire.zig").Names }, ",\"loaded_tools\":", Hole{ .json = @import("creation_receipt_wire.zig").Names }, ",\"permission_mode\":\"", Hole{ .tag = cli_value.PermissionMode }, "\",\"compaction_trigger\":", Hole.optional_id, "}" };
+
 pub const configuration_reply = struct {
     const head = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"" ++ command_spec.spec(.configure).reply_type ++ "\",\"answer\":{\"status\":";
     const execution = "},\"execution\":{\"status\":\"unavailable\",\"reason\":\"direct_reply_does_not_wait_for_model_processing\"}}";
     pub const accepted = .{ head ++ "\"accepted\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"revision\":\"", Hole.decimal, "\",\"created\":", Hole.boolean, execution };
+    pub const accepted_create = .{ head ++ "\"accepted\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"revision\":\"", Hole.decimal, "\",\"created\":", Hole.boolean } ++ creation_configuration_shape ++ .{execution};
     pub const accepted_skills = .{ head ++ "\"accepted\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"revision\":\"", Hole.decimal, "\",\"created\":false,\"skills\":\"", Hole{ .tag = SkillsReloadStatus }, "\"" ++ execution };
     pub const rejected = .{ head ++ "\"rejected\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"code\":\"", Hole{ .tag = ConfigurationRejection }, "\",\"message\":", Hole{ .optional_string = @import("tool_record.zig").HostToolSet.max_refusal_message_bytes }, execution };
     pub const conflict = .{ head ++ "\"conflict\",\"replayed\":false,\"session\":", Hole{ .string = max_session_bytes }, ",\"code\":\"idempotency_key_conflict\"" ++ execution };
-    pub const max_bytes = maxShapeBytes(.{ accepted, accepted_skills, rejected, conflict });
+    pub const max_bytes = maxShapeBytes(.{ accepted, accepted_create, accepted_skills, rejected, conflict });
 };
 
 pub const message_reply = struct {
@@ -2077,10 +2105,12 @@ pub const message_reply = struct {
     const execution = ",\"execution\":{\"status\":\"queued\"}}";
     pub const accepted = .{ head ++ "\"accepted\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"admission\":\"", Hole.decimal, "\"},\"input\":" } ++
         content_reference_shape ++ .{ ",\"queue\":{\"status\":\"queued\",\"admission\":\"", Hole.decimal, "\"}" ++ execution };
+    pub const accepted_create = .{ head ++ "\"accepted\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"admission\":\"", Hole.decimal, "\"" } ++ creation_configuration_shape ++ .{"},\"input\":"} ++
+        content_reference_shape ++ .{ ",\"queue\":{\"status\":\"queued\",\"admission\":\"", Hole.decimal, "\"}" ++ execution };
     pub const rejected = .{ head ++ "\"rejected\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"code\":\"", Hole{ .tag = MessageRejection }, "\",\"message\":", Hole{ .optional_string = @import("tool_record.zig").HostToolSet.max_refusal_message_bytes }, "},\"input\":" } ++
         content_reference_shape ++ .{execution};
     pub const conflict = .{ head ++ "\"conflict\",\"replayed\":false,\"session\":", Hole{ .string = max_session_bytes }, ",\"code\":\"idempotency_key_conflict\"}" ++ execution };
-    pub const max_bytes = maxShapeBytes(.{ accepted, rejected, conflict });
+    pub const max_bytes = maxShapeBytes(.{ accepted, accepted_create, rejected, conflict });
 };
 
 pub const session_stop_reply = struct {
@@ -3300,5 +3330,39 @@ test "Action promotion parses one owned target and binds semantic replay" {
         var invalid: MetadataSource = .{ .input = head ++ tail };
         var invalid_parser = Tested.Parser{ .source = &invalid };
         try std.testing.expectError(error.InvalidIdentity, parseForTest(&invalid_parser));
+    }
+}
+
+test "configuration preferences parse sparsely and bind idempotency" {
+    const cases = [_]struct { fields: []const u8, failure: ?anyerror = null }{
+        .{ .fields = "" },
+        .{ .fields = "\"preferences\":{}" },
+        .{ .fields = "\"preferences\":{\"reasoning_effort\":\"high\"}" },
+        .{ .fields = "\"preferences\":{\"permission_mode\":\"ask\",\"reasoning_effort\":\"low\"}" },
+        .{ .fields = "\"preferences\":{\"reasoning_effort\":\"12345678901234567\"}", .failure = error.ValueTooLong },
+        .{ .fields = "\"preferences\":null", .failure = error.InvalidJsonShape },
+        .{ .fields = "\"preferences\":{\"reasoning_effort\":null}", .failure = error.InvalidJsonShape },
+        .{ .fields = "\"preferences\":{\"other\":\"x\"}", .failure = error.UnexpectedField },
+        .{ .fields = "\"preferences\":{\"permission_mode\":\"ask\",\"permission_mode\":\"ask\"}", .failure = error.UnexpectedField },
+        .{ .fields = "\"preferences\":{},\"preferences\":{}", .failure = error.UnexpectedField },
+    };
+    var digests: [4][32]u8 = undefined;
+    for (cases, 0..) |case, index| {
+        var buffer: [1024]u8 = undefined;
+        const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"configure\",\"store\":\"store\",\"key\":\"key\",\"session\":\"session\",\"configuration\":{{{s}}}}}", .{case.fields});
+        var source: MetadataSource = .{ .input = json };
+        var parser = Tested.Parser{ .source = &source };
+        if (case.failure) |failure| {
+            try std.testing.expectError(failure, parseForTest(&parser));
+            continue;
+        }
+        const command = (try parseForTest(&parser)).configure;
+        digests[index] = command.semanticDigest();
+        for (digests[0..index]) |prior| try std.testing.expect(!std.mem.eql(u8, &prior, &digests[index]));
+        if (index == 0) try std.testing.expect(command.configuration.preferences == null) else {
+            const preferences = command.configuration.preferences.?;
+            try std.testing.expectEqual(if (index >= 2) FieldState.value else FieldState.omitted, preferences.reasoning_effort.state);
+            try std.testing.expectEqual(if (index == 3) FieldState.value else FieldState.omitted, preferences.permission_mode.state);
+        }
     }
 }

@@ -2480,6 +2480,22 @@ const Capture = struct {
                 }
             }
         }
+        if (input.preferences.reasoning_effort != null or input.preferences.permission_mode != null) {
+            try self.write(separator);
+            try self.write("\"preferences\":{");
+            var preference_separator: []const u8 = "";
+            if (input.preferences.reasoning_effort) |effort| {
+                try self.write("\"reasoning_effort\":");
+                try self.writeJsonString(@tagName(effort));
+                preference_separator = ",";
+            }
+            if (input.preferences.permission_mode) |mode| {
+                try self.write(preference_separator);
+                try self.write("\"permission_mode\":");
+                try self.writeJsonString(@tagName(mode));
+            }
+            try self.write("}");
+        }
         try self.write("}");
     }
 
@@ -6458,4 +6474,30 @@ test "Action stop captures preserve target and bytes through generated and expli
     for ([_]u64{ 0, std.math.maxInt(u64) }) |action_id| {
         try std.testing.expectError(error.InvalidTarget, captureActionStop(io, .{ .store = root, .session = "k7m2qx", .action_id = action_id }, .{ .generated = root }));
     }
+}
+
+test "creation capture preserves raw saved preferences independently of explicit settings" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(io, .fromMode(0o700));
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    var captured = try captureConfigure(io, .{
+        .store = root,
+        .session = .create,
+        .reasoning_effort = .{ .present = true, .value = "low" },
+        .preferences = .{ .reasoning_effort = .high, .permission_mode = .ask },
+    }, .{ .generated = root }).get();
+    defer captured.close(io);
+    var bytes: [8192]u8 = undefined;
+    const length = try captured.file.readPositionalAll(io, &bytes, 0);
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes[0..length], .{});
+    defer parsed.deinit();
+    const configuration = parsed.value.object.get("configuration").?.object;
+    try std.testing.expectEqualStrings("low", configuration.get("reasoning_effort").?.string);
+    try std.testing.expect(!configuration.contains("model"));
+    const prefs = configuration.get("preferences").?.object;
+    try std.testing.expectEqualStrings("high", prefs.get("reasoning_effort").?.string);
+    try std.testing.expectEqualStrings("ask", prefs.get("permission_mode").?.string);
 }

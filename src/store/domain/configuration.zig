@@ -420,6 +420,14 @@ fn prepareParent(a: anytype, reference: []const u8, reads: *ConfigurationReads) 
     a.readInto(parent_settings, .{ .session = reference }, &reads.inherited, &reads.parent_found);
 }
 
+fn preferences(configuration: *const content_custody.Configuration) configuration_defaults.Preferences {
+    const saved = if (configuration.preferences) |*value| value else return .{};
+    return .{
+        .reasoning_effort = if (saved.reasoning_effort.state == .value) saved.reasoning_effort.value.slice() else null,
+        .permission_mode = if (saved.permission_mode.state == .value) saved.permission_mode.value.slice() else null,
+    };
+}
+
 pub fn inheritParent(host_tool_set: *const tool_defs.HostToolSet, configuration: *const content_custody.Configuration, reads: *ConfigurationReads) !?configuration_admission.Rejection {
     if (!reads.inherits_parent) return null;
     if (!reads.parent_found.get()) return .unknown_session;
@@ -439,6 +447,7 @@ pub fn inheritParent(host_tool_set: *const tool_defs.HostToolSet, configuration:
             .permission_mode = &configuration.permission_mode,
             .reasoning_effort = &configuration.reasoning_effort,
             .compaction_trigger = &configuration.compaction_trigger,
+            .preferences = preferences(configuration),
         });
         if (toolsRejection(host_tool_set, reads.inherited.provider, resolved.tools)) |code| return code;
         if (resolved.parent_refusal) |failure| break :refusal ParentFailure.from(failure);
@@ -820,6 +829,7 @@ fn validateRequest(a: anytype, request: *const Request, reads: *ConfigurationRea
     const configuration = &reads.configuration;
     const creating = session.len == 0;
     if (targetRejection(session)) |code| return .{ .rejected = code };
+    if (!creating and request.configuration.preferences != null) return .{ .rejected = .preferences_on_update };
     if (configuration.permission_mode.state == .value and
         std.meta.stringToEnum(cli_value.PermissionMode, configuration.permission_mode.value.slice()) == null)
     {
@@ -875,6 +885,7 @@ fn validateModel(a: anytype, request: *const Request, reads: *ConfigurationReads
         .permission_mode = configuration.permission_mode,
         .reasoning_effort = configuration.reasoning_effort,
         .compaction_trigger = configuration.compaction_trigger,
+        .preferences = preferences(request.configuration),
     });
     if (reads.defaults.parent_refusal) |failure| {
         reads.parent_failure = ParentFailure.from(failure);

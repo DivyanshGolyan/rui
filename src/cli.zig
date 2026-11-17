@@ -1906,6 +1906,7 @@ const OverviewEntry = struct {
     workspace_len: usize,
     home: []const u8,
     binding: ?new_session_selection.Binding,
+    model_pinned: bool = false,
     launch: ?HostLaunchResult = null,
     login_at: ?u64,
 };
@@ -1927,21 +1928,23 @@ fn prepareOverviewUsing(init: std.process.Init, options: NewSessionOptions, entr
     const destination = try snapshot.destination(home, &fallback);
     try preflightNewSession(init.io, destination.path, destination.saved);
     const usable: provider_selection.Readinesses = .initFill(.configured);
-    const selected = try snapshot.resolve(&usable);
+    const selected = try snapshot.resolveDisplay(&usable);
     var readiness = localReadiness(init);
-    entry.binding = try snapshot.resolve(&readiness);
+    entry.binding = try snapshot.resolveDisplay(&readiness);
     if (selected != null and entry.binding != null) {
-        if (intent.model == null and std.mem.eql(u8, entry.binding.?.provider.slice(), "openai")) entry.binding = null;
+        if (connection == null and intent.model == null and std.mem.eql(u8, entry.binding.?.provider.slice(), "openai")) entry.binding = null;
     } else {
         const connection_info = try host_start.inspectConnection(init, destination.path);
         readiness.set(.openai, connection_info.readiness);
-        entry.binding = try snapshot.resolve(&readiness);
-        if (connection_info.custom() and intent.model == null) {
+        entry.binding = try snapshot.resolveDisplay(&readiness);
+        if (connection == null and connection_info.custom() and intent.model == null) {
             if (entry.binding) |*binding| if (std.mem.eql(u8, binding.provider.slice(), "openai")) {
                 entry.binding = null;
             };
         }
     }
+    const pin = try snapshot.resolve(&readiness);
+    entry.model_pinned = if (pin) |value| value.model.len != 0 else false;
     entry.login_at = null;
     try entry.store.set(destination.path);
     entry.launch = null;
@@ -1973,7 +1976,7 @@ fn activateOverviewConnectionUsing(init: std.process.Init, intent: new_session_s
     const entry = try init.gpa.create(OverviewEntry);
     defer init.gpa.destroy(entry);
     try prepareOverviewUsing(init, .{ .store = intent.store, .provider = intent.provider, .model = intent.model }, entry, ops, connection);
-    return .{ .pending = connection != null and entry.launch != null and entry.launch.?.outcome == .ready and entry.launch.?.outcome.ready.adopted, .binding = entry.binding orelse return error.HostModelUnavailable, .store = entry.store, .launch = entry.launch };
+    return .{ .pending = connection != null and entry.launch != null and entry.launch.?.outcome == .ready and entry.launch.?.outcome.ready.adopted, .binding = entry.binding orelse return error.HostModelUnavailable, .model_pinned = entry.model_pinned, .store = entry.store, .launch = entry.launch };
 }
 
 fn overviewProviderReady(init: std.process.Init, store: []const u8) provider_selection.Readinesses {
@@ -2307,11 +2310,13 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
         } else .{} };
         saved_effort = if (reads.saved_effort) snapshot.defaults.reasoning_effort else null;
         if (reads.binding) {
-            binding = try snapshot.resolveUnprompted();
-            input.model = .{ .present = true, .value = binding.model.slice() };
-            if (!input.parent.present) input.provider = .{ .present = true, .value = binding.provider.slice() };
+            if (try snapshot.resolveCreation()) |chosen| {
+                binding = chosen;
+                if (binding.model.len != 0) input.model = .{ .present = true, .value = binding.model.slice() };
+                if (!input.parent.present) input.provider = .{ .present = true, .value = binding.provider.slice() };
+            }
         }
-        input.applySavedCreation(input.model.value, saved_effort, snapshot.defaults.permission_mode);
+        input.applySavedCreation(saved_effort, snapshot.defaults.permission_mode);
         if (!input.parent.present and !input.workspace.present) {
             var cwd = try std.Io.Dir.cwd().openDir(io, ".", .{});
             defer cwd.close(io);
@@ -2431,15 +2436,11 @@ fn messageWithStep(init: std.process.Init, parsed: *const cli_args.Parsed, confi
     var reply_buffer: client.ReplyBuffer = .{};
     const reply = try takeReply(step, sender.sendCaptured(&captured, .{ .map = init.environ_map }, &reply_buffer), &captured);
     if (!reply.isAccepted()) return writeMutationReply(io, reply, .json, captured.replay);
-    const admitted = readStartConfiguration(init, sender, input.store, reply.context.session.slice(), reply.context.key.slice()) catch |err| {
-        // Admission is known even when its immutable settings cannot be read.
-        try writeMutationReply(io, reply, .json, captured.replay);
-        return err;
-    };
+    const admitted = (try reply.answer).result.accepted.message.configuration orelse return error.InvalidResponse;
     const receipt = configuration.?.receipt.observed(
-        @tagName(admitted.provider.value),
+        @tagName(admitted.provider),
         admitted.model.slice(),
-        if (admitted.reasoning_effort) |effort| @tagName(effort.value) else null,
+        if (admitted.reasoning_effort) |effort| @tagName(effort) else null,
     );
     var output: JsonOutput = undefined;
     const writer = output.init(io, .stdout);
@@ -2671,7 +2672,7 @@ fn openExistingOverview(init: std.process.Init, destination: []const u8, open: ?
     const home = init.environ_map.get("HOME");
     const binding: ?new_session_selection.Binding = blk: {
         const snapshot: new_session_selection.Snapshot = .{ .intent = selectors, .defaults = if (selectors.needsPreferences()) preferences.load(home orelse break :blk null) catch break :blk null else .{} };
-        break :blk snapshot.resolveUnprompted() catch null;
+        break :blk snapshot.resolveUnpromptedDisplay() catch null;
     };
     return openOverview(init, .{
         .store = destination,
@@ -3681,37 +3682,13 @@ fn presentMutationReply(writer: *std.Io.Writer, reply: protocol_reply.MutationRe
     try writer.flush();
 }
 
-fn readStartConfiguration(init: std.process.Init, requester: client.Requests, store: []const u8, session: []const u8, key: []const u8) !protocol_reply.CreationRevision {
-    const file = try renderScratch(init);
-    defer file.close(init.io);
-    var response: client.ReplyBuffer = .{};
-    const reply = requester.inspectSession(store, session, .full, file, &response) catch |err| return readTransportFailure(init.io, store, err);
-    const bytes = switch (reply) {
-        .report => |report| report.bytes,
-        .command => |command| {
-            try writeCommandReply(init.io, command, .stderr);
-            try protocol_reply.checkCanonicalFailure(command);
-            return error.HostInvocationFailed;
-        },
-    };
-    var input: [protocol.content_window_bytes]u8 = undefined;
-    var file_reader = file.reader(init.io, &.{});
-    var body = file_reader.interface.limited(.limited64(bytes), &input);
-    var storage: [protocol.content_window_bytes]u8 = undefined;
-    var fixed = std.heap.FixedBufferAllocator.init(&storage);
-    var reader = std.json.Reader.init(fixed.allocator(), &body.interface);
-    defer reader.deinit();
-    const result = try protocol_reply.decodeCreationRevision(fixed.allocator(), &reader, session, key);
-    if (body.remaining != .nothing) return error.InvalidObservation;
-    return result;
-}
-
 const StartConfiguration = struct {
     provider: ?[]const u8,
     parent: ?[]const u8 = null,
     model: []const u8,
     reasoning_effort: ?[]const u8,
     effort_source: enum { flag, saved, model_default },
+    saved_effort: ?model_capability.ReasoningEffort = null,
 
     fn resolve(input: configure_input.ConfigureInput, effort_flag: bool, saved_effort: ?model_capability.ReasoningEffort) StartConfiguration {
         const model = input.model.value;
@@ -3720,7 +3697,8 @@ const StartConfiguration = struct {
             .parent = if (input.parent.present) input.parent.value else null,
             .model = model,
             .reasoning_effort = input.reasoning_effort.value,
-            .effort_source = if (effort_flag) .flag else if (model_capability.startEffort(model_catalog.shipped, saved_effort, model) != null) .saved else .model_default,
+            .effort_source = if (effort_flag) .flag else .model_default,
+            .saved_effort = saved_effort,
         };
     }
 
@@ -3729,9 +3707,28 @@ const StartConfiguration = struct {
         result.provider = if (self.parent == null) provider else null;
         result.model = model;
         result.reasoning_effort = effort;
+        if (self.effort_source != .flag) result.effort_source = if (self.saved_effort != null and effort != null and std.mem.eql(u8, @tagName(self.saved_effort.?), effort.?)) .saved else .model_default;
         return result;
     }
 };
+
+fn writeCreationConfiguration(writer: *std.Io.Writer, config: @import("creation_receipt.zig").Configuration) !void {
+    try writer.writeAll(",\"configuration\":{\"provider\":");
+    try std.json.Stringify.value(@tagName(config.provider), .{}, writer);
+    try writer.writeAll(",\"model\":");
+    try std.json.Stringify.value(config.model.slice(), .{}, writer);
+    try writer.writeAll(",\"reasoning_effort\":");
+    try std.json.Stringify.value(if (config.reasoning_effort) |effort| @tagName(effort) else null, .{}, writer);
+    try writer.writeAll(",\"workspace\":");
+    try std.json.Stringify.value(config.workspace.slice(), .{}, writer);
+    try writer.writeAll(",\"tools\":");
+    try (@import("creation_receipt_wire.zig").Names{ .value = config.tools }).writeJson(writer);
+    try writer.writeAll(",\"loaded_tools\":");
+    try (@import("creation_receipt_wire.zig").Names{ .value = config.loaded_tools }).writeJson(writer);
+    try writer.print(",\"permission_mode\":\"{s}\",\"compaction_trigger\":", .{@tagName(config.permission_mode)});
+    if (config.compaction_trigger) |trigger| try writer.print("\"{d}\"", .{trigger}) else try writer.writeAll("null");
+    try writer.writeByte('}');
+}
 
 fn writeMutationJson(writer: *std.Io.Writer, reply: protocol_reply.MutationReply, configuration: ?StartConfiguration) !void {
     try writer.writeAll("{\"context\":");
@@ -3745,7 +3742,7 @@ fn writeMutationJson(writer: *std.Io.Writer, reply: protocol_reply.MutationReply
         std.debug.assert(reply.isAccepted() and reply.target == .message and reply.target.message.creates_session);
         try writer.writeAll(",\"configuration\":");
         if (value.parent != null) {
-            try std.json.Stringify.value(value, .{}, writer);
+            try std.json.Stringify.value(.{ .provider = value.provider, .parent = value.parent, .model = value.model, .reasoning_effort = value.reasoning_effort, .effort_source = value.effort_source }, .{}, writer);
         } else {
             try std.json.Stringify.value(.{
                 .provider = value.provider,
@@ -3787,8 +3784,12 @@ fn writeMutationJson(writer: *std.Io.Writer, reply: protocol_reply.MutationReply
             .configure => |value| {
                 try writer.print(",\"revision\":\"{d}\",\"created\":{}", .{ value.revision, value.created });
                 if (value.skills) |status| try writer.print(",\"skills\":\"{s}\"", .{@tagName(status)});
+                if (value.configuration) |config| try writeCreationConfiguration(writer, config);
             },
-            .message => |value| try writer.print(",\"admission\":\"{d}\"", .{value.admission}),
+            .message => |value| {
+                try writer.print(",\"admission\":\"{d}\"", .{value.admission});
+                if (value.configuration) |config| try writeCreationConfiguration(writer, config);
+            },
             .session_stop => |value| {
                 try writer.writeAll(",\"selection\":{\"turn\":");
                 if (value.turn) |turn| try writer.print("\"{d}\"", .{turn}) else try writer.writeAll("null");
@@ -3853,7 +3854,8 @@ test "session start configuration reports resolved effort and its source" {
         }, case.flag, case.saved);
         try std.testing.expectEqualStrings("openai", value.provider.?);
         try std.testing.expectEqualStrings(case.model, value.model);
-        try std.testing.expectEqual(case.source, value.effort_source);
+        const observed = value.observed("openai", case.model, case.effort);
+        try std.testing.expectEqual(case.source, observed.effort_source);
         if (case.effort) |effort| {
             try std.testing.expect(value.reasoning_effort != null);
             try std.testing.expectEqualStrings(effort, value.reasoning_effort.?);
@@ -3874,42 +3876,18 @@ test "session start reports Host settings while retaining invocation effort sour
     try std.testing.expectEqualStrings("model-served", report.model);
     try std.testing.expectEqualStrings("high", report.reasoning_effort.?);
     try std.testing.expectEqual(requested.effort_source, report.effort_source);
+    var saved = requested;
+    saved.saved_effort = .max;
+    try std.testing.expectEqual(.model_default, saved.observed("codex", "model-served", "high").effort_source);
+    try std.testing.expectEqual(.saved, saved.observed("codex", "model-served", "max").effort_source);
+    saved.effort_source = .flag;
+    try std.testing.expectEqual(.flag, saved.observed("codex", "model-served", "high").effort_source);
     try std.testing.expect(report.observed("codex", "no-effort", null).reasoning_effort == null);
     var attached = requested;
     attached.parent = "k7m2qx";
     const attached_report = attached.observed("codex", "model-served", "high");
     try std.testing.expect(attached_report.provider == null);
     try std.testing.expectEqualStrings("k7m2qx", attached_report.parent.?);
-}
-
-test "session start mutation receipt adds configuration without changing send" {
-    const wire = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"message_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"admission\":\"7\"},\"input\":{\"type\":\"text\",\"bytes\":\"3\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"},\"queue\":{\"status\":\"queued\",\"admission\":\"7\"},\"execution\":{\"status\":\"queued\"}}";
-    var reply = protocol_reply.decodeMutationReply(.{ .status = 200, .body = wire }, "", .{ .message = .{ .bytes = 3, .digest = @splat(0), .creates_session = true } });
-    try reply.context.store.set("/store");
-    try reply.context.key.set("handle");
-    reply.context.kind = .message;
-    const context = "{\"context\":{\"store\":\"/store\",\"session\":\"k7m2qx\",\"key\":\"handle\",\"kind\":\"message\"}";
-    const tail = ",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"admission\":\"7\"},\"input\":{\"type\":\"text\",\"bytes\":\"3\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"},\"queue\":{\"status\":\"queued\",\"admission\":\"7\"}}";
-    var buffer: [2048]u8 = undefined;
-    var writer = std.Io.Writer.fixed(&buffer);
-    try writeMutationJson(&writer, reply, .{ .provider = "codex", .model = "gpt-6.1-sol", .reasoning_effort = "low", .effort_source = .model_default });
-    try std.testing.expectEqualStrings(context ++ ",\"configuration\":{\"provider\":\"codex\",\"model\":\"gpt-6.1-sol\",\"reasoning_effort\":\"low\",\"effort_source\":\"model_default\"}" ++ tail, writer.buffered());
-    writer.end = 0;
-    const attached = StartConfiguration.resolve(.{
-        .store = "/store",
-        .session = .create,
-        .parent = .{ .present = true, .value = "09azvw" },
-        .model = .{ .present = true, .value = "unlisted-model" },
-        .reasoning_effort = .{ .present = true, .value = "low" },
-    }, false, null);
-    try std.testing.expect(attached.provider == null);
-    try std.testing.expectEqualStrings("09azvw", attached.parent.?);
-    try writeMutationJson(&writer, reply, attached);
-    try std.testing.expectEqualStrings(context ++ ",\"configuration\":{\"provider\":null,\"parent\":\"09azvw\",\"model\":\"unlisted-model\",\"reasoning_effort\":\"low\",\"effort_source\":\"model_default\"}" ++ tail, writer.buffered());
-    writer.end = 0;
-    reply.target.message.creates_session = false;
-    try writeMutationJson(&writer, reply, null);
-    try std.testing.expectEqualStrings(context ++ tail, writer.buffered());
 }
 
 test "mutation presentation renders owned diagnostics and context with bounded writer" {
@@ -3930,17 +3908,17 @@ test "mutation presentation renders owned diagnostics and context with bounded w
 }
 
 test "mutation presentation complete modes preserve escaped original context" {
-    const accepted_wire = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"configuration_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"revision\":\"7\",\"created\":true},\"execution\":{\"status\":\"unavailable\",\"reason\":\"direct_reply_does_not_wait_for_model_processing\"},\"wire_only\":true}";
+    const accepted_wire = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"configuration_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"revision\":\"7\",\"created\":false},\"execution\":{\"status\":\"unavailable\",\"reason\":\"direct_reply_does_not_wait_for_model_processing\"},\"wire_only\":true}";
     const failed_wire = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"busy\",\"code\":\"capacity\\n\\u001b\",\"wire_only\":true}";
     const context = "{\"store\":\"/store\",\"session\":\"k7m2qx\",\"key\":\"key/µ\\\"\\n\\u001b\",\"kind\":\"configure\"}";
-    const accepted_json = "{\"context\":" ++ context ++ ",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"revision\":\"7\",\"created\":true}}";
+    const accepted_json = "{\"context\":" ++ context ++ ",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"revision\":\"7\",\"created\":false}}";
     const failed_json = "{\"context\":" ++ context ++ ",\"error\":{\"status\":\"503\",\"reason\":\"HostInvocationFailed\",\"certainty\":\"unconfirmed\",\"type\":\"busy\",\"code\":\"capacity\\n\\u001b\"}}";
     const human_context = "Store: /store\nSession: k7m2qx\nkey: key/µ\\\"\\n\\x1b\n";
     const failed_human = human_context ++ "invocation: HostInvocationFailed (HTTP 503); outcome unconfirmed\ntype: busy\ncode: capacity\\n\\x1b\n";
     const modes = [_]MutationPresentation{ .json, .human, .interactive_configuration };
     const accepted_expected = [_][]const u8{
         accepted_json ++ "\n",
-        human_context ++ "admitted: accepted\nreplayed: false\nrevision: 7; created: true\n",
+        human_context ++ "admitted: accepted\nreplayed: false\nrevision: 7; created: false\n",
         "Rui: Configured.\n",
     };
     const failed_expected = [_][]const u8{

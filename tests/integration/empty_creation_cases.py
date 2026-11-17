@@ -97,8 +97,9 @@ def empty_creation(binary, root, store_settings, env):
 
             record = root / "cli.json"
             cli = invoke("session", "configure", "--store", store, "--record", record, "--key", "empty-creation:cli",
-                         "--provider", binding["provider"], "--model", binding["model"], "--workspace", workspace)
-            assert json.loads(record.read_text())["configuration"] == binding
+                         "--model", binding["model"], "--workspace", workspace)
+            unchosen = {key: value for key, value in binding.items() if key != "provider"}
+            assert json.loads(record.read_text())["configuration"] == unchosen
             assert check(inspect(cli["context"]["session"])) == resolved
 
             records = home / ".config/rui/requests"
@@ -127,4 +128,32 @@ def empty_creation(binary, root, store_settings, env):
                     lambda: close_pty(master), lambda: close_pty(slave))
         finally:
             host_process.dispose_all(close_host)
-    print("empty creation: CLI, TUI and TypeScript persist identical Host defaults, including TypeScript Workspace-only creation")
+
+        # The client has no provider preference. Two served providers leave the
+        # Host unable to choose; an explicit provider still resolves normally.
+        ambiguous_document = dict(document, providers={**document["providers"], "codex": {"unauthenticated": True}})
+        host = subprocess.Popen([str(binary), "host", "serve", "--settings", "-"], env=clean,
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            host.stdin.write(settings_fixture.frame(ambiguous_document))
+            host.stdin.flush()
+            settings_fixture.wait_for_host(sock, "", host)
+            store = settings_fixture.host_info(sock, "")["store"]
+            record = root / "ambiguous.json"
+            rejected = subprocess.run([str(binary), "session", "configure", "--store", store, "--record", str(record),
+                                       "--key", "empty-creation:ambiguous", "--model", binding["model"],
+                                       "--workspace", str(workspace)], env=clean, cwd=workspace,
+                                      text=True, capture_output=True, timeout=20)
+            assert rejected.returncode == 3, rejected
+            assert json.loads(record.read_text())["configuration"] == unchosen
+            assert json.loads(rejected.stdout)["answer"]["code"] == "incomplete_initial_configuration", rejected
+
+            explicit_record = root / "explicit.json"
+            explicit = invoke("session", "configure", "--store", store, "--record", explicit_record,
+                              "--key", "empty-creation:explicit", "--provider", "openai",
+                              "--model", binding["model"], "--workspace", workspace)
+            assert json.loads(explicit_record.read_text())["configuration"] == binding
+            assert check(inspect(explicit["context"]["session"])) == resolved
+        finally:
+            host_process.dispose_all(close_host)
+    print("empty creation: CLI and TypeScript use the sole Host provider; explicitly bound TUI agrees; ambiguous Host requires a provider")

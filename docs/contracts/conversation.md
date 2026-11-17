@@ -120,7 +120,7 @@ Unsupported values reject the whole update.
 Catalog-only values such as `ultra` do not expand Rui's grammar or trigger a fallback.
 Catalog support is source metadata, not account entitlement or live backend qualification.
 
-The Host chooses `low` when supported, otherwise the model’s lowest listed effort, otherwise null. For an unlisted exact binding it uses the product effort choice; explicit effort values in the closed grammar pass through (D229). The CLI and TUI can send a supported personal saved effort as an explicit choice.
+The Host chooses `low` when supported, otherwise the model’s lowest listed effort, otherwise null. For an unlisted exact binding it uses the product effort choice; explicit effort values in the closed grammar pass through (D229). The CLI and TUI may send personal saved effort as a creation preference; the Host applies it only when effort is omitted and accepted for the selected model (including an unlisted model), otherwise it uses the model default. An explicit effort is validated as requested and never downgraded to a saved value or default.
 On an existing Session, omission preserves the saved effort; explicit null requests the Host default. Configuration validates the effective requested-or-retained effort against the effective model. The pinned `openai-responses/2` codec cannot encode a boundary back to unspecified effort, so a reset that would clear an assigned value rejects atomically as `unsupported_reasoning_effort` (D165).
 `--reasoning-effort default` requests the Host default; `--reasoning-effort VALUE` selects a value for `session configure` and initial `session start`; chat info’s Effort field submits the equivalent typed edit.
 Current inspection reports the effective `reasoning_effort` and saved nullable `reasoning_effort_override`; an explicit saved value wins.
@@ -267,7 +267,7 @@ These are synthetic local evidence, not live provider, remote filesystem or powe
 
 #### Host settings defaults
 
-The functional-core domain matrix compares omitted, explicit and null settings with independently recorded base values across listed, unlisted and no-effort models and parent states. Store tests exercise defaulted child authority and keyed replay after parent or catalog changes; reset tests retain the no-effort clearing refusal. Cross-client integration checks CLI, TUI and TypeScript creation against SQLite and live MySQL. A reverting mutation must fail the relevant default assertion.
+The functional-core domain matrix compares omitted, explicit and null settings with independently recorded base values across listed, unlisted and no-effort models, saved preferences and parent states. It covers unsupported saved-effort fallback, strict validation of explicit effort, and refusal of preferences on addressed updates. Store tests exercise defaulted child authority and keyed replay after parent or catalog changes; reset tests retain the no-effort clearing refusal. Cross-client integration checks CLI, TUI and TypeScript creation against SQLite and live MySQL. A reverting mutation must fail the relevant default assertion.
 
 #### Parent creation (D178)
 

@@ -78,7 +78,7 @@ const agent_spec_properties = blk: {
         };
         properties = properties ++ (if (properties.len == 0) "" else ",") ++ "\"" ++ entry.spec ++ "\":{\"type\":" ++ json_type ++ extra ++ "}";
     }
-    break :blk properties;
+    break :blk properties ++ ",\"preferences\":{\"type\":\"object\",\"properties\":{\"reasoning_effort\":{\"type\":\"string\",\"enum\":[\"none\",\"low\",\"medium\",\"high\",\"xhigh\",\"max\"]},\"permission_mode\":{\"type\":\"string\",\"enum\":[\"ask\",\"bypass\"]}},\"additionalProperties\":false}";
 };
 
 pub const skill_description = "Invoke an advertised skill by name to read its complete raw SKILL.md and absolute path. Reload rescans this Session's repository and Host-home .agents/skills roots, appending only changed catalog entries. Skills are ordinary conversation content, grant no tools or permissions, and execute nothing on load.";

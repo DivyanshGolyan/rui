@@ -1617,11 +1617,26 @@ noinline fn submitConfigure(host: *Host, command: *const wire_request.ConfigureC
     };
     const checked = core_tools.parseAgentSpec(arena, preset.spec, &resolved.configuration) catch |err| return configureFailure(host, err);
     std.debug.assert(checked == .accepted);
-    inline for (@typeInfo(wire_request.Configuration).@"struct".field_names) |field| {
-        const override = &@field(command.configuration, field);
-        if (override.state != .omitted) @field(resolved.configuration, field) = override.*;
-    }
+    overlayConfiguration(&resolved.configuration, &command.configuration);
     return configureCapturedSkills(host, resolved, &decision);
+}
+
+fn overlayConfiguration(base: *wire_request.Configuration, override: *const wire_request.Configuration) void {
+    inline for (@import("session_settings.zig").spec_entries) |entry| {
+        const field = &@field(override, entry.field);
+        if (field.state != .omitted) @field(base, entry.field) = field.*;
+    }
+    if (override.preferences) |preferences| base.preferences = preferences;
+}
+
+test "preset overlay retains or replaces the whole preferences object" {
+    var base: wire_request.Configuration = .{ .preferences = .{} };
+    base.preferences.?.reasoning_effort.state = .value;
+    try base.preferences.?.reasoning_effort.value.set("high");
+    overlayConfiguration(&base, &.{});
+    try std.testing.expectEqualStrings("high", base.preferences.?.reasoning_effort.value.slice());
+    overlayConfiguration(&base, &.{ .preferences = .{} });
+    try std.testing.expectEqual(protocol.FieldState.omitted, base.preferences.?.reasoning_effort.state);
 }
 
 fn configureFailure(host: *Host, err: anyerror) error{OutOfMemory}!store_module.ConfigureReply {
@@ -4300,6 +4315,8 @@ test "presets seed configure before Store validation and idempotency" {
     create.* = .{ .preset = .{} };
     try create.preset.?.set("review");
     try create.key.set("preset-create");
+    create.configuration.workspace.state = .value;
+    try create.configuration.workspace.value.set(root);
     const reload = try arena.create(wire_request.ConfigureCommand);
     reload.* = .{ .preset = create.preset, .reload_skills = true };
     try reload.key.set("skills-reload-preset-empty");
@@ -4355,7 +4372,7 @@ test "presets seed configure before Store validation and idempotency" {
     try std.testing.expectEqual(protocol.Provider.codex, observed.provider.?);
     try std.testing.expectEqualStrings(root, observed.workspace.slice());
     try std.testing.expectEqual(@as(?u64, 12000), observed.compaction_trigger_override);
-    try std.testing.expectEqual(@as(?protocol.ReasoningEffort, null), observed.reasoning_effort_override);
+    try std.testing.expectEqual(@import("configuration_defaults.zig").startEffort(@import("model_catalog.zig").shipped, "preset-override-model"), observed.reasoning_effort_override);
     try std.testing.expectEqualStrings("bypass", observed.permission_mode.slice());
     try std.testing.expectEqual(@as(u64, 1), try store_module.testing.queryU64(&storage, "SELECT count(*) FROM tool_set_member WHERE tool_set_id=?1", .{observed.tool_set_id}));
     try std.testing.expectEqual(@as(u64, 1), try store_module.testing.queryU64(&storage, "SELECT count(*) FROM tool_set_member member JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id WHERE member.tool_set_id=?1 AND tool.name='start_agent'", .{observed.tool_set_id}));
@@ -4377,7 +4394,10 @@ test "presets seed configure before Store validation and idempotency" {
     const invalid = try arena.create(wire_request.ConfigureCommand);
     invalid.* = .{ .preset = create.preset };
     try invalid.key.set("preset-invalid-resolved");
-    invalid.configuration.compaction_trigger.state = .explicit_null;
+    invalid.configuration.workspace.state = .value;
+    try invalid.configuration.workspace.value.set(root);
+    invalid.configuration.compaction_trigger.state = .value;
+    try invalid.configuration.compaction_trigger.value.set("0");
     const refused = try submitConfigure(&host, invalid);
     try std.testing.expect(refused == .rejected);
     try std.testing.expectEqual(protocol.ConfigurationRejection.invalid_compaction_trigger, refused.rejected.code);
@@ -4402,7 +4422,6 @@ test "presets seed configure before Store validation and idempotency" {
     try std.testing.expect(update_replay == .rejected and update_replay.rejected.replayed);
     try std.testing.expectEqual(protocol.ConfigurationRejection.preset_on_update, update_replay.rejected.code);
 }
-
 test "session archive renders accepted intent and completion for both archive and restore" {
     const protocol_reply = @import("protocol_reply.zig");
     var command: protocol.SessionArchiveCommand = .{};

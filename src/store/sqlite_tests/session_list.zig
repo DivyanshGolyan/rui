@@ -368,3 +368,81 @@ test "a stopping Turn with queued work adds no list read rounds or passes" {
     const work = (try store_core.activityPageForTesting(&storage, request)).work.work;
     try std.testing.expect(work.state == .stopping and work.actions.stop);
 }
+
+test "creating Message replay reads independently of Session history in SQLite steps" {
+    const wire_request = @import("../../wire_request.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try store_testing.canonicalCwd(std.testing.io, &workspace_buffer);
+    const settings = try completeConfiguration("receipt-steps", "", workspace, "model-a");
+    var message: wire_request.MessageCommand = .{ .configuration = settings.configuration };
+    try message.key.set("receipt-steps");
+    message.text = try tests.testingBytesContent(&tmp, "receipt-steps-input", "initial");
+    defer message.removeTemporaryContent(std.testing.io) catch unreachable;
+    const created = storage.submitMessageWithModel(&message, null, .{});
+    try std.testing.expect(created == .accepted);
+    const session = created.accepted.session;
+    const Counter = struct {
+        fn steps(store: *Store, command: *const wire_request.MessageCommand) !u64 {
+            var counter: TestingSteps = .{};
+            counter.begin(store.sqliteDatabase());
+            const replay = store.submitMessageWithModel(command, null, .{});
+            counter.end(store.sqliteDatabase());
+            try std.testing.expect(replay == .accepted and replay.accepted.replayed);
+            return counter.steps;
+        }
+    };
+    _ = try Counter.steps(&storage, &message);
+    const few = try Counter.steps(&storage, &message);
+    for (0..64) |index| {
+        var key: [64]u8 = undefined;
+        const name = try std.fmt.bufPrint(&key, "receipt-steps-history-{d}", .{index});
+        try submitTestMessage(&storage, &tmp, name, name, session.slice(), "history");
+    }
+    try std.testing.expect(few > 0);
+    try std.testing.expectEqual(few, try Counter.steps(&storage, &message));
+}
+
+test "creating configuration receipt replay reads independently of Session history in SQLite steps" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try store_testing.canonicalCwd(std.testing.io, &workspace_buffer);
+    var create = try completeConfiguration("configure-receipt-steps", "", workspace, "model-a");
+    const created = try storage.configure(&create, .{});
+    try std.testing.expect(created == .accepted and created.accepted.configuration != null);
+    const session = created.accepted.session;
+    const Counter = struct {
+        fn steps(store: *Store, command: *const @import("../../wire_request.zig").ConfigureCommand) !u64 {
+            var counter: TestingSteps = .{};
+            counter.begin(store.sqliteDatabase());
+            const result = store.configure(command, .{});
+            counter.end(store.sqliteDatabase());
+            const replay = try result;
+            try std.testing.expect(replay == .accepted and replay.accepted.replayed and replay.accepted.configuration != null);
+            return counter.steps;
+        }
+    };
+    _ = try Counter.steps(&storage, &create);
+    const few = try Counter.steps(&storage, &create);
+    for (0..64) |index| {
+        var key: [64]u8 = undefined;
+        const name = try std.fmt.bufPrint(&key, "configure-receipt-steps-history-{d}", .{index});
+        try submitTestMessage(&storage, &tmp, name, name, session.slice(), "history");
+    }
+    for (0..64) |index| {
+        var key: [64]u8 = undefined;
+        const name = try std.fmt.bufPrint(&key, "configure-receipt-steps-revision-{d}", .{index});
+        var update = try completeConfiguration(name, session.slice(), workspace, if (index % 2 == 0) "model-b" else "model-a");
+        try std.testing.expect((try storage.configure(&update, .{})) == .accepted);
+    }
+    try std.testing.expect(few > 0);
+    try std.testing.expectEqual(few, try Counter.steps(&storage, &create));
+}

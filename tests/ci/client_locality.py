@@ -21,14 +21,10 @@ DEFAULT_IMPORT = "imports product_defaults.zig"
 CLASSIFIER = "classifies Session work"
 TS_DEFAULT = "hard-codes a Session default"
 ISSUES = {DEFAULT_IMPORT: "#1621", CLASSIFIER: "#1622", TS_DEFAULT: "#1621"}
-# Saved personal effort remains client-owned until its settings move to the Host.
-# This pair already exists at the trusted base; retagging never authorizes growth.
-DEFERRED_ISSUES = {("src/client_defaults.zig", DEFAULT_IMPORT): "#1629"}
-
 # Shared dependencies can be in graph.host even though these client entry points
 # themselves must remain covered. Keep the requested minimum inventory together.
 REQUIRED_SOURCES = (
-    "src/cli.zig", "src/cli_args.zig", "src/client.zig", "src/client_defaults.zig",
+    "src/cli.zig", "src/cli_args.zig", "src/client.zig",
     "src/configure_input.zig", "src/new_session_selection.zig", "src/Overview.zig",
     "src/overview_view.zig", "src/OverviewLines.zig", "src/SessionFrontend.zig",
     "src/SessionSubmission.zig", "src/SessionInput.zig", "src/session_view.zig",
@@ -44,7 +40,6 @@ ALLOWED = {
     ("src/app_settings.zig", "imports product_defaults.zig"): "#1621",
     ("src/cli.zig", "imports product_defaults.zig"): "#1621",
     ("src/cli_args.zig", "imports product_defaults.zig"): "#1621",
-    ("src/client_defaults.zig", "imports product_defaults.zig"): "#1629",
     ("src/new_session_selection.zig", "imports product_defaults.zig"): "#1621",
     ("src/status_page.zig", "imports product_defaults.zig"): "#1621",
     ("src/attention.zig", "classifies Session work"): "#1622",
@@ -222,10 +217,7 @@ def allowed_entries(source, *, trusted=False):
         if (not isinstance(pair, tuple) or len(pair) != 2 or not all(isinstance(part, str) for part in pair)
                 or pair[1] not in ISSUES):
             raise ValueError(f"client_locality.py allowance needs its removal issue: {pair!r}")
-        expected = DEFERRED_ISSUES.get(pair, ISSUES[pair[1]])
-        # The trusted history names the original unit before this deferral.
-        inherited_issue = trusted and pair in DEFERRED_ISSUES and issue == ISSUES[pair[1]]
-        if issue != expected and not inherited_issue:
+        if issue != ISSUES[pair[1]]:
             raise ValueError(f"client_locality.py allowance needs its removal issue: {pair!r}")
     return entries
 

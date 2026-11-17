@@ -15,6 +15,7 @@ import host_process
 import os_semantics
 from preset_creation_cases import preset_creation
 from empty_creation_cases import empty_creation
+from preferences_bridge_cases import preferences_bridge
 from settings_fixture import WIRE, frame, host_info, mcp_server, output, post, refusal, wait_for_host
 
 
@@ -392,6 +393,7 @@ def main(network, ci):
     held.close()
     silent.close()
     sdk_tool_set(root, good, network, ci)
+    preferences_bridge(RUI, root / "preferences-bridge", {"sqlite": {"dir": str(root / "preferences-store")}}, os.environ)
     print(f"settings document: ready, store_locked, runtime_dir_unusable, stdin close stopped the Host in {elapsed:.2f} s, opened paused, preset creation and four preset refusals, four document refusals, MCP tools listed, a collision refused, a server down tolerated")
 
 

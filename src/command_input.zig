@@ -155,6 +155,11 @@ pub const ToolsField = struct {
     }
 };
 
+pub const Preferences = struct {
+    reasoning_effort: OptionalBounded(16) = .{},
+    permission_mode: OptionalBounded(16) = .{},
+};
+
 fn ConfigurationOf(comptime Custody: type) type {
     const ContentField = Commands(Custody).ContentField;
     return struct {
@@ -173,12 +178,13 @@ fn ConfigurationOf(comptime Custody: type) type {
         reasoning_effort: OptionalBounded(16) = .{},
         label: OptionalBounded(max_label_bytes) = .{},
         parent: OptionalBounded(6) = .{},
+        preferences: ?Preferences = null,
 
         comptime {
             const fields = @typeInfo(Configuration).@"struct";
-            if (fields.field_names.len != session_settings.spec_entries.len)
+            if (fields.field_names.len != session_settings.spec_entries.len + 1)
                 @compileError("Session settings table must cover Configuration exactly");
-            for (session_settings.spec_entries, fields.field_names, fields.field_types) |entry, name, Field| {
+            for (session_settings.spec_entries, fields.field_names[0..session_settings.spec_entries.len], fields.field_types[0..session_settings.spec_entries.len]) |entry, name, Field| {
                 if (!std.mem.eql(u8, entry.field, name))
                     @compileError("Session settings table must follow Configuration field order: " ++ name);
                 const Expected = switch (entry.kind) {
@@ -263,6 +269,11 @@ fn configureDigest(session: []const u8, configuration: anytype, require_model: b
     if (configuration.parent.state != .omitted) {
         hashField(&hash, "rui/core/configure/parent/v1");
         hashOptional(&hash, &configuration.parent);
+    }
+    if (configuration.preferences) |preferences| {
+        hashField(&hash, "rui/core/configure/preferences/v1");
+        hashOptional(&hash, &preferences.reasoning_effort);
+        hashOptional(&hash, &preferences.permission_mode);
     }
     return hash.finalResult();
 }

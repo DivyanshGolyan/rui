@@ -37,6 +37,8 @@ export interface AgentSpec {
 	effort?: Schemas["AgentSpec"]["effort"];
 	/** Compact the conversation at this many tokens. `null` requests the Host default. */
 	compactAt?: number | null;
+	/** Soft creation preferences, used when no stronger setting applies. */
+	preferences?: { reasoningEffort?: NonNullable<Schemas["AgentSpec"]["effort"]>; permissionMode?: "ask" | "bypass" };
 	/** A name shown in lists. `null` clears it. */
 	label?: string | null;
 }
@@ -139,6 +141,10 @@ export function agentSpec(spec: Partial<SessionSpec>): Schemas["Configuration"] 
 		...(spec.outputReservation === undefined ? {} : { outputReservation: spec.outputReservation }),
 		...(spec.effort === undefined ? {} : { effort: spec.effort }),
 		...(spec.label === undefined ? {} : { label: spec.label }),
+		...(spec.preferences === undefined ? {} : { preferences: {
+			...(spec.preferences.reasoningEffort === undefined ? {} : { reasoning_effort: spec.preferences.reasoningEffort }),
+			...(spec.preferences.permissionMode === undefined ? {} : { permission_mode: spec.preferences.permissionMode }),
+		} }),
 	};
 }
 

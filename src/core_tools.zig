@@ -929,7 +929,10 @@ test "start_agent spec schema covers every noninherited Session setting" {
         if (comptime !std.mem.eql(u8, entry.field, "workspace") and !std.mem.eql(u8, entry.field, "provider"))
             try std.testing.expect(properties.contains(entry.spec));
     }
-    try std.testing.expectEqual(@import("session_settings.zig").entries.len - 2, properties.count());
+    const preferences = properties.get("preferences").?.object;
+    try std.testing.expect(preferences.get("properties").?.object.contains("reasoning_effort"));
+    try std.testing.expect(preferences.get("properties").?.object.contains("permission_mode"));
+    try std.testing.expectEqual(@import("session_settings.zig").entries.len - 1, properties.count());
 }
 
 test "read_action accepts only own-Session bounded canonical decimal arguments" {

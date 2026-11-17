@@ -728,9 +728,10 @@ test "new Session permissions use no file then saved ask or bypass with either f
         const values = try load(home);
         for ([_]?PermissionMode{ null, .ask, .bypass }) |flag| {
             var input: configure_input.ConfigureInput = .{ .store = "", .session = .create, .permission_mode = if (flag) |mode| .{ .present = true, .value = @tagName(mode) } else .{} };
-            input.applySavedCreation("gpt-6.1-sol", values.reasoning_effort, values.permission_mode);
-            try std.testing.expectEqual(flag != null or saved != null, input.permission_mode.present);
-            if (flag orelse saved) |mode| try std.testing.expectEqualStrings(@tagName(mode), input.permission_mode.value);
+            input.applySavedCreation(values.reasoning_effort, values.permission_mode);
+            try std.testing.expectEqual(flag != null, input.permission_mode.present);
+            if (flag) |mode| try std.testing.expectEqualStrings(@tagName(mode), input.permission_mode.value);
+            try std.testing.expectEqual(saved, input.preferences.permission_mode);
         }
     }
 }
