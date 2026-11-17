@@ -113,11 +113,14 @@ class VerifyRuiTest(unittest.TestCase):
             root = Path(directory)
             scratch = root / "scratch"
             scratch.mkdir()
+            untrusted = root / "candidate/tests/integration"
+            untrusted.mkdir(parents=True)
+            (untrusted / "model_fixture.py").write_text('raise RuntimeError("candidate fixture loaded")\n')
             (root / "run.json").write_text(json.dumps({
                 "id": "image-consent-test", "scratch": str(scratch),
                 "home": str(scratch / "home"), "store": str(scratch / "store"),
                 "project": str(scratch), "binary": "/unused/rui",
-                "source": str(SCRIPT.parents[4]),
+                "source": str(root / "candidate"),
             }))
             with subprocess.Popen([sys.executable, str(SCRIPT), "_fixture", str(root)],
                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE) as provider:
@@ -223,6 +226,7 @@ class VerifyRuiTest(unittest.TestCase):
                         patch.object(sys, "argv", sys.argv[:]), patch.object(sys, "path", sys.path[:]), \
                         contextlib.redirect_stdout(io.StringIO()):
                     new(args)
+                    self.assertEqual(sys.path[0], str(SCRIPT.parents[4] / "tests/integration"))
                 self.assertEqual(sent_to, [] if no_sessions else ["fybw8c"])
                 self.assertEqual(len(started), 0 if no_sessions else 2)
                 saved = json.loads(next((root / "cache/runs").glob("*/run.json")).read_text())

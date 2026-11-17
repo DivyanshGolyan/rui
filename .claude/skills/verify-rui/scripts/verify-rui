@@ -457,7 +457,7 @@ def fixture_main(args):
     """
     run = Run(args.run)
     sys.argv = [sys.argv[0], str(run.rui)]
-    sys.path.insert(0, str(pathlib.Path(run.meta["source"]) / "tests/integration"))
+    sys.path.insert(0, str(HERE.parents[4] / "tests/integration"))
     import http.server
     import model_fixture as fixture
     log = run.evidence / "provider.jsonl"
@@ -651,7 +651,7 @@ def tap_main(args):
     require_screen(build)
     term = pathlib.Path(args.term_dir)
     term.mkdir(parents=True, exist_ok=True)
-    sys.path.insert(0, str(source / "tests/integration"))
+    sys.path.insert(0, str(HERE.parents[4] / "tests/integration"))
     try:
         os.environ["RUI_TEST_GHOSTTY_VT"] = build["screen_library"]
         from terminal_screen import ScreenCapture
@@ -912,7 +912,7 @@ def cmd_new(args):
     run = Run(root)
     (run.home / ".config/rui").mkdir(parents=True, mode=0o700)
     sys.argv = [sys.argv[0], str(run.rui)]
-    sys.path.insert(0, str(pathlib.Path(run.meta["source"]) / "tests/integration"))
+    sys.path.insert(0, str(HERE.parents[4] / "tests/integration"))
     import codex_integration as codex_fixture
     codex_fixture.credentials(run.home / ".config/rui/codex.json")
     python = sys.executable
@@ -3737,8 +3737,11 @@ def cmd_shots(args):
                                              pkg_dir=None, force=False, no_screen=False, upgrade=True))
             identifier = json.loads(output.getvalue())["sha"]
         build = load_build(identifier)
-        raw = subprocess.check_output(["git", "-C", build["source"], "show",
-                                       f"{build['tree']}:.claude/skills/verify-rui/scripts/frames.json"], text=True)
+        if getattr(args, "scenario", None):
+            raw = pathlib.Path(args.scenario).read_text()
+        else:
+            raw = subprocess.check_output(["git", "-C", build["source"], "show",
+                                           f"{build['tree']}:.claude/skills/verify-rui/scripts/frames.json"], text=True)
         scenario = validate_scenario(json.loads(raw), None)
         metadata = {"build": build.get("sha", identifier), "tree": build["tree"],
                     "recipe_sha256": hashlib.sha256(raw.encode("utf-8")).hexdigest()}
@@ -4092,6 +4095,7 @@ def main():
     p = sub.add_parser("shots", help="capture a build's own screen recipe")
     p.add_argument("build", nargs="?", metavar="BUILD")
     p.add_argument("--baseline", metavar="DIR")
+    p.add_argument("--scenario", metavar="FILE", help="use this trusted recipe instead of the build tree recipe")
     p.add_argument("--only", metavar="NAME,...")
     p.add_argument("--shard", metavar="I/N")
     p.add_argument("--out")
