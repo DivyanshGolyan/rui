@@ -5,7 +5,7 @@ import pathlib
 import model_fixture as fixture
 from host_process import wait_for
 from human_cli_fixture import keyed_frame, read_terminal
-from overview_fixture import world
+from tool_profile_fixture import profile_worlds
 from product_defaults import DEFAULTS, compaction_trigger, start_effort
 from terminal_process import terminal_process
 
@@ -66,7 +66,7 @@ def references(w):
     return {row["reference"] for row in json.loads(w.run("session", "list", "--all"))["sessions"]}
 
 
-def fresh_callers():
+def fresh_callers(world, engine):
     allowed = DEFAULTS.tools.split(",")
     loaded = DEFAULTS.loaded_tools.split(",")
     replies = {name: answer(name) for name in ("configured", "started", "tui-new", "tui-wide")}
@@ -101,10 +101,10 @@ def fresh_callers():
                 screen.keys(b"\r")
                 screen.contains(name + " answered")
                 first_request(w, session, loaded)
-    print("tool profiles: fresh CLI configure/start and narrow/wide TUI creation save allowed/loaded sets and offer only loaded tools", flush=True)
+    print(f"tool profiles ({engine}): fresh CLI configure/start and narrow/wide TUI creation save allowed/loaded sets and offer only loaded tools", flush=True)
 
 
-def restrictions_and_resume():
+def restrictions_and_resume(world, engine):
     cases = (
         ("none", None, [], []),
         ("bash", None, ["bash"], ["bash"]),
@@ -135,10 +135,10 @@ def restrictions_and_resume():
             w.run("session", "send", "--to", session, input=f"restricted-{index}")
             first_request(w, session, loaded)
             profile(w, session, allowed, loaded, "ask")
-    print("tool profiles: explicit empty/restricted selections, explicit loaded subsets, label updates and resume preserve authority and first wire", flush=True)
+    print(f"tool profiles ({engine}): explicit empty/restricted selections, explicit loaded subsets, label updates and resume preserve authority and first wire", flush=True)
 
 
-def discovery():
+def discovery(world, engine):
     allowed = DEFAULTS.tools.split(",")
     loaded = DEFAULTS.loaded_tools.split(",")
     with world("tool-profile-discovery") as w:
@@ -162,7 +162,7 @@ def discovery():
                        and item.get("type") == "function_call_output"]
             assert output["output"], output
             profile(w, session, tools, final)
-    print("tool profiles: discovery loads deferred read_action, projects stop_action, and preserves a restricted Session", flush=True)
+    print(f"tool profiles ({engine}): discovery loads deferred read_action, projects stop_action, and preserves a restricted Session", flush=True)
 
 
 class ChildReplies(dict):
@@ -193,7 +193,7 @@ class ChildReplies(dict):
         return answer("child")
 
 
-def attached_child():
+def attached_child(world, engine):
     replies = ChildReplies()
     with world("attached-tool-profile", replies, active_capacity=2) as w:
         parent = w.session("--tools", "skill,start_agent", "--permission-mode", "ask")
@@ -213,11 +213,13 @@ def attached_child():
         assert "narrowed child" in outputs and "forbidden child" in outputs, outputs
         assert "bash" in outputs["forbidden child"] and "Nothing was started" in outputs["forbidden child"], outputs
         profile(w, parent, ["skill", "start_agent"], ["skill", "start_agent"], "ask")
-    print("tool profiles: attached children keep narrowed tools and reject widening beyond their parent", flush=True)
+    print(f"tool profiles ({engine}): attached children keep narrowed tools and reject widening beyond their parent", flush=True)
 
 
 def main():
-    fresh_callers()
-    restrictions_and_resume()
-    discovery()
-    attached_child()
+    with profile_worlds() as worlds:
+        for engine, world in worlds:
+            fresh_callers(world, engine)
+            restrictions_and_resume(world, engine)
+            discovery(world, engine)
+            attached_child(world, engine)
