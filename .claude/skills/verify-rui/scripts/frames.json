@@ -50,7 +50,7 @@
         "Not confirmed"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
       ]
     },
     {
@@ -99,7 +99,7 @@
         "Sending..."
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
       ],
       "expect_next": {
         "Send failure witness": "Not confirmed · ctrl+r retries original"
@@ -160,7 +160,7 @@
         "Not confirmed"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
       ]
     },
     {
@@ -209,7 +209,7 @@
         "Sending..."
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
       ],
       "expect_next": {
         "Send failure witness": "Not confirmed · ctrl+r retries original"
@@ -244,7 +244,7 @@
         "enter retry"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
       ],
       "cast": [
         {
@@ -277,7 +277,7 @@
         "enter retry"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
       ]
     },
     {
@@ -6170,7 +6170,7 @@
         }
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -6196,7 +6196,7 @@
         "enter retry"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -6214,7 +6214,7 @@
         "enter retry"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     },
     {
@@ -6240,7 +6240,7 @@
         "enter retry"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
       ]
     }
   ]
