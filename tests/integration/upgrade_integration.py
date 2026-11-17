@@ -208,9 +208,9 @@ os.execv(plan["curl"], [plan["curl"], *args])
 class Case:
     def __init__(self, root, binary, releases, name):
         self.root = root / name
-        self.root.mkdir()
+        self.root.mkdir(mode=0o700)
         self.home = self.root / "home"
-        self.home.mkdir()
+        self.home.mkdir(mode=0o700)
         self.store = self.root / "store"
         self.binary = binary
         self.releases = releases
