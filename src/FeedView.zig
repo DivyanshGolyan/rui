@@ -11,10 +11,13 @@ const Row = selecting.RowFor(@FieldType(Window, "document"));
 const Self = @This();
 const SessionInput = @import("SessionInput.zig");
 const Hover = @import("widgets/Hover.zig");
+const PendingText = @import("TerminalText.zig");
 
 window: *Window,
 anchor: *Feed,
 tail: ?vxfw.Widget = null,
+pending: ?struct { text: []const u8, note: ?[]const u8 = null } = null,
+message_note: ?resident.MessageNote = null,
 latest_ending: ?resident.LatestEnding = null,
 retry_actionable: bool = false,
 style: vaxis.Style = .{},
@@ -79,7 +82,7 @@ pub fn widget(self: *Self) vxfw.Widget {
 }
 
 pub fn presentation(self: *const Self) resident.Presentation {
-    return .{ .latest_ending = self.latest_ending, .retry_actionable = self.retry_actionable };
+    return .{ .latest_ending = self.latest_ending, .retry_actionable = self.retry_actionable, .message_note = self.message_note };
 }
 
 fn layout(self: *const Self) viewport.Layout {
@@ -373,6 +376,40 @@ fn mouse(self: *Self, ctx: *vxfw.EventContext, value: vaxis.Mouse) !void {
     }
 }
 
+const PendingDocument = viewport.Sized(8192, true);
+const PendingSink = struct {
+    document: *PendingDocument,
+    pub fn feed(self: @This(), bytes: []const u8) !void {
+        try self.document.append(bytes);
+    }
+};
+
+fn pendingDocument(self: *Self, ctx: vxfw.DrawContext) std.mem.Allocator.Error!*PendingDocument {
+    const pending = self.pending.?;
+    const document = try ctx.arena.create(PendingDocument);
+    document.* = .{ .width_method = self.method, .sidenotes = true, .quotes = true };
+    const sink: PendingSink = .{ .document = document };
+    document.append(PendingText.user_message_on ++ "\x1b[90m›\x1b[39m ") catch unreachable;
+    var body: View.UserBody(PendingSink) = undefined;
+    body.init(sink, pending.text.len, false) catch unreachable;
+    body.feed(pending.text) catch unreachable;
+    _ = body.finish() catch unreachable;
+    document.append("\n" ++ PendingText.user_message_off) catch unreachable;
+    document.prepare() catch unreachable;
+    return document;
+}
+
+fn paintPending(self: *const Self, document: anytype, win: vaxis.Window, row: i64) void {
+    var top = row;
+    var offset: ?usize = if (document.length != 0) 0 else null;
+    while (offset) |at| : (offset = document.nextLine(at)) {
+        if (top >= self.size.height) break;
+        const height = document.lineRows(self.layout(), at);
+        if (top + height > 0) _ = document.printLine(win, @intCast(top), at, true, self.colour, self.style, self.colours);
+        top += height;
+    }
+}
+
 fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const self: *Self = @ptrCast(@alignCast(raw));
     var surface = try vxfw.Surface.init(ctx.cell_arena, self.widget(), ctx.max.size());
@@ -380,8 +417,22 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     if (self.selection) |held| if (!self.current(held.purpose)) {
         _ = self.cancelSelection();
     };
+    const pending = if (self.pending != null) try self.pendingDocument(ctx) else null;
+    const body_height: u16 = if (pending) |document| @intCast(document.measure(self.layout(), .{}, std.math.maxInt(u16)).rows) else 0;
+    const pending_note = if (self.pending != null and self.pending.?.note != null) note: {
+        const document = try ctx.arena.create(viewport.Sized(256, true));
+        document.* = .{ .width_method = self.method };
+        document.append("\x1b[90m  ") catch unreachable;
+        document.append(self.pending.?.note.?) catch unreachable;
+        document.append("\x1b[0m\n") catch unreachable;
+        document.prepare() catch unreachable;
+        break :note document;
+    } else null;
+    const note_height: u16 = if (pending_note) |document| @intCast(document.measure(self.layout(), .{}, std.math.maxInt(u16)).rows) else 0;
+    const pending_height = @as(u32, body_height) + note_height;
     const tail = if (self.tail) |child| try child.draw(ctx.withConstraints(.{}, ctx.max)) else null;
-    self.window.tail_rows = if (tail) |child| child.size.height else 0;
+    const gap: u16 = if (pending != null and tail != null and tail.?.size.height != 0) 1 else 0;
+    self.window.tail_rows = @as(u32, pending_height) + gap + (if (tail) |child| child.size.height else 0);
     const entries = self.window.layoutEntriesWith(self.layout(), self.presentation());
     const visible = self.anchor.visible(entries, self.size.height);
     var screen: vaxis.Screen = .{ .width = self.size.width, .height = self.size.height, .width_method = self.method, .buf = surface.buffer };
@@ -395,15 +446,18 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         first = .{ .key = entry.key, .offset = offset - entry.offset };
     } else if (visible.first < entries.len) first = .{ .key = resident.tail_key, .offset = 0 };
     self.drawn = .{ .quote = self.quoteFrame(), .first = first, .row = visible.row, .pad = visible.pad, .width = self.size.width, .height = self.size.height };
-    if (tail) |child| {
+    if (self.window.tail_rows != 0) {
         var row: i64 = visible.pad;
         for (entries[@min(visible.first, entries.len)..], @min(visible.first, entries.len)..) |entry, i| {
             if (entry.key.order(resident.tail_key) == .eq) {
                 if (i == visible.first) row -= visible.row;
-                if (row < self.size.height and row + child.size.height > 0) {
+                if (pending) |document| self.paintPending(document, win, row);
+                if (pending_note) |document| self.paintPending(document, win, row + body_height);
+                row += @as(i64, pending_height) + gap;
+                if (tail) |child| if (row < self.size.height and row + child.size.height > 0) {
                     surface.children = try ctx.arena.alloc(vxfw.SubSurface, 1);
                     surface.children[0] = .{ .origin = .{ .row = @intCast(row), .col = 0 }, .surface = child };
-                }
+                };
                 break;
             }
             for (entry.lines, 0..) |height, line| {
@@ -1179,4 +1233,82 @@ fn appendQuoteTestRow(window: *Window, position: u64, bytes: []const u8) !void {
     try document.append(@import("TerminalText.zig").body_off);
     try document.prepare();
     try window.append(&.{.{ .key = .{ .position = position }, .text = resident.Text.fromDocument(&document) }});
+}
+
+test "FeedView optimistic multiline band and attached note stay inside the viewport with or without colour" {
+    for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |colour| {
+        const window = try testWindow();
+        defer std.testing.allocator.destroy(window);
+        var anchor: Feed = .{};
+        var view: Self = .{ .window = window, .anchor = &anchor, .colour = colour, .style = .{ .fg = .{ .index = 7 }, .bg = .{ .index = 8 } }, .colours = .{ .quiet = .{ .index = 9 }, .user_band = .{ .index = 10 } }, .pending = .{ .text = "first\nsecond", .note = "Not confirmed · ctrl+r retries original" } };
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const frame = try testFrame(&view, arena.allocator(), width, 6);
+        try std.testing.expectEqual(@as(usize, width) * 6, frame.buffer.len);
+        try std.testing.expectEqual(@as(u32, 3), window.tail_rows);
+        try std.testing.expectEqualStrings("›", testCell(frame, 3, 0));
+        try std.testing.expectEqualStrings("s", testCell(frame, 4, 2));
+        try std.testing.expectEqualStrings("N", testCell(frame, 5, 2));
+        for (3..5) |row| for (0..width) |col| try std.testing.expectEqual(if (colour) view.colours.user_band else view.style.bg, frame.readCell(col, row).style.bg);
+        try std.testing.expectEqual(view.style.bg, frame.readCell(2, 5).style.bg);
+        try std.testing.expectEqual(if (colour) view.colours.quiet else view.style.fg, frame.readCell(2, 5).style.fg);
+        try std.testing.expectEqual(@as(usize, 0), window.count);
+        try std.testing.expectEqual(@as(usize, 0), frame.children.len);
+    };
+}
+
+test "FeedView maximum original and escaped preview remain bounded and scroll without oversized surfaces" {
+    const bytes = try std.testing.allocator.alloc(u8, SessionInput.capacity);
+    defer std.testing.allocator.free(bytes);
+    @memset(bytes, 0x1b);
+    for ([_]usize{ View.collapse_bytes, SessionInput.capacity }) |length| for ([_]u16{ 1, 2, 46, 140 }) |width| for ([_]u16{ 1, 3, 30 }) |height| {
+        const window = try testWindow();
+        defer std.testing.allocator.destroy(window);
+        var anchor: Feed = .{};
+        var view: Self = .{ .window = window, .anchor = &anchor, .pending = .{ .text = bytes[0..length], .note = "Not confirmed · ctrl+r retries original" } };
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const first = try testFrame(&view, arena.allocator(), width, height);
+        try std.testing.expectEqual(@as(usize, width) * height, first.buffer.len);
+        try std.testing.expectEqual(@as(usize, 0), first.children.len);
+        const document = try view.pendingDocument(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = height }, .cell_size = .{} });
+        try std.testing.expect(document.length < 8192);
+        try std.testing.expect(std.mem.indexOf(u8, document.text(), "\\x1b") != null);
+        try std.testing.expect(std.mem.indexOfScalar(u8, document.text(), 0x1b) == null);
+        if (length > View.collapse_bytes) try std.testing.expect(std.mem.indexOf(u8, document.text(), "┄") != null);
+        try std.testing.expectEqual(length, view.pending.?.text.len);
+        view.scroll(-1);
+        const older = try testFrame(&view, arena.allocator(), width, height);
+        try std.testing.expectEqual(first.buffer.len, older.buffer.len);
+        try std.testing.expectEqual(@as(usize, 0), window.count);
+    };
+}
+
+test "FeedView canonical failure annotation is exact-key frame decoration rather than a second Message" {
+    for ([_]u16{ 46, 140 }) |width| {
+        const window = try testWindow();
+        defer std.testing.allocator.destroy(window);
+        var prepared: viewport.Sized(256, true) = .{};
+        try prepared.append(PendingText.user_message_on ++ "› original\n" ++ PendingText.user_message_off);
+        try prepared.prepare();
+        try window.append(&.{.{ .key = .{ .position = 20 }, .text = resident.Text.fromDocument(&prepared), .message_key = @splat('A') }});
+        const original = try std.testing.allocator.dupe(u8, window.document.text());
+        defer std.testing.allocator.free(original);
+        var anchor: Feed = .{};
+        var view: Self = .{ .window = window, .anchor = &anchor, .message_note = .{ .key = @splat('A'), .text = "Not confirmed · ctrl+r retries original" } };
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const first = try testFrame(&view, arena.allocator(), width, 6);
+        try std.testing.expectEqualStrings("›", testCell(first, 4, 0));
+        try std.testing.expectEqualStrings("N", testCell(first, 5, 2));
+        try std.testing.expectEqual(@as(usize, 1), window.count);
+        try std.testing.expectEqual(@as(u32, 0), window.tail_rows);
+        try std.testing.expectEqualStrings(original, window.document.text());
+        const repeated = try testFrame(&view, arena.allocator(), width, 6);
+        try std.testing.expectEqualDeep(first.buffer, repeated.buffer);
+        view.message_note.?.key = @splat('B');
+        const other = try testFrame(&view, arena.allocator(), width, 6);
+        try std.testing.expectEqualStrings("›", testCell(other, 5, 0));
+        try std.testing.expectEqualStrings(original, window.document.text());
+    }
 }

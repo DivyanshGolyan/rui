@@ -332,6 +332,11 @@ test "SessionChrome puts notices in Footer without a state row and preserves nee
         const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 12 }, .cell_size = .{} };
         self.place(&screen, &input, .{ .width = width, .facts = .{ .name = "Archive audit", .archive = .archived } });
         const idle = try input.widget().draw(ctx);
+        self.place(&screen, &input, .{ .width = width, .facts = .{ .name = "Archive audit", .archive = .archived }, .progress = "Opening…" });
+        const opening = try input.widget().draw(ctx);
+        try std.testing.expectEqual(idle.size.height, opening.size.height);
+        try std.testing.expectEqualStrings("", self.state.text);
+        try std.testing.expectEqualStrings("Opening…", self.status.bar.notice.?);
         self.place(&screen, &input, .{ .width = width, .facts = .{ .name = "Archive audit", .archive = .archived }, .notice = "Copied 3 lines", .stoppable = true });
         const noticed = try input.widget().draw(ctx);
         try std.testing.expectEqual(idle.size.height, noticed.size.height);

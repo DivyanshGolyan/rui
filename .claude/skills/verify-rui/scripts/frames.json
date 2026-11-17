@@ -5,6 +5,226 @@
   ],
   "states": [
     {
+      "name": "send-optimistic-night",
+      "note": "A real client Message stays in the feed while its fixture-owned Host is suspended; capture before the admission deadline with an empty composer",
+      "theme": "night",
+      "open": "Night optimistic witness",
+      "cast": [
+        {
+          "label": "Night optimistic witness",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "messages": [
+            "Earlier conversation witness"
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "text": "Optimistic send witness"
+        },
+        {
+          "wait": "Optimistic send witness"
+        },
+        {
+          "host": "suspend"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Optimistic send witness",
+          "empty_composer": true,
+          "timeout": 3
+        }
+      ],
+      "expect": [
+        "Optimistic send witness",
+        "alt+i info"
+      ],
+      "absent": [
+        "Sending…",
+        "Sending...",
+        "Not confirmed"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
+    },
+    {
+      "name": "send-failed-night",
+      "note": "A real client Message stays in the feed while its fixture-owned Host is suspended; admission timeout attaches retry to the original Message",
+      "theme": "night",
+      "open": "Night failed witness",
+      "cast": [
+        {
+          "label": "Night failed witness",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "messages": [
+            "Earlier conversation witness"
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "text": "Send failure witness"
+        },
+        {
+          "wait": "Send failure witness"
+        },
+        {
+          "host": "suspend"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Not confirmed · ctrl+r retries original",
+          "empty_composer": true,
+          "timeout": 12
+        }
+      ],
+      "expect": [
+        "Send failure witness",
+        "Not confirmed · ctrl+r retries original",
+        "alt+i info"
+      ],
+      "absent": [
+        "Sending…",
+        "Sending..."
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ],
+      "expect_next": {
+        "Send failure witness": "Not confirmed · ctrl+r retries original"
+      },
+      "expect_style": [
+        {
+          "text": "Not confirmed · ctrl+r retries original",
+          "foreground": "#a2a3bc"
+        }
+      ],
+      "expect_background": {
+        "Not confirmed · ctrl+r retries original": "#121933"
+      }
+    },
+    {
+      "name": "send-optimistic-day",
+      "note": "A real client Message stays in the feed while its fixture-owned Host is suspended; capture before the admission deadline with an empty composer",
+      "theme": "day",
+      "open": "Day optimistic witness",
+      "cast": [
+        {
+          "label": "Day optimistic witness",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "messages": [
+            "Earlier conversation witness"
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "text": "Optimistic send witness"
+        },
+        {
+          "wait": "Optimistic send witness"
+        },
+        {
+          "host": "suspend"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Optimistic send witness",
+          "empty_composer": true,
+          "timeout": 3
+        }
+      ],
+      "expect": [
+        "Optimistic send witness",
+        "alt+i info"
+      ],
+      "absent": [
+        "Sending…",
+        "Sending...",
+        "Not confirmed"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
+    },
+    {
+      "name": "send-failed-day",
+      "note": "A real client Message stays in the feed while its fixture-owned Host is suspended; admission timeout attaches retry to the original Message",
+      "theme": "day",
+      "open": "Day failed witness",
+      "cast": [
+        {
+          "label": "Day failed witness",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "messages": [
+            "Earlier conversation witness"
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "text": "Send failure witness"
+        },
+        {
+          "wait": "Send failure witness"
+        },
+        {
+          "host": "suspend"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Not confirmed · ctrl+r retries original",
+          "empty_composer": true,
+          "timeout": 12
+        }
+      ],
+      "expect": [
+        "Send failure witness",
+        "Not confirmed · ctrl+r retries original",
+        "alt+i info"
+      ],
+      "absent": [
+        "Sending…",
+        "Sending..."
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ],
+      "expect_next": {
+        "Send failure witness": "Not confirmed · ctrl+r retries original"
+      },
+      "expect_style": [
+        {
+          "text": "Not confirmed · ctrl+r retries original",
+          "foreground": "#6a6253"
+        }
+      ],
+      "expect_background": {
+        "Not confirmed · ctrl+r retries original": "#f3eee2"
+      }
+    },
+    {
       "name": "chatfeed-night-blank-line",
       "note": "One sent multiline Message retains its interior blank row inside an uninterrupted user tint band, with time on its first line",
       "theme": "night",

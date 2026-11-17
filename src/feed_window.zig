@@ -34,6 +34,7 @@ pub const Entry = struct {
     tight: bool = false,
     provisional: bool = false,
     messages: []const MessageTarget = &.{},
+    message_key: ?[36]u8 = null,
 };
 
 pub const row_capacity = 32 * 1024;
@@ -71,9 +72,26 @@ pub const Opened = struct {
 
 pub const LatestEnding = @import("feed_reads.zig").Ending(Key);
 pub const RetryHit = union(enum) { link: Key, padding };
+pub const MessageNote = struct { key: [36]u8, text: []const u8 };
 pub const Presentation = struct {
     latest_ending: ?LatestEnding = null,
     retry_actionable: bool = false,
+    message_note: ?MessageNote = null,
+};
+
+const NoteLine = struct {
+    document: viewport.Sized(256, true) = .{},
+    fn init(self: *NoteLine, window: *const Window, entry: Window.Stored, offset: usize, presentation: Presentation) bool {
+        const note = presentation.message_note orelse return false;
+        const key = entry.message_key orelse return false;
+        if (!std.mem.eql(u8, &key, &note.key) or window.document.lineEnd(offset) + 1 != entry.offset + entry.length) return false;
+        self.document.width_method = window.document.width_method;
+        self.document.append("\x1b[90m  ") catch unreachable;
+        self.document.append(note.text) catch unreachable;
+        self.document.append("\x1b[0m\n") catch unreachable;
+        self.document.prepare() catch unreachable;
+        return true;
+    }
 };
 
 const EndingLine = struct {
@@ -134,6 +152,7 @@ pub const Window = struct {
         length: usize,
         tight: bool,
         provisional: bool,
+        message_key: ?[36]u8 = null,
     };
 
     document: Document = .{ .dirty = false, .sidenotes = true, .quotes = true },
@@ -170,7 +189,7 @@ pub const Window = struct {
     pub fn replace(self: *Window, key: Key, new_text: Text) Error!void {
         const index = self.indexOf(key) orelse unreachable;
         const old = self.entries[index];
-        try self.splice(index, 1, &.{.{ .key = key, .text = new_text, .tight = old.tight, .provisional = old.provisional }});
+        try self.splice(index, 1, &.{.{ .key = key, .text = new_text, .tight = old.tight, .provisional = old.provisional, .message_key = old.message_key }});
     }
 
     pub fn replaceFrom(self: *Window, first: Key, entries: []const Entry) Error!void {
@@ -263,7 +282,9 @@ pub const Window = struct {
 
     pub fn lineRows(self: *const Window, entry: Stored, layout: viewport.Layout, offset: usize, presentation: Presentation) u16 {
         var ending: EndingLine = .{};
-        return if (ending.init(self, entry, offset, presentation)) ending.document.lineRows(layout, 0) else self.document.lineRows(layout, offset);
+        const source = if (ending.init(self, entry, offset, presentation)) ending.document.lineRows(layout, 0) else self.document.lineRows(layout, offset);
+        var note: NoteLine = .{};
+        return source +| if (note.init(self, entry, offset, presentation)) note.document.lineRows(layout, 0) else 0;
     }
 
     pub fn pointAt(self: *const Window, offset: usize) ?Point {
@@ -436,7 +457,13 @@ pub const Window = struct {
                         held.* = ending;
                         break :decorated held.document.printLine(window, top, 0, true, colour, plain, colours);
                     } else self.document.printLine(window, top, offset, true, colour, plain, colours);
-                    row += @as(i32, height) - @as(i32, @intCast(skip));
+                    var note: NoteLine = .{};
+                    const note_height: u16 = if (note.init(self, entry, offset, presentation)) decorated: {
+                        const held = try arena.?.create(NoteLine);
+                        held.* = note;
+                        break :decorated held.document.printLine(window, @intCast(top + height), 0, true, colour, plain, colours);
+                    } else 0;
+                    row += @as(i32, height) + note_height - @as(i32, @intCast(skip));
                     if (next == end) row += self.gapAfter(i);
                 }
                 offset = next;
@@ -561,7 +588,7 @@ pub const Window = struct {
                 const last = offset + p.length - 1;
                 self.document.styles[last] = viewport.seamStyle(self.document.styles[last]);
             }
-            self.entries[first + i] = .{ .key = entry.key, .offset = offset, .length = p.length, .tight = entry.tight, .provisional = entry.provisional };
+            self.entries[first + i] = .{ .key = entry.key, .offset = offset, .length = p.length, .tight = entry.tight, .provisional = entry.provisional, .message_key = entry.message_key };
             for (entry.messages) |target| {
                 if (target.offset >= p.head) continue;
                 self.targets[self.target_count] = .{ .point = .{ .key = entry.key, .offset = target.offset }, .target = target.target };
@@ -1263,4 +1290,21 @@ test "feed_window consecutive tool rows stay adjacent folded or open across ever
         try testing.expectEqual(@as(u1, 1), window.gapAfter(0));
         try testing.expectEqual(@as(u1, 1), window.gapAfter(1));
     }
+}
+
+test "feed message identity survives display replacement and trimming" {
+    const window = try std.testing.allocator.create(Window);
+    defer std.testing.allocator.destroy(window);
+    window.* = .{};
+    const original: [36]u8 = @splat('a');
+    const next: [36]u8 = @splat('b');
+    try window.append(&.{
+        .{ .key = .{ .position = 1 }, .text = .{ .bytes = "original\n" }, .message_key = original },
+        .{ .key = .{ .position = 2 }, .text = .{ .bytes = "next\n" }, .message_key = next },
+    });
+    try window.replace(.{ .position = 2 }, .{ .bytes = "expanded\n" });
+    try std.testing.expectEqual(next, window.entries[1].message_key.?);
+    window.trim(1, 0);
+    try std.testing.expectEqual(next, window.entries[0].message_key.?);
+    try std.testing.expectEqual(@as(u64, 2), window.entries[0].key.position);
 }
