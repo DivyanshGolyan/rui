@@ -648,7 +648,15 @@ test "read_image exact permission frozen workspace capacity background and stop 
                 try patch.session.set(session.slice());
                 patch.configuration.workspace.state = .value;
                 try patch.configuration.workspace.value.set("/");
-                try std.testing.expect((try storage.configure(&patch, .{})) == .accepted);
+                const refused_workspace = try storage.configure(&patch, .{});
+                try std.testing.expect(refused_workspace == .rejected and refused_workspace.rejected.code == .workspace_is_immutable);
+                var update: wire_request.ConfigureCommand = .{};
+                try update.key.set("image-config-change");
+                try update.session.set(session.slice());
+                update.configuration.tools = try .of(&.{});
+                update.configuration.permission_mode.state = .value;
+                try update.configuration.permission_mode.value.set("bypass");
+                try std.testing.expect((try storage.configure(&update, .{})) == .accepted);
                 try storage.close();
                 opened = false;
                 try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
