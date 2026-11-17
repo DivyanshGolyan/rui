@@ -372,7 +372,6 @@ upgrade_guidance: bool = false,
 relaunch_line: [upgrade_status.max_line_bytes]u8 = undefined,
 relaunch_line_len: usize = 0,
 title: session_chrome.Title = .{},
-initial_list_deadline: ?u64 = null,
 jobs: [max_jobs]Job = undefined,
 job_count: usize = 0,
 job: Job = .list,
@@ -430,19 +429,9 @@ fn initScreen(self: *Self, screen: *SessionScreen) !void {
     self.screen_ready = true;
 }
 
-fn initialListHeld(self: *Self, width: u16, now_ms: u64) bool {
-    const deadline = self.initial_list_deadline orelse return false;
-    if ((width < Root.split_at and self.root.session != null) or self.state.listed_at_ms != null or self.state.list_stale or hostHeld(self) or now_ms >= deadline) {
-        if (self.state.listed_at_ms == null and (self.state.launch == .sizing or self.state.launch == .waiting)) self.state.launch = .done;
-        self.initial_list_deadline = null;
-        return false;
-    }
-    return true;
-}
-
 fn holdInitialPresentation(raw: *anyopaque, width: u16) bool {
     const self: *Self = @ptrCast(@alignCast(raw));
-    return self.initialListHeld(width, self.animationMs());
+    return self.state.initialPresentation(width >= Root.split_at or self.root.session == null) == .holding;
 }
 
 fn widget(self: *Self) vxfw.Widget {
@@ -488,7 +477,7 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
             try app.vx.queryColor(app.tty.writer(), .bg);
             try self.paintCursor();
             try ctx.requestFocus(self.widget());
-            if (!self.signInIsFirstRun()) self.initial_list_deadline = self.animationMs() + 150;
+            if (!self.signInIsFirstRun()) _ = try self.event(.{ .presentation_start = self.animationMs() });
             if (self.options.open) |reference| try self.appNext(ctx, try self.event(.{ .open = reference }));
         },
         .focus_in => try ctx.requestFocus(self.widget()),
@@ -529,11 +518,23 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
                     try self.dispatch(.all);
                 }
             }
-            if (self.initial_list_deadline != null and self.root.size.width != 0 and !self.initialListHeld(self.root.size.width, self.animationMs())) ctx.redraw = true;
+            const presentation = try self.eventResult(.{ .presentation_tick = .{
+                .now_ms = self.animationMs(),
+                .list_visible = if (self.root.size.width == 0) null else self.root.size.width >= Root.split_at or self.root.session == null,
+                .host_unavailable = hostHeld(self),
+            } });
+            ctx.redraw = ctx.redraw or presentation.redraw;
             if (!self.state.upgrading()) try self.appDiscoverUpgrade(ctx);
             const launch = try self.eventResult(.launch_poll);
             try self.appNext(ctx, launch.next);
             ctx.redraw = ctx.redraw or launch.redraw;
+            if (self.state.initialPresentation(true) == .released) {
+                if (self.root.input.layer == .main and self.root.input.mainFocused()) {
+                    if (self.root.session) |session| try ctx.requestFocus(session);
+                }
+                _ = try self.event(.presentation_presented);
+                ctx.redraw = true;
+            }
             if (!self.root.input.layer.settingsOpen()) try self.root.settings_page.widget().handleEvent(ctx, .tick);
             if (self.state.presentation_revision != revision or self.hostState() != host_state or !std.meta.eql(self.host_launch, host_launch) or self.wantsFrame()) ctx.redraw = true;
             const open: ?[]const u8 = if (self.app_session) |shown| if (shown.frontend) |frontend| frontend.titleName() else null else null;
@@ -1125,7 +1126,7 @@ fn signedIn(raw: *anyopaque, ctx: *vxfw.EventContext, activation: SignIn.Activat
         self.state.notice = notice;
     }
     try self.root.signedIn(ctx);
-    if (first_run) self.initial_list_deadline = self.animationMs() + 150;
+    if (first_run) _ = try self.event(.{ .presentation_start = self.animationMs() });
     if (self.root.session == null) try ctx.requestFocus(self.widget());
 }
 
@@ -2189,83 +2190,39 @@ const Rig = struct {
     }
 };
 
-test "initial presentation waits for the first live list with bounded fallback" {
-    const Scenario = enum { early, late, unavailable, empty };
-    for ([_]Scenario{ .early, .late, .unavailable, .empty }) |scenario| {
-        var cancellation: client.Cancellation = .{};
-        const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .open = "k7m2qx".* }, fake_operations, &cancellation);
-        defer rig.close();
-        const overview = rig.overview;
-        const chat: vxfw.Text = .{ .text = "Chat witness" };
-        overview.root.session = chat.widget();
-        overview.initial_list_deadline = 150;
-        try std.testing.expect(overview.initialListHeld(140, 149));
-        if (scenario == .late) {
-            try std.testing.expect(!overview.initialListHeld(140, 150));
-        }
-        overview.initial_list_deadline = overview.animationMs() + 60_000;
-        var held = try rig.shown(140, 30);
-        defer held.deinit();
-        try std.testing.expect(std.mem.indexOf(u8, try held.text(), "Loading") == null);
-        try std.testing.expect(std.mem.indexOf(u8, try held.text(), "Chat witness") == null);
-        _ = try overview.event(.{ .tick = test_now_s * 1000 });
-        try std.testing.expectEqual(Job.list, std.meta.activeTag(overview.jobs[0]));
-        try std.testing.expectEqual(Job.host, std.meta.activeTag(overview.jobs[1]));
-        if (scenario == .late) overview.initial_list_deadline = overview.animationMs();
-        if (scenario == .unavailable) overview.host_observation = .unavailable;
-        if (scenario == .late or scenario == .unavailable) {
-            var fallback = try rig.shown(140, 30);
-            defer fallback.deinit();
-            try std.testing.expect(std.mem.indexOf(u8, try fallback.text(), "Loading") != null);
-            try std.testing.expect(std.mem.indexOf(u8, try fallback.text(), "Chat witness") != null);
-        }
-        if (scenario == .unavailable) continue;
-        if (scenario == .empty) Seen.now.listed = 0;
-        try overview.dispatch(.all);
-        try rig.answered();
-        _ = try overview.complete();
-        var live = try rig.shown(140, 30);
-        defer live.deinit();
-        const text = try live.text();
-        try std.testing.expect(std.mem.indexOf(u8, text, "Loading") == null);
-        try std.testing.expect(std.mem.indexOf(u8, text, "Chat witness") != null);
-        try std.testing.expect(std.mem.indexOf(u8, text, if (scenario == .empty) "No unarchived Sessions." else "k7m2qx") != null);
-        try std.testing.expect(overview.initial_list_deadline == null);
-    }
+test "initial list is queued before Host observation" {
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
+    defer rig.close();
+    _ = try rig.overview.event(.{ .tick = test_now_s * 1000 });
+    try std.testing.expectEqual(Job.list, std.meta.activeTag(rig.overview.jobs[0]));
+    try std.testing.expectEqual(Job.host, std.meta.activeTag(rig.overview.jobs[1]));
 }
 
-test "initial bare overview holds the list at narrow and wide widths" {
-    for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |late| {
+test "initial presentation release restores focus only to the active Session" {
+    for ([_]bool{ false, true }) |main_focused| {
         var cancellation: client.Cancellation = .{};
         const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
         defer rig.close();
         const overview = rig.overview;
-        _ = try view.step(&overview.state, .{ .launch_start = .{ .explicit_session = false, .restoring = false } });
-        overview.initial_list_deadline = overview.animationMs() + 60_000;
-        var held = try rig.shown(width, 30);
-        defer held.deinit();
-        try std.testing.expect(std.mem.indexOf(u8, try held.text(), "Loading") == null);
-        try std.testing.expect(std.mem.indexOf(u8, try held.text(), "+ New Session") == null);
-        _ = try overview.event(.{ .tick = test_now_s * 1000 });
-        try std.testing.expectEqual(Job.list, std.meta.activeTag(overview.jobs[0]));
-        try std.testing.expectEqual(Job.host, std.meta.activeTag(overview.jobs[1]));
-        if (late) {
-            overview.initial_list_deadline = overview.animationMs();
-            var fallback = try rig.shown(width, 30);
-            defer fallback.deinit();
-            try std.testing.expect(std.mem.indexOf(u8, try fallback.text(), "Loading") != null);
-            try std.testing.expect(std.mem.indexOf(u8, try fallback.text(), "+ New Session") != null);
-            try std.testing.expectEqual(.done, overview.state.launch);
-        }
-        try overview.dispatch(.all);
-        try rig.answered();
-        _ = try overview.complete();
-        var live = try rig.shown(width, 30);
-        defer live.deinit();
-        try std.testing.expect(std.mem.indexOf(u8, try live.text(), "Loading") == null);
-        if (width < Root.split_at or late) try std.testing.expect(std.mem.indexOf(u8, try live.text(), "k7m2qx") != null);
-        try std.testing.expect(overview.initial_list_deadline == null);
-    };
+        const chat: vxfw.Text = .{ .text = "Chat" };
+        overview.root.session = chat.widget();
+        overview.root.size = .{ .width = 140, .height = 30 };
+        overview.root.input.area = if (main_focused) .main else .list;
+        _ = try overview.event(.{ .presentation_start = overview.animationMs() });
+        _ = try overview.event(.{ .host = null });
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        try appEvent(overview, &ctx, .tick);
+        var focused = false;
+        for (ctx.cmds.items) |command| if (command == .request_focus and command.request_focus.eql(chat.widget())) {
+            focused = true;
+        };
+        try std.testing.expectEqual(main_focused, focused);
+        try std.testing.expect(ctx.redraw);
+        try std.testing.expectEqual(.done, overview.state.initialPresentation(true));
+    }
 }
 
 test "App overview paints its ground and plain footer" {

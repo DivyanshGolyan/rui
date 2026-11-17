@@ -20,7 +20,7 @@ The [Session UI contract](docs/contracts/session-ui.md#required-evidence) requir
 
 ## First launch list
 
-Run `zig build test-native -Dtest-filter='initial presentation'` and `zig build test-native -Dtest-filter='initial bare overview'` and capture wide-launch, narrow-launch and chat before and after. The Session UI evidence row covers early, late, unavailable and empty live answers; PTY frames are not physical-terminal evidence.
+Run `zig build test-logic -Dtest-filter='initial presentation core'` and `zig build test-native -Dtest-filter='initial list is queued'` and capture wide-launch, narrow-launch and chat before and after. The Session UI evidence row covers early, late, unavailable and empty live answers; PTY frames are not physical-terminal evidence.
 
 ## List tint padding
 
