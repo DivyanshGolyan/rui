@@ -16,13 +16,14 @@ pub const BuiltinInstructions = enum {
     }
 };
 
+// Codex had not published 6.2 templates on 2026-11-17; gpt-6.2-sol and gpt-6.2-astra reuse
+// the 6.1 Sol and Terra/Astra assets until it does (model_instructions/README.md).
 pub fn builtinInstructions(model: []const u8) BuiltinInstructions {
     const reviewed = .{
         .{ "gpt-6-luna", BuiltinInstructions.luna },
         .{ "gpt-6.1-terra", BuiltinInstructions.terra },
         .{ "gpt-6.1-sol", BuiltinInstructions.sol },
         .{ "gpt-6-astra", BuiltinInstructions.astra },
-        // Codex has not published 6.2 templates yet; reuse the 6.1 Sol and Terra/Astra assets.
         .{ "gpt-6.2-sol", BuiltinInstructions.sol },
         .{ "gpt-6.2-astra", BuiltinInstructions.astra },
     };
