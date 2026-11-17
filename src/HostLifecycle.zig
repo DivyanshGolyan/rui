@@ -1,6 +1,7 @@
 //! Upgrade owns the transition, not Host admission or child argv. Both the
 //! precondition and replacement execute the target's public settings/starter.
 const std = @import("std");
+const launch_frame = @import("host_launch_frame.zig");
 const client = @import("client.zig");
 const protocol = @import("protocol.zig");
 const protocol_reply = @import("protocol_reply.zig");
@@ -196,7 +197,8 @@ fn arguments(allocator: std.mem.Allocator, binary: []const u8, request: host_sta
         .start => "start",
         .status => "status",
     } });
-    if (command == .check) try argv.append(allocator, "--check");
+    if (command == .check) try argv.appendSlice(allocator, &.{ "--check", "--" ++ launch_frame.check_option });
+    if (command == .start) try argv.appendSlice(allocator, &.{ "--" ++ launch_frame.input_option, "0" });
     try argv.appendSlice(allocator, &.{ "--store", request.dir });
     if (command != .status) {
         if (request.settings_file) |file| try argv.appendSlice(allocator, &.{ "--settings", file });
@@ -354,15 +356,18 @@ pub fn activate(init: std.process.Init, allocator: std.mem.Allocator, observatio
         return .{ .unsupported = .configuration_unavailable };
     };
     const check_argv = try arguments(arena.allocator(), executable, request, .check);
-    const checked = process.runIn(private, init.io, check_argv, cancellation, 8192, .fromSeconds(300), context) catch |err| {
+    const checked = process.runIn(private, init.io, check_argv, cancellation, launch_frame.max_bytes, .fromSeconds(300), context) catch |err| {
         if (err == error.Cancelled) return .cancelled;
         return .{ .unsupported = .configuration_unavailable };
     };
     defer process.dispose(private, checked);
     if (!checked.term.success()) {
         if (try refusal(private, checked)) |failure| return .{ .refused = .{ .stage = .checking, .failure = failure } };
-        return .{ .unsupported = .configuration_unavailable };
+        return .{ .unsupported = .target_capability };
     }
+    // The frame owner validates version/framing/bounds. Lifecycle neither
+    // decodes settings nor reconstructs the target's admitted input.
+    launch_frame.accept(checked.stdout) catch return .{ .unsupported = .target_capability };
     process.check(cancellation) catch return .cancelled;
     const current = client.observeHostForUpgradeProfile(init.io, request.dir, plan.observed.profile, null) catch return .{ .unconfirmed = .stopping };
     if (!sameHost(current, plan.observed)) return .replacement_observed;
@@ -379,7 +384,9 @@ pub fn activate(init: std.process.Init, allocator: std.mem.Allocator, observatio
     Progress.send(progress, .starting);
     process.waitForTestGate(allocator, init.io, init.environ_map.get("RUI_TEST_UPGRADE_BEFORE_START_GATE"), null, .fromSeconds(300)) catch return .{ .unconfirmed = .starting };
     const start_argv = try arguments(arena.allocator(), executable, request, .start);
-    const started = process.runIn(private, init.io, start_argv, null, 8192, .fromSeconds(300), context) catch return .{ .unconfirmed = .starting };
+    var start_context = context;
+    start_context.input = checked.stdout;
+    const started = process.runIn(private, init.io, start_argv, null, 8192, .fromSeconds(300), start_context) catch return .{ .unconfirmed = .starting };
     defer process.dispose(private, started);
     if (!started.term.success()) {
         if (try refusal(private, started)) |failure| return .{ .refused = .{ .stage = .starting, .failure = failure } };

@@ -1,5 +1,6 @@
 const std = @import("std");
 const grammar = @import("cli_grammar.zig");
+const launch_frame = @import("host_launch_frame.zig");
 const provider_name = @import("provider_name.zig");
 const retention_capacity = @import("retention_capacity.zig");
 const Option = grammar.Option;
@@ -94,6 +95,7 @@ pub fn runningSources(arena: std.mem.Allocator, argv: []const []const u8) !Runni
     };
     for (definition.options) |option| {
         if (std.mem.eql(u8, option.hex_of orelse option.name, "store")) continue;
+        if (std.mem.eql(u8, option.name, launch_frame.input_option)) continue; // consumed descriptor is provenance, never a replay input
         if (option.hidden and parsed.hasNamed(option.name)) restartable = false;
     }
     return .{
@@ -140,6 +142,7 @@ pub const host_destination = &[_]Option{ value("store", "PATH"), blk: {
 } };
 pub const settings_options = host_destination ++ &[_]Option{
     value("settings", "FILE|-"),
+    hiddenNumber(launch_frame.input_option, 0, std.math.maxInt(c_int)),
     .{ .name = "set", .argument = "PATH=VALUE", .repeated = true },
 };
 const serve_test = &[_]Option{

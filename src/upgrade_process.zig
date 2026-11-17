@@ -1,4 +1,5 @@
 const std = @import("std");
+const launch_transfer = @import("host_launch_transfer.zig");
 const client = @import("client.zig");
 const policy = @import("download_policy.zig");
 
@@ -41,6 +42,8 @@ pub const Result = std.process.RunResult;
 pub const Context = struct {
     environ_map: ?*const std.process.Environ.Map = null,
     cwd: std.process.Child.Cwd = .inherit,
+    /// Opaque checked launch frame, transported only through private stdin.
+    input: ?[]const u8 = null,
 };
 
 pub fn dispose(allocator: std.mem.Allocator, result: Result) void {
@@ -50,6 +53,7 @@ pub fn dispose(allocator: std.mem.Allocator, result: Result) void {
 
 fn capture(allocator: std.mem.Allocator, io: std.Io, argv: []const []const u8, limit: usize, deadline: std.Io.Clock.Timestamp, context: Context, done: *std.atomic.Value(bool)) std.process.RunError!Result {
     defer done.store(true, .release);
+    if (context.input) |bytes| return captureInput(allocator, io, argv, limit, deadline, context, bytes);
     return std.process.run(allocator, io, .{
         .argv = argv,
         .environ_map = context.environ_map,
@@ -58,6 +62,41 @@ fn capture(allocator: std.mem.Allocator, io: std.Io, argv: []const []const u8, l
         .stderr_limit = .limited(4096),
         .timeout = .{ .deadline = deadline },
     });
+}
+
+fn captureInput(allocator: std.mem.Allocator, io: std.Io, argv: []const []const u8, limit: usize, deadline: std.Io.Clock.Timestamp, context: Context, bytes: []const u8) std.process.RunError!Result {
+    var child = try std.process.spawn(io, .{ .argv = argv, .environ_map = context.environ_map, .cwd = context.cwd, .stdin = .pipe, .stdout = .pipe, .stderr = .pipe });
+    defer child.kill(io);
+    const input = child.stdin.?.handle;
+    launch_transfer.nonblocking(input) catch return error.Unexpected;
+    launch_transfer.nonblocking(child.stdout.?.handle) catch return error.Unexpected;
+    launch_transfer.nonblocking(child.stderr.?.handle) catch return error.Unexpected;
+    var delivery: launch_transfer.Transfer = .{ .input = input, .bytes = bytes };
+    child.stdin = null;
+    defer delivery.deinit();
+    var stdout: std.ArrayList(u8) = .empty;
+    defer stdout.deinit(allocator);
+    var stderr_bytes: std.ArrayList(u8) = .empty;
+    defer stderr_bytes.deinit(allocator);
+    var closed = [2]bool{ false, false };
+    var buffers: [2][8192]u8 = undefined;
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&buffers));
+    while (!closed[0] or !closed[1]) {
+        if (deadline.durationFromNow(io).raw.nanoseconds <= 0) return error.Timeout;
+        const moved = delivery.step(.{}, .{
+            .{ .fd = if (closed[0]) -1 else child.stdout.?.handle, .buffer = &buffers[0] },
+            .{ .fd = if (closed[1]) -1 else child.stderr.?.handle, .buffer = &buffers[1] },
+        }) catch return error.Unexpected;
+        if (stdout.items.len + moved.counts[0] > limit or stderr_bytes.items.len + moved.counts[1] > 4096) return error.StreamTooLong;
+        try stdout.appendSlice(allocator, buffers[0][0..moved.counts[0]]);
+        try stderr_bytes.appendSlice(allocator, buffers[1][0..moved.counts[1]]);
+        for (0..2) |i| closed[i] = closed[i] or moved.closed[i];
+        if (!moved.progressed and (!closed[0] or !closed[1])) try std.Io.sleep(io, .fromMilliseconds(1), .awake);
+    }
+    const term = try child.wait(io);
+    const output = try stdout.toOwnedSlice(allocator);
+    errdefer allocator.free(output);
+    return .{ .term = term, .stdout = output, .stderr = try stderr_bytes.toOwnedSlice(allocator) };
 }
 
 pub fn run(allocator: std.mem.Allocator, io: std.Io, argv: []const []const u8, cancellation: ?*const client.Cancellation, limit: usize) !Result {

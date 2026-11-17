@@ -33,6 +33,8 @@ const providers = @import("providers.zig");
 const api_key = @import("api_key.zig");
 const host_start = @import("host_start.zig");
 const host_settings = @import("host_settings.zig");
+const launch_frame = @import("host_launch_frame.zig");
+const launch_transfer = @import("host_launch_transfer.zig");
 const start_report = @import("start_report.zig");
 const new_session_selection = @import("new_session_selection.zig");
 const platform = @import("platform.zig");
@@ -1079,6 +1081,10 @@ fn hostSettings(init: std.process.Init, command: cli_args.Command, parsed: *cons
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const selected = try selectedStore(init, parsed.get("store"), &selected_buffer);
     var failure: start_report.Failure = undefined;
+    if (parsed.has(launch_frame.input_option) or (parsed.has(launch_frame.check_option) and !parsed.has("check"))) {
+        failure = .init(.settings_invalid, "private launch protocol requires its matching check or start entry");
+        return writeRefusal(init.io, &failure, .invalid);
+    }
     var output: std.Io.File.Writer = .init(.stdout(), init.io, &.{});
     if (command == .host_settings and parsed.has("paths")) return host_start.listPaths(&output.interface);
     if (command == .host_settings and parsed.has("check")) {
@@ -1087,7 +1093,21 @@ fn hostSettings(init: std.process.Init, command: cli_args.Command, parsed: *cons
         settings.* = .{};
         defer settings.deinit();
         var fixtures: providers.Fixtures = .{};
-        _ = try admitHost(init, parsed, selected, settings, &fixtures, &failure, .detached);
+        if (parsed.has(launch_frame.check_option)) {
+            var frozen = host_start.freezeStart(init, .{ .dir = selected, .settings_file = parsed.get("settings"), .assignments = parsed.all("set") }, settings, &failure) catch |err| {
+                if (err == error.SettingsInvalid) return writeRefusal(init.io, &failure, .invalid);
+                return err;
+            };
+            defer frozen.deinit(init.gpa);
+            settings.deinit();
+            const intent = try host_start.decodeStart(init, frozen.bytes, selected, settings, &failure);
+            host_start.finishDetached(init, settings, intent, fixtures, &failure) catch |err| {
+                if (err == error.SettingsInvalid) return writeRefusal(init.io, &failure, .invalid);
+                return err;
+            };
+            _ = try finishHostAdmission(init, selected, settings, fixtures, &failure);
+            try std.Io.File.stdout().writeStreamingAll(init.io, frozen.bytes);
+        } else _ = try admitHost(init, parsed, selected, settings, &fixtures, &failure, .detached);
         return;
     }
     const result = if (command == .host_settings)
@@ -1104,6 +1124,20 @@ fn host(init: std.process.Init, command: cli_args.Command, parsed: *const cli_ar
     var fallback: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const selected = try selectedStore(init, parsed.get("store"), &fallback);
     if (command == .host_start) {
+        if (parsed.get(launch_frame.input_option)) |descriptor| {
+            var failure: start_report.Failure = undefined;
+            const fd = std.fmt.parseInt(c_int, descriptor, 10) catch unreachable;
+            if (fd != 0) {
+                failure = .init(.settings_invalid, "private starter input must be its anonymous stdin descriptor");
+                return writeRefusal(init.io, &failure, .invalid);
+            }
+            var frozen = launch_transfer.readFrame(init.gpa, init.io, fd) catch {
+                failure = .init(.settings_invalid, "missing, malformed or unsupported private launch frame");
+                return writeRefusal(init.io, &failure, .invalid);
+            };
+            defer frozen.deinit(init.gpa);
+            return startHostRequest(init, .{ .dir = selected, .settings_file = parsed.get("settings"), .assignments = parsed.all("set"), .frozen = frozen.bytes }, false, .{});
+        }
         return startHostForTerminal(init, selected, false, parsed.get("settings"), parsed.all("set"), null);
     }
     if (command == .host_pause) return pauseHost(init.io, selected, if (parsed.get("instance")) |instance| try protocol.parseInstanceId(instance) else null);
@@ -1232,11 +1266,15 @@ fn startHostForTerminal(init: std.process.Init, selected: []const u8, quiet: boo
 }
 
 fn startHostForTerminalUsing(init: std.process.Init, selected: []const u8, quiet: bool, settings_file: ?[]const u8, assignments: []const []const u8, readiness: ?*const provider_selection.Readinesses, ops: HostLaunchOps) !void {
+    _ = readiness; // Credential defaults belong to the child intake owner.
+    return startHostRequest(init, .{ .dir = selected, .settings_file = settings_file, .assignments = assignments }, quiet, ops);
+}
+
+fn startHostRequest(init: std.process.Init, request: host_start.Spawn, quiet: bool, ops: HostLaunchOps) !void {
     var progress: TerminalHostProgress = .{};
     var result: HostLaunchResult = .failed(.setup, error.HostLaunchFailed);
-    _ = readiness; // Credential defaults belong to the child intake owner.
-    host_start.spawn(init, .{ .dir = selected, .settings_file = settings_file, .assignments = assignments }, ops, .{ .context = &progress, .report = TerminalHostProgress.report }, &result);
-    try reportHostLaunch(init.io, &result, quiet, assignments.len != 0 or settings_file != null, progress.shown);
+    host_start.spawn(init, request, ops, .{ .context = &progress, .report = TerminalHostProgress.report }, &result);
+    try reportHostLaunch(init.io, &result, quiet, request.assignments.len != 0 or request.settings_file != null, progress.shown);
 }
 
 const launchFailure = host_start.launchFailure;
@@ -2081,7 +2119,25 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const selected = try selectedStore(init, parsed.get("store"), &selected_buffer);
     var preparation_failure: start_report.Failure = undefined;
-    const prepared = try admitHost(init, parsed, selected, settings, &tuning.fixtures, &preparation_failure, .foreground);
+    const prepared = if (parsed.get(launch_frame.input_option)) |descriptor| frozen: {
+        const fd = std.fmt.parseInt(c_int, descriptor, 10) catch unreachable;
+        if (fd != launch_frame.child_descriptor) {
+            preparation_failure = .init(.settings_invalid, "private child input is not its reserved launch descriptor");
+            return writeRefusal(io, &preparation_failure, .invalid);
+        }
+        var frozen = launch_transfer.readFrame(init.gpa, io, fd) catch {
+            preparation_failure = .init(.settings_invalid, "missing, malformed or unsupported private launch frame");
+            return writeRefusal(io, &preparation_failure, .invalid);
+        };
+        defer frozen.deinit(init.gpa);
+        const intent = host_start.decodeStart(init, frozen.bytes, selected, settings, &preparation_failure) catch |err| {
+            if (err == error.SettingsInvalid) return writeRefusal(io, &preparation_failure, .invalid);
+            return err;
+        };
+        try host_start.finishDetached(init, settings, intent, tuning.fixtures, &preparation_failure);
+        tuning.admitted_directory = selected;
+        break :frozen try finishHostAdmission(init, selected, settings, tuning.fixtures, &preparation_failure);
+    } else try admitHost(init, parsed, selected, settings, &tuning.fixtures, &preparation_failure, .foreground);
     var failure: ?start_report.Failure = null;
     return finishServe(io, host_start.shutdownPolicy(settings), host_start.storeKind(settings), &failure, server.serve(io, std.heap.c_allocator, selected, prepared, tuning, &failure));
 }
@@ -2093,13 +2149,17 @@ fn admitHost(init: std.process.Init, parsed: *const cli_args.Parsed, selected: [
         if (err == error.SettingsInvalid) return writeRefusal(init.io, failure, caller_exit.knownError(err));
         return err;
     };
-    const served = providers.fromSettings(settings, fixtures.*);
+    return finishHostAdmission(init, selected, settings, fixtures.*, failure);
+}
+
+fn finishHostAdmission(init: std.process.Init, selected: []const u8, settings: *host_settings.Settings, fixtures: providers.Fixtures, failure: *start_report.Failure) !host_settings.Prepared {
+    const served = providers.fromSettings(settings, fixtures);
     if (try served.proxyRefusal(std.heap.c_allocator)) |reason| {
         stderr.diagnostic("rui: https_proxy/HTTPS_PROXY {s}; Rui tunnels only through an http:// proxy. The Host did not start.\n", .{reason});
         recordExit(.environment);
         return error.Reported;
     }
-    return host_start.admitSelected(init, selected, settings, fixtures.*, failure) catch |err| {
+    return host_start.admitSelected(init, selected, settings, fixtures, failure) catch |err| {
         if (err == error.SettingsInvalid) return writeRefusal(init.io, failure, caller_exit.knownError(err));
         return err;
     };
@@ -4327,7 +4387,7 @@ const LaunchFixture = struct {
     fn verify(raw: ?*anyopaque, _: std.Io, _: *const platform.Paths, pid: c_int, started: u64, _: []const u8, _: ?i128, _: *protocol_reply.HostInfoFacts) bool {
         return cast(raw).exact_identity and cast(raw).scenario != .competitor and pid == 42 and started == 12;
     }
-    fn launch(raw: ?*anyopaque, _: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, argc: usize, fd: *c_int, report_fd: *c_int, pid: *c_int, started: *c_ulonglong) c_int {
+    fn launch(raw: ?*anyopaque, _: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, argc: usize, _: c_int, fd: *c_int, report_fd: *c_int, pid: *c_int, started: *c_ulonglong) c_int {
         pid.* = 42;
         started.* = 12;
         const self = cast(raw);
@@ -4338,6 +4398,7 @@ const LaunchFixture = struct {
         std.debug.assert(std.mem.eql(u8, std.mem.span(argv[3].?), "--store"));
         var at: usize = 5;
         while (at < argc) : (at += 2) {
+            if (std.mem.eql(u8, std.mem.span(argv[at].?), "--" ++ launch_frame.input_option)) continue;
             std.debug.assert(std.mem.eql(u8, std.mem.span(argv[at].?), "--set"));
             self.assignments += 1;
             if (self.expected_assignment) |expected| self.assignments_match = self.assignments_match and std.mem.eql(u8, expected, std.mem.span(argv[at + 1].?));
@@ -4354,7 +4415,7 @@ const LaunchFixture = struct {
         const self = cast(raw);
         if (fd == self.report_fd) {
             self.report_reads += 1;
-            if (self.delay_refusal) return -1;
+            if (self.delay_refusal) return -@as(isize, @intFromEnum(std.posix.E.AGAIN));
             if (self.report_reads != 1) return 0;
             const failure: ?start_report.Failure = switch (self.scenario) {
                 .competitor => .init(.store_locked, "another Host owns this Store"),
@@ -4369,7 +4430,7 @@ const LaunchFixture = struct {
             return 0;
         }
         self.reads += 1;
-        if (self.delay_refusal and self.scenario == .competitor) return -1;
+        if (self.delay_refusal and self.scenario == .competitor) return -@as(isize, @intFromEnum(std.posix.E.AGAIN));
         switch (self.scenario) {
             .migration_success, .migration_timeout, .migration_both, .migration_eof, .migration_final => {
                 const text: []const u8 = switch (self.scenario) {
@@ -4391,13 +4452,13 @@ const LaunchFixture = struct {
             },
             else => {},
         }
-        if (self.scenario == .timeout or self.scenario == .interrupted) return -1; // EAGAIN, not EOF.
+        if (self.scenario == .timeout or self.scenario == .interrupted) return -@as(isize, @intFromEnum(std.posix.E.AGAIN)); // EAGAIN, not EOF.
         if (self.scenario == .closed) return 0;
         if (self.scenario == .full and self.reads == 1) {
             @memset(bytes, 'x');
             return @intCast(bytes.len);
         }
-        if (self.reads == 1 and (self.scenario == .success or self.scenario == .invalid_url or self.scenario == .missing_key)) return -1;
+        if (self.reads == 1 and (self.scenario == .success or self.scenario == .invalid_url or self.scenario == .missing_key)) return -@as(isize, @intFromEnum(std.posix.E.AGAIN));
         const text = switch (self.scenario) {
             .refusal => if (self.reads == 1) refusal else "",
             .identity => if (self.reads == 1) identity else "",
