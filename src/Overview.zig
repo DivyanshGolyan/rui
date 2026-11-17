@@ -1434,7 +1434,7 @@ fn creationInput(self: *const Self, snapshot: *const CreationSnapshot, compactio
         .provider = if (binding.*) |value| .{ .present = true, .value = @tagName(value.provider) } else .{},
         .model = if (binding.*) |*value| .{ .present = true, .value = value.model.slice() } else .{},
     };
-    configuration.completeCreation(if (binding.*) |value| value.provider else .codex, if (binding.*) |*value| value.model.slice() else product_defaults.recommended_model, saved.effort, saved.permission, compaction_buffer);
+    configuration.completeCreation(if (binding.*) |value| value.provider else .codex, if (binding.*) |*value| value.model.slice() else product_defaults.recommended_model, @import("os/read_image_file.zig").available, saved.effort, saved.permission, compaction_buffer);
     return configuration;
 }
 
@@ -2452,8 +2452,8 @@ test "empty creation sends the fresh tool profile" {
     defer rig.close();
     try std.testing.expect(try rig.press("\r") == null);
     try std.testing.expect(try rig.settle() == null);
-    try std.testing.expectEqualStrings(product_defaults.tools, Seen.now.creation.tools.?.slice());
-    try std.testing.expectEqualStrings(product_defaults.loaded_tools, Seen.now.creation.loaded_tools.?.slice());
+    try std.testing.expectEqualStrings(product_defaults.creationTools(true, @import("os/read_image_file.zig").available).allowed, Seen.now.creation.tools.?.slice());
+    try std.testing.expectEqualStrings(product_defaults.creationTools(true, @import("os/read_image_file.zig").available).loaded, Seen.now.creation.loaded_tools.?.slice());
 }
 
 test "empty creation takes saved effort only when the launch reads defaults" {
@@ -5471,7 +5471,7 @@ test "chat pinned controls preserve late-listed Sessions and the physical last-r
             var shown = try rig.shown(size.width, size.height);
             defer shown.deinit();
             try std.testing.expectEqual(size.width == 140, std.mem.indexOf(u8, try shown.text(), "+ New Session") != null);
-            try std.testing.expect(std.mem.indexOf(u8, try shown.line(size.height - 1), "alt+i info") != null);
+            try std.testing.expect(std.mem.indexOf(u8, try shown.line(size.height - 1), "alt+i info") == null);
             if (size.width == 140) {
                 try std.testing.expectEqual(if (listed) listed_references.len else 1, overview.app_sessions.shown_at.len);
                 if (listed) {
@@ -6485,8 +6485,8 @@ test "accepted empty creation opens the returned Session with blank focused chat
         try std.testing.expectEqualStrings("gpt-6-luna", Seen.now.creation.model.?.slice());
         try std.testing.expectEqualStrings("ask", Seen.now.creation.permission_mode.slice());
         try std.testing.expectEqualStrings("high", Seen.now.creation.reasoning_effort.?.slice());
-        try std.testing.expectEqualStrings(product_defaults.tools, Seen.now.creation.tools.?.slice());
-        try std.testing.expectEqualStrings(product_defaults.loaded_tools, Seen.now.creation.loaded_tools.?.slice());
+        try std.testing.expectEqualStrings(product_defaults.creationTools(true, @import("os/read_image_file.zig").available).allowed, Seen.now.creation.tools.?.slice());
+        try std.testing.expectEqualStrings(product_defaults.creationTools(true, @import("os/read_image_file.zig").available).loaded, Seen.now.creation.loaded_tools.?.slice());
         try std.testing.expect(Seen.now.creation.label == null);
         try std.testing.expect(frontend.reader.thread == null);
         const focused = rig.last_focus orelse return error.ExpectedChatFocus;

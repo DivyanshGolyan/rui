@@ -968,7 +968,10 @@ pub noinline fn serve(
         lease.* = try platform.StoreLease.acquire(io, settings.store.sqlite.dir.slice());
     defer lease.release();
     if (mysql_url == null and !settings.interface.dir.anchored) try lease.useRuntimeDirectory(settings.interface.dir.slice(), socket_path);
-    lease.paths.retainReachableDirectory(io, host_directory);
+    if (tuning.admitted_directory) |directory|
+        try lease.paths.host_directory.set(directory)
+    else
+        lease.paths.retainReachableDirectory(io, host_directory);
     if (!stderr.tryExclude()) return error.HostReadinessOutputUnavailable;
     var readiness_owned = true;
     defer if (readiness_owned) stderr.release();

@@ -25,3 +25,9 @@ pub fn linkTrust(module: *std.Build.Module) void {
     module.linkFramework("Security", .{});
     module.linkFramework("CoreFoundation", .{});
 }
+
+/// Verified native Mac acceptance can buffer output instead of owning the terminal.
+pub fn configureAcceptance(b: *std.Build, artifacts: ?[]const u8) void {
+    if (artifacts != null and b.graph.host.result.os.tag == .macos)
+        @import("ci.zig").concurrentAcceptance(b);
+}

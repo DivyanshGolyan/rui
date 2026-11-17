@@ -23,6 +23,7 @@ pub const Call = union(Tool) {
     find_tools,
     message_agent: *const core_tools.MessageAgentArguments,
     read_action,
+    read_image,
     read_transcript: ?Bounded(session_id.bytes),
     skill,
     start_agent,
@@ -53,6 +54,11 @@ pub fn describe(call: Call) Description {
         .find_tools => blk: {
             var out: Description = .{};
             out.set("Find tools") catch unreachable;
+            break :blk out;
+        },
+        .read_image => blk: {
+            var out: Description = .{};
+            out.set("Read an image") catch unreachable;
             break :blk out;
         },
         .read_action => blk: {
@@ -197,6 +203,7 @@ pub const CallFacts = struct {
     message_agent: ?core_tools.MessageAgentCheck = null,
     removed: bool = false,
     invalid_mcp_arguments: bool = false,
+    read_image: ?bool = null,
     find_tools: bool = false,
     skill: bool = false,
     read_transcript: bool = false,
@@ -221,6 +228,7 @@ pub const CallFacts = struct {
     pub fn description(self: *const CallFacts) ?Description {
         if (self.bashArguments()) |arguments| return describe(.{ .bash = arguments });
         if (self.messageAgentArguments()) |arguments| return describe(.{ .message_agent = arguments });
+        if (self.read_image == true) return describe(.read_image);
         if (self.find_tools) return describe(.find_tools);
         if (self.skill) return describe(.skill);
         if (self.read_transcript) return describe(.{ .read_transcript = self.transcript_id });
@@ -285,6 +293,7 @@ pub fn inspectCall(name_source: anytype, name_length: u64, arguments: anytype, o
         .bash = if (named and (runner == null or runner == .bash)) try checkBashArguments(arguments) else null,
         .message_agent = if (messaging and (runner == null or runner == .core)) try core_tools.checkMessageAgent(arguments, &discard) else null,
         .removed = removed,
+        .read_image = if (runner == .read_image) try @import("read_image_arguments.zig").valid(arguments) else null,
         .invalid_mcp_arguments = if (runner == .mcp) !try checkMcpArguments(arguments) else false,
         .read_transcript = transcript and (runner == null or runner == .core),
         .transcript_id = if (transcript and (runner == null or runner == .core)) try transcriptDescriptionId(arguments) else null,
@@ -396,6 +405,7 @@ pub const removed_tool_result = "This tool was removed.";
 pub fn rejectionResult(code: tool_proposal.Rejection, facts: *const CallFacts, name: anytype, name_length: u64, name_digest: [32]u8, buffer: *[192]u8) ![]const u8 {
     switch (code) {
         .invalid_arguments => {
+            if (facts.read_image == false) return "Invalid arguments for tool 'read_image': expected only a nonempty Host-local path string of at most 4096 UTF-8 bytes.";
             if (facts.invalid_mcp_arguments) return std.fmt.bufPrint(buffer, "Invalid arguments for tool '{s}': the arguments are not one well-formed JSON object.", .{facts.tool.?.name});
             if (facts.message_agent) |check| return switch (check.rejected) {
                 inline else => |value| "Invalid arguments for tool 'message_agent': " ++ comptime value.text() ++ ".",
@@ -422,6 +432,7 @@ pub fn rejectionResult(code: tool_proposal.Rejection, facts: *const CallFacts, n
 
 pub fn classifyCall(facts: *const CallFacts) ?tool_proposal.Rejection {
     if (facts.tool == null) return .unknown_tool;
+    if (facts.read_image == false) return .invalid_arguments;
     if (facts.invalid_mcp_arguments) return .invalid_arguments;
     if (facts.bash) |check| if (check == .rejected) return .invalid_arguments;
     if (facts.message_agent) |check| if (check == .rejected) return .invalid_arguments;

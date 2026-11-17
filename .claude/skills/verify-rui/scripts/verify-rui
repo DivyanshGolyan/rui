@@ -29,6 +29,7 @@ import tarfile
 import threading
 import time
 import tempfile
+import unicodedata
 from urllib.parse import quote
 
 CACHE = pathlib.Path(os.environ.get("VERIFY_RUI_CACHE", pathlib.Path.home() / ".cache/verify-rui"))
@@ -365,6 +366,7 @@ def fixture_main(args):
     Policy (by the latest user text, or by a pending tool result):
       * after a function_call_output: echo tool summary, or believable prose in realistic mode
       * text containing "tool demonstration": three Bash calls (ls, exit 127, stderr+exit 1)
+      * text containing "image consent check": one read_image call for design/checkout.png (needs approval in ask mode)
       * text containing "consent check": one 32-line Bash command (needs approval in ask mode)
       * text containing "long tool output": one Bash call that prints 32 numbered lines
       * text containing "long bash": one Bash command that sleeps 8 s
@@ -491,6 +493,10 @@ def fixture_main(args):
                 # A stream the provider adapter cannot read: the Turn fails.
                 kind = "invalid-output"
                 payload = b"data: {not json\n\n"
+            elif user_text and "image consent check" in user_text:
+                kind = "image-consent-call"
+                payload = fixture.sse_tool_calls(f"r{n}", [
+                    ("read_image", f"c{n}", json.dumps({"path": "design/checkout.png"}))])
             elif user_text and "consent check" in user_text:
                 kind = "consent-call"
                 command = "set -eu\n" + "\n".join(f"printf 'step {k:02d}\\n' >> progress.log" for k in range(1, 31)) + "\nwc -l progress.log"
@@ -2951,11 +2957,64 @@ def frame_upgrade_viewport(run, terminal, state):
         frame_steps(run, terminal, [{"keys": ["Esc"]}, {"wait": "Settings"}])
 
 
+def frame_chat_ready(plain, witness=None, empty=False):
+    if any(marker in plain for marker in ("Opening…", "Reading this Session", "Host paused", "Notifications")):
+        return False
+    lines = plain.splitlines()
+
+    def is_rule(line):
+        line = line.strip()
+        return bool(line) and (set(line) <= {"─"} or set(line) <= {"-"})
+
+    for index in range(max(1, len(lines) - 6), len(lines) - 1):
+        def cell_width(text):
+            return sum(0 if unicodedata.combining(char) else
+                       2 if unicodedata.east_asian_width(char) in ("W", "F") else 1 for char in text)
+
+        divider = None
+        if not is_rule(lines[index]):
+            for separator in ("│", "|"):
+                left, found, right = lines[index].partition(separator)
+                if found and is_rule(right):
+                    divider = (cell_width(left), separator)
+                    break
+            if divider is None:
+                continue
+
+        def pane(line):
+            if divider is None:
+                return line
+            column, separator = divider
+            for position, char in enumerate(line):
+                if char == separator and cell_width(line[:position]) == column:
+                    return line[position + 1:]
+            return ""
+
+        top = next((i for i in range(index - 1, -1, -1) if is_rule(pane(lines[i]))), None)
+        if top is None or top + 1 >= index:
+            continue
+        prompt = pane(lines[top + 1])
+        if re.match(r"^\s*[›>](?:\s|$)", prompt) is None:
+            continue
+        if empty and (top + 2 != index or re.fullmatch(r"\s*[›>]\s+Type a task\s*", prompt) is None):
+            continue
+        footer = []
+        for line in lines[index + 1:index + 4]:
+            text = pane(line)
+            if is_rule(text):
+                break
+            footer.append(text)
+        if not any(line.strip() for line in footer):
+            continue
+        if witness is None or any(witness in pane(line) for line in lines[:top]):
+            return True
+    return False
+
+
 def frame_failure_settled(terminal, before):
     marker = "! Couldn't reach GitHub; nothing changed" if before else "Update failed"
-    terminal.wait(lambda c: marker in c.completed and "Host paused" not in c.completed
-                  and "Reading this Session" not in c.completed
-                  and (before or "alt+i info" in c.completed), "failed Upgrade reread the open conversation")
+    terminal.wait(lambda c: marker in c.completed and frame_chat_ready(c.completed, empty=True),
+                  "failed Upgrade reread the open conversation")
 
 
 def frame_drive_upgrade(run, terminal, state, fixture):
@@ -2989,8 +3048,8 @@ def frame_drive_upgrade(run, terminal, state, fixture):
         selected = run.home / ".local/bin/rui"
         import os_semantics
         terminal.wait(lambda c: os_semantics.process_executable(terminal.process.pid) == selected.resolve()
-                      and (f"Upgraded to {version}" if before else "alt+i info") in c.completed
-                      and "Notifications" not in c.completed,
+                      and frame_chat_ready(c.completed, state["open"])
+                      and (not before or f"Upgraded to {version}" in c.completed),
                       "installed release relaunched the same conversation", timeout=40)
         status = json.loads(frame_command(run.rui_cmd("host", "status", "--store", run.store), "upgraded Host status").stdout)
         if status["instance"] == run.meta["upgrade_previous_instance"]:

@@ -16,7 +16,7 @@ Use these names when describing a change or a screenshot. Panels and notices cou
 | Effort | Click chat effort, Tab twice then Enter, or open **Effort** in Settings/Chat info | Arrows then Enter, or click a level; Esc closes | [Model choice and Effort](./model-choice.md) |
 | Sign-in | First run without credentials, or **Sign-in** in Settings | Tab/Shift-Tab then Enter, or click account/method/controls; edit API fields; **Copy code**, **Open browser**, **Back**, **Close** | [Sign-in and first run](./sign-in.md) |
 | Approval | A chat using **ask first** needs a tool decision | PgUp/PgDn or wheel reads; Left/Right selects **Allow once**/**Deny**, Enter confirms; click a choice; typing moves to draft; Esc restores the choice | [Consent](./consent.md) |
-| Chat info | Alt-I or click **alt+i info** | Arrows and Enter, or click fields/actions; **Rename**, **Archive**, **Copy last answer**; Esc closes | [Chat info and navigation](./status-navigation.md) |
+| Chat info | Alt-I or click the chat footer | Arrows and Enter, or click fields/actions; **Rename**, **Archive**, **Copy last answer**; Esc closes | [Chat info and navigation](./status-navigation.md) |
 | Tool output | Ctrl-O on a tool or click its heading | Ctrl-O or another click folds it; arrows, PgUp/PgDn or wheel scroll | [Chat info and navigation](./status-navigation.md) |
 | Message | Ctrl-O on a collapsed message | Read its full text; arrows, PgUp/PgDn or wheel scroll; Ctrl-O or Esc returns | [Chat info and navigation](./status-navigation.md) |
 | Archived | Home, Down, Right, Enter on Overview, or click **Archived** | Up/Down then Enter or click opens a chat; Esc returns; `/unarchive` in the chat restores it | [Archive and Archived](./archive.md) |
@@ -53,7 +53,7 @@ Working, queued, stopped and failed messages are Chat states; [work and stop](./
 
 - [Compose and submit](./compose-submit.md): draft entry, multiline paste, a single submission, the answer, capture correlation, and the input matrix every editor-hosting surface must pass.
 - [Consent](./consent.md): approval prompt reading, **Allow once**, **Deny**, retained drafts and pasted input.
-- [Chat info and navigation](./status-navigation.md): Alt-I or **alt+i info**, panels above visible feed, tool output (Ctrl-O), PgUp/PgDn, arrows, wheel, Ctrl-G and Esc.
+- [Chat info and navigation](./status-navigation.md): Alt-I or the clickable chat footer, panels above visible feed, tool output (Ctrl-O), PgUp/PgDn, arrows, wheel, Ctrl-G and Esc.
 - [Exit and terminal restoration](./exit-restore.md): Ctrl-C and SIGTERM restore termios and the screen.
 - [tmux attached and detached](./tmux.md): the same journeys through a private tmux server, with or without a client.
 - [Hardware input](./hardware-input.md): physical keys and wheel in a GUI terminal (L4, needs a human).

@@ -145,7 +145,11 @@ A long gate (`check`, `check-full`, `test`, `stack-frames`) runs alone, and besi
 Only non-promotion manually dispatched runs whose diff touches no strict path rerun a failed batch once and report both results; a pass after the rerun is a flake to fix.
 Ready PRs, promotions and the documentation lane never rerun, except a batch that failed only on [listed flakes](#listed-flakes).
 Qualification keeps one job per target. macOS packs native work into at most three workers: execution plus portable logic, callers, and remaining native targets.
-Composed gates, long witnesses, launch, Debug admission, reply delivery and H2 stay isolated from other target batches.
+Composed gates, long witnesses, launch, Debug admission, reply delivery, H2 and UID-wide Upgrade stay isolated from other target batches.
+Within a macOS worker using verified CI artifacts, independent acceptance commands overlap through Zig's existing DAG scheduler.
+The shared build CI owner checks their exit status and keeps execution fresh while buffering combined output on stderr; inherited terminal I/O would hold Zig's global stderr lock.
+Compilation, generated outputs, explicit I/O checks and Zig test protocols keep their existing owners.
+The compiler-backed acceptance regression runs explicitly in the existing compiler-equipped `cache_execution` job alongside the warm-cache execution proof; its explicit `ACCEPTANCE_INPUTS` also select that job and focused local feedback, while it stays outside the five-minute Python policy suite.
 A Selected checks dispatch can supply a JSON `native_targets` array to reproduce an exact native selection through the same producer, matrix and acceptance owners; this diagnostic mode disables retries and quarantine.
 The `linux` and `macos` statuses fail if any selected job fails or is cancelled.
 A failing aggregate names each failed job of its run and whether infrastructure or a check failed it ([failure_cause.py](../../tests/ci/failure_cause.py)), so a red never reads only as an exit code.
@@ -273,7 +277,7 @@ The allowlist lives in [mac_runner.py](../../tests/ci/mac_runner.py).
 Fork PRs, including NimishGolyan/rui, stay hosted.
 Promotion, compile-only main builds, macOS qualification and the existing cache-execution checks keep their hosted runners; hosted-VM measurements therefore remain comparable.
 The routing job reads `GET /repos/{repo}/actions/runners` with the repository secret `MAC_RUNNER_STATUS_TOKEN`, a fine-grained PAT limited to this repository with Administration: read.
-An online, idle runner labelled `rui-mac` selects the Mac; a missing secret, API error, ten-second timeout, malformed response, busy/offline runner or `RUI_MAC_RUNNER=off` selects `macos-15`.
+An online `rui-mac` selects the Mac when idle or when its queued jobs are fewer than hosted queued jobs plus one if at least five hosted jobs are running; ties select `macos-15`. If queue data is unavailable, only an idle Mac is selected; unavailable runner status, an offline runner or `RUI_MAC_RUNNER=off` selects hosted macOS.
 This is a snapshot, not a reservation: after choosing the Mac, jobs queue for its one runner process; a later disconnect does not reroute that run.
 The Mac restores caches but never publishes them to GitHub.
 Compilation and build-runner cache keys include the actual native-tool identity (including Xcode and SDK); compiler/package caches have their existing platform/dependency keys.
@@ -292,6 +296,7 @@ This relies on the direct worker-child process relationship checked in `actions/
 Never run `job-started.sh` directly: a rejected invocation kills its calling process.
 The process-supervision test runs in a disposable subprocess; installation and native Actions behavior still need verification on the Mac.
 It deletes the global Zig cache before a job when that cache exceeds 40 GiB.
+After admission it also stops every other `ruici` process outside its own runner ancestry and empties `ruici`'s TMPDIR, because only one job runs at a time and a hosted VM would have discarded both; a leftover `rui host serve` otherwise shows up in a later job's Host discovery.
 The separate account isolates local files; it still executes trusted PR code on a personal Mac.
 
 Pause scheduling with `gh variable set RUI_MAC_RUNNER --repo DivyanshGolyan/rui --body off` (unset it or set `on` to resume).

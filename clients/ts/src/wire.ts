@@ -3585,7 +3585,7 @@ export interface components {
             parent_operation: components["schemas"]["Decimal"];
             call_ordinal: components["schemas"]["Decimal"];
             /** @enum {string} */
-            tool: "bash" | "find_tools" | "message_agent" | "read_action" | "read_transcript" | "skill" | "start_agent" | "stop_action" | "web_search";
+            tool: "bash" | "find_tools" | "message_agent" | "read_action" | "read_image" | "read_transcript" | "skill" | "start_agent" | "stop_action" | "web_search";
             permission_revision: components["schemas"]["Decimal"];
             /** @enum {string} */
             authorization: "core" | "pending" | "bypass" | "allow_once";
