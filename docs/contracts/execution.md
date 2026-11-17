@@ -282,7 +282,7 @@ The Responses `/1`, `/2` and `/3` input domains extend additively with image-bea
 PNG and JPEG Image parts name raw Content; the codec supplies data-URL MIME framing and `detail:auto`, and the shell reads verified bounded windows through a pinned standard-base64 cursor.
 Source reads and emitted bytes consume the existing preparation allowance; request scratch, cancellation and sealing keep their existing owners.
 An image-bearing tool result uses an actual `function_call_output.output` array under its original `call_id`, never a synthetic user Message.
-Text-only results remain strings, saved MCP JSON stays opaque text, and every old handler, escape, Carry and route dialect keeps its original bytes.
+Text-only results remain strings, and every old handler, escape, Carry and route dialect keeps its original bytes. MCP image results and the raw-prefix exception follow the [MCP result contract](model-io.md#operations-and-frozen-requests).
 Only the open resumes and the close ends the new history element; partial image state never enters Carry.
 These codec and raw-byte transforms do not themselves admit or persist typed images, validate media containers, or qualify provider image support.
 The codec's encoder state is a small value of the codec's own type that the shell stores, and it holds the codec's carry.

@@ -36,7 +36,7 @@ The subsystem references keep accepted behavior and required evidence together. 
 
 - [Admission and Session configuration](docs/contracts/admission.md#required-evidence).
 - [Conversation, settings, and skills](docs/contracts/conversation.md#required-evidence).
-- [Model requests and provider context](docs/contracts/model-io.md#required-evidence).
+- [Model requests and provider context](docs/contracts/model-io.md#required-evidence), including MCP image result ordering, failure and replay, and synthetic provider request evidence.
 - [Tools, execution, and recovery](docs/contracts/execution.md#required-evidence).
 - [Store transactions and representation](docs/contracts/store.md#required-evidence).
 - [Session stops and outcomes](docs/contracts/sessions.md#required-evidence).
