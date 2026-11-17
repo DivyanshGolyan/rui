@@ -38,10 +38,12 @@ A clock that ticks every second is motion with no news, so times read "now" for 
 
 ## 5. Tint is what you said, lines are where you act
 
-A tinted band always means a message the person sent, and nothing else is tinted.
+A tinted message band means a message the person sent. List selection and hover use tint to show where the person can act.
 The two lines at the bottom of a chat hold the live area: the input, and any panel opened from it (the command list, chat info, Settings).
 Panels opened from the input appear between those two lines, on the plain background, with no box and no tint.
 So a glance answers two questions: what did I say (tint), and where do I type or choose (between the lines).
+
+Tint never touches text: leave at least two columns before it and at least one, preferably two, after it. Sent-message bands leave half a row above and below with half blocks; ASCII terminals or terminals unable to colour the blocks use a full blank tinted row instead. List rows keep only the sideways inset so neighbours stay together. Plain rows keep the same inset, so selection and hover never move text.
 
 ## 6. One edge, one grammar
 

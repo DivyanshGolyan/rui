@@ -47,7 +47,7 @@ pub const SessionControls = struct {
     fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
         const self: *SessionControls = @ptrCast(@alignCast(raw));
         const GroupedList = @import("GroupedList.zig");
-        const width = ctx.max.width.?;
+        const width = @import("widgets/RowInset.zig").contentWidth(ctx.max.width.?);
         const built = try overview_view.listSegments(ctx.arena, self.state, .new_session, width, self.caps, 0);
         const tabs = try overview_view.listSegments(ctx.arena, self.state, .views, width, self.caps, 0);
         var regions: std.ArrayList(GroupedList.Region) = .empty;
@@ -148,10 +148,9 @@ pub const Settings = struct {
         for (0..size.width) |column| surface.writeCell(@intCast(column), 0, .{ .char = .{ .grapheme = if (self.caps.unicode) "─" else "-", .width = 1 }, .style = widget_style.of(self.caps, .{ .colour = .quiet }) });
         if (height < 2) return surface;
         const ground: overview_view.Background = if (self.selected) .selection else if (self.hover.contains(target)) .hover else .ground;
-        const name: vxfw.RichText = .{ .text = &.{.{ .text = "   Settings", .style = widget_style.of(self.caps, .{ .colour = if (self.selected) .strong else .normal, .bold = self.selected, .background = ground }) }}, .softwrap = false };
-        const label = try name.widget().draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = 1 }));
-        @memset(surface.buffer[size.width .. 2 * size.width], .{ .style = widget_style.of(self.caps, .{ .background = ground }) });
-        if (label.size.height > 0) @memcpy(surface.buffer[size.width..][0..label.size.width], label.buffer[0..label.size.width]);
+        const row_style = widget_style.of(self.caps, .{ .background = ground });
+        @memset(surface.buffer[size.width .. 2 * size.width], .{ .style = row_style });
+        try @import("widgets/RowInset.zig").draw(ctx, surface, 1, &.{.{ .text = "   Settings", .style = widget_style.of(self.caps, .{ .colour = if (self.selected) .strong else .normal, .bold = self.selected, .background = ground }) }}, row_style);
         self.hover.targets = try ctx.arena.dupe(Hover.Rect, &.{target});
         if (height < 3) return surface;
         const status = @import("upgrade_status.zig");
@@ -202,13 +201,13 @@ test "session tabs press only separate drawn destinations and clear clipped targ
             try shown.render(window, controls.widget());
             var line: std.ArrayList(u8) = .empty;
             for (0..width) |col| try line.appendSlice(arena.allocator(), screen.readCell(@intCast(col), 0).?.char.grapheme);
-            try std.testing.expect(std.mem.startsWith(u8, line.items, " + New Session"));
+            try std.testing.expect(std.mem.startsWith(u8, line.items, "   + New Session"));
         }
         for (0..3) |row| for (0..@max(1, width)) |col| {
             clicks.got = null;
             events.consume_event = false;
             try controls.widget().handleEvent(&events, .{ .mouse = .{ .col = @intCast(col), .row = @intCast(row), .button = .left, .type = .press, .mods = .{} } });
-            const expected: ?overview_view.Click = if (col >= width or row >= height) null else if (row == 0) .new_session else if (col >= 2 and col < @min(10, width -| 1)) .sessions else if (col >= 12 and col < @min(20, width -| 1)) .archived else null;
+            const expected: ?overview_view.Click = if (col >= width or row >= height) null else if (row == 0) .new_session else if (col >= 5 and col < @min(13, width -| 3)) .sessions else if (col >= 15 and col < @min(23, width -| 3)) .archived else null;
             try std.testing.expectEqual(expected, clicks.got);
         };
     };
@@ -226,7 +225,7 @@ test "sidebar bottom separates Settings memory and update targets across geometr
             const frame = try settings.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = height }, .cell_size = .{} });
             try std.testing.expectEqual(@min(height, 3), frame.size.height);
             if (width >= 20 and height >= 3) {
-                try std.testing.expect(std.mem.startsWith(u8, try cells(arena.allocator(), frame, 1), "   Settings"));
+                try std.testing.expect(std.mem.startsWith(u8, try cells(arena.allocator(), frame, 1), "     Settings"));
                 const bottom = try cells(arena.allocator(), frame, 2);
                 try std.testing.expect(std.mem.indexOf(u8, bottom, "Settings") == null);
                 try std.testing.expect(std.mem.indexOf(u8, bottom, "rui") == null);
@@ -313,7 +312,7 @@ test "session tab focus survives pointer hover without changing active filter" {
     var controls: SessionControls = .{ .state = &state, .userdata = &clicks, .on_click = Clicks.take };
     const draw: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 2 }, .cell_size = .{} };
     var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-    for ([_]overview_view.ArchiveFilter{ .active, .archived }) |filter| for ([_]overview_view.Selection{ .sessions, .archived }) |focus| for ([_]i16{ 3, 13, 30 }) |pointer| {
+    for ([_]overview_view.ArchiveFilter{ .active, .archived }) |filter| for ([_]overview_view.Selection{ .sessions, .archived }) |focus| for ([_]i16{ 5, 15, 30 }) |pointer| {
         state.archive = filter;
         state.selected = focus;
         _ = try controls.widget().draw(draw);
@@ -322,9 +321,9 @@ test "session tab focus survives pointer hover without changing active filter" {
         var screen: vaxis.Screen = try .init(arena.allocator(), .{ .cols = 46, .rows = 2, .x_pixel = 0, .y_pixel = 0 });
         const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 46, .height = 2, .screen = &screen };
         try shown.render(window, controls.widget());
-        try std.testing.expectEqual(widget_style.of(.{}, .{ .background = .selection }).bg, screen.readCell(if (focus == .sessions) 2 else 12, 1).?.style.bg);
-        try std.testing.expectEqual(filter == .active, screen.readCell(2, 1).?.style.bold);
-        try std.testing.expectEqual(filter == .archived, screen.readCell(12, 1).?.style.bold);
+        try std.testing.expectEqual(widget_style.of(.{}, .{ .background = .selection }).bg, screen.readCell(if (focus == .sessions) 5 else 15, 1).?.style.bg);
+        try std.testing.expectEqual(filter == .active, screen.readCell(5, 1).?.style.bold);
+        try std.testing.expectEqual(filter == .archived, screen.readCell(15, 1).?.style.bold);
         try std.testing.expectEqual(focus, state.selected);
         try std.testing.expectEqual(filter, state.archive);
     };
