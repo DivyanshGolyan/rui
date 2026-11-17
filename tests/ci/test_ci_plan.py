@@ -26,14 +26,20 @@ def selection(documentation=False):
 class PlanTest(unittest.TestCase):
     def test_manual_native_diagnostics_keep_exact_targets_and_disable_retries(self):
         targets = ['test', 'test-logic', 'upgrade-integration']
-        result = plan(selection(), event_name='workflow_dispatch', draft=False, promotion=False,
-                      change_kind=ChangeKind.NORMAL, native_targets=targets).outputs
-        self.assertEqual(result['native_targets'], targets)
-        self.assertEqual(result['macos_matrix'], shards(targets, 'macos', mysql_suites=selection()['mysql_suites']))
-        self.assertTrue(result['native'])
-        self.assertFalse(result['retry'])
-        self.assertEqual(result['quarantine'], 'off')
-        for targets in ([], ['test', 'test'], '--help', ['--help'], ['test;false'], [1]):
+        for mac_required in (False, True):
+            with self.subTest(mac_required=mac_required):
+                selected = selection()
+                selected['mac_required'] = mac_required
+                result = plan(selected, event_name='workflow_dispatch', draft=False, promotion=False,
+                              change_kind=ChangeKind.NORMAL, native_targets=targets).outputs
+                self.assertEqual(result['native_targets'], targets)
+                self.assertIsNot(result['native_targets'], targets)
+                self.assertEqual(result['macos_matrix'], shards(targets, 'macos', mysql_suites=selected['mysql_suites']))
+                self.assertTrue(result['native'])
+                self.assertFalse(result['retry'])
+                self.assertEqual(result['quarantine'], 'off')
+        for targets in (None, False, 1, 1.5, {}, {'target': 'test'}, [], ['test', 'test'],
+                        '--help', ['--help'], ['test;false'], [1]):
             with self.subTest(targets=targets), self.assertRaises(ValueError):
                 plan(selection(), event_name='workflow_dispatch', draft=False, promotion=False,
                      change_kind=ChangeKind.NORMAL, native_targets=targets)
