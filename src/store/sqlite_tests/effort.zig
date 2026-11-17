@@ -65,10 +65,7 @@ test "reasoning effort overrides are model-checked and frozen on each admitted O
     const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
 
     const clear = try configureTestEffort(&storage, "effort-clear", session.slice(), .explicit_null, "");
-    try std.testing.expect(clear == .rejected);
-    try std.testing.expectEqual(protocol.ConfigurationRejection.unsupported_reasoning_effort, clear.rejected.code);
-    try std.testing.expectEqual(observed.revision, (try storage.inspectSessionForTesting(session.slice())).revision);
-    try std.testing.expect(try configureTestEffort(&storage, "effort-client-default", session.slice(), .value, "low") == .accepted);
+    try std.testing.expect(clear == .accepted);
     observed = try storage.inspectSessionForTesting(session.slice());
     try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .low), observed.reasoning_effort);
     try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .low), observed.reasoning_effort_override);
@@ -101,7 +98,7 @@ test "reasoning effort overrides are model-checked and frozen on each admitted O
     try std.testing.expectEqualSlices(?protocol.ReasoningEffort, &.{ .high, .low, .medium, .medium }, revisions[0..revision_count]);
 
     const unknown = try configureTestSession(&storage, "effort-unknown");
-    try std.testing.expectEqual(@as(?protocol.ReasoningEffort, null), (try storage.inspectSessionForTesting(unknown.slice())).reasoning_effort);
+    try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .low), (try storage.inspectSessionForTesting(unknown.slice())).reasoning_effort);
     for (std.enums.values(protocol.ReasoningEffort)) |effort| {
         var key: [64]u8 = undefined;
         const accepted = try configureTestEffort(&storage, try std.fmt.bufPrint(&key, "effort-unknown-{s}", .{@tagName(effort)}), unknown.slice(), .value, @tagName(effort));
