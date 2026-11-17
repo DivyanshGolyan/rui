@@ -1097,7 +1097,12 @@ def mysql_restart_cases(root, binary, releases):
                                                       output, diagnostic))
                             return gate.with_name(gate.name + ".entered").exists()
                         wait_for(frozen, "real MySQL A source frozen before child launch", timeout=30)
-                        assert c.status()["status"] == "unavailable"
+                        # A missing MySQL endpoint is deliberately not proof
+                        # that its DB lock is free. The known old child is gone;
+                        # only the new child's readyA below proves acquisition.
+                        assert old.poll() is not None, "old MySQL Host is still living"
+                        stopped = c.status()
+                        assert stopped["status"] == "owned_unavailable", stopped
                         missing = "RUI_FROZEN_SOURCE_MUST_STAY_UNUSED"
                         assert missing not in c.env
                         changed = json.loads(json.dumps(document))
