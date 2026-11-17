@@ -175,6 +175,22 @@ noinline fn receiptNames(names: *const Bounded(tool_set.max_names_bytes), count:
     out.* = sorted.names;
 }
 
+test "creation receipt names reject empty segments and sort valid names" {
+    var input: Bounded(tool_set.max_names_bytes) = .{};
+    var output: Bounded(tool_set.max_names_bytes) = .{};
+    try input.set("z,a");
+    try receiptNames(&input, 2, &output);
+    try std.testing.expectEqualStrings("a,z", output.slice());
+    for ([_][]const u8{ ",foo", "foo,", "foo,,bar", "foo,foo" }) |invalid| {
+        try input.set(invalid);
+        try std.testing.expectError(error.CorruptStore, receiptNames(&input, 2, &output));
+    }
+    input.len = 0;
+    try receiptNames(&input, 0, &output);
+    try std.testing.expectEqual(@as(usize, 0), output.len);
+    try std.testing.expectError(error.CorruptStore, receiptNames(&input, 1, &output));
+}
+
 fn creationReceipt(row: *const creation_receipt_read.Row, out: *command_reply.CreationConfiguration) !void {
     if (row.tools_count != row.tools_rows or row.loaded_count != row.loaded_rows) return error.CorruptStore;
     out.provider = row.provider;
