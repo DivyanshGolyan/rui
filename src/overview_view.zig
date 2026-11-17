@@ -6629,6 +6629,55 @@ const LinesDomainBase = struct {
         try std.testing.expect(std.meta.eql(selected, state.selected));
         try std.testing.expectEqual(@as(?usize, at), Lines.highlighted(state, true));
     }
+    fn checkBoundaries() !void {
+        // Preserve the base's small-list and every pin-split boundaries without
+        // multiplying the work-state Cartesian domain above.
+        for (0..9) |total| for (0..total + 1) |pins| {
+            var rows: [8]Listed = undefined;
+            for (rows[0..total], 0..) |*row, index| {
+                var ref = "aaaaaa".*;
+                ref[5] += @intCast(index);
+                row.* = session(&ref, .{ .finished = ago(index + 1) }, .{});
+                row.pin_order = if (index < pins) 8 - index else null;
+            }
+            var state = try opened(rows[0..total]);
+            defer state.deinit();
+            var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer arena.deinit();
+            const gap = pins > 0 and pins < total;
+            const count = @max(1, total + @intFromBool(gap));
+            try std.testing.expectEqual(count, Lines.count(&state));
+            var before: usize = 0;
+            for (0..count) |line| {
+                const built = (try Lines.at(arena.allocator(), &state, line, 80, .{}, 0)).?;
+                try std.testing.expectEqual(total - before, Lines.sessionsFrom(&state, line));
+                if (total == 0 or (gap and line == pins)) {
+                    try std.testing.expect(built.target == null);
+                    try std.testing.expect(built.alternate == null);
+                    try std.testing.expectEqual(total == 0, built.heading);
+                } else {
+                    const ref = rows[before].reference;
+                    try std.testing.expectEqual(ref, built.target.?.open);
+                    try std.testing.expectEqual(ref, built.alternate.?.pin.reference);
+                    try std.testing.expectEqual(before >= pins, built.alternate.?.pin.pinned);
+                    state.selected = .{ .session = ref };
+                    try std.testing.expectEqual(@as(?usize, line), Lines.highlighted(&state, true));
+                    try std.testing.expectEqual(@as(?usize, line), Lines.named(&state));
+                    before += 1;
+                }
+            }
+            try std.testing.expectEqual(total, before);
+            try std.testing.expect((try Lines.at(arena.allocator(), &state, count, 80, .{}, 0)) == null);
+            try std.testing.expectEqual(@as(usize, 0), Lines.sessionsFrom(&state, count));
+            state.selected = .sessions;
+            for (rows[0..total]) |row| {
+                move(&state, .next);
+                try std.testing.expectEqual(row.reference, state.selected.session);
+            }
+            move(&state, .next);
+            try std.testing.expect(state.selected == .settings);
+        };
+    }
 };
 
 test "overview lines fixture domain preserves base targets focus bold archive and animation" {
@@ -6800,6 +6849,7 @@ test "overview lines fixture domain preserves base targets focus bold archive an
         move(&state, .previous);
         try std.testing.expect(state.selected == .new_session);
     };
+    try D.checkBoundaries();
     // Recorded by running this same fixture domain against base 03aa26d0.
     try std.testing.expectEqual(@as(u64, 0x50a2b94318a8b3e8), bytes_and_styles);
 }
