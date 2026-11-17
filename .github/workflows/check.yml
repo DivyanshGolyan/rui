@@ -125,10 +125,14 @@ jobs:
           for status in ('queued', 'in_progress'):
               runs.extend(pages('/runs', 'workflow_runs', {'status': status}))
           counts = {'mac_queued': 0, 'hosted_queued': 0, 'hosted_running': 0}
+          seen = set()
           for run in runs:
               run_id = run['id']
               if type(run_id) is not int or run_id <= 0:
                   raise ValueError('Invalid workflow run ID')
+              if run_id in seen:
+                  continue
+              seen.add(run_id)
               for job in pages('/runs/' + str(run_id) + '/jobs', 'jobs', {}):
                   labels, status = job['labels'], job['status']
                   if not isinstance(labels, list) or any(not isinstance(label, str) for label in labels) or not isinstance(status, str):

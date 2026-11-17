@@ -566,7 +566,7 @@ class QueueSnapshotWorkflowTest(unittest.TestCase):
         script = textwrap.dedent(re.search(
             r"      - name: Read the workflow queue snapshot\n.*?        run: \|\n(.*?)(?=      - name: Choose)",
             workflow, re.S).group(1))
-        state = {"failure": None, "calls": []}
+        state = {"failure": None, "calls": [], "transition": False}
 
         class Handler(http.server.BaseHTTPRequestHandler):
             def log_message(self, *args):
@@ -581,7 +581,8 @@ class QueueSnapshotWorkflowTest(unittest.TestCase):
                     return
                 page = int(query["page"][0])
                 if parsed.path.endswith("/runs"):
-                    rows = [{"id": i} for i in range(1, 102)] if query["status"] == ["queued"] else []
+                    rows = ([{"id": i} for i in range(1, 102)] if query["status"] == ["queued"]
+                            else ([{"id": 1}] if state["transition"] else []))
                     key = "workflow_runs"
                 else:
                     run_id = int(parsed.path.split("/")[-2])
@@ -619,6 +620,15 @@ class QueueSnapshotWorkflowTest(unittest.TestCase):
                                     for path_, query in state["calls"]))
                 self.assertTrue(any(path_.endswith("/jobs") and query["page"] == ["2"]
                                     for path_, query in state["calls"]))
+                state["transition"] = True
+                state["calls"].clear()
+                result = execute()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(path.read_text()),
+                                 {"mac_queued": 1, "hosted_queued": 1, "hosted_running": 1})
+                first_job_calls = [(path_, query) for path_, query in state["calls"]
+                                   if path_.endswith("/runs/1/jobs") and query["page"] == ["1"]]
+                self.assertEqual(len(first_job_calls), 1)
                 for failure in ("http", "malformed"):
                     with self.subTest(failure=failure):
                         path.write_text("stale")
