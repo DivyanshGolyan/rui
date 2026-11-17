@@ -996,21 +996,21 @@ class SelectionTest(unittest.TestCase):
         for name, part, artifact in (('macos_build', 'compiled', 'compiled-macos'),
                                      ('macos_build_unit', 'compiled-unit', 'compiled-macos-unit')):
             job = jobs[name]
-            self.assertIn('needs: plan', job)
-            self.assertIn('runs-on: macos-15', job)
+            self.assertIn('needs: [plan, mac_runner]', job)
+            self.assertIn("runs-on: ${{ fromJSON(needs.mac_runner.outputs.runs_on || '\"macos-15\"') }}", job)
             self.assertIn('timeout-minutes: 60', job)
             self.assertIn('check-part: ' + part + '\n', job)
             self.assertIn('TARGETS: ${{ needs.plan.outputs.native_targets }}', job)
             self.assertIn('artifact: ${{ steps.publish.outputs.artifact-id }}', job)
             self.assertIn('name: ' + artifact + '-${{ github.run_attempt }}', job)
             self.assertIn('if-no-files-found: error', job)
-        self.assertIn("if: ${{ needs.plan.outputs.macos_split == 'true' }}", jobs['macos_build_unit'])
+        self.assertIn("if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.macos_split == 'true' }}", jobs['macos_build_unit'])
         self.assertIn('build "$TARGETS" --part unit', jobs['macos_build_unit'])
         self.assertIn("PART: ${{ needs.plan.outputs.macos_split == 'true' && 'rest' || 'all' }}",
                       jobs['macos_build'])
         self.assertIn('build "$TARGETS" --part "$PART"', jobs['macos_build'])
         suites = jobs['macos_suites']
-        self.assertIn('needs: [plan, macos_build, macos_build_unit]', suites)
+        self.assertIn('needs: [plan, mac_runner, macos_build, macos_build_unit]', suites)
         self.assertIn('max-parallel: 3', suites)
         self.assertIn('ARTIFACT_ID: ${{ needs.macos_build.outputs.artifact }}', suites)
         self.assertIn('UNIT_ARTIFACT_ID: ${{ needs.macos_build_unit.outputs.artifact }}', suites)
