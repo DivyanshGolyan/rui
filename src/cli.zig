@@ -2282,8 +2282,8 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
     }
     if (parsed.get("workspace")) |workspace| input.workspace = .{ .present = true, .value = workspace };
     if (parsed.get("instructions")) |path| input.instructions = .{ .state = .value, .path = path };
-    input.tools = parsed.get("tools");
-    input.loaded_tools = parsed.get("loaded-tools");
+    input.tools = if (parsed.get("tools")) |text| .{ .cli = text } else null;
+    input.loaded_tools = if (parsed.get("loaded-tools")) |text| .{ .cli = text } else null;
     if (parsed.get("permission-mode")) |mode| input.permission_mode = .{ .present = true, .value = mode };
     if (parsed.get("output-schema")) |path| input.output_schema = .{ .state = .value, .path = path };
     if (parsed.has("text-output")) input.output_schema = .{ .state = .explicit_null };
@@ -2555,7 +2555,7 @@ test "chat info inspection takes Session facts from Current and detects changes"
     defer file.close(io);
     const listed = try tmp.dir.createFile(io, "actions", .{ .read = true });
     defer listed.close(io);
-    const report = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"delta\":\"full\",\"since\":null,\"profile\":\"current\",\"archive_state\":\"active\",\"session\":{\"reference\":\"k7m2qx\",\"parent\":null,\"workspace\":\"/home/d/w\",\"provider\":\"openai\",\"model\":\"gpt-6.1-sol\",\"revision\":\"3\",\"tools\":[\"bash\"],\"loaded_tools\":[\"bash\"],\"permission_mode\":\"ask\",\"instructions\":{\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"},\"output_schema\":null,\"reasoning_effort\":\"high\",\"reasoning_effort_override\":\"high\",\"compaction_trigger\":\"1000\",\"context_estimate\":\"310\",\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":\"lane four\",\"created_at\":\"1\"},\"pending_messages\":\"0\",\"work\":{\"state\":{\"kind\":\"finished\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"latest_outcome\":null},\"peers\":{\"from_person_at\":null},\"first_message\":null,\"selected_message\":\"m1\",\"recent_messages\":[{\"turn\":\"1\",\"message\":\"m1\",\"outcome\":\"completed\"}],\"actions\":{\"count\":\"0\",\"unresolved\":[],\"resolved\":[]},\"rejected_calls\":{\"count\":\"0\",\"items\":[]},\"actionable_permissions\":[],\"execution\":{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"0\",\"scratch_used_bytes\":\"0\",\"unavailable\":[\"structured_output\"]}}";
+    const report = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"delta\":\"full\",\"since\":null,\"profile\":\"current\",\"archive_state\":\"active\",\"session\":{\"reference\":\"k7m2qx\",\"parent\":null,\"workspace\":\"/home/d/w\",\"provider\":\"openai\",\"model\":\"gpt-6.1-sol\",\"revision\":\"3\",\"tools\":[\"bash\",\"find_tools\",\"lookup\",\"none\"],\"loaded_tools\":[\"find_tools\",\"none\"],\"permission_mode\":\"ask\",\"instructions\":{\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"},\"output_schema\":null,\"reasoning_effort\":\"high\",\"reasoning_effort_override\":\"high\",\"compaction_trigger\":\"1000\",\"context_estimate\":\"310\",\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":\"lane four\",\"created_at\":\"1\"},\"pending_messages\":\"0\",\"work\":{\"state\":{\"kind\":\"finished\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"latest_outcome\":null},\"peers\":{\"from_person_at\":null},\"first_message\":null,\"selected_message\":\"m1\",\"recent_messages\":[{\"turn\":\"1\",\"message\":\"m1\",\"outcome\":\"completed\"}],\"actions\":{\"count\":\"0\",\"unresolved\":[],\"resolved\":[]},\"rejected_calls\":{\"count\":\"0\",\"items\":[]},\"actionable_permissions\":[],\"execution\":{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"0\",\"scratch_used_bytes\":\"0\",\"unavailable\":[\"structured_output\"]}}";
     try file.writePositionalAll(io, report, 0);
     var reply = try protocol_reply.CurrentReply.decode(io, file, "k7m2qx", .{ .report = .{ .bytes = report.len } });
     const taken = try std.testing.allocator.create([2]status_page.Session);
@@ -2563,6 +2563,8 @@ test "chat info inspection takes Session facts from Current and detects changes"
     taken[0].archive_state = .active;
     taken[1].archive_state = .active;
     try std.testing.expect(try sessionStatus(io, &reply.current, file, &taken[0], null, listed));
+    try std.testing.expectEqualStrings("bash find_tools lookup none", taken[0].tools.names.slice());
+    try std.testing.expectEqualStrings("find_tools none", taken[0].loaded_tools.names.slice());
     try std.testing.expectEqualStrings("lane four", taken[0].label.slice());
     try std.testing.expectEqualStrings("/home/d/w", taken[0].workspace.slice());
     try std.testing.expectEqualStrings("gpt-6.1-sol", taken[0].model.slice());
@@ -2574,6 +2576,9 @@ test "chat info inspection takes Session facts from Current and detects changes"
     try listed.writePositionalAll(io, "kept", 0);
     try std.testing.expect(!try sessionStatus(io, &reply.current, file, &taken[1], &taken[0], listed));
     try std.testing.expectEqual(@as(u64, 4), try listed.length(io));
+    taken[0].loaded_tools = try .of(&.{"find_tools"});
+    try std.testing.expect(try sessionStatus(io, &reply.current, file, &taken[1], &taken[0], listed));
+    taken[0].loaded_tools = taken[1].loaded_tools;
     taken[0].work.recent_count = 0;
     try std.testing.expect(try sessionStatus(io, &reply.current, file, &taken[1], &taken[0], listed));
     try std.testing.expectEqual(@as(u64, 0), try listed.length(io));
@@ -2598,7 +2603,8 @@ fn takeStatus(taken: *status_page.Session, current: *const protocol_reply.Curren
         .ask => .ask,
         .bypass => .bypass,
     };
-    taken.tools = settings.tools.set;
+    taken.tools = settings.tools.names;
+    taken.loaded_tools = settings.loaded_tools.names;
     taken.instructions = settings.instructions.bytes.value != 0;
     taken.compaction_trigger = if (settings.compaction_trigger) |tokens| tokens.value else null;
     taken.compaction_override = settings.compaction_trigger_override != null;
@@ -2690,8 +2696,8 @@ fn openExistingOverview(init: std.process.Init, destination: []const u8, open: ?
 }
 
 pub fn sessionConfigure(init: std.process.Init, read: client.ReadContext, destination: []const u8, reference: []const u8, edit: ChatInfo.Edit) !bool {
-    var tools_buffer: [info_tools_bytes]u8 = undefined;
-    const input = try infoConfiguration(destination, reference, edit, &tools_buffer);
+    var tools_buffer: InfoTools = undefined;
+    const input = try infoConfiguration(destination, reference, &edit, &tools_buffer);
     const parsed: cli_args.Parsed = .{ .definition = cli_args.live_configure };
     var step: ?client.Step = .store;
     return configureCaptured(init, read.requests(), &parsed, .{ .store = destination, .session = reference }, input, &step) catch |err| {
@@ -2701,25 +2707,29 @@ pub fn sessionConfigure(init: std.process.Init, read: client.ReadContext, destin
     };
 }
 
-const info_tools_bytes = blk: {
-    var count: usize = "none".len;
-    for (std.enums.values(@import("built_in_tool.zig").BuiltInTool)) |tool| count += @tagName(tool).len + 1;
-    break :blk count;
+const InfoTools = struct {
+    allowed: [protocol.max_tools][]const u8,
+    loaded: [protocol.max_tools][]const u8,
+
+    fn names(buffer: *[protocol.max_tools][]const u8, field: *const protocol.ToolsField) []const []const u8 {
+        var iterator = field.iterator();
+        var count: usize = 0;
+        while (iterator.next()) |name| {
+            buffer[count] = name;
+            count += 1;
+        }
+        return buffer[0..count];
+    }
 };
 
-fn infoConfiguration(store: []const u8, session: []const u8, edit: ChatInfo.Edit, tools_buffer: *[info_tools_bytes]u8) !configure_input.ConfigureInput {
+fn infoConfiguration(store: []const u8, session: []const u8, edit: *const ChatInfo.Edit, tools_buffer: *InfoTools) !configure_input.ConfigureInput {
     var input: configure_input.ConfigureInput = .{ .store = store, .session = .{ .named = session } };
-    switch (edit) {
+    switch (edit.*) {
         .effort => |effort| input.reasoning_effort = .{ .present = true, .value = if (effort) |level| @tagName(level) else null },
         .permission => |permission| input.permission_mode = .{ .present = true, .value = @tagName(permission) },
-        .tools => |tools| {
-            var out = std.Io.Writer.fixed(tools_buffer);
-            var selected = tools.iterator();
-            while (selected.next()) |tool| {
-                if (out.buffered().len != 0) try out.writeByte(',');
-                try out.writeAll(@tagName(tool));
-            }
-            input.tools = if (out.buffered().len == 0) "none" else out.buffered();
+        .tools => |*tools| {
+            input.tools = .{ .names = InfoTools.names(&tools_buffer.allowed, &tools.allowed) };
+            input.loaded_tools = .{ .names = InfoTools.names(&tools_buffer.loaded, &tools.loaded) };
         },
         .model => |model| {
             try admitModel(model);
@@ -5126,31 +5136,39 @@ test "archive mutation presentation preserves requested intent and pending settl
 }
 
 test "chat info edits produce sparse typed Session configuration without slash parsing" {
-    var tools_buffer: [info_tools_bytes]u8 = undefined;
-    const effort = try infoConfiguration("/store", "k7m2qx", .{ .effort = .high }, &tools_buffer);
+    var tools_buffer: InfoTools = undefined;
+    const effort = try infoConfiguration("/store", "k7m2qx", &.{ .effort = .high }, &tools_buffer);
     try std.testing.expectEqualStrings("/store", effort.store);
     try std.testing.expectEqualStrings("k7m2qx", effort.session.named);
     try std.testing.expect(effort.reasoning_effort.present);
     try std.testing.expectEqualStrings("high", effort.reasoning_effort.value.?);
-    const reset = try infoConfiguration("/store", "k7m2qx", .{ .effort = null }, &tools_buffer);
+    const reset = try infoConfiguration("/store", "k7m2qx", &.{ .effort = null }, &tools_buffer);
     try std.testing.expect(reset.reasoning_effort.present and reset.reasoning_effort.value == null);
     for ([_]@FieldType(status_page.Session, "permission"){ .ask, .bypass }) |mode| {
-        const permission = try infoConfiguration("/store", "k7m2qx", .{ .permission = mode }, &tools_buffer);
+        const permission = try infoConfiguration("/store", "k7m2qx", &.{ .permission = mode }, &tools_buffer);
         try std.testing.expect(permission.permission_mode.present);
         try std.testing.expectEqualStrings(@tagName(mode), permission.permission_mode.value);
         try std.testing.expect(!permission.model.present and !permission.provider.present and !permission.workspace.present and !permission.label.present and !permission.reasoning_effort.present);
     }
-    const none = try infoConfiguration("/store", "k7m2qx", .{ .tools = .{} }, &tools_buffer);
-    try std.testing.expectEqualStrings("none", none.tools.?);
-    const selected = try infoConfiguration("/store", "k7m2qx", .{ .tools = .initMany(&.{ .bash, .skill, .web_search }) }, &tools_buffer);
-    try std.testing.expectEqualStrings("bash,skill,web_search", selected.tools.?);
-    const model = try infoConfiguration("/store", "k7m2qx", .{ .model = "future-chat" }, &tools_buffer);
+    const none = try infoConfiguration("/store", "k7m2qx", &.{ .tools = .{} }, &tools_buffer);
+    try std.testing.expectEqual(@as(usize, 0), none.tools.?.names.len);
+    try std.testing.expectEqual(@as(usize, 0), none.loaded_tools.?.names.len);
+    const selected_edit: ChatInfo.Edit = .{ .tools = .{ .allowed = try protocol.ToolsField.of(&.{ "bash", "skill", "web_search" }) } };
+    const selected = try infoConfiguration("/store", "k7m2qx", &selected_edit, &tools_buffer);
+    try std.testing.expectEqualStrings("bash", selected.tools.?.names[0]);
+    try std.testing.expectEqualStrings("skill", selected.tools.?.names[1]);
+    try std.testing.expectEqualStrings("web_search", selected.tools.?.names[2]);
+    const mcp_edit: ChatInfo.Edit = .{ .tools = .{ .allowed = try .of(&.{"none"}), .loaded = try .of(&.{"none"}) } };
+    const mcp = try infoConfiguration("/store", "k7m2qx", &mcp_edit, &tools_buffer);
+    try std.testing.expectEqualStrings("none", mcp.tools.?.names[0]);
+    try std.testing.expectEqualStrings("none", mcp.loaded_tools.?.names[0]);
+    const model = try infoConfiguration("/store", "k7m2qx", &.{ .model = "future-chat" }, &tools_buffer);
     try std.testing.expect(model.model.present and !model.provider.present);
     try std.testing.expectEqualStrings("future-chat", model.model.value);
-    const label = try infoConfiguration("/store", "k7m2qx", .{ .label = "lane \"four\"" }, &tools_buffer);
+    const label = try infoConfiguration("/store", "k7m2qx", &.{ .label = "lane \"four\"" }, &tools_buffer);
     try std.testing.expect(label.label.present);
     try std.testing.expectEqualStrings("lane \"four\"", label.label.value.?);
-    const clear = try infoConfiguration("/store", "k7m2qx", .{ .label = "" }, &tools_buffer);
+    const clear = try infoConfiguration("/store", "k7m2qx", &.{ .label = "" }, &tools_buffer);
     try std.testing.expect(clear.label.present and clear.label.value == null);
 }
 
