@@ -932,3 +932,65 @@ test "compound Message retains ordered input across replay and saved refusal" {
         }
     }.run);
 }
+
+test "creating captured Messages reuse matching configuration content" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            const Capture = @import("../../InputCapture.zig");
+            const custody = @import("../../content_custody.zig");
+            for ([_]bool{ false, true }) |compound| {
+                for ([_]enum { instructions, output_schema, default_instructions }{ .instructions, .output_schema, .default_instructions }) |field| {
+                    var tmp = std.testing.tmpDir(.{});
+                    defer tmp.cleanup();
+                    var storage: Store = undefined;
+                    try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                    defer storage.close() catch unreachable;
+                    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+                    const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+                    const settings = try completeConfiguration("matching-config", "", workspace, "model-a");
+                    var message: custody.MessageCommand = .{ .configuration = settings.configuration };
+                    try message.key.set("matching-message");
+                    defer message.removeTemporaryContent(std.testing.io) catch unreachable;
+                    const text = if (field == .default_instructions) "" else "{\"type\":\"object\",\"title\":\"matching input\"}";
+                    switch (field) {
+                        .instructions => message.configuration.?.instructions = try testingBytesContent(&tmp, "instructions", text),
+                        .output_schema => message.configuration.?.output_schema = try testingBytesContent(&tmp, "output-schema", text),
+                        .default_instructions => {},
+                    }
+                    var used: std.atomic.Value(u64) = .init(0);
+                    var capture: Capture = undefined;
+                    const spool = try tmp.dir.createFile(std.testing.io, "spool", .{ .read = true });
+                    const index = try tmp.dir.createFile(std.testing.io, "index", .{ .read = true });
+                    try tmp.dir.deleteFile(std.testing.io, "spool");
+                    try tmp.dir.deleteFile(std.testing.io, "index");
+                    capture.init(std.testing.io, spool, index, .{ .used = &used, .limit = 100000 });
+                    defer capture.close();
+                    try capture.begin(.text, text.len);
+                    var allowance: usize = text.len;
+                    _ = try capture.append(text, &allowance, false);
+                    try capture.end();
+                    if (compound) {
+                        const image = @embedFile("../../testing/fixtures/input-baseline.jpg");
+                        try capture.begin(.{ .image = .{ .assertion = .jpeg } }, image.len);
+                        var available: usize = image.len;
+                        _ = try capture.append(image, &available, false);
+                        try capture.end();
+                    }
+                    const loan = try capture.seal();
+                    const reply = try storage.submitMessageParts(&message, loan, null, .{});
+                    try std.testing.expect(reply == .accepted and !reply.accepted.replayed);
+                    try std.testing.expect(!storage.isFenced());
+                    try std.testing.expect((try storage.submitMessageParts(&message, loan, null, .{})).accepted.replayed);
+                    const saved = try store_testing.queryU64(&storage, "SELECT primary_content_id FROM core_command WHERE command_key='matching-message'", .{});
+                    const input = if (compound) try store_testing.queryU64(&storage, "SELECT part_content_id FROM content_part WHERE content_id=?1 AND ordinal=0", .{saved}) else saved;
+                    const configured = if (field == .output_schema)
+                        try store_testing.queryU64(&storage, "SELECT output_schema_content_id FROM session WHERE session_ref=?1", .{reply.accepted.session.slice()})
+                    else
+                        try store_testing.queryU64(&storage, "SELECT instructions_content_id FROM session WHERE session_ref=?1", .{reply.accepted.session.slice()});
+                    try std.testing.expectEqual(input, configured);
+                    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM content WHERE digest=?1 AND byte_length=?2 AND private=0", .{ store_testing.Blob{ .bytes = &protocol.contentDigest(text) }, text.len }));
+                }
+            }
+        }
+    }.run);
+}

@@ -248,7 +248,9 @@ pub fn importSlot(a: anytype, value: *Import) !ContentSlot {
 }
 
 fn acquireSlot(a: anytype, value: *Import, policy: enum { tracked, sequential }) !ContentSlot {
-    if (policy == .tracked) adoptInserted(a, value);
+    // Earlier imports in this transaction may have inserted this identity
+    // after its lookup, including before a sequential captured part.
+    adoptInserted(a, value);
     if (value.found) |row| return .{ .id = @intCast(row.content_id.get()), .existing = true };
     const id = try insertRow(a, value);
     if (policy == .tracked) a.recordInserted(&value.digest, value.length, value.private, id);
