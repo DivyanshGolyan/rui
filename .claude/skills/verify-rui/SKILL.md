@@ -68,7 +68,7 @@ $V build --here --out BUILD
 $V shots BUILD --out CANDIDATE --baseline BASELINE
 ```
 
-`build --here [--out DIR]` builds the current checkout, including uncommitted changes, in ReleaseSafe and keys it by its content tree (`tree-...`). It defaults to available CPU parallelism; `RUI_BUILD_JOBS` overrides that. Omitting `BUILD` from `shots` defaults to a `build --here` build. Make a baseline with `shots` first, and pass its output directory as `--baseline`. Use `--only a,b` to select states or `--no-png` to omit PNGs.
+`build --here [--out DIR]` builds the current checkout, including uncommitted changes, in ReleaseSafe and keys it by its content tree, HEAD and release tag (`tree-...`). It defaults to available CPU parallelism; `RUI_BUILD_JOBS` overrides that. Omitting `BUILD` from `shots` defaults to a `build --here` build. Make a baseline with `shots` first, and pass its output directory as `--baseline`. Use `--only a,b` to select states or `--no-png` to omit PNGs.
 
 Open `index.html` to review changed and new screens and failures first. `diff.json` lists changed, new and removed entries, the same count and failures. Changes alone succeed; capture failures exit 1. `shots.json` retains each name, size, status, reason, fingerprint and files. The fingerprint covers committed cells, styles, dimensions and terminal colours, excluding cursor and timing.
 

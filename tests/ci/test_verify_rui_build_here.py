@@ -30,12 +30,14 @@ def setup(tmp_path):
     bindir.mkdir()
     zig = bindir / 'zig'
     zig.write_text('''#!/usr/bin/env python3
-import os, pathlib, sys
+import os, pathlib, subprocess, sys
 if sys.argv[1:] == ['version']:
     print('fake')
     raise SystemExit
 with open(os.environ['ZIG_CALLS'], 'a') as f:
     f.write(' '.join(sys.argv[1:]) + '\\n')
+if os.environ.get('TAG_DURING_BUILD') and sys.argv[1:2] == ['build']:
+    subprocess.run(['git', 'tag', 'v1.2.3'], check=True)
 if os.environ.get('MUTATE_DURING_BUILD') and sys.argv[1:2] == ['build']:
     pathlib.Path('tracked').write_text('changed during build')
 if os.environ.get('MUTATE_DURING_ACTOR') and 'upgrade-fixture' in sys.argv:
@@ -68,7 +70,7 @@ def check_here_content_cache_and_index(tmp_path):
     (repo / 'ignored').write_text('ignored')
     before = (repo / '.git/index').read_bytes()
     first = json.loads(build(repo, env, '--upgrade').stdout)
-    assert first['sha'] == 'tree-' + first['tree']
+    assert first['sha'].startswith('tree-')
     assert first['head'] == git(repo, 'rev-parse', 'HEAD')
     assert first['dirty'] is True
     assert (repo / '.git/index').read_bytes() == before
@@ -122,14 +124,14 @@ class BuildHereTests(unittest.TestCase):
             self.assertEqual(git(repo, 'show', record['tree'] + ':ignored'), 'force staged')
             self.assertEqual((repo / '.git/index').read_bytes(), before)
 
-    def test_cache_refreshes_head_and_dirty_for_same_tree(self):
+    def test_cache_distinguishes_head_for_same_tree(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo, tmp, env = setup(Path(tmp))
             first = json.loads(build(repo, env).stdout)
             calls = (tmp / 'calls').read_text()
             git(repo, 'commit', '--allow-empty', '-qm', 'same tree')
             second = json.loads(build(repo, env).stdout)
-            self.assertEqual(first['sha'], second['sha'])
+            self.assertNotEqual(first['sha'], second['sha'])
             self.assertNotEqual(first['head'], second['head'])
             self.assertEqual(second['head'], git(repo, 'rev-parse', 'HEAD'))
             self.assertFalse(second['dirty'])
@@ -138,10 +140,83 @@ class BuildHereTests(unittest.TestCase):
             git(repo, 'commit', '-qm', 'different tree')
             (repo / 'tracked').write_text('initial')
             third = json.loads(build(repo, env).stdout)
-            self.assertEqual(first['sha'], third['sha'])
+            self.assertNotEqual(first['sha'], third['sha'])
             self.assertEqual(third['head'], git(repo, 'rev-parse', 'HEAD'))
             self.assertTrue(third['dirty'])
+            self.assertGreater(len((tmp / 'calls').read_text()), len(calls))
+
+    def test_dirty_tree_then_committed_rebuilds(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, tmp, env = setup(Path(tmp))
+            (repo / 'tracked').write_text('new content')
+            dirty = json.loads(build(repo, env).stdout)
+            calls = (tmp / 'calls').read_text()
+            git(repo, 'add', 'tracked')
+            git(repo, 'commit', '-qm', 'commit same content')
+            clean = json.loads(build(repo, env).stdout)
+            self.assertEqual(dirty['tree'], clean['tree'])
+            self.assertNotEqual(dirty['sha'], clean['sha'])
+            self.assertTrue(dirty['dirty'])
+            self.assertFalse(clean['dirty'])
+            self.assertGreater(len((tmp / 'calls').read_text()), len(calls))
+
+    def test_explicit_output_requires_force_for_new_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, tmp, env = setup(Path(tmp))
+            out = tmp / 'artifacts'
+            first = json.loads(build(repo, env, '--out', str(out)).stdout)
+            git(repo, 'commit', '--allow-empty', '-qm', 'new identity')
+            result = subprocess.run([sys.executable, str(SCRIPT), 'build', '--here', '--no-screen',
+                                     '--out', str(out)], cwd=repo, env=env, text=True, capture_output=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('different build; use --force', result.stderr)
+            self.assertEqual(json.loads((out / 'manifest.json').read_text())['sha'], first['sha'])
+            replacement = json.loads(build(repo, env, '--out', str(out), '--force').stdout)
+            self.assertNotEqual(first['sha'], replacement['sha'])
+            self.assertEqual(replacement['head'], git(repo, 'rev-parse', 'HEAD'))
+
+    def test_release_tag_changes_cache_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, tmp, env = setup(Path(tmp))
+            first = json.loads(build(repo, env).stdout)
+            calls = (tmp / 'calls').read_text()
+            self.assertIsNone(first['release_tag'])
+            git(repo, 'tag', 'v1.2.3')
+            tagged = json.loads(build(repo, env).stdout)
+            self.assertEqual(tagged['release_tag'], 'v1.2.3')
+            self.assertNotEqual(first['sha'], tagged['sha'])
+            self.assertGreater(len((tmp / 'calls').read_text()), len(calls))
+            calls = (tmp / 'calls').read_text()
+            self.assertEqual(json.loads(build(repo, env).stdout)['sha'], tagged['sha'])
             self.assertEqual((tmp / 'calls').read_text(), calls)
+            git(repo, 'tag', '-d', 'v1.2.3')
+            self.assertEqual(json.loads(build(repo, env).stdout)['sha'], first['sha'])
+
+    def test_pinned_build_rebuilds_when_tag_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, tmp, env = setup(Path(tmp))
+            head = git(repo, 'rev-parse', 'HEAD')
+            command = [sys.executable, str(SCRIPT), 'build', head, '--source', str(repo), '--no-screen']
+            def run():
+                return json.loads(subprocess.run(command, cwd=repo, env=env, text=True,
+                                                 capture_output=True, check=True).stdout)
+            self.assertIsNone(run()['release_tag'])
+            calls = (tmp / 'calls').read_text()
+            git(repo, 'tag', 'v1.2.3')
+            self.assertEqual(run()['release_tag'], 'v1.2.3')
+            self.assertGreater(len((tmp / 'calls').read_text()), len(calls))
+
+    def test_tag_change_during_build_rejects_manifest(self):
+        for pinned in (False, True):
+            with self.subTest(pinned=pinned), tempfile.TemporaryDirectory() as tmp:
+                repo, tmp, env = setup(Path(tmp))
+                env['TAG_DURING_BUILD'] = '1'
+                identity = [git(repo, 'rev-parse', 'HEAD'), '--source', str(repo)] if pinned else ['--here']
+                result = subprocess.run([sys.executable, str(SCRIPT), 'build', *identity, '--no-screen'],
+                                        cwd=repo, env=env, text=True, capture_output=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('source changed', result.stderr)
+                self.assertFalse(list((tmp / 'cache/builds').glob('*/manifest.json')))
 
     def test_screen_cache_upgrade_and_source_change(self):
         with tempfile.TemporaryDirectory() as tmp:
