@@ -12,8 +12,6 @@ pub const Region = struct { start: u16, end: u16, target: Target, selected: bool
 pub const Row = struct {
     segments: []const Segment,
     heading: bool = false,
-    second: ?[]const Segment = null,
-    height: u16 = 1,
     target: ?Target = null,
     alternate_target: ?Target = null,
     regions: []const Region = &.{},
@@ -73,15 +71,9 @@ const Frame = struct {
         const self: *Frame = @ptrCast(@alignCast(@constCast(raw)));
         const owner = self.owner;
         const built = try owner.rows.rowFn(owner.rows.userdata, index, arena);
-        std.debug.assert(built.height > 0 and (built.second == null or built.height >= 2));
         const selected = owner.selected != null and owner.selected.? == index;
         std.debug.assert(!(selected and built.heading));
-        const segments = try arena.alloc(vaxis.Segment, built.segments.len);
-        for (built.segments, segments) |segment, *dest| {
-            var role = segment.style;
-            if (selected) role.background = owner.selection_background;
-            dest.* = .{ .text = segment.text, .style = widget_style.of(owner.caps, role) };
-        }
+        const segments = try widget_style.segments(arena, owner.caps, built.segments, if (selected) owner.selection_background else null);
         const target_id: ?u32 = if (built.target) |target| blk: {
             const id: u32 = @intCast(self.targets.items.len);
             try self.targets.append(arena, .{ .id = id, .target = target });
@@ -98,14 +90,7 @@ const Frame = struct {
             try self.targets.append(arena, .{ .id = id, .target = region.target });
             dest.* = .{ .start = region.start, .end = region.end, .target = id, .selected = region.selected };
         }
-        const lines = try arena.alloc(List.Line, built.height);
-        lines[0] = segments;
-        for (lines[1..]) |*line| line.* = &.{};
-        if (built.second) |second| {
-            const converted = try arena.alloc(vaxis.Segment, second.len);
-            for (second, converted) |segment, *dest| dest.* = .{ .text = segment.text, .style = widget_style.of(owner.caps, segment.style) };
-            lines[1] = converted;
-        }
+        const lines = try arena.dupe(List.Line, &.{segments});
         return .{ .lines = lines, .target = target_id, .alternate_target = alternate_id, .regions = regions };
     }
 };
@@ -224,7 +209,7 @@ test "GroupedList quiet rows normalize whole lines before selection and hover in
             .target = .{ .open = listed.reference },
         }};
         var presses: Pressed = .{};
-        var list: Self = .{ .rows = .of(&rows), .selected = if (first.selected) 0 else null, .caps = caps, .on_press = presses.press() };
+        var list: Self = .{ .rows = .of(&rows), .selected = if (selected) 0 else null, .caps = caps, .on_press = presses.press() };
         const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 2 }, .cell_size = .{} };
         _ = try list.widget().draw(ctx);
         if (hover_row) |row| {
@@ -367,34 +352,30 @@ test "GroupedList without on_press only scrolls on the wheel" {
     try std.testing.expect(list.shown.first > 0);
 }
 
-test "GroupedList two-line rows select and press both lines with a pinned tail" {
-    var rows = [_]Row{.{ .segments = &.{.{ .text = "first", .style = .{ .colour = .strong, .bold = true } }}, .second = &.{.{ .text = "detail", .style = .{ .colour = .quiet } }}, .height = 2, .target = .{ .open = numbered(1) } }};
-    const all: []const Row = &rows;
+test "GroupedList selects and presses a row with a pinned tail" {
+    const rows: []const Row = &.{.{ .segments = &.{.{ .text = "first", .style = .{ .colour = .strong, .bold = true } }}, .target = .{ .open = numbered(1) } }};
     var presses: Pressed = .{};
     const tail: vxfw.Text = .{ .text = "rule\nSettings" };
-    var list: Self = .{ .rows = .of(&all), .selected = 0, .on_press = presses.press(), .tail = .{ .widget = tail.widget(), .rows = 2 } };
+    var list: Self = .{ .rows = .of(&rows), .selected = 0, .on_press = presses.press(), .tail = .{ .widget = tail.widget(), .rows = 2 } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 8 }, .cell_size = .{} };
     const surface = try list.widget().draw(ctx);
     try std.testing.expectEqual(@as(i17, 6), surface.children[1].origin.row);
     const row = surface.children[0].surface.children[0].surface;
-    try std.testing.expectEqual(@as(u16, 2), row.size.height);
-    for ([_]u16{ 0, 1 }) |y| for ([_]u16{ 0, 10, 39 }) |x| try std.testing.expectEqual(widget_style.of(.{}, .{ .background = .selection }).bg, row.readCell(x, y).style.bg);
+    try std.testing.expectEqual(@as(u16, 1), row.size.height);
+    for ([_]u16{ 0, 10, 39 }) |x| try std.testing.expectEqual(widget_style.of(.{}, .{ .background = .selection }).bg, row.readCell(x, 0).style.bg);
     try std.testing.expect(row.readCell(0, 0).style.bold);
-    try std.testing.expect(!row.readCell(0, 1).style.bold);
     var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-    for ([_]i16{ 0, 1 }) |y| {
-        try list.widget().handleEvent(&events, leftPress(3, y));
-        try std.testing.expectEqualStrings(&numbered(1), &presses.targets[presses.count - 1].open);
-    }
-    try std.testing.expectEqual(@as(usize, 2), presses.count);
+    try list.widget().handleEvent(&events, leftPress(3, 0));
+    try std.testing.expectEqual(@as(usize, 1), presses.count);
+    try std.testing.expectEqualStrings(&numbered(1), &presses.targets[0].open);
 }
 
 test "GroupedList markers count Sessions not the New Session entry and stay quiet centered" {
     const Source = struct {
         fn row(_: *const anyopaque, index: usize, _: std.mem.Allocator) std.mem.Allocator.Error!Row {
-            return .{ .segments = &.{.{ .text = "row", .style = .{} }}, .height = 2, .target = if (index == 0) .new_session else .{ .open = numbered(index) } };
+            return .{ .segments = &.{.{ .text = "row", .style = .{} }}, .target = if (index == 0) .new_session else .{ .open = numbered(index) } };
         }
         fn count(_: *const anyopaque, first: u32) u32 {
             return 6 -| (first -| 1);
@@ -410,9 +391,9 @@ test "GroupedList markers count Sessions not the New Session entry and stay quie
     defer arena.deinit();
     for ([_]overview_view.Caps.Depth{ .direct, .none }) |depth| for ([_]u32{ 0, 6 }) |selected| {
         var list: Self = .{ .rows = .{ .userdata = undefined, .count = 7, .rowFn = Source.row, .countFromFn = Source.count }, .selected = selected, .aboveFn = Source.above, .belowFn = Source.below, .caps = .{ .depth = depth } };
-        const surface = try list.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 30, .height = 7 }, .cell_size = .{} });
+        const surface = try list.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 30, .height = 4 }, .cell_size = .{} });
         const indicator = surface.children[if (selected == 0) surface.children.len - 1 else 1];
-        try std.testing.expectEqual(@as(i17, if (selected == 0) 6 else 0), indicator.origin.row);
+        try std.testing.expectEqual(@as(i17, if (selected == 0) 3 else 0), indicator.origin.row);
         var text: std.ArrayList(u8) = .empty;
         for (0..30) |x| try text.appendSlice(arena.allocator(), indicator.surface.readCell(@intCast(x), 0).char.grapheme);
         try std.testing.expectEqualStrings(if (selected == 0) "           ↓ 4 more           " else "           ↑ 3 more           ", text.items);
