@@ -49,6 +49,60 @@ class CheckpointTests(unittest.TestCase):
                              ["builtin.zig", "builtin.zig", "dependencies.zig", "inventory.json", "manifest", "manifest", "object.o", "object.o"])
             checkpoint.validate()
 
+    def test_shared_library_file_links_are_guarded_or_copied_without_following(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            base = Path(scratch)
+            fixture = Fixture(base)
+            for index, root in enumerate((fixture.local, fixture.global_cache)):
+                for elf in (False, True):
+                    directory = root / "o" / (("e" if elf else "f") * 32)
+                    directory.mkdir()
+                    target = directory / "libghostty-vt.so.1.0.0"
+                    target.write_bytes(fixture.candidate_bytes if elf else b"library fixture")
+                    (directory / "libghostty-vt.so.1").symlink_to(target.name)
+                    (directory / "libghostty-vt.so").symlink_to("libghostty-vt.so.1")
+            checkpoint = proof.Checkpoint([fixture.local, fixture.global_cache], base / "links", reserve_bytes=0)
+            for index, root in enumerate((fixture.local, fixture.global_cache)):
+                for name in ("e" * 32, "f" * 32):
+                    directory = root / "o" / name
+                    saved = checkpoint.destination / str(index) / "mutable" / name
+                    self.assertEqual(saved.exists(), index == 1 or name == "f" * 32)
+                    if saved.exists():
+                        self.assertTrue((saved / "libghostty-vt.so").is_symlink())
+                        self.assertEqual(os.readlink(saved / "libghostty-vt.so"), "libghostty-vt.so.1")
+                        (directory / "libghostty-vt.so").unlink()
+                        (directory / "libghostty-vt.so.1.0.0").write_bytes(b"changed library")
+            checkpoint.restore()
+            for root in (fixture.local, fixture.global_cache):
+                for name in ("e" * 32, "f" * 32):
+                    self.assertEqual(os.readlink(root / "o" / name / "libghostty-vt.so"), "libghostty-vt.so.1")
+                    expected = fixture.candidate_bytes if name == "e" * 32 else b"library fixture"
+                    self.assertEqual((root / "o" / name / "libghostty-vt.so.1.0.0").read_bytes(), expected)
+            checkpoint.validate()
+            link = fixture.local / "o" / ("e" * 32) / "libghostty-vt.so"
+            link.unlink()
+            link.symlink_to("libghostty-vt.so.1.0.0")
+            with self.assertRaisesRegex(proof.ProofError, "fairness unproved"):
+                checkpoint.validate()
+
+    def test_unknown_link_targets_still_fail_before_checkpoint(self):
+        for kind in ("absolute", "absolute-inside", "outside", "broken", "loop", "directory"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as scratch:
+                base = Path(scratch)
+                fixture = Fixture(base)
+                directory = fixture.mutable
+                outside = base / "outside"
+                outside.write_bytes(b"untouched")
+                link = directory / "alias"
+                target = {"absolute": str(outside), "absolute-inside": str(directory / "dependencies.zig"),
+                          "outside": "../../../outside", "broken": "missing",
+                          "loop": "alias", "directory": "."}[kind]
+                link.symlink_to(target)
+                with self.assertRaises(proof.ProofError):
+                    proof.Checkpoint([fixture.local, fixture.global_cache], base / "bad", reserve_bytes=0)
+                self.assertEqual(outside.read_bytes(), b"untouched")
+                self.assertEqual(os.readlink(link), target)
+
     def test_quarantine_and_repeated_arms_restore_same_bytes_and_output_inodes(self):
         with tempfile.TemporaryDirectory() as scratch:
             fixture = Fixture(Path(scratch))
@@ -128,6 +182,17 @@ class CheckpointTests(unittest.TestCase):
                                  budget_bytes=1, reserve_bytes=0)
             self.assertEqual(proof.metadata(fixture.local / "o"), before)
             self.assertFalse((base / "too-large").exists())
+
+    def test_disk_reserve_failure_reports_runner_capacity_without_mutation(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            base = Path(scratch)
+            fixture = Fixture(base)
+            before = proof.metadata(fixture.local / "o")
+            with patch.object(proof.shutil, "disk_usage", return_value=SimpleNamespace(free=123)), \
+                    self.assertRaisesRegex(proof.ProofError, r"copy \+ 456 reserve > 123 available"):
+                proof.Checkpoint([fixture.local, fixture.global_cache], base / "no-room", reserve_bytes=456)
+            self.assertEqual(proof.metadata(fixture.local / "o"), before)
+            self.assertFalse((base / "no-room").exists())
 
     def test_substituted_output_namespace_never_deletes_foreign_files(self):
         with tempfile.TemporaryDirectory() as scratch:
@@ -312,7 +377,7 @@ class ParserTests(unittest.TestCase):
 
 
 class RunOwnerTests(unittest.TestCase):
-    def run_fixture(self, base, *, fail_unlink=False, archives=False):
+    def run_fixture(self, base, *, fail_unlink=False, archives=False, candidate_miss=False):
         fixture = Fixture(base)
         workspace = base / "workspace"
         (workspace / "src").mkdir(parents=True)
@@ -391,7 +456,8 @@ class RunOwnerTests(unittest.TestCase):
                 new = root / "o" / f"new-{len(builds)}"
                 new.mkdir()
                 (new / "compiled").write_bytes(b"prior arm output")
-            return WARM.replace("ReleaseSafe native cached", "ReleaseSafe native success") if "-Dpr-ci=true" in argv else WARM
+            text = WARM.replace("ReleaseSafe native cached", "ReleaseSafe native success") if "-Dpr-ci=true" in argv else WARM
+            return text.replace("Debug native cached", "Debug native success") if candidate and candidate_miss else text
 
         def measure(roots, destination, **kwargs):
             measurements.append((tuple(roots), destination.name))
@@ -403,14 +469,20 @@ class RunOwnerTests(unittest.TestCase):
                 self.assertTrue(all(not owner.exists() for owner in owners))
             return dict(compressed_bytes=100 if destination.name == "before" else 50, elapsed_seconds=1)
 
+        console = io.StringIO()
         with chdir(workspace), patch.dict(os.environ, RUNNER_TEMP=str(runner_temp)), \
                 patch.object(snapshot, "audit", side_effect=audit), \
                 patch.object(snapshot, "invalidate_manifest_owners", side_effect=invalidate), \
                 patch.object(proof.Checkpoint, "quarantine_candidates", new=quarantine), \
                 patch.object(Path, "unlink", new=unlink), patch.object(proof, "stage", side_effect=stage), \
-                patch.object(proof, "measure_archive", side_effect=measure), redirect_stdout(io.StringIO()):
+                patch.object(proof, "measure_archive", side_effect=measure), redirect_stdout(console):
             status = proof.run(args)
         summary = json.loads((runner_temp / "rui-cache-profile" / "proof" / "summary.json").read_text())
+        logged = json.loads(console.getvalue())
+        self.assertEqual(logged["errors"], summary["errors"])
+        self.assertEqual(logged["parity"], summary["parity"])
+        self.assertEqual(logged["pairs"], [{key: pair[key] for key in ("profile", "scenario", "parity", "differences")
+                                           if key in pair} for pair in summary["pairs"]])
         self.assertEqual(fixture.source.read_bytes(), original_source)
         self.assertEqual(fixture.source.stat().st_mtime_ns, original_mtime)
         self.assertTrue(fixture.candidate.exists())
@@ -447,6 +519,14 @@ class RunOwnerTests(unittest.TestCase):
             self.assertEqual(events[-2:], ["build-control", "invalidate"])
             self.assertEqual(summary["pairs"][-1]["scenario"], "edit")
             self.assertEqual(set(summary["pairs"][-1]["arms"]), {"control"})
+
+    def test_parity_difference_is_in_job_output_and_never_accepted(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            status, summary, _, _, _ = self.run_fixture(Path(scratch), candidate_miss=True)
+            self.assertEqual(status, 1)
+            self.assertFalse(summary["parity"])
+            self.assertTrue(summary["pairs"][0]["differences"])
+            self.assertEqual(summary["pairs"][0]["differences"][0]["field"], "nodes")
 
     def test_archive_pair_is_separate_and_restores_main_checkpoint_before_builds(self):
         with tempfile.TemporaryDirectory() as scratch:
