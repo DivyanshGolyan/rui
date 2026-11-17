@@ -5,6 +5,7 @@ Overview lists saved chats under **Sessions**, with **+ New Session**, **Archive
 ## Sub-features
 
 - Up/Down select rows. Home selects **+ New Session**; End selects **Settings**. Enter opens the selection. Left collapses a selected Session's descendants and Right expands them.
+- Creator Sessions contain their attached and detached descendants. Left and Right fold and expand locally; hidden questions appear in the collapsed badge. Pointer presence or a list key holds ordering briefly while marks update and new siblings append; release highlights moved rows. Edge pills and Alt-? reach questions outside the viewport.
 - Long lists show **↑**, **↓** and **more**. Long names fit within their row.
 - Finished and working chats without a message from you appear dimmer. Chats needing approval stay prominent.
 - Left from an empty draft focuses the list beside a wide chat. Enter on the open row returns to its input. Clicking the list or chat also moves focus.
@@ -26,6 +27,10 @@ Compare 140×40 with 46×30. Check pinned actions at the middle and end of a lon
 Run the ordered browsing fixture with `$V frames FULLSHA --only focus-seed-earlier,focus-browse-wide,focus-browse-narrow`. The seed finishes the alternate chat earlier so newest-first ordering is deterministic. Wide Down settles on the alternate chat's feed; narrow Down shows its selected list row, with neither chat's feed nor an **enter open** hint visible.
 
 Frame states: `focus-seed-earlier`, `focus-browse-wide`, `focus-browse-narrow`
+
+Capture creator nesting with `$V frames FULLSHA --scenario .claude/skills/verify-rui/scripts/creator-tree.json --only tree-unicode,tree-ascii,hidden-question-unicode,hidden-question-ascii,held-arrival-unicode,release-unicode,held-arrival-ascii,sidebar-unicode,sidebar-ascii --sizes 140x40,46x30 --record`. Capture the `edge-below`, `edge-above` and `edge-open` states in Unicode and ASCII separately. Review the recorded frames as well as stills for the release flash.
+
+This scenario creates descendants through the real StartAgent provider and verifies their public creator and lifecycle parent. Its `creator` label refers to an earlier cast Session; `attached` selects the lifecycle relationship and `birth` creates a child during the terminal run. The sender fixture remains separate. The full-overview and row-selection helpers wait for the committed list and verify the selected row; scenario-specific active capacity defaults to two when omitted.
 
 ## Gotchas
 

@@ -56,6 +56,7 @@ list: *vxfw.ListView = undefined,
 shown: List.Range = .{},
 shown_at: []const Span = &.{},
 anchor: ?struct { target: Target, index: u32, row: i17 } = null,
+anchor_after_wheel: ?i16 = null,
 
 pub const Tail = struct { widget: vxfw.Widget, rows: u16 };
 
@@ -129,10 +130,15 @@ fn reportPress(raw: *anyopaque, ctx: *vxfw.EventContext, id: u32) anyerror!void 
 fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     switch (input) {
-        .mouse_leave => self.anchor = null,
+        .mouse_leave => {
+            self.anchor = null;
+            self.anchor_after_wheel = null;
+        },
         .mouse => |mouse| if (mouse.type == .motion or mouse.type == .press) {
             self.anchor = null;
+            self.anchor_after_wheel = null;
             if (mouse.button == .wheel_up or mouse.button == .wheel_down or mouse.button == .wheel_left or mouse.button == .wheel_right) {
+                self.anchor_after_wheel = mouse.row;
                 try self.inner.widget().handleEvent(ctx, input);
                 return;
             }
@@ -192,6 +198,15 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         dest.* = .{ .row = span.row, .height = span.height, .target = target, .index = self.inner.shown.first + @as(u32, @intCast(offset)) };
     }
     self.shown_at = spans;
+    if (self.anchor_after_wheel) |pointer_row| {
+        self.anchor_after_wheel = null;
+        for (spans) |span| {
+            if (pointer_row >= span.row and pointer_row < span.row + span.height) {
+                if (span.target) |target| self.anchor = .{ .target = target, .index = span.index, .row = span.row };
+                break;
+            }
+        }
+    }
     return surface;
 }
 
@@ -594,4 +609,49 @@ test "GroupedList shows moved row flash with and without selection in each colou
             try std.testing.expectEqual(settled.reverse, flashed.reverse);
         }
     };
+}
+
+test "GroupedList recaptures the pointer after wheel before a new row arrives" {
+    const Fixture = struct {
+        rows: []const Row,
+        fn at(raw: *const anyopaque, index: usize, _: std.mem.Allocator) std.mem.Allocator.Error!Row {
+            const self: *const @This() = @ptrCast(@alignCast(raw));
+            return self.rows[index];
+        }
+        fn find(raw: *const anyopaque, target: Target) ?u32 {
+            const self: *const @This() = @ptrCast(@alignCast(raw));
+            for (self.rows, 0..) |row, index| {
+                if (row.target) |item| if (std.meta.eql(item, target)) return @intCast(index);
+            }
+            return null;
+        }
+    };
+    for ([_]?u32{ null, 0, 8 }) |selection| {
+        var before: [8]Row = undefined;
+        for (&before, 0..) |*row, index| row.* = .{ .segments = &.{.{ .text = "row", .style = .{} }}, .target = .{ .open = numbered(index) } };
+        var after: [9]Row = undefined;
+        after[0] = .{ .segments = &.{.{ .text = "new child", .style = .{} }}, .target = .{ .open = numbered(99) } };
+        @memcpy(after[1..], &before);
+        var fixture: Fixture = .{ .rows = &before };
+        var list: Self = .{ .rows = .{ .userdata = &fixture, .count = before.len, .rowFn = Fixture.at, .findFn = Fixture.find } };
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 20, .height = 3 }, .cell_size = .{} };
+        _ = try list.widget().draw(ctx);
+        var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        try list.widget().handleEvent(&events, .{ .mouse = .{ .col = 1, .row = 1, .button = .none, .type = .motion, .mods = .{} } });
+        try list.widget().handleEvent(&events, .{ .mouse = .{ .col = 1, .row = 1, .button = .wheel_down, .type = .press, .mods = .{} } });
+        _ = try list.widget().draw(ctx);
+        try std.testing.expect(list.shown.first > 0);
+        const anchor = list.anchor orelse return error.TestExpectedEqual;
+        try std.testing.expectEqual(@as(i17, 1), anchor.row);
+        fixture.rows = &after;
+        list.rows.count = after.len;
+        list.selected = selection;
+        _ = try list.widget().draw(ctx);
+        const physical = for (list.shown_at) |span| {
+            if (span.target) |target| if (std.meta.eql(target, anchor.target)) break span.row;
+        } else return error.TestExpectedEqual;
+        try std.testing.expectEqual(anchor.row, physical);
+    }
 }

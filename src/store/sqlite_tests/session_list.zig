@@ -325,6 +325,38 @@ test "list clock includes queued input after a finished Turn" {
     try std.testing.expectEqual(@as(u64, 300), try listed.number(&.{"state_change_at"}));
 }
 
+test "list clock records the last permission at a distinct durable time" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try tests.configureTestSessionAsk(&storage, "clock-controlled-config");
+    try submitTestMessage(&storage, &tmp, "clock-controlled-input", "clock-controlled-message", session.slice(), "propose");
+    const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try tests.settleTwoActionsForTesting(&storage, &tmp, model, "clock-controlled-tools");
+    try store_testing.sqlite_only.exec(&storage, "UPDATE session SET created_at=100 WHERE session_ref=?1", .{session.slice()});
+    try store_testing.sqlite_only.exec(&storage, "UPDATE conversation_entry SET recorded_at=150 WHERE session_ref=?1 AND entry_kind=1", .{session.slice()});
+    try store_testing.sqlite_only.exec(&storage, "UPDATE model_operation SET resolved_at=200 WHERE session_ref=?1 AND resolved_at IS NOT NULL", .{session.slice()});
+    const first = try store_testing.queryU64(&storage, "SELECT min(action_id) FROM action_operation", .{});
+    const second = try store_testing.queryU64(&storage, "SELECT max(action_id) FROM action_operation", .{});
+    var allow: protocol.PermissionDecisionCommand = .{ .action_id = first, .decision = .allow_once };
+    try allow.key.set("clock-controlled-first");
+    try allow.session.set(session.slice());
+    try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
+    try store_testing.sqlite_only.exec(&storage, "UPDATE action_operation SET decided_at=300 WHERE action_id=?1", .{first});
+    var partial = try testingListRow(&storage, &tmp, session.slice());
+    defer partial.deinit();
+    try std.testing.expectEqual(@as(u64, 200), try partial.number(&.{"state_change_at"}));
+    allow.action_id = second;
+    try allow.key.set("clock-controlled-second");
+    try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
+    try store_testing.sqlite_only.exec(&storage, "UPDATE action_operation SET decided_at=400 WHERE action_id=?1", .{second});
+    var completed = try testingListRow(&storage, &tmp, session.slice());
+    defer completed.deinit();
+    try std.testing.expectEqual(@as(u64, 400), try completed.number(&.{"state_change_at"}));
+}
+
 test "a list page of mixed work takes its deepest row's rounds, and a pass per row a statement repeats for" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

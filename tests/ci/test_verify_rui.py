@@ -28,6 +28,35 @@ def committed(text, columns=100, lines=20):
 
 
 class VerifyRuiTest(unittest.TestCase):
+    def test_resize_ignores_inflight_spinner_until_reset_frame_commits(self):
+        import io
+        import threading
+
+        terminal_type = runpy.run_path(str(SCRIPT))["FrameTerminal"]
+        terminal = terminal_type.__new__(terminal_type)
+        capture = types.SimpleNamespace(generation=7, reset_generation=0, frame_reset_generation=0)
+        capture.resize = lambda *_: None
+        terminal.capture = capture
+        terminal.condition = threading.Condition()
+        terminal.master = 41
+        terminal.output_events = io.StringIO()
+        terminal.process = types.SimpleNamespace(output=types.SimpleNamespace(complete=False))
+        accepted = []
+
+        def wait(predicate, _description, **_kwargs):
+            capture.generation += 1
+            accepted.append(predicate(capture))
+            capture.reset_generation += 1
+            accepted.append(predicate(capture))
+            capture.frame_reset_generation = capture.reset_generation
+            capture.generation += 1
+            accepted.append(predicate(capture))
+
+        terminal.wait = wait
+        with patch("fcntl.ioctl"):
+            terminal.resize((46, 30))
+        self.assertEqual(accepted, [False, False, True])
+
     def test_host_launcher_uses_exact_credential_free_generic_settings(self):
         launch = runpy.run_path(str(SCRIPT))["launch_host"]
         with tempfile.TemporaryDirectory() as directory:
@@ -1015,7 +1044,7 @@ while True:
         self.assertGreater(len(default["states"]), 25)
 
     def test_regex_absences_validate_and_roundtrip_before_launch(self):
-        pattern = r"^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+        pattern = r"^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
         data = self.scenario()
         data["states"][0]["absent_regex"] = [pattern]
         validated = self.helper["validate_scenario"](data)
@@ -1028,12 +1057,12 @@ while True:
 
     def test_regex_absences_reject_dynamic_rows_in_readiness_and_saved_captures(self):
         state = {"name": "no-empty-rows", "steps": [], "expect": ["Settings"],
-                 "absent_regex": [r"^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"]}
-        clean = "  + New Session\n ✓ Existing conversation  3h\n  Settings"
+                 "absent_regex": [r"^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"]}
+        clean = " + New Session\n   Existing conversation  3h\n   Settings"
         run = types.SimpleNamespace(meta={"sha": "a" * 40})
         for size in ((140, 40), (46, 30)):
-            for sid, age in (("9xt4vy", "42s"), ("emged6", "7m"), ("000000", "3h"), ("zzzzzz", "12d"),
-                             ("9xt4vy", "0s │"), ("emged6", "42s│ Model")):
+            for sid, age in (("9xt4vy", "now"), ("emged6", "7m"), ("000000", "3h"), ("zzzzzz", "12d"),
+                             ("9xt4vy", "now │"), ("emged6", "7m│ Model")):
                 with self.subTest(size=size, sid=sid, age=age), tempfile.TemporaryDirectory() as temp:
                     bad = f"{clean}\n ○ {sid}                  {age}"
 
@@ -1060,14 +1089,14 @@ while True:
                     " ○ 9xt4vy", "text mentions ○ 9xt4vy  2m"):
             with self.subTest(named_or_nonrow=row):
                 self.assertIsNone(self.helper["frame_row_failure"](state, clean + "\n" + row))
-        for row in (" ○ 9xt4vy  0s │", " ○ emged6  42s│ Model", " ○ 000000  2m │chat text"):
+        for row in (" ○ 9xt4vy  now │", " ○ emged6  now│ Model", " ○ 000000  2m │chat text"):
             with self.subTest(raw_sidebar=row):
                 self.assertIsNotNone(self.helper["frame_row_failure"](state, row))
-        for row in (" ○ New Session  0s │", " ○ New Session  0s │Model",
+        for row in (" ○ New Session  now │", " ○ New Session  now │Model",
                     " ○ Existing 9xt4vy  2m │chat", " ○ 9xt4vy extra  2m │chat"):
             with self.subTest(named_sidebar=row):
                 self.assertIsNone(self.helper["frame_row_failure"](state, row))
-        self.assertIsNone(self.helper["frame_row_failure"]({"name": "unrelated"}, " ○ 9xt4vy  0s"))
+        self.assertIsNone(self.helper["frame_row_failure"]({"name": "unrelated"}, " ○ 9xt4vy  now"))
 
     def test_empty_chat_roundtrips_and_current_chat_labels_exclude_raw_ids(self):
         scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
@@ -1083,7 +1112,7 @@ while True:
             if state.get("first_run"):
                 continue
             with self.subTest(raw_id_excluded_in_state=name):
-                self.assertIsNotNone(self.helper["frame_row_failure"](state, " ○ 9xt4vy  0s │ chat"))
+                self.assertIsNotNone(self.helper["frame_row_failure"](state, " ○ 9xt4vy  now │ chat"))
         for name in ("chat-empty", "start-model", "start-effort", "start-picked"):
             state = states[name]
             steps = state["steps"]
@@ -1091,7 +1120,7 @@ while True:
             self.assertEqual(steps[typed_ready + 1], {"wait": "○ New Session", "min_columns": 140})
             self.assertEqual(state["sizes"], [(140, 40), (46, 30)])
             self.assertIsNone(self.helper["frame_row_failure"](
-                {"name": name, "absent_regex": state["absent_regex"]}, " ○ New Session  0s │chat"))
+                {"name": name, "absent_regex": state["absent_regex"]}, " ○ New Session  now │chat"))
         for name in ("empty-chat-left", "empty-chat-model-left", "empty-chat-two-left"):
             state = states[name]
             self.assertTrue(state["first_frame"])
@@ -1692,7 +1721,7 @@ while True:
                 self.assertTrue(records[0]["ok"])
 
     def test_initial_readiness_accepts_editorless_list_and_legacy_prompt(self):
-        listed = "  + New Session\n  Settings"
+        listed = " + New Session\n   Settings"
         self.assertNotIn("Type a task", listed)
         def accepts_list(predicate, _description, **_kwargs):
             self.assertTrue(predicate(types.SimpleNamespace(completed=listed)),
@@ -1731,7 +1760,7 @@ while True:
         )
         cases = [("", False), ("Sign in to Rui", False), (modal, True),
                  (modal + "Opening…", False),
-                 ("  + New Session\n  Settings", True), (" › Type a task", True)]
+                 (" + New Session\n   Settings", True), (" › Type a task", True)]
         cases.extend((modal.replace(label, ""), False) for label in
                      ("Sign in to Rui", "ChatGPT", "API key", "Close", "Tab / Shift-Tab"))
 
@@ -2067,7 +2096,7 @@ while True:
         self.helper["frame_ready"](terminal, state)
         terminal.wait.assert_not_called()
         failure = self.helper["frame_row_failure"]
-        wrong = "■ Stop the slow job  0s\n   Old completed answer\n■ Another Session\n   Stopped\n■ Stopped"
+        wrong = "■ Stop the slow job  now\n   Old completed answer\n■ Another Session\n   Stopped\n■ Stopped"
         self.assertIsNotNone(failure(state, wrong))
         self.assertIsNone(failure(state, wrong.replace("Old completed answer", "Stopped")))
 
@@ -2088,7 +2117,7 @@ while True:
             good = "\n" * (height - 1) + "Sidebar chat  alt+i info\n"
             self.assertIsNone(failure(state, good))
             self.assertIsNotNone(failure(state, good + "\n"))
-            self.assertIsNotNone(failure(state, good + "  Settings  │\n"))
+            self.assertIsNotNone(failure(state, good + "   Settings  │\n"))
 
     def test_stop_waits_for_a_running_bash_not_an_approval(self):
         running = self.helper["frame_bash_running"]

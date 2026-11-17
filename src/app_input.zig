@@ -229,7 +229,7 @@ pub const Effects = struct {
     pub const Focus = enum { main, list, settings, sign_in };
     /// What a key the overview takes arrived under, and whether it is
     /// pasted text.
-    pub const Delivery = struct { under: Layer.Covered, pasted: bool, wide: bool = false };
+    pub const Delivery = struct { under: Layer.Covered, pasted: bool, wide: bool = false, list_origin: bool = true };
     pub const Route = union(enum) {
         pass,
         sign_in,
@@ -358,7 +358,7 @@ fn stepInner(state: *State, facts: Facts, input: Input) Effects {
     if (state.layer == .sign_in) return .{ .route = .sign_in };
     if (input == .key and state.layer == .settings) return settingsKey(state, facts.settings, input.key);
     if (state.layer == .main and !state.pasting and input == .key and !(facts.frame.modal and facts.session_open) and (input.key.named == .alt_up or input.key.named == .alt_down or input.key.named == .alt_question))
-        return .{ .route = .{ .overview = .{ .under = .main, .pasted = false, .wide = facts.wide } } };
+        return .{ .route = .{ .overview = .{ .under = .main, .pasted = false, .wide = facts.wide, .list_origin = state.listFocused() or !facts.session_open } } };
     if (input == .key and !state.pasting and !facts.frame.modal) {
         const move = if (facts.accepts_tab and state.area == .main and state.field == .input and input.key.named == .tab) null else if (input.key.named) |name| keys.get(name) else null;
         if (move) |direction| if (tabNext(facts.frame.slice(), currentFocus(state.*), direction == .previous)) |target| {
@@ -838,6 +838,7 @@ test "Option session navigation routes main chords without taking paste or modal
             if (!pasted or focused or !open) {
                 try std.testing.expect(effects.route == .overview);
                 try std.testing.expectEqual(pasted, effects.route.overview.pasted);
+                if (!pasted) try std.testing.expectEqual(focused or !open, effects.route.overview.list_origin);
             } else try std.testing.expect(effects.route == .session);
         }
         try std.testing.expectEqual(focused, state.listFocused());
