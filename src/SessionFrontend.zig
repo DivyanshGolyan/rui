@@ -9308,7 +9308,7 @@ test "chat info supplies the one bottom footer after the input and both dividers
         var previous: []const u8 = "";
         while (rows.next()) |line| : (row += 1) {
             if (row == size.height - 1) {
-                try std.testing.expect(std.mem.startsWith(u8, line, "Fix retry deadline"));
+                try std.testing.expect(std.mem.startsWith(u8, line, " Fix retry deadline"));
                 try std.testing.expect(std.mem.endsWith(u8, std.mem.trimEnd(u8, line, " "), "esc"));
             } else if (row == size.height - 2 or row == @as(usize, @intCast(input.origin.row))) {
                 try std.testing.expect(std.mem.startsWith(u8, line, "──"));

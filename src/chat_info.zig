@@ -449,13 +449,18 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const size = ctx.max.size();
     if (size.width == 0 or size.height == 0) return .empty(self.widget());
     const children = try ctx.arena.alloc(vxfw.SubSurface, 2);
-    children[0] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = try self.bodyWidget().draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = size.height - 1 })) };
+    children[0] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = try drawBodyMode(self, ctx.withConstraints(.{}, .{ .width = size.width, .height = size.height - 1 }), true) };
     children[1] = .{ .origin = .{ .row = children[0].surface.size.height, .col = 0 }, .surface = try self.footerWidget().draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = 1 })) };
     return .{ .widget = self.widget(), .size = .{ .width = size.width, .height = children[0].surface.size.height + 1 }, .buffer = &.{}, .children = children, .cursor = children[0].surface.cursor };
 }
 
 fn drawBody(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
-    return drawBodyContents(raw, ctx) catch |err| switch (err) {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    return drawBodyMode(self, ctx, false);
+}
+
+fn drawBodyMode(self: *Self, ctx: vxfw.DrawContext, show_title: bool) std.mem.Allocator.Error!vxfw.Surface {
+    return drawBodyContents(self, ctx, show_title) catch |err| switch (err) {
         error.OutOfMemory, error.WriteFailed => error.OutOfMemory,
         error.NoSpaceLeft => unreachable,
     };
@@ -487,13 +492,13 @@ fn folderValue(self: *const Self, ctx: vxfw.DrawContext, room: u16) ![]const u8 
     return std.fmt.allocPrint(ctx.arena, "{s}{s}", .{ ellipsis, basename[start..] });
 }
 
-fn drawBodyContents(raw: *anyopaque, ctx: vxfw.DrawContext) !vxfw.Surface {
-    const self: *Self = @ptrCast(@alignCast(raw));
+fn drawBodyContents(self: *Self, ctx: vxfw.DrawContext, show_title: bool) !vxfw.Surface {
     self.bind();
     const size = ctx.max.size();
     if (size.width == 0 or size.height == 0) return .empty(self.bodyWidget());
     const name = try safe(ctx.arena, self.title());
-    self.panel.title = name;
+    self.panel.title = if (show_title) name else "";
+    self.panel.show_title = show_title or self.renaming or self.failures[6] != null or self.pending == 6;
     var tool_text: std.Io.Writer.Allocating = .init(ctx.arena);
     if (self.ready) {
         var selected = self.session.tools.iterator();
@@ -503,6 +508,9 @@ fn drawBodyContents(raw: *anyopaque, ctx: vxfw.DrawContext) !vxfw.Surface {
         }
     }
     self.fields[2].value = if (!self.ready) "unavailable" else if (tool_text.written().len == 0) "no tools" else tool_text.written();
+    const tail = try Panel.displayText(ctx.arena, self.fields[2].tail orelse "", self.panel.unicode);
+    const tool_room = Panel.valueWidth(size.width) -| @as(u16, @intCast(@min(ctx.stringWidth(tail), std.math.maxInt(u16))));
+    self.fields[2].value = (try view.fitted(ctx.arena, self.backend.caps(self.backend.context), self.fields[2].value, tool_room, .head)).bytes;
     if (self.ready) {
         self.fields[3].value = try self.folderValue(ctx, Panel.valueWidth(size.width));
         self.fields[4].value = try safe(ctx.arena, self.session.model.slice());
@@ -546,6 +554,7 @@ fn drawFooterContents(raw: *anyopaque, ctx: vxfw.DrawContext) !vxfw.Surface {
     const footer: Footer = .{
         .left = try Panel.displayText(ctx.arena, name, caps.unicode),
         .right = "esc",
+        .left_inset = 1,
         .style = widget_style.of(caps, .{ .colour = .quiet }),
     };
     var surface = try footer.widget().draw(ctx);
@@ -1161,9 +1170,70 @@ test "Chat info footer stays plain in both themes and widths" {
         const plain = widget_style.of(fixture.backend().caps(&fixture), .{ .colour = .quiet });
         for (surface.buffer, 0..) |cell, col| {
             try std.testing.expectEqual(plain, cell.style);
-            const expected = if (col < page.title().len) page.title()[col] else if (col >= width - 3) "esc"[col - (width - 3)] else ' ';
+            const expected = if (col > 0 and col <= page.title().len) page.title()[col - 1] else if (col >= width - 3) "esc"[col - (width - 3)] else ' ';
             try std.testing.expectEqual(expected, cell.char.grapheme[0]);
         }
+    };
+}
+
+test "Chat info hosted idle has no title row but rename and errors retain one" {
+    var fixture: Fixture = .{};
+    fixture.init();
+    var page: Self = .{ .backend = fixture.backend() };
+    page.refresh();
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    for ([_]u16{ 140, 46 }) |width| {
+        const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 40 }, .cell_size = .{} };
+        const idle = try page.bodyWidget().draw(ctx);
+        const idle_height = idle.size.height;
+        try std.testing.expectEqual(@as(u16, 0), page.panel.body.top);
+        try std.testing.expectEqual(@as(?u16, 0), page.panel.fieldRow(0));
+        try std.testing.expectEqualStrings("E", idle.readCell(3, 0).char.grapheme);
+        const standalone = try page.widget().draw(ctx);
+        try std.testing.expectEqual(idle_height + 2, standalone.size.height);
+        try std.testing.expectEqual(@as(u16, 1), page.panel.body.top);
+        page.failures[6] = " · couldn't save";
+        const failed = try page.bodyWidget().draw(ctx);
+        try std.testing.expectEqual(idle_height + 1, failed.size.height);
+        try std.testing.expectEqual(@as(?u16, 1), page.panel.fieldRow(0));
+        page.failures[6] = null;
+        page.renaming = true;
+        const editing = try page.bodyWidget().draw(ctx);
+        try std.testing.expectEqual(idle_height + 1, editing.size.height);
+        try std.testing.expectEqual(@as(?u16, 1), page.panel.fieldRow(0));
+        page.renaming = false;
+    }
+}
+
+test "Chat info hosted tools advertise clipping at wide and narrow widths" {
+    var fixture: Fixture = .{};
+    fixture.init();
+    fixture.session.tools = try .of(&.{
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    });
+    var page: Self = .{ .backend = fixture.backend() };
+    page.refresh();
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    for ([_]bool{ true, false }) |unicode| for ([_]u16{ 140, 46 }) |width| {
+        fixture.unicode = unicode;
+        const body = try dumpWidget(page.bodyWidget(), arena.allocator(), width, 16);
+        const mark = if (unicode) "…" else ".";
+        try std.testing.expect(std.mem.endsWith(u8, page.fields[2].value, mark));
+        try std.testing.expect(std.mem.indexOf(u8, body, page.fields[2].value) != null);
+        try std.testing.expect(std.mem.indexOf(u8, body, "Fix retry deadline") == null);
+        try std.testing.expectEqual(@as(usize, Panel.valueWidth(width)), page.fields[2].value.len - mark.len + (if (unicode) @as(usize, 1) else mark.len));
+        const footer = try dumpWidget(page.footerWidget(), arena.allocator(), width, 1);
+        try std.testing.expect(std.mem.indexOf(u8, footer, "Fix retry deadline") != null);
+        try std.testing.expect(std.mem.endsWith(u8, footer, "esc\n"));
+        page.failures[2] = " · couldn't save";
+        const failed = try dumpWidget(page.bodyWidget(), arena.allocator(), width, 16);
+        try std.testing.expect(std.mem.endsWith(u8, page.fields[2].value, mark));
+        try std.testing.expect(std.mem.indexOf(u8, failed, "couldn't save") != null);
+        page.failures[2] = null;
     };
 }
 
@@ -1189,7 +1259,8 @@ test "Chat info hosted body excludes its independent single-row footer" {
         try std.testing.expect(std.mem.indexOf(u8, footer, "esc close") == null);
         try std.testing.expect(std.mem.endsWith(u8, footer, "esc\n"));
         try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, footer, "\n"));
-        try std.testing.expectEqualStrings(try std.fmt.allocPrint(arena.allocator(), "{s}{s}", .{ body, footer }), complete);
+        try std.testing.expect(std.mem.indexOf(u8, body, "Fix retry deadline") == null);
+        try std.testing.expect(std.mem.indexOf(u8, complete, "Fix retry deadline") != null);
         if (!unicode) for (body) |byte| try std.testing.expect(byte < 0x80);
         if (!unicode) for (footer) |byte| try std.testing.expect(byte < 0x80);
     };
@@ -1450,12 +1521,12 @@ test "Chat info natural body matches the mock grows by actual Model rows and shr
         defer arena.deinit();
         var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
         const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 40 }, .cell_size = .{} };
-        const base_height: u16 = if (context) 10 else 9;
+        const base_height: u16 = if (context) 9 else 8;
         const body = try page.bodyWidget().draw(ctx);
         try std.testing.expectEqual(base_height, body.size.height);
         const complete = try page.widget().draw(ctx);
-        try std.testing.expectEqual(base_height + 1, complete.size.height);
-        try std.testing.expectEqual(@as(i17, base_height), complete.children[1].origin.row);
+        try std.testing.expectEqual(base_height + 2, complete.size.height);
+        try std.testing.expectEqual(@as(i17, base_height + 1), complete.children[1].origin.row);
         const text = try dumpWidget(page.bodyWidget(), arena.allocator(), width, 40);
         try std.testing.expect(std.mem.endsWith(u8, text, "   Rename     Archive     Copy last answer\n\n"));
         page.panel.selected = 4;
@@ -1463,14 +1534,14 @@ test "Chat info natural body matches the mock grows by actual Model rows and shr
         const all = try page.bodyWidget().draw(ctx);
         try std.testing.expectEqual(base_height + 8, all.size.height);
         try std.testing.expectEqual(@as(u16, 8), page.panel.custom_height);
-        try std.testing.expectEqual(@as(u16, 5), all.cursor.?.row);
+        try std.testing.expectEqual(@as(u16, 4), all.cursor.?.row);
         try std.testing.expectEqual(@as(usize, 7), page.model_choice.hits.len);
         try typeText(&page, &events, "9");
         const narrowed = try page.bodyWidget().draw(ctx);
         try std.testing.expectEqual(base_height + 1, narrowed.size.height);
         try std.testing.expectEqual(@as(u16, 1), page.panel.custom_height);
         try std.testing.expectEqual(@as(usize, 1), page.model_choice.hits.len);
-        try std.testing.expectEqual(@as(u16, 5), narrowed.cursor.?.row);
+        try std.testing.expectEqual(@as(u16, 4), narrowed.cursor.?.row);
         try std.testing.expectEqual(@as(u16, 20), narrowed.cursor.?.col);
         const narrowed_text = try dumpWidget(page.bodyWidget(), arena.allocator(), width, 40);
         try std.testing.expect(std.mem.indexOf(u8, narrowed_text, "model-9") != null);

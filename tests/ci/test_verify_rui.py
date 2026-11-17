@@ -2153,6 +2153,20 @@ while True:
         for text in ("context left", "100% left", "alt+i info"):
             self.assertIn(text, fresh["absent"])
 
+    def test_panels_chat_info_requires_numeric_context_at_both_sizes(self):
+        states = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))["states"]
+        state = next(state for state in states if state["name"] == "panels-chat-info")
+        self.assertEqual(state["sizes"], [(140, 40), (46, 30)])
+        self.assertIn("Context", state["expect"])
+        self.assertNotIn("Context", state["absent"])
+        self.assertIn("unknown of", state["absent"])
+        for text in ("Allowed tools", "Copy last answer", "The retry draft is ready.", "› keep this retry draft"):
+            self.assertIn(text, state["expect"])
+        failure = self.helper["frame_row_failure"]
+        self.assertIsNone(failure(state, "Context         18 of 244,800"))
+        self.assertIsNotNone(failure(state, "Context         unknown of 244,800"))
+        self.assertIsNotNone(failure(state, "Model           gpt-6.1-sol"))
+
     def test_stop_waits_for_a_running_bash_not_an_approval(self):
         running = self.helper["frame_bash_running"]
         for kind, count, expected in (("bash", "0", False), ("bash", "1", True),

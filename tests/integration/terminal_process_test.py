@@ -171,6 +171,25 @@ class TerminalProcessTest(unittest.TestCase):
         self.assertFalse(predicate(listed + "\n › Type a task", 3, 3))
         self.assertFalse(predicate(" › Type a task\ngpt-6-luna", 3, 0))
 
+    def test_app_settings_open_recognizes_only_the_settings_pane_footer(self):
+        from human_cli_fixture import app_settings_open
+
+        with patch("human_cli_fixture.overview_frame") as overview, \
+                patch("human_cli_fixture.panel_frame") as panel:
+            app_settings_open(17)
+        self.assertEqual(overview.call_args.args[2], b"\x1b[F")
+        self.assertEqual(panel.call_args.args[2], b"\r")
+        accept = panel.call_args.args[1]
+        for width, sidebar in ((50, ""), (161, " Memory 2 GB".ljust(31) + "│")):
+            with self.subTest(width=width):
+                pane_width = width - len(sidebar)
+                def frame(footer):
+                    return "body\n" + sidebar + footer.ljust(pane_width)
+                self.assertTrue(accept(frame(" Settings     esc")))
+                for footer in (" Settings", " esc", " Settings esc extra", " Model esc", ""):
+                    self.assertFalse(accept(frame(footer)))
+        self.assertFalse(accept("body\n Settings esc".ljust(31) + "│ Other esc"))
+
     def test_overview_retained_notice_requires_explicit_relaxation_and_complete_list(self):
         from human_cli_fixture import overview_frame
 
