@@ -16,7 +16,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631;
-pub const schema_version: u32 = 78;
+pub const schema_version: u32 = 79;
 
 pub const IdentityMismatch = struct {
     saved_selector: Bounded(store_path.max_bytes) = .{},
@@ -56,7 +56,8 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 75, .digest = 0xcea5bf4db0d3978d },
     .{ .schema_version = 76, .digest = 0x0d2cb1706af6379c },
     .{ .schema_version = 77, .digest = 0x180d1a249b979d56 },
-    .{ .schema_version = 78, .digest = 0x16d1f8d4aba882c5 },
+    .{ .schema_version = 78, .digest = 0xa3f9fee49afacee2 },
+    .{ .schema_version = 79, .digest = 0x73f89feb47e61ded },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -700,6 +701,17 @@ pub const migrations = [_]Migration{
     },
     .{
         .from = 77,
+        .sqlite = &.{
+            "CREATE TABLE action_stop(\n source_action_id INTEGER PRIMARY KEY NOT NULL REFERENCES action_operation(action_id),\n target_action_id INTEGER NOT NULL REFERENCES action_operation(action_id),\n CHECK(source_action_id<>target_action_id)\n) STRICT, WITHOUT ROWID",
+            "CREATE INDEX action_stop_target ON action_stop(target_action_id)",
+        },
+        .mysql = &.{
+            "CREATE TABLE action_stop(\n source_action_id BIGINT NOT NULL,\n target_action_id BIGINT NOT NULL,\n PRIMARY KEY(source_action_id),\n FOREIGN KEY(source_action_id) REFERENCES action_operation(action_id),\n FOREIGN KEY(target_action_id) REFERENCES action_operation(action_id),\n CHECK(source_action_id<>target_action_id)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
+            "CREATE INDEX action_stop_target ON action_stop(target_action_id)",
+        },
+    },
+    .{
+        .from = 78,
         .sqlite = &.{
             "ALTER TABLE content ADD COLUMN form INTEGER NOT NULL DEFAULT 0 CHECK(form IN (0,1) AND (form=0 OR private=0))",
             "CREATE TABLE content_part(\n content_id INTEGER NOT NULL REFERENCES content(content_id),\n ordinal INTEGER NOT NULL CHECK(ordinal>=0),\n part_content_id INTEGER NOT NULL REFERENCES content(content_id),\n PRIMARY KEY(content_id,ordinal),\n CHECK(part_content_id<>content_id)\n) STRICT, WITHOUT ROWID",
@@ -1650,6 +1662,20 @@ pub const tables = [_]Table{
         .without_rowid = true,
     },
     .{
+        .name = "action_stop",
+        .columns = &.{
+            .{ .name = "source_action_id", .type = .int },
+            .{ .name = "target_action_id", .type = .int },
+        },
+        .primary_key = &.{"source_action_id"},
+        .foreign_keys = &.{
+            references("source_action_id", "action_operation", &.{"action_id"}),
+            references("target_action_id", "action_operation", &.{"action_id"}),
+        },
+        .checks = &.{"source_action_id<>target_action_id"},
+        .without_rowid = true,
+    },
+    .{
         .name = "action_control_command",
         .columns = &.{
             .{ .name = "command_key", .type = .{ .text = null } },
@@ -1669,6 +1695,7 @@ pub const tables = [_]Table{
 };
 
 pub const indexes = [_]Index{
+    .{ .name = "action_stop_target", .table = "action_stop", .columns = &.{"target_action_id"} },
     .{ .name = "content_part_by_part", .table = "content_part", .columns = &.{"part_content_id"} },
     .{ .name = "session_obligation_parent", .table = "session", .columns = &.{ "parent_ref", "obligation_since", "session_ref" }, .where = "obligation_since IS NOT NULL" },
     .{ .name = "session_forward_owed_message", .table = "session_forward", .columns = &.{ "target_ref", "message_delivered" } },
@@ -1912,7 +1939,7 @@ pub fn objects(comptime dialect: rsql.Dialect) []const Object {
 pub const mysql_session = [_][:0]const u8{
     "SET NAMES utf8mb4 COLLATE utf8mb4_0900_bin",
     "SET SESSION sql_mode='ONLY_FULL_GROUP_BY,STRICT_ALL_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION,NO_BACKSLASH_ESCAPES'",
-    std.fmt.comptimePrint("SET SESSION group_concat_max_len={d}", .{tool_name.max_names_bytes}),
+    std.fmt.comptimePrint("SET SESSION group_concat_max_len={d}", .{tool_name.max_offered_names_bytes}),
     "SET SESSION autocommit=1",
 };
 

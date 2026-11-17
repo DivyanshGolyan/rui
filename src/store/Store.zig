@@ -1261,6 +1261,16 @@ pub const Store = struct {
         return transition.apply(self, skills_domain.SettleTool, .{ .binding = binding, .allocator = allocator, .captured = captured }, faults);
     }
 
+    pub fn stopAction(self: *Store, source: ActionAttemptBinding, target: u64, faults: Faults) !@import("domain/action_stop.zig").Outcome {
+        return self.queue().write(stopActionHeld, .{ self, source, target, faults });
+    }
+
+    fn stopActionHeld(self: *Store, source: ActionAttemptBinding, target: u64, faults: Faults) !@import("domain/action_stop.zig").Outcome {
+        const result = try transition.apply(self, @import("domain/action_stop.zig").Stop, .{ .source = source, .target = target }, faults);
+        if (result == .selected or result == .pending) _ = @as(*OutOfLine, @fieldParentPtr("ring", self.changes)).control_generation.fetchAdd(1, .release);
+        return result;
+    }
+
     pub fn failCoreCall(self: *Store, binding: ActionAttemptBinding, result: []const u8, faults: Faults) !bool {
         return self.queue().write(resolveCoreCallHeld, .{ self, binding, ActionResolutionCode.failed, result, faults });
     }
@@ -1585,7 +1595,7 @@ const scratch_align = @max(@alignOf(configuration_domain.ConfigurationReads), @a
 const accepted_settlement_growth = 14352;
 
 comptime {
-    if (@sizeOf(configuration_domain.ConfigurationReads) != 15624 or scratch_bytes != 19032)
+    if (@sizeOf(configuration_domain.ConfigurationReads) != 15624 or scratch_bytes != 19048)
         @compileError(std.fmt.comptimePrint("the Store's scratch is {d} bytes and the configure reads {d}; restate them here", .{ scratch_bytes, @sizeOf(configuration_domain.ConfigurationReads) }));
     if (scratch_bytes - 4888 > accepted_settlement_growth) @compileError("the settlement batch outgrew what the owner accepted");
 }
@@ -1594,7 +1604,7 @@ comptime {
 /// which the kernel faults in only as they are written: an idle Host keeps
 /// none of the ring's 88 KiB resident. A configure, a creating Message or
 /// a success settlement writes the scratch's pages once, and they stay
-/// resident for the Store's life: at most 19032 bytes, a settlement
+/// resident for the Store's life: at most 19048 bytes, a settlement
 /// batch's size; a configure uses 14968.
 /// Not `Allocator.create`, whose ReleaseSafe 0xAA fill would write every
 /// page now.

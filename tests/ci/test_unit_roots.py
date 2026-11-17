@@ -2,6 +2,7 @@ import importlib.util
 import os
 from pathlib import Path
 import re
+import signal
 import subprocess
 import sys
 import tempfile
@@ -21,13 +22,14 @@ class GeneratedRunnerTest(unittest.TestCase):
             runner.generate("pub fn main() void {}")
 
     def test_every_stock_reference_is_replaced_but_builtin_is_retained(self):
-        source = "const a = builtin.test_functions;\nconst b = builtin.test_functions.len;\n"
+        source = "const a = builtin.test_functions;\nconst b = builtin.test_functions.len;\npub fn main(init: std.process.Init.Minimal) void {}\n"
         generated = runner.generate(source)
         self.assertTrue(generated.startswith("const a = unitTests();\nconst b = unitTests().len;\n"))
         self.assertEqual(generated.count("builtin.test_functions"), 1)
         self.assertIn("const all = builtin.test_functions;", generated)
         self.assertIn("partition.owner(test_fn.name)", generated)
         self.assertIn("unit_tests = selected[0..count]", generated)
+        self.assertIn("unit_environ = init.environ;", generated)
 
     def test_filtered_runner_refuses_a_run_without_named_tests(self):
         generated = runner.generate_filtered("const a = builtin.test_functions;\n")
@@ -38,88 +40,134 @@ class GeneratedRunnerTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "runner changed"):
             runner.generate_filtered("pub fn main() void {}")
 
+    def test_changed_stock_main_fails_closed(self):
+        for source in ("pub fn main(other: NewInit) void { _ = builtin.test_functions; }",
+                       "pub fn main () void { _ = builtin.test_functions; }",
+                       "const tests = builtin.test_functions;"):
+            with self.subTest(source=source), self.assertRaisesRegex(ValueError, "environment initialization"):
+                runner.generate(source)
+
     def test_command_line_generator(self):
         with tempfile.TemporaryDirectory() as tmp:
             source, output = Path(tmp, "stock runner.zig"), Path(tmp, "generated runner.zig")
-            source.write_text("const tests = builtin.test_functions;\n")
+            source.write_text("const tests = builtin.test_functions;\npub fn main(init: std.process.Init.Minimal) void {}\n")
             subprocess.run([sys.executable, str(ROOT / "tests/ci/unit_test_runner.py"), str(source), str(output)], check=True)
             self.assertEqual(output.read_text(), runner.generate(source.read_text()))
 
 
-class DeadlineTest(unittest.TestCase):
+class ParallelRootsTest(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(prefix="unit roots ")
+        self.tmp = tempfile.TemporaryDirectory(prefix="parallel unit roots ")
         self.addCleanup(self.tmp.cleanup)
         self.directory = Path(self.tmp.name)
+        self.integration = self.directory / "integration"
+        self.integration.mkdir()
+        ci = self.directory / "ci"
+        ci.mkdir()
         self.events = self.directory / "events"
-        text = (ROOT / "tests/integration/check.sh").read_text()
-        function = text.split("with_deadline() {", 1)[1].split("\nrun_timed()", 1)[0]
-        self.helper = self.directory / "deadline helper.sh"
-        self.helper.write_text("with_deadline() {" + function + '\nwith_deadline "$@"\n')
+        self.native_ready = self.directory / "native ready"
+        self.store_ready = self.directory / "store ready"
+        os.mkfifo(self.native_ready)
+        os.mkfifo(self.store_ready)
+        source = (ROOT / "tests/integration/check.sh").read_text()
+        before, cases = source.split("cases() {", 1)
+        after = cases.split("\nrun_timed()", 1)[1]
+        self.driver = self.integration / "check.sh"
+        self.driver.write_text(before + "cases() { :; }\nrun_timed()" + after)
+        (self.integration / "host_process.py").write_text(
+            "import os, sys\nos.execvp(sys.argv[2], sys.argv[2:])\n")
+        (ci / "store_shards.py").write_text(
+            "import os, subprocess, sys\nfrom pathlib import Path\n"
+            "expected = {'store root.py': 'run', 'native root.py': 'native'}.get(Path(sys.argv[2]).name, 'aggregate')\n"
+            "assert sys.argv[1] == expected, sys.argv\n"
+            "assert sys.argv[3:] == ['--timeout', '1200'], sys.argv\n"
+            "assert os.environ['RUI_TEST_EXACT_INACTIVITY'] == '0'\n"
+            "raise SystemExit(subprocess.call([sys.argv[2]]))\n")
 
-    def root(self, name, delay=0, status=0):
+    def root(self, name, status=0, barrier=True):
         path = self.directory / (name + " root.py")
+        if barrier and name == "native":
+            handshake = (f"with open({str(self.native_ready)!r}, 'w') as f: f.write('ready')\n"
+                         f"with open({str(self.store_ready)!r}) as f: assert f.read() == 'ready'\n")
+        elif barrier:
+            handshake = (f"with open({str(self.native_ready)!r}) as f: assert f.read() == 'ready'\n"
+                         f"with open({str(self.store_ready)!r}, 'w') as f: f.write('ready')\n")
+        else:
+            handshake = ""
         path.write_text(
-            "import os, time\n"
-            f"with open({str(self.events)!r}, 'a') as f:\n"
-            f"    f.write({name!r} + ':' + str(os.getpid()) + '\\n')\n"
-            f"time.sleep({delay!r})\nraise SystemExit({status})\n"
-        )
+            f"#!{sys.executable}\nimport os\n"
+            "assert os.environ['RUI_TEST_EXACT_INACTIVITY'] == '0'\n"
+            f"with open({str(self.events)!r}, 'a') as f: f.write('{name} started\\n')\n"
+            + handshake +
+            f"with open({str(self.events)!r}, 'a') as f: f.write('{name} finished\\n')\n"
+            f"raise SystemExit({status})\n")
+        path.chmod(0o755)
         return str(path)
 
-    def run_roots(self, budget, roots):
-        return subprocess.run(["sh", str(self.helper), str(budget), sys.executable,
-                               "--unit-roots", *roots], capture_output=True, text=True, timeout=8)
+    def run_gate(self, native, store=None):
+        command = ["sh", str(self.driver), "release-safe", "debug", "parallel", native,
+                   "host-status", "session-list", "activity", "preference-policy", "notice", "mysql-admin"]
+        if store is not None:
+            command.append(store)
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   text=True, start_new_session=True)
+        try:
+            stdout, stderr = process.communicate(timeout=8)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.communicate()
+            raise
+        return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
 
-    def names(self):
-        return [line.split(":")[0] for line in self.events.read_text().splitlines()]
-
-    def test_success_runs_roots_in_order_with_spaces(self):
-        result = self.run_roots(3, [self.root("native"), self.root("store")])
+    def test_native_and_store_start_together_and_both_finish(self):
+        result = self.run_gate(self.root("native"), self.root("store"))
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.names(), ["native", "store"])
+        self.assertCountEqual(self.events.read_text().splitlines(),
+                              ["native started", "store started", "native finished", "store finished"])
+        self.assertIn("native passed: exit=0", result.stdout)
+        self.assertIn("store passed: exit=0", result.stdout)
 
-    def test_failure_suppresses_later_roots(self):
-        result = self.run_roots(3, [self.root("native", status=7), self.root("store")])
-        self.assertEqual(result.returncode, 7, result.stderr)
-        self.assertEqual(self.names(), ["native"])
+    def test_failure_waits_for_and_reports_both_roots(self):
+        for native_status, store_status in ((7, 0), (0, 9), (7, 9)):
+            with self.subTest(native_status=native_status, store_status=store_status):
+                self.events.unlink(missing_ok=True)
+                result = self.run_gate(self.root("native", native_status), self.root("store", store_status))
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertCountEqual(self.events.read_text().splitlines(),
+                                      ["native started", "store started", "native finished", "store finished"])
+                output = result.stdout + result.stderr
+                self.assertIn(f"native {'failed' if native_status else 'passed'}: exit={native_status}", output)
+                self.assertIn(f"store {'failed' if store_status else 'passed'}: exit={store_status}", output)
 
-    def test_budget_is_shared_and_active_child_is_reaped(self):
-        result = self.run_roots(1.5, [self.root("native", delay=0.9),
-                                      self.root("store", delay=0.9), self.root("must not run")])
-        self.assertEqual(result.returncode, 124, result.stderr)
-        self.assertIn("last test named above stalled", result.stdout)
-        self.assertEqual(self.names(), ["native", "store"])
-        pid = int(self.events.read_text().splitlines()[-1].split(":")[1])
-        with self.assertRaises(ProcessLookupError):
-            os.kill(pid, 0)
-
-    def test_empty_root_list_fails_closed(self):
-        result = self.run_roots(3, [])
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("No unit roots supplied", result.stderr)
+    def test_an_empty_unit_selection_starts_neither_launcher(self):
+        result = self.run_gate("")
+        self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(self.events.exists())
+        self.assertNotIn("native passed:", result.stdout)
+        self.assertNotIn("store passed:", result.stdout)
 
-    def test_single_command_interface_is_preserved(self):
-        result = subprocess.run(["sh", str(self.helper), "3", sys.executable, self.root("legacy")],
-                                capture_output=True, text=True, timeout=8)
+    def test_filtered_aggregate_runs_once_without_store_launcher(self):
+        result = self.run_gate(self.root("filtered aggregate", barrier=False))
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.names(), ["legacy"])
+        self.assertEqual(self.events.read_text().splitlines(),
+                         ["filtered aggregate started", "filtered aggregate finished"])
+        self.assertNotIn("store passed:", result.stdout)
 
 
 class BuildWiringTest(unittest.TestCase):
-    def test_store_is_last_and_runs_are_serial_but_compiles_are_not(self):
+    def test_unit_roots_run_independently_without_ordering_compilation(self):
         partition = (ROOT / "src/unit_test_partition.zig").read_text()
         members = re.search(r"pub const Root = enum\s*\{([^}]+)\}", partition).group(1)
         self.assertEqual([name.strip() for name in members.split(",") if name.strip()],
                          ["native", "store"])
         build = build_files.source()
-        self.assertIn("if (previous) |prior| run.step.dependOn(&prior.step)", build)
+        self.assertNotIn("if (previous) |prior| run.step.dependOn(&prior.step)", build)
+        self.assertIn("store_shards.py", build)
         self.assertNotIn("compile.step.dependOn(&run_tests.step)", build)
         self.assertIn("run.has_side_effects = true", build)
         self.assertIn('run.setEnvironmentVariable("RUI_TEST_EXACT_INACTIVITY", "0")', build)
 
-    def test_full_execution_overlaps_native_but_unsplit_stays_serial(self):
+    def test_full_execution_overlaps_units_but_unsplit_orders_processes(self):
         build = build_files.source()
         gate = build.split("    const native_gate =", 1)[1].split("    if (!pr_ci)", 1)[0]
         self.assertTrue(gate.startswith(" if (check_part == .execution) full_check_step else &process_integrations.step;"))
@@ -150,14 +198,16 @@ class BuildWiringTest(unittest.TestCase):
         self.assertEqual(build.count(".test_runner = filtered_runner"), 2)
         self.assertIn('generate.addArg("--filtered")', build)
 
-    def test_standalone_roots_do_not_inherit_the_serial_chain(self):
+    def test_standalone_roots_keep_independent_target_ownership(self):
         build = build_files.source()
         partitions = {row["partition"]: row for row in build_files.unit_roots() if "partition" in row}
         self.assertEqual({key: row["target"] for key, row in partitions.items()},
                          {"native": "test-native", "store": "test-store"})
         self.assertIn('b.step(root(.native).target,', build)
         self.assertIn('b.step(root(.store).target,', build)
-        self.assertIn('runs.set(identity, &standalone.step)', build)
+        self.assertIn('runs.set(identity, run)', build)
+        self.assertIn('combined.dependOn(run)', build)
+        self.assertIn('unitRun(b, ci, tests[index], if (identity == .store) "run" else "native")', build)
         self.assertIn('attach(entry[0], .all, entry[1], &runs, .runs)', build)
         for partition in ("native", "store"):
             self.assertIn((f"test-{partition}", "all"), partitions[partition]["owners"])
@@ -173,7 +223,9 @@ class BuildWiringTest(unittest.TestCase):
         self.assertIn("dependOnDirectoryContents", build)
         self.assertIn("directory.walk", build)
         shell = (ROOT / "tests/integration/check.sh").read_text()
-        self.assertRegex(shell, r'with_deadline 1200 .*--unit-roots "\$test_binary" "\$@"')
+        self.assertRegex(shell, r'run_case execution native .*store_shards\.py" "\$unit_mode" "\$test_binary" --timeout 1200')
+        self.assertRegex(shell, r'run_case execution store .*store_shards\.py" run "\$store_binary" --timeout 1200')
+        self.assertNotIn("--unit-roots", shell)
 
 
 if __name__ == "__main__":

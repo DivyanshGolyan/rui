@@ -70,7 +70,7 @@ test "a Store at the migration baseline with its rows takes every migration at o
     try std.testing.expectEqualStrings(fresh_rows.written(), migrated_rows.written());
 }
 
-test "schema 78 preserves legacy refusal diagnostics without inventing input" {
+test "schema 79 preserves legacy refusal diagnostics without inventing input" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;

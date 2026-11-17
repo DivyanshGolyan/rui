@@ -829,7 +829,7 @@ pub const SettingsRead = struct {
         const page = view.page.?;
         if (!row.catalogs_consistent) return error.CorruptStore;
         page.keep(.batch, row.instructions_content_id, &row.instructions_bytes);
-        if (row.member_count > tool_defs.max_tools or row.provider_count > row.member_count) return error.CorruptStore;
+        if (row.member_count > @import("../../tool_name.zig").max_offered_tools or row.provider_count > row.member_count) return error.CorruptStore;
         view.tool_set_id = row.tool_set_id.get();
         view.tool_count = row.member_count;
         view.provider_tool_count = row.provider_count;
