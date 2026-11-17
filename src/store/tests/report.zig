@@ -731,9 +731,11 @@ test "served work intents imply admission across permission and control states" 
                     try std.testing.expectEqual(protocol.MessageRequestState.waiting_for_permission, observed.requestState().?);
                     var response: protocol.CommandObservationBuffer = .{};
                     try response.render(@import("../../host_reply.zig").renderFullCommandObservation, .{ "intent-first", &observed, @as(?[]const u8, null) });
-                    const decoded = try @import("../../protocol_reply.zig").CommandObservation.parse(.{ .status = 200, .body = response.bytes[0..response.len] }, "intent-first");
-                    try std.testing.expectEqual(protocol.MessageRequestState.waiting_for_permission, decoded.state.?);
-                    try std.testing.expectEqual(@as(?u64, null), decoded.work.?.first_action);
+                    var decoded = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, response.bytes[0..response.len], .{});
+                    defer decoded.deinit();
+                    const observation = decoded.value.object.get("observation").?.object;
+                    try std.testing.expectEqualStrings("waiting_for_permission", observation.get("state").?.string);
+                    try std.testing.expect(observation.get("work").?.object.get("first_action").? == .null);
                 }
                 if (scenario == .message_decline or scenario == .mixed) {
                     const bytes = try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, .current);

@@ -361,11 +361,13 @@ test "client Message decoder retains automatic denial wait after a new Message" 
     try store.testingSubmitMessage(&storage, &tmp, "decline-next-file", "decline-next", session.slice(), "Use new instructions.");
     for ([_][]const u8{ "decline-first", "decline-next" }) |key| {
         const observation = try store.testing.observeCommandForTesting(&storage, key);
+        try std.testing.expectEqual(protocol.MessageRequestState.waiting_for_permission, observation.requestState().?);
         var rendered: std.Io.Writer.Allocating = .init(std.testing.allocator);
         defer rendered.deinit();
         try @import("host_reply.zig").renderFullCommandObservation(.{ .writer = &rendered.writer }, key, &observation, null);
         const decoded = try protocol_reply.CommandObservation.parse(.{ .status = 200, .body = rendered.written() }, key);
         try std.testing.expectEqual(.waiting_for_permission, decoded.state.?);
+        try std.testing.expectEqual(observation.kind.message.?.work.?.first_action, decoded.work.?.first_action);
         try std.testing.expect(decoded.work.?.first_action == null and decoded.work.?.actions.decide == null);
         try std.testing.expect(decoded.work.?.actions.stop);
         try std.testing.expectEqual(.needs_you, decoded.work.?.group);
