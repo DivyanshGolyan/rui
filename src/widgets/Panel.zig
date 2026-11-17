@@ -8,6 +8,15 @@ const RowInset = @import("RowInset.zig");
 
 pub const value_column: u16 = 19;
 
+/// The right edge and width of a standard field value, after the row inset.
+pub fn valueEnd(width: u16) u16 {
+    return RowInset.bounds(width).end;
+}
+
+pub fn valueWidth(width: u16) u16 {
+    return valueEnd(width) -| value_column;
+}
+
 pub const Field = struct { label: []const u8, value: []const u8, tail: ?[]const u8 = null, selectable: bool = true, visible: bool = true };
 pub const Choice = struct { field: usize, labels: []const []const u8, current: ?usize, selected: usize };
 pub const CustomChoice = struct {
@@ -308,8 +317,8 @@ fn drawFieldValue(self: *Self, ctx: vxfw.DrawContext, surface: *vxfw.Surface, in
     const field = self.fields[index];
     const value_widget = if (self.custom_choice) |choice| if (choice.field == index) choice.value_widget else null else null;
     if (value_widget) |value| {
-        if (RowInset.bounds(surface.size.width).end > start) {
-            const drawn = try value.draw(ctx.withConstraints(.{}, .{ .width = RowInset.bounds(surface.size.width).end - start, .height = 1 }));
+        if (valueEnd(surface.size.width) > start) {
+            const drawn = try value.draw(ctx.withConstraints(.{}, .{ .width = valueEnd(surface.size.width) - start, .height = 1 }));
             try children.append(.{ .origin = .{ .row = row, .col = start }, .surface = drawn });
             if (drawn.cursor) |cursor| {
                 surface.cursor = cursor;
@@ -319,14 +328,14 @@ fn drawFieldValue(self: *Self, ctx: vxfw.DrawContext, surface: *vxfw.Surface, in
         }
     } else {
         const tail = try displayText(ctx.arena, field.tail orelse "", self.unicode);
-        const limit: u16 = @intCast(RowInset.bounds(surface.size.width).end -| ctx.stringWidth(tail));
+        const limit: u16 = @intCast(valueEnd(surface.size.width) -| ctx.stringWidth(tail));
         const end = paintTo(ctx, surface.*, try displayText(ctx.arena, field.value, self.unicode), start, row, style, limit);
         if (tail.len > 0) {
             var quiet = self.quiet;
             quiet.bg = style.bg;
             quiet.reverse = style.reverse;
             quiet.ul_style = style.ul_style;
-            _ = paintTo(ctx, surface.*, tail, end, row, quiet, RowInset.bounds(surface.size.width).end);
+            _ = paintTo(ctx, surface.*, tail, end, row, quiet, valueEnd(surface.size.width));
         }
     }
     if (field.selectable) try targets.append(.{ .row = row, .start = 0, .end = surface.size.width, .index = index });

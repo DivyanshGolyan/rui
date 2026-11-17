@@ -503,7 +503,7 @@ fn drawBodyContents(raw: *anyopaque, ctx: vxfw.DrawContext) !vxfw.Surface {
     }
     self.fields[2].value = if (!self.ready) "unavailable" else if (tool_text.written().len == 0) "none" else tool_text.written();
     if (self.ready) {
-        self.fields[3].value = try self.folderValue(ctx, size.width -| Panel.value_column);
+        self.fields[3].value = try self.folderValue(ctx, Panel.valueWidth(size.width));
         self.fields[4].value = try safe(ctx.arena, self.session.model.slice());
         if (self.session.context_estimate) |tokens| {
             var context: std.Io.Writer.Allocating = .init(ctx.arena);
@@ -1309,13 +1309,13 @@ test "Chat info Folder prefers whole components then a grapheme-aligned basename
         page.home = case.home;
         page.refresh();
         page.bind();
-        const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = case.room + 19, .height = 14 }, .cell_size = .{} };
+        const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = case.room + 21, .height = 14 }, .cell_size = .{} };
         const value = try page.folderValue(ctx, case.room);
         try std.testing.expectEqualStrings(case.expected, value);
         try std.testing.expect(ctx.stringWidth(value) <= case.room);
         _ = try page.bodyWidget().draw(ctx);
         try std.testing.expectEqualStrings(case.expected, page.fields[3].value);
-        const text = try dumpWidget(page.bodyWidget(), arena.allocator(), case.room + 19, 14);
+        const text = try dumpWidget(page.bodyWidget(), arena.allocator(), case.room + 21, 14);
         if (case.expected.len > 0) try std.testing.expect(std.mem.indexOf(u8, text, case.expected) != null);
         if (!case.unicode) for (text) |byte| try std.testing.expect(byte < 0x80);
         _ = arena.reset(.retain_capacity);
@@ -1621,7 +1621,7 @@ test "Chat info standalone effort checks the actual Session effort without chang
         try std.testing.expectEqual(actual, page.panel.choice.?.current);
         for ([_]u16{ 46, 140 }) |width| {
             const drawn = try page.standaloneWidget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
-            for (0..page.effort_count) |row| try std.testing.expectEqualStrings(if (actual == row) "✓" else " ", drawn.readCell(1, @intCast(row + 1)).char.grapheme);
+            for (0..page.effort_count) |row| try std.testing.expectEqualStrings(if (actual == row) "✓" else " ", drawn.readCell(3, @intCast(row + 1)).char.grapheme);
         }
     };
 }
@@ -1694,7 +1694,7 @@ test "Chat info standalone Model and Effort retry read and save failures by draw
         try std.testing.expectEqualStrings(if (failure == .read) " · couldn't read chat" else " · couldn't save", page.failures[index].?);
         const retained = try page.standaloneWidget().draw(draw_ctx);
         try std.testing.expectEqual(@as(u16, 2), retained.size.height);
-        try std.testing.expect(!std.mem.eql(u8, " ", retained.readCell(1, 1).char.grapheme));
+        try std.testing.expect(!std.mem.eql(u8, " ", retained.readCell(3, 1).char.grapheme));
         fixture.fail_read = false;
         const before_read = fixture.read_calls;
         const before_save = fixture.save_calls;
