@@ -224,6 +224,8 @@ jobs:
           echo "NODE_PATH=$RUNNER_TEMP/screens-node/node_modules" >> "$GITHUB_ENV"
           echo "VERIFY_RUI_UPGRADE_FIXTURE_USER=$(id -un)" >> "$GITHUB_ENV"
           "$RUNNER_TEMP/screens-node/node_modules/.bin/playwright" install --with-deps chromium
+          # verify-rui shots starts the fixture Host, whose helpers import h2.
+          python3 -m pip install --disable-pip-version-check -r tests/integration/requirements.txt
       - name: Capture baseline shard with trusted tooling
         env:
           SHARD: ${{ matrix.shard }}
@@ -282,6 +284,8 @@ jobs:
           echo "NODE_PATH=$RUNNER_TEMP/screens-node/node_modules" >> "$GITHUB_ENV"
           echo "VERIFY_RUI_UPGRADE_FIXTURE_USER=$(id -un)" >> "$GITHUB_ENV"
           "$RUNNER_TEMP/screens-node/node_modules/.bin/playwright" install --with-deps chromium
+          # verify-rui shots starts the fixture Host, whose helpers import h2.
+          python3 -m pip install --disable-pip-version-check -r tests/integration/requirements.txt
       - name: Capture candidate shard
         env:
           SHARD: ${{ matrix.shard }}
