@@ -59,7 +59,7 @@ class UpgradeEmptyChatTest(unittest.TestCase):
         screen.tail = bytearray()
         screen.transition_tail = b""
         screen.entries = screen.restorations = 0
-        process = SimpleNamespace(send_signal=Mock(), poll=Mock(return_value=0))
+        process = SimpleNamespace(send_signal=Mock(), poll=Mock(return_value=0), wait=Mock(return_value=0))
         chunks = [BlockingIOError(), b"receipt \x1b[?104", b"9l\x1b[?25h done", b""]
         with patch.object(self.fixture.os, "read", side_effect=chunks) as read, \
                 patch("select.select", return_value=([42], [], [])), \

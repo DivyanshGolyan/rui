@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 import contextlib
+import errno
+import functools
 import hashlib
 import http.server
 import itertools
@@ -8,6 +10,7 @@ import os
 import pathlib
 import re
 import secrets
+import select
 import shlex
 import shutil
 import signal
@@ -17,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from urllib.parse import quote
 
 import live_engines
@@ -31,6 +35,7 @@ from terminal_screen import ScreenCapture, shown
 from upgrade_fixture import Gate, Releases
 
 
+terminal_process = functools.partial(terminal_process, eof=True)
 TERMINAL_COLUMNS = max(COLUMNS, 140)
 
 
@@ -866,6 +871,10 @@ class TerminalScreen:
         try:
             data = os.read(self.master, 65536)
         except BlockingIOError:
+            return None
+        except OSError as error:
+            if error.errno != errno.EIO:
+                raise
             data = b""
         if data:
             transitions = self.transition_tail + data
@@ -875,6 +884,7 @@ class TerminalScreen:
             self.capture.feed(data)
             self.tail.extend(data)
             del self.tail[:-16384]
+        return bool(data)
 
     def observe(self):
         self.read_output()
@@ -1557,11 +1567,14 @@ def proof_relaunched(c, screen, process):
 def exit_on_sigint(screen, process, description):
     process.send_signal(signal.SIGINT)
 
-    def exited():
-        screen.read_output()
-        return process.poll() is not None
-
-    wait_for(exited, description)
+    deadline = time.monotonic() + 8
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not select.select([screen.master], [], [], remaining)[0]:
+            raise TimeoutError(f"timed out waiting for {description}")
+        if screen.read_output() is False:
+            break
+    process.wait(timeout=max(0, deadline - time.monotonic()))
     output = bytes(screen.tail)
     restored = output.rfind(b"\x1b[?1049l")
     assert restored >= 0, f"{description}: terminal not restored"
