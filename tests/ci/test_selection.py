@@ -1677,6 +1677,13 @@ fi
                     self.assertEqual(workflow.count(diagnostic_gate), 1)
                     self.assertIn('tests/ci/cache_snapshot_proof.py', producer)
                     workflow = workflow.replace(diagnostic_gate, '', 1)
+                    mac_gate = ("publish-caches: ${{ github.ref == 'refs/heads/main' && "
+                                "needs.mac_runner.outputs.self_hosted != 'true' && 'true' || 'false' }}")
+                    for name in ('macos_build', 'macos_build_unit', 'macos_suites'):
+                        native = re.search(r'(?ms)^  ' + name + r':\n(.*?)(?=^  [\w-]+:\n|\Z)', workflow)[1]
+                        self.assertEqual(native.count(mac_gate), 1, name)
+                    self.assertEqual(workflow.count(mac_gate), 3)
+                    workflow = workflow.replace(mac_gate, '')
                 self.assertNotIn('publish-caches', workflow, f'{path.name} native checks must keep publishing')
         self.assertNotIn('actions/cache', Path('.github/actions/setup/action.yml').read_text())
         setup = Path('.github/actions/setup/caches/action.yml').read_text()
