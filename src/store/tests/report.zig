@@ -645,7 +645,7 @@ test "derived work facts are served across all work replies" {
 
 test "served work intents imply admission across permission and control states" {
     try store_testing.forEachEngine(struct {
-        const Scenario = enum { idle, queued, in_flight, retrying, finished, stopped, approval, message_decline, mixed };
+        const Scenario = enum { idle, queued, in_flight, retrying, finished, stopped, stopping, stopping_queued, approval, message_decline, mixed };
         const Intent = enum { stop, interrupt, decide };
 
         fn run(case: *store_testing.Case) !void {
@@ -671,6 +671,15 @@ test "served work intents imply admission across permission and control states" 
                         } else if (scenario != .in_flight) {
                             try settleTwoActionsForTesting(&storage, &tmp, model, "intent-calls");
                             old_action = try store_testing.queryU64(&storage, "SELECT min(action_id) FROM action_operation WHERE session_ref=?1", .{session.slice()});
+                            if (scenario == .stopping or scenario == .stopping_queued) {
+                                var allow: protocol.PermissionDecisionCommand = .{ .session = session, .action_id = old_action, .decision = .allow_once };
+                                try allow.key.set("intent-allow-running");
+                                try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
+                                _ = (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?;
+                                var stop = try completeSessionStop("intent-running-stop", session.slice());
+                                try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+                                if (scenario == .stopping_queued) try submitTestMessage(&storage, &tmp, "intent-after-stop-file", "intent-after-stop", session.slice(), "new work");
+                            }
                             if (scenario == .mixed) {
                                 var promote: @import("../../command_input.zig").ActionBackgroundCommand = .{ .session = session, .action_id = old_action };
                                 try promote.key.set("intent-promote");
@@ -693,7 +702,7 @@ test "served work intents imply admission across permission and control states" 
                 var request: protocol.ActivityPage = .{};
                 request.session = session;
                 const work = (try store_core.activityPageForTesting(&storage, request)).work.work;
-                try std.testing.expectEqual(scenario != .idle and scenario != .finished and scenario != .stopped, work.actions.stop);
+                try std.testing.expectEqual(scenario != .idle and scenario != .finished and scenario != .stopped and scenario != .stopping, work.actions.stop);
                 try std.testing.expectEqual(scenario == .in_flight, work.actions.interrupt != null);
                 try std.testing.expectEqual(scenario == .approval or scenario == .mixed, work.actions.decide != null);
                 try std.testing.expectEqual(work.actions.decide, work.first_action);

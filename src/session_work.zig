@@ -83,6 +83,7 @@ pub const Inputs = struct {
         input_cutoff: u64,
         stopped_at: ?u64 = null,
         interruptible: bool = false,
+        stop_remaining: bool = false,
         terminal: ?Terminal = null,
         op: Op,
         actions: Inputs.Actions = .{},
@@ -169,7 +170,7 @@ pub fn derive(inputs: Inputs) error{CorruptStore}!Work {
         if (inputs.owed_since) |at| work.state = .{ .working = .{ .since = @max(work.state.since(), at) } };
     }
     const current = if (inputs.latest) |turn| turn.terminal == null and turn.stopped_at == null else false;
-    work.actions.stop = current or inputs.oldest_pending != null or inputs.owed_since != null;
+    work.actions.stop = current or inputs.oldest_pending != null or inputs.owed_since != null or if (inputs.latest) |turn| turn.stop_remaining else false;
     if (inputs.latest) |turn| {
         if (current and turn.interruptible and turn.op == .in_flight) work.actions.interrupt = .{ .turn = turn.turn_id, .operation = turn.operation_id };
     }
@@ -623,7 +624,7 @@ test "work loses whether a model operation is current" {
 
 test "actions derive from work inputs" {
     const pending = Inputs.Pending{ .at = 600, .position = 60 };
-    for (0..32) |mask| {
+    for (0..64) |mask| {
         const queued: ?Inputs.Pending = if (mask & 1 != 0) pending else null;
         const owed: ?u64 = if (mask & 2 != 0) 600 else null;
         const decision: ?u64 = if (mask & 4 != 0) 41 else null;
@@ -641,11 +642,12 @@ test "actions derive from work inputs" {
             if (turn) |*t| {
                 if (mask & 8 != 0) t.stopped_at = 450;
                 if (mask & 16 != 0) t.interruptible = false;
+                t.stop_remaining = mask & 32 != 0;
             }
             // first_action requires a latest Turn, even when it refers to an older Action.
             if (turn == null and decision != null) continue;
             const work = try derive(.{ .now_ms = 0, .created_at = 1, .latest = turn, .oldest_pending = queued, .owed_since = owed, .first_action = decision });
-            try std.testing.expectEqual((index >= 1 and index <= 3 and mask & 8 == 0) or queued != null or owed != null, work.actions.stop);
+            try std.testing.expectEqual((index >= 1 and index <= 3 and mask & 8 == 0) or queued != null or owed != null or (turn != null and mask & 32 != 0), work.actions.stop);
             try std.testing.expectEqual(index == 1 and mask & 8 == 0 and mask & 16 == 0, work.actions.interrupt != null);
             if (work.actions.interrupt) |target| {
                 try std.testing.expectEqual(@as(u64, 7), target.turn);

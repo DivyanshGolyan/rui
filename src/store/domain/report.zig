@@ -508,6 +508,9 @@ fn WorkLatest(comptime Args: type, comptime session: []const u8) type {
         .sql = "SELECT t.turn_id,t.operation_id,t.input_cutoff,t.outcome_code,t.outcome_content_id,t.outcome_at,t.outcome_position," ++
             "coalesce(o.resolution_code,o.last_failure_code) AS operation_code,o.retry_due_at_ms,o.attempt_ordinal,o.attempt_at,o.retry_scheduled_at,o.resolved_at," ++
             "(" ++ command_domain.unresolvedModelOperationSql("o") ++ " AND " ++ command_domain.currentModelOperationSql("o", "t") ++ ") AS interruptible," ++
+            "CASE WHEN EXISTS(SELECT 1 FROM session_stop WHERE selected_turn_id=t.turn_id) THEN (" ++
+            command_domain.pendingMessageAfterStopSql(session) ++ " OR " ++
+            "EXISTS(SELECT 1 FROM session s WHERE s.session_ref=" ++ session ++ " AND s.obligation_since IS NOT NULL)) ELSE 0 END AS stop_remaining," ++
             "(SELECT @payload(content) FROM content WHERE content_id=o.resolution_content_id AND byte_length<=" ++ std.fmt.comptimePrint("{d}", .{Quota.max_bytes}) ++
             " AND t.outcome_code NOT IN ('completed','cancelled')) AS diagnostic," ++
             "(SELECT stopped_at FROM session_stop @index(session_stop_turn) WHERE selected_turn_id=t.turn_id ORDER BY position LIMIT 1) AS stopped_at " ++
@@ -534,6 +537,7 @@ const WorkLatestRow = struct {
     retry_scheduled_at: ?rsql.Positive,
     resolved_at: ?rsql.Positive,
     interruptible: bool,
+    stop_remaining: bool,
     diagnostic: ?rsql.Blob(Quota.max_bytes),
     stopped_at: ?rsql.Positive,
 };
@@ -764,8 +768,8 @@ pub const WorkRead = struct {
         const found = try count.found();
         w.stage = switch (w.stage) {
             .latest => if (found and w.inputs.latest.?.terminal == null) .actions else .cutoff,
-            .actions => if (!found) return error.ActionReadFailed else if (w.inputs.latest.?.actions.running != 0) .oldest else if (w.inputs.latest.?.stopped_at != null) .cutoff else .done,
-            .oldest => if (!found) return error.CorruptStore else if (w.inputs.latest.?.stopped_at != null) .cutoff else .done,
+            .actions => if (!found) return error.ActionReadFailed else if (w.inputs.latest.?.actions.running != 0) .oldest else .done,
+            .oldest => if (!found) return error.CorruptStore else .done,
             .stop => if (!found) return error.CorruptStore else .owed,
             .cutoff => .queued,
             .queued => if (found) .done else if (w.cutoff == 0) .owed else .excluded,
@@ -816,6 +820,7 @@ pub const WorkRead = struct {
             .input_cutoff = row.input_cutoff.get(),
             .stopped_at = optional(row.stopped_at),
             .interruptible = row.interruptible,
+            .stop_remaining = row.stop_remaining,
             .op = undefined,
         };
         if (row.resolved_at) |at| {

@@ -46,8 +46,10 @@ const MessageObservation = reads_domain.MessageObservation;
 const session_work = @import("../../session_work.zig");
 const TurnOutcome = turn_domain.TurnOutcome;
 
-pub const session_stop_cutoff_sql =
-    "SELECT admission_cutoff FROM session_stop WHERE session_ref=?1 ORDER BY admission_cutoff DESC LIMIT 1";
+pub fn sessionStopCutoffSql(comptime session: []const u8) []const u8 {
+    return "SELECT admission_cutoff FROM session_stop WHERE session_ref=" ++ session ++ " ORDER BY admission_cutoff DESC LIMIT 1";
+}
+pub const session_stop_cutoff_sql = sessionStopCutoffSql("?1");
 pub const pending_message_count_sql =
     "SELECT count(*) AS pending FROM message_admission WHERE session_ref=?1 AND turn_id IS NULL AND admission_id>?2";
 
@@ -1861,9 +1863,13 @@ const interruption_operation = rsql.Read(.{
     .cardinality = .optional,
 });
 
+pub fn pendingMessageAfterStopSql(comptime session: []const u8) []const u8 {
+    return "EXISTS(SELECT 1 FROM message_admission WHERE session_ref=" ++ session ++ " AND turn_id IS NULL AND admission_id>coalesce((" ++
+        sessionStopCutoffSql(session) ++ "),0))";
+}
+
 const applicable_pending = rsql.Read(.{
-    .sql = "SELECT EXISTS(SELECT 1 FROM message_admission WHERE session_ref=?1 AND turn_id IS NULL AND admission_id>coalesce((" ++
-        session_stop_cutoff_sql ++ "),0)) AS pending",
+    .sql = "SELECT " ++ pendingMessageAfterStopSql("?1") ++ " AS pending",
     .Args = struct { session: []const u8 },
     .Row = struct { pending: bool },
     .cardinality = .one,
