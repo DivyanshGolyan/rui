@@ -38,6 +38,12 @@ def empty_creation(binary, root, store_settings, env):
         return {name: value for name, value in saved.items() if name not in ("reference", "created_at")}
 
     with host_process.short_interface_directory() as runtime:
+        clean["RUI_RUNTIME_DIR"] = str(runtime)
+        if "sqlite" in store_settings:
+            placement = subprocess.run([str(binary), "host", "set", "--store", store_settings["sqlite"]["dir"],
+                                        "interface.dir", str(runtime)], env=clean, cwd=workspace,
+                                       text=True, capture_output=True, timeout=20)
+            assert placement.returncode == 0, placement
         document = {
             "store": store_settings,
             "interface": {"dir": str(runtime), "lifetime": "stdin"},
@@ -73,7 +79,6 @@ def empty_creation(binary, root, store_settings, env):
             sock = runtime / "rui.sock"
             settings_fixture.wait_for_host(sock, "", host)
             store = settings_fixture.host_info(sock, "")["store"]
-            clean["RUI_RUNTIME_DIR"] = str(runtime)
 
             def invoke(*args):
                 result = subprocess.run([str(binary), *map(str, args)], env=clean, cwd=workspace,
@@ -85,7 +90,7 @@ def empty_creation(binary, root, store_settings, env):
                 return invoke("session", "inspect", "--store", store, "--session", session)
 
             record = root / "cli.json"
-            cli = invoke("session", "configure", "--store", store, "--record", record,
+            cli = invoke("session", "configure", "--store", store, "--record", record, "--key", "empty-creation:cli",
                          "--provider", binding["provider"], "--model", binding["model"], "--workspace", workspace)
             assert json.loads(record.read_text())["configuration"] == binding
             assert check(inspect(cli["context"]["session"])) == resolved

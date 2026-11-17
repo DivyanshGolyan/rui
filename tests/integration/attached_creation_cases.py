@@ -159,11 +159,12 @@ def attached_creation(binary, directory, root, env, *, scalar=None):
             invoke("defaults", "configure", "--provider", saved_provider, "--model", "gpt-6.1-sol")
             for door in ("configure", "start"):
                 for explicit in (False, True):
-                    record = root / f"parent-compaction-{saved_provider}-{door}-{explicit}.json"
+                    key = f"parent-compaction-{saved_provider}-{door}-{explicit}"
+                    record = root / (key + ".json")
                     options = ["--compaction-trigger", "2000"] if explicit else []
                     created = value("session", door, "--store", directory, "--parent", parent,
                                     "--model", "gpt-6.1-sol", "--tools", "bash", "--loaded-tools", "bash",
-                                    "--permission-mode", "bypass", "--record", record, *options,
+                                    "--permission-mode", "bypass", "--record", record, "--key", key, *options,
                                     input="attached compaction evidence" if door == "start" else None)
                     captured = json.loads(record.read_bytes())["configuration"]
                     assert "provider" not in captured and "workspace" not in captured, captured
