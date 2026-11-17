@@ -112,12 +112,13 @@ jobs:
                   with urllib.request.urlopen(request, timeout=10) as response:
                       data = json.load(response)
                   batch = data[key]
-                  if not isinstance(batch, list) or type(data['total_count']) is not int:
+                  if not isinstance(batch, list):
                       raise ValueError('Malformed Actions API response')
                   rows.extend(batch)
+                  # A short page ends the list. total_count is not used: for
+                  # status-filtered runs GitHub reports more than it returns
+                  # (run 44107206214), which made every snapshot unavailable.
                   if len(batch) < 100:
-                      if len(rows) < data['total_count']:
-                          raise ValueError('Incomplete Actions API response')
                       return rows
                   page += 1
 
