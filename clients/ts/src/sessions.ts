@@ -21,8 +21,8 @@ export interface AgentSpec {
 	workspace?: string;
 	/** `openai` or `codex`. Fixed for the Session's life. */
 	provider?: NonNullable<Schemas["AgentSpec"]["provider"]>;
-	/** May change within the Session's fixed provider. */
-	model: string;
+	/** The Host chooses the model when omitted at creation. May change within the fixed provider. */
+	model?: string;
 	instructions?: string;
 	/** JSON output schema object; `null` clears it. */
 	outputSchema?: Record<string, unknown> | null;
@@ -44,7 +44,7 @@ export interface AgentSpec {
 /** The same agent spec accepted by creation and connect-time presets. */
 export type SessionSpec = AgentSpec;
 
-/** Creation needs a model, or a named preset with explicit overrides. */
+/** Chosen creation settings, optionally seeded by a named preset. */
 export type SessionCreate = ((AgentSpec & { preset?: never }) | ({ preset: string } & Partial<AgentSpec>)) & {
 	/** Create an attached child, inheriting provider, workspace and Bash environment. */
 	parent?: string;

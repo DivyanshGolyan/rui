@@ -195,11 +195,12 @@ function sessionTypeContract(spec: SessionSpec): void {
 	const { effort: _effort, ...withoutEffort } = spec;
 	const missingEffort: SessionSpec = withoutEffort;
 	const minimal: SessionSpec = { model: "gpt-6.1-sol" };
-	// @ts-expect-error creation still needs a model
 	const missingModel: SessionSpec = {};
+	// @ts-expect-error an explicit null model cannot request the Host default
+	const nullModel: SessionSpec = { model: null };
 	const nullCompaction: SessionUpdate = { compactAt: null };
 	const sparse: SessionUpdate = {};
-	void [missingEffort, minimal, missingModel, nullCompaction, sparse];
+	void [missingEffort, minimal, missingModel, nullModel, nullCompaction, sparse];
 }
 void sessionTypeContract;
 
@@ -220,10 +221,10 @@ test("creation can name a preset without inventing missing fields", async () => 
 
 function presetTypeContract(sessions: Sessions): void {
 	void sessions.create({ preset: "review" }, { idempotencyKey: "preset" });
-	// @ts-expect-error neither a full spec nor a preset
 	void sessions.create({}, { idempotencyKey: "empty" });
-	// @ts-expect-error a partial spec needs a preset
 	void sessions.create({ instructions: "Do this" }, { idempotencyKey: "partial" });
+	// @ts-expect-error an explicit null model is never valid
+	void sessions.create({ model: null }, { idempotencyKey: "null-model" });
 	// @ts-expect-error a preset name is never null
 	void sessions.create({ preset: null }, { idempotencyKey: "null" });
 	// @ts-expect-error presets only seed creation

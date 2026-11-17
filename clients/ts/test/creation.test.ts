@@ -6,6 +6,7 @@ import { Sessions, type AgentSpec, type Link, type SessionCreate } from "../src/
 import { WIRE_VERSION } from "../src/transport.ts";
 
 const fields = [
+	["model", "gpt-6.1-sol", "gpt-6.1-sol"],
 	["tools", ["web_search", "bash", "bash"], ["bash", "web_search"]],
 	["loadedTools", ["web_search", "bash", "web_search"], ["bash", "web_search"]],
 	["permissionMode", "ask", "ask"],
@@ -16,8 +17,8 @@ const fields = [
 test("creation sends only chosen settings for every omitted and explicit field combination", async () => {
 	for (let mask = 0; mask < 1 << fields.length; mask++) {
 		const chosen = fields.filter((_, index) => (mask & (1 << index)) !== 0);
-		const spec: AgentSpec = { model: "gpt-6.1-sol", ...Object.fromEntries(chosen.map(([name, value]) => [name, value])) };
-		const expected = { model: "gpt-6.1-sol", ...Object.fromEntries(chosen.map(([name, , value]) => [name, value])) };
+		const spec: AgentSpec = Object.fromEntries(chosen.map(([name, value]) => [name, value]));
+		const expected = Object.fromEntries(chosen.map(([name, , value]) => [name, value]));
 		const before = structuredClone(spec);
 		const idempotencyKey = `chosen:${mask}`;
 		const link: Link = {

@@ -78,19 +78,19 @@ test("connect presets seed creation, overrides win and edited presets replay by 
 	}
 });
 
-test("a connect preset still requires a model", { skip }, async () => {
+test("a connect preset refuses an explicit null model", { skip }, async () => {
 	const root = realpathSync(mkdtempSync(join(tmpdir(), "rui-ts-")));
 	await assert.rejects(Rui.connect({
 		store: { sqlite: { dir: join(root, "store") } },
 		providers: { openai: { endpoint: "https://api.openai.com/v1/responses", key: "sk-ts-presets" } },
-		// @ts-expect-error Deliberately omit the required model to exercise Host refusal.
-		presets: { review: { tools: [] } },
+		// @ts-expect-error Deliberately pass a null model to exercise Host refusal.
+		presets: { review: { model: null, tools: [] } },
 	}, { binary: binary ?? "rui" }), (error: unknown) => error instanceof RuiStartError && error.code === "settings_invalid" && /review.*model/.test(error.message));
 });
 
 test("the Host resolves omitted preset settings at creation and preserves explicit choices", { skip }, async () => {
 	const root = realpathSync(mkdtempSync(join(tmpdir(), "rui-ts-")));
-	const minimal: AgentSpec = { model: "gpt-6.1-sol", workspace: root };
+	const minimal: AgentSpec = { workspace: root };
 	const rui = await Rui.connect({
 		store: { sqlite: { dir: join(root, "store") } },
 		providers: { openai: { endpoint: "https://api.openai.com/v1/responses", key: "sk-ts-presets" } },
@@ -108,6 +108,7 @@ test("the Host resolves omitted preset settings at creation and preserves explic
 		for (const field of ["model", "provider", "workspace", "tools", "loaded_tools", "permission_mode", "reasoning_effort", "compaction_trigger_override"]) {
 			assert.deepEqual(saved[field], directSettings[field], field);
 		}
+		assert.equal(saved.model, "gpt-6.1-sol");
 		assert.equal(saved.reasoning_effort, "low");
 		assert.equal(saved.permission_mode, "bypass");
 		assert.equal(saved.compaction_trigger_override, "945000");
