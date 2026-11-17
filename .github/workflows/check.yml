@@ -61,6 +61,7 @@ jobs:
     timeout-minutes: 3
     permissions:
       contents: read
+      actions: read
     outputs:
       runs_on: ${{ steps.decide.outputs.runs_on || '"macos-15"' }}
       self_hosted: ${{ steps.decide.outputs.self_hosted || 'false' }}
@@ -84,6 +85,66 @@ jobs:
               "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/runners?per_page=100" \
               -o "$RUNNER_TEMP/mac-runners.json" || rm -f "$RUNNER_TEMP/mac-runners.json"
           fi
+      - name: Read the workflow queue snapshot
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          QUEUE_PATH: ${{ runner.temp }}/mac-queue.json
+        run: |
+          rm -f "$QUEUE_PATH" "$QUEUE_PATH.tmp"
+          trap 'rm -f "$QUEUE_PATH.tmp"' EXIT
+          timeout 60s python3 - <<'PY'
+          import json
+          import os
+          import urllib.parse
+          import urllib.request
+
+          base = os.environ['GITHUB_API_URL'].rstrip('/') + '/repos/' + os.environ['GITHUB_REPOSITORY'] + '/actions'
+          headers = {'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
+                     'Accept': 'application/vnd.github+json'}
+
+          def pages(path, key, params):
+              rows = []
+              page = 1
+              while True:
+                  query = urllib.parse.urlencode(dict(params, per_page=100, page=page))
+                  request = urllib.request.Request(base + path + '?' + query, headers=headers)
+                  with urllib.request.urlopen(request, timeout=10) as response:
+                      data = json.load(response)
+                  batch = data[key]
+                  if not isinstance(batch, list) or type(data['total_count']) is not int:
+                      raise ValueError('Malformed Actions API response')
+                  rows.extend(batch)
+                  if len(batch) < 100:
+                      if len(rows) < data['total_count']:
+                          raise ValueError('Incomplete Actions API response')
+                      return rows
+                  page += 1
+
+          runs = []
+          for status in ('queued', 'in_progress'):
+              runs.extend(pages('/runs', 'workflow_runs', {'status': status}))
+          counts = {'mac_queued': 0, 'hosted_queued': 0, 'hosted_running': 0}
+          for run in runs:
+              run_id = run['id']
+              if type(run_id) is not int or run_id <= 0:
+                  raise ValueError('Invalid workflow run ID')
+              for job in pages('/runs/' + str(run_id) + '/jobs', 'jobs', {}):
+                  labels, status = job['labels'], job['status']
+                  if not isinstance(labels, list) or any(not isinstance(label, str) for label in labels) or not isinstance(status, str):
+                      raise ValueError('Malformed workflow job')
+                  if 'rui-mac' in labels and status == 'queued':
+                      counts['mac_queued'] += 1
+                  if 'macos-15' in labels:
+                      if status == 'queued':
+                          counts['hosted_queued'] += 1
+                      elif status == 'in_progress':
+                          counts['hosted_running'] += 1
+          path = os.environ['QUEUE_PATH']
+          with open(path + '.tmp', 'w') as output:
+              json.dump(counts, output)
+          os.replace(path + '.tmp', path)
+          PY
       - name: Choose the Mac runner with hosted fallback
         id: decide
         if: ${{ always() }}
@@ -92,6 +153,7 @@ jobs:
           INPUTS: ${{ toJSON(inputs) }}
           RUI_MAC_RUNNER: ${{ vars.RUI_MAC_RUNNER }}
           RUNNERS_PATH: ${{ runner.temp }}/mac-runners.json
+          QUEUE_PATH: ${{ runner.temp }}/mac-queue.json
         run: python3 -B tests/ci/mac_runner.py
       - name: Explain an unavailable routing decision
         if: ${{ always() && steps.decide.outcome != 'success' }}
