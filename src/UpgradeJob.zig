@@ -783,6 +783,8 @@ test "Upgrade publication version survives cancellation and restart discovery or
 
 test "background discovery domain covers version order publication failure cancellation and once-only retirement" {
     const Candidate = @import("release_candidate.zig").Version;
+    const running_version = Candidate.parse(@import("transport_options").version) catch null;
+    const newer_candidate = if (running_version) |running| running.order(.{ .schema = 999, .patch = 2 }) == .lt else false;
     for ([_]struct { []const u8, Candidate, bool }{
         .{ "0.60.1", .{ .schema = 60, .patch = 0 }, false },
         .{ "0.60.1", .{ .schema = 60, .patch = 1 }, false },
@@ -819,7 +821,7 @@ test "background discovery domain covers version order publication failure cance
         try std.testing.expect(job.finished and job.operation == .discover);
         try std.testing.expect(job.task.thread == null and job.checked == null and job.result == null);
         try std.testing.expectEqual(Outcome.unchanged, job.outcome);
-        try std.testing.expectEqual(case == 0, job.availability() != null);
+        try std.testing.expectEqual(case == 0 and newer_candidate, job.availability() != null);
         job.deinit();
         try std.testing.expect(job.discovery_attempted);
         try std.testing.expect(!job.started and !job.cancelling);

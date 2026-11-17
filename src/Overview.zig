@@ -7701,6 +7701,9 @@ test "Session pin drawn Root gestures preserve composer focus draft and caret ac
 test "background discovery reaches the production version widget without requesting an upgrade" {
     for (0..3) |case| {
         const discovery_failed = case == 1;
+        const running_version = @import("release_candidate.zig").Version.parse(@import("transport_options").version) catch null;
+        const newer_candidate = if (running_version) |running| running.schema < 999 or (running.schema == 999 and running.patch < 2) else false;
+        const offers_update = !discovery_failed and newer_candidate;
         const rig = try openOverview();
         defer rig.close();
         const overview = rig.overview;
@@ -7739,7 +7742,7 @@ test "background discovery reaches the production version widget without request
         try overview.appDiscoverUpgrade(&ctx);
         try std.testing.expect(!overview.state.upgrading());
         try std.testing.expect(overview.state.upgrade.run == null);
-        try std.testing.expectEqual(!discovery_failed, overview.state.upgrade.available != null);
+        try std.testing.expectEqual(offers_update, overview.state.upgrade.available != null);
         try std.testing.expect(job.finished and job.task.thread == null and job.result == null and job.checked == null);
         var shown = try rig.shown(80, 24);
         defer shown.deinit();
@@ -7748,7 +7751,8 @@ test "background discovery reaches the production version widget without request
             if (std.mem.startsWith(u8, try shown.line(@intCast(row)), "  Settings")) break @intCast(row);
         } else return error.TestExpectedSettingsRow;
         const bottom = try shown.line(settings_row + 1);
-        try std.testing.expectEqual(!discovery_failed, std.mem.indexOf(u8, bottom, "Update to 0.999.2") != null);
+        try std.testing.expectEqual(offers_update, std.mem.indexOf(u8, bottom, "Update to 0.999.2") != null);
+        if (!offers_update) try std.testing.expect(std.mem.indexOf(u8, bottom, @import("transport_options").version) != null);
         try std.testing.expect(std.mem.indexOf(u8, bottom, "Update failed") == null);
         try overview.appDiscoverUpgrade(&ctx);
         try std.testing.expect(job.task.thread == null);
