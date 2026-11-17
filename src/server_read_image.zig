@@ -231,16 +231,16 @@ fn scratchFile(host: *Host, action: u64, ordinal: u64) !std.Io.File {
 
 const Progress = union(enum) { pending, complete, input_failed: anyerror };
 
-fn isImageError(err: anyerror) bool {
+fn isInputFailure(err: anyerror) bool {
+    if (err == error.ScratchCapacityExceeded) return true;
     inline for (@typeInfo(@import("input_media.zig").Error).error_set.error_names.?) |name| {
         if (err == @field(anyerror, name)) return true;
     }
     return false;
 }
 
-/// File and validation errors are definite failed reads. Capture I/O is an
-/// infrastructure failure: input may have been read completely, so the caller
-/// fences rather than replacing it with an ordinary file failure.
+/// File, validation and scratch-capacity failures settle explicitly through the
+/// existing failure path. Capture I/O still fences: its outcome is uncertain.
 fn advance(io: std.Io, active: *Active) !Progress {
     const capture = &active.capture.?;
     const remaining = active.length - capture.length;
@@ -248,7 +248,7 @@ fn advance(io: std.Io, active: *Active) !Progress {
     if (count == 0 and remaining != 0) return .{ .input_failed = error.ImageFileChanged };
     var allowance: usize = count;
     _ = capture.append(active.window[0..count], &allowance, false) catch |err| {
-        if (isImageError(err)) return .{ .input_failed = err };
+        if (isInputFailure(err)) return .{ .input_failed = err };
         return err;
     };
     if (capture.length != active.length) return .pending;
@@ -256,20 +256,33 @@ fn advance(io: std.Io, active: *Active) !Progress {
     const more = active.source.?.readPositionalAll(io, &extra, active.length) catch |err| return .{ .input_failed = err };
     if (more != 0) return .{ .input_failed = error.ImageFileChanged };
     capture.end() catch |err| {
-        if (isImageError(err)) return .{ .input_failed = err };
+        if (isInputFailure(err)) return .{ .input_failed = err };
         return err;
     };
     return .complete;
 }
 
+const TestCase = enum { snapshot, missing, invalid, oversized, stop, background, capture, seal, publication, shutdown, payload_capacity, index_capacity };
+
 test "read_image custody owns snapshot publication stop background and recovery" {
+    try testReadImage(&.{ .snapshot, .missing, .invalid, .oversized, .stop, .background, .capture, .seal, .publication, .shutdown });
+}
+
+test "read_image payload growth exhaustion settles failure and releases custody" {
+    try testReadImage(&.{.payload_capacity});
+}
+
+test "read_image index creation exhaustion settles failure and releases custody" {
+    try testReadImage(&.{.index_capacity});
+}
+
+fn testReadImage(cases: []const TestCase) !void {
     if (!source_file.available) return error.SkipZigTest;
     const testing = store.testing;
     const protocol = @import("protocol.zig");
     const retention = @import("output_retention.zig");
     const png = @embedFile("codecs/fixtures/image-input/pixel.png");
-    const Case = enum { snapshot, missing, invalid, oversized, stop, background, capture, seal, publication, shutdown };
-    for (std.enums.values(Case)) |case| {
+    for (cases) |case| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
         var root_buffer: [protocol.max_workspace_bytes]u8 = undefined;
@@ -302,12 +315,19 @@ test "read_image custody owns snapshot publication stop background and recovery"
             }
         }
         const selected = (try storage.nextAction(.read_image, .{ .free_credit = .one, .mcp_open = false })).?;
-        var used: std.atomic.Value(u64) = .init(0);
+        const baseline: u64 = if (case == .payload_capacity or case == .index_capacity) 17 else 0;
+        var used: std.atomic.Value(u64) = .init(baseline);
         var retained: [2]retention.Entry = @splat(.{});
-        var queue = retention.Queue.initialize(std.testing.io, root, .{ .used = &used, .limit = if (case == .capture) png.len else 1024 * 1024 }, &retained);
+        const limit: u64 = baseline + switch (case) {
+            .payload_capacity => png.len - 1,
+            .index_capacity => png.len + @import("input_parts.zig").Record.byte_length - 1,
+            else => 1024 * 1024,
+        };
+        var queue = retention.Queue.initialize(std.testing.io, root, .{ .used = &used, .limit = limit }, &retained);
         defer queue.cleanupAll();
         var records: [1]execution.CustodyRecord = @splat(.{});
         var host: Host = .{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage, .retention = &queue, .custody = execution.CustodyPool.initialize(&records) };
+        var capture_vtable = std.testing.io.vtable.*;
         var calls: Calls = .{};
         defer calls.shutdown(&host);
         try std.testing.expectEqual(@import("execution_turn.zig").Admission.admitted, calls.admit(&host, selected));
@@ -318,6 +338,20 @@ test "read_image custody owns snapshot publication stop background and recovery"
             try std.testing.expectEqual(@as(usize, 1), host.custody.occupied());
             try std.testing.expect(calls.contains(selected.action_id));
             try std.testing.expectError(error.DispatchPermitConsumed, host.custody.consumeLaunchAuthority(active.token, .{ .action = active.binding }, .now(std.testing.io, .awake)));
+            if (case == .payload_capacity) {
+                // Retain an initial payload charge before later growth fails.
+                var allowance: usize = 1;
+                try std.testing.expectEqual(@as(usize, 1), try active.capture.?.append(png[0..1], &allowance, false));
+                try std.testing.expectEqual(baseline + 1, used.load(.acquire));
+            }
+            if (case == .capture) {
+                capture_vtable.fileWritePositional = struct {
+                    fn write(_: ?*anyopaque, _: std.Io.File, _: []const u8, _: []const []const u8, _: usize, _: u64) std.Io.File.WritePositionalError!usize {
+                        return error.NoSpaceLeft;
+                    }
+                }.write;
+                active.capture.?.io.vtable = &capture_vtable;
+            }
             if (case == .snapshot) {
                 // Replacement after acquisition cannot redirect the snapshot.
                 try tmp.dir.rename("image.png", tmp.dir, "original.png", std.testing.io);
@@ -342,7 +376,7 @@ test "read_image custody owns snapshot publication stop background and recovery"
         }
         try std.testing.expect(!calls.any());
         try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
-        try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+        try std.testing.expectEqual(baseline, used.load(.acquire));
         if (case == .capture or case == .seal or case == .publication or case == .shutdown) {
             try std.testing.expectEqual(@as(u64, 1), try testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND resolution_code IS NULL", .{selected.action_id}));
             if (case != .shutdown) try std.testing.expect(!host.launchAllowed());
@@ -355,6 +389,13 @@ test "read_image custody owns snapshot publication stop background and recovery"
             try testing.testingSqliteStore(&storage, &tmp, std.testing.io);
             storage_open = true;
             try std.testing.expect(try storage.recoverOneUncertainAction(.empty()));
+        }
+        if (case == .payload_capacity or case == .index_capacity) {
+            try std.testing.expect(host.launchAllowed());
+            try std.testing.expect(!storage.isFenced());
+            const text = "Image read failed: ScratchCapacityExceeded.";
+            try std.testing.expectEqual(@as(u64, 1), try testing.queryU64(&storage, "SELECT count(*) FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id WHERE a.action_id=?1 AND a.resolution_code='failed' AND c.form=0 AND c.byte_length=?2 AND c.digest=?3", .{ selected.action_id, text.len, testing.Blob{ .bytes = &protocol.contentDigest(text) } }));
+            try std.testing.expect(!(try storage.recoverOneUncertainAction(.empty())));
         }
         const code = switch (case) {
             .snapshot, .background => "succeeded",
