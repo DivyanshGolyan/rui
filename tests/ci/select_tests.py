@@ -350,7 +350,7 @@ SETUP_CACHE_LINE = re.compile(r"cache", re.IGNORECASE)
 CACHE_LINE = re.compile(r"zig[-_ ]?cache|\.cache/zig|cache[-_]dir|cache_root|has_side_effects|ci-compiled|build-cache"
                         r"|publish-caches|cache-execution", re.IGNORECASE)
 CACHE_POLICY = (".github/actions/setup/caches/save-keys.cjs", ".github/scripts/prune-caches.cjs", "tests/ci/cache_execution.py", "tests/ci/zig_cache_restat.c",
-                "tests/ci/run_selected.py")
+                "tests/ci/run_selected.py", "tests/ci/cache_snapshot.py")
 
 
 def code_lines(source):
@@ -467,7 +467,7 @@ RULES = (
     (("tests/integration/canonical_failure_integration.py", "build.zig"),
      ("canonical-failure-integration",), ("canonical-failure-integration",), "Canonical failure caller oracle"),
     (("build.zig", "build.zig.zon", "install.sh", "src/fetch_dependencies.sh", "src/build_*", "src/*.patch", ".agents/setup",
-      ".github/actions/setup/action.yml", "screen-emulator/*", "tests/ci/build_artifact.py"),
+      ".github/actions/setup/action.yml", "screen-emulator/*", "tests/ci/build_artifact.py", "tests/ci/cache_snapshot.py"),
      ("check-full", "admission-debug-integration", "test-full"),
      ("check-full", "admission-debug-integration", "test-full"),
      "Build, dependency or bootstrap inputs"),

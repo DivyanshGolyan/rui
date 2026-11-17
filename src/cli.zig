@@ -2330,6 +2330,7 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
     if (input.reload_skills and named == null) return usage();
     if (named != null and named.?.len == 0) return usage();
     if (parsed.get("parent")) |reference| input.parent = .{ .present = true, .value = reference };
+    if (parsed.get("preset")) |name| input.preset = .{ .present = true, .value = name };
     if (parsed.get("provider")) |name| input.provider = .{ .present = true, .value = name };
     if (parsed.get("model")) |model| {
         try admitModel(model);
@@ -2350,7 +2351,7 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
     var saved_effort: ?model_capability.ReasoningEffort = null;
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
     var compaction_buffer: [20]u8 = undefined;
-    if (input.session == .create) {
+    if (input.session == .create and !input.preset.present) {
         const intent: new_session_selection.Intent = .{
             .provider = if (input.provider.present) input.provider.value else null,
             .model = if (input.model.present) input.model.value else null,
@@ -2400,7 +2401,7 @@ fn configureCaptured(init: std.process.Init, requester: client.Requests, parsed:
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     input.store = try selectedStore(init, if (live) |address| address.store else parsed.get("store"), &selected_buffer);
     var compaction_buffer: [20]u8 = undefined;
-    if (input.session == .named and input.resetsToDefault()) {
+    if (input.session == .named and !input.preset.present and input.resetsToDefault()) {
         var current_model: protocol.Bounded(protocol.max_model_bytes) = .{};
         var current_provider: protocol.Provider = undefined;
         {

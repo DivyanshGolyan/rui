@@ -73,7 +73,7 @@ pub const Command = enum {
     fn definitionValue(self: Command) Definition {
         return switch (self) {
             .session_start => .{ .resource = .session, .name = "start", .description = "Read the first Message from stdin, atomically create a Session and admit that Message. Print a JSON mutation receipt with the new ID in .context.session, the request handle in .context.key and the resolved configuration, not a completed answer. Fresh Sessions allow all built-in tools and initially load bash, find_tools, skill and web_search; set instructions separately with session configure --instructions -. Recover the original request as kind message after lost output.", .details = label_help ++ parent_help, .options = destination ++ capture ++ parent ++ binding ++ start_settings, .mutation = true },
-            .session_configure => .{ .resource = .session, .name = "configure", .description = "Capture settings, including the Session's Label (its name or title), then admit configuration only. Omit the Session selector to create a fresh address with concrete defaults; addressed changes preserve omitted settings. --reload-skills only rescans this Session catalog, appends changed catalog instructions, and acknowledges without starting model work. Do not combine it with settings.", .details = compaction_help, .options = destination ++ session ++ capture ++ parent ++ binding ++ settings ++ &[_]Option{flag("reload-skills")}, .conflicts = settings_conflicts, .mutation = true },
+            .session_configure => .{ .resource = .session, .name = "configure", .description = "Capture settings, including the Session's Label (its name or title), then admit configuration only. Omit the Session selector to create a fresh address with concrete defaults or a named preset; addressed changes preserve omitted settings. --reload-skills only rescans this Session catalog, appends changed catalog instructions, and acknowledges without starting model work. Do not combine it with settings.", .details = compaction_help, .options = destination ++ session ++ capture ++ parent ++ preset ++ binding ++ settings ++ &[_]Option{flag("reload-skills")}, .conflicts = settings_conflicts, .mutation = true },
             .session_send => .{ .resource = .session, .name = "send", .description = "Read exact Message text from stdin and admit it to --to ID, exactly six lowercase Crockford characters (for example k7m2qx). Peers use their sender's Store and reject a conflicting --store. Without a sender, --store or saved Store defaults apply. Returns an admission receipt, before the recipient completes. Each /name word in the text that names one of the recipient's advertised skills appends that skill's complete SKILL.md and absolute path to what the model reads; the text itself is saved as written. Empty stdin sends nothing.", .options = destination ++ capture ++ &[_]Option{value("to", "ID")}, .mutation = true, .requires = &.{&.{"to"}} },
             .session_inspect => .{ .resource = .session, .name = "inspect", .description = "Read saved Session settings and work as JSON, or export exact retained failed-response bytes. Inspection never admits work.", .details = "--failed-response body|metadata requires --operation ID and --attempt N, excludes --profile, and writes only that stored byte stream to stdout. Redirect body output to a file; it can contain binary or private data. Missing records or omitted bodies fail on stderr. Partial bodies export their retained prefix; inspect metadata for status. No Host is started and no provider is contacted.\n", .options = destination ++ session ++ &[_]Option{ choice("profile", cli_value.ReportProfile), choice("failed-response", cli_value.FailedResponsePart), value("operation", "ID"), value("attempt", "N") }, .conflicts = &.{.{ .code = .profile_excludes_failed_response, .a = "profile", .b = "failed-response" }}, .requires = need_session },
             .session_list => .{ .resource = .session, .name = "list", .description = "List active Sessions in the current Workspace, or all Workspaces with --all, as one JSON value. --archived lists only archived Sessions; --include-archived includes both. --since TOKEN, the since of an earlier listing, lists only the Sessions that may have changed since it (delta changed), nothing (not_modified), or every Session (full).", .options = destination ++ &[_]Option{ flag("all"), flag("archived"), flag("include-archived"), value("since", "TOKEN") }, .conflicts = &.{.{ .code = .archive_visibility_conflict, .a = "archived", .b = "include-archived" }} },
@@ -149,7 +149,14 @@ const parent_help =
     \\
 ;
 
-const compaction_help = label_help ++ parent_help ++ reasoning_help ++ compaction_policy ++
+const preset_help =
+    \\--preset NAME creates from a named Host Settings preset; only explicitly supplied settings override it.
+    \\Presets are only available to session configure creation; session start does not support them.
+    \\Omitted settings inherit the preset. default sends null: output reservation clears; effort clears only where the model permits; compaction trigger is refused.
+    \\
+;
+
+const compaction_help = label_help ++ parent_help ++ preset_help ++ reasoning_help ++ compaction_policy ++
     \\ Inspect settings with rui session inspect.
     \\Omit --session to allocate a new six-character ID. --session ID updates only an existing Session; unknown IDs never create one.
     \\
@@ -158,6 +165,7 @@ const compaction_help = label_help ++ parent_help ++ reasoning_help ++ compactio
 const destination = serve_grammar.destination;
 const session = &[_]Option{value("session", "ID")};
 const parent = &[_]Option{value("parent", "ID")};
+const preset = &[_]Option{value("preset", "NAME")};
 const key = &[_]Option{ value("key", "KEY"), hex("key-hex", "key", 128) };
 const capture = &[_]Option{ value("record", "FILE"), value("key", "KEY"), hex("key-hex", "key", 128), hiddenValue("test-drop-reply") };
 const binding = settingOptions(.binding, false);
@@ -853,4 +861,13 @@ test "parent relation reaches only creating command grammars without hiding cano
     }
     try expectValidation(.session_configure, &.{ "--session", "k7m2qx", "--parent", "09azvw" }, false);
     try expectValidation(.session_send, &.{ "--to", "k7m2qx", "--parent", "09azvw" }, error.UnknownArgument);
+}
+
+test "preset is a Configure option and Start refuses it" {
+    var storage: [1024]u8 = undefined;
+    const parsed = try testParse(Command.session_configure.definition(), &.{ "--preset", "restricted" }, &storage);
+    try std.testing.expectEqualStrings("restricted", parsed.getNamed("preset").?);
+    try expectValidation(.session_configure, &.{ "--preset", "x", "--preset", "x" }, error.DuplicateArgument);
+    try expectValidation(.session_start, &.{ "--preset", "x" }, error.UnknownArgument);
+    try expectValidation(.session_configure, &.{ "--session", "k7m2qx", "--preset", "x" }, false);
 }

@@ -103,6 +103,11 @@ An empty Message stream sends nothing.
 Without `--session`, `session configure` creates a Session with no Message.
 With `--session`, it updates only that Session and keeps the settings you omit.
 
+Use `session configure --preset NAME` to create from a named Host Settings preset.
+The preset supplies the complete initial configuration; explicitly supplied options override it, while omitted options retain the preset values.
+For preset creation, `default` sends null: it clears the output reservation, clears effort only where the model permits, and is refused for the compaction trigger. Empty instructions, `--tools none`, `--loaded-tools none`, `--label ""` and `--text-output` are explicit overrides.
+Preset creation is not available on `session start`.
+
 ## Approve Actions
 
 If a request needs approval, inspect the reported Action first:
