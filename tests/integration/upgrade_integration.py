@@ -10,7 +10,6 @@ import os
 import pathlib
 import re
 import secrets
-import select
 import shlex
 import shutil
 import signal
@@ -20,7 +19,6 @@ import subprocess
 import sys
 import tempfile
 import threading
-import time
 from urllib.parse import quote
 
 import live_engines
@@ -1567,14 +1565,11 @@ def proof_relaunched(c, screen, process):
 def exit_on_sigint(screen, process, description):
     process.send_signal(signal.SIGINT)
 
-    deadline = time.monotonic() + 8
-    while True:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0 or not select.select([screen.master], [], [], remaining)[0]:
-            raise TimeoutError(f"timed out waiting for {description}")
-        if screen.read_output() is False:
-            break
-    process.wait(timeout=max(0, deadline - time.monotonic()))
+    def exited_and_drained():
+        return screen.read_output(), process.poll()
+
+    wait_for(exited_and_drained, description,
+             ready=lambda observation: observation[0] is False and observation[1] is not None)
     output = bytes(screen.tail)
     restored = output.rfind(b"\x1b[?1049l")
     assert restored >= 0, f"{description}: terminal not restored"
