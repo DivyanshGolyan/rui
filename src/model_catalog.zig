@@ -22,6 +22,9 @@ pub fn builtinInstructions(model: []const u8) BuiltinInstructions {
         .{ "gpt-6.1-terra", BuiltinInstructions.terra },
         .{ "gpt-6.1-sol", BuiltinInstructions.sol },
         .{ "gpt-6-astra", BuiltinInstructions.astra },
+        // Codex has not published 6.2 templates yet; reuse the 6.1 Sol and Terra/Astra assets.
+        .{ "gpt-6.2-sol", BuiltinInstructions.sol },
+        .{ "gpt-6.2-astra", BuiltinInstructions.astra },
     };
     inline for (reviewed) |entry| if (std.mem.eql(u8, model, entry[0])) return entry[1];
     return .generic;
@@ -188,18 +191,20 @@ test "model catalog chat facts cover exact types modalities and whole non-chat f
     }
 }
 
-test "built-in instructions select only four exact requested model identities" {
+test "built-in instructions select only six exact requested model identities" {
     const cases = .{
         .{ "gpt-6-luna", BuiltinInstructions.luna, @embedFile("model_instructions/luna.txt") },
         .{ "gpt-6.1-terra", BuiltinInstructions.terra, @embedFile("model_instructions/terra-astra.txt") },
         .{ "gpt-6.1-sol", BuiltinInstructions.sol, @embedFile("model_instructions/sol.txt") },
         .{ "gpt-6-astra", BuiltinInstructions.astra, @embedFile("model_instructions/terra-astra.txt") },
+        .{ "gpt-6.2-sol", BuiltinInstructions.sol, @embedFile("model_instructions/sol.txt") },
+        .{ "gpt-6.2-astra", BuiltinInstructions.astra, @embedFile("model_instructions/terra-astra.txt") },
     };
     inline for (cases) |case| {
         try std.testing.expectEqual(case[1], builtinInstructions(case[0]));
         try std.testing.expectEqualStrings(case[2], builtinInstructions(case[0]).bytes());
     }
-    for ([_][]const u8{ "", "gpt-6-sol", "gpt-6-terra", "gpt-6.1-luna", "GPT-6-LUNA", "openai/gpt-6-luna", "gpt-6-luna-extra", "gpt-6-lun", "gpt-6.1-sol-extra", "gpt-6-astra-2026", "future-chat" }) |model| {
+    for ([_][]const u8{ "", "gpt-6-sol", "gpt-6-terra", "gpt-6.1-luna", "GPT-6-LUNA", "openai/gpt-6-luna", "gpt-6-luna-extra", "gpt-6-lun", "gpt-6.1-sol-extra", "gpt-6-astra-2026", "gpt-6.2-terra", "gpt-6.2-sol-extra", "future-chat" }) |model| {
         try std.testing.expectEqual(BuiltinInstructions.generic, builtinInstructions(model));
         try std.testing.expectEqualStrings("", builtinInstructions(model).bytes());
     }
