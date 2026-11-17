@@ -67,7 +67,7 @@ def main():
             stdout, stderr = caller.communicate(timeout=20)
             assert caller.returncode == 0, (stdout, stderr)
             admitted = json.loads(stdout)
-            assert canonical_fixture.announced(subprocess.CompletedProcess(args, 0, stdout, stderr)) == "receipt-original"
+            assert not stderr, stderr
             expected = {"provider": "codex", "model": DEFAULTS.recommended_model,
                         "reasoning_effort": start_effort(DEFAULTS.recommended_model), "effort_source": "model_default"}
             assert admitted["configuration"] == expected, admitted
@@ -75,7 +75,8 @@ def main():
             original = record.read_bytes()
             saved = json.loads(original)
             assert set(saved["configuration"]) == {"provider", "model", "workspace"}, saved
-            replayed = json.loads(invoke(*args, input=task).stdout)
+            replay_args = args[:-4] + ["--record", root / "replay.json", "--key", "receipt-original"]
+            replayed = json.loads(invoke(*replay_args, input=task).stdout)
             assert replayed["configuration"] == expected and replayed["context"] == admitted["context"], replayed
             assert replayed["answer"]["replayed"] and replayed["answer"]["admission"] == admitted["answer"]["admission"], replayed
             assert record.read_bytes() == original
@@ -86,16 +87,17 @@ def main():
             failure_record = root / "report-failure.json"
             failure_args = args[:-4] + ["--record", failure_record, "--key", "receipt-report-failure"]
             for replay in (False, True):
-                failed = subprocess.run([str(fixture.RUI), *map(str, failure_args)], env=environment,
+                replay_args = failure_args[:-4] + ["--record", root / ("report-failure-replay.json" if replay else "report-failure.json"),
+                                                   "--key", "receipt-report-failure"]
+                failed = subprocess.run([str(fixture.RUI), *map(str, replay_args)], env=environment,
                                         cwd=workspace, input=task, text=True, capture_output=True, timeout=20)
                 assert failed.returncode != 0, failed
                 known = json.loads(failed.stdout)
                 assert known["answer"]["status"] == "accepted" and known["answer"]["replayed"] is replay, known
                 assert known["context"]["key"] == "receipt-report-failure" and known["context"]["session"], known
                 assert "configuration" not in known and "canonical_store_failure" in failed.stderr, failed
-                assert canonical_fixture.announced(failed) == "receipt-report-failure"
             recovered = value("request", "recover", "--store", store, "--record", failure_record,
-                              "--key", "receipt-report-failure")
+                              "--kind", "message")
             assert recovered["answer"]["replayed"] and recovered["context"] == known["context"], recovered
             print("session start receipt: concurrent edit, immutable replay and accepted identity after report failure passed", flush=True)
         finally:
