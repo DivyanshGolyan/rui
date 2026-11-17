@@ -2919,6 +2919,8 @@ export interface components {
             turn: components["schemas"]["Decimal"] | null;
             operation: components["schemas"]["Decimal"] | null;
             first_action: components["schemas"]["Decimal"] | null;
+            group: components["schemas"]["GroupBrief"] | null;
+            group_manual: boolean;
             last_line: components["schemas"]["LastLineFields"] | null;
             revision: components["schemas"]["Decimal"];
             workspace: string;
@@ -3224,6 +3226,17 @@ export interface components {
             group_action: "collapse";
             group_id: components["schemas"]["Decimal"];
             collapsed: boolean;
+        } | {
+            /** @constant */
+            version: "20";
+            /** @constant */
+            kind: "session_group";
+            store: string;
+            key: string;
+            session: string;
+            /** @constant */
+            group_action: "rename_current";
+            group_name: string;
         };
         SessionPinConflictReply: {
             /** @constant */

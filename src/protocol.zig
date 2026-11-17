@@ -1170,37 +1170,28 @@ fn ParserOf(comptime Custody: type) type {
         }
 
         fn parseSessionGroup(self: *Parser, out: *SessionGroupCommand, members: *Members) !void {
+            const group = @import("session_group.zig");
             const Field = enum { key, session, group_action, group_name, group_id, collapsed };
-            const Action = std.meta.Tag(@import("session_group.zig").Action);
             var seen: std.enums.EnumSet(Field) = .empty;
-            var action: ?Action = null;
-            var name: @import("session_group.zig").Name = .{};
-            var id: u64 = 0;
-            var collapsed: bool = false;
+            var action: ?std.meta.Tag(group.Action) = null;
+            var fields: group.Action.Fields = .{};
             while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
                 .key => try self.readCommandKey(&out.key),
                 .session => try self.readSmallString(&out.session),
                 .group_action => {
                     var text: Bounded(16) = .{};
                     try self.readSmallString(&text);
-                    action = std.meta.stringToEnum(Action, text.slice()) orelse return error.InvalidJsonShape;
+                    action = std.meta.stringToEnum(std.meta.Tag(group.Action), text.slice()) orelse return error.InvalidJsonShape;
                 },
-                .group_name => try self.readSmallString(&name),
-                .group_id => id = try self.readCanonicalU64(),
-                .collapsed => collapsed = try self.readBoolean(),
+                .group_name => {
+                    fields.name = .{};
+                    try self.readSmallString(&fields.name.?);
+                },
+                .group_id => fields.group = try self.readCanonicalU64(),
+                .collapsed => fields.collapsed = try self.readBoolean(),
             };
             try require(Field, seen, &.{ .key, .session, .group_action });
-            const selected = action orelse return error.InvalidJsonShape;
-            if (seen.contains(.group_name) != (selected == .assign or selected == .rename) or
-                seen.contains(.group_id) != (selected == .rename or selected == .collapse) or
-                seen.contains(.collapsed) != (selected == .collapse)) return error.InvalidJsonShape;
-            out.action = switch (selected) {
-                .assign => .{ .assign = name },
-                .leave => .leave,
-                .automatic => .automatic,
-                .rename => .{ .rename = .{ .group = id, .name = name } },
-                .collapse => .{ .collapse = .{ .group = id, .collapsed = collapsed } },
-            };
+            out.action = group.Action.fromFields(action orelse return error.InvalidJsonShape, fields) catch return error.InvalidJsonShape;
         }
 
         fn parseModelInterruption(self: *Parser, out: *ModelInterruptionCommand, members: *Members) !void {
@@ -1948,11 +1939,12 @@ pub const session_pin_request = struct {
 pub const session_group_request = struct {
     pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"session_group\",\"store\":", store_hole, ",\"key\":", key_hole, ",\"session\":", session_hole };
     pub const assign = head ++ .{ ",\"group_action\":\"assign\",\"group_name\":", Hole{ .string = max_group_name_bytes }, "}" };
+    pub const rename_current = head ++ .{ ",\"group_action\":\"rename_current\",\"group_name\":", Hole{ .string = max_group_name_bytes }, "}" };
     pub const leave = head ++ .{",\"group_action\":\"leave\"}"};
     pub const automatic = head ++ .{",\"group_action\":\"automatic\"}"};
     pub const rename = head ++ .{ ",\"group_action\":\"rename\",\"group_id\":\"", Hole.decimal, "\",\"group_name\":", Hole{ .string = max_group_name_bytes }, "}" };
     pub const collapse = head ++ .{ ",\"group_action\":\"collapse\",\"group_id\":\"", Hole.decimal, "\",\"collapsed\":", Hole.boolean, "}" };
-    pub const variants = .{ assign, leave, automatic, rename, collapse };
+    pub const variants = .{ assign, leave, automatic, rename, collapse, rename_current };
 };
 pub const model_interruption_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"model_interruption\",\"store\":", store_hole, ",\"key\":", key_hole, ",\"target\":{\"session\":", session_hole, ",\"turn\":\"", Hole.decimal, "\",\"operation\":\"", Hole.decimal, "\"}}" };
 pub const permission_decision_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"permission_decision\",\"store\":", store_hole, ",\"key\":", key_hole, ",\"session\":", session_hole, ",\"action\":\"", Hole.decimal, "\",\"decision\":\"", Hole{ .tag = PermissionDecision }, "\"}" };
@@ -3305,9 +3297,10 @@ test "Action promotion parses one owned target and binds semantic replay" {
 
 test "group parser requires action-specific fields and semantic digest binds every action" {
     const prefix = "{\"version\":\"" ++ wire_version ++ "\",\"store\":\"s\",\"kind\":\"session_group\",\"key\":\"k\",\"session\":\"k7m2qx\"";
-    var digests: [6][32]u8 = undefined;
+    var digests: [7][32]u8 = undefined;
     inline for (.{
         ",\"group_action\":\"assign\",\"group_name\":\"Work\"}",
+        ",\"group_action\":\"rename_current\",\"group_name\":\"Work\"}",
         ",\"group_action\":\"leave\"}",
         ",\"group_action\":\"automatic\"}",
         ",\"group_action\":\"rename\",\"group_id\":\"1\",\"group_name\":\"Work\"}",
@@ -3335,5 +3328,19 @@ test "group parser requires action-specific fields and semantic digest binds eve
         var source: MetadataSource = .{ .input = prefix ++ case[0] };
         var parser: Tested.Parser = .{ .source = &source };
         try std.testing.expectError(case[1], parseForTest(&parser));
+    }
+}
+
+test "group protocol keeps semantic refusals representable for durable Store answers" {
+    const prefix = "{\"version\":\"" ++ wire_version ++ "\",\"store\":\"s\",\"kind\":\"session_group\",\"key\":\"k\",\"session\":\"k7m2qx\"";
+    inline for (.{
+        .{ ",\"group_action\":\"assign\",\"group_name\":\"\"}", error.InvalidGroupName },
+        .{ ",\"group_action\":\"rename\",\"group_id\":\"0\",\"group_name\":\"Work\"}", error.InvalidGroupId },
+        .{ ",\"group_action\":\"collapse\",\"group_id\":\"18446744073709551615\",\"collapsed\":false}", error.InvalidGroupId },
+    }) |case| {
+        var source: MetadataSource = .{ .input = prefix ++ case[0] };
+        var parser: Tested.Parser = .{ .source = &source };
+        const request = try parseForTest(&parser);
+        try std.testing.expectError(case[1], request.session_group.action.validate());
     }
 }

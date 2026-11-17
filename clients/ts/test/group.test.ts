@@ -9,6 +9,7 @@ import { WIRE_VERSION } from "../src/transport.ts";
 test("group operations preserve the exact desired action and notify only accepted edits", async () => {
 	const actions: SessionGroupAction[] = [
 		{ group_action: "assign", group_name: 'Work "雪"' },
+		{ group_action: "rename_current", group_name: "Current release" },
 		{ group_action: "leave" },
 		{ group_action: "automatic" },
 		{ group_action: "rename", group_id: "9007199254740993", group_name: "Release" },

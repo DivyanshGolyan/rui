@@ -535,15 +535,27 @@ fn appKey(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event, delivery:
     };
     try self.appNext(ctx, try self.event(.{ .input = .{
         .key = semantic,
+        .row = if (semantic == .enter or semantic == .left or (semantic == .action and semantic.action == .open_session)) self.app_sessions.keyboardTarget() else null,
         .under = delivery.under == .settings,
         .pasted = delivery.pasted,
     } }));
+    if (delivery.under == .main and !delivery.pasted) {
+        const navigated = semantic == .left or (semantic == .action and switch (semantic.action) {
+            .previous, .next, .select_previous, .select_next, .first, .last => true,
+            else => false,
+        });
+        if (navigated) self.app_sessions.selectKeyboard(self.state.selected);
+    }
     ctx.consumeAndRedraw();
 }
 
 fn appClick(raw: *anyopaque, ctx: *vxfw.EventContext, click: view.Click) anyerror!void {
     const self: *Self = @ptrCast(@alignCast(raw));
     try self.appNext(ctx, try self.event(.{ .clicked = .{ .target = click } }));
+    switch (click) {
+        .open, .new_session, .sessions, .archived, .settings => self.app_sessions.selectKeyboard(self.state.selected),
+        .pin, .group => {},
+    }
     ctx.redraw = true;
 }
 
@@ -836,7 +848,8 @@ const SessionRows = struct {
         const self: *const SessionRows = @ptrCast(@alignCast(raw));
         const item = view.listItem(self.state, index).?;
         const built = try view.listSegments(arena, self.state, item, self.width, self.caps, self.frame);
-        return .{ .segments = built.segments, .heading = built.heading, .target = view.clickOf(self.state, item), .alternate_target = view.pinClickOf(self.state, item) };
+        const input = view.rowInputOf(self.state, item);
+        return .{ .segments = built.segments, .heading = built.heading, .target = if (input) |value| value.target else null, .parent = if (input) |value| value.parent else null, .alternate_target = view.pinClickOf(self.state, item) };
     }
 };
 
@@ -1436,7 +1449,7 @@ fn conversed(raw: *anyopaque, kind: view.Kind, input: view.ConversationInput) !v
 fn observed(raw: *anyopaque, read: session_list.Snapshot, opening: bool) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     errdefer self.lent_failed = true;
-    const next = try self.event(.{ .observed = .{ .reference = self.opened, .read_version = read.read_version, .work = read.work, .last_line = read.last_line, .opening = opening } });
+    const next = try self.event(.{ .observed = .{ .reference = self.opened, .read_version = read.read_version, .work = read.work, .group = read.group, .group_manual = read.group_manual, .last_line = read.last_line, .opening = opening } });
     std.debug.assert(next == null);
 }
 
@@ -2023,6 +2036,7 @@ const Rig = struct {
     taken: [64 * 1024]u8 = undefined,
     attention: TerminalApp.Attention = undefined,
     last_focus: ?vxfw.Widget = null,
+    frames: std.heap.ArenaAllocator = .init(std.testing.allocator),
 
     fn open(options: Options, ops: Operations, interrupted: *client.Cancellation) !*Rig {
         Seen.now = .{};
@@ -2052,6 +2066,7 @@ const Rig = struct {
         rig.overview.worker.cancel();
         if (rig.overview.worker.thread != null) rig.overview.worker.join() catch {};
         rig.overview.destroy();
+        rig.frames.deinit();
         rig.out.deinit();
         rig.screen.deinit();
         std.testing.allocator.destroy(rig.screen);
@@ -2060,6 +2075,8 @@ const Rig = struct {
     }
 
     fn press(rig: *Rig, bytes: []const u8) !?Ending {
+        const size = rig.overview.root.size;
+        _ = try rig.overview.root.widget().draw(.{ .arena = rig.frames.allocator(), .cell_arena = rig.frames.allocator(), .min = .{}, .max = .{ .width = if (size.width != 0) size.width else rig.overview.state.size.width, .height = if (size.height != 0) size.height else rig.overview.state.size.height }, .cell_size = .{} });
         var ctx = rig.context();
         defer ctx.cmds.deinit(std.testing.allocator);
         try app_events.send(&ctx, bytes, rig.overview.root.widget(), rig.overview.widget());
@@ -2067,9 +2084,7 @@ const Rig = struct {
     }
 
     fn click(rig: *Rig, column: u16, row: u16, width: u16, height: u16) !?Ending {
-        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-        defer arena.deinit();
-        const frame = try rig.overview.root.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = height }, .cell_size = .{} });
+        const frame = try rig.overview.root.widget().draw(.{ .arena = rig.frames.allocator(), .cell_arena = rig.frames.allocator(), .min = .{}, .max = .{ .width = width, .height = height }, .cell_size = .{} });
         var ctx = rig.context();
         defer ctx.cmds.deinit(std.testing.allocator);
         try app_events.mouse(&ctx, frame, .{ .col = @intCast(column), .row = @intCast(row), .button = .left, .type = .press, .mods = .{} });
@@ -2086,7 +2101,7 @@ const Rig = struct {
     fn shown(rig: *Rig, width: u16, height: u16) !Shown {
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         errdefer arena.deinit();
-        const surface = try rig.overview.root.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = height }, .cell_size = .{} });
+        const surface = try rig.overview.root.widget().draw(.{ .arena = rig.frames.allocator(), .cell_arena = rig.frames.allocator(), .min = .{}, .max = .{ .width = width, .height = height }, .cell_size = .{} });
         var screen: vaxis.Screen = try .init(arena.allocator(), .{ .rows = height, .cols = width, .x_pixel = 0, .y_pixel = 0 });
         const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = height, .screen = &screen };
         try surface.render(window, rig.overview.root.session orelse rig.overview.widget());
@@ -7657,4 +7672,96 @@ test "App session groups capture mouse and keyboard edits on the shared list" {
         try std.testing.expect(!Seen.now.group_request.?.action.collapse.collapsed);
         try std.testing.expectEqual(@as(usize, 0), Seen.now.conversations);
     }
+}
+
+const GroupKeyFrame = struct {
+    fn row(reference: view.Reference, id: u64, collapsed: bool) view.Listed {
+        return .{ .reference = reference, .workspace = "/work", .provider = .codex, .label = "Member", .state = .{ .finished = .{ .since = 1 } }, .first = .{ .position = 1, .admission = reference[0], .sender = null }, .group = .{ .id = id, .name = @import("session_group.zig").Name.from(if (id == 7) "Original" else "Destination") catch unreachable, .collapsed = collapsed, .revision = 1 }, .group_manual = true, .read_version = .{ .instance = @splat(1), .generation = 1 } };
+    }
+
+    fn publish(overview: *Self, rows: []view.Listed, generation: u64) !void {
+        for (rows) |*row_| {
+            row_.read_version.generation = generation;
+            row_.group.?.revision = generation;
+        }
+        _ = try view.step(&overview.state, .{ .tick = (generation - 1) * view.list_interval_ms });
+        _ = try view.step(&overview.state, .{ .list = .{ .page = .{ .rows = rows, .answer = .{ .delta = .full, .since = .{ .instance = @splat(1), .generation = generation } } } } });
+    }
+
+    fn draw(rig: *Rig, sidebar: bool, width: u16) !void {
+        const widget_ = if (sidebar) rig.overview.listWidget() else rig.overview.widget();
+        _ = try widget_.draw(.{ .arena = rig.frames.allocator(), .cell_arena = rig.frames.allocator(), .min = .{}, .max = .{ .width = width, .height = 30 }, .cell_size = .{} });
+        try std.testing.expect(rig.overview.app_sessions.shown_at.len != 0);
+    }
+
+    fn key(rig: *Rig, codepoint: u21) !void {
+        var ctx = rig.context();
+        defer ctx.cmds.deinit(ctx.alloc);
+        try appKey(rig.overview, &ctx, .{ .key_press = .{ .codepoint = codepoint } }, .{ .under = .main, .pasted = false });
+        try std.testing.expect(!ctx.quit);
+        try std.testing.expectEqual(@as(usize, 1), rig.overview.job_count);
+        try std.testing.expectEqual(@as(usize, 1), rig.overview.state.request_count);
+    }
+};
+
+test "App session groups keyboard headers retain drawn desired state through refresh on both surfaces" {
+    for ([_]bool{ false, true }) |sidebar| for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |collapsed| for ([_]u21{ vaxis.Key.enter, vaxis.Key.left, vaxis.Key.right }) |key| {
+        var cancellation: client.Cancellation = .{};
+        const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
+        defer rig.close();
+        var rows = [_]view.Listed{ GroupKeyFrame.row("aaaaaa".*, 7, collapsed), GroupKeyFrame.row("bbbbbb".*, 7, collapsed) };
+        try GroupKeyFrame.publish(rig.overview, &rows, 1);
+        rig.overview.state.selected = .{ .group = 7 };
+        try GroupKeyFrame.draw(rig, sidebar, width);
+        for (&rows) |*row| row.group.?.collapsed = !collapsed;
+        try GroupKeyFrame.publish(rig.overview, &rows, 2);
+        try GroupKeyFrame.key(rig, key);
+        const request = rig.overview.jobs[0].group;
+        try std.testing.expectEqual(@as(u64, 7), request.action.collapse.group);
+        try std.testing.expectEqual(if (key == vaxis.Key.enter) !collapsed else key == vaxis.Key.left, request.action.collapse.collapsed);
+        try std.testing.expectEqual(@as(usize, 0), Seen.now.conversations);
+    };
+}
+
+test "App session groups Left retains drawn member parent after canonical move on both surfaces" {
+    for ([_]bool{ false, true }) |sidebar| for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |destination_collapsed| for ([_]bool{ false, true }) |last_member| {
+        var cancellation: client.Cancellation = .{};
+        const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
+        defer rig.close();
+        var rows = [_]view.Listed{ GroupKeyFrame.row("aaaaaa".*, 7, false), GroupKeyFrame.row("bbbbbb".*, 7, false), GroupKeyFrame.row("cccccc".*, 8, destination_collapsed) };
+        try GroupKeyFrame.publish(rig.overview, &rows, 1);
+        rig.overview.state.selected = .{ .session = "aaaaaa".* };
+        try GroupKeyFrame.draw(rig, sidebar, width);
+        rows[0].group = rows[2].group;
+        if (last_member) rows[1].group = rows[2].group;
+        try GroupKeyFrame.publish(rig.overview, &rows, 2);
+        try GroupKeyFrame.key(rig, vaxis.Key.left);
+        const request = rig.overview.jobs[0].group;
+        try std.testing.expectEqualStrings("aaaaaa", &request.reference);
+        try std.testing.expectEqual(@as(u64, 7), request.action.collapse.group);
+        try std.testing.expect(request.action.collapse.collapsed);
+        try std.testing.expectEqual(@as(usize, 0), Seen.now.conversations);
+    };
+}
+
+test "App session groups queued navigation advances only among drawn targets" {
+    for ([_]bool{ false, true }) |sidebar| for ([_]u16{ 46, 140 }) |width| {
+        var cancellation: client.Cancellation = .{};
+        const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
+        defer rig.close();
+        var rows = [_]view.Listed{ GroupKeyFrame.row("aaaaaa".*, 7, false), GroupKeyFrame.row("bbbbbb".*, 8, false) };
+        try GroupKeyFrame.publish(rig.overview, &rows, 1);
+        rig.overview.state.selected = .{ .group = 7 };
+        try GroupKeyFrame.draw(rig, sidebar, width);
+        var ctx = rig.context();
+        defer ctx.cmds.deinit(ctx.alloc);
+        for ([_]u21{ vaxis.Key.down, vaxis.Key.down, vaxis.Key.enter }) |key| {
+            try appKey(rig.overview, &ctx, .{ .key_press = .{ .codepoint = key } }, .{ .under = .main, .pasted = false });
+        }
+        try std.testing.expectEqual(@as(u64, 8), rig.overview.state.selected.group);
+        try std.testing.expectEqual(@as(usize, 1), rig.overview.job_count);
+        try std.testing.expectEqual(@as(u64, 8), rig.overview.jobs[0].group.action.collapse.group);
+        try std.testing.expect(rig.overview.jobs[0].group.action.collapse.collapsed);
+        try std.testing.expectEqual(@as(usize, 0), Seen.now.conversations);
+    };
 }

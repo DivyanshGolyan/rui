@@ -369,7 +369,7 @@ pub const SessionGroupCommand = struct {
         hashField(&hash, self.session.slice());
         hashField(&hash, @tagName(self.action));
         switch (self.action) {
-            .assign => |name| hashField(&hash, name.slice()),
+            .assign, .rename_current => |name| hashField(&hash, name.slice()),
             .leave, .automatic => {},
             .rename => |value| {
                 var id: [8]u8 = undefined;

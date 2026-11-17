@@ -278,6 +278,9 @@ pub const GroupSession = struct {
             if (session_id.valid(session)) r.readInto(member, .{ .session = session }, &t.target, &t.found);
             switch (command.action) {
                 .assign => |*name| if (group.validName(name.slice())) r.read(named, .{ .name = name.slice() }, &t.duplicate),
+                .rename_current => |*name| {
+                    if (group.validName(name.slice())) r.read(named, .{ .name = name.slice() }, &t.duplicate);
+                },
                 .rename => |*value| {
                     if (group.validId(value.group)) r.read(by_id, .{ .id = value.group }, &t.selected);
                     if (group.validName(value.name.slice())) r.read(named, .{ .name = value.name.slice() }, &t.duplicate);
@@ -313,14 +316,21 @@ pub const GroupSession = struct {
                 scratch.grouping.prepare(r, t.target.session, &scratch.next.workspace);
                 return .{ .round = .automatic };
             },
+            .rename_current => |*name| t.rename(r, name, if (t.target.group_id) |id| id.get() else null),
             .rename => |*value| {
-                if (!group.validId(value.group)) t.rejection = .invalid_group_id else if (!group.validName(value.name.slice())) t.rejection = .invalid_group_name else if (t.selected == null) t.rejection = .unknown_group else if (t.duplicate != null and t.duplicate.?.group_id.get() != value.group) t.rejection = .group_name_exists else if (!t.selected.?.name.eql(value.name.slice())) r.write(rename_group, .{ .id = value.group, .name = value.name.slice() });
+                if (!group.validId(value.group)) t.rejection = .invalid_group_id else t.rename(r, &value.name, if (t.selected) |selected| selected.group_id.get() else null);
             },
             .collapse => |value| {
                 if (!group.validId(value.group)) t.rejection = .invalid_group_id else if (t.selected == null) t.rejection = .unknown_group else if (t.selected.?.collapsed != value.collapsed) r.write(collapse_group, .{ .id = value.group, .collapsed = value.collapsed });
             },
         }
         return t.finish(r);
+    }
+
+    fn rename(t: *GroupSession, r: *transition.Round(GroupSession), name: *const group.Name, id: ?u64) void {
+        if (!group.validName(name.slice())) t.rejection = .invalid_group_name else if (id == null) t.rejection = .unknown_group else if (t.duplicate) |duplicate| {
+            if (duplicate.group_id.get() != id.?) t.rejection = .group_name_exists;
+        } else r.write(rename_group, .{ .id = id.?, .name = name.slice() });
     }
 
     fn finish(t: *GroupSession, r: *transition.Round(GroupSession)) !transition.Next(GroupSession) {
@@ -335,3 +345,10 @@ pub const GroupSession = struct {
         return if (t.rejection) |code| .{ .rejected = .{ .replayed = false, .code = code } } else .{ .accepted = .{ .replayed = false } };
     }
 };
+
+pub fn brief(row: anytype) error{CorruptStore}!?group.Brief {
+    const id = row.group_id orelse return null;
+    const name = row.group_name orelse return error.CorruptStore;
+    if (!group.validName(name.slice())) return error.CorruptStore;
+    return .{ .id = id.get(), .name = name, .collapsed = row.group_collapsed orelse return error.CorruptStore, .revision = (row.group_revision orelse return error.CorruptStore).get() };
+}

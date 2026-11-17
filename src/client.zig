@@ -1201,17 +1201,10 @@ pub fn captureSessionGroup(io: std.Io, input: SessionGroupInput, target: Capture
     var key_buffer: [36]u8 = undefined;
     const location = try target.resolve(io, &path_buffer, &key_buffer);
     try protocol_reply.validateIdentityInputs(location.key, input.session);
-    switch (input.action) {
-        .assign => |name| if (!@import("session_group.zig").validName(name.slice())) return error.InvalidGroupName,
-        .rename => |value| {
-            if (!@import("session_group.zig").validName(value.name.slice())) return error.InvalidGroupName;
-            if (value.group == 0 or value.group > std.math.maxInt(i64)) return error.InvalidGroupId;
-        },
-        .collapse => |value| if (value.group == 0 or value.group > std.math.maxInt(i64)) return error.InvalidGroupId,
-        .leave, .automatic => {},
-    }
+    try input.action.validate();
     return switch (input.action) {
         .assign => |name| runCapture(io, paths.store.slice(), &location, input.session, .session_group, null, Capture.writeRequest, .{ protocol.session_group_request.assign, .{ paths.store.slice(), location.key, input.session, name.slice() } }),
+        .rename_current => |name| runCapture(io, paths.store.slice(), &location, input.session, .session_group, null, Capture.writeRequest, .{ protocol.session_group_request.rename_current, .{ paths.store.slice(), location.key, input.session, name.slice() } }),
         .leave => runCapture(io, paths.store.slice(), &location, input.session, .session_group, null, Capture.writeRequest, .{ protocol.session_group_request.leave, .{ paths.store.slice(), location.key, input.session } }),
         .automatic => runCapture(io, paths.store.slice(), &location, input.session, .session_group, null, Capture.writeRequest, .{ protocol.session_group_request.automatic, .{ paths.store.slice(), location.key, input.session } }),
         .rename => |value| runCapture(io, paths.store.slice(), &location, input.session, .session_group, null, Capture.writeRequest, .{ protocol.session_group_request.rename, .{ paths.store.slice(), location.key, input.session, value.group, value.name.slice() } }),
@@ -1679,19 +1672,14 @@ fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: protocol
         } },
     };
     if (kind == .session_group) {
-        const selected = (fields.group_action orelse return error.InvalidRequestRecord).slice();
-        const assign = std.mem.eql(u8, selected, "assign");
-        const rename = std.mem.eql(u8, selected, "rename");
-        const collapse = std.mem.eql(u8, selected, "collapse");
-        if (!(assign or rename or collapse or std.mem.eql(u8, selected, "leave") or std.mem.eql(u8, selected, "automatic")) or
-            (fields.group_name != null) != (assign or rename) or
-            (fields.group_id != null) != (rename or collapse) or
-            (fields.collapsed != null) != collapse) return error.InvalidRequestRecord;
-        if (fields.group_name) |name| if (!@import("session_group.zig").validName(name.slice())) return error.InvalidRequestRecord;
-        if (fields.group_id) |id| {
-            const value = protocol_reply.decimalId(id, false) catch return error.InvalidRequestRecord;
-            if (value > std.math.maxInt(i64)) return error.InvalidRequestRecord;
-        }
+        const group = @import("session_group.zig");
+        const selected = fields.group_action orelse return error.InvalidRequestRecord;
+        const action = group.Action.fromFields(std.meta.stringToEnum(std.meta.Tag(group.Action), selected.slice()) orelse return error.InvalidRequestRecord, .{
+            .name = if (fields.group_name) |name| name.value else null,
+            .group = if (fields.group_id) |id| protocol_reply.decimalId(id, true) catch return error.InvalidRequestRecord else null,
+            .collapsed = fields.collapsed,
+        }) catch return error.InvalidRequestRecord;
+        action.validate() catch return error.InvalidRequestRecord;
     } else if (fields.group_action != null or fields.group_name != null or fields.group_id != null or fields.collapsed != null) return error.InvalidRequestRecord;
     if ((kind != .configure and kind != .message and fields.configuration != null) or
         (fields.require_model != null and !(kind == .configure or kind == .message and fields.configuration != null)) or
@@ -3038,7 +3026,7 @@ test "client activity peer boundary rejects noncanonical IDs and owns canonical 
         var body: protocol.RequestBuffer = .{};
         try body.append("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"activity_page\",\"delta\":\"full\",\"since\":null,\"end\":\"1\",\"direction\":\"forward\",\"items\":[{\"position\":\"1\",\"ordinal\":\"0\",\"at\":\"1\",\"value\":{\"send_failed\":{\"key\":\"key\\u0000雪\",\"target\":{\"session\":");
         try body.appendJsonString(session);
-        try body.append("},\"code\":\"invalid_sender_handle\"}}}],\"more\":false,\"call_activity\":{\"total\":\"0\",\"entries\":[]},\"queued\":{\"count\":\"0\",\"oldest_position\":\"0\",\"newest_admission\":\"0\",\"newest_position\":\"0\"},\"work\":{\"read_version\":\"00000000000000000000000000000000.0\",\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"revision\":\"1\",\"workspace\":\"/w\"}}");
+        try body.append("},\"code\":\"invalid_sender_handle\"}}}],\"more\":false,\"call_activity\":{\"total\":\"0\",\"entries\":[]},\"queued\":{\"count\":\"0\",\"oldest_position\":\"0\",\"newest_admission\":\"0\",\"newest_position\":\"0\"},\"work\":{\"read_version\":\"00000000000000000000000000000000.0\",\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"revision\":\"1\",\"workspace\":\"/w\",\"group\":null,\"group_manual\":false}}");
         if (index < 2) {
             const page = try protocol_reply.ActivityPage.parse(body.slice(), .{});
             @memset(body.bytes[0..body.len], 'x');
@@ -3064,7 +3052,7 @@ test "client failed-send target is required and nullable without relaxing peers"
         var body: protocol.RequestBuffer = .{};
         try body.append("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"activity_page\",\"delta\":\"full\",\"since\":null,\"end\":\"1\",\"direction\":\"forward\",\"items\":[{\"position\":\"1\",\"ordinal\":\"0\",\"at\":\"1\",\"value\":{\"send_failed\":{\"key\":\"refused\",");
         try body.append(case.field);
-        try body.append("\"code\":\"unsupported_reasoning_effort\"}}}],\"more\":false,\"call_activity\":{\"total\":\"0\",\"entries\":[]},\"queued\":{\"count\":\"0\",\"oldest_position\":\"0\",\"newest_admission\":\"0\",\"newest_position\":\"0\"},\"work\":{\"read_version\":\"00000000000000000000000000000000.0\",\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"revision\":\"1\",\"workspace\":\"/w\"}}");
+        try body.append("\"code\":\"unsupported_reasoning_effort\"}}}],\"more\":false,\"call_activity\":{\"total\":\"0\",\"entries\":[]},\"queued\":{\"count\":\"0\",\"oldest_position\":\"0\",\"newest_admission\":\"0\",\"newest_position\":\"0\"},\"work\":{\"read_version\":\"00000000000000000000000000000000.0\",\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"revision\":\"1\",\"workspace\":\"/w\",\"group\":null,\"group_manual\":false}}");
         if (case.failure) |failure| {
             try std.testing.expectError(failure, protocol_reply.ActivityPage.parse(body.slice(), .{}));
             continue;
@@ -5386,7 +5374,7 @@ test "group captures preserve every action through original-byte recovery" {
     const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
     const Group = @import("session_group.zig");
     const name = try Group.Name.from("Work \"雪\"");
-    const actions = [_]Group.Action{ .{ .assign = name }, .leave, .automatic, .{ .rename = .{ .group = 7, .name = name } }, .{ .collapse = .{ .group = 7, .collapsed = true } }, .{ .collapse = .{ .group = 7, .collapsed = false } } };
+    const actions = [_]Group.Action{ .{ .assign = name }, .{ .rename_current = name }, .leave, .automatic, .{ .rename = .{ .group = 7, .name = name } }, .{ .collapse = .{ .group = 7, .collapsed = true } }, .{ .collapse = .{ .group = 7, .collapsed = false } } };
     for (actions) |action| {
         var captured = try captureSessionGroup(io, .{ .store = root, .session = "k7m2qx", .action = action }, .{ .generated = root });
         const identity = captured.saved;
@@ -5404,4 +5392,31 @@ test "group captures preserve every action through original-byte recovery" {
     }
     try std.testing.expectError(error.InvalidGroupName, captureSessionGroup(io, .{ .store = root, .session = "k7m2qx", .action = .{ .assign = .{} } }, .{ .generated = root }));
     try std.testing.expectError(error.InvalidGroupId, captureSessionGroup(io, .{ .store = root, .session = "k7m2qx", .action = .{ .collapse = .{ .group = 0, .collapsed = true } } }, .{ .generated = root }));
+}
+
+test "group recovery rejects malformed action fields before retransmission" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(io, .fromMode(0o700));
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    const handle = "01234567-89ab-4cde-8012-3456789abcde";
+    inline for (.{
+        ",\"group_action\":\"collapse\",\"group_id\":\"7\"}",
+        ",\"group_action\":\"rename\",\"group_id\":\"0\",\"group_name\":\"Work\"}",
+        ",\"group_action\":\"assign\",\"group_name\":\"\"}",
+        ",\"group_action\":\"collapse\",\"group_id\":\"18446744073709551615\",\"collapsed\":false}",
+        ",\"group_action\":\"collapse\",\"group_id\":\"07\",\"collapsed\":false}",
+    }) |tail| {
+        var body: protocol.RequestBuffer = .{};
+        try body.append("{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"session_group\",\"store\":");
+        try body.appendJsonString(root);
+        try body.append(",\"key\":\"" ++ handle ++ "\",\"session\":\"k7m2qx\"" ++ tail);
+        const file = try tmp.dir.createFile(io, handle ++ ".json", .{});
+        try file.writeStreamingAll(io, body.slice());
+        file.close(io);
+        try std.testing.expectError(error.InvalidRequestRecord, openCaptured(io, .{ .generated = .{ .directory = root, .handle = handle } }));
+        try std.testing.expectError(error.InvalidRequestRecord, inspectCaptured(io, root, handle));
+    }
 }

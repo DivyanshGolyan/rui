@@ -16,6 +16,7 @@ pub const Row = struct {
     height: u16 = 1,
     target: ?Target = null,
     alternate_target: ?Target = null,
+    parent: ?@import("session_group.zig").Id = null,
     regions: []const Region = &.{},
 };
 
@@ -58,11 +59,12 @@ shown_at: []const Span = &.{},
 pub const Tail = struct { widget: vxfw.Widget, rows: u16 };
 
 const Span = struct { row: i17, height: u16, target: ?Target };
-const Captured = struct { id: u32, target: Target };
+const Captured = struct { id: u32, target: Target, parent: ?@import("session_group.zig").Id = null };
 
 const Frame = struct {
     owner: *Self,
     targets: std.ArrayList(Captured) = .empty,
+    selected: ?u32 = null,
 
     fn count(raw: *const anyopaque, first: u32) u32 {
         const self: *const Frame = @ptrCast(@alignCast(raw));
@@ -84,9 +86,10 @@ const Frame = struct {
         }
         const target_id: ?u32 = if (built.target) |target| blk: {
             const id: u32 = @intCast(self.targets.items.len);
-            try self.targets.append(arena, .{ .id = id, .target = target });
+            try self.targets.append(arena, .{ .id = id, .target = target, .parent = built.parent });
             break :blk id;
         } else null;
+        if (selected) self.selected = target_id;
         const alternate_id: ?u32 = if (built.alternate_target) |target| blk: {
             const id: u32 = @intCast(self.targets.items.len);
             try self.targets.append(arena, .{ .id = id, .target = target });
@@ -119,6 +122,39 @@ fn reportPress(raw: *anyopaque, ctx: *vxfw.EventContext, id: u32) anyerror!void 
     const frame: *Frame = @ptrCast(@alignCast(raw));
     const press = frame.owner.on_press orelse return;
     for (frame.targets.items) |target| if (target.id == id) return press.pressed(press.userdata, ctx, target.target);
+}
+
+pub fn keyboardTarget(self: *const Self) ?overview_view.RowInput {
+    const frame = self.drawnFrame() orelse return null;
+    const id = frame.selected orelse return null;
+    for (self.inner.shown_at) |span| if (span.target == id) {
+        const captured = frame.targets.items[id];
+        return .{ .target = captured.target, .parent = captured.parent };
+    };
+    return null;
+}
+
+pub fn selectKeyboard(self: *Self, selection: overview_view.Selection) void {
+    const frame = self.drawnFrame() orelse return;
+    frame.selected = null;
+    for (self.inner.shown_at) |span| {
+        const id = span.target orelse continue;
+        const captured = frame.targets.items[id];
+        const matches = switch (selection) {
+            .session => |reference| captured.target == .open and std.mem.eql(u8, &captured.target.open, &reference),
+            .group => |group| captured.target == .group and captured.target.group.action.collapse.group == group,
+            else => false,
+        };
+        if (matches) {
+            frame.selected = id;
+            return;
+        }
+    }
+}
+
+fn drawnFrame(self: *const Self) ?*Frame {
+    const press = self.inner.on_press orelse return null;
+    return @ptrCast(@alignCast(press.userdata));
 }
 
 fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {

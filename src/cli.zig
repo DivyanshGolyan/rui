@@ -2982,17 +2982,13 @@ fn pinSession(init: std.process.Init, parsed: *const cli_args.Parsed, pinned: bo
 }
 
 fn groupAction(parsed: *const cli_args.Parsed) !@import("session_group.zig").Action {
-    const mode = parsed.get("mode").?;
-    var name: @import("session_group.zig").Name = .{};
-    if (parsed.get("name")) |value| name.set(value) catch return error.InvalidGroupName;
-    const id = if (parsed.get("group")) |value| try std.fmt.parseInt(u64, value, 10) else 0;
-    const rename = std.mem.eql(u8, mode, "rename");
-    const assign = std.mem.eql(u8, mode, "assign");
-    const collapse = std.mem.eql(u8, mode, "collapse");
-    if ((parsed.get("name") != null) != (assign or rename) or
-        (parsed.get("group") != null) != (rename or collapse) or
-        (parsed.get("collapsed") != null) != collapse) return error.InvalidGroupOptions;
-    return if (assign) .{ .assign = name } else if (rename) .{ .rename = .{ .group = id, .name = name } } else if (collapse) .{ .collapse = .{ .group = id, .collapsed = std.mem.eql(u8, parsed.get("collapsed").?, "true") } } else if (std.mem.eql(u8, mode, "leave")) .leave else .automatic;
+    const group = @import("session_group.zig");
+    const kind = std.meta.stringToEnum(std.meta.Tag(group.Action), parsed.get("mode").?) orelse return error.InvalidGroupOptions;
+    return group.Action.fromFields(kind, .{
+        .name = if (parsed.get("name")) |value| group.Name.from(value) catch return error.InvalidGroupName else null,
+        .group = if (parsed.get("group")) |value| try std.fmt.parseInt(u64, value, 10) else null,
+        .collapsed = if (parsed.get("collapsed")) |value| std.mem.eql(u8, value, "true") else null,
+    });
 }
 
 fn groupSession(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
@@ -5331,40 +5327,23 @@ test "Host launch scoped readiness still discovers selected private keys and req
     }
 }
 
-test "group CLI intent validates the full mode and option presence domain" {
-    const modes = [_][]const u8{ "assign", "leave", "automatic", "rename", "collapse" };
-    for (modes) |mode| {
-        for ([_]bool{ false, true }) |has_name| for ([_]bool{ false, true }) |has_id| for ([_]bool{ false, true }) |has_collapsed| {
-            var args: [12][]const u8 = undefined;
-            var count: usize = 0;
-            for ([_][]const u8{ "--session", "k7m2qx", "--mode", mode }) |value| {
-                args[count] = value;
-                count += 1;
-            }
-            if (has_name) {
-                args[count..][0..2].* = .{ "--name", "Work" };
-                count += 2;
-            }
-            if (has_id) {
-                args[count..][0..2].* = .{ "--group", "7" };
-                count += 2;
-            }
-            if (has_collapsed) {
-                args[count..][0..2].* = .{ "--collapsed", "false" };
-                count += 2;
-            }
-            var problem: cli_args.Refusal = undefined;
-            var storage: [2048]u8 = undefined;
-            var fixed = std.heap.FixedBufferAllocator.init(&storage);
-            const parsed = try cli_args.Command.session_group.definition().parse(args[0..count], fixed.allocator(), &problem);
-            const expects_name = std.mem.eql(u8, mode, "assign") or std.mem.eql(u8, mode, "rename");
-            const expects_id = std.mem.eql(u8, mode, "rename") or std.mem.eql(u8, mode, "collapse");
-            const expects_collapsed = std.mem.eql(u8, mode, "collapse");
-            if (has_name == expects_name and has_id == expects_id and has_collapsed == expects_collapsed) {
-                const intent = try groupAction(&parsed);
-                try std.testing.expectEqualStrings(mode, @tagName(intent));
-                if (intent == .collapse) try std.testing.expect(!intent.collapse.collapsed);
-            } else try std.testing.expectError(error.InvalidGroupOptions, groupAction(&parsed));
-        };
+test "group CLI decodes argument formats into the shared action owner" {
+    const Case = struct { args: []const []const u8, expected: @import("session_group.zig").Action };
+    const name = try @import("session_group.zig").Name.from("Work");
+    for ([_]Case{
+        .{ .args = &.{ "--session", "k7m2qx", "--mode", "assign", "--name", "Work" }, .expected = .{ .assign = name } },
+        .{ .args = &.{ "--session", "k7m2qx", "--mode", "rename_current", "--name", "Work" }, .expected = .{ .rename_current = name } },
+        .{ .args = &.{ "--session", "k7m2qx", "--mode", "leave" }, .expected = .leave },
+        .{ .args = &.{ "--session", "k7m2qx", "--mode", "automatic" }, .expected = .automatic },
+        .{ .args = &.{ "--session", "k7m2qx", "--mode", "rename", "--group", "7", "--name", "Work" }, .expected = .{ .rename = .{ .group = 7, .name = name } } },
+        .{ .args = &.{ "--session", "k7m2qx", "--mode", "collapse", "--group", "7", "--collapsed", "true" }, .expected = .{ .collapse = .{ .group = 7, .collapsed = true } } },
+        .{ .args = &.{ "--session", "k7m2qx", "--mode", "collapse", "--group", "7", "--collapsed", "false" }, .expected = .{ .collapse = .{ .group = 7, .collapsed = false } } },
+        .{ .args = &.{ "--session", "k7m2qx", "--mode", "collapse", "--group", "0", "--collapsed", "false" }, .expected = .{ .collapse = .{ .group = 0, .collapsed = false } } },
+    }) |case| {
+        var problem: cli_args.Refusal = undefined;
+        var storage: [2048]u8 = undefined;
+        var fixed = std.heap.FixedBufferAllocator.init(&storage);
+        const parsed = try cli_args.Command.session_group.definition().parse(case.args, fixed.allocator(), &problem);
+        try std.testing.expectEqualDeep(case.expected, try groupAction(&parsed));
     }
 }

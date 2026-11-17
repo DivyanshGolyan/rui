@@ -12107,6 +12107,19 @@
               }
             ]
           },
+          "group": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GroupBrief"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "group_manual": {
+            "type": "boolean"
+          },
           "last_line": {
             "anyOf": [
               {
@@ -12132,6 +12145,8 @@
           "turn",
           "operation",
           "first_action",
+          "group",
+          "group_manual",
           "last_line",
           "revision",
           "workspace"
@@ -13246,6 +13261,50 @@
               "group_action",
               "group_id",
               "collapsed"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "version": {
+                "const": "20"
+              },
+              "kind": {
+                "const": "session_group"
+              },
+              "store": {
+                "type": "string",
+                "maxLength": 492,
+                "x-rui-max-bytes": 492
+              },
+              "key": {
+                "type": "string",
+                "maxLength": 128,
+                "x-rui-max-bytes": 128
+              },
+              "session": {
+                "type": "string",
+                "maxLength": 128,
+                "x-rui-max-bytes": 128
+              },
+              "group_action": {
+                "const": "rename_current"
+              },
+              "group_name": {
+                "type": "string",
+                "maxLength": 100,
+                "x-rui-max-bytes": 100
+              }
+            },
+            "required": [
+              "version",
+              "kind",
+              "store",
+              "key",
+              "session",
+              "group_action",
+              "group_name"
             ],
             "additionalProperties": false
           }

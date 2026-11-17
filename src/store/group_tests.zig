@@ -164,6 +164,9 @@ test "session group first label topic placement metadata and pagination remain d
             try std.testing.expectEqual(first.revision + 2, brief.revision);
             try accepted(&storage, "group-collapse-again", ids[0].slice(), .{ .collapse = .{ .group = first.id, .collapsed = true } });
             try std.testing.expectEqual(brief.revision, (try saved(&storage, ids[0].slice())).group.?.revision);
+            try accepted(&storage, "group-rename-same", ids[0].slice(), .{ .rename = .{ .group = first.id, .name = renamed } });
+            try accepted(&storage, "group-current-rename-same", ids[0].slice(), .{ .rename_current = renamed });
+            try std.testing.expectEqual(brief.revision, (try saved(&storage, ids[0].slice())).group.?.revision);
             var archive: protocol.SessionArchiveCommand = .{};
             try archive.key.set("group-archive");
             archive.session = ids[0];
@@ -193,6 +196,8 @@ test "session group invalid edits reject atomically and preserve names" {
             const Case = struct { key: []const u8, session: []const u8, action: group.Action, code: mutation_answer.SessionGroupRejection };
             const cases = [_]Case{
                 .{ .key = "group-bad-name", .session = session.slice(), .action = .{ .assign = try .from(" ") }, .code = .invalid_group_name },
+                .{ .key = "group-current-bad-name", .session = session.slice(), .action = .{ .rename_current = try .from(" ") }, .code = .invalid_group_name },
+                .{ .key = "group-current-duplicate", .session = session.slice(), .action = .{ .rename_current = try .from("Second") }, .code = .group_name_exists },
                 .{ .key = "group-bad-id", .session = session.slice(), .action = .{ .collapse = .{ .group = 0, .collapsed = true } }, .code = .invalid_group_id },
                 .{ .key = "group-missing", .session = session.slice(), .action = .{ .collapse = .{ .group = std.math.maxInt(i64), .collapsed = true } }, .code = .unknown_group },
                 .{ .key = "group-duplicate", .session = session.slice(), .action = .{ .rename = .{ .group = id, .name = try .from("Second") } }, .code = .group_name_exists },
@@ -304,6 +309,102 @@ test "session group transaction failure rolls back placement metadata and comman
             const retried = storage.groupSession(&edit, .{});
             try std.testing.expect(retried == .accepted and !retried.accepted.replayed);
             try std.testing.expect((try saved(&storage, session.slice())).manual);
+        }
+    }.run);
+}
+
+fn currentGroup(storage: *Store, reference: []const u8) !@import("../activity_facts.zig").PageWork {
+    var request: @import("../activity_read.zig").ActivityPage = .{};
+    try request.session.set(reference);
+    const page = try @import("Store.zig").activityPageForTesting(storage, request);
+    var buffer: [@import("../activity_reply.zig").max_page_bytes]u8 = undefined;
+    var out = std.Io.Writer.fixed(&buffer);
+    try @import("../activity_reply.zig").writePage(&out, &page);
+    const decoded = try @import("../protocol_reply.zig").ActivityPage.parse(out.buffered(), .{});
+    try std.testing.expectEqualDeep(page.work, decoded.facts.work);
+    return decoded.facts.work;
+}
+
+test "session group current activity snapshot is canonical outside every archive list filter" {
+    try testing.forEachEngine(struct {
+        fn run(case: *testing.Case) !void {
+            for ([_]bool{ false, true }) |archived| for (std.enums.values(@import("../session_archive.zig").Filter)) |filter| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                const session = try create(&storage, "group-current-session", null, null);
+                if (archived) {
+                    var archive: protocol.SessionArchiveCommand = .{ .session = session };
+                    try archive.key.set("group-current-archive");
+                    try std.testing.expect(storage.archiveSession(&archive, .{}) == .accepted);
+                }
+                try accepted(&storage, "group-current-first", session.slice(), .{ .assign = try .from("Current first") });
+                const original = (try currentGroup(&storage, session.slice())).group.?;
+                const listed = try fixtures.TestingListing.read(&storage, &tmp, .{ .archive = filter });
+                const visible = filter == .all or (filter == .archived) == archived;
+                try std.testing.expectEqual(@as(usize, @intFromBool(visible)), listed.count);
+                try accepted(&storage, "group-current-move", session.slice(), .{ .assign = try .from("Current second") });
+                const moved = try currentGroup(&storage, session.slice());
+                try std.testing.expect(moved.group_manual and moved.group.?.id != original.id);
+                try std.testing.expect(moved.group.?.name.eql("Current second"));
+                try accepted(&storage, "group-current-rename", session.slice(), .{ .rename = .{ .group = moved.group.?.id, .name = try .from("Current renamed") } });
+                const renamed = try currentGroup(&storage, session.slice());
+                try std.testing.expectEqual(moved.group.?.id, renamed.group.?.id);
+                try std.testing.expect(renamed.group.?.name.eql("Current renamed"));
+                try std.testing.expect(renamed.read_version.generation > moved.read_version.generation);
+                try accepted(&storage, "group-current-leave", session.slice(), .leave);
+                const left = try currentGroup(&storage, session.slice());
+                try std.testing.expect(left.group == null and left.group_manual);
+                try accepted(&storage, "group-current-automatic", session.slice(), .automatic);
+                const automatic = try currentGroup(&storage, session.slice());
+                try std.testing.expect(automatic.group == null and !automatic.group_manual);
+                const other = try create(&storage, "group-current-other", null, null);
+                try accepted(&storage, "group-current-original-unchanged", other.slice(), .{ .assign = try .from("Current first") });
+                try std.testing.expectEqual(original.id, (try currentGroup(&storage, other.slice())).group.?.id);
+            };
+        }
+    }.run);
+}
+
+test "session group rename current resolves membership atomically before refresh and replays its saved result" {
+    try testing.forEachEngine(struct {
+        fn run(case: *testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try create(&storage, "group-current-race-session", null, null);
+            const first_peer = try create(&storage, "group-current-race-first-peer", null, null);
+            const second_peer = try create(&storage, "group-current-race-second-peer", null, null);
+            try accepted(&storage, "group-current-race-first", session.slice(), .{ .assign = try .from("Race first") });
+            try accepted(&storage, "group-current-race-first-peer-place", first_peer.slice(), .{ .assign = try .from("Race first") });
+            const stale = (try currentGroup(&storage, session.slice())).group.?;
+            var rename = try command("group-current-race-rename", session.slice(), .{ .rename_current = try .from("Race renamed") });
+            try accepted(&storage, "group-current-race-external-move", session.slice(), .{ .assign = try .from("Race second") });
+            const renamed = storage.groupSession(&rename, .{});
+            try std.testing.expect(renamed == .accepted and !renamed.accepted.replayed);
+            const observed = (try currentGroup(&storage, session.slice())).group.?;
+            try std.testing.expect(observed.id != stale.id and observed.name.eql("Race renamed"));
+            const kept = (try currentGroup(&storage, first_peer.slice())).group.?;
+            try std.testing.expectEqual(stale.id, kept.id);
+            try std.testing.expect(kept.name.eql("Race first"));
+            try accepted(&storage, "group-current-race-second-peer-place", second_peer.slice(), .{ .assign = try .from("Race renamed") });
+            try accepted(&storage, "group-current-race-move-again", session.slice(), .{ .assign = try .from("Race first") });
+            const replay = storage.groupSession(&rename, .{});
+            try std.testing.expect(replay == .accepted and replay.accepted.replayed);
+            try std.testing.expect((try currentGroup(&storage, first_peer.slice())).group.?.name.eql("Race first"));
+            try std.testing.expect((try currentGroup(&storage, second_peer.slice())).group.?.name.eql("Race renamed"));
+            try rename.key.set("group-current-race-left-rename");
+            try accepted(&storage, "group-current-race-left", session.slice(), .leave);
+            const left = storage.groupSession(&rename, .{});
+            try std.testing.expect(left == .rejected and left.rejected.code == .unknown_group);
+            try accepted(&storage, "group-current-race-place-after-refusal", session.slice(), .{ .assign = try .from("Race first") });
+            const rejected_replay = storage.groupSession(&rename, .{});
+            try std.testing.expect(rejected_replay == .rejected and rejected_replay.rejected.replayed and rejected_replay.rejected.code == .unknown_group);
+            try std.testing.expect((try currentGroup(&storage, first_peer.slice())).group.?.name.eql("Race first"));
         }
     }.run);
 }

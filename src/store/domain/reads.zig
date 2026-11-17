@@ -823,8 +823,9 @@ const HostedRead = struct {
 };
 
 const page_session = rsql.Read(.{
-    .sql = "SELECT model,permission_mode,revision,next_position,compaction_trigger,output_reservation,reasoning_effort,created_at,provider,workspace " ++
-        "FROM session WHERE session_ref=?1",
+    .sql = "SELECT model,permission_mode,session.revision,next_position,compaction_trigger,output_reservation,reasoning_effort,created_at,provider,workspace," ++
+        "g.group_id,g.name AS group_name,g.collapsed AS group_collapsed,g.revision AS group_revision,m.manual AS group_manual " ++
+        "FROM session JOIN session_group_member m ON m.session_ref=session.session_ref LEFT JOIN session_group g ON g.group_id=m.group_id WHERE session.session_ref=?1",
     .Args = struct { session: []const u8 },
     .Row = struct {
         model: Bounded(model_capability.max_model_bytes),
@@ -837,6 +838,11 @@ const page_session = rsql.Read(.{
         created_at: rsql.Positive,
         provider: provider_name.Provider,
         workspace: *Bounded(workspace_path.max_bytes),
+        group_id: ?rsql.Positive,
+        group_name: ?@import("../../session_group.zig").Name,
+        group_collapsed: ?bool,
+        group_revision: ?rsql.Positive,
+        group_manual: bool,
     },
     .cardinality = .optional,
 });
@@ -905,6 +911,8 @@ pub noinline fn activityPage(a: *ReadAccess, request: *const activity_read.Activ
     try last_line.finish(&page.work.last_line);
     page.work.read_version = .{ .instance = a.store.instance, .generation = a.store.commitGeneration() };
     page.work.revision = session.revision.get();
+    page.work.group = try @import("session_groups.zig").brief(&session);
+    page.work.group_manual = session.group_manual;
 }
 
 pub const activity_search_budget = 8 * 1024 * 1024;

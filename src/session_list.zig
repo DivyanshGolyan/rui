@@ -67,6 +67,8 @@ pub const SavedLastLine = struct {
 };
 
 pub const Snapshot = struct {
+    group: ?@import("session_group.zig").Brief = null,
+    group_manual: bool = false,
     read_version: change_ring.Token = .{ .instance = @splat(0), .generation = 0 },
     work: session_work.Work,
     last_line: ?SavedLastLine = null,

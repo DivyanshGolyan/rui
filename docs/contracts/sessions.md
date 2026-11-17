@@ -77,16 +77,23 @@ Grouping never changes Messages, work, pins, archive state, or parent links.
 `leave` clears membership and records a durable negative override, even if the Session was already ungrouped.
 `automatic` clears the manual choice and current membership, then evaluates automatic placement again.
 `rename` and `collapse` target a group ID and change its name or explicit desired collapse state.
+`rename_current` resolves the target Session's current membership and renames that group in the same Store transaction.
+An ungrouped Session rejects with `unknown_group`.
 Repeating the same desired collapse state or name is a no-op.
 The serialized Store transition owns validation, atomic updates, replay, conflicts, and fault fencing.
 Replay returns the historical answer without applying an older assignment, leave, rename, or collapse again.
 
-The CLI exposes these actions through `rui session group --session ID --mode assign|leave|automatic|rename|collapse`.
-`assign` requires `--name`; `rename` requires `--group` and `--name`; `collapse` requires `--group` and `--collapsed true|false`.
+The CLI exposes these actions through `rui session group --session ID --mode assign|leave|automatic|rename_current|rename|collapse`.
+`assign` and `rename_current` require `--name` without `--group`.
+`rename` requires `--group` and `--name`; `collapse` requires `--group` and `--collapsed true|false`.
+Each mode accepts only its own action fields, as defined by `session_group.Action.fromFields`.
 Every mode requires `--session`, including actions that target a group ID.
 The chat commands `/group NAME`, `/ungroup`, `/autogroup`, and `/group-rename NAME` share the overview's captured-command ledger and recovery owner.
 They admit no Message or Configure.
-`/group-rename` targets the current chat's group and rejects an ungrouped chat.
+`/group-rename` sends `rename_current` intent and uses the membership saved when the rename transaction runs.
+A previously accepted move determines its target even before a refreshed listing or Activity snapshot arrives.
+It never captures a group ID from a retained listing row.
+Replay returns the saved accepted or rejected answer without resolving membership again, even after another move.
 
 Automatic placement preserves every manual assignment and negative override.
 A new child retains its birth creator for grouping independently of whether its parent link is attached.
@@ -223,7 +230,7 @@ A crash reopens committed queue/selection facts without inventing a terminal out
 | Contract | Canonical checks | Limits and exceptions |
 | --- | --- | --- |
 | [Control replay and conflicts](admission.md#recovering-a-submission-after-a-lost-reply) | `'exact model interruption'`, `'idle Session stop'`, `'controls remove scheduled retries'`, `'allow once survives'`, `'model revisions'` | Reopen is not crash recovery |
-| [Session grouping](#grouping-sessions) | `session_group.zig` tests manual-choice preservation and name/ID boundaries. `store/group_tests.zig`: `session group manual moves leaves and reset persist through replay and reopen`, `session group first label topic placement metadata and pagination remain durable`, and `session group invalid edits reject atomically and preserve names`. `session_group_topic.zig` tests exact salient sets, strong references, ambiguous and spoofed references, UTF-8, controls, Workspace isolation, and boundary limits. | Store tests run through `forEachEngine` for available engines. Reopen is not process-crash evidence. Native macOS grouping checks remain unverified until CI; test names describe coverage, not a completed native run. |
+| [Session grouping](#grouping-sessions) | `session_group.zig` tests manual-choice preservation and name/ID boundaries. `store/group_tests.zig`: `session group manual moves leaves and reset persist through replay and reopen`, `session group first label topic placement metadata and pagination remain durable`, and `session group invalid edits reject atomically and preserve names`. `session group rename current resolves membership atomically before refresh and replays its saved result` covers an intervening move and replay after another move or a refused ungrouped rename. `session_group_topic.zig` tests exact salient sets, strong references, ambiguous and spoofed references, UTF-8, controls, Workspace isolation, and boundary limits. | Store tests run through `forEachEngine` for available engines. Reopen is not process-crash evidence. Native macOS grouping checks remain unverified until CI; test names describe coverage, not a completed native run. |
 | Native control replay | `control_integration.py` `prove_idle_stop_wire_recovery`, `prove_retry_wait_control`, `check_schema`, `bash_integration.py`, `admission_integration.sh` | None |
 
 ### Control races and acknowledgement

@@ -160,9 +160,21 @@ To clear that choice and evaluate automatic grouping again, run:
 rui session group --store "$STORE" --session "$SESSION" --mode automatic
 ```
 
+To rename the Session's current group without reading its ID first, run:
+
+```sh
+rui session group --store "$STORE" --session "$SESSION" --mode rename_current --name "Migration work"
+```
+
+The Store resolves current membership and renames that group in one transaction.
+A move accepted before that transaction changes the target, even when your last listing still shows the previous group.
+An ungrouped Session rejects with `unknown_group`.
+Recovering the saved request returns its original answer without resolving membership again.
+
+To rename or collapse a specific group instead, use its stable ID.
 To find the saved group ID, run `rui session list --store "$STORE" --all` and read the member's `group.id`.
 Set `GROUP` to that ID.
-To rename that group, run:
+To rename that exact group, run:
 
 ```sh
 rui session group --store "$STORE" --session "$SESSION" --mode rename --group "$GROUP" --name "Migration work"
@@ -175,7 +187,8 @@ rui session group --store "$STORE" --session "$SESSION" --mode collapse --group 
 ```
 
 Use `--collapsed false` to expand it.
-Every mode requires `--session`; rename and collapse also require the target `--group` ID.
+Every mode requires `--session`; `rename` and `collapse` also require the target `--group` ID.
+`assign` and `rename_current` require `--name` and do not accept `--group`.
 Group IDs stay stable across rename, and names are unique within the Store.
 Names, membership, collapse, and manual choices survive Host restart and moving the same Store.
 These commands use the ordinary saved-request recovery protocol and send no model Message.

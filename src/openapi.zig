@@ -136,7 +136,7 @@ pub const routes = [_]Route{
         .path = protocol.CommandKind.session_group.route(),
         .kind = .session_group,
         .summary = "Assigns, leaves, automatically groups, renames or folds a Session group. Retried by its key.",
-        .variants = &.{ variant(protocol.session_group_request.assign, .{}), variant(protocol.session_group_request.leave, .{}), variant(protocol.session_group_request.automatic, .{}), variant(protocol.session_group_request.rename, .{}), variant(protocol.session_group_request.collapse, .{}) },
+        .variants = &.{ variant(protocol.session_group_request.assign, .{}), variant(protocol.session_group_request.leave, .{}), variant(protocol.session_group_request.automatic, .{}), variant(protocol.session_group_request.rename, .{}), variant(protocol.session_group_request.collapse, .{}), variant(protocol.session_group_request.rename_current, .{}) },
         .reply = jsonReply(.{ protocol.session_group_reply.accepted, protocol.session_group_reply.rejected }),
         .conflict = jsonReply(.{protocol.session_group_reply.conflict}),
     },

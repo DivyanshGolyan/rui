@@ -112,6 +112,18 @@ pub const ConversationPage = struct {
     }
 };
 
+const JsonGroupBrief = struct {
+    id: JsonString(20),
+    name: JsonString(protocol.max_group_name_bytes),
+    collapsed: bool,
+    revision: JsonString(20),
+
+    fn core(self: JsonGroupBrief) !@import("session_group.zig").Brief {
+        if (!@import("session_group.zig").validName(self.name.slice())) return error.InvalidObservation;
+        return .{ .id = try ActivityPage.id(self.id, false), .name = self.name.value, .collapsed = self.collapsed, .revision = try ActivityPage.id(self.revision, false) };
+    }
+};
+
 pub const ActivityCursor = struct {
     end: ?u64 = null,
     position: u64 = 0,
@@ -156,7 +168,7 @@ pub const ActivityPage = struct {
         const Items = JsonArray(Item, 16);
         const CallEntry = struct { operation: JsonString(20), ordinal: JsonString(20), presentation: JsonToolPresentation };
         const Calls = JsonArray(CallEntry, 3);
-        const Work = struct { read_version: JsonString(protocol.SinceToken.max_bytes), state: JsonWorkState, turn: ?JsonString(20), operation: ?JsonString(20), first_action: ?JsonString(20), last_line: ?struct { position: JsonString(20), text: ?JsonString(session_list.max_last_line_bytes) } = null, revision: JsonString(20), workspace: JsonString(protocol.max_workspace_bytes) };
+        const Work = struct { read_version: JsonString(protocol.SinceToken.max_bytes), group: ?JsonGroupBrief, group_manual: bool, state: JsonWorkState, turn: ?JsonString(20), operation: ?JsonString(20), first_action: ?JsonString(20), last_line: ?struct { position: JsonString(20), text: ?JsonString(session_list.max_last_line_bytes) } = null, revision: JsonString(20), workspace: JsonString(protocol.max_workspace_bytes) };
         const Queued = struct { count: JsonString(20), oldest_position: JsonString(20), newest_admission: JsonString(20), newest_position: JsonString(20) };
         const Wire = struct { version: JsonString(8), type: JsonString(32), delta: JsonEnum(enum { full }), since: ?JsonString(SessionToken.max_bytes), end: JsonString(20), direction: JsonEnum(@FieldType(ActivityCursor, "direction")), items: Items, more: bool, call_activity: struct { total: JsonString(20), entries: Calls }, queued: Queued, work: Work };
         var storage: [2 * activity_reply.max_page_bytes]u8 = undefined;
@@ -298,6 +310,8 @@ pub const ActivityPage = struct {
         if (wire.work.last_line) |line| facts.last_line = .{ .position = try id(line.position, false), .text = if (line.text) |text| text.value else null };
         facts.read_version = protocol.SinceToken.parse(wire.work.read_version.slice()) catch return error.InvalidActivityPage;
         facts.revision = try id(wire.work.revision, false);
+        facts.group = if (wire.work.group) |value| value.core() catch return error.InvalidActivityPage else null;
+        facts.group_manual = wire.work.group_manual;
         if (!std.fs.path.isAbsolute(wire.work.workspace.slice())) return error.InvalidActivityPage;
         facts.workspace.set(wire.work.workspace.slice()) catch return error.InvalidActivityPage;
         return page;
@@ -1363,7 +1377,7 @@ pub const SessionListPage = struct {
                 read_version: JsonString(protocol.SinceToken.max_bytes),
                 archive_state: JsonEnum(protocol.SessionArchiveState),
                 pin_order: ?JsonString(20),
-                group: ?struct { id: JsonString(20), name: JsonString(protocol.max_group_name_bytes), collapsed: bool, revision: JsonString(20) },
+                group: ?JsonGroupBrief,
                 group_manual: bool,
                 reference: JsonString(protocol.max_session_bytes),
                 parent: ?JsonString(protocol.session_id_bytes),
@@ -1389,12 +1403,11 @@ pub const SessionListPage = struct {
             if (!protocol.validSessionId(wire.reference.slice()) or wire.workspace.value.len == 0 or wire.model.value.len == 0) return error.InvalidCharacter;
             if (wire.parent) |parent| if (!protocol.validSessionId(parent.slice()) or parent.eql(wire.reference.slice())) return error.InvalidCharacter;
             if (wire.label) |label| if (!protocol.validLabel(label.slice())) return error.InvalidCharacter;
-            if (wire.group) |group| if (!@import("session_group.zig").validName(group.name.slice())) return error.InvalidCharacter;
             var row: Row = .{
                 .read_version = try protocol.SinceToken.parse(wire.read_version.slice()),
                 .archive_state = wire.archive_state.value,
                 .pin_order = if (wire.pin_order) |rank| try ActivityPage.id(rank, false) else null,
-                .group = if (wire.group) |group| .{ .id = try ActivityPage.id(group.id, false), .name = group.name.value, .collapsed = group.collapsed, .revision = try ActivityPage.id(group.revision, false) } else null,
+                .group = if (wire.group) |group| try group.core() else null,
                 .group_manual = wire.group_manual,
                 .reference = wire.reference.value,
                 .parent = if (wire.parent) |parent| parent.value else null,
@@ -4020,5 +4033,34 @@ test "group list metadata rejects missing facts invalid names and noncanonical i
         defer std.testing.allocator.free(invalid);
         try file.writePositionalAll(io, invalid, 0);
         try std.testing.expectError(error.InvalidSessionPage, SessionListPage.read(io, file, invalid.len, "/w", .{}));
+    }
+}
+
+test "activity page current group snapshot preserves manual placement and rejects malformed metadata" {
+    var facts: protocol.ActivityFacts = .{ .end = 0, .work = .{ .revision = 1, .work = .{ .state = .{ .idle = .{ .since = 1 } } } } };
+    try facts.work.workspace.set("/work");
+    var buffer: [activity_reply.max_page_bytes]u8 = undefined;
+    for ([_]bool{ false, true }) |manual| for ([_]bool{ false, true }) |grouped| {
+        facts.work.group_manual = manual;
+        facts.work.group = if (grouped) .{ .id = 7, .name = try .from("Current group"), .collapsed = true, .revision = 3 } else null;
+        var out = std.Io.Writer.fixed(&buffer);
+        try activity_reply.writePage(&out, &facts);
+        const parsed = try ActivityPage.parse(out.buffered(), .{});
+        try std.testing.expectEqualDeep(facts.work, parsed.facts.work);
+    };
+    var out = std.Io.Writer.fixed(&buffer);
+    try activity_reply.writePage(&out, &facts);
+    for ([_][2][]const u8{
+        .{ "\"id\":\"7\"", "\"id\":\"0\"" },
+        .{ "\"revision\":\"3\"", "\"revision\":\"0\"" },
+        .{ "\"name\":\"Current group\"", "\"name\":\"\"" },
+        .{ "\"name\":\"Current group\"", "\"name\":\"Bad\\tgroup\"" },
+        .{ "\"group_manual\":true,", "" },
+        .{ "\"group\":{\"id\":\"7\",\"name\":\"Current group\",\"collapsed\":true,\"revision\":\"3\"},", "" },
+    }) |change| {
+        const malformed = try std.mem.replaceOwned(u8, std.testing.allocator, out.buffered(), change[0], change[1]);
+        defer std.testing.allocator.free(malformed);
+        try std.testing.expect(!std.mem.eql(u8, malformed, out.buffered()));
+        try std.testing.expectError(error.InvalidActivityPage, ActivityPage.parse(malformed, .{}));
     }
 }

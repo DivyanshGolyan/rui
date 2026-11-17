@@ -140,6 +140,7 @@ pub const Input = union(enum) { action: Action, enter, left, ignored };
 
 pub const InputDelivery = struct {
     key: Input,
+    row: ?RowInput = null,
     under: bool = false,
     pasted: bool = false,
 };
@@ -359,6 +360,25 @@ pub fn clickOf(state: *const State, item: Item) ?Click {
     };
 }
 
+pub const RowInput = struct {
+    target: Click,
+    parent: ?session_group.Id = null,
+};
+
+pub fn rowInputOf(state: *const State, item: Item) ?RowInput {
+    const target = clickOf(state, item) orelse return null;
+    var result: RowInput = .{ .target = target };
+    if (item == .row) {
+        const row = &state.rows.items[state.order.items[item.row]];
+        if (row.pin_order == null) if (row.group) |brief| {
+            if (groupLine(state, brief.id) != null) {
+                result.parent = brief.id;
+            }
+        };
+    }
+    return result;
+}
+
 pub fn pinClickOf(state: *const State, item: Item) ?Click {
     return switch (item) {
         .row => |at| blk: {
@@ -473,7 +493,7 @@ pub const ModelsRead = union(enum) {
 
 const ReasoningEffort = model_capability.ReasoningEffort;
 
-pub const Observed = struct { read_version: Token, reference: Reference, work: session_work.Work, last_line: ?session_list.SavedLastLine = null, opening: bool };
+pub const Observed = struct { read_version: Token, reference: Reference, work: session_work.Work, group: ?session_group.Brief = null, group_manual: bool = false, last_line: ?session_list.SavedLastLine = null, opening: bool };
 
 pub const ConversationInput = union(enum) {
     other,
@@ -883,7 +903,7 @@ pub const State = struct {
                 });
                 try reindex(self);
             }
-            settleRow(self, &self.rows.items[at.?], .{ .read_version = read.read_version, .work = read.work, .last_line = read.last_line });
+            settleRow(self, &self.rows.items[at.?], .{ .read_version = read.read_version, .work = read.work, .group = read.group, .group_manual = read.group_manual, .last_line = read.last_line });
             try arrange(self);
         };
         if (!read.opening or attention.Attention.of(read.work) == null) return;
@@ -1059,7 +1079,22 @@ pub const State = struct {
     }
 };
 
-pub const Counts = struct { needs_you: usize = 0, working: usize = 0, queued: usize = 0, failed: usize = 0 };
+pub const Counts = struct {
+    needs_you: usize = 0,
+    working: usize = 0,
+    queued: usize = 0,
+    failed: usize = 0,
+
+    fn addRow(self: *Counts, state: *const State, row: *const Row) void {
+        switch (rules.get(shownKind(state, row)).mark) {
+            .needs_you => self.needs_you += 1,
+            .active => self.working += 1,
+            .queued => self.queued += 1,
+            .failed => self.failed += 1,
+            .waiting, .finished, .stopped, .newer => {},
+        }
+    }
+};
 
 pub const Summary = struct { counts: Counts = .{} };
 
@@ -1189,21 +1224,7 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
             },
         },
         .first_line => |result| try firstLine(state, result),
-        .clicked => |input| if (!state.creating()) switch (input.target) {
-            .open => |reference| try clickOpen(state, reference, &effects),
-            .pin => |request| pinIntent(state, request, &effects),
-            .group => |request| groupIntent(state, request, &effects),
-            .new_session => {
-                state.selected = .new_session;
-                try enter(state, &effects);
-            },
-            .sessions => try selectView(state, .active, &effects),
-            .archived => try selectView(state, .archived, &effects),
-            .settings => {
-                state.selected = .settings;
-                effects.add(.open_settings);
-            },
-        },
+        .clicked => |input| if (!state.creating()) try activate(state, input.target, &effects),
         .unconfirmed => |left| {
             std.debug.assert(canHoldSend(state));
             state.requests[state.request_count] = .{ .kind = .send, .session = left.reference, .status = .unknown, .sent = left.recovery };
@@ -1217,22 +1238,12 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
                 .archive => |archive| archiveIntent(state, .{ .ask = .{ .reference = input.reference, .work = input.work, .archive = archive } }, &effects),
                 .unarchive => archiveIntent(state, .{ .restore = input.reference }, &effects),
                 .pin => |pinned| pinIntent(state, .{ .reference = input.reference, .pinned = pinned }, &effects),
-                .group => |action| grouping: {
+                .group => |action| {
                     const resolved: session_group.Action = switch (action) {
                         .assign => |name| .{ .assign = name },
                         .leave => .leave,
                         .automatic => .automatic,
-                        .rename => |name| blk: {
-                            const row = state.find(input.reference) orelse {
-                                state.say(.attention, "! This chat has no group to rename.", .{});
-                                break :grouping;
-                            };
-                            const group = row.group orelse {
-                                state.say(.attention, "! This chat has no group to rename.", .{});
-                                break :grouping;
-                            };
-                            break :blk .{ .rename = .{ .group = group.id, .name = name } };
-                        },
+                        .rename => |name| .{ .rename_current = name },
                     };
                     groupIntent(state, .{ .reference = input.reference, .action = resolved }, &effects);
                 },
@@ -1269,7 +1280,7 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
                         .assign => "Chat moved to group.",
                         .leave => "Chat left the group. Automatic grouping is paused for this chat.",
                         .automatic => "Automatic grouping restored for this chat.",
-                        .rename => "Group renamed.",
+                        .rename, .rename_current => "Group renamed.",
                         .collapse => "",
                     }});
                 },
@@ -1467,7 +1478,7 @@ fn tick(state: *State, now_ms: u64, effects: *Effects) error{OutOfMemory}!void {
     var changed = false;
     for (state.rows.items) |*row| {
         const was = std.meta.activeTag(row.state);
-        if (row.read_version) |version| settleRow(state, row, .{ .read_version = version, .work = row.work(), .last_line = row.last_line });
+        if (row.read_version) |version| settleRow(state, row, .{ .read_version = version, .work = row.work(), .group = row.group, .group_manual = row.group_manual, .last_line = row.last_line });
         changed = changed or was != std.meta.activeTag(row.state);
     }
     if (changed) try arrange(state);
@@ -1584,8 +1595,6 @@ fn commit(state: *State, answer: Answer) error{OutOfMemory}!void {
         const same = if (incoming.first) |first| if (row.first) |known| first.admission == known.admission else false else false;
         row.archive_state = incoming.archive_state;
         row.pin_order = incoming.pin_order;
-        row.group = incoming.group;
-        row.group_manual = incoming.group_manual;
         row.workspace = incoming.workspace;
         row.provider = incoming.provider;
         row.label = incoming.label;
@@ -1593,7 +1602,7 @@ fn commit(state: *State, answer: Answer) error{OutOfMemory}!void {
         row.from_person_at = incoming.from_person_at;
         if (!same) row.line = .unread;
         row.listed = state.archive.includes(incoming.archive_state);
-        settleRow(state, row, .{ .read_version = incoming.read_version.?, .work = incoming.work(), .last_line = incoming.last_line });
+        settleRow(state, row, .{ .read_version = incoming.read_version.?, .work = incoming.work(), .group = incoming.group, .group_manual = incoming.group_manual, .last_line = incoming.last_line });
         retitle(state, row, title(state, &was).text);
     };
     for (state.rows.items) |row| if (!row.listed) {
@@ -1636,6 +1645,8 @@ fn settleRow(state: *const State, row: *Row, read: session_list.Snapshot) void {
         if (std.mem.eql(u8, &known.instance, &read.read_version.instance) and read.read_version.generation <= known.generation) return;
     }
     row.read_version = read.read_version;
+    row.group = read.group;
+    row.group_manual = read.group_manual;
     row.state = read.work.state.asOf(state.now_ms);
     row.turn = read.work.turn;
     row.operation = read.work.operation;
@@ -1741,13 +1752,7 @@ fn projectGroups(state: *State) error{OutOfMemory}!void {
         group.members += 1;
         group.manual = group.manual or row.group_manual;
         group.unpinned += @intFromBool(row.pin_order == null);
-        switch (rules.get(shownKind(state, row)).mark) {
-            .needs_you => group.counts.needs_you += 1,
-            .active => group.counts.working += 1,
-            .queued => group.counts.queued += 1,
-            .failed => group.counts.failed += 1,
-            .waiting, .finished, .stopped, .newer => {},
-        }
+        group.counts.addRow(state, row);
     }
     for (state.sort_keys.items) |*key| if (key.group) |id| {
         if (!state.groupOf(id).?.displayed()) key.group = null;
@@ -1793,12 +1798,8 @@ fn projectGroups(state: *State) error{OutOfMemory}!void {
 
 fn counts(state: *const State) Counts {
     var result: Counts = .{};
-    for (state.rows.items) |*row| if (visible(state, row)) switch (rules.get(shownKind(state, row)).mark) {
-        .needs_you => result.needs_you += 1,
-        .active => result.working += 1,
-        .queued => result.queued += 1,
-        .failed => result.failed += 1,
-        .waiting, .finished, .stopped, .newer => {},
+    for (state.rows.items) |*row| if (visible(state, row)) {
+        result.addRow(state, row);
     };
     return result;
 }
@@ -1896,6 +1897,24 @@ fn workLine(words: *[work_line.max_words_bytes]u8, state: *const State, row: *co
     return if (state.openStop(row.reference) != null) work_line.stopping else work_line.of(words, (&row.state), null, state.now_ms);
 }
 
+fn activate(state: *State, target: Click, effects: *Effects) error{OutOfMemory}!void {
+    switch (target) {
+        .open => |reference| try clickOpen(state, reference, effects),
+        .pin => |request| pinIntent(state, request, effects),
+        .group => |request| groupIntent(state, request, effects),
+        .new_session => {
+            state.selected = .new_session;
+            try enter(state, effects);
+        },
+        .sessions => try selectView(state, .active, effects),
+        .archived => try selectView(state, .archived, effects),
+        .settings => {
+            state.selected = .settings;
+            effects.add(.open_settings);
+        },
+    }
+}
+
 fn clickOpen(state: *State, reference: Reference, effects: *Effects) error{OutOfMemory}!void {
     _ = position(state, reference) orelse return;
     state.selected = .{ .session = reference };
@@ -1932,27 +1951,30 @@ fn listInput(state: *State, delivery: InputDelivery, effects: *Effects) error{Ou
     if (delivery.under or state.creating()) return;
     switch (input) {
         .ignored => unreachable,
-        .enter => try enter(state, effects),
-        .left => switch (state.selected) {
-            .archived => state.selected = .sessions,
-            .group => |id| fold(state, id, true, effects),
-            .session => |ref| if (state.find(ref)) |row| {
-                if (row.pin_order == null) if (row.group) |group| {
-                    if (groupLine(state, group.id) != null) {
-                        state.selected = .{ .group = group.id };
-                        fold(state, group.id, true, effects);
-                    }
-                };
-            },
-            else => {},
+        .enter => if (delivery.row) |row| try activate(state, row.target, effects) else switch (state.selected) {
+            .session, .group => {},
+            else => try enter(state, effects),
+        },
+        .left => if (delivery.row) |row| {
+            const request: ?GroupRequest = switch (row.target) {
+                .group => |group| collapseRequest(group, true),
+                .open => |reference| if (row.parent) |id| .{ .reference = reference, .action = .{ .collapse = .{ .group = id, .collapsed = true } } } else null,
+                else => null,
+            };
+            if (request) |group| {
+                state.selected = .{ .group = group.action.collapse.group };
+                groupIntent(state, group, effects);
+            }
+        } else if (state.selected == .archived) {
+            state.selected = .sessions;
         },
         .action => |action| switch (action) {
             .exit => unreachable,
-            .open_session => switch (state.selected) {
-                .session => try enter(state, effects),
-                .group => |id| fold(state, id, false, effects),
+            .open_session => if (delivery.row) |row| {
+                try activate(state, if (row.target == .group) .{ .group = collapseRequest(row.target.group, false) } else row.target, effects);
+            } else switch (state.selected) {
                 .sessions => state.selected = .archived,
-                .new_session, .archived, .settings => {},
+                .new_session, .archived, .settings, .group, .session => {},
             },
             .clear => {
                 state.notice = null;
@@ -2010,11 +2032,7 @@ fn enter(state: *State, effects: *Effects) error{OutOfMemory}!void {
         effects.add(.open_settings);
         return;
     }
-    if (state.selected == .group) {
-        const group = state.groupOf(state.selected.group) orelse return;
-        fold(state, group.brief.id, !group.brief.collapsed, effects);
-        return;
-    }
+    if (state.selected == .group) return;
     if (state.selected == .sessions) return selectView(state, .active, effects);
     if (state.selected == .archived) return selectView(state, .archived, effects);
     if (state.selected == .session) if (state.conversing) |open| if (std.mem.eql(u8, &state.selected.session, &open)) {
@@ -2096,10 +2114,6 @@ fn groupIntent(state: *State, request: GroupRequest, effects: *Effects) void {
         }
     };
     if (organizationHeld(state, request.reference)) return;
-    switch (request.action) {
-        .collapse => |target| if (state.groupOf(target.group) == null) return,
-        else => {},
-    }
     if (state.request(.group, request.reference)) {
         state.requests[state.request_count - 1].group_action = request.action;
         effects.add(.{ .group = request });
@@ -2115,10 +2129,8 @@ fn groupTarget(action: session_group.Action) ?session_group.Id {
     };
 }
 
-fn fold(state: *State, id: session_group.Id, collapsed: bool, effects: *Effects) void {
-    const group = state.groupOf(id) orelse return;
-    if (group.brief.collapsed == collapsed) return;
-    groupIntent(state, .{ .reference = group.reference, .action = .{ .collapse = .{ .group = id, .collapsed = collapsed } } }, effects);
+fn collapseRequest(request: GroupRequest, collapsed: bool) GroupRequest {
+    return .{ .reference = request.reference, .action = .{ .collapse = .{ .group = request.action.collapse.group, .collapsed = collapsed } } };
 }
 
 fn pinIntent(state: *State, request: PinRequest, effects: *Effects) void {
@@ -3010,11 +3022,16 @@ fn refresh(state: *State, delta: Delta, since: Token, rows: []const Listed) !Eff
 
 var test_edits: u32 = 0;
 
+fn testRowInput(state: *const State) ?RowInput {
+    const line = focusedLine(state, true) orelse return null;
+    return rowInputOf(state, listItem(state, line) orelse return null);
+}
+
 fn press(state: *State, action: Action) !Effects {
-    return step(state, .{ .input = .{ .key = .{ .action = action } } });
+    return step(state, .{ .input = .{ .key = .{ .action = action }, .row = testRowInput(state) } });
 }
 fn submit(state: *State) !Effects {
-    return step(state, .{ .input = .{ .key = .enter } });
+    return step(state, .{ .input = .{ .key = .enter, .row = testRowInput(state) } });
 }
 
 fn expectEffects(expected: []const Effect, actual: Effects) !void {
@@ -5231,7 +5248,7 @@ test "New Session Enter and click create exactly once with a copied default" {
         var state = try opened(&.{});
         defer state.deinit();
         state.default = Default.of("openai", "gpt-6-sol");
-        const input: Event = if (click) .{ .clicked = .{ .target = .new_session } } else .{ .input = .{ .key = .enter } };
+        const input: Event = if (click) .{ .clicked = .{ .target = .new_session } } else .{ .input = .{ .key = .enter, .row = testRowInput(&state) } };
         const effects = try step(&state, input);
         try expectEffects(&.{.{ .create = state.default }}, effects);
         state.default.?.model.set("changed-after-admission") catch unreachable;
@@ -5240,7 +5257,7 @@ test "New Session Enter and click create exactly once with a copied default" {
         try std.testing.expectEqualStrings("gpt-6-sol", effects.slice()[0].create.?.model.slice());
         state.default = null;
         try std.testing.expect(state.creating());
-        try expectEffects(&.{}, try step(&state, .{ .input = .{ .key = .enter } }));
+        try expectEffects(&.{}, try step(&state, .{ .input = .{ .key = .enter, .row = testRowInput(&state) } }));
         try expectEffects(&.{}, try step(&state, .{ .clicked = .{ .target = .new_session } }));
         try std.testing.expectEqual(@as(usize, 1), state.request_count);
         try std.testing.expectEqual(.create, state.requests[0].kind);
@@ -5675,7 +5692,7 @@ test "empty Session projection shows only the current open empty and reconciles 
     try std.testing.expectEqual(@as(usize, 3), state.rows.items.len);
     state.selected = .{ .session = "empty1".* };
     try std.testing.expect(state.selectedRow() == null);
-    try expectEffects(&.{}, try step(&state, .{ .input = .{ .key = .enter } }));
+    try expectEffects(&.{}, try step(&state, .{ .input = .{ .key = .enter, .row = testRowInput(&state) } }));
 }
 
 test "empty Session projection leaving the last visible empty selects New Session" {
@@ -5910,7 +5927,7 @@ test "Overview list activation resumes same or opens other chat at wide and narr
         _ = try step(&state, .{ .resized = .{ .width = width, .height = 30 } });
         _ = try step(&state, .{ .conversation = "b2c3d4".* });
         state.selected = .{ .session = if (same) "b2c3d4".* else "g7h8j9".* };
-        const effects = try step(&state, .{ .input = .{ .key = key } });
+        const effects = try step(&state, .{ .input = .{ .key = key, .row = testRowInput(&state) } });
         var opens: usize = 0;
         var resumes: usize = 0;
         for (effects.slice()) |effect| switch (effect) {
@@ -5932,7 +5949,7 @@ test "Overview list Right does not create or open Settings and clicks share resu
     defer state.deinit();
     for ([_]Selection{ .new_session, .settings }) |selection| {
         state.selected = selection;
-        const effects = try step(&state, .{ .input = .{ .key = .{ .action = .open_session } } });
+        const effects = try step(&state, .{ .input = .{ .key = .{ .action = .open_session }, .row = testRowInput(&state) } });
         for (effects.slice()) |effect| try std.testing.expect(effect != .create and effect != .open_settings);
     }
     _ = try step(&state, .{ .conversation = "b2c3d4".* });
@@ -6182,20 +6199,20 @@ test "session list tabs have explicit destinations active no-op and one selectio
         try expectEffects(&.{}, try step(&state, .{ .clicked = .{ .target = .sessions } }));
         try std.testing.expectEqual(Selection.sessions, state.selected);
         try std.testing.expectEqual(ArchiveFilter.active, state.archive);
-        try expectEffects(&.{}, try step(&state, .{ .input = .{ .key = .enter } }));
-        _ = try step(&state, .{ .input = .{ .key = .{ .action = .open_session } } });
+        try expectEffects(&.{}, try step(&state, .{ .input = .{ .key = .enter, .row = testRowInput(&state) } }));
+        _ = try step(&state, .{ .input = .{ .key = .{ .action = .open_session }, .row = testRowInput(&state) } });
         try std.testing.expectEqual(Selection.archived, state.selected);
         try std.testing.expectEqual(ArchiveFilter.active, state.archive);
-        try std.testing.expect(hasEffect(try step(&state, .{ .input = .{ .key = .enter } }), .list));
+        try std.testing.expect(hasEffect(try step(&state, .{ .input = .{ .key = .enter, .row = testRowInput(&state) } }), .list));
         try std.testing.expectEqual(Selection.archived, state.selected);
         try std.testing.expectEqual(ArchiveFilter.archived, state.archive);
         _ = try respond(&state, .full, testToken(2), &.{});
         try expectEffects(&.{}, try step(&state, .{ .clicked = .{ .target = .archived } }));
-        try expectEffects(&.{}, try step(&state, .{ .input = .{ .key = .enter } }));
+        try expectEffects(&.{}, try step(&state, .{ .input = .{ .key = .enter, .row = testRowInput(&state) } }));
         _ = try step(&state, .{ .input = .{ .key = .left } });
         try std.testing.expectEqual(Selection.sessions, state.selected);
         try std.testing.expectEqual(ArchiveFilter.archived, state.archive);
-        try std.testing.expect(hasEffect(try step(&state, .{ .input = .{ .key = .enter } }), .list));
+        try std.testing.expect(hasEffect(try step(&state, .{ .input = .{ .key = .enter, .row = testRowInput(&state) } }), .list));
         try std.testing.expectEqual(ArchiveFilter.active, state.archive);
         try std.testing.expectEqual(before, state.now_ms);
         try std.testing.expectEqual(@as(usize, 0), state.request_count);
@@ -6524,8 +6541,7 @@ test "session groups rename retained open chats across archive filters" {
         const name = try session_group.Name.from("Renamed");
         const effects = try step(&state, .{ .conversed = .{ .reference = row.reference, .work = .finished, .input = .{ .group = .{ .rename = name } } } });
         try std.testing.expectEqual(@as(usize, 1), effects.len);
-        try std.testing.expectEqual(@as(session_group.Id, 7), effects.items[0].group.action.rename.group);
-        try std.testing.expectEqualStrings("Renamed", effects.items[0].group.action.rename.name.slice());
+        try std.testing.expectEqualStrings("Renamed", effects.items[0].group.action.rename_current.slice());
     }
 }
 
@@ -6546,4 +6562,131 @@ test "session groups Alt navigation does nothing from an open hidden member" {
             try std.testing.expectEqual(@as(session_group.Id, 7), state.selected.group);
         }
     }
+}
+
+test "session groups count every work state across pinned and collapsed membership" {
+    const Case = struct { work: WorkState, expected: Counts };
+    const cases = [_]Case{
+        .{ .work = .{ .idle = ago(2) }, .expected = .{} },
+        .{ .work = .{ .pending = ago(2) }, .expected = .{ .queued = 1 } },
+        .{ .work = .{ .working = ago(2) }, .expected = .{ .working = 1 } },
+        .{ .work = .{ .retrying = .{ .since = test_now_s - 2, .due_at_ms = (test_now_s + 10) * 1000, .cause = bounded(session_work.max_code_bytes, "provider_temporary_http_429"), .attempt = 1 } }, .expected = .{ .working = 1 } },
+        .{ .work = .{ .retrying = .{ .since = test_now_s - 2, .due_at_ms = test_now_s * 1000, .cause = bounded(session_work.max_code_bytes, "provider_temporary_http_429"), .attempt = 1 } }, .expected = .{ .queued = 1 } },
+        .{ .work = .{ .bash = .{ .since = test_now_s - 2, .call = 1, .description = null, .running = 1, .approvals = 0 } }, .expected = .{ .working = 1 } },
+        .{ .work = .{ .bash = .{ .since = test_now_s - 2, .call = 1, .description = null, .running = 1, .approvals = 1 } }, .expected = .{ .needs_you = 1 } },
+        .{ .work = .{ .approval = ago(2) }, .expected = .{ .needs_you = 1 } },
+        .{ .work = .{ .stopping = ago(2) }, .expected = .{ .working = 1 } },
+        .{ .work = .{ .finished = ago(2) }, .expected = .{} },
+        .{ .work = .{ .failed = .{ .since = test_now_s - 2, .code = bounded(session_work.max_code_bytes, "provider_output_invalid"), .resets_at = null } }, .expected = .{ .failed = 1 } },
+        .{ .work = .{ .stopped = .{ .since = test_now_s - 2, .cause = .stop } }, .expected = .{} },
+    };
+    for (std.enums.values(Kind)) |kind| {
+        var found = false;
+        for (cases) |case| found = found or std.meta.activeTag(case.work) == kind;
+        try std.testing.expect(found);
+    }
+    for (cases) |case| for ([_]bool{ false, true }) |pinned| for ([_]bool{ false, true }) |collapsed| {
+        const row = session("aaaaaa", case.work, .{ .label = "Member", .group = testGroup(7, "Group", collapsed), .group_manual = true, .pin_order = if (pinned) 1 else null });
+        var state = try opened(&.{row});
+        defer state.deinit();
+        try std.testing.expectEqual(case.expected, state.summary.counts);
+        try std.testing.expectEqual(case.expected, state.groupOf(7).?.counts);
+    };
+}
+
+test "session groups canonical observations preserve membership across archive filters and stale listing" {
+    for ([_]ArchiveState{ .active, .archived }) |archive| for ([_]ArchiveFilter{ .active, .archived, .all }) |filter| for ([_]bool{ false, true }) |direct| for ([_]?session_group.Id{ null, 7, 8 }) |next_group| for ([_]bool{ false, true }) |manual| {
+        const row = session("aaaaaa", .{ .finished = ago(2) }, .{ .label = "Open", .archive_state = archive, .group = testGroup(7, "Old", false), .read_version = testToken(1) });
+        var state = try testState();
+        defer state.deinit();
+        state.archive = filter;
+        state.listing_archive = filter;
+        _ = try step(&state, .{ .conversation = row.reference });
+        _ = try step(&state, .{ .tick = test_now_s * 1000 });
+        _ = try respond(&state, .full, testToken(1), if (direct) &.{} else &.{row});
+        const group: ?session_group.Brief = if (next_group) |id| testGroup(id, "Current", true) else null;
+        const current: Observed = .{ .reference = row.reference, .read_version = testToken(3), .work = .{ .state = .{ .finished = ago(1) } }, .group = group, .group_manual = manual, .opening = true };
+        _ = try step(&state, .{ .observed = current });
+        try std.testing.expect(std.meta.eql(group, state.find(row.reference).?.group));
+        try std.testing.expectEqual(manual, state.find(row.reference).?.group_manual);
+        _ = try refresh(&state, .full, testToken(2), &.{row});
+        try std.testing.expect(std.meta.eql(group, state.find(row.reference).?.group));
+        try std.testing.expectEqual(manual, state.find(row.reference).?.group_manual);
+        for ([_]Token{ testToken(2), testToken(3), .{ .instance = @splat(0xee), .generation = 99 } }) |version| {
+            var stale = current;
+            stale.read_version = version;
+            stale.group = testGroup(9, "Stale", false);
+            stale.group_manual = !manual;
+            _ = try step(&state, .{ .observed = stale });
+            try std.testing.expect(std.meta.eql(group, state.find(row.reference).?.group));
+            try std.testing.expectEqual(manual, state.find(row.reference).?.group_manual);
+        }
+        const name = try session_group.Name.from("Renamed");
+        const effects = try step(&state, .{ .conversed = .{ .reference = row.reference, .work = .finished, .input = .{ .group = .{ .rename = name } } } });
+        try std.testing.expectEqual(@as(usize, 1), effects.len);
+        try std.testing.expectEqualStrings("Renamed", effects.items[0].group.action.rename_current.slice());
+        var cleared = current;
+        cleared.read_version = testToken(4);
+        cleared.group = null;
+        cleared.group_manual = false;
+        _ = try step(&state, .{ .observed = cleared });
+        try std.testing.expect(state.find(row.reference).?.group == null);
+        try std.testing.expect(!state.find(row.reference).?.group_manual);
+    };
+}
+
+test "session groups rename asks Host for current membership before observation or after accepted move" {
+    for ([_]bool{ false, true }) |moved| {
+        var state = try testState();
+        defer state.deinit();
+        const reference = "aaaaaa".*;
+        if (moved) {
+            const effects = try step(&state, .{ .conversed = .{ .reference = reference, .work = .finished, .input = .{ .group = .{ .assign = try session_group.Name.from("Destination") } } } });
+            _ = try step(&state, .{ .group = .{ .request = effects.items[0].group, .outcome = .accepted } });
+        }
+        const effects = try step(&state, .{ .conversed = .{ .reference = reference, .work = .finished, .input = .{ .group = .{ .rename = try session_group.Name.from("New name") } } } });
+        try std.testing.expectEqual(@as(usize, 1), effects.len);
+        try std.testing.expectEqualStrings("New name", effects.items[0].group.action.rename_current.slice());
+        try std.testing.expectEqualStrings(&reference, &effects.items[0].group.reference);
+    }
+}
+
+test "session groups keyboard uses captured parent and desired state instead of refreshed projection" {
+    for ([_]Input{ .enter, .left, .{ .action = .open_session } }) |key| {
+        var row = session("aaaaaa", .{ .finished = ago(2) }, .{ .label = "Member", .group = testGroup(7, "Before", false), .group_manual = true });
+        var state = try opened(&.{row});
+        defer state.deinit();
+        state.selected = .{ .group = 7 };
+        const header = testRowInput(&state).?;
+        row.group.?.collapsed = true;
+        row.group.?.revision = 2;
+        _ = try refresh(&state, .full, testToken(2), &.{row});
+        const effects = try step(&state, .{ .input = .{ .key = key, .row = header } });
+        try std.testing.expectEqual(@as(usize, 1), effects.len);
+        try std.testing.expectEqual(@as(u64, 7), effects.items[0].group.action.collapse.group);
+        try std.testing.expectEqual(key != .action, effects.items[0].group.action.collapse.collapsed);
+    }
+    for ([_]bool{ false, true }) |collapsed| {
+        var row = session("aaaaaa", .{ .finished = ago(2) }, .{ .label = "Member", .group = testGroup(7, "Before", false), .group_manual = true });
+        var state = try opened(&.{row});
+        defer state.deinit();
+        state.selected = .{ .session = row.reference };
+        const member = testRowInput(&state).?;
+        row.group = testGroup(8, "After", collapsed);
+        _ = try refresh(&state, .full, testToken(2), &.{row});
+        try std.testing.expect(state.groupOf(7) == null);
+        const effects = try step(&state, .{ .input = .{ .key = .left, .row = member } });
+        try std.testing.expectEqual(@as(usize, 1), effects.len);
+        try std.testing.expectEqual(@as(u64, 7), effects.items[0].group.action.collapse.group);
+        try std.testing.expect(effects.items[0].group.action.collapse.collapsed);
+    }
+}
+
+test "session groups unavailable keyboard row targets require a drawn capture" {
+    var state = try opened(&.{session("aaaaaa", .{ .finished = ago(2) }, .{ .label = "Member", .group = testGroup(7, "Group", false), .group_manual = true })});
+    defer state.deinit();
+    for ([_]Selection{ .{ .session = "aaaaaa".* }, .{ .group = 7 } }) |selection| for ([_]Input{ .enter, .left, .{ .action = .open_session } }) |key| {
+        state.selected = selection;
+        try expectEffects(&.{}, try step(&state, .{ .input = .{ .key = key } }));
+    };
 }

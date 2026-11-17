@@ -3055,7 +3055,7 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
         const read = self.reading.feed_read;
         if (read == .opening or read == .scan or phase == .permission) {
             const result = &self.job.result;
-            observed = .{ .snapshot = .{ .read_version = result.work.read_version, .work = result.work.work, .last_line = result.work.last_line }, .opening = read == .opening };
+            observed = .{ .snapshot = .{ .read_version = result.work.read_version, .work = result.work.work, .last_line = result.work.last_line, .group = result.work.group, .group_manual = result.work.group_manual }, .opening = read == .opening };
             self.live.work = .fromCore(result.work.work);
             self.live.queued = result.queued;
             if (result.queued_line) |shown| self.live.queued_line = shown;
@@ -4916,7 +4916,7 @@ const ArchiveOverview = struct {
 
     fn observed(raw: *anyopaque, snapshot: session_list.Snapshot, opening: bool) !void {
         const self: *ArchiveOverview = @ptrCast(@alignCast(raw));
-        const effects = try overview_view.step(&self.state, .{ .observed = .{ .reference = "k7m2qx".*, .read_version = snapshot.read_version, .work = snapshot.work, .last_line = snapshot.last_line, .opening = opening } });
+        const effects = try overview_view.step(&self.state, .{ .observed = .{ .reference = "k7m2qx".*, .read_version = snapshot.read_version, .work = snapshot.work, .last_line = snapshot.last_line, .group = snapshot.group, .group_manual = snapshot.group_manual, .opening = opening } });
         try std.testing.expectEqual(@as(usize, 0), effects.len);
     }
 

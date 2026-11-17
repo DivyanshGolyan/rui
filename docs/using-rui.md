@@ -137,7 +137,7 @@ The overview list uses the full width at every terminal size, with no empty chat
 | --- | --- |
 | Up, Down, Home, End | Move through visible chats, group headers, **+ New Session**, view tabs, and **Settings**. |
 | Shift-Up, Shift-Down | Select the row above or below. |
-| Right, Left | Move between the view tabs. Right opens a Session or expands a group. Left on an unpinned member selects and collapses its group; Left on a header collapses it. |
+| Right, Left | Move between the view tabs. Right opens a Session or expands a group. Left on a member beneath a group header selects and collapses that group; Left on a header collapses it. |
 | Enter | Opens the selected Session, toggles a group, creates an empty chat from **+ New Session**, selects a view tab, or opens **Settings**. |
 | Alt-Up, Alt-Down | Opens the previous or next visible chat, skipping headers and collapsed children. |
 | Esc, Ctrl-G | Closes the topmost choice or panel, and in the archived Sessions returns to the usual list; no draft or per-start settings exist to clear. |
@@ -222,11 +222,15 @@ To keep the chat ungrouped, enter `/ungroup`.
 That choice survives new labels and Host restart.
 To evaluate automatic grouping again, enter `/autogroup`.
 To rename the chat's whole group, enter `/group-rename Migration work`.
+The command uses the chat's group when the Store applies the rename, even immediately after a move.
+It also works when the open chat is outside the list's current archive filter.
+An ungrouped chat reports that it has no group.
 Group names are unique within the Store and accept up to 100 UTF-8 bytes.
 
 Click a group header or select it and press Enter to collapse or expand it.
-Left collapses a group; on an unpinned member, Left also selects its header.
+Left collapses a group; on a member beneath a group header, Left also selects that header.
 Right expands a selected header.
+Clicks and Enter, Left, or Right use the group shown in the drawn row if the list refreshes before you activate it.
 Collapse keeps an open chat and its draft intact; its header highlights while that chat is hidden.
 Alt-Up and Alt-Down switch among visible chats and skip collapsed children.
 

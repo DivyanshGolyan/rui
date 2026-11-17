@@ -326,7 +326,7 @@ fn rowValues(rows: []const ShownRow, index: usize, now_ms: u64, row: *const List
     return .{
         .archive_state = row.archive_state,
         .pin_order = if (row.pin_order) |rank| rank.get() else null,
-        .group = try groupBrief(row),
+        .group = try @import("session_groups.zig").brief(row),
         .group_manual = row.group_manual,
         .reference = row.session_ref.slice(),
         .parent = if (row.parent_ref) |*parent| parent.slice() else null,
@@ -400,10 +400,3 @@ pub const LastLineRead = struct {
         } else null } else null;
     }
 };
-
-fn groupBrief(row: *const ListRow) error{CorruptStore}!?@import("../../session_group.zig").Brief {
-    const id = row.group_id orelse return null;
-    const name = row.group_name orelse return error.CorruptStore;
-    if (!@import("../../session_group.zig").validName(name.slice())) return error.CorruptStore;
-    return .{ .id = id.get(), .name = name, .collapsed = row.group_collapsed orelse return error.CorruptStore, .revision = (row.group_revision orelse return error.CorruptStore).get() };
-}

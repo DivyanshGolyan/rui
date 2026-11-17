@@ -83,6 +83,8 @@ pub const Queued = struct {
 };
 
 pub const PageWork = struct {
+    group: ?@import("session_group.zig").Brief = null,
+    group_manual: bool = false,
     read_version: change_ring.Token = .{ .instance = @splat(0), .generation = 0 },
     work: session_work.Work = .{ .state = .{ .idle = .{ .since = 0 } } },
     last_line: ?session_list.SavedLastLine = null,
