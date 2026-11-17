@@ -17,6 +17,12 @@ def empty_creation(binary, root, store_settings, env):
     home, workspace = root / "home", root / "workspace"
     home.mkdir(mode=0o700)
     workspace.mkdir(mode=0o700)
+    config = home / ".config/rui"
+    config.mkdir(parents=True, mode=0o700)
+    fixture_key = "sk-empty-creation-fixture"
+    key_file = config / "openai.key"
+    key_file.write_text(fixture_key + "\n")
+    key_file.chmod(0o600)
     clean = dict(env, HOME=str(home))
     for name in ("RUI_STORE", "RUI_ADDRESS", "RUI_SENDER_HANDLE", "RUI_RUNTIME_DIR"):
         clean.pop(name, None)
@@ -49,7 +55,7 @@ def empty_creation(binary, root, store_settings, env):
             "interface": {"dir": str(runtime), "lifetime": "stdin"},
             "execution": {"paused": True},
             "providers": {"openai": {"endpoint": "https://api.openai.com/v1/responses",
-                                      "key": {"value": "sk-empty-creation-fixture"}}},
+                                      "key": {"value": fixture_key}}},
         }
         helper = pathlib.Path(__file__).resolve().parents[2] / "clients/ts/test/fixtures/empty-creation.ts"
         typed = subprocess.run(["node", "--experimental-strip-types", str(helper)], env=clean, cwd=workspace,
@@ -109,7 +115,7 @@ def empty_creation(binary, root, store_settings, env):
                 assert len(captured) == 1, captured
                 tui = json.loads(captured.pop().read_text())
                 assert tui["kind"] == "configure" and tui["configuration"] == binding, tui
-                admission = invoke("request", "recover", "--store", store, "--key", tui["key"])
+                admission = invoke("request", "recover", tui["key"])
                 assert admission["answer"]["replayed"] is True, admission
                 assert check(inspect(admission["context"]["session"])) == resolved
                 os.write(master, b"\x04")

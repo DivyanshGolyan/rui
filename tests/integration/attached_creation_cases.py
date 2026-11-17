@@ -180,7 +180,9 @@ def attached_creation(binary, directory, root, env, *, scalar=None):
                     assert saved["compaction_trigger"] == expected, saved
                     assert saved["compaction_trigger_override"] == expected, saved
                     if door == "start":
-                        wait(created["context"]["key"])
+                        ended = value("request", "wait", "--store", directory, "--key", created["context"]["key"],
+                                      "--timeout-seconds", "25")
+                        assert ended["observation"]["state"] == "completed", ended
                     replay = value("request", "recover", "--store", directory, "--record", record,
                                    "--kind", "message" if door == "start" else "configure")
                     assert replay["answer"]["replayed"] is True and replay["context"]["session"] == child, replay
