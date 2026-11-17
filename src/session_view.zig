@@ -832,8 +832,10 @@ fn toolRequest(io: std.Io, scratch: std.Io.File, sink: anytype, colour: bool, to
     }
     try indented.feed("\nTool: ");
     try indented.feed(tool.name.slice());
-    try indented.feed("\nServer: ");
-    try indented.feed(tool.server.?.slice());
+    if (tool.server) |server| {
+        try indented.feed("\nServer: ");
+        try indented.feed(server.slice());
+    }
     try indented.feed("\nArguments:\n");
     var lines: Indented(*Indented(@TypeOf(sink))) = .{ .sink = &indented, .prefix = content_mark, .marks_empty = true, .line_start = true };
     var escaped: Escaped(@TypeOf(&lines)) = .{ .sink = &lines, .text = .{ .mode = .multiline } };
