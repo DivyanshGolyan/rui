@@ -47,7 +47,7 @@ def finished(report):
 
 
 def row_of(frame, label):
-    found = [n + 1 for n, line in enumerate(frame.split("\n")) if re.match(rf" \S {re.escape(label)}( |$)", line)]
+    found = [n + 1 for n, line in enumerate(frame.split("\n")) if re.match(rf" . {re.escape(label)}( |$)", line)]
     assert len(found) == 1, (label, found, frame)
     return found[0]
 
