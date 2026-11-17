@@ -90,6 +90,7 @@ test {
     _ = @import("protocol.zig");
     _ = @import("wire_request.zig");
     _ = @import("session_skills.zig");
+    _ = @import("creation_receipt_wire.zig");
     _ = @import("protocol_reply.zig");
     _ = @import("protocol_reply_store_tests.zig");
     _ = @import("caller_rejection.zig");
