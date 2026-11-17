@@ -761,8 +761,8 @@ pub const WorkRead = struct {
         const found = try count.found();
         w.stage = switch (w.stage) {
             .latest => if (found and w.inputs.latest.?.terminal == null) .actions else .cutoff,
-            .actions => if (!found) return error.ActionReadFailed else if (w.inputs.latest.?.actions.running != 0) .oldest else .done,
-            .oldest => if (!found) return error.CorruptStore else .done,
+            .actions => if (!found) return error.ActionReadFailed else if (w.inputs.latest.?.actions.running != 0) .oldest else if (w.inputs.latest.?.stopped_at != null) .cutoff else .done,
+            .oldest => if (!found) return error.CorruptStore else if (w.inputs.latest.?.stopped_at != null) .cutoff else .done,
             .stop => if (!found) return error.CorruptStore else .owed,
             .cutoff => .queued,
             .queued => if (found) .done else if (w.cutoff == 0) .owed else .excluded,

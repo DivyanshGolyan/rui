@@ -435,7 +435,7 @@ export interface components {
     schemas: {
         ActionBackgroundConflictReply: {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             type: "action_background_reply";
             answer: {
@@ -451,7 +451,7 @@ export interface components {
         };
         ActionBackgroundReply: {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             type: "action_background_reply";
             answer: {
@@ -468,7 +468,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             type: "action_background_reply";
             answer: {
@@ -483,7 +483,7 @@ export interface components {
         };
         ActionBackgroundRequest: {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             kind: "action_background";
             store: string;
@@ -493,7 +493,7 @@ export interface components {
         };
         ActivityContentRequest: {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             kind: "activity_content";
             store: string;
@@ -715,7 +715,7 @@ export interface components {
         };
         ActivityPageReply: {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             type: "activity_page";
             end: components["schemas"]["Decimal"];
@@ -731,7 +731,7 @@ export interface components {
             since: string | null;
         } | {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             type: "activity_page";
             /** @constant */
@@ -740,7 +740,7 @@ export interface components {
         };
         ActivityPageRequest: {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             kind: "activity_page";
             store: string;
@@ -773,7 +773,7 @@ export interface components {
         };
         ActivitySearchReply: {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             type: "activity_search";
             items: components["schemas"]["ActivitySearchItem"][];
@@ -781,7 +781,7 @@ export interface components {
         };
         ActivitySearchRequest: {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             kind: "activity_search";
             store: string;
@@ -841,7 +841,7 @@ export interface components {
         };
         ConfigureConflictReply: {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             type: "configuration_reply";
             answer: {
@@ -862,7 +862,7 @@ export interface components {
         };
         ConfigureReply: {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             type: "configuration_reply";
             answer: {
@@ -881,7 +881,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             type: "configuration_reply";
             answer: {
@@ -903,7 +903,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             type: "configuration_reply";
             answer: {
@@ -924,7 +924,7 @@ export interface components {
         };
         ConfigureRequest: {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             kind: "configure";
             store: string;
@@ -939,7 +939,7 @@ export interface components {
         };
         ConversationContentRequest: {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             kind: "conversation_content";
             store: string;
@@ -953,7 +953,7 @@ export interface components {
         };
         ConversationPageReply: {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             type: "conversation_page";
             /** @constant */
@@ -1034,7 +1034,7 @@ export interface components {
             more: false;
         } | {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             type: "conversation_page";
             /** @constant */
@@ -1118,7 +1118,7 @@ export interface components {
         };
         ConversationPageRequest: {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             kind: "conversation_page";
             store: string;
@@ -1131,7 +1131,7 @@ export interface components {
         Decimal: string;
         ErrorReply: {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @enum {string} */
             type: "invocation_error" | "observation_error" | "busy" | "unsupported" | "host_unavailable" | "result_unavailable" | "action_unavailable" | "conversation_unavailable" | "activity_unavailable" | "failed_response_unavailable";
             code: string;
@@ -1145,7 +1145,7 @@ export interface components {
         };
         HostInfoReply: {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             type: "host_info";
             store: string;
@@ -1172,21 +1172,21 @@ export interface components {
         };
         HostInfoRequest: {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             kind: "host_info";
             store: string;
         };
         HostPauseReply: {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             type: "host_pause_reply";
             paused: boolean;
         };
         HostPauseRequest: {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             kind: "host_pause";
             store: string;
@@ -1325,7 +1325,7 @@ export interface components {
         };
         HostStopReply: {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             type: "host_stop_reply";
             /** @constant */
@@ -1333,14 +1333,14 @@ export interface components {
         };
         HostStopRequest: {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             kind: "host_stop";
             store: string;
         };
         InspectSessionReply: {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             type: "session_report";
             /** @constant */
@@ -1363,7 +1363,7 @@ export interface components {
             execution: components["schemas"]["domainreportExecutionJson"];
         } | {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             type: "session_report";
             /** @constant */
@@ -1384,7 +1384,7 @@ export interface components {
             execution: components["schemas"]["domainreportExecutionJson"];
         } | {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             type: "session_report";
             /** @constant */
@@ -1403,7 +1403,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             type: "session_report";
             /** @constant */
@@ -1420,7 +1420,7 @@ export interface components {
         };
         InspectSessionRequest: {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             kind: "inspect_session";
             store: string;
@@ -1428,7 +1428,7 @@ export interface components {
             since?: string | null;
         } | {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             kind: "inspect_session";
             store: string;
@@ -1437,7 +1437,7 @@ export interface components {
             profile: "full";
         } | {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             kind: "inspect_session";
             store: string;
@@ -1453,7 +1453,7 @@ export interface components {
         };
         ListSessionsReply: {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             type: "session_list";
             sessions: components["schemas"]["SessionRow"][];
@@ -1466,7 +1466,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             type: "session_list";
             sessions: components["schemas"]["SessionRow"][];
@@ -1479,7 +1479,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             type: "session_list";
             sessions: components["schemas"]["SessionRow"][];
@@ -1490,7 +1490,7 @@ export interface components {
         };
         ListSessionsRequest: {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             kind: "list_sessions";
             store: string;
@@ -1505,7 +1505,7 @@ export interface components {
         };
         MessageConflictReply: {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             type: "message_reply";
             answer: {
@@ -1534,7 +1534,7 @@ export interface components {
         };
         MessageReply: {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             type: "message_reply";
             answer: {
@@ -1561,7 +1561,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             type: "message_reply";
             answer: {
@@ -1586,7 +1586,7 @@ export interface components {
         };
         MessageRequest: {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             kind: "message";
             store: string;
@@ -1609,7 +1609,7 @@ export interface components {
         };
         ModelInterruptionConflictReply: {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             type: "model_interruption_reply";
             answer: {
@@ -1628,7 +1628,7 @@ export interface components {
         };
         ModelInterruptionReply: {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             type: "model_interruption_reply";
             answer: {
@@ -1643,7 +1643,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             type: "model_interruption_reply";
             answer: {
@@ -1661,7 +1661,7 @@ export interface components {
         };
         ModelInterruptionRequest: {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             kind: "model_interruption";
             store: string;
@@ -1684,14 +1684,14 @@ export interface components {
         };
         ModelListReply: {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             type: "model_list";
             providers: components["schemas"]["ModelListEntry"][];
         };
         ModelListRequest: {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             kind: "model_list";
             store: string;
@@ -1702,7 +1702,7 @@ export interface components {
         };
         ObserveCommandReply: {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             type: "command_observation";
             key: string;
@@ -1715,7 +1715,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             type: "command_observation";
             key: string;
@@ -1755,7 +1755,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             type: "command_observation";
             key: string;
@@ -1829,6 +1829,10 @@ export interface components {
                 work: {
                     state: components["schemas"]["WorkStateJson"];
                     first_action: components["schemas"]["Decimal"] | null;
+                    attention: components["schemas"]["WorkAttentionJson"] | null;
+                    /** @enum {string} */
+                    group: "needs_you" | "working" | "queued" | "done";
+                    actions: components["schemas"]["WorkActionsJson"];
                 };
             } | {
                 /** @enum {string} */
@@ -1852,6 +1856,10 @@ export interface components {
                 work: {
                     state: components["schemas"]["WorkStateJson"];
                     first_action: components["schemas"]["Decimal"] | null;
+                    attention: components["schemas"]["WorkAttentionJson"] | null;
+                    /** @enum {string} */
+                    group: "needs_you" | "working" | "queued" | "done";
+                    actions: components["schemas"]["WorkActionsJson"];
                 };
             } | {
                 /** @enum {string} */
@@ -1879,6 +1887,10 @@ export interface components {
                 work: {
                     state: components["schemas"]["WorkStateJson"];
                     first_action: components["schemas"]["Decimal"] | null;
+                    attention: components["schemas"]["WorkAttentionJson"] | null;
+                    /** @enum {string} */
+                    group: "needs_you" | "working" | "queued" | "done";
+                    actions: components["schemas"]["WorkActionsJson"];
                 };
             } | {
                 /** @enum {string} */
@@ -1907,6 +1919,10 @@ export interface components {
                 work: {
                     state: components["schemas"]["WorkStateJson"];
                     first_action: components["schemas"]["Decimal"] | null;
+                    attention: components["schemas"]["WorkAttentionJson"] | null;
+                    /** @enum {string} */
+                    group: "needs_you" | "working" | "queued" | "done";
+                    actions: components["schemas"]["WorkActionsJson"];
                 };
             } | {
                 /** @enum {string} */
@@ -1934,6 +1950,10 @@ export interface components {
                 work: {
                     state: components["schemas"]["WorkStateJson"];
                     first_action: components["schemas"]["Decimal"] | null;
+                    attention: components["schemas"]["WorkAttentionJson"] | null;
+                    /** @enum {string} */
+                    group: "needs_you" | "working" | "queued" | "done";
+                    actions: components["schemas"]["WorkActionsJson"];
                 };
                 recovery: components["schemas"]["MessageRecoveryJson"];
             } | {
@@ -1963,6 +1983,10 @@ export interface components {
                 work: {
                     state: components["schemas"]["WorkStateJson"];
                     first_action: components["schemas"]["Decimal"] | null;
+                    attention: components["schemas"]["WorkAttentionJson"] | null;
+                    /** @enum {string} */
+                    group: "needs_you" | "working" | "queued" | "done";
+                    actions: components["schemas"]["WorkActionsJson"];
                 };
                 recovery: components["schemas"]["MessageRecoveryJson"];
             } | {
@@ -1990,6 +2014,10 @@ export interface components {
                         since: components["schemas"]["Decimal"];
                     };
                     first_action: components["schemas"]["Decimal"] | null;
+                    attention: components["schemas"]["WorkAttentionJson"] | null;
+                    /** @enum {string} */
+                    group: "needs_you" | "working" | "queued" | "done";
+                    actions: components["schemas"]["WorkActionsJson"];
                 };
             } | {
                 /** @enum {string} */
@@ -2017,6 +2045,10 @@ export interface components {
                         since: components["schemas"]["Decimal"];
                     };
                     first_action: components["schemas"]["Decimal"] | null;
+                    attention: components["schemas"]["WorkAttentionJson"] | null;
+                    /** @enum {string} */
+                    group: "needs_you" | "working" | "queued" | "done";
+                    actions: components["schemas"]["WorkActionsJson"];
                 };
             } | {
                 /** @enum {string} */
@@ -2048,6 +2080,10 @@ export interface components {
                         since: components["schemas"]["Decimal"];
                     };
                     first_action: components["schemas"]["Decimal"] | null;
+                    attention: components["schemas"]["WorkAttentionJson"] | null;
+                    /** @enum {string} */
+                    group: "needs_you" | "working" | "queued" | "done";
+                    actions: components["schemas"]["WorkActionsJson"];
                 };
             } | {
                 /** @enum {string} */
@@ -2080,6 +2116,10 @@ export interface components {
                         since: components["schemas"]["Decimal"];
                     };
                     first_action: components["schemas"]["Decimal"] | null;
+                    attention: components["schemas"]["WorkAttentionJson"] | null;
+                    /** @enum {string} */
+                    group: "needs_you" | "working" | "queued" | "done";
+                    actions: components["schemas"]["WorkActionsJson"];
                 };
             } | {
                 /** @enum {string} */
@@ -2111,6 +2151,10 @@ export interface components {
                         since: components["schemas"]["Decimal"];
                     };
                     first_action: components["schemas"]["Decimal"] | null;
+                    attention: components["schemas"]["WorkAttentionJson"] | null;
+                    /** @enum {string} */
+                    group: "needs_you" | "working" | "queued" | "done";
+                    actions: components["schemas"]["WorkActionsJson"];
                 };
                 recovery: components["schemas"]["MessageRecoveryJson"];
             } | {
@@ -2144,6 +2188,10 @@ export interface components {
                         since: components["schemas"]["Decimal"];
                     };
                     first_action: components["schemas"]["Decimal"] | null;
+                    attention: components["schemas"]["WorkAttentionJson"] | null;
+                    /** @enum {string} */
+                    group: "needs_you" | "working" | "queued" | "done";
+                    actions: components["schemas"]["WorkActionsJson"];
                 };
                 recovery: components["schemas"]["MessageRecoveryJson"];
             } | {
@@ -2564,7 +2612,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             type: "command_observation";
             key: string;
@@ -2616,7 +2664,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             type: "command_observation";
             key: string;
@@ -2662,7 +2710,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             type: "command_observation";
             key: string;
@@ -2708,7 +2756,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             type: "command_observation";
             key: string;
@@ -2754,7 +2802,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             type: "command_observation";
             key: string;
@@ -2792,7 +2840,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             type: "command_observation";
             key: string;
@@ -2850,7 +2898,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             type: "command_observation";
             key: string;
@@ -2860,7 +2908,7 @@ export interface components {
         };
         ObserveCommandRequest: {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             kind: "observe_command";
             store: string;
@@ -2874,6 +2922,10 @@ export interface components {
             turn: components["schemas"]["Decimal"] | null;
             operation: components["schemas"]["Decimal"] | null;
             first_action: components["schemas"]["Decimal"] | null;
+            attention: components["schemas"]["WorkAttentionJson"] | null;
+            /** @enum {string} */
+            group: "needs_you" | "working" | "queued" | "done";
+            actions: components["schemas"]["WorkActionsJson"];
             last_line: components["schemas"]["LastLineFields"] | null;
             revision: components["schemas"]["Decimal"];
             workspace: string;
@@ -2886,7 +2938,7 @@ export interface components {
         };
         PermissionDecisionConflictReply: {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             type: "permission_decision_reply";
             answer: {
@@ -2904,7 +2956,7 @@ export interface components {
         };
         PermissionDecisionReply: {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             type: "permission_decision_reply";
             answer: {
@@ -2918,7 +2970,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             type: "permission_decision_reply";
             answer: {
@@ -2935,7 +2987,7 @@ export interface components {
         };
         PermissionDecisionRequest: {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             kind: "permission_decision";
             store: string;
@@ -2953,7 +3005,7 @@ export interface components {
         };
         ReadActionArgumentsRequest: {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             kind: "read_action_arguments";
             store: string;
@@ -2962,7 +3014,7 @@ export interface components {
         };
         ReadActionCallIdRequest: {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             kind: "read_action_call_id";
             store: string;
@@ -2971,7 +3023,7 @@ export interface components {
         };
         ReadActionReply: {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             type: "action_read";
             session: string;
@@ -2981,7 +3033,7 @@ export interface components {
             final: null;
         } | {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             type: "action_read";
             session: string;
@@ -3005,7 +3057,7 @@ export interface components {
         };
         ReadActionRequest: {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             kind: "read_action";
             store: string;
@@ -3015,7 +3067,7 @@ export interface components {
         };
         ReadResultRequest: {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             kind: "read_result";
             store: string;
@@ -3023,7 +3075,7 @@ export interface components {
         };
         SessionArchiveConflictReply: {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             type: "session_archive_reply";
             answer: {
@@ -3042,7 +3094,7 @@ export interface components {
         };
         SessionArchiveReply: {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             type: "session_archive_reply";
             answer: {
@@ -3058,7 +3110,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             type: "session_archive_reply";
             answer: {
@@ -3076,7 +3128,7 @@ export interface components {
         };
         SessionArchiveRequest: {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             kind: "session_archive";
             store: string;
@@ -3086,7 +3138,7 @@ export interface components {
         };
         SessionPinConflictReply: {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             type: "session_pin_reply";
             answer: {
@@ -3101,7 +3153,7 @@ export interface components {
         };
         SessionPinReply: {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             type: "session_pin_reply";
             answer: {
@@ -3113,7 +3165,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             type: "session_pin_reply";
             answer: {
@@ -3127,7 +3179,7 @@ export interface components {
         };
         SessionPinRequest: {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             kind: "session_pin";
             store: string;
@@ -3162,7 +3214,7 @@ export interface components {
         };
         SessionStopConflictReply: {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             type: "session_stop_reply";
             answer: {
@@ -3181,7 +3233,7 @@ export interface components {
         };
         SessionStopReply: {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             type: "session_stop_reply";
             answer: {
@@ -3200,7 +3252,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             type: "session_stop_reply";
             answer: {
@@ -3218,7 +3270,7 @@ export interface components {
         };
         SessionStopRequest: {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             kind: "session_stop";
             store: string;
@@ -3230,10 +3282,14 @@ export interface components {
             turn: components["schemas"]["Decimal"] | null;
             operation: components["schemas"]["Decimal"] | null;
             first_action: components["schemas"]["Decimal"] | null;
+            attention: components["schemas"]["WorkAttentionJson"] | null;
+            /** @enum {string} */
+            group: "needs_you" | "working" | "queued" | "done";
+            actions: components["schemas"]["WorkActionsJson"];
         };
         SkillSuggestionsReply: {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             type: "skill_suggestions";
             revision: components["schemas"]["Decimal"];
@@ -3245,7 +3301,7 @@ export interface components {
         };
         SkillSuggestionsRequest: {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             kind: "skill_suggestions";
             store: string;
@@ -3253,7 +3309,7 @@ export interface components {
             prefix: string;
         } | {
             /** @constant */
-            version: "20";
+            version: "21";
             /** @constant */
             kind: "skill_suggestions";
             store: string;
@@ -3272,6 +3328,21 @@ export interface components {
             /** @enum {string} */
             code: "unresolved" | "pending_permission" | "background" | "succeeded" | "failed" | "timed_out" | "indeterminate" | "storage_failed" | "spawn_failed" | "cancelled" | "infrastructure_shutdown" | "denied" | "unknown_tool" | "invalid_arguments";
             publication_position: components["schemas"]["Decimal"] | null;
+        };
+        WorkActionsJson: {
+            stop: boolean;
+            interrupt: components["schemas"]["WorkInterruptJson"] | null;
+            decide: components["schemas"]["Decimal"] | null;
+        };
+        WorkAttentionJson: {
+            /** @enum {string} */
+            kind: "approval" | "failed" | "finished";
+            turn: components["schemas"]["Decimal"];
+            step: components["schemas"]["Decimal"];
+        };
+        WorkInterruptJson: {
+            turn: components["schemas"]["Decimal"];
+            operation: components["schemas"]["Decimal"];
         };
         WorkStateJson: {
             /** @enum {string} */
@@ -3418,6 +3489,10 @@ export interface components {
             turn: components["schemas"]["Decimal"] | null;
             operation: components["schemas"]["Decimal"] | null;
             first_action: components["schemas"]["Decimal"] | null;
+            attention: components["schemas"]["WorkAttentionJson"] | null;
+            /** @enum {string} */
+            group: "needs_you" | "working" | "queued" | "done";
+            actions: components["schemas"]["WorkActionsJson"];
             latest_outcome: components["schemas"]["domainreportCurrentJsonOutcome"] | null;
         };
         domainreportExecutionJson: {
@@ -3600,7 +3675,7 @@ export interface components {
     responses: never;
     parameters: {
         /** @description The wire version this document describes. Any other version is refused. */
-        WireVersion: "20";
+        WireVersion: "21";
         /** @description The Host instance (from host-info) the request is meant for; a different instance refuses it. */
         HostInstance: string;
         /** @description The Host instance (from host-info) the request is meant for; a different instance refuses it, and a request without it is refused. */

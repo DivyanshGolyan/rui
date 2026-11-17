@@ -52,7 +52,7 @@ function report(work: CurrentReport["work"], parent: string | null = null): Curr
 }
 
 const idleWork: CurrentReport["work"] = {
-	state: { kind: "idle", since: "9007199254740993" }, turn: null, operation: null, first_action: null, latest_outcome: null,
+	state: { kind: "idle", since: "9007199254740993" }, turn: null, operation: null, first_action: null, attention: null, group: "done", actions: { stop: false, interrupt: null, decide: null }, latest_outcome: null,
 };
 
 test("status requests the Current profile and maps reported facts and parent losslessly", async () => {

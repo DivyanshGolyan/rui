@@ -84,7 +84,7 @@ pub const Inputs = struct {
         stopped_at: ?u64 = null,
         terminal: ?Terminal = null,
         op: Op,
-        actions: Actions = .{},
+        actions: Inputs.Actions = .{},
     };
 
     pub const Terminal = struct {
@@ -120,6 +120,15 @@ pub const Work = struct {
     turn: ?u64 = null,
     operation: ?u64 = null,
     first_action: ?u64 = null,
+    actions: Actions = .{},
+    served_attention: ?Attention = null,
+    served_group: ?Group = null,
+};
+
+pub const Actions = struct {
+    stop: bool = false,
+    interrupt: ?struct { turn: u64, operation: u64 } = null,
+    decide: ?u64 = null,
 };
 
 pub const Attention = struct {
@@ -158,6 +167,12 @@ pub fn derive(inputs: Inputs) error{CorruptStore}!Work {
     if (work.state.progress() == null) {
         if (inputs.owed_since) |at| work.state = .{ .working = .{ .since = @max(work.state.since(), at) } };
     }
+    const current = if (inputs.latest) |turn| turn.terminal == null and turn.stopped_at == null else false;
+    work.actions.stop = current or inputs.oldest_pending != null or inputs.owed_since != null;
+    if (inputs.latest) |turn| {
+        if (current and turn.op == .in_flight) work.actions.interrupt = .{ .turn = turn.turn_id, .operation = turn.operation_id };
+    }
+    work.actions.decide = inputs.first_action;
     return work;
 }
 
@@ -597,5 +612,62 @@ test "attention and group match base client classification across work states" {
 test "work loses whether a model operation is current" {
     const in_flight = try derive(.{ .now_ms = 0, .created_at = 1, .latest = activeTurn(.{ .in_flight = .{ .attempt_at = 500 } }, .{}) });
     const owed = try derive(.{ .now_ms = 0, .created_at = 1, .latest = endedTurn(.completed, "completed"), .owed_since = 500 });
-    try std.testing.expectEqualDeep(in_flight, owed);
+    try std.testing.expectEqualDeep(in_flight.state, owed.state);
+    try std.testing.expectEqual(in_flight.turn, owed.turn);
+    try std.testing.expectEqual(in_flight.operation, owed.operation);
+    try std.testing.expect(in_flight.actions.interrupt != null);
+    try std.testing.expect(owed.actions.interrupt == null);
+    try std.testing.expect(in_flight.actions.stop and owed.actions.stop);
+}
+
+test "actions derive from work inputs" {
+    const pending = Inputs.Pending{ .at = 600, .position = 60 };
+    for (0..8) |mask| {
+        const queued: ?Inputs.Pending = if (mask & 1 != 0) pending else null;
+        const owed: ?u64 = if (mask & 2 != 0) 600 else null;
+        const decision: ?u64 = if (mask & 4 != 0) 41 else null;
+        const turns = [_]?Inputs.Turn{
+            null,
+            activeTurn(.{ .in_flight = .{ .attempt_at = 300 } }, .{}),
+            activeTurn(.{ .waiting = .{ .scheduled_at = 300, .due_at_ms = 5000, .cause = "retry", .attempt = 1 } }, .{}),
+            activeTurn(.{ .resolved = .{ .resolution = .answer, .at = 300 } }, .{}),
+            endedTurn(.completed, "completed"),
+            endedTurn(.failed, "failed"),
+            endedTurn(.cancelled, "cancelled"),
+        };
+        for (turns, 0..) |turn, index| {
+            // first_action requires a latest Turn, even when it refers to an older Action.
+            if (turn == null and decision != null) continue;
+            const work = try derive(.{ .now_ms = 0, .created_at = 1, .latest = turn, .oldest_pending = queued, .owed_since = owed, .first_action = decision });
+            try std.testing.expectEqual((index >= 1 and index <= 3) or queued != null or owed != null, work.actions.stop);
+            try std.testing.expectEqual(index == 1, work.actions.interrupt != null);
+            if (work.actions.interrupt) |target| {
+                try std.testing.expectEqual(@as(u64, 7), target.turn);
+                try std.testing.expectEqual(@as(u64, 19), target.operation);
+            }
+            try std.testing.expectEqual(decision, work.actions.decide);
+        }
+    }
+}
+
+test "actions cover proposal and stopping combinations" {
+    for (0..8) |mask| {
+        const queued: ?Inputs.Pending = if (mask & 1 != 0) .{ .at = 600, .position = 60 } else null;
+        const decision: ?u64 = if (mask & 2 != 0) 41 else null;
+        const stopped = mask & 4 != 0;
+        const action_sets = [_]Inputs.Actions{
+            .{},
+            .{ .total = 1, .unresolved = 1, .awaiting = 1, .first_awaiting = 41 },
+            .{ .total = 1, .unresolved = 1, .running = 1, .oldest_running = .{ .at = 400, .call = 1, .description = null } },
+            .{ .total = 2, .unresolved = 2, .awaiting = 1, .first_awaiting = 41, .running = 1, .oldest_running = .{ .at = 400, .call = 1, .description = null } },
+        };
+        for (action_sets) |set| {
+            var turn = activeTurn(proposals(340), set);
+            if (stopped) turn.stopped_at = 500;
+            const work = try derive(.{ .created_at = 1, .now_ms = 0, .latest = turn, .oldest_pending = queued, .first_action = decision });
+            try std.testing.expectEqual(!stopped or queued != null, work.actions.stop);
+            try std.testing.expect(work.actions.interrupt == null);
+            try std.testing.expectEqual(decision, work.actions.decide);
+        }
+    }
 }
