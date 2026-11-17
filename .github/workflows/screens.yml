@@ -206,6 +206,13 @@ jobs:
           V="$RUNNER_TEMP/screens-tooling/.claude/skills/verify-rui/scripts/verify-rui"
           git fetch --no-tags origin "$BASE_TIP"
           git worktree add --detach "$RUNNER_TEMP/base-source" "$BASE"
+          # Setup restored these package graphs; retain local paths for Zig's relative dependencies.
+          for package_dir in zig-pkg screen-emulator/zig-pkg; do
+            if [ -d "$GITHUB_WORKSPACE/$package_dir" ]; then
+              mkdir -p "$RUNNER_TEMP/base-source/$package_dir"
+              cp -a "$GITHUB_WORKSPACE/$package_dir/." "$RUNNER_TEMP/base-source/$package_dir/"
+            fi
+          done
           mkdir -p "$RUNNER_TEMP/screens-baseline-build"
           export VERIFY_RUI_CACHE="$RUNNER_TEMP/screens-baseline-build/cache"
           (cd "$RUNNER_TEMP/base-source"; bash src/fetch_dependencies.sh; bash src/fetch_screen_dependencies.sh; "$V" build --here > "$RUNNER_TEMP/screens-baseline-build/build.json")
@@ -292,12 +299,14 @@ jobs:
           V="$RUNNER_TEMP/screens-tooling/.claude/skills/verify-rui/scripts/verify-rui"
           export VERIFY_RUI_CACHE="$RUNNER_TEMP/screens-baseline-build/cache"
           build_id=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["sha"])' "$RUNNER_TEMP/screens-baseline-build/build.json")
-          if "$V" shots "$build_id" --shard "$SHARD/4" --scenario "$RUNNER_TEMP/screens-tooling/.claude/skills/verify-rui/scripts/frames.json" --out "$RUNNER_TEMP/baseline-shard"; then
+          mkdir -p "$RUNNER_TEMP/baseline-shard"
+          if "$V" shots "$build_id" --shard "$SHARD/4" --scenario "$RUNNER_TEMP/screens-tooling/.claude/skills/verify-rui/scripts/frames.json" --out "$RUNNER_TEMP/baseline-shard" 2>&1 | tee "$RUNNER_TEMP/baseline-capture.log"; then
             echo success > "$RUNNER_TEMP/baseline-shard/verdict"
           else
-            test -f "$RUNNER_TEMP/baseline-shard/shots.json"
             echo failure > "$RUNNER_TEMP/baseline-shard/verdict"
+            if [ -d "$VERIFY_RUI_CACHE/runs" ]; then cp -a "$VERIFY_RUI_CACHE/runs" "$RUNNER_TEMP/baseline-shard/evidence"; fi
           fi
+          mv "$RUNNER_TEMP/baseline-capture.log" "$RUNNER_TEMP/baseline-shard/capture.log"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: ${{ always() }}
         with:
@@ -374,11 +383,11 @@ jobs:
           mkdir -p "$RUNNER_TEMP/results"
           export VERIFY_RUI_CACHE="$RUNNER_TEMP/screens-build/cache"
           build_id=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["sha"])' "$RUNNER_TEMP/screens-build/build.json")
-          if "$V" shots "$build_id" --shard "$SHARD/4" --scenario "$RUNNER_TEMP/screens-tooling/.claude/skills/verify-rui/scripts/frames.json" --out "$RUNNER_TEMP/results/head"; then
+          if "$V" shots "$build_id" --shard "$SHARD/4" --scenario "$RUNNER_TEMP/screens-tooling/.claude/skills/verify-rui/scripts/frames.json" --out "$RUNNER_TEMP/results/head" 2>&1 | tee "$RUNNER_TEMP/results/capture.log"; then
             echo success > "$RUNNER_TEMP/results/verdict"
           else
-            test -f "$RUNNER_TEMP/results/head/shots.json"
             echo failure > "$RUNNER_TEMP/results/verdict"
+            if [ -d "$VERIFY_RUI_CACHE/runs" ]; then cp -a "$VERIFY_RUI_CACHE/runs" "$RUNNER_TEMP/results/evidence"; fi
           fi
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: ${{ always() }}
@@ -440,14 +449,20 @@ jobs:
           shards=()
           for number in 1 2 3 4; do
             shard="$RUNNER_TEMP/shards/screens-$number-$GITHUB_RUN_ID"
-            test -f "$shard/head/shots.json"
             case "$(cat "$shard/verdict")" in
-              success) ;;
+              success) test -f "$shard/head/shots.json" && test -f "$shard/head/shots-meta.json" ;;
               failure) candidate_ok=false ;;
               *) exit 1 ;;
             esac
-            shards+=("$shard/head")
+            if [ -f "$shard/head/shots.json" ] && [ -f "$shard/head/shots-meta.json" ]; then
+              shards+=("$shard/head")
+            fi
           done
+          if [ "${#shards[@]}" -eq 0 ]; then
+            mkdir -p "$RUNNER_TEMP/empty-candidate"
+            echo '[]' > "$RUNNER_TEMP/empty-candidate/shots.json"
+            shards+=("$RUNNER_TEMP/empty-candidate")
+          fi
           if [ -n "$BASE" ]; then
             base_shards=()
             if [ "$BASELINE_MISSING" = false ]; then
@@ -458,14 +473,20 @@ jobs:
             else
               for number in 1 2 3 4; do
                 shard="$RUNNER_TEMP/baseline-shards/screens-baseline-$number-$GITHUB_RUN_ID"
-                test -f "$shard/shots.json"
                 case "$(cat "$shard/verdict")" in
-                  success) ;;
+                  success) test -f "$shard/shots.json" && test -f "$shard/shots-meta.json" ;;
                   failure) baseline_ok=false ;;
                   *) exit 1 ;;
                 esac
-                base_shards+=("$shard")
+                if [ -f "$shard/shots.json" ] && [ -f "$shard/shots-meta.json" ]; then
+                  base_shards+=("$shard")
+                fi
               done
+            fi
+            if [ "${#base_shards[@]}" -eq 0 ]; then
+              mkdir -p "$RUNNER_TEMP/empty-baseline"
+              echo '[]' > "$RUNNER_TEMP/empty-baseline/shots.json"
+              base_shards+=("$RUNNER_TEMP/empty-baseline")
             fi
             if ! "$V" shots-merge "${base_shards[@]}" --out "$RUNNER_TEMP/baseline"; then
               baseline_ok=false
@@ -481,6 +502,25 @@ jobs:
               test -f "$RUNNER_TEMP/merged/shots.json"
             fi
           fi
+          python3 - "$RUNNER_TEMP" "$GITHUB_RUN_ID" "$BASELINE_MISSING" "$BASE" <<'PY_FAILURES'
+          import json, pathlib, sys
+          root, run, baseline_missing, base = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4]
+          failures = []
+          for label, pattern in [('candidate', 'shards/screens-{}-' + run) ,
+                                 ('baseline', 'baseline-shards/screens-baseline-{}-' + run)]:
+              if label == 'baseline' and (not base or baseline_missing != 'true'):
+                  continue
+              for number in range(1, 5):
+                  shard = root / pattern.format(number)
+                  if (shard / 'verdict').read_text().strip() != 'failure':
+                      continue
+                  log = shard / 'capture.log'
+                  lines = log.read_text(errors='replace').splitlines() if log.exists() else []
+                  reason = next((line for line in lines if line.startswith('verify-rui:')), None)
+                  reason = reason or next((line for line in lines if line.strip()), 'unknown capture error')
+                  failures.append({'side': label, 'shard': number, 'reason': reason})
+          (root / 'capture-failures.json').write_text(json.dumps(failures))
+          PY_FAILURES
           echo "candidate_ok=$candidate_ok" >> "$GITHUB_OUTPUT"
           echo "baseline_ok=$baseline_ok" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -594,7 +634,7 @@ jobs:
           echo "Screen preview wall time: $(( $(date +%s) - STARTED )) seconds" >> "$GITHUB_STEP_SUMMARY"
           if [ -n "$PR" ]; then
             cd "$GITHUB_WORKSPACE"
-            python3 tests/ci/screens_comment.py --diff "$RUNNER_TEMP/merged/diff.json" --repo "$GITHUB_REPOSITORY" --pr "$PR" --head "$HEAD_SHA" --base "$BASE" --shots "$RUNNER_TEMP/merged/shots.json" --baseline-shots "$RUNNER_TEMP/baseline/shots.json"
+            python3 tests/ci/screens_comment.py --diff "$RUNNER_TEMP/merged/diff.json" --repo "$GITHUB_REPOSITORY" --pr "$PR" --head "$HEAD_SHA" --base "$BASE" --shots "$RUNNER_TEMP/merged/shots.json" --baseline-shots "$RUNNER_TEMP/baseline/shots.json" --capture-failures "$RUNNER_TEMP/capture-failures.json" --run-id "$GITHUB_RUN_ID"
           fi
           test "$CANDIDATE_OK" = true && test "$BASELINE_OK" = true
   cleanup:

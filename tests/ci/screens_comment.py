@@ -26,14 +26,21 @@ def image(record, repo, pr, head, label):
     return f'![{label}]({url})'
 
 
-def render(diff, repo, pr, head, base, shots=(), baseline_shots=()):
+def render(diff, repo, pr, head, base, shots=(), baseline_shots=(), capture_failures=(), run_id=None):
     """Build a bounded Markdown comment from the shots diff manifest."""
     groups = {key: diff[key] for key in ('changed', 'new', 'removed', 'failed')}
-    counts = f"{len(groups['changed'])} changed, {len(groups['new'])} new, {diff['same_count']} unchanged, {len(groups['failed'])} failed"
+    counts = f"{len(groups['changed'])} changed, {len(groups['new'])} new, {diff['same_count']} unchanged, {len(groups['failed']) + len(capture_failures)} failed"
     header = f'{MARKER}\n## Screens\n\nHead: `{text(head)}`  \nBase: `{text(base)}`\n\n{counts}\n'
     sections = []
-    if groups['failed']:
+    if groups['failed'] or capture_failures:
         sections.append('\n### Failures\n\n')
+        for failure in capture_failures:
+            reason = str(failure.get('reason') or 'unknown capture error').splitlines()[0]
+            reason = reason.removeprefix('verify-rui: ').strip() or 'unknown capture error'
+            sections.append(f"- **{text(failure['side'])} shard {text(failure['shard'])}**: capture failed: {text(reason)}\n")
+        if capture_failures and run_id:
+            sections.append(f"\n[Capture diagnostics in workflow artifacts](https://github.com/{repo}/actions/runs/{quote(str(run_id), safe='')})\n")
+    if groups['failed']:
         for pair in groups['failed']:
             failed = [r for r in (pair.get('before'), pair.get('after')) if r and not r.get('ok', True)]
             for record in failed:
@@ -114,6 +121,8 @@ def main():
     parser.add_argument('--base', required=True)
     parser.add_argument('--shots', help='merged shots.json for unchanged sizes')
     parser.add_argument('--baseline-shots', help='baseline shots.json for unchanged sizes')
+    parser.add_argument('--capture-failures', help='capture-level failures for each shard')
+    parser.add_argument('--run-id', help='workflow run containing diagnostic artifacts')
     args = parser.parse_args()
     with open(args.diff, encoding='utf-8') as source:
         diff = json.load(source)
@@ -123,7 +132,8 @@ def main():
         with open(path, encoding='utf-8') as source:
             return json.load(source)
     body = render(diff, args.repo, args.pr, args.head, args.base,
-                  load_optional(args.shots), load_optional(args.baseline_shots))
+                  load_optional(args.shots), load_optional(args.baseline_shots),
+                  load_optional(args.capture_failures), args.run_id)
     token = os.environ['GITHUB_TOKEN']
     upsert(lambda method, path, body=None: github(method, path, token, body), args.repo, args.pr, args.head, body)
 

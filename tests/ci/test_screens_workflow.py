@@ -82,13 +82,63 @@ class ScreensWorkflowTest(unittest.TestCase):
         for cache in ('screens-build', 'screens-baseline-build'):
             self.assertEqual(workflow.count('export VERIFY_RUI_CACHE="$RUNNER_TEMP/' + cache + '/cache"'), 2)
 
+    def test_early_capture_failure_keeps_verdict_and_host_evidence(self):
+        workflow = WORKFLOW.read_text()
+        for label, step_name, artifact in (('candidate', 'Capture candidate shard', 'results'),
+                                           ('baseline', 'Capture baseline shard with trusted tooling', 'baseline-shard')):
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                root = pathlib.Path(tmp)
+                tool = root / 'screens-tooling/.claude/skills/verify-rui/scripts/verify-rui'
+                tool.parent.mkdir(parents=True)
+                tool.write_text('#!/bin/bash\nmkdir -p "$VERIFY_RUI_CACHE/runs/test/evidence"\nprintf "panic from Host\\n" > "$VERIFY_RUI_CACHE/runs/test/evidence/host.log"\necho "verify-rui: host did not become ready (rc=-6)" >&2\nexit 1\n')
+                tool.chmod(0o755)
+                cache_name = 'screens-build' if label == 'candidate' else 'screens-baseline-build'
+                build = root / cache_name
+                build.mkdir()
+                (build / 'build.json').write_text(json.dumps({'sha': 'tree-' + 'a' * 64}))
+                step = workflow.split('      - name: ' + step_name + '\n', 1)[1].split('      - uses: actions/upload-artifact@', 1)[0]
+                script = textwrap.dedent(step.split('        run: |\n', 1)[1])
+                result = subprocess.run(['bash', '-c', script], env={**os.environ, 'RUNNER_TEMP': tmp, 'SHARD': '2'},
+                                        text=True, capture_output=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                output = root / artifact
+                self.assertEqual((output / 'verdict').read_text().strip(), 'failure')
+                self.assertIn('host did not become ready', (output / 'capture.log').read_text())
+                self.assertEqual((output / 'evidence/test/evidence/host.log').read_text(), 'panic from Host\n')
+                self.assertFalse((output / ('head/shots.json' if label == 'candidate' else 'shots.json')).exists())
+
+    def test_baseline_seeds_existing_setup_caches_without_replacing_fetch(self):
+        workflow = WORKFLOW.read_text()
+        job = workflow.split('  baseline_build:\n', 1)[1].split('  baseline_capture:\n', 1)[0]
+        start = job.index('          for package_dir in zig-pkg screen-emulator/zig-pkg; do')
+        end = job.index('          mkdir -p "$RUNNER_TEMP/screens-baseline-build"', start)
+        copy_script = textwrap.dedent(job[start:end])
+        self.assertIn('bash src/fetch_dependencies.sh; bash src/fetch_screen_dependencies.sh;', job)
+        for available in (False, True):
+            with self.subTest(available=available), tempfile.TemporaryDirectory() as tmp:
+                root = pathlib.Path(tmp)
+                workspace, source = root / 'workspace', root / 'base-source'
+                workspace.mkdir()
+                source.mkdir()
+                if available:
+                    for name in ('zig-pkg/hash-a', 'screen-emulator/zig-pkg/hash-b'):
+                        path = workspace / name
+                        path.mkdir(parents=True)
+                        (path / 'package').write_text(name)
+                env = {**os.environ, 'GITHUB_WORKSPACE': str(workspace), 'RUNNER_TEMP': tmp}
+                subprocess.run(['bash', '-c', 'set -euo pipefail\n' + copy_script], env=env, check=True)
+                for name in ('zig-pkg/hash-a', 'screen-emulator/zig-pkg/hash-b'):
+                    self.assertEqual((source / name / 'package').exists(), available)
+                    if available:
+                        self.assertEqual((source / name / 'package').read_text(), name)
+
     def test_capture_verdicts_reach_publication_for_candidate_and_baseline(self):
         workflow = WORKFLOW.read_text()
         merge = workflow.split('      - name: Merge captures\n', 1)[1].split('      - uses: actions/upload-artifact@', 1)[0]
         script = textwrap.dedent(merge.split('        run: |\n', 1)[1])
         repo = WORKFLOW.parents[2]
         for side in ('candidate', 'baseline'):
-            for failure in ('none', 'record', 'run', 'exit'):
+            for failure in ('none', 'record', 'run', 'exit', 'early'):
                 for with_base in ((True, False) if side == 'candidate' else (True,)):
                     with self.subTest(side=side, failure=failure, with_base=with_base), tempfile.TemporaryDirectory() as tmp:
                         root = pathlib.Path(tmp)
@@ -104,9 +154,12 @@ class ScreensWorkflowTest(unittest.TestCase):
                                           'ok': not (broken and failure == 'record'),
                                           'reason': 'failed' if broken and failure == 'record' else None,
                                           'fingerprint': 'same', 'files': {}}
-                                (capture / 'shots.json').write_text(json.dumps([record]))
-                                (capture / 'shots-meta.json').write_text(json.dumps({'failed': broken and failure == 'run'}))
-                                (shard / 'verdict').write_text('failure' if broken and failure == 'exit' else 'success')
+                                if not (broken and failure == 'early'):
+                                    (capture / 'shots.json').write_text(json.dumps([record]))
+                                    (capture / 'shots-meta.json').write_text(json.dumps({'failed': broken and failure == 'run'}))
+                                (shard / 'verdict').write_text('failure' if broken and failure in ('exit', 'early') else 'success')
+                                if broken and failure == 'early':
+                                    (shard / 'capture.log').write_text('verify-rui: host did not become ready (rc=-6)\nother lines\n')
                         output = root / 'outputs'
                         env = {**os.environ, 'RUNNER_TEMP': tmp, 'GITHUB_RUN_ID': '1',
                                'GITHUB_RUN_ATTEMPT': '2', 'GITHUB_OUTPUT': str(output),
@@ -117,12 +170,39 @@ class ScreensWorkflowTest(unittest.TestCase):
                         self.assertEqual(verdicts['baseline_ok'], 'false' if side == 'baseline' and failure != 'none' else 'true')
                         candidate_failed = (side == 'candidate' and failure != 'none') or (side == 'baseline' and failure == 'record')
                         self.assertEqual(verdicts['candidate_ok'], 'false' if candidate_failed else 'true')
+                        if failure == 'early':
+                            failures = json.loads((root / 'capture-failures.json').read_text())
+                            self.assertEqual(failures, [{'side': side, 'shard': 1, 'reason': 'verify-rui: host did not become ready (rc=-6)'}])
         publish = workflow.split('      - name: Publish screenshots and update comment', 1)[1].split('  cleanup:', 1)[0]
         self.assertIn('if [ "$BASELINE_CACHEABLE" = true ] && [ "$BASELINE_OK" = true ]; then', publish)
         self.assertIn('if [ "$CANDIDATE_OK" = true ]; then', publish)
         self.assertIn('test "$CANDIDATE_OK" = true && test "$BASELINE_OK" = true', publish)
         self.assertNotIn("item['ok']", publish)
         self.assertNotIn("['failed']", publish.split('          PY_MEDIA', 1)[1])
+
+    def test_merge_all_early_failures_still_produces_comment_data(self):
+        workflow = WORKFLOW.read_text()
+        step = workflow.split('      - name: Merge captures\n', 1)[1].split('      - uses: actions/upload-artifact@', 1)[0]
+        script = textwrap.dedent(step.split('        run: |\n', 1)[1])
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            (root / 'screens-tooling').symlink_to(WORKFLOW.parents[2], target_is_directory=True)
+            for number in range(1, 5):
+                for name in (f'shards/screens-{number}-1', f'baseline-shards/screens-baseline-{number}-1'):
+                    shard = root / name
+                    shard.mkdir(parents=True)
+                    (shard / 'verdict').write_text('failure')
+                    (shard / 'capture.log').write_text('verify-rui: Host aborted\nextra detail\n')
+            output = root / 'outputs'
+            env = {**os.environ, 'RUNNER_TEMP': tmp, 'GITHUB_RUN_ID': '1', 'GITHUB_OUTPUT': str(output),
+                   'BASE': 'base', 'BASELINE_MISSING': 'true'}
+            result = subprocess.run(['bash', '-c', script], cwd=WORKFLOW.parents[2], env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(dict(line.split('=', 1) for line in output.read_text().splitlines()),
+                             {'candidate_ok': 'false', 'baseline_ok': 'false'})
+            self.assertEqual(len(json.loads((root / 'capture-failures.json').read_text())), 8)
+            self.assertTrue((root / 'merged/diff.json').is_file())
+            self.assertEqual(json.loads((root / 'merged/shots.json').read_text()), [])
 
     def test_cached_baseline_is_rechecked_by_merge_owner(self):
         workflow = WORKFLOW.read_text()
