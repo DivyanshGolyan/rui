@@ -2759,7 +2759,7 @@ pub fn controls(arena: Allocator, state: *const State, width: u16, caps: Caps) e
     var regions: [2]Region = undefined;
     var region_count: usize = 0;
     inline for (.{ .{ "Sessions", Selection.sessions, ArchiveFilter.active, Click.sessions }, .{ "Archived", Selection.archived, ArchiveFilter.archived, Click.archived } }, 0..) |tab, index| {
-        const start = 2 + index * 10;
+        const start = text_column + index * 10;
         const active = state.archive == tab[2];
         const focused = state.selected == tab[1];
         const cells = try built.put(start, tab[0], width -| 1 -| start, .{
@@ -3162,7 +3162,7 @@ test "every work state follows the rules table, in Unicode and ASCII" {
             defer std.testing.allocator.free(text);
             var lines = std.mem.splitScalar(u8, text, '\n');
             try std.testing.expectEqualStrings(" + New Session", lines.next().?);
-            try std.testing.expectEqualStrings("  Sessions  Archived", lines.next().?);
+            try std.testing.expectEqualStrings("   Sessions  Archived", lines.next().?);
             try std.testing.expectEqualStrings(expected, lines.next().?);
         }
         state.selected = .new_session;

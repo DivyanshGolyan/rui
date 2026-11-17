@@ -63,6 +63,9 @@ publication: Publication = .not_sent,
 last_error: ?anyerror = null,
 accepted: ?Accepted = null,
 retry: ?[36]u8 = null,
+retain_message: bool = false,
+projected: bool = false,
+settled_message: ?struct { ticket: Input.Ticket, key: [36]u8 } = null,
 
 pub fn view(self: *const Self) ?View {
     const intent = self.intent orelse return null;
@@ -81,10 +84,13 @@ pub fn recovery(self: *const Self) Recovery {
 
 pub fn begin(self: *Self, intent: Intent) !void {
     std.debug.assert(self.intent == null and self.task.thread == null);
+    std.debug.assert(intent.ticket() == null or self.settled_message == null);
     self.intent = intent;
+    self.projected = false;
     self.state = .not_started;
     self.reply = null;
     self.publication = .not_sent;
+    self.key = @splat(0);
     const target: client.CaptureTarget = .{ .generated = self.directory };
     self.target = .{ .reserved = try target.resolve(self.io, &self.path, &self.key) };
     try self.startWorker(submit);
@@ -303,18 +309,63 @@ fn apply(self: *Self, result: anyerror!void) !End {
     if (answer.result == .accepted) {
         const confirmed = self.state == .unconfirmed;
         self.accepted = .{ .kind = kind, .key = self.key };
-        self.release();
         const admission: ?u64 = switch (answer.result.accepted) {
             .message => |message| message.admission,
             else => null,
         };
         const denies: ?u64 = if (intent == .message_then_deny) intent.message_then_deny.action else null;
+        if (self.retain_message and intent.ticket() != null and !self.projected) {
+            std.debug.assert(self.settled_message == null);
+            self.settled_message = .{ .ticket = intent.ticket().?, .key = self.key };
+            self.retire();
+            return .{ .accepted = .{ .kind = kind, .confirmed = confirmed, .admission = admission, .denies = denies } };
+        }
+        self.release();
         return .{ .accepted = .{ .kind = kind, .confirmed = confirmed, .admission = admission, .denies = denies } };
     }
     self.state = .rejected;
     var code: protocol.Bounded(protocol.max_code_bytes) = .{};
     if (answer.result == .rejected) code = answer.result.rejected else try code.set("request conflict");
     return .{ .rejected = .{ .kind = kind, .code = code } };
+}
+
+pub fn messageText(self: *const Self) ?[]const u8 {
+    const ticket = if (self.intent) |intent| intent.ticket() else null;
+    const held = ticket orelse if (self.settled_message) |settled| settled.ticket else return null;
+    return self.input.message(held) catch unreachable;
+}
+
+pub fn observeMessage(self: *Self, key: [36]u8) void {
+    if (self.settled_message) |settled| {
+        if (std.mem.eql(u8, &key, &settled.key)) {
+            self.input.release(settled.ticket) catch unreachable;
+            self.settled_message = null;
+        }
+    }
+    if (self.intent) |intent| if (intent.ticket() != null and std.mem.eql(u8, &key, &self.key)) {
+        self.projected = true;
+    };
+}
+
+pub fn messageKey(self: *const Self) ?[36]u8 {
+    if (self.intent) |intent| if (intent.ticket() != null) return self.key;
+    return if (self.settled_message) |settled| settled.key else null;
+}
+
+pub fn messageProjected(self: *const Self) bool {
+    if (self.intent) |intent| if (intent.ticket() != null) return self.projected;
+    return false;
+}
+
+pub fn messageHeld(self: *const Self) bool {
+    return self.settled_message != null;
+}
+
+pub fn disposeMessage(self: *Self) void {
+    std.debug.assert(self.task.thread == null);
+    const settled = self.settled_message orelse return;
+    self.input.release(settled.ticket) catch unreachable;
+    self.settled_message = null;
 }
 
 pub fn discardRejected(self: *Self) !void {
@@ -326,11 +377,16 @@ pub fn discardRejected(self: *Self) !void {
 fn release(self: *Self) void {
     std.debug.assert(self.task.thread == null);
     if (self.intent.?.ticket()) |ticket| self.input.release(ticket) catch unreachable;
+    self.retire();
+}
+
+fn retire(self: *Self) void {
     self.close();
     self.intent = null;
     self.publication = .not_sent;
     self.last_error = null;
     self.retry = null;
+    self.projected = false;
 }
 
 pub fn close(self: *Self) void {
@@ -362,11 +418,15 @@ test "submission reservation failure retains unsent intent ahead of accepted his
     for (0..3) |kind| {
         var input: Input = undefined;
         input.init();
-        var self: Self = .{ .io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable }, .store = "unused", .session = "k7m2qx", .directory = "unused", .input = &input, .environment = .empty, .accepted = .{ .kind = .message, .key = @splat('A') } };
+        var self: Self = .{ .io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable }, .store = "unused", .session = "k7m2qx", .directory = "unused", .input = &input, .environment = .empty, .key = @splat('A'), .projected = true, .accepted = .{ .kind = .message, .key = @splat('A') } };
         const intent: Intent = if (kind == 0) .{ .message = input.submitText("original café!") } else .{ .decision = .{ .action = 9, .decision = if (kind == 1) .allow_once else .deny } };
         _ = input.typed("next té!\x1b[D");
         try std.testing.expectError(error.EntropyUnavailable, self.begin(intent));
         try std.testing.expectEqual(.not_started, self.view().?.state);
+        try std.testing.expectEqual(@as([36]u8, @splat(0)), self.view().?.key);
+        self.observeMessage(@splat('A'));
+        try std.testing.expect(!self.messageProjected());
+        try std.testing.expectEqual(@as([36]u8, @splat('A')), self.accepted.?.key);
         try std.testing.expectEqual(intent.kind(), self.recovery().not_sent);
         try std.testing.expect(self.join() == .absent);
         try std.testing.expectError(error.SubmissionUnresolved, self.discardRejected());
@@ -665,4 +725,103 @@ test "submission settles wire Admission only after join and releases only accept
             }
         }
     }
+}
+
+test "accepted native Message keeps its exact input loan until canonical insertion" {
+    var input: Input = undefined;
+    input.init();
+    const ticket = input.submitText("same text\nsecond line");
+    var self: Self = .{ .io = std.testing.io, .store = "unused", .session = "k7m2qx", .directory = "unused", .input = &input, .environment = .empty, .intent = .{ .message = ticket }, .key = @splat('A'), .state = .submitting, .retain_message = true };
+    self.reply = .{ .status = 200, .context = .{ .kind = .message }, .target = .{ .message = .{ .bytes = 21, .digest = protocol.contentDigest("same text\nsecond line") } }, .answer = .{ .replayed = false, .result = .{ .accepted = .{ .message = .{ .admission = 37 } } } } };
+    const end = try self.apply({});
+    try std.testing.expect(end == .accepted);
+    try std.testing.expect(self.intent == null and self.view() == null);
+    try std.testing.expect(self.messageHeld());
+    try std.testing.expectEqualStrings("same text\nsecond line", self.messageText().?);
+    try std.testing.expectEqual(@as([36]u8, @splat('A')), self.messageKey().?);
+    _ = input.append("next draft");
+    try std.testing.expect(input.typed("\r") == .busy);
+    try std.testing.expectEqualStrings("next draft", input.composition().bytes);
+    try self.requestRecovery(null);
+    try std.testing.expect(self.retry == null);
+    try std.testing.expect(self.recovery() == .accepted);
+    self.observeMessage(@splat('B'));
+    try std.testing.expect(self.messageHeld());
+    self.observeMessage(@splat('A'));
+    try std.testing.expect(!self.messageHeld() and self.messageText() == null);
+    try std.testing.expectError(error.NoSubmission, input.message(ticket));
+    self.observeMessage(@splat('A'));
+    const next = input.typed("\r");
+    try std.testing.expect(next == .message);
+    self.intent = .{ .message = next.message };
+    self.key = @splat('B');
+    self.observeMessage(@splat('A'));
+    try std.testing.expect(!self.messageProjected());
+    try std.testing.expectEqualStrings("next draft", self.messageText().?);
+    self.state = .rejected;
+    try self.discardRejected();
+}
+
+test "uncertain canonical observation hides only the echo and retains original recovery" {
+    var input: Input = undefined;
+    input.init();
+    const ticket = input.submitText("same text");
+    var self: Self = .{ .io = std.testing.io, .store = "unused", .session = "k7m2qx", .directory = "unused", .input = &input, .environment = .empty, .intent = .{ .message = ticket }, .key = @splat('A'), .state = .unconfirmed, .publication = .published, .retain_message = true };
+    self.observeMessage(@splat('B'));
+    try std.testing.expect(!self.messageProjected());
+    self.observeMessage(@splat('A'));
+    try std.testing.expect(self.messageProjected());
+    try std.testing.expectEqual(State.unconfirmed, self.view().?.state);
+    try std.testing.expectEqualStrings("same text", try input.message(ticket));
+    try self.requestRecovery(null);
+    try std.testing.expectEqual(@as([36]u8, @splat('A')), self.retry.?);
+    try std.testing.expect(self.recovery() == .saved);
+    self.reply = .{ .status = 200, .context = .{ .kind = .message }, .target = .{ .message = .{ .bytes = 9, .digest = protocol.contentDigest("same text") } }, .answer = .{ .replayed = true, .result = .{ .accepted = .{ .message = .{ .admission = 37 } } } } };
+    const end = try self.apply({});
+    try std.testing.expect(end.accepted.confirmed);
+    try std.testing.expect(self.intent == null and !self.messageHeld());
+    try std.testing.expectError(error.NoSubmission, input.message(ticket));
+    try std.testing.expect(self.retry == null);
+}
+
+test "accepted reason presentation loan never delays or borrows the denial authority" {
+    const Worker = struct {
+        fn done(_: *anyopaque, _: *Task) !void {}
+    };
+    var input: Input = undefined;
+    input.init();
+    const ticket = input.submitText("reason");
+    var self: Self = .{ .io = std.testing.io, .store = "unused", .session = "k7m2qx", .directory = "unused", .input = &input, .environment = .empty, .intent = .{ .message_then_deny = .{ .ticket = ticket, .action = 19 } }, .key = @splat('A'), .state = .submitting, .retain_message = true };
+    self.reply = .{ .status = 200, .context = .{ .kind = .message }, .target = .{ .message = .{ .bytes = 6, .digest = protocol.contentDigest("reason") } }, .answer = .{ .replayed = false, .result = .{ .accepted = .{ .message = .{ .admission = 37 } } } } };
+    const end = try self.apply({});
+    try std.testing.expectEqual(@as(?u64, 19), end.accepted.denies);
+    try std.testing.expect(self.intent == null and self.messageHeld());
+    self.intent = .{ .decision = .{ .action = 19, .decision = .deny } };
+    self.key = @splat('B');
+    self.state = .submitting;
+    self.reply = .{ .status = 200, .context = .{ .kind = .permission_decision }, .target = .{ .permission_decision = .{ .action = 19, .decision = .deny } }, .answer = .{ .replayed = false, .result = .{ .accepted = .permission_decision } } };
+    try self.task.start(self.io, &self, Worker.done);
+    try std.testing.expectEqual(@as([36]u8, @splat('A')), self.messageKey().?);
+    try std.testing.expectEqualStrings("reason", self.messageText().?);
+    self.observeMessage(@splat('A'));
+    try std.testing.expect(!self.messageHeld());
+    try std.testing.expect(self.task.thread != null and self.intent.? == .decision);
+    try std.testing.expectError(error.NoSubmission, input.message(ticket));
+    const decision = self.join();
+    try std.testing.expectEqual(Kind.decision, decision.accepted.kind);
+    try std.testing.expect(self.intent == null and self.messageText() == null);
+    try std.testing.expectEqual(@as([36]u8, @splat('B')), self.accepted.?.key);
+    self.disposeMessage();
+}
+
+test "leaving disposes accepted presentation custody without changing current original" {
+    var input: Input = undefined;
+    input.init();
+    const ticket = input.submitText("accepted reason");
+    var self: Self = .{ .io = std.testing.io, .store = "unused", .session = "k7m2qx", .directory = "unused", .input = &input, .environment = .empty, .intent = .{ .decision = .{ .action = 19, .decision = .deny } }, .key = @splat('B'), .state = .unconfirmed, .publication = .published, .settled_message = .{ .ticket = ticket, .key = @splat('A') } };
+    self.disposeMessage();
+    self.disposeMessage();
+    try std.testing.expect(input.submitted == null);
+    try std.testing.expectEqual(Kind.decision, self.view().?.kind);
+    try std.testing.expectEqual(@as([36]u8, @splat('B')), self.recovery().saved.original.key);
 }

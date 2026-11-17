@@ -145,7 +145,7 @@ pub fn send(status: ?[]const u8, in_flight: bool) Send {
     return if (text.len == 0) .{} else if (in_flight) .{ .progress = text } else .{ .needs = text };
 }
 
-test "a send is progress while in flight, needs the person once unresolved, and says nothing once accepted" {
+test "opening and decision progress share the footer while unresolved decisions retain their state" {
     const same = struct {
         fn text(want: ?[]const u8, got: ?[]const u8) !void {
             try std.testing.expectEqual(want == null, got == null);
@@ -156,15 +156,16 @@ test "a send is progress while in flight, needs the person once unresolved, and 
             try text(want.progress, got.progress);
         }
     }.check;
-    try same(.{ .progress = "Sending…" }, send("Sending…", true));
+    try same(.{ .progress = "Opening…" }, send("Opening…", true));
     try same(.{ .needs = "! Not confirmed · ctrl+r retries original" }, send("! Not confirmed · ctrl+r retries original", false));
     try same(.{}, send("", false));
     for ([_]bool{ false, true }) |in_flight| try same(.{}, send(null, in_flight));
-    try std.testing.expectEqualStrings("! Unknown command /x", bar(.{ .progress = "Sending…", .notice = "! Unknown command /x", .width = 80 }).notice.?);
-    const sending = bar(.{ .progress = "Sending…", .overview = "! Other Session failed", .width = 80 });
-    try std.testing.expectEqualStrings("Sending…", sending.left);
-    try std.testing.expectEqual(Tone.quiet, sending.tone);
-    try std.testing.expectEqualStrings("! x", bar(.{ .needs = "! x", .notice = "Copied 3 lines", .progress = "Sending…", .width = 80 }).left);
+    try std.testing.expectEqualStrings("! Unknown command /x", bar(.{ .progress = "Opening…", .notice = "! Unknown command /x", .width = 80 }).notice.?);
+    const opening = bar(.{ .progress = "Opening…", .overview = "! Other Session failed", .width = 80 });
+    try std.testing.expectEqualStrings("", opening.left);
+    try std.testing.expectEqualStrings("Opening…", opening.notice.?);
+    try std.testing.expectEqual(Tone.quiet, opening.tone);
+    try std.testing.expectEqualStrings("! x", bar(.{ .needs = "! x", .notice = "Copied 3 lines", .progress = "Opening…", .width = 80 }).left);
 }
 
 pub const facts_bytes = @import("protocol.zig").max_workspace_bytes + session_line.capacity + " · ".len + "Stopping and archiving".len;
@@ -327,11 +328,11 @@ test "a result of one line is a notice; one of two lines is a page" {
 const gap = 2;
 
 pub fn bar(facts: Facts) Bar {
-    var result: Bar = .{ .notice = facts.notice };
+    var result: Bar = .{ .notice = facts.notice orelse facts.progress };
     if (facts.needs) |needs| {
         result.left = needs;
         result.tone = .attention;
-    } else if (facts.progress orelse facts.overview) |left| {
+    } else if (if (facts.progress == null) facts.overview else null) |left| {
         result.left = left;
         result.tone = if (std.mem.startsWith(u8, left, "!")) .attention else .quiet;
     }
