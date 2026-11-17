@@ -1296,7 +1296,8 @@ while True:
         self.assertIn("code · file", states["slash"]["absent"])
         escape = states["draft-chat-choice-escape"]
         self.assertNotIn("Draft lifecycle", escape["expect"])  # Sidebar is hidden at 46 columns.
-        self.assertIn("alt+i info", escape["expect"])
+        self.assertIn("gpt-6.1-sol", escape["expect"])
+        self.assertIn("alt+i info", escape["absent"])
         self.assertEqual(escape["steps"][-1], {"gone": "enter pick"})
         for suffix, theme, ink in (("", "night", "#a9b6ec"), ("-day", "day", "#1f2d6b")):
             with self.subTest(theme=theme):
@@ -2117,19 +2118,34 @@ while True:
         for name in ("chat-no-new-session", "chat-sidebar-rows"):
             state = states[name]
             self.assertIn("+ New Session", state["absent"])
-            self.assertEqual(state["expect_last"], "alt+i info")
+            self.assertEqual(state["expect_last"], "gpt-6.1-sol")
+            self.assertIn("alt+i info", state["absent"])
         self.assertEqual(states["chat-no-new-session"]["sizes"][0], (140, 40))
         self.assertIn({"wait": "Schema migration"}, states["chat-no-new-session"]["steps"])
         self.assertEqual(states["chat-sidebar-rows"]["sizes"], [(140, 40)])
         for label in ("Schema migration", "Sidebar chat", "Batch job"):
             self.assertIn(label, states["chat-sidebar-rows"]["expect"])
         failure = self.helper["frame_row_failure"]
-        state = {"expect_last": "alt+i info"}
+        state = {"expect_last": "gpt-6.1-sol"}
         for height in (30, 40):
-            good = "\n" * (height - 1) + "Sidebar chat  alt+i info\n"
+            good = "\n" * (height - 1) + "gpt-6.1-sol · high\n"
             self.assertIsNone(failure(state, good))
             self.assertIsNotNone(failure(state, good + "\n"))
             self.assertIsNotNone(failure(state, good + "   Settings  │\n"))
+
+    def test_chat_footer_frames_hide_permanent_info_and_unused_context(self):
+        states = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))["states"]
+        for state in states:
+            with self.subTest(state=state["name"]):
+                self.assertNotIn("alt+i info", state["expect"])
+                self.assertNotEqual(state.get("expect_last"), "alt+i info")
+        fresh = next(state for state in states if state["name"] == "chat-footer-below-half")
+        self.assertEqual(fresh["sizes"], [(140, 40), (46, 30)])
+        self.assertEqual(fresh["open"], "Context budget witness")
+        self.assertEqual(fresh["cast"][0]["messages"], ["Check context budget"])
+        self.assertEqual(fresh["expect_last"], "gpt-6.1-sol")
+        for text in ("context left", "100% left", "alt+i info"):
+            self.assertIn(text, fresh["absent"])
 
     def test_stop_waits_for_a_running_bash_not_an_approval(self):
         running = self.helper["frame_bash_running"]

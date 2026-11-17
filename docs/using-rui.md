@@ -55,7 +55,7 @@ It reports installation separately from activation, including when an applicatio
 
 ## Chat info
 
-Press **Alt+I** in a conversation, or click its Session/model/effort line or **alt+i info**, to open the same info panel above the input.
+Press **Alt+I** in a conversation, or click its Session footer line, to open the same info panel above the input.
 Clicking that line again while info is open leaves the panel and any open choice alone.
 The panel has its own ground and never becomes part of the feed; your draft stays below it unchanged.
 It uses only the height it needs, leaving recent messages visible above it.
