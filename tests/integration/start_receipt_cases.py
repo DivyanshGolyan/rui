@@ -105,4 +105,3 @@ def main():
                 lambda: host_process.stop_process(caller, timeout=5) if caller is not None else None,
                 lambda: proxy.close() if proxy is not None else None,
                 lambda: fixture.stop_host(host) if host is not None else None)
-

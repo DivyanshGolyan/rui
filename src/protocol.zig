@@ -2858,7 +2858,8 @@ test "protocol sparse creation preserves all omitted settings independent of fie
                 const configuration = if (comptime std.mem.eql(u8, kind, "message")) &request.message.configuration.? else &request.configure.configuration;
                 inline for (fields, 0..) |field, index| {
                     const expected: FieldState = if (present & (@as(usize, 1) << index) == 0) .omitted else if (index == 1 or index == 5) .explicit_null else .value;
-                    try std.testing.expectEqual(expected, @field(configuration, field[1]).state);
+                    const name = field[1];
+                    try std.testing.expectEqual(expected, @field(configuration, name).state);
                 }
             }
         }
