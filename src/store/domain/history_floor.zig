@@ -4,6 +4,10 @@ const model_capability = @import("../../model_capability.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
 const rsql = @import("../rsql.zig");
 const tool_fulfillment = @import("tool_fulfillment.zig");
+const content_parts = @import("content_parts.zig");
+const content_domain = @import("content.zig");
+const store_core = @import("../Store.zig");
+const store_access = @import("../access.zig");
 const store_schema = @import("../schema.zig");
 
 pub const levels = 3;
@@ -66,7 +70,7 @@ pub const Walk = struct {
 };
 
 const floor_facts = rsql.Read(.{
-    .sql = "SELECT current.admission_position,current.history_floor,current.history_level,base.history_floor AS base_floor,coalesce(base.admission_position,0) AS frontier," ++
+    .sql = "SELECT current.session_ref,current.admission_position,current.history_floor,current.history_level,base.history_floor AS base_floor,coalesce(base.admission_position,0) AS frontier," ++
         "coalesce((SELECT min(first.session_position) FROM conversation_entry first @index(conversation_entry_history) " ++
         "WHERE first.session_ref=current.session_ref AND first.entry_kind=1),0) AS first_message," ++
         "current.output_reservation,current.context_window,r.model,base_revision.model AS base_model FROM model_operation current " ++
@@ -79,6 +83,7 @@ const floor_facts = rsql.Read(.{
         "WHERE current.operation_id=?1 AND current.purpose=1",
     .Args = struct { operation: u64 },
     .Row = struct {
+        session_ref: Bounded(@import("../../session_id.zig").bytes),
         admission_position: rsql.Positive,
         history_floor: ?rsql.Positive,
         history_level: ?u8,
@@ -110,12 +115,12 @@ pub const item_bytes_sql = "coalesce((SELECT bag.byte_length FROM content bag WH
     "WHERE tool_call.operation_id=i.operation_id AND tool_call.item_ordinal=i.item_ordinal AND tool_call.session_ref=i.session_ref),0)";
 
 const units = rsql.Read(.{
-    .sql = "SELECT e.session_position AS start,content.byte_length+coalesce((SELECT sum(body.byte_length) FROM message_skill skill " ++
+    .sql = "SELECT e.session_position AS start,content.content_id,content.form,content.digest,content.byte_length,content.byte_length+coalesce((SELECT sum(body.byte_length) FROM message_skill skill " ++
         "JOIN content body ON body.content_id=skill.content_id WHERE skill.admission_id=e.source_admission_id),0) AS size FROM model_operation current " ++
         "JOIN conversation_entry e @index(conversation_entry_history) ON e.session_ref=current.session_ref " ++
         "JOIN content ON content.content_id=e.content_id " ++
         "WHERE current.operation_id=?1 AND e.session_position<?2 AND e.session_position>?3 AND e.entry_kind=1 AND e.session_position!=?4 UNION ALL " ++
-        "SELECT o.admission_position,(SELECT coalesce(sum(" ++ item_bytes_sql ++ "),0) FROM model_output_item i WHERE i.operation_id=o.operation_id)+" ++
+        "SELECT o.admission_position,NULL,NULL,NULL,NULL,(SELECT coalesce(sum(" ++ item_bytes_sql ++ "),0) FROM model_output_item i WHERE i.operation_id=o.operation_id)+" ++
         "coalesce((SELECT sum(result.byte_length) FROM action_operation a JOIN content result ON result.content_id=" ++ tool_fulfillment.actionContentSql("a") ++ " " ++
         "WHERE a.parent_operation_id=o.operation_id),0) FROM model_operation current " ++
         "JOIN model_operation o @index(model_operation_context_history) ON o.session_ref=current.session_ref " ++
@@ -123,7 +128,7 @@ const units = rsql.Read(.{
         store_schema.oneOf("o.resolution_code", &store_schema.accepted_resolutions) ++ " AND o.purpose=0 " ++
         std.fmt.comptimePrint("ORDER BY 1 DESC LIMIT {d}", .{page_rows}),
     .Args = struct { operation: u64, below: u64, above: u64, first_message: u64, frontier: u64 },
-    .Row = struct { start: rsql.Positive, size: u64 },
+    .Row = struct { start: rsql.Positive, content_id: ?u64, form: ?u8, digest: ?[32]u8, byte_length: ?u64, size: u64 },
     .cardinality = .each,
     .compound = true,
 });
@@ -154,6 +159,11 @@ pub const InheritedFloor = struct {
 
 pub const FloorSearch = struct {
     operation: u64,
+    entry: ?*const store_core.Entry = null,
+    prepared: ?*const Prepared = null,
+    used_prepared: bool = false,
+    weight: ?content_parts.Cursor.Weight = null,
+    compound: ?units.Row = null,
     read: union { facts: floor_facts.Row, walk: Walk } = undefined,
     from: u8 = levels,
     paged: bool = false,
@@ -167,9 +177,23 @@ pub const FloorSearch = struct {
         a.read(floor_facts, .{ .operation = search.operation }, &search.read.facts);
     }
 
-    pub fn next(search: *FloorSearch, a: anytype) bool {
+    pub fn visit(search: *FloorSearch, row: *const units.Row) bool {
+        search.read.walk.page_rows += 1;
+        if ((row.form orelse 0) != 0) {
+            search.compound = row.*;
+            return false;
+        }
+        return search.read.walk.take(row.start.get(), row.size);
+    }
+
+    pub fn next(search: *FloorSearch, a: anytype) !bool {
         if (!search.paged) {
             const facts = &search.read.facts;
+            if (search.prepared) |prepared| {
+                if (!prepared.matches(search.operation, facts)) return error.FloorPreparationRequired;
+                search.used_prepared = true;
+                return false;
+            }
             const from: u8 = facts.history_level orelse 0;
             if (from >= levels) return false;
             const compatible = if (facts.base_model) |*model| output_item.Kind.compaction.replayableTo(model.slice(), facts.model.slice(), .selected_base) else true;
@@ -180,6 +204,11 @@ pub const FloorSearch = struct {
             search.frontier = if (compatible) facts.frontier else 0;
             const walk: Walk = .init(facts.context_window, facts.output_reservation, facts.admission_position.get());
             search.read = .{ .walk = walk };
+        } else if (search.compound) |row| {
+            const weight = search.weight orelse return error.FloorPreparationRequired;
+            _ = search.read.walk.take(row.start.get(), row.size - row.byte_length.? +| weight.bytes);
+            search.compound = null;
+            search.weight = null;
         } else if (search.read.walk.page_rows < page_rows) return false;
         const walk = &search.read.walk;
         if (walk.done()) return false;
@@ -190,15 +219,99 @@ pub const FloorSearch = struct {
             .above = search.base_floor,
             .first_message = search.first_message,
             .frontier = search.frontier,
-        }, page_rows, walk);
+        }, page_rows, search);
         search.paged = true;
         return true;
     }
 
     pub fn room(search: *const FloorSearch) ?Room {
+        if (search.used_prepared) return search.prepared.?.room;
         if (search.from >= levels) return null;
         const choice = search.read.walk.deeper(search.from, search.previous) orelse return null;
         return .{ .choice = choice, .previous = search.previous, .first_message = search.first_message };
+    }
+};
+
+/// A certified result for one immutable Operation recipe. Later Messages and
+/// final background Action outcomes do not change its selected unit prefix.
+pub const Prepared = struct {
+    operation: u64,
+    facts: floor_facts.Row,
+    room: ?Room,
+
+    fn matches(self: *const Prepared, operation: u64, facts: *const floor_facts.Row) bool {
+        return self.operation == operation and self.facts.session_ref.eql(facts.session_ref.slice()) and
+            self.facts.admission_position == facts.admission_position and
+            self.facts.history_floor == facts.history_floor and self.facts.history_level == facts.history_level and
+            self.facts.base_floor == facts.base_floor and self.facts.frontier == facts.frontier and
+            self.facts.first_message == facts.first_message and self.facts.output_reservation == facts.output_reservation and
+            self.facts.context_window == facts.context_window and self.facts.model.eql(facts.model.slice()) and
+            optionalModelEqual(self.facts.base_model, facts.base_model);
+    }
+
+    fn optionalModelEqual(left: ?Bounded(model_capability.max_model_bytes), right: ?Bounded(model_capability.max_model_bytes)) bool {
+        if (left) |value| return if (right) |other| value.eql(other.slice()) else false;
+        return right == null;
+    }
+};
+
+/// Caller-owned continuation. Each step performs one SQL page or one raw
+/// manifest window, with no Entry or transaction retained between steps.
+pub const Preparation = struct {
+    search: FloorSearch = undefined,
+    facts: floor_facts.Row = undefined,
+    cursor: ?@import("../../os/pages.zig").Mapped(content_parts.Cursor) = null,
+    stage: enum { start, walk, done } = .start,
+    ready: bool = false,
+    prepared: ?Prepared = null,
+
+    pub fn init(self: *Preparation, operation: u64) void {
+        self.* = .{ .search = .{ .operation = operation } };
+    }
+
+    pub fn deinit(self: *Preparation) void {
+        if (self.cursor) |cursor| cursor.unmap();
+        self.cursor = null;
+    }
+
+    pub fn step(self: *Preparation, a: anytype) !bool {
+        if (self.ready) return true;
+        if (self.stage == .start) {
+            self.search.start(a);
+            try store_access.runAs(a, error.CorruptStore);
+            self.facts = self.search.read.facts;
+            self.stage = .walk;
+            return false;
+        }
+        if (self.search.compound) |row| {
+            if (self.search.weight == null) {
+                if (self.cursor == null) {
+                    const value = try content_domain.Value.of(row.content_id.?, row.form.?, row.byte_length.?, row.digest.?);
+                    const cursor = try @import("../../os/pages.zig").Mapped(content_parts.Cursor).map();
+                    cursor.value.init(value);
+                    self.cursor = cursor;
+                }
+                const cursor = self.cursor.?.value;
+                switch (try cursor.step(a)) {
+                    .raw => {},
+                    .rows => try store_access.runAs(a, error.CorruptStore),
+                    .part, .done => unreachable,
+                }
+                if (cursor.certified) {
+                    self.search.weight = cursor.weight;
+                    self.deinit();
+                }
+                return false;
+            }
+        }
+        if (try self.search.next(a)) {
+            try store_access.runAs(a, error.CorruptStore);
+            return false;
+        }
+        self.prepared = .{ .operation = self.search.operation, .facts = self.facts, .room = self.search.room() };
+        self.ready = true;
+        self.stage = .done;
+        return true;
     }
 };
 

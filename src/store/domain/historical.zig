@@ -18,6 +18,9 @@ const historical_domain = @This();
 const operation_effort = @import("operation_effort.zig");
 const action_read_domain = @import("action_read.zig");
 const content_domain = @import("content.zig");
+const content_parts = @import("content_parts.zig");
+const input_parts = @import("../../input_parts.zig");
+const Mapped = @import("../../os/pages.zig").Mapped;
 const model_settlement_domain = @import("model_settlement.zig");
 const skills_domain = @import("skills.zig");
 const history_floor_domain = @import("history_floor.zig");
@@ -83,10 +86,21 @@ pub const HistoricalTool = struct {
 
 pub const HistoricalEntryKind = enum { user, instruction, provider_output, tool_results, operation, skill };
 
+pub const HistoricalInput = struct {
+    view: *RequestPage,
+    value: content_domain.Value,
+};
+
+pub const HistoricalInputPart = struct {
+    kind: input_parts.Kind,
+    content: HistoricalContent,
+};
+
 pub const HistoricalEntry = struct {
     position: u64,
     kind: HistoricalEntryKind,
     content: ?HistoricalContent = null,
+    input: ?HistoricalInput = null,
     requested_model: ?Bounded(model_capability.max_model_bytes) = null,
     source_action: ?struct { id: u64, session: Bounded(session_id.bytes) } = null,
     sender: ?Bounded(session_id.max_reference_bytes) = null,
@@ -162,6 +176,8 @@ pub const RequestPage = struct {
     inline_readers: usize = 0,
     ahead: ToolsAhead = .none,
     output_parts: ?OutputPartCursor = null,
+    compound_inputs: bool = false,
+    message_cursor: ?Mapped(content_parts.Cursor) = null,
 
     const entry_batch = 16;
 
@@ -216,6 +232,7 @@ pub const RequestPage = struct {
         outputs_step,
         entry: u64,
         parts,
+        message_part,
         tool_result,
         tools: struct { walk: Page.ToolWalk, ordinal: u64 },
         provider_tool: *HistoricalTool,
@@ -230,6 +247,7 @@ pub const RequestPage = struct {
         outputs_step: bool,
         entry: EntryProgress,
         parts,
+        message_part: MessageProgress,
         tool_result: ?HistoricalToolResult,
         tools,
         provider_tool,
@@ -238,6 +256,8 @@ pub const RequestPage = struct {
         content: usize,
         corrupt,
     };
+
+    pub const MessageProgress = union(enum) { pending, ready: ?*const HistoricalInputPart };
 
     pub const Read = struct {
         question: Question,
@@ -424,6 +444,31 @@ pub const RequestPage = struct {
         return nextPart(self) catch self.corrupt();
     }
 
+    pub fn openMessage(self: *RequestPage, input: HistoricalInput) !void {
+        std.debug.assert(self.active and input.view == self and input.value.reference == .parts);
+        if (self.message_cursor == null) self.message_cursor = try Mapped(content_parts.Cursor).map();
+        self.message_cursor.?.value.init(input.value);
+    }
+
+    pub fn nextMessagePart(self: *RequestPage) !?HistoricalInputPart {
+        std.debug.assert(self.active and self.message_cursor != null);
+        return switch ((try self.ask(.message_part)).message_part) {
+            .pending => self.askMessageAgain(),
+            .ready => |part| ready: {
+                if (part == null) {
+                    self.message_cursor.?.unmap();
+                    self.message_cursor = null;
+                }
+                break :ready if (part) |value| value.* else null;
+            },
+        };
+    }
+
+    fn askMessageAgain(self: *RequestPage) error{PageRead} {
+        self.keepRead(.{ .question = .message_part });
+        return error.PageRead;
+    }
+
     pub fn nextToolResult(self: *RequestPage) !?HistoricalToolResult {
         std.debug.assert(self.active);
         return (try self.ask(.tool_result)).tool_result;
@@ -478,6 +523,8 @@ pub const RequestPage = struct {
         std.debug.assert(self.active and self.readers == 0);
         if (self.page) |page| std.heap.c_allocator.rawFree(std.mem.asBytes(page), .of(Page), @returnAddress());
         self.page = null;
+        if (self.message_cursor) |cursor| cursor.unmap();
+        self.message_cursor = null;
         self.active = false;
     }
 
@@ -762,7 +809,7 @@ const ReadAhead = struct {
         const from = &ahead.from;
         const kept = std.meta.eql(from.keys, keysOf(view)) and kept: {
             ahead.groups.finish(view) catch break :kept false;
-            ahead.batch.finish(null, view, from.after_position) catch break :kept false;
+            ahead.batch.finish(view, from.after_position) catch break :kept false;
             break :kept true;
         };
         if (!kept) {
@@ -905,6 +952,7 @@ pub noinline fn readPage(self: *Store, page: *RequestPage) !void {
             page.read = null;
             return;
         },
+        .message_part => .{ .message_part = try self.readHistoricalMessagePart(page) },
         .tool_result => .{ .tool_result = try readHistoricalToolResult(self, page) },
         .tools => |tools| {
             try readTools(self, page, tools.walk, tools.ordinal);
@@ -1047,14 +1095,20 @@ pub fn effortBeforeSql(comptime session: []const u8, comptime boundary: []const 
 const base_anchors_from = "FROM model_output_item anchor @index(model_output_compaction_anchor) ";
 const base_anchors_where = "WHERE anchor.operation_id=base.operation_id AND anchor.item_kind=4";
 
+const selected_floor_sql = replay_recipe.Recipe.floorSql("current_revision.model", "base_revision.model", "base.history_floor", "current.history_floor");
+const first_message_sql = "CASE WHEN coalesce(current.history_floor,base.history_floor) IS NULL THEN 0 ELSE coalesce((SELECT min(first.session_position) " ++
+    "FROM conversation_entry first @index(conversation_entry_history) WHERE first.session_ref=current.session_ref AND first.entry_kind=1),0) END";
+
 const output_boundary = rsql.Read(.{
     .sql = "SELECT current.admission_position,base.operation_id,coalesce(base.admission_position,0) AS frontier," ++
         "current.history_floor AS own_floor,base.history_floor AS base_floor,current_revision.model AS current_model,base_revision.model AS base_model," ++
         "(SELECT count(*) " ++ base_anchors_from ++ base_anchors_where ++ ") AS anchors," ++
         "(SELECT min(anchor.session_position) " ++ base_anchors_from ++ base_anchors_where ++ ") AS anchor_position," ++
         "(SELECT count(*) " ++ base_anchors_from ++ "JOIN content bag ON bag.content_id=anchor.extras_content_id " ++ base_anchors_where ++ ") AS anchor_bags," ++
-        "CASE WHEN coalesce(current.history_floor,base.history_floor) IS NULL THEN 0 ELSE coalesce((SELECT min(first.session_position) " ++
-        "FROM conversation_entry first @index(conversation_entry_history) WHERE first.session_ref=current.session_ref AND first.entry_kind=1),0) END AS first_message " ++
+        first_message_sql ++ " AS first_message," ++
+        "EXISTS(SELECT 1 FROM conversation_entry message JOIN content input ON input.content_id=message.content_id " ++
+        "WHERE message.session_ref=current.session_ref AND message.entry_kind=1 AND message.session_position<current.admission_position " ++
+        "AND input.form<>0 AND (message.session_position>" ++ selected_floor_sql ++ " OR message.session_position=(" ++ first_message_sql ++ "))) AS compound_inputs " ++
         "FROM model_operation current LEFT JOIN model_operation base ON base.operation_id=" ++ selected_base_sql ++ " " ++
         "JOIN session_revision current_revision ON current_revision.session_ref=current.session_ref AND current_revision.revision=current.settings_revision " ++
         "LEFT JOIN session_revision base_revision ON base_revision.session_ref=base.session_ref AND base_revision.revision=base.settings_revision " ++
@@ -1072,6 +1126,7 @@ const output_boundary = rsql.Read(.{
         anchor_position: ?rsql.Positive,
         anchor_bags: u64,
         first_message: u64,
+        compound_inputs: bool,
     },
     .cardinality = .each,
 });
@@ -1137,6 +1192,7 @@ const OutputSources = struct {
 };
 
 fn keepOutputBoundary(view: *RequestPage, row: *const output_boundary.Row) error{CorruptStore}!void {
+    view.compound_inputs = row.compound_inputs;
     view.output_boundary = row.admission_position.get();
     view.selected_base = if (row.operation_id) |id| id.get() else 0;
     view.output_frontier = row.frontier;
@@ -1333,27 +1389,9 @@ const EntryBatch = struct {
     view: *RequestPage,
     decoded: *historical_entries.Row,
     failure: ?error{CorruptStore} = null,
-    unsupported: ?content_domain.Value = null,
 
     pub fn visit(batch: *EntryBatch, row: *const historical_entries.Row) bool {
         const view = batch.view;
-        if (row.form) |form| {
-            if (form == 1) {
-                if (row.private != false or row.content_id == null or row.byte_length == null or row.digest == null) {
-                    batch.failure = error.CorruptStore;
-                } else {
-                    batch.unsupported = content_domain.Value.of(row.content_id.?.get(), form, row.byte_length.?, row.digest.?) catch {
-                        batch.failure = error.CorruptStore;
-                        return false;
-                    };
-                }
-                return false;
-            }
-            if (form != 0) {
-                batch.failure = error.CorruptStore;
-                return false;
-            }
-        }
         view.entries[view.entries_end] = historicalEntry(view, row) catch |err| {
             batch.failure = err;
             return false;
@@ -1433,16 +1471,11 @@ const BatchRead = struct {
         if (read.ahead) view.page.?.tools_walk = .{};
     }
 
-    fn finish(read: *const BatchRead, a: ?*ReadAccess, view: *RequestPage, after_position: u64) !void {
+    fn finish(read: *const BatchRead, view: *RequestPage, after_position: u64) !void {
         errdefer read.discard(view);
         const page = view.page.?;
         if (!read.sources.consistent) return error.CorruptStore;
         if (read.entries.failure) |err| return err;
-        if (read.entries.unsupported) |value| {
-            const access = a orelse return error.CorruptStore;
-            try @import("content_parts.zig").verify(access, value);
-            return error.InputPartsNotSupported;
-        }
         if (view.entries_end < RequestPage.entry_batch)
             view.entries_done_after = if (view.entries_end == 0) after_position else view.entries[view.entries_end - 1].position;
         page.parts_complete = read.parts.past or page.parts_end < Page.part_batch;
@@ -1458,7 +1491,7 @@ fn nextOrdinaryHistoricalEntry(a: *ReadAccess, view: *RequestPage, after_positio
         read.discard(view);
         return err;
     };
-    try read.finish(a, view, after_position);
+    try read.finish(view, after_position);
     return if (view.entries_end == 0) null else &view.entries[0];
 }
 
@@ -1611,6 +1644,15 @@ const Page = struct {
     fn exchange(page: *Page) *RequestPage.Read {
         comptime std.debug.assert(@sizeOf(RequestPage.Read) <= row_bytes and @alignOf(RequestPage.Read) <= row_align);
         return @ptrCast(&page.row);
+    }
+
+    // A yielded image name stays in the existing row scratch until ask copies
+    // it. The read exchange uses the preceding bytes, and Cursor decodes its
+    // own rows; no Page row is decoded between this write and the consumer.
+    fn messagePart(page: *Page) *HistoricalInputPart {
+        const offset = comptime std.mem.alignForward(usize, @sizeOf(RequestPage.Read), @alignOf(HistoricalInputPart));
+        comptime std.debug.assert(@alignOf(HistoricalInputPart) <= row_align and offset + @sizeOf(HistoricalInputPart) <= row_bytes);
+        return @ptrCast(@alignCast(page.row[offset..].ptr));
     }
 
     fn decoded(page: *Page, comptime Row: type) *Row {
@@ -1875,6 +1917,7 @@ fn historicalEntry(view: *RequestPage, row: *const historical_entries.Row) error
         .declares = row.declares orelse return error.CorruptStore,
     };
     var content: ?HistoricalContent = null;
+    var input: ?HistoricalInput = null;
     var requested_model: ?Bounded(model_capability.max_model_bytes) = null;
     if (kind == .provider_output) {
         if (row.consistent != true) return error.CorruptStore;
@@ -1892,6 +1935,14 @@ fn historicalEntry(view: *RequestPage, row: *const historical_entries.Row) error
             .digest = row.digest orelse return error.CorruptStore,
         };
         if (row.private orelse return error.CorruptStore) return error.CorruptStore;
+        switch (try input_parts.Form.decode(row.form orelse return error.CorruptStore)) {
+            .bytes => {},
+            .parts => {
+                if (kind != .user or row.source_action != null) return error.CorruptStore;
+                input = .{ .view = view, .value = try content_domain.Value.of(content_id.get(), row.form.?, content.?.length, content.?.digest) };
+                content = null;
+            },
+        }
     }
     return .{
         .position = row.session_position.get(),
@@ -1900,6 +1951,7 @@ fn historicalEntry(view: *RequestPage, row: *const historical_entries.Row) error
         .sender = row.sender,
         .source_action = if (row.source_action) |action| .{ .id = action.get(), .session = row.source_session orelse return error.CorruptStore } else null,
         .content = content,
+        .input = input,
     };
 }
 
@@ -2124,7 +2176,7 @@ fn readNextHistoricalToolGroup(a: *ReadAccess, view: *RequestPage, after_positio
             if (rides) read.discard(view);
             return err;
         };
-        const batch: anyerror!void = if (rides) read.finish(a, view, after_position) else {};
+        const batch: anyerror!void = if (rides) read.finish(view, after_position) else {};
         try groups.finish(view);
         try batch;
         if (page.groups_end == 0 and !scan.done) return error.HistoricalPending;
@@ -2186,6 +2238,25 @@ fn partsExhausted(view: *RequestPage) bool {
     const page = view.page.?;
     while (page.parts_next < page.parts_end and page.parts[page.parts_next].session_position.get() < position) page.parts_next += 1;
     return page.parts_next == page.parts_end and !page.parts_complete;
+}
+
+pub fn messagePartFrom(a: *ReadAccess, view: *RequestPage) !RequestPage.MessageProgress {
+    return switch (try view.message_cursor.?.value.step(a)) {
+        .raw => .pending,
+        .rows => rows: {
+            try store_access.runAs(a, error.CorruptStore);
+            break :rows .pending;
+        },
+        .done => .{ .ready = null },
+        .part => |part| ready: {
+            const value = view.page.?.messagePart();
+            value.* = .{
+                .kind = part.kind,
+                .content = .{ .view = view, .content_id = @intCast(part.content_id), .length = part.reference.length, .digest = part.reference.digest },
+            };
+            break :ready .{ .ready = value };
+        },
+    };
 }
 
 fn readHistoricalParts(self: *Store, view: *RequestPage) !void {

@@ -1942,15 +1942,67 @@ fn renderModelList(out: protocol.JsonOut, host: *Host, facts: []const @import("m
 }
 
 fn captureSessionReport(host: *Host, request: *const protocol.InspectSession, request_number: u64) !store_module.SessionReport {
-    var capture: store_module.SessionReportCapture = .{ .io = host.io, .writer = null, .budget = host.retention.sharedBudget() };
+    const State = struct {
+        capture: store_module.SessionReportCapture,
+        reply: session_report_reply.Reply(store_module.SessionReportCapture),
+    };
+    const state = try createUnfilled(host.allocator, State);
+    defer host.allocator.destroy(state);
+    const capture = &state.capture;
+    capture.* = .{ .io = host.io, .writer = null, .budget = host.retention.sharedBudget() };
     try capture.create(host.lease.paths.scratch.slice(), request_number, host.hooks.fails(.report_unlink));
     errdefer capture.deinit();
-    const reply = try createUnfilled(host.allocator, session_report_reply.Reply(store_module.SessionReportCapture));
-    defer host.allocator.destroy(reply);
-    reply.capture = &capture;
-    reply.execution = executionFacts(host);
-    try host.store.readSessionReport(request.session.slice(), request.profile, reply);
+    state.reply.capture = capture;
+    state.reply.execution = executionFacts(host);
+    try host.store.readSessionReport(request.session.slice(), request.profile, &state.reply);
     return capture.seal();
+}
+
+test "Session report capture releases its heap state after sealing or scratch exhaustion" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var lease: platform.StoreLease = undefined;
+    lease.paths = .{};
+    try lease.paths.scratch.set(root);
+    var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    var storage: store_module.Store = undefined;
+    try storage.open(std.testing.io, try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite", .{root}), root);
+    defer storage.close() catch unreachable;
+    var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = &lease, .store = &storage };
+    var retention = output_retention.Queue.initialize(host.io, root, .{ .used = &host.scratch_used, .limit = 9000 }, &.{});
+    host.retention = &retention;
+    var request: protocol.InspectSession = .{};
+    try request.session.set("k7m2qx");
+    {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+        host.allocator = failing.allocator();
+        defer host.allocator = std.testing.allocator;
+        try std.testing.expectError(error.OutOfMemory, captureSessionReport(&host, &request, 0));
+        try std.testing.expectEqual(@as(u64, 0), host.scratch_used.load(.acquire));
+        try std.testing.expect(!storage.isFenced());
+    }
+    {
+        var report = try captureSessionReport(&host, &request, 1);
+        defer report.deinit();
+        try std.testing.expect(report.length != 0);
+        try std.testing.expectEqual(report.length, host.scratch_used.load(.acquire));
+        var bytes: [1024]u8 = undefined;
+        const length = try report.read(0, &bytes);
+        try std.testing.expectEqual(report.length, length);
+        try std.testing.expect(std.mem.indexOf(u8, bytes[0..length], "session_not_found") != null);
+    }
+    try std.testing.expectEqual(@as(u64, 0), host.scratch_used.load(.acquire));
+    retention.budget.limit = 1;
+    try std.testing.expectError(error.ReportScratchExhausted, captureSessionReport(&host, &request, 2));
+    try std.testing.expectEqual(@as(u64, 0), host.scratch_used.load(.acquire));
+    try std.testing.expect(!storage.isFenced());
+    retention.budget.limit = 9000;
+    host.hooks.failures.insert(.report_unlink);
+    try std.testing.expectError(error.ReportScratchCleanupFailed, captureSessionReport(&host, &request, 3));
+    try std.testing.expectEqual(@as(u64, 0), host.scratch_used.load(.acquire));
+    try std.testing.expect(!storage.isFenced());
 }
 
 fn captureSessionList(host: *Host, request: *const protocol.ListSessions, request_number: u64) !store_module.SessionReport {
