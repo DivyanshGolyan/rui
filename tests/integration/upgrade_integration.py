@@ -133,7 +133,7 @@ class Case:
     def upgrade(self, *args, expect=0):
         return self.run("upgrade", "--store", self.store, *args, expect=expect)
 
-    def build(self, name, version=None, *, managed=True):
+    def build(self, name, version=None, *, managed=True, native=None):
         # Cases can share HOME to exercise a whole-Host batch. Retained
         # artifacts still belong to each Case, not to that shared installation
         # selector. Keep one managed leaf (the production ownership shape).
@@ -143,7 +143,7 @@ class Case:
         (build / "bin").mkdir(parents=True)
         executable = build / "bin/rui"
         if version is None:
-            shutil.copy2(self.binary, executable)
+            shutil.copy2(self.binary if native is None else native, executable)
         else:
             executable.write_text(f"#!/bin/sh\n[ \"$1\" = --version ] || exit 91\nprintf '%s\\n' 'rui {version} (synthetic metadata fixture)'\n")
             executable.chmod(0o755)
@@ -158,8 +158,8 @@ class Case:
     def old_selection(self):
         self.select(self.build("synthetic-selected-old", "0.1.0"))
 
-    def start_host(self, name="retained-real-host", *, managed=True, store_hex=False, extra=(), sources_only=False, source=False):
-        build = self.build(name, managed=managed)
+    def start_host(self, name="retained-real-host", *, managed=True, store_hex=False, extra=(), sources_only=False, source=False, native=None):
+        build = self.build(name, managed=managed, native=native)
         if source:
             (build / "revision").write_text("synthetic-source-revision-marker\n")
         destination = ["--store-hex", os.fsencode(self.store).hex()] if store_hex else ["--store", self.store]
@@ -671,7 +671,10 @@ def pre_freeze_target_case(root, binary, releases, pre_freeze_binary):
         saved.write_text(json.dumps({"interface": {"dir": str(runtime)}, "providers": {},
                                      "execution": {"activeCapacity": 2}}))
         saved.chmod(0o600)
-        old, previous = c.start_host(sources_only=True)
+        # Both running Host and selected target use the actual old artifact.
+        # Otherwise a newer coordinator version can trigger no-downgrade before
+        # the capability precondition this witness is intended to exercise.
+        old, previous = c.start_host(sources_only=True, native=pre_freeze_binary)
         target = c.build("actual-pre-freeze-build")
         shutil.copy2(pre_freeze_binary, target / "bin/rui")
         public_check = subprocess.run([target / "bin/rui", "host", "settings", "--check", "--store", c.store],
