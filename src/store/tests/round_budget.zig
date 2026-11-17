@@ -58,6 +58,7 @@ test "every function that enters the Store has a round budget" {
         @embedFile("../access.zig"),
         @embedFile("../archive_tests.zig"),
         @embedFile("../pin_tests.zig"),
+        @embedFile("../creator_tests.zig"),
         @embedFile("../engine.zig"),
         @embedFile("../engine/Sqlite.zig"),
         @embedFile("../engine/Mysql.zig"),
