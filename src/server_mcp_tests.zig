@@ -171,7 +171,7 @@ fn run(case: Case) !void {
         const work = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?;
         try expectHere(@src(), work == .mcp);
         try std.testing.expectEqual(@import("execution_turn.zig").Admission.admitted, active.admit(host, work.mcp));
-        if (case == .image) action_binding = active.entries[0].?.binding;
+        if (case == .image or case == .image_exhausted) action_binding = active.entries[0].?.binding;
         if (case != .down) {
             const input = try allocator.create(store.ActionExecutionInput);
             defer allocator.destroy(input);
@@ -323,6 +323,12 @@ fn run(case: Case) !void {
         if (case == .image) {
             try std.testing.expectEqual(@as(u64, 1), try sql.queryU64(storage, "SELECT count(*) FROM content WHERE digest=?1 AND byte_length=?2", .{ store.testing.Blob{ .bytes = &protocol.contentDigest(image_png) }, image_png.len }));
             try std.testing.expectEqual(@as(u64, 1), try sql.queryU64(storage, "SELECT count(*) FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id WHERE c.form=1", .{}));
+        }
+        if (case == .image_exhausted) {
+            const text = @import("result_fault.zig").storage_failed_text;
+            try std.testing.expectEqualStrings("The Host's scratch storage filled while saving this result.", text);
+            try std.testing.expectEqual(@as(u64, 1), try sql.queryU64(storage, "SELECT count(*) FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id WHERE a.action_id=?1 AND a.resolution_code='storage_failed' AND c.form=0 AND c.byte_length=?2 AND c.digest=?3", .{ action_binding.action_id, text.len, store.testing.Blob{ .bytes = &protocol.contentDigest(text) } }));
+            try std.testing.expect(!(try storage.recoverOneUncertainAction(.empty())));
         }
         if (case == .image_bad) {
             try std.testing.expectEqual(@as(u64, 1), try sql.queryU64(storage, "SELECT count(*) FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id WHERE c.form=0", .{}));

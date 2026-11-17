@@ -6,6 +6,8 @@ const protocol = @import("protocol.zig");
 const Running = @import("mcp/Running.zig");
 const offered = @import("mcp/offered.zig");
 const fenceDispatch = @import("server_host.zig").fenceDispatch;
+const tool_settle = @import("tool_settle.zig");
+const result_fault = @import("result_fault.zig");
 
 pub const Server = @import("mcp/servers.zig").Server;
 pub const Servers = @import("mcp/servers.zig").Servers;
@@ -18,6 +20,11 @@ pub const Active = struct {
     arena: std.heap.ArenaAllocator,
     running: Running = undefined,
     started: bool = false,
+    profile: @import("tool_record.zig").Profile = undefined,
+
+    fn slot(self: *const Active) tool_settle.Slot {
+        return .{ .token = self.token, .binding = self.binding, .publication_phase = "MCP settlement" };
+    }
 
     fn freeLocal(self: *Active, allocator: std.mem.Allocator) void {
         if (self.started) self.running.deinit();
@@ -171,15 +178,17 @@ pub const Calls = struct {
                     };
                 }
                 if (result_capture.failure) |err| {
-                    if (err == error.ScratchCapacityExceeded) {
-                        settle(host, active, .storage_failed, "MCP image capture failed: ScratchCapacityExceeded.");
+                    const fault: result_fault.Failure = .{ .capture = err };
+                    if (result_fault.classify(fault) == .storage_full) {
+                        _ = tool_settle.failure(host, active.slot(), "MCP image capture", fault);
                     } else {
-                        fenceDispatch(host, "MCP image capture", err);
+                        // An already-running MCP capture failed; its result is uncertain.
+                        _ = tool_settle.fence(host, "MCP image capture", .{ .capture = err });
                     }
                 } else if (result_capture.capture) |capture| {
                     publishParts(host, active, resolution, capture);
                 } else {
-                    settle(host, active, resolution, out.written());
+                    _ = tool_settle.result(host, active.slot(), active.profile, resolution, .{ .text = out.written() });
                 }
                 active.destroy(host);
                 entry.* = null;
@@ -280,13 +289,10 @@ const ResultCapture = struct {
 
 noinline fn publishParts(host: *Host, active: *Active, code: store.ActionResolutionCode, capture: *InputCapture) void {
     const loan = capture.seal() catch |err| {
-        fenceDispatch(host, "MCP image sealing", err);
+        _ = tool_settle.fence(host, "MCP image sealing", .{ .capture = err });
         return;
     };
-    if (!host.custody.claimTerminalDelivery(active.token)) return;
-    _ = host.store.settleActionAttemptParts(active.binding, code, loan, host.hooks.storeFaults(.action_result)) catch |err| {
-        fenceDispatch(host, "MCP settlement", err);
-    };
+    _ = tool_settle.result(host, active.slot(), active.profile, code, .{ .parts = loan });
 }
 
 fn nowMs(host: *const Host) u64 {
@@ -294,10 +300,7 @@ fn nowMs(host: *const Host) u64 {
 }
 
 fn settle(host: *Host, active: *Active, code: store.ActionResolutionCode, text: []const u8) void {
-    if (!host.custody.claimTerminalDelivery(active.token)) return;
-    _ = host.store.settleActionAttempt(active.binding, code, text, host.hooks.storeFaults(.action_result)) catch |err| {
-        fenceDispatch(host, "MCP settlement", err);
-    };
+    _ = tool_settle.fixed(host, active.slot(), code, text);
 }
 
 fn preparationFailed(host: *Host, active: *Active, err: anyerror) void {
@@ -314,6 +317,7 @@ noinline fn prepare(host: *Host, active: *Active) !void {
     const arena = active.arena.allocator();
     const input = try arena.create(store.ActionExecutionInput);
     try host.store.readActionExecutionInput(.mcp, active.binding, input);
+    active.profile = @import("tool_record.zig").Runner.mcp.resultProfile(input.runner.mcp.bash_offered);
     const config = for (host.mcp_servers.entries) |*server| {
         if (std.mem.eql(u8, server.name, input.runner.mcp.server.slice())) break server;
     } else {

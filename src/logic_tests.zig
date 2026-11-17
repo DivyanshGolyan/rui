@@ -115,6 +115,7 @@ const cores = .{
     .{ "read_image_arguments.zig", @import("read_image_arguments.zig") },
     .{ "replay_recipe.zig", @import("replay_recipe.zig") },
     .{ "request_wait.zig", @import("request_wait.zig") },
+    .{ "result_fault.zig", @import("result_fault.zig") },
     .{ "retention_capacity.zig", @import("retention_capacity.zig") },
     .{ "retry_policy.zig", @import("retry_policy.zig") },
     .{ "schema_json.zig", @import("schema_json.zig") },
@@ -196,6 +197,18 @@ test {
     _ = @import("tools.zig");
     _ = @import("core_tools.zig");
     inline for (cores) |core| _ = core[1];
+}
+
+test "positional I/O errors retain provenance across the whole domain" {
+    const fault = @import("result_fault.zig");
+    inline for (.{ std.Io.File.ReadPositionalError, std.Io.File.WritePositionalError }) |ErrorSet| {
+        inline for (@typeInfo(ErrorSet).error_set.error_names.?) |name| {
+            const err = @field(anyerror, name);
+            try std.testing.expectEqual(fault.Fault.rejected, fault.classify(.{ .source = err }));
+            try std.testing.expectEqual(fault.Fault.uncertain, fault.classify(.{ .capture = err }));
+            try std.testing.expectEqual(fault.Fault.uncertain, fault.classify(.{ .store = err }));
+        }
+    }
 }
 
 test "functional cores stay within the core boundary" {

@@ -331,12 +331,24 @@ pub const read_image_record: Record = .{
     .input_schema = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":4096}},\"required\":[\"path\"],\"additionalProperties\":false}",
 };
 
+pub const Profile = struct { excerpt_bytes: u32, retain: bool };
+
 pub const Runner = enum {
     bash,
     read_image,
     core,
     mcp,
     provider,
+
+    /// The offer comes from the frozen tool set of the model operation.
+    pub fn resultProfile(self: Runner, bash_offered: bool) Profile {
+        return switch (self) {
+            .bash => .{ .excerpt_bytes = 20_000, .retain = true },
+            .mcp => .{ .excerpt_bytes = 10_000, .retain = bash_offered },
+            .read_image => .{ .excerpt_bytes = 0, .retain = false },
+            .core, .provider => unreachable,
+        };
+    }
 
     pub fn beforeAdmissionStopText(self: Runner) []const u8 {
         return switch (self) {
@@ -514,5 +526,14 @@ test "MCP missing tools tool set resolution covers every empty-server combinatio
             if (mask & (@as(usize, 1) << @intCast(index)) == 0) try std.testing.expectEqualStrings(server, empty.next().?);
         }
         try std.testing.expectEqual(@as(?[]const u8, null), empty.next());
+    }
+}
+
+
+test "result profiles follow runner and frozen Bash offer" {
+    for ([_]bool{ false, true }) |offer| {
+        try std.testing.expectEqualDeep(Profile{ .excerpt_bytes = 20_000, .retain = true }, Runner.bash.resultProfile(offer));
+        try std.testing.expectEqualDeep(Profile{ .excerpt_bytes = 10_000, .retain = offer }, Runner.mcp.resultProfile(offer));
+        try std.testing.expectEqualDeep(Profile{ .excerpt_bytes = 0, .retain = false }, Runner.read_image.resultProfile(offer));
     }
 }

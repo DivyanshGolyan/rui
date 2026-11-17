@@ -6,11 +6,15 @@ const InputCapture = @import("InputCapture.zig");
 const arguments = @import("read_image_arguments.zig");
 const source_file = @import("os/read_image_file.zig");
 const fenceDispatch = @import("server_host.zig").fenceDispatch;
+const tool_settle = @import("tool_settle.zig");
+const result_fault = @import("result_fault.zig");
 
 pub const capacity = 16;
 
 const Active = struct {
     token: execution.CustodyToken,
+    profile: @import("tool_record.zig").Profile = undefined,
+    preparation_failure: ?result_fault.Failure = null,
     binding: store.ActionAttemptBinding,
     source: ?std.Io.File = null,
     capture: ?InputCapture = null,
@@ -19,6 +23,17 @@ const Active = struct {
     length: u64 = 0,
     deadline: std.Io.Clock.Timestamp = undefined,
     window: [InputCapture.window_bytes]u8 = undefined,
+
+    fn recordFailure(self: *Active, failure: result_fault.Failure) anyerror {
+        self.preparation_failure = failure;
+        return switch (failure) {
+            inline else => |err| err,
+        };
+    }
+
+    fn slot(self: *const Active, phase: []const u8) tool_settle.Slot {
+        return .{ .token = self.token, .binding = self.binding, .publication_phase = phase };
+    }
 
     fn destroy(self: *Active, host: *Host) void {
         const token = self.token;
@@ -72,7 +87,7 @@ pub const Calls = struct {
             return .admitted;
         };
         prepare(host, active) catch |err| {
-            fail(host, active, err);
+            fail(host, active, active.preparation_failure orelse .{ .source = err });
             active.destroy(host);
             return .admitted;
         };
@@ -93,7 +108,7 @@ pub const Calls = struct {
                 settleText(host, active, .timed_out, "Image read timed out before its result was saved.");
             } else {
                 const progress_result = advance(host.io, active) catch |err| {
-                    fenceDispatch(host, "image snapshot capture", err);
+                    _ = tool_settle.failure(host, active.slot("image read failure publication"), "image snapshot capture", .{ .capture = err });
                     active.destroy(host);
                     entry.* = null;
                     progress = true;
@@ -102,8 +117,8 @@ pub const Calls = struct {
                 progress = true;
                 switch (progress_result) {
                     .pending => continue,
-                    .input_failed => |err| {
-                        fail(host, active, err);
+                    .input_failed => |fault| {
+                        failInput(host, active, fault);
                         active.destroy(host);
                         entry.* = null;
                         continue;
@@ -131,23 +146,20 @@ pub const Calls = struct {
 /// publication fails. Recovery reports the original Attempt as indeterminate.
 fn publish(host: *Host, active: *Active) void {
     const loan = active.capture.?.seal() catch |err| {
-        fenceDispatch(host, "image snapshot sealing", err);
+        _ = tool_settle.fence(host, "image snapshot sealing", .{ .capture = err });
         return;
     };
-    if (!host.custody.claimTerminalDelivery(active.token)) return;
-    _ = host.store.settleActionAttemptParts(active.binding, .succeeded, loan, host.hooks.storeFaults(.action_result)) catch |err| {
-        fenceDispatch(host, "image read result publication", err);
-    };
+    _ = tool_settle.result(host, active.slot("image read result publication"), active.profile, .succeeded, .{ .parts = loan });
 }
 
 fn settleText(host: *Host, active: *Active, code: store.ActionResolutionCode, text: []const u8) void {
-    if (!host.custody.claimTerminalDelivery(active.token)) return;
-    _ = host.store.settleActionAttempt(active.binding, code, text, host.hooks.storeFaults(.action_result)) catch |err| {
-        fenceDispatch(host, "image read failure publication", err);
-    };
+    _ = tool_settle.fixed(host, active.slot("image read failure publication"), code, text);
 }
 
-fn fail(host: *Host, active: *Active, err: anyerror) void {
+fn fail(host: *Host, active: *Active, fault: result_fault.Failure) void {
+    const err = switch (fault) {
+        inline else => |value| value,
+    };
     if (host.store.isFenced()) {
         fenceDispatch(host, "image read canonical input", err);
     } else if (err == error.HostDispatchSuppressed) {
@@ -155,9 +167,28 @@ fn fail(host: *Host, active: *Active, err: anyerror) void {
     } else if (err == error.SupersededByControl) {
         settleText(host, active, .cancelled, "Stopped before this image read completed.");
     } else {
-        var buffer: [192]u8 = undefined;
-        const code: store.ActionResolutionCode = if (err == error.ScratchCapacityExceeded) .storage_failed else .failed;
-        settleText(host, active, code, std.fmt.bufPrint(&buffer, "Image read failed: {s}.", .{@errorName(err)}) catch unreachable);
+        if (result_fault.classify(fault) == .storage_full) {
+            _ = tool_settle.failure(host, active.slot("image read failure publication"), "image snapshot capture", fault);
+        } else {
+            _ = tool_settle.message(host, active.slot("image read failure publication"), .failed, "Image read failed: {s}.", .{@errorName(err)});
+        }
+    }
+}
+
+fn failInput(host: *Host, active: *Active, fault: result_fault.Failure) void {
+    if (host.store.isFenced()) {
+        _ = tool_settle.fence(host, "image read canonical input", fault);
+        return;
+    }
+    switch (result_fault.classify(fault)) {
+        .rejected => {
+            const err = switch (fault) {
+                inline else => |value| value,
+            };
+            _ = tool_settle.message(host, active.slot("image read failure publication"), .failed, "Image read failed: {s}.", .{@errorName(err)});
+        },
+        .storage_full, .suppressed, .uncertain => _ = tool_settle.failure(host, active.slot("image read failure publication"), "image snapshot capture", fault),
+        .superseded => settleText(host, active, .cancelled, "Stopped before this image read completed."),
     }
 }
 
@@ -187,69 +218,70 @@ const Source = struct {
 };
 
 noinline fn prepare(host: *Host, active: *Active) !void {
-    try host.store.readActionExecutionInput(.read_image, active.binding, &active.input);
+    host.store.readActionExecutionInput(.read_image, active.binding, &active.input) catch |err| return active.recordFailure(.{ .store = err });
+    active.profile = @import("tool_record.zig").Runner.read_image.resultProfile(false);
     var reader: store.ContentReader = undefined;
-    reader.open(try host.store.openContent(active.input.arguments));
+    reader.open(host.store.openContent(active.input.arguments) catch |err| return active.recordFailure(.{ .store = err }));
     defer reader.close();
     var source: Source = .{ .reader = &reader, .length = active.input.arguments.length };
-    if (!try arguments.parse(&source, &active.path)) return error.InvalidImageArguments;
+    if (!(arguments.parse(&source, &active.path) catch |err| return active.recordFailure(.{ .store = err }))) return active.recordFailure(.{ .source = error.InvalidImageArguments });
     const now = std.Io.Clock.Timestamp.now(host.io, .awake);
     active.deadline = now.addDuration(.{ .raw = .fromMilliseconds(@intCast(active.input.timeout_ms)), .clock = .awake });
-    try host.custody.consumeLaunchAuthority(active.token, .{ .action = active.binding }, now);
-    try host.store.withActionLaunchHandoff(active.binding, .{ .host = host, .active = active }, struct {
+    host.custody.consumeLaunchAuthority(active.token, .{ .action = active.binding }, now) catch |err| return active.recordFailure(.{ .store = err });
+    host.store.withActionLaunchHandoff(active.binding, .{ .host = host, .active = active }, struct {
         fn handoff(context: anytype, cutoff: u64) !void {
             try context.host.withEffectLaunch(context, launch);
             try context.host.custody.watchMessages(context.active.token, cutoff);
         }
         fn launch(context: anytype) !void {
-            context.active.source = try source_file.open(context.host.io, context.active.input.runner.read_image.workspace.slice(), context.active.path.slice());
+            context.active.source = source_file.open(context.host.io, context.active.input.runner.read_image.workspace.slice(), context.active.path.slice()) catch |err| return context.active.recordFailure(.{ .source = err });
         }
-    }.handoff);
-    active.length = (try active.source.?.stat(host.io)).size;
+    }.handoff) catch |err| return if (active.preparation_failure != null) err else active.recordFailure(.{ .store = err });
+    active.length = (active.source.?.stat(host.io) catch |err| return active.recordFailure(.{ .source = err })).size;
     // Check size before allocating storage or reading any payload.
-    _ = try @import("input_media.zig").Scanner.init(active.length, null, .{});
+    _ = @import("input_media.zig").Scanner.init(active.length, null, .{}) catch |err| return active.recordFailure(.{ .source = err });
     active.capture = .{ .io = host.io, .resources = null };
-    try @import("server_input_scratch.zig").init(host, active.binding.action_id, &active.capture.?);
-    try active.capture.?.begin(.{ .image = .{} }, active.length);
+    @import("server_input_scratch.zig").init(host, active.binding.action_id, &active.capture.?) catch |err| return active.recordFailure(.{ .capture = err });
+    active.capture.?.begin(.{ .image = .{} }, active.length) catch |err| return active.recordFailure(.{ .capture = err });
 }
 
-const Progress = union(enum) { pending, complete, input_failed: anyerror };
-
-fn isInputFailure(err: anyerror) bool {
-    if (err == error.ScratchCapacityExceeded) return true;
-    inline for (@typeInfo(@import("input_media.zig").Error).error_set.error_names.?) |name| {
-        if (err == @field(anyerror, name)) return true;
-    }
-    return false;
-}
+const Progress = union(enum) { pending, complete, input_failed: result_fault.Failure };
 
 /// File, validation and scratch-capacity failures settle explicitly through the
 /// existing failure path. Capture I/O still fences: its outcome is uncertain.
 fn advance(io: std.Io, active: *Active) !Progress {
     const capture = &active.capture.?;
     const remaining = active.length - capture.length;
-    const count = active.source.?.readPositionalAll(io, active.window[0..@intCast(@min(remaining, active.window.len))], capture.length) catch |err| return .{ .input_failed = err };
-    if (count == 0 and remaining != 0) return .{ .input_failed = error.ImageFileChanged };
+    const count = active.source.?.readPositionalAll(io, active.window[0..@intCast(@min(remaining, active.window.len))], capture.length) catch |err| return .{ .input_failed = .{ .source = err } };
+    if (count == 0 and remaining != 0) return .{ .input_failed = .{ .source = error.ImageFileChanged } };
     var allowance: usize = count;
     _ = capture.append(active.window[0..count], &allowance, false) catch |err| {
-        if (isInputFailure(err)) return .{ .input_failed = err };
+        const fault: result_fault.Failure = .{ .capture = err };
+        switch (result_fault.classify(fault)) {
+            .rejected, .storage_full => return .{ .input_failed = fault },
+            else => {},
+        }
         return err;
     };
     if (capture.length != active.length) return .pending;
     var extra: [1]u8 = undefined;
-    const more = active.source.?.readPositionalAll(io, &extra, active.length) catch |err| return .{ .input_failed = err };
-    if (more != 0) return .{ .input_failed = error.ImageFileChanged };
+    const more = active.source.?.readPositionalAll(io, &extra, active.length) catch |err| return .{ .input_failed = .{ .source = err } };
+    if (more != 0) return .{ .input_failed = .{ .source = error.ImageFileChanged } };
     capture.end() catch |err| {
-        if (isInputFailure(err)) return .{ .input_failed = err };
+        const fault: result_fault.Failure = .{ .capture = err };
+        switch (result_fault.classify(fault)) {
+            .rejected, .storage_full => return .{ .input_failed = fault },
+            else => {},
+        }
         return err;
     };
     return .complete;
 }
 
-const TestCase = enum { snapshot, missing, invalid, oversized, stop, background, capture, seal, publication, shutdown, payload_capacity, index_capacity };
+const TestCase = enum { snapshot, missing, invalid, oversized, stop, background, source_io, capture, seal, publication, shutdown, payload_capacity, index_capacity };
 
 test "read_image custody owns snapshot publication stop background and recovery" {
-    try testReadImage(&.{ .snapshot, .missing, .invalid, .oversized, .stop, .background, .capture, .seal, .publication, .shutdown });
+    try testReadImage(&.{ .snapshot, .missing, .invalid, .oversized, .stop, .background, .source_io, .capture, .seal, .publication, .shutdown });
 }
 
 test "read_image payload growth exhaustion settles failure and releases custody" {
@@ -331,7 +363,7 @@ fn testReadImage(cases: []const TestCase) !void {
             if (case == .capture) {
                 capture_vtable.fileWritePositional = struct {
                     fn write(_: ?*anyopaque, _: std.Io.File, _: []const u8, _: []const []const u8, _: usize, _: u64) std.Io.File.WritePositionalError!usize {
-                        return error.NoSpaceLeft;
+                        return error.InputOutput;
                     }
                 }.write;
                 active.capture.?.io.vtable = &capture_vtable;
@@ -347,7 +379,23 @@ fn testReadImage(cases: []const TestCase) !void {
             }
             if (case == .background) try std.testing.expect(storage.backgroundAction(.{ .live_action = selected.action_id }, .{}) == .accepted);
             if (case == .publication) host.hooks.failures.insert(.result_before_commit);
-            if (case == .seal) {
+            if (case == .source_io) {
+                var source_io = std.testing.io;
+                var source_vtable = source_io.vtable.*;
+                source_vtable.fileReadPositional = struct {
+                    fn read(_: ?*anyopaque, _: std.Io.File, _: []const []u8, _: u64) std.Io.File.ReadPositionalError!usize {
+                        return error.InputOutput;
+                    }
+                }.read;
+                source_io.vtable = &source_vtable;
+                const outcome = try advance(source_io, active);
+                try std.testing.expect(outcome == .input_failed);
+                try std.testing.expect(outcome.input_failed == .source);
+                failInput(&host, active, outcome.input_failed);
+                active.destroy(&host);
+                calls.entries[0] = null;
+                try std.testing.expect(host.launchAllowed());
+            } else if (case == .seal) {
                 const complete = try advance(std.testing.io, active);
                 try std.testing.expect(complete == .complete);
                 try active.capture.?.resources.?.index.setLength(std.testing.io, 0);
@@ -377,7 +425,7 @@ fn testReadImage(cases: []const TestCase) !void {
         if (case == .payload_capacity or case == .index_capacity) {
             try std.testing.expect(host.launchAllowed());
             try std.testing.expect(!storage.isFenced());
-            const text = "Image read failed: ScratchCapacityExceeded.";
+            const text = result_fault.storage_failed_text;
             try std.testing.expectEqual(@as(u64, 1), try testing.queryU64(&storage, "SELECT count(*) FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id WHERE a.action_id=?1 AND a.resolution_code='storage_failed' AND c.form=0 AND c.byte_length=?2 AND c.digest=?3", .{ selected.action_id, text.len, testing.Blob{ .bytes = &protocol.contentDigest(text) } }));
             try std.testing.expect(!(try storage.recoverOneUncertainAction(.empty())));
         }
