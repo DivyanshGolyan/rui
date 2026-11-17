@@ -327,7 +327,9 @@ pub fn build(b: *std.Build) void {
     if (pr_ci) upgrade_release.root_module.strip = true;
     const upgrade_fixture_step = b.step("upgrade-fixture", "Build the same-source native actor with synthetic release identity for upgrade evidence");
     upgrade_fixture_step.dependOn(&b.addInstallArtifact(upgrade_release, .{}).step);
-    const upgrade_integration = screen_module.screenCommand(b, screen, &.{"python3"});
+    const upgrade_integration = screen_module.screenCommand(b, screen, &.{});
+    upgrade_integration.addPrefixedFileArg("RUI_TEST_MYSQL_ADMIN=", ci.path(mysql_launch_admin));
+    upgrade_integration.addArg("python3");
     upgrade_integration.addFileArg(b.path("tests/integration/upgrade_integration.py"));
     upgrade_integration.addFileArg(ci.path(upgrade_release));
     const upgrade_step = b.step("upgrade-integration", "Run isolated release publication and exact Host upgrade lifecycle cases");
@@ -347,7 +349,7 @@ pub fn build(b: *std.Build) void {
 
     const ts_client = b.addSystemCommand(&.{"python3"});
     ts_client.addFileArg(b.path("tests/integration/host_process.py"));
-    ts_client.addArgs(&.{ "exec", "env" });
+    ts_client.addArgs(&.{ "exec-mysql", "env" });
     ts_client.addPrefixedFileArg("RUI_BINARY=", ci.path(release_safe));
     ts_client.addPrefixedFileArg("RUI_TEST_MYSQL_ADMIN=", ci.path(mysql_launch_admin));
     ts_client.addArgs(&.{ "node", "--experimental-strip-types", "--test", "--test-concurrency=1", "test/*.test.ts" });

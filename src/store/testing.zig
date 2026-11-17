@@ -468,7 +468,27 @@ pub fn stageEndingMessageUpgrade(storage: *Store, keep_pending_forward: bool) !v
     }
 }
 
+fn dropCompoundContentUpgradeShape(storage: *Store) !void {
+    const Native = struct {
+        fn exec(store: *Store, sql: [:0]const u8) !void {
+            if (store.engine == .mysql) return mysql_testing.rawExec(store, sql);
+            return sqlite.exec(store.sqliteDatabase(), sql);
+        }
+    };
+    try Native.exec(storage, "UPDATE core_command SET primary_content_id=secondary_content_id,secondary_content_id=NULL WHERE kind=2 AND accepted=0");
+    try Native.exec(storage, "DROP TABLE content_part");
+    if (storage.engine == .mysql) {
+        try Native.exec(storage, "SET @rui_parts_ddl=(SELECT CONCAT('ALTER TABLE content DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`') FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='content' AND tc.CONSTRAINT_TYPE='CHECK' AND LOCATE('form',cc.CHECK_CLAUSE)>0)");
+        try Native.exec(storage, "PREPARE rui_parts FROM @rui_parts_ddl");
+        try Native.exec(storage, "EXECUTE rui_parts");
+        try Native.exec(storage, "DEALLOCATE PREPARE rui_parts");
+        try Native.exec(storage, "SET @rui_parts_ddl=NULL");
+    }
+    try Native.exec(storage, "ALTER TABLE content DROP COLUMN form");
+}
+
 fn dropFinalInputUpgradeShape(storage: *Store) !void {
+    try dropCompoundContentUpgradeShape(storage);
     @setEvalBranchQuota(200_000);
     const Native = struct {
         fn exec(store: *Store, sql: [:0]const u8) !void {
@@ -520,9 +540,13 @@ fn dropBackgroundUpgradeShape(storage: *Store) !void {
     try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM session_pin_command", .{}));
     try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM session_pin WHERE command_key IS NOT NULL", .{}));
     try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM action_control_command", .{}));
+    try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM action_stop", .{}));
     try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM action_operation WHERE background_content_id IS NOT NULL OR background_position IS NOT NULL OR background_at IS NOT NULL", .{}));
     try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM session_stop WHERE action_cutoff<>0", .{}));
     try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM message_admission WHERE source_action_id IS NOT NULL", .{}));
+    // Reject unrepresentable compound values before any dialect starts DDL.
+    try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM content WHERE form<>0", .{}));
+    try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM content_part", .{}));
     const catalog = " FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.CONSTRAINT_TYPE='CHECK' AND tc.TABLE_NAME=";
     const checks = .{
         .{ "action_operation", "LOCATE('background_',cc.CHECK_CLAUSE)>0", 2 },
@@ -547,6 +571,7 @@ fn dropBackgroundUpgradeShape(storage: *Store) !void {
         try Native.exec(storage, "DEALLOCATE PREPARE rui_rewind");
         try Native.exec(storage, "SET @rui_rewind_ddl=NULL");
     }
+    try Native.exec(storage, "DROP TABLE action_stop");
     try dropFinalInputUpgradeShape(storage);
     try Native.exec(storage, "DROP TABLE action_control_command");
     if (storage.engine == .mysql) {
@@ -595,6 +620,18 @@ fn dropPinOrganization(storage: *Store) !void {
         }
     };
     try dropBackgroundUpgradeShape(storage);
+    if (storage.engine == .mysql) {
+        try Native.exec(storage, "SET @rui_creator_ddl=(SELECT CONCAT('ALTER TABLE session DROP FOREIGN KEY `',REPLACE(CONSTRAINT_NAME,'`','``'),'`') FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='session' AND COLUMN_NAME='creator_ref' AND REFERENCED_TABLE_NAME='session')");
+        try Native.exec(storage, "PREPARE rui_creator FROM @rui_creator_ddl");
+        try Native.exec(storage, "EXECUTE rui_creator");
+        try Native.exec(storage, "DEALLOCATE PREPARE rui_creator");
+        try Native.exec(storage, "SET @rui_creator_ddl=(SELECT CONCAT('ALTER TABLE session DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`') FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='session' AND tc.CONSTRAINT_TYPE='CHECK' AND LOCATE('creator_ref',cc.CHECK_CLAUSE)>0)");
+        try Native.exec(storage, "PREPARE rui_creator FROM @rui_creator_ddl");
+        try Native.exec(storage, "EXECUTE rui_creator");
+        try Native.exec(storage, "DEALLOCATE PREPARE rui_creator");
+        try Native.exec(storage, "SET @rui_creator_ddl=NULL");
+    }
+    try Native.exec(storage, "ALTER TABLE session DROP COLUMN creator_ref");
     try Native.exec(storage, "DROP TABLE session_pin");
     try Native.exec(storage, "DROP TABLE session_pin_command");
     if (storage.engine == .mysql) {

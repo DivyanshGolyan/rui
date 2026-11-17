@@ -302,6 +302,14 @@ fn MessageCommandOf(comptime Custody: type) type {
         }
 
         pub fn semanticDigest(self: *const MessageCommand) [32]u8 {
+            return self.inputDigest(null);
+        }
+
+        pub fn semanticDigestForInput(self: *const MessageCommand, reference: @import("input_parts.zig").Reference) [32]u8 {
+            return self.inputDigest(reference);
+        }
+
+        fn inputDigest(self: *const MessageCommand, input: ?@import("input_parts.zig").Reference) [32]u8 {
             var hash = std.crypto.hash.sha2.Sha256.init(.{});
             hashField(&hash, "rui/core/message/v4");
             hashField(&hash, self.session.slice());
@@ -312,7 +320,10 @@ fn MessageCommandOf(comptime Custody: type) type {
             }
             hash.update(&.{@intFromBool(self.sender_handle != null)});
             if (self.sender_handle) |handle| hashField(&hash, handle.slice());
-            hashContent(&hash, &self.text);
+            if (input) |reference| {
+                const identity = reference.identity();
+                hashContentIdentity(&hash, .value, identity.length, &identity.digest);
+            } else hashContent(&hash, &self.text);
             if (self.configuration) |*configuration| {
                 hashField(&hash, "initial-configuration");
                 hash.update(&configureDigest("", configuration, self.require_model));
@@ -445,12 +456,16 @@ fn hashOptional(hash: *std.crypto.hash.sha2.Sha256, field: anytype) void {
 }
 
 fn hashContent(hash: *std.crypto.hash.sha2.Sha256, field: anytype) void {
-    hash.update(&.{@backingInt(field.state)});
-    if (field.state == .value) {
+    hashContentIdentity(hash, field.state, field.length, &field.digest);
+}
+
+fn hashContentIdentity(hash: *std.crypto.hash.sha2.Sha256, state: FieldState, size: u64, digest: *const [32]u8) void {
+    hash.update(&.{@backingInt(state)});
+    if (state == .value) {
         var length: [8]u8 = undefined;
-        std.mem.writeInt(u64, &length, field.length, .big);
+        std.mem.writeInt(u64, &length, size, .big);
         hash.update(&length);
-        hash.update(&field.digest);
+        hash.update(digest);
     }
 }
 

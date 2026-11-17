@@ -27,6 +27,7 @@ const store_core = @import("../Store.zig");
 const Store = store_core.Store;
 const configuration_domain = @import("configuration.zig");
 const content_domain = @import("content.zig");
+const content_parts = @import("content_parts.zig");
 const sourced_input = @import("sourced_input.zig");
 const report_domain = @import("report.zig");
 const session_list_domain = @import("session_list_read.zig");
@@ -495,7 +496,7 @@ noinline fn readPublicRows(a: *ReadAccess, session: []const u8, rows: []const pu
         }
     }
     if (items.len != 0 or lower <= upper or cursor != null) try runRows(a);
-    if (cursor) |read| try read.takeMetadata();
+    if (cursor) |read| try read.takeMetadata(a);
     var contents = false;
     for (rows, items, reads[0..items.len]) |row, *item, *read| switch (read.reads) {
         .hosted => |*hosted| try hosted.found(),
@@ -523,7 +524,7 @@ noinline fn readPublicRows(a: *ReadAccess, session: []const u8, rows: []const pu
     for (items, reads[0..items.len]) |*item, *read| switch (read.reads) {
         .hosted => {},
         .content => |*content| {
-            try content.takeMetadata();
+            try content.takeMetadata(a);
             item.content = .{ .length = content.content.metadata.length, .digest = content.content.metadata.digest };
             if (item.sender != null) try read.label.found();
             if (content.content.tool_operation != null) {
@@ -683,9 +684,9 @@ const PublicContentRead = struct {
         a.read(content_metadata, .{ .content_id = @intCast(read.content.id) }, &read.metadata);
     }
 
-    fn takeMetadata(read: *PublicContentRead) !void {
+    fn takeMetadata(read: *PublicContentRead, a: *ReadAccess) !void {
         if (read.content.tool_operation != null) try read.outcome.finish();
-        read.content.metadata = try content_domain.publicMetadata(&read.metadata);
+        read.content.metadata = try content_parts.publicMetadata(a, @intCast(read.content.id), &read.metadata);
     }
 };
 
@@ -696,7 +697,7 @@ fn publicConversationContent(a: *ReadAccess, session: []const u8, position: u64,
     try read.found();
     read.queueMetadata(a);
     try runRows(a);
-    try read.takeMetadata();
+    try read.takeMetadata(a);
     return read.content;
 }
 
@@ -823,7 +824,7 @@ const HostedRead = struct {
 };
 
 const page_session = rsql.Read(.{
-    .sql = "SELECT model,permission_mode,revision,next_position,compaction_trigger,output_reservation,reasoning_effort,created_at,provider,workspace " ++
+    .sql = "SELECT model,permission_mode,revision,next_position,compaction_trigger,output_reservation,reasoning_effort,created_at,provider,workspace,creator_ref " ++
         "FROM session WHERE session_ref=?1",
     .Args = struct { session: []const u8 },
     .Row = struct {
@@ -837,6 +838,7 @@ const page_session = rsql.Read(.{
         created_at: rsql.Positive,
         provider: provider_name.Provider,
         workspace: *Bounded(workspace_path.max_bytes),
+        creator_ref: ?Bounded(session_id.bytes),
     },
     .cardinality = .optional,
 });
@@ -905,6 +907,7 @@ pub noinline fn activityPage(a: *ReadAccess, request: *const activity_read.Activ
     try last_line.finish(&page.work.last_line);
     page.work.read_version = .{ .instance = a.store.instance, .generation = a.store.commitGeneration() };
     page.work.revision = session.revision.get();
+    page.work.creator = session.creator_ref;
 }
 
 pub const activity_search_budget = 8 * 1024 * 1024;
@@ -1003,7 +1006,10 @@ pub fn searchActivity(a: *ReadAccess, request: *const activity_read.ActivitySear
 
 fn searchField(a: *ReadAccess, scratch: *SearchScratch, field: activity_read.ProposalFieldReference, budget: *usize) !void {
     const reference: ContentReference = .{ .length = field.length, .digest = field.digest };
-    const id = try content_domain.contentIdOf(a, reference, false);
+    const id = content_domain.contentIdOf(a, reference, false) catch |err| switch (err) {
+        error.ContentIsParts => return error.CorruptStore,
+        else => return err,
+    };
     try searchContent(a, scratch, .{ .store = a.store, .content_id = id, .reference = reference }, budget);
 }
 
@@ -1578,7 +1584,7 @@ const ItemRead = struct {
         }
     }
 
-    fn take(read: *ItemRead) !void {
+    fn take(read: *ItemRead, a: *ReadAccess) !void {
         defer read.round += 1;
         const item = read.item;
         if (read.round == 0) return read.takeRow();
@@ -1591,13 +1597,13 @@ const ItemRead = struct {
                     if (kind == 2) try message.entry.found();
                     return;
                 }
-                const content = try content_domain.publicMetadata(&message.metadata);
+                const content = try content_parts.publicMetadata(a, message.read.content_id, &message.metadata);
                 message.read.message.content = .{ .length = content.length, .digest = content.digest };
                 if (message.read.message.sender != null) try message.label.found();
                 item.at = message.read.message.admitted_at;
                 if (kind == 2) {
                     if (message.read.message.state != .applied) return error.CorruptStore;
-                    try message.entry.takeMetadata();
+                    try message.entry.takeMetadata(a);
                     if (message.entry.content.id != message.read.content_id) return error.CorruptStore;
                     item.at = message.entry.content.at;
                 }
@@ -1608,7 +1614,7 @@ const ItemRead = struct {
                 switch (read.round) {
                     1 => return content.read.found(),
                     2 => {
-                        try content.read.takeMetadata();
+                        try content.read.takeMetadata(a);
                         const found = content.read.content;
                         item.at = found.at;
                         const value: activity_facts.Item.Content = .{ .length = found.metadata.length, .digest = found.metadata.digest };
@@ -1648,7 +1654,7 @@ const ItemRead = struct {
                     item.at = item.value.sent.admitted_at;
                     return;
                 }
-                const content = try content_domain.publicMetadata(&sent.metadata);
+                const content = try content_parts.publicMetadata(a, sent.read.content_id, &sent.metadata);
                 item.value.sent.content = .{ .length = content.length, .digest = content.digest };
                 try sent.label.found();
                 read.exposes(sent.read.content_id, &item.value.sent.content);
@@ -1669,7 +1675,7 @@ const ItemRead = struct {
                     item.at = outcome.read.at;
                     if (outcome.read.content_id != null) return;
                 } else {
-                    const content = try content_domain.publicMetadata(&outcome.metadata);
+                    const content = try content_parts.publicMetadata(a, outcome.read.content_id.?, &outcome.metadata);
                     item.value.turn_ended.content = .{ .length = content.length, .digest = content.digest };
                     read.exposes(outcome.read.content_id.?, &item.value.turn_ended.content.?);
                 }
@@ -1817,7 +1823,7 @@ noinline fn readItems(comptime max: usize, a: *ReadAccess, session: []const u8, 
         };
         if (!busy) break;
         try runRows(a);
-        for (reads[0..at.len]) |*read| if (!read.done) try read.take();
+        for (reads[0..at.len]) |*read| if (!read.done) try read.take(a);
         if (calls) |activity| try activity.take(round);
     }
     if (located) |first| first.* = reads[0].located();

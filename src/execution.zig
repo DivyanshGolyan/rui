@@ -286,6 +286,8 @@ pub const CustodyRecord = struct {
     timing: model_timing.Attempt = .{},
     action_started: ?std.Io.Clock.Timestamp = null,
     background_checked: bool = false,
+    message_cutoff: ?u64 = null,
+    message_checked_generation: ?u64 = null,
 };
 
 pub const DispatchCapacity = packed struct(u3) {
@@ -325,6 +327,8 @@ pub const CustodyPool = struct {
             record.timing.reset();
             record.action_started = null;
             record.background_checked = false;
+            record.message_cutoff = null;
+            record.message_checked_generation = null;
             record.delivered.store(false, .release);
             return .{ .index = index, .generation = generation };
         }
@@ -340,6 +344,28 @@ pub const CustodyPool = struct {
             if (started.durationTo(observed).raw.nanoseconds < @as(i128, threshold_ms) * std.time.ns_per_ms) continue;
             record.background_checked = true;
             return record.binding.action;
+        }
+        return null;
+    }
+
+    pub const MessageWatch = struct { binding: attempt.ActionAttemptBinding, cutoff: u64 };
+
+    pub fn watchMessages(self: *CustodyPool, token: CustodyToken, cutoff: u64) !void {
+        const record = try self.current(token);
+        if (record.state.load(.acquire) != .attached or record.binding != .action) return error.CustodyDetached;
+        record.message_cutoff = cutoff;
+        record.message_checked_generation = null;
+    }
+
+    pub fn nextMessageWatch(self: *CustodyPool, cursor: *usize, generation: u64) ?MessageWatch {
+        while (cursor.* < self.records.len) {
+            const record = &self.records[cursor.*];
+            cursor.* += 1;
+            if (record.state.load(.acquire) != .attached or record.binding != .action or record.delivered.load(.acquire)) continue;
+            const cutoff = record.message_cutoff orelse continue;
+            if (record.message_checked_generation == generation) continue;
+            record.message_checked_generation = generation;
+            return .{ .binding = record.binding.action, .cutoff = cutoff };
         }
         return null;
     }
@@ -1130,4 +1156,26 @@ test "automatic background threshold covers launch timing terminal custody and r
         try pool.consumeLaunchAuthority(reused, .{ .action = action }, before);
         try std.testing.expectEqual(action, pool.nextBackgroundDue(due, 1).?);
     }
+}
+
+test "interrupt regression: Message watches cover every running Action once per Store generation" {
+    var records: [3]CustodyRecord = @splat(.{});
+    var pool = CustodyPool.initialize(&records);
+    var tokens: [3]CustodyToken = undefined;
+    for (&tokens, 0..) |*token, i| {
+        token.* = pool.reserve().?;
+        var permit: attempt.ActionDispatchPermit = .{ .binding = .{ .turn_id = 1, .parent_operation_id = 2, .action_id = i + 1 } };
+        _ = try pool.attach(token.*, &permit);
+        if (i < 2) try pool.watchMessages(token.*, 7);
+    }
+    var cursor: usize = 0;
+    try std.testing.expectEqual(@as(u64, 1), pool.nextMessageWatch(&cursor, 10).?.binding.action_id);
+    try std.testing.expectEqual(@as(u64, 2), pool.nextMessageWatch(&cursor, 10).?.binding.action_id);
+    try std.testing.expect(pool.nextMessageWatch(&cursor, 10) == null);
+    cursor = 0;
+    try std.testing.expect(pool.nextMessageWatch(&cursor, 10) == null);
+    try std.testing.expect(pool.claimTerminalDelivery(tokens[0]));
+    cursor = 0;
+    try std.testing.expectEqual(@as(u64, 2), pool.nextMessageWatch(&cursor, 11).?.binding.action_id);
+    try std.testing.expect(pool.nextMessageWatch(&cursor, 11) == null);
 }

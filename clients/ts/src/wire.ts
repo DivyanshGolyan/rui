@@ -2868,6 +2868,7 @@ export interface components {
             since?: string | null;
         };
         PageWork: {
+            creator: string | null;
             read_version: string;
             state: components["schemas"]["WorkStateJson"];
             turn: components["schemas"]["Decimal"] | null;
@@ -3149,6 +3150,7 @@ export interface components {
             /** @enum {string} */
             permission_mode: "ask" | "bypass";
             parent: string | null;
+            creator: string | null;
             label: string | null;
             created_at: components["schemas"]["Decimal"];
             revision: components["schemas"]["Decimal"];
@@ -3391,7 +3393,7 @@ export interface components {
             parent_operation: components["schemas"]["Decimal"];
             call_ordinal: components["schemas"]["Decimal"];
             /** @enum {string} */
-            tool: "bash" | "find_tools" | "message_agent" | "read_action" | "read_transcript" | "skill" | "start_agent" | "web_search";
+            tool: "bash" | "find_tools" | "message_agent" | "read_action" | "read_transcript" | "skill" | "start_agent" | "stop_action" | "web_search";
             permission_revision: components["schemas"]["Decimal"];
             /** @enum {string} */
             authorization: "core" | "pending" | "bypass" | "allow_once";

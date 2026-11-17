@@ -115,6 +115,11 @@ def assert_running_upgrade(dialect, binary, store, seed, ready, previous, versio
     current = json.loads(shown)
     assert current["store"] == previous["store"] == str(store), shown
     assert current["instance"] != previous["instance"], "installer left the old Host running"
+    assert current["active_capacity"] == previous["active_capacity"], (previous, current)
+    assert current["paused"] == previous["paused"], (previous, current)
+    assert current["capabilities"]["bash"] == previous["capabilities"]["bash"], (previous, current)
+    for provider, served in current["capabilities"]["providers"].items():
+        assert served == previous["capabilities"]["providers"].get(provider, "unserved"), (previous, current)
     with os_semantics.unix_stream() as connection:
         connection.settimeout(5)
         connection.connect(ready["socket"])
@@ -279,9 +284,11 @@ def main():
         fixture.RUI = binary
         dialect = previous_cli = Dialect(binary)
         expected = "Saved before reinstall: café\nsecond line remains intact".encode()
+        fresh = b"Fresh work after upgrade uses the retained endpoint."
         endpoint = fixture.SuccessEndpoint([
             fixture.sse_answer("upgrade-response", "upgrade-reasoning", "upgrade-message",
                                expected.decode())[0],
+            fixture.sse_answer("fresh-response", "fresh-reasoning", "fresh-message", fresh.decode())[0],
         ])
         thread = threading.Thread(target=endpoint.serve_forever)
         thread.start()
@@ -399,6 +406,16 @@ def main():
             for field, value in configuration.items():
                 assert after[field] == value, (field, value, after)
             assert len(endpoint.requests) == 1, "upgrade replayed completed work"
+            if args.running_host:
+                # A ready socket alone cannot show the endpoint/network source
+                # survived. New work must reach the same actual provider peer.
+                dialect.message(root, store, "fresh-upgrade-message", session, "Check the retained endpoint.")
+                observed, answer, _ = dialect.wait_for_result_release(
+                    store, "fresh-upgrade-message", session, time.monotonic() + 15)
+                assert observed["result"]["status"] == "completed" and answer == fresh, observed
+                assert len(endpoint.requests) == 2, "new work did not use the retained provider exactly once"
+                assert dialect.read_result(store, "upgrade-message") == expected, "new work changed the saved answer"
+                print("Running-release semantics passed: providers, active capacity, Bash, pause and fresh work at the retained endpoint", flush=True)
         finally:
             dispose_all(
                 lambda: stop_process(seed) if args.running_host and seed is not None else None,

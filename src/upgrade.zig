@@ -185,22 +185,12 @@ pub fn install(init: std.process.Init, allocator: std.mem.Allocator, checked: *c
 }
 
 fn waitAfterPublication(init: std.process.Init, cancellation: ?*const client.Cancellation) !void {
-    if (init.environ_map.get("RUI_TEST_UPGRADE_AFTER_PUBLICATION_GATE")) |gate| {
-        while (true) {
-            try process.check(cancellation);
-            const file = std.Io.Dir.cwd().openFile(init.io, gate, .{}) catch |err| {
-                if (err == error.FileNotFound) break;
-                return err;
-            };
-            file.close(init.io);
-            try std.Io.sleep(init.io, .fromMilliseconds(10), .awake);
-        }
-    }
+    return process.waitForTestGate(init.arena.allocator(), init.io, init.environ_map.get("RUI_TEST_UPGRADE_AFTER_PUBLICATION_GATE"), cancellation, .fromSeconds(300));
 }
 
 pub fn compatible(result: *const Result) bool {
     return switch (result.selectedActivation()) {
-        .client_incompatible, .unconfirmed, .failed, .replacement_observed => false,
+        .client_incompatible, .unconfirmed, .failed, .replacement_observed, .refused => false,
         else => true,
     };
 }
@@ -300,10 +290,10 @@ test "upgrade restart results cover every activation for selected and other Stor
                 };
                 const guided = switch (activation) {
                     .not_needed, .superseded, .already_ready, .ready, .client_incompatible => false,
-                    .unsupported, .replacement_observed, .cancelled, .failed, .unconfirmed => true,
+                    .unsupported, .replacement_observed, .cancelled, .failed, .unconfirmed, .refused => true,
                 };
                 const safe = !selected or switch (activation) {
-                    .client_incompatible, .unconfirmed, .failed, .replacement_observed => false,
+                    .client_incompatible, .unconfirmed, .failed, .replacement_observed, .refused => false,
                     else => true,
                 };
                 try std.testing.expectEqual(safe, compatible(&result));

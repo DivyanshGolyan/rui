@@ -86,6 +86,8 @@ export interface SessionSummary {
 	state: string;
 	archiveState: SessionArchiveState;
 	parent: string | null;
+	/** Session that started this Session, including a detached agent. */
+	creator: Schemas["SessionRow"]["creator"];
 }
 
 type CurrentReport = Extract<Schemas["InspectSessionReply"], { profile: "current"; work: unknown }>;
@@ -445,7 +447,7 @@ export class Sessions {
 				),
 			);
 			for (const row of page.sessions) {
-				summaries.push({ id: row.reference, label: row.label, state: row.work.state.kind, archiveState: row.archive_state, parent: row.parent });
+				summaries.push({ id: row.reference, label: row.label, state: row.work.state.kind, archiveState: row.archive_state, parent: row.parent, creator: row.creator });
 			}
 			if (page.next === null || !("after" in page.next)) return summaries.reverse();
 			after = page.next.after;

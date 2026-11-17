@@ -88,7 +88,7 @@ Resolve(a) ==
     /\ phase' = [phase EXCEPT ![a] = "done"]
     /\ IF phase[a] = "bg" /\ ~StoppedForAdmit(a)
        THEN /\ admitted' = admitted \cup
-                 {[a |-> a, id |-> nextId, afterStop |-> stopAsked, bound |-> FALSE]}
+                 {[a |-> a, id |-> nextId, afterStop |-> (stopAsked \/ actStopped[a]), bound |-> FALSE]}
             /\ nextId' = nextId + 1
        ELSE UNCHANGED <<admitted, nextId>>
 
@@ -140,6 +140,13 @@ UserStops ==
     /\ ApplyStop
     /\ stopAsked' = TRUE
     /\ UNCHANGED <<phase, orphan, admitted, resolutions, nextId, owed, hostUp, waiter>>
+
+(* A per-Action stop selects only this unresolved Action.                 *)
+StopAction(a) ==
+    /\ hostUp /\ phase[a] \in {"fg", "bg"} /\ ~actStopped[a]
+    /\ actStopped' = [actStopped EXCEPT ![a] = TRUE]
+    /\ UNCHANGED <<phase, orphan, admitted, resolutions, nextId, stopCut,
+                   owed, stopAsked, turnOpen, hostUp, waiter>>
 
 (* The attached parent stops: turn.zig owes this Session a stop.           *)
 ParentStops ==
@@ -207,7 +214,7 @@ WaiterEnds ==
                    actStopped, owed, stopAsked, turnOpen, hostUp>>
 
 Next ==
-    \/ \E a \in Actions : Dispatch(a) \/ Promote(a) \/ Settle(a) \/ Recover(a)
+    \/ \E a \in Actions : Dispatch(a) \/ Promote(a) \/ Settle(a) \/ Recover(a) \/ StopAction(a)
                           \/ SettleAgain(a)
     \/ HostDies \/ HostStarts \/ UserStops \/ ParentStops \/ OwedStopSettles
     \/ StartTurn \/ InputBoundary \/ PersonStartsTurn \/ TurnEnds
