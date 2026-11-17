@@ -42,7 +42,7 @@ pub const Result = std.process.RunResult;
 pub const Context = struct {
     environ_map: ?*const std.process.Environ.Map = null,
     cwd: std.process.Child.Cwd = .inherit,
-    /// Opaque checked launch frame, transported only through private stdin.
+    /// Opaque checked settings handoff, transported only through private stdin.
     input: ?[]const u8 = null,
 };
 

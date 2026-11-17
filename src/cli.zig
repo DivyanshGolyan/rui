@@ -33,7 +33,7 @@ const providers = @import("providers.zig");
 const api_key = @import("api_key.zig");
 const host_start = @import("host_start.zig");
 const host_settings = @import("host_settings.zig");
-const launch_frame = @import("host_launch_frame.zig");
+const settings_handoff = @import("host_settings_handoff.zig");
 const launch_transfer = @import("host_launch_transfer.zig");
 const start_report = @import("start_report.zig");
 const new_session_selection = @import("new_session_selection.zig");
@@ -1081,7 +1081,7 @@ fn hostSettings(init: std.process.Init, command: cli_args.Command, parsed: *cons
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const selected = try selectedStore(init, parsed.get("store"), &selected_buffer);
     var failure: start_report.Failure = undefined;
-    if (parsed.has(launch_frame.input_option) or (parsed.has(launch_frame.check_option) and !parsed.has("check"))) {
+    if (parsed.has(settings_handoff.input_option) or (parsed.has(settings_handoff.check_option) and !parsed.has("check"))) {
         failure = .init(.settings_invalid, "private launch protocol requires its matching check or start entry");
         return writeRefusal(init.io, &failure, .invalid);
     }
@@ -1093,7 +1093,7 @@ fn hostSettings(init: std.process.Init, command: cli_args.Command, parsed: *cons
         settings.* = .{};
         defer settings.deinit();
         var fixtures: providers.Fixtures = .{};
-        if (parsed.has(launch_frame.check_option)) {
+        if (parsed.has(settings_handoff.check_option)) {
             var frozen = host_start.freezeStart(init, .{ .dir = selected, .settings_file = parsed.get("settings"), .assignments = parsed.all("set") }, settings, &failure) catch |err| {
                 if (err == error.SettingsInvalid) return writeRefusal(init.io, &failure, .invalid);
                 return err;
@@ -1119,15 +1119,15 @@ fn host(init: std.process.Init, command: cli_args.Command, parsed: *const cli_ar
     var fallback: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const selected = try selectedStore(init, parsed.get("store"), &fallback);
     if (command == .host_start) {
-        if (parsed.get(launch_frame.input_option)) |descriptor| {
+        if (parsed.get(settings_handoff.input_option)) |descriptor| {
             var failure: start_report.Failure = undefined;
             const fd = std.fmt.parseInt(c_int, descriptor, 10) catch unreachable;
             if (fd != 0) {
                 failure = .init(.settings_invalid, "private starter input must be its anonymous stdin descriptor");
                 return writeRefusal(init.io, &failure, .invalid);
             }
-            var frozen = launch_transfer.readFrame(init.gpa, init.io, fd) catch {
-                failure = .init(.settings_invalid, "missing, malformed or unsupported private launch frame");
+            var frozen = launch_transfer.readHandoff(init.gpa, init.io, fd) catch {
+                failure = .init(.settings_invalid, "missing, malformed or unsupported private settings handoff");
                 return writeRefusal(init.io, &failure, .invalid);
             };
             defer frozen.deinit(init.gpa);
@@ -2117,14 +2117,14 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const selected = try selectedStore(init, parsed.get("store"), &selected_buffer);
     var preparation_failure: start_report.Failure = undefined;
-    const prepared = if (parsed.get(launch_frame.input_option)) |descriptor| frozen: {
+    const prepared = if (parsed.get(settings_handoff.input_option)) |descriptor| frozen: {
         const fd = std.fmt.parseInt(c_int, descriptor, 10) catch unreachable;
-        if (fd != launch_frame.child_descriptor) {
+        if (fd != settings_handoff.child_descriptor) {
             preparation_failure = .init(.settings_invalid, "private child input is not its reserved launch descriptor");
             return writeRefusal(io, &preparation_failure, .invalid);
         }
-        var frozen = launch_transfer.readFrame(init.gpa, io, fd) catch {
-            preparation_failure = .init(.settings_invalid, "missing, malformed or unsupported private launch frame");
+        var frozen = launch_transfer.readHandoff(init.gpa, io, fd) catch {
+            preparation_failure = .init(.settings_invalid, "missing, malformed or unsupported private settings handoff");
             return writeRefusal(io, &preparation_failure, .invalid);
         };
         defer frozen.deinit(init.gpa);
@@ -4483,7 +4483,7 @@ const LaunchFixture = struct {
         std.debug.assert(std.mem.eql(u8, std.mem.span(argv[3].?), "--store"));
         var at: usize = 5;
         while (at < argc) : (at += 2) {
-            if (std.mem.eql(u8, std.mem.span(argv[at].?), "--" ++ launch_frame.input_option)) continue;
+            if (std.mem.eql(u8, std.mem.span(argv[at].?), "--" ++ settings_handoff.input_option)) continue;
             std.debug.assert(std.mem.eql(u8, std.mem.span(argv[at].?), "--set"));
             self.assignments += 1;
             if (self.expected_assignment) |expected| self.assignments_match = self.assignments_match and std.mem.eql(u8, expected, std.mem.span(argv[at + 1].?));

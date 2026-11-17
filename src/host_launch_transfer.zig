@@ -1,8 +1,8 @@
-//! One nonblocking input pump, shared by detached launch and checked-frame
+//! One nonblocking input pump, shared by detached launch and checked-handoff
 //! forwarding. Every step drains BOTH bounded diagnostic readers before one
 //! partial write; callers retain their existing readiness/deadline policies.
 const std = @import("std");
-const frame = @import("host_launch_frame.zig");
+const settings_handoff = @import("host_settings_handoff.zig");
 extern fn rui_launch_input_pipe(*c_int, *c_int) c_int;
 extern fn rui_write_launch_input(c_int, [*]const u8, usize) c_long;
 
@@ -76,7 +76,7 @@ pub const Transfer = struct {
 
 /// Consume and close the anonymous descriptor before any service/workload can
 /// inherit it. No public source lookup or resolved value enters this decoder.
-pub fn readFrame(gpa: std.mem.Allocator, io: std.Io, fd: c_int) !frame.Owned {
+pub fn readHandoff(gpa: std.mem.Allocator, io: std.Io, fd: c_int) !settings_handoff.Owned {
     defer _ = std.c.close(fd);
     if (std.c.fcntl(fd, std.c.F.SETFD, @as(c_int, std.c.FD_CLOEXEC)) < 0) return error.SettingsInvalid;
     const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = false } };
@@ -95,10 +95,10 @@ pub fn readFrame(gpa: std.mem.Allocator, io: std.Io, fd: c_int) !frame.Owned {
             else => return err,
         };
         if (n == 0) break;
-        if (n > frame.max_bytes -| bytes.items.len) return error.SettingsInvalid;
+        if (n > settings_handoff.max_bytes -| bytes.items.len) return error.SettingsInvalid;
         try bytes.appendSlice(private, buffer[0..n]);
     }
-    _ = try frame.inspect(bytes.items);
+    _ = try settings_handoff.inspect(bytes.items);
     return .{ .bytes = try bytes.toOwnedSlice(private) };
 }
 
@@ -109,7 +109,7 @@ test "frozen launch input consumes EOF and closes valid malformed and truncated 
     settings.* = .{};
     defer settings.deinit();
     var failure: @import("start_report.zig").Failure = undefined;
-    var owned = try frame.freeze(gpa, "/frozen-input", settings, .automatic, &failure);
+    var owned = try settings_handoff.freeze(gpa, "/frozen-input", settings, .automatic, &failure);
     defer owned.deinit(gpa);
     for ([_][]const u8{ owned.bytes, owned.bytes[0 .. owned.bytes.len - 1], "not a frame" }, 0..) |bytes, i| {
         var pipe = try Pipe.init();
@@ -118,12 +118,12 @@ test "frozen launch input consumes EOF and closes valid malformed and truncated 
         _ = std.c.close(pipe.writer);
         pipe.writer = -1;
         const fd = pipe.reader;
-        pipe.reader = -1; // readFrame owns and closes it on every exit.
+        pipe.reader = -1; // readHandoff owns and closes it on every exit.
         if (i == 0) {
-            var read = try readFrame(gpa, std.testing.io, fd);
+            var read = try readHandoff(gpa, std.testing.io, fd);
             defer read.deinit(gpa);
             try std.testing.expectEqualSlices(u8, owned.bytes, read.bytes);
-        } else try std.testing.expectError(error.SettingsInvalid, readFrame(gpa, std.testing.io, fd));
+        } else try std.testing.expectError(error.SettingsInvalid, readHandoff(gpa, std.testing.io, fd));
         try std.testing.expect(std.c.fcntl(fd, std.c.F.GETFD) < 0);
     }
 }

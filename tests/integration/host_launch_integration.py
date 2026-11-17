@@ -869,7 +869,7 @@ def frozen_settings_launches(root, env):
     for label, payload in (("missing", b""), ("future", b"rui-host-settings-v99\n")):
         directory = private / ("refused-private-" + label)
         failed = subprocess.run([str(RUI), "host", "start", "--store", directory,
-                                 "--settings-input-v1", "0"], input=payload,
+                                 "--settings-handoff-input-v1", "0"], input=payload,
                                 env=selected_env, capture_output=True, timeout=COMMAND_TIMEOUT)
         assert failed.returncode == 2, (label, failed.returncode, failed.stdout, failed.stderr)
         assert json.loads(failed.stdout)["rui_start_error"]["code"] == "settings_invalid", failed.stdout

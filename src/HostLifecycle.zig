@@ -1,7 +1,7 @@
 //! Upgrade owns the transition, not Host admission or child argv. Both the
 //! precondition and replacement execute the target's public settings/starter.
 const std = @import("std");
-const launch_frame = @import("host_launch_frame.zig");
+const settings_handoff = @import("host_settings_handoff.zig");
 const client = @import("client.zig");
 const protocol = @import("protocol.zig");
 const protocol_reply = @import("protocol_reply.zig");
@@ -197,8 +197,8 @@ fn arguments(allocator: std.mem.Allocator, binary: []const u8, request: host_sta
         .start => "start",
         .status => "status",
     } });
-    if (command == .check) try argv.appendSlice(allocator, &.{ "--check", "--" ++ launch_frame.check_option });
-    if (command == .start) try argv.appendSlice(allocator, &.{ "--" ++ launch_frame.input_option, "0" });
+    if (command == .check) try argv.appendSlice(allocator, &.{ "--check", "--" ++ settings_handoff.check_option });
+    if (command == .start) try argv.appendSlice(allocator, &.{ "--" ++ settings_handoff.input_option, "0" });
     try argv.appendSlice(allocator, &.{ "--store", request.dir });
     if (command != .status) {
         if (request.settings_file) |file| try argv.appendSlice(allocator, &.{ "--settings", file });
@@ -356,7 +356,7 @@ pub fn activate(init: std.process.Init, allocator: std.mem.Allocator, observatio
         return .{ .unsupported = .configuration_unavailable };
     };
     const check_argv = try arguments(arena.allocator(), executable, request, .check);
-    const checked = process.runIn(private, init.io, check_argv, cancellation, launch_frame.max_bytes, .fromSeconds(300), context) catch |err| {
+    const checked = process.runIn(private, init.io, check_argv, cancellation, settings_handoff.max_bytes, .fromSeconds(300), context) catch |err| {
         if (err == error.Cancelled) return .cancelled;
         return .{ .unsupported = .configuration_unavailable };
     };
@@ -367,7 +367,7 @@ pub fn activate(init: std.process.Init, allocator: std.mem.Allocator, observatio
     }
     // The frame owner validates version/framing/bounds. Lifecycle neither
     // decodes settings nor reconstructs the target's admitted input.
-    launch_frame.accept(checked.stdout) catch return .{ .unsupported = .target_capability };
+    settings_handoff.accept(checked.stdout) catch return .{ .unsupported = .target_capability };
     process.check(cancellation) catch return .cancelled;
     const current = client.observeHostForUpgradeProfile(init.io, request.dir, plan.observed.profile, null) catch return .{ .unconfirmed = .stopping };
     if (!sameHost(current, plan.observed)) return .replacement_observed;

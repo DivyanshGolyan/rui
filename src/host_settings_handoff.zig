@@ -6,8 +6,8 @@ const protocol = @import("protocol.zig");
 const start_report = @import("start_report.zig");
 const secret_value = @import("secret_value.zig");
 pub const ProviderIntent = enum(u8) { automatic = 0, explicit = 1 };
-pub const input_option = "settings-input-v1";
-pub const check_option = "freeze-settings-v1";
+pub const input_option = "settings-handoff-input-v1";
+pub const check_option = "settings-handoff-check-v1";
 pub const child_descriptor = 5;
 const magic = "rui-host-settings-v1\n";
 const prefix_bytes = magic.len + 1 + 4 + 8;
@@ -62,10 +62,10 @@ pub fn freeze(gpa: std.mem.Allocator, directory: []const u8, settings: *const hs
 }
 
 pub fn decode(bytes: []const u8, selected: []const u8, settings: *hs.Settings, gpa: std.mem.Allocator, check: hs.PresetCheck, failure: *start_report.Failure) !ProviderIntent {
-    const view = inspect(bytes) catch return invalid(failure, "missing, malformed or unsupported private launch frame");
-    if (!std.mem.eql(u8, view.directory, selected)) return invalid(failure, "private launch frame names another Host directory");
+    const view = inspect(bytes) catch return invalid(failure, "missing, malformed or unsupported private settings handoff");
+    if (!std.mem.eql(u8, view.directory, selected)) return invalid(failure, "private settings handoff names another Host directory");
     try hs.applyComposed(settings, gpa, view.document, check, failure);
-    if (!hs.unresolved(settings)) return invalid(failure, "private launch frame must contain source descriptions only");
+    if (!hs.unresolved(settings)) return invalid(failure, "private settings handoff must contain source descriptions only");
     return view.intent;
 }
 
@@ -74,7 +74,7 @@ fn invalid(failure: *start_report.Failure, message: []const u8) error{SettingsIn
     return error.SettingsInvalid;
 }
 
-test "frozen launch frame preserves OS-byte selector intent and file-origin schema without public sources" {
+test "frozen settings handoff preserves OS-byte selector intent and file-origin schema without public sources" {
     const gpa = std.testing.allocator;
     const a = try gpa.create(hs.Settings);
     defer gpa.destroy(a);

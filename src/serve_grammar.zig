@@ -1,6 +1,6 @@
 const std = @import("std");
 const grammar = @import("cli_grammar.zig");
-const launch_frame = @import("host_launch_frame.zig");
+const settings_handoff = @import("host_settings_handoff.zig");
 const provider_name = @import("provider_name.zig");
 const retention_capacity = @import("retention_capacity.zig");
 const Option = grammar.Option;
@@ -95,7 +95,7 @@ pub fn runningSources(arena: std.mem.Allocator, argv: []const []const u8) !Runni
     };
     for (definition.options) |option| {
         if (std.mem.eql(u8, option.hex_of orelse option.name, "store")) continue;
-        if (std.mem.eql(u8, option.name, launch_frame.input_option)) continue; // consumed descriptor is provenance, never a replay input
+        if (std.mem.eql(u8, option.name, settings_handoff.input_option)) continue; // consumed descriptor is provenance, never a replay input
         if (option.hidden and parsed.hasNamed(option.name)) restartable = false;
     }
     return .{
@@ -142,7 +142,7 @@ pub const host_destination = &[_]Option{ value("store", "PATH"), blk: {
 } };
 pub const settings_options = host_destination ++ &[_]Option{
     value("settings", "FILE|-"),
-    hiddenNumber(launch_frame.input_option, 0, std.math.maxInt(c_int)),
+    hiddenNumber(settings_handoff.input_option, 0, std.math.maxInt(c_int)),
     .{ .name = "set", .argument = "PATH=VALUE", .repeated = true },
 };
 const serve_test = &[_]Option{
@@ -222,7 +222,7 @@ test "running Host sources have one syntax owner across current and retired argv
         .{ .argv = &.{ "rui", "host", "serve", "--store", "/host" }, .dir = "/host" },
         .{ .argv = &.{ "rui", "host", "serve", "--store-hex", "2f686f7374", "--settings", "/document-\xff" }, .dir = "/host", .settings = "/document-\xff" },
         .{ .argv = &.{ "rui", "host", "serve", "--settings", "/document", "--set", "providers={}", "--set", "execution.activeCapacity=3" }, .settings = "/document", .assignments = &.{ "providers={}", "execution.activeCapacity=3" } },
-        .{ .argv = &.{ "rui", "host", "serve", "--store", "/host", "--settings", "/document-\xff", "--set", "execution=@/values-\xff", "--" ++ launch_frame.input_option, "5" }, .dir = "/host", .settings = "/document-\xff", .assignments = &.{"execution=@/values-\xff"} },
+        .{ .argv = &.{ "rui", "host", "serve", "--store", "/host", "--settings", "/document-\xff", "--set", "execution=@/values-\xff", "--" ++ settings_handoff.input_option, "5" }, .dir = "/host", .settings = "/document-\xff", .assignments = &.{"execution=@/values-\xff"} },
         .{ .argv = &.{ "rui", "host", "serve", "--provider", "codex", "--provider", "openai", "--active-capacity", "4", "--bash-path", "/bin/bash", "--bash-timeout-ms", "1000", "--provider-ca-file", "/network-ca" }, .assignments = &.{ "providers.codex={}", "providers.openai={}", "execution.activeCapacity=4", "tools.bash.path=/bin/bash", "tools.bash.timeoutMs=1000", "network.caFile=/network-ca" } },
         // Syntax keeps source spellings; only admission can decide whether
         // their effective settings reproduce in a detached replacement.

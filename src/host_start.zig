@@ -1,6 +1,6 @@
 const std = @import("std");
 const hs = @import("host_settings.zig");
-const launch_frame = @import("host_launch_frame.zig");
+const settings_handoff = @import("host_settings_handoff.zig");
 const transfer = @import("host_launch_transfer.zig");
 const cli_args = @import("cli_args.zig");
 const providers = @import("providers.zig");
@@ -1426,7 +1426,7 @@ pub fn launchReady(result: *HostLaunchResult, ready: @import("protocol_reply.zig
     result.outcome.ready.diagnostics_directory.set(paths.diagnosticsDirectory()) catch unreachable;
 }
 
-pub const ProviderIntent = launch_frame.ProviderIntent;
+pub const ProviderIntent = settings_handoff.ProviderIntent;
 
 pub fn readSources(init: std.process.Init, request: Spawn, settings: *hs.Settings, failure: *start_report.Failure) !ProviderIntent {
     var wiping: secret_value.WipingAllocator = .{ .backing = init.gpa };
@@ -1609,17 +1609,17 @@ pub fn checkStart(init: std.process.Init, request: Spawn, failure: *start_report
 
 /// Retain this caller-owned unresolved allocation through route selection and
 /// freezing. Full --check may resolve it only AFTER the source-only frame exists.
-pub fn freezeStart(init: std.process.Init, request: Spawn, settings: *hs.Settings, failure: *start_report.Failure) !launch_frame.Owned {
+pub fn freezeStart(init: std.process.Init, request: Spawn, settings: *hs.Settings, failure: *start_report.Failure) !settings_handoff.Owned {
     const intent = try readStart(init, request, settings, failure);
     var canonical: [protocol.max_store_bytes]u8 = undefined;
     const directory = try platform.canonicalStoreDestination(init.io, request.dir, &canonical);
-    return launch_frame.freeze(init.gpa, directory, settings, intent, failure);
+    return settings_handoff.freeze(init.gpa, directory, settings, intent, failure);
 }
 
 pub fn decodeStart(init: std.process.Init, bytes: []const u8, selected: []const u8, settings: *hs.Settings, failure: *start_report.Failure) !ProviderIntent {
     var canonical: [protocol.max_store_bytes]u8 = undefined;
     const directory = try platform.canonicalStoreDestination(init.io, selected, &canonical);
-    const intent = try launch_frame.decode(bytes, directory, settings, init.gpa, checkPreset, failure);
+    const intent = try settings_handoff.decode(bytes, directory, settings, init.gpa, checkPreset, failure);
     try detachedValue(settings, failure);
     try anchorPlacement(init, settings, directory, failure);
     return intent;
@@ -1687,7 +1687,7 @@ pub noinline fn spawn(init: std.process.Init, typed: Spawn, ops: Ops, progress: 
         error.FileNotFound, error.SettingsInvalid => null,
         else => return launchFailure(result, .store_access, error.StoreAccessFailed, null),
     };
-    if (typed.frozen) |bytes| if (resolved) |*paths| paths.host_directory.set((launch_frame.inspect(bytes) catch unreachable).directory) catch unreachable;
+    if (typed.frozen) |bytes| if (resolved) |*paths| paths.host_directory.set((settings_handoff.inspect(bytes) catch unreachable).directory) catch unreachable;
     switch (if (resolved) |*paths| ops.observe(ops.context, io, paths, null) else @as(@import("protocol_reply.zig").HostStatus, .unavailable)) {
         .ready => |ready| return launchReady(result, ready, &resolved.?, true),
         .incompatible => return launchFailure(result, .incompatible, error.IncompatibleHost, null),
@@ -1699,7 +1699,7 @@ pub noinline fn spawn(init: std.process.Init, typed: Spawn, ops: Ops, progress: 
     var anchoring: std.heap.ArenaAllocator = .init(wiping.allocator());
     defer anchoring.deinit();
     var cwd: Cwd = .{ .io = io };
-    var frozen: ?launch_frame.Owned = null;
+    var frozen: ?settings_handoff.Owned = null;
     defer if (frozen) |*owned_frame| owned_frame.deinit(init.gpa);
     const admitted: anyerror!Spawn = admit: {
         const anchored = anchorTyped(anchoring.allocator(), &cwd, typed, &reach_failure) catch |err| break :admit err;
@@ -1714,7 +1714,7 @@ pub noinline fn spawn(init: std.process.Init, typed: Spawn, ops: Ops, progress: 
         return;
     };
     const frame_bytes = typed.frozen orelse frozen.?.bytes;
-    const admitted_directory = (launch_frame.inspect(frame_bytes) catch unreachable).directory;
+    const admitted_directory = (settings_handoff.inspect(frame_bytes) catch unreachable).directory;
     // Placement and the selected directory come from the same retained intake,
     // before creating a directory or publishing a child. Never select again
     // from saved sources (or the original directory alias) after freezing.
@@ -1758,7 +1758,7 @@ pub noinline fn spawn(init: std.process.Init, typed: Spawn, ops: Ops, progress: 
         argv[first + 1 + index * 2] = value.ptr;
         owned += 1;
     }
-    argv[provenance_argc] = "--" ++ launch_frame.input_option;
+    argv[provenance_argc] = "--" ++ settings_handoff.input_option;
     argv[provenance_argc + 1] = "5";
     var input_pipe = transfer.Pipe.init() catch |err| return launchFailure(result, .setup, err, paths.selector());
     defer input_pipe.close();
