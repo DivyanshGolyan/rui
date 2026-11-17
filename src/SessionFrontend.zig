@@ -988,7 +988,6 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
         .failure = failure.fg,
         .band = style.of(self.app_caps, .{ .background = .bar }).bg,
         .user_band = style.of(self.app_caps, .{ .background = .user_message }).bg,
-        .half_blocks = self.app_caps.unicode and self.app_caps.depth != .none,
         .no_depth = self.app_caps.depth == .none,
         .selection = style.of(self.app_caps, .{ .background = .selection }).bg,
     };

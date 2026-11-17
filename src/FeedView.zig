@@ -1254,10 +1254,8 @@ test "FeedView optimistic multiline band and attached note stay inside the viewp
         };
         for ([_]u16{ 1, 4 }) |row| {
             const cell = frame.readCell(0, row);
-            if (colour) {
-                try std.testing.expectEqualStrings(if (row == 1) "▄" else "▀", cell.char.grapheme);
-                try std.testing.expectEqual(view.colours.user_band, cell.style.fg);
-            } else try std.testing.expect(cell.style.reverse);
+            try std.testing.expectEqualStrings(" ", cell.char.grapheme);
+            if (colour) try std.testing.expectEqual(view.colours.user_band, cell.style.bg) else try std.testing.expect(cell.style.reverse);
         }
         try std.testing.expectEqual(view.style.bg, frame.readCell(2, 5).style.bg);
         try std.testing.expectEqual(if (colour) view.colours.quiet else view.style.fg, frame.readCell(2, 5).style.fg);
@@ -1320,4 +1318,42 @@ test "FeedView canonical failure annotation is exact-key frame decoration rather
         try std.testing.expectEqualStrings("›", testCell(other, 4, 2));
         try std.testing.expectEqualStrings(original, window.document.text());
     }
+}
+
+test "FeedView separates consecutive padded messages on the chat ground" {
+    for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |colour| {
+        const window = try testWindow();
+        defer std.testing.allocator.destroy(window);
+        var short: viewport.Sized(512, true) = .{};
+        try short.append(PendingText.user_message_on ++ "› short\n" ++ PendingText.user_message_off);
+        try short.prepare();
+        var long: viewport.Sized(512, true) = .{};
+        try long.append(PendingText.user_message_on ++ "› ");
+        const count: usize = if (width == 46) 75 else 265;
+        for (0..count) |_| try long.append("x");
+        try long.append("\n" ++ PendingText.user_message_off);
+        try long.prepare();
+        try window.append(&.{
+            .{ .key = .{ .position = 1 }, .text = resident.Text.fromDocument(&short) },
+            .{ .key = .{ .position = 2 }, .text = resident.Text.fromDocument(&long) },
+        });
+        var anchor: Feed = .{};
+        var view: Self = .{ .window = window, .anchor = &anchor, .colour = colour, .style = .{ .bg = .{ .index = 8 } }, .colours = .{ .user_band = .{ .index = 10 } } };
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const frame = try testFrame(&view, arena.allocator(), width, 10);
+        try std.testing.expectEqualStrings("›", testCell(frame, 2, 2));
+        try std.testing.expectEqualStrings("›", testCell(frame, 6, 2));
+        for (0..width) |column| {
+            const gap = frame.readCell(@intCast(column), 4);
+            try std.testing.expectEqualStrings(" ", gap.char.grapheme);
+            try std.testing.expectEqual(view.style.bg, gap.style.bg);
+            try std.testing.expect(!gap.style.reverse);
+            for ([_]u16{ 3, 5 }) |row| {
+                const padding = frame.readCell(@intCast(column), row);
+                try std.testing.expectEqualStrings(" ", padding.char.grapheme);
+                if (colour) try std.testing.expectEqual(view.colours.user_band, padding.style.bg) else try std.testing.expect(padding.style.reverse);
+            }
+        }
+    };
 }

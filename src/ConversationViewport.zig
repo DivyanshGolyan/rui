@@ -74,7 +74,6 @@ pub const Colours = struct {
     band: vaxis.Color = .default,
     user_band: vaxis.Color = .default,
     selection: vaxis.Color = .default,
-    half_blocks: bool = true,
     no_depth: bool = false,
 };
 
@@ -493,26 +492,17 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             const can_colour = colour and !colours.no_depth;
             const used = self.printBody(window, body_row, offset, commit, can_colour, base, colours);
             if (commit and kind == .user_message) {
-                if (top) paintCap(window, row, true, can_colour, base, colours);
-                if (lower_cap) paintCap(window, body_row + @as(i17, @intCast(used)), false, can_colour, base, colours);
+                if (top) paintCap(window, row, can_colour, base, colours);
+                if (lower_cap) paintCap(window, body_row + @as(i17, @intCast(used)), can_colour, base, colours);
             }
             return used + @as(u16, @intFromBool(top)) + @as(u16, @intFromBool(lower_cap));
         }
 
-        fn paintCap(window: vaxis.Window, row: i17, top: bool, colour: bool, base: vaxis.Style, colours: Colours) void {
+        fn paintCap(window: vaxis.Window, row: i17, colour: bool, base: vaxis.Style, colours: Colours) void {
             if (row < 0 or row >= window.height) return;
             var style = base;
-            var cell: vaxis.Cell = .{};
-            if (colour and colours.half_blocks) {
-                style.fg = colours.user_band;
-                cell.char = .{ .grapheme = if (top) "▄" else "▀", .width = 1 };
-            } else if (colour) {
-                style.bg = colours.user_band;
-            } else {
-                style.reverse = true;
-            }
-            cell.style = style;
-            window.child(.{ .y_off = row, .height = 1 }).fill(cell);
+            if (colour) style.bg = colours.user_band else style.reverse = true;
+            window.child(.{ .y_off = row, .height = 1 }).fill(.{ .style = style });
         }
 
         fn printBody(self: *const Self, window: vaxis.Window, row: i17, offset: usize, commit: bool, colour: bool, base: vaxis.Style, colours: Colours) u16 {
@@ -1847,8 +1837,7 @@ test "user band fills wrapped rows and summaries without tinting the next tool r
             for (row..row + used) |y| {
                 for (0..20) |x| {
                     const cell = screen.screen.readCell(@intCast(x), @intCast(y)).?;
-                    const cap = (index == 0 and y == row) or (index == 1 and y == row + used - 1);
-                    try std.testing.expectEqual(if (colour and index < 2 and !cap) colours.user_band else plain.bg, cell.style.bg);
+                    try std.testing.expectEqual(if (colour and index < 2) colours.user_band else plain.bg, cell.style.bg);
                     try std.testing.expect(!cell.style.italic);
                 }
             }
@@ -1869,7 +1858,7 @@ test "whole user message provenance tints empty bodies and rejects italics witho
     _ = document.draw(window, .{}, true, true, plain, colours);
     for (0..5) |row| for (0..40) |column| {
         const cell = screen.screen.readCell(@intCast(column), @intCast(row)).?;
-        try std.testing.expectEqual(if (row == 1 or row == 2) colours.user_band else plain.bg, cell.style.bg);
+        try std.testing.expectEqual(if (row < 4) colours.user_band else plain.bg, cell.style.bg);
         try std.testing.expect(!cell.style.italic);
     };
 }
@@ -1901,8 +1890,7 @@ test "user band provenance includes blank and wrapped message lines only" {
             const used = document.printLine(window, @intCast(row), offset, true, colour, plain, colours);
             if (case.wraps and width == 20 and user) try std.testing.expect(used > 1);
             for (row..row + used) |y| for (0..width) |x| {
-                const cap = user and ((line == 0 and y == row) or (line + 1 == case.lines and y == row + used - 1));
-                try std.testing.expectEqual(if (colour and user and !cap) colours.user_band else plain.bg, screen.screen.readCell(@intCast(x), @intCast(y)).?.style.bg);
+                try std.testing.expectEqual(if (colour and user) colours.user_band else plain.bg, screen.screen.readCell(@intCast(x), @intCast(y)).?.style.bg);
             };
             row += used;
             offset = @min(document.lineEnd(offset) + 1, document.length);
@@ -1919,7 +1907,8 @@ test "user band provenance includes blank and wrapped message lines only" {
 test "user band padding domain retains rows and source text" {
     const testing = std.testing;
     for ([_]u16{ 46, 140 }) |width| for ([_]u8{ 0, 1, 2 }) |depth| for ([_]bool{ false, true }) |unicode_caps| {
-        var document: Sized(1024, true) = .{ .sidenotes = true };
+        const method: Method = if (unicode_caps) .unicode else .wcwidth;
+        var document: Sized(1024, true) = .{ .sidenotes = true, .width_method = method };
         try document.append(TerminalText.user_message_on ++ "› \x1b[8m14:20\x1b[0mshort\n" ++ TerminalText.user_message_off ++
             TerminalText.user_message_on ++ "› ");
         const count: usize = if (width == 46) 75 else 265;
@@ -1927,28 +1916,27 @@ test "user band padding domain retains rows and source text" {
         try document.append("\n" ++ TerminalText.user_message_off);
         try document.prepare();
         const second = document.nextLine(0).?;
-        const layout: Layout = .{ .width = width, .method = .unicode };
+        const layout: Layout = .{ .width = width, .method = method };
         try testing.expectEqual(@as(u16, 3), document.lineRows(layout, 0));
         const second_rows = document.lineRows(layout, second);
         try testing.expectEqual(@as(u16, 5), second_rows);
         const colour = depth != 0;
         const band: vaxis.Color = if (depth == 1) .{ .index = 8 } else .{ .rgb = .{ 10, 20, 30 } };
         const ground: vaxis.Style = .{ .bg = .{ .index = 1 } };
-        const colours: Colours = .{ .user_band = band, .half_blocks = unicode_caps and colour, .no_depth = !colour };
+        const colours: Colours = .{ .user_band = band, .no_depth = !colour };
         var screen: TestScreen = undefined;
         const height: u16 = 12;
         const window = screen.window(width, height);
+        screen.screen.width_method = method;
         window.fill(.{ .style = ground });
         _ = document.draw(window, .{}, true, true, ground, colours);
         for ([_]u16{ 0, 2, 3, 3 + second_rows - 1 }) |row| for (0..width) |column| {
             const cell = screen.screen.readCell(@intCast(column), row).?;
             try testing.expect(document.cellOffset(cell) == null);
-            if (colour and unicode_caps) {
-                try testing.expectEqualStrings(if (row == 0 or row == 3) "▄" else "▀", cell.char.grapheme);
-                try testing.expectEqual(band, cell.style.fg);
-                try testing.expectEqual(ground.bg, cell.style.bg);
-            } else if (colour) {
+            try testing.expectEqualStrings(" ", cell.char.grapheme);
+            if (colour) {
                 try testing.expectEqual(band, cell.style.bg);
+                try testing.expect(!cell.style.reverse);
             } else try testing.expect(cell.style.reverse);
         };
         try testing.expectEqualStrings("›", screen.screen.readCell(2, 1).?.char.grapheme);
@@ -1975,12 +1963,10 @@ test "user band padding domain retains rows and source text" {
             try testing.expect(document.cellOffset(cell) == null);
             if (from.offset == 0) {
                 try testing.expectEqualStrings("›", screen.screen.readCell(2, 0).?.char.grapheme);
-            } else if (colour and unicode_caps) {
-                try testing.expectEqualStrings("▀", cell.char.grapheme);
-                try testing.expectEqual(band, cell.style.fg);
-            } else if (colour) {
-                try testing.expectEqual(band, cell.style.bg);
-            } else try testing.expect(cell.style.reverse);
+            } else {
+                try testing.expectEqualStrings(" ", cell.char.grapheme);
+                if (colour) try testing.expectEqual(band, cell.style.bg) else try testing.expect(cell.style.reverse);
+            }
         }
     };
 }
