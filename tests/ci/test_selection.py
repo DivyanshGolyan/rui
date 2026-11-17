@@ -1215,6 +1215,7 @@ class SelectionTest(unittest.TestCase):
         self.assertNotIn("check", select(["tests/integration/control_fixture.py"], "review", AVAILABLE)["targets"])
         for path, target in (("control_integration.py", "control-integration"),
                              ("dispatch_integration.py", "dispatch-integration"),
+                             ("read_image_integration.py", "read-image-integration"),
                              ("canonical_failure_integration.py", "canonical-failure-integration")):
             with self.subTest(path=path):
                 result = select([f"tests/integration/{path}"], "review", AVAILABLE)
@@ -2217,6 +2218,7 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
     def test_parts_are_disjoint_and_cover_the_unchanged_full_gate(self):
         expected = {
             "admission_integration.sh release", "dispatch_integration.py release",
+            "read_image_integration.py release",
             "bash_owner_integration.py release", "bash_integration.py release",
             "peer_integration.py release", "bash_environment_integration.py release",
             "sender_identity_integration.py release",
