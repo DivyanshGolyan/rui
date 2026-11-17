@@ -1914,6 +1914,7 @@ fn readCapturedIdentity(io: std.Io, file: *std.Io.File, handle: []const u8) !pro
     try key.set(parsed.value.key);
     const session = parsed.value.session orelse if (parsed.value.target) |target| target.session else return error.InvalidRequestRecord;
     const kind = std.meta.stringToEnum(protocol.CommandKind, parsed.value.kind) orelse return error.InvalidRequestRecord;
+    if (kind == .session_group) return (try readCapturedBinding(io, file)).saved;
     var identity: protocol_reply.MutationIdentity = .{ .store = store, .key = key, .kind = kind };
     const creation = session.len == 0 and (kind == .configure or
         kind == .message and std.mem.startsWith(u8, prefix[kind_marker..], ",\"configuration\":"));
@@ -5710,6 +5711,7 @@ test "group recovery rejects malformed action fields before retransmission" {
         file.close(io);
         try std.testing.expectError(error.InvalidRequestRecord, openCaptured(io, .{ .generated = .{ .directory = root, .handle = handle } }));
         try std.testing.expectError(error.InvalidRequestRecord, inspectCaptured(io, root, handle));
+        try std.testing.expectError(error.InvalidRequestRecord, inspectCapturedRequest(io, root, handle));
     }
 }
 

@@ -5402,7 +5402,18 @@ test "group CLI decodes argument formats into the shared action owner" {
         var storage: [2048]u8 = undefined;
         var fixed = std.heap.FixedBufferAllocator.init(&storage);
         const parsed = try cli_args.Command.session_group.definition().parse(case.args, fixed.allocator(), &problem);
-        try std.testing.expectEqualDeep(case.expected, try groupAction(&parsed));
+        const actual = try groupAction(&parsed);
+        try std.testing.expectEqual(std.meta.activeTag(case.expected), std.meta.activeTag(actual));
+        switch (case.expected) {
+            .assign => |expected| try std.testing.expectEqualStrings(expected.slice(), actual.assign.slice()),
+            .rename_current => |expected| try std.testing.expectEqualStrings(expected.slice(), actual.rename_current.slice()),
+            .leave, .automatic => {},
+            .rename => |expected| {
+                try std.testing.expectEqual(expected.group, actual.rename.group);
+                try std.testing.expectEqualStrings(expected.name.slice(), actual.rename.name.slice());
+            },
+            .collapse => |expected| try std.testing.expectEqualDeep(expected, actual.collapse),
+        }
     }
 }
 
