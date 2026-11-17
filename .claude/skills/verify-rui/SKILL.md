@@ -64,11 +64,10 @@ The helper is `scripts/verify-rui`. Set `V=.claude/skills/verify-rui/scripts/ver
 Use `shots` to preview every state in a build's recipe at its own sizes and compare it with a baseline:
 
 ```sh
-$V build --here --out BUILD
-$V shots BUILD --out CANDIDATE --baseline BASELINE
+$V shots --out CANDIDATE --baseline BASELINE
 ```
 
-`build --here [--out DIR]` builds the current checkout, including uncommitted changes, in ReleaseSafe and keys it by its content tree (`tree-...`). It defaults to available CPU parallelism; `RUI_BUILD_JOBS` overrides that. Omitting `BUILD` from `shots` defaults to a `build --here` build. Make a baseline with `shots` first, and pass its output directory as `--baseline`. Use `--only a,b` to select states or `--no-png` to omit PNGs.
+With no build identifier, `shots` builds the current checkout, including uncommitted changes, in ReleaseSafe and keys it by its content tree, HEAD and release tag (`tree-...`). It defaults to available CPU parallelism; `RUI_BUILD_JOBS` overrides that. Pass a build identifier to `shots` to use an existing build: a full 40-hex commit SHA or a `tree-...` content ID. Set `VERIFY_RUI_CACHE` to an absolute path to override the default `~/.cache/verify-rui`; the build cache must be outside the checkout for current-checkout builds. Make a baseline with `shots` first, and pass its output directory as `--baseline`. Use `--only a,b` to select states or `--no-png` to omit PNGs.
 
 Open `index.html` to review changed and new screens and failures first. `diff.json` lists changed, new and removed entries, the same count and failures. Changes alone succeed; capture failures exit 1. `shots.json` retains each name, size, status, reason, fingerprint and files. The fingerprint covers committed cells, styles, dimensions and terminal colours, excluding cursor and timing.
 

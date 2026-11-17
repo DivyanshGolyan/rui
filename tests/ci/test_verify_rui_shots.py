@@ -29,6 +29,21 @@ class ShotsTest(unittest.TestCase):
         self.module = runpy.run_path(str(SCRIPT))
         self.globals = self.module['cmd_shots'].__globals__
 
+    def test_shots_rejects_directory_build_before_creating_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            directory = root / 'build'
+            directory.mkdir()
+            (directory / 'manifest.json').write_text(json.dumps({'sha': 'a' * 40}))
+            for identifier in (str(directory), 'build', '../build'):
+                with self.subTest(identifier=identifier):
+                    args = argparse.Namespace(build=identifier, only=None, shard=None, out=str(root / 'out'),
+                                              no_png=True, baseline=None)
+                    with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
+                        self.module['cmd_shots'](args)
+                    self.assertEqual(error.exception.code, 2)
+                    self.assertFalse(Path(args.out).exists())
+
     def test_diff_orders_failures_and_omits_unchanged(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -201,7 +216,22 @@ class ShotsTest(unittest.TestCase):
             (b / 'shots-meta.json').write_text(json.dumps(meta))
             with contextlib.redirect_stdout(io.StringIO()):
                 self.module['cmd_shots_merge'](args)
-            self.assertEqual(json.loads((root / 'out/shots-meta.json').read_text()), meta)
+            self.assertEqual(json.loads((root / 'out/shots-meta.json').read_text()), {**meta, 'failed': False})
+
+    def test_merge_accepts_matching_provenance_with_different_status_and_legacy_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = [root / 'a', root / 'b', root / 'c']
+            meta = {'build': 'build', 'tree': 'tree', 'recipe_sha256': 'a' * 64}
+            for path, status in zip(paths, (None, False, True)):
+                write_shots(path, [])
+                (path / 'shots-meta.json').write_text(json.dumps(
+                    meta if status is None else {**meta, 'failed': status}))
+            args = argparse.Namespace(directories=[str(path) for path in paths], out=str(root / 'out'), baseline=None)
+            with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as error:
+                self.module['cmd_shots_merge'](args)
+            self.assertEqual(error.exception.code, 1)
+            self.assertEqual(json.loads((root / 'out/shots-meta.json').read_text()), {**meta, 'failed': True})
 
     def test_baseline_failure_produces_failure_exit_for_shots_and_merge(self):
         scenario = json.loads(SCRIPT.with_name('frames.json').read_text())
@@ -226,6 +256,7 @@ class ShotsTest(unittest.TestCase):
             meta = json.loads((root / 'out/shots-meta.json').read_text())
             self.assertEqual((meta['build'], meta['tree']), ('build', 'tree'))
             self.assertEqual(len(meta['recipe_sha256']), 64)
+            self.assertTrue(meta['failed'])
             self.assertEqual(len(json.loads((root / 'out/diff.json').read_text())['failed']), 1)
             merge = argparse.Namespace(directories=[args.out], out=str(root / 'merged'), baseline=str(baseline))
             with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as error:
@@ -233,11 +264,117 @@ class ShotsTest(unittest.TestCase):
             self.assertEqual(error.exception.code, 1)
             self.assertEqual(len(json.loads((root / 'merged/diff.json').read_text())['failed']), 1)
 
-    def test_directory_build_run_tag_is_safe_and_deterministic(self):
-        tag = self.module['build_run_tag']('/tmp/build/manifest.json')
-        self.assertEqual(len(tag), 7)
-        self.assertTrue(tag.isalnum())
-        self.assertEqual(tag, self.module['build_run_tag']('/tmp/build/manifest.json'))
+    def test_run_failure_survives_merge_with_successful_or_empty_captures(self):
+        scenario = json.loads(SCRIPT.with_name('frames.json').read_text())
+        scenario['states'] = scenario['states'][:1]
+        name = scenario['states'][0]['name']
+        for has_capture in (False, True):
+            for use_baseline in (False, True):
+                with self.subTest(has_capture=has_capture, baseline=use_baseline), tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    baseline = root / 'baseline'
+                    write_shots(baseline, [])
+                    args = argparse.Namespace(build='tree-build', only=None, shard=None, out=str(root / 'out'),
+                                              no_png=True, baseline=None)
+                    def frames(child):
+                        rows = []
+                        if has_capture:
+                            rows.append({'name': name, 'size': '80x24', 'ok': True, 'reason': None,
+                                         'cells_sha256': 'abc', 'files': {}})
+                        Path(child.out, 'frames.json').write_text(json.dumps(rows))
+                        raise SystemExit(1)
+                    with patch.dict(self.globals, {'load_build': lambda _: {'source': '/repo', 'tree': 'tree'},
+                                                  'run_frames': frames}), \
+                         patch('subprocess.check_output', return_value=json.dumps(scenario)), \
+                         contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as error:
+                        self.module['cmd_shots'](args)
+                    self.assertEqual(error.exception.code, 1)
+                    self.assertTrue(json.loads((root / 'out/shots-meta.json').read_text())['failed'])
+                    self.assertFalse((root / 'out/shots-status.json').exists())
+                    merge = argparse.Namespace(directories=[args.out], out=str(root / 'merged'),
+                                               baseline=str(baseline) if use_baseline else None)
+                    with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as error:
+                        self.module['cmd_shots_merge'](merge)
+                    self.assertEqual(error.exception.code, 1)
+                    self.assertTrue(json.loads((root / 'merged/shots-meta.json').read_text())['failed'])
+                    merge.directories = [merge.out]
+                    merge.out = str(root / 'again')
+                    with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as error:
+                        self.module['cmd_shots_merge'](merge)
+                    self.assertEqual(error.exception.code, 1)
+
+    def test_real_frames_failures_propagate_through_shots_and_merge(self):
+        scenario = {'sizes': ['80x24'], 'states': [{'name': 'screen', 'open': 'overview', 'steps': []}]}
+        for failure in ('capture', 'render', 'cleanup'):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                run = types.SimpleNamespace(root=root, home=root / 'home', evidence=root / 'evidence',
+                                            meta={'sha': 'abc', 'sessions': {}})
+                args = argparse.Namespace(build='abc', only=None, shard=None, out=str(root / 'out'),
+                                          no_png=failure != 'render', baseline=None)
+                class Terminal:
+                    def __init__(self, *_args):
+                        self.frame = types.SimpleNamespace(columns=80, lines=24)
+                    def close(self):
+                        pass
+                def capture(_run, _terminal, out, state, size, reason):
+                    if failure == 'capture':
+                        raise RuntimeError('capture failed')
+                    name = 'screen@80x24.html'
+                    (out / name).write_text('screen')
+                    return {'name': state['name'], 'size': '80x24', 'files': {'html': name},
+                            'status': 'ok', 'ok': True, 'reason': reason, 'note': '', 'sha': 'abc'}
+                def cleanup(_):
+                    if failure == 'cleanup':
+                        raise SystemExit(1)
+                def process(command, **_kwargs):
+                    if command[-1] != '--check':
+                        # Rendering can fail after producing a usable capture.
+                        (Path(command[-1]).parent / 'screen@80x24.png').write_bytes(b'png')
+                        return types.SimpleNamespace(returncode=1, stderr='render failed')
+                    return types.SimpleNamespace(returncode=0, stderr='')
+                @contextlib.contextmanager
+                def upgrade(run, state, _build):
+                    yield run, state, None
+                replacements = {'Run': lambda _: run, 'cmd_new': lambda _: print(root),
+                    'cmd_cleanup': cleanup, 'load_build': lambda _: {'source': '/repo', 'tree': 'tree',
+                                                                      'screen_library': '/test'},
+                    'require_screen': lambda _: None, 'FrameTerminal': Terminal, 'frame_upgrade_run': upgrade,
+                    'seed_cast': lambda *_: None, 'frame_initial_ready': lambda *_a, **_k: None,
+                    'frame_drive_upgrade': lambda *_: None, 'frame_steps': lambda *_a, **_k: False,
+                    'frame_upgrade_viewport': lambda *_: None, 'frame_ready': lambda *_a, **_k: None,
+                    'frame_capture': capture, 'frame_upgrade_journey': lambda *_: None,
+                    'frame_host_suspension': lambda *_: None, 'frame_finish_held_upgrade': lambda *_: None}
+                with patch.dict(self.globals, replacements), patch('subprocess.check_output', return_value=json.dumps(scenario)), \
+                     patch('subprocess.run', side_effect=process), patch('shutil.which', return_value='/test/node'), \
+                     contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()), \
+                     self.assertRaises(SystemExit) as error:
+                    self.module['cmd_shots'](args)
+                self.assertEqual(error.exception.code, 1)
+                records = json.loads((root / 'out/shots.json').read_text())
+                self.assertEqual(records[0]['ok'], failure != 'capture')
+                self.assertTrue(json.loads((root / 'out/shots-meta.json').read_text())['failed'])
+                merge = argparse.Namespace(directories=[args.out], out=str(root / 'merged'), baseline=None)
+                with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as error:
+                    self.module['cmd_shots_merge'](merge)
+                self.assertEqual(error.exception.code, 1)
+                self.assertTrue(json.loads((root / 'merged/shots-meta.json').read_text())['failed'])
+
+    def test_merge_validates_all_statuses_before_creating_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            a, b = root / 'a', root / 'b'
+            write_shots(a, [])
+            write_shots(b, [])
+            (a / 'shots-meta.json').write_text(json.dumps({'failed': True}))
+            args = argparse.Namespace(directories=[str(a), str(b)], out=str(root / 'out'), baseline=None)
+            for invalid in ({'failed': 'false'}, {}, {'failed': False, 'extra': 1}):
+                with self.subTest(invalid=invalid):
+                    (b / 'shots-meta.json').write_text(json.dumps(invalid))
+                    with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
+                        self.module['cmd_shots_merge'](args)
+                    self.assertEqual(error.exception.code, 2)
+                    self.assertFalse(Path(args.out).exists())
 
     def test_resize_failure_saves_last_committed_frame_and_timing(self):
         run_frames = self.module['run_frames']
