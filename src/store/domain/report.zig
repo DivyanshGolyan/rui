@@ -510,7 +510,7 @@ fn WorkLatest(comptime Args: type, comptime session: []const u8) type {
             "(" ++ command_domain.unresolvedModelOperationSql("o") ++ " AND " ++ command_domain.currentModelOperationSql("o", "t") ++ ") AS interruptible," ++
             "CASE WHEN EXISTS(SELECT 1 FROM session_stop WHERE selected_turn_id=t.turn_id) THEN (" ++
             command_domain.pendingMessageAfterStopSql(session) ++ " OR " ++
-            "EXISTS(SELECT 1 FROM session s WHERE s.session_ref=" ++ session ++ " AND s.obligation_since IS NOT NULL)) ELSE 0 END AS stop_remaining," ++
+            "(" ++ obligation.firstChildSql(session, "") ++ " IS NOT NULL)) ELSE 0 END AS stop_remaining," ++
             "(SELECT @payload(content) FROM content WHERE content_id=o.resolution_content_id AND byte_length<=" ++ std.fmt.comptimePrint("{d}", .{Quota.max_bytes}) ++
             " AND t.outcome_code NOT IN ('completed','cancelled')) AS diagnostic," ++
             "(SELECT stopped_at FROM session_stop @index(session_stop_turn) WHERE selected_turn_id=t.turn_id ORDER BY position LIMIT 1) AS stopped_at " ++
