@@ -153,13 +153,25 @@ def prove_case(root, name):
         actions = report["full"]["actions"]
         assert len(actions) == 1, report
         action = actions[0]["action"] if action is None else action
-        final = wait(lambda: (value if (value := read(action))["state"] == "resolved" else None), "saved explicit Resolution")
-        assert final["final"]["code"] == expected, final
+        if expected == "succeeded":
+            # Byte-only Action reads deliberately exclude compound image results.
+            # Inspect their saved Resolution and validate the typed provider input.
+            def image_resolution():
+                report = command("session", "inspect", "--store", store, "--session", session, "--profile", "full")
+                rows = [row for row in report["full"]["actions"] if row["action"] == action]
+                assert len(rows) == 1, report
+                return rows[0] if rows[0]["resolution"] is not None else None
+
+            final = wait(image_resolution, "saved image Resolution")
+            assert final["resolution"] == expected, final
+        else:
+            final = wait(lambda: (value if (value := read(action))["state"] == "resolved" else None), "saved explicit Resolution")
+            assert final["final"]["code"] == expected, final
+            assert int(final["final"]["content"]["bytes"]) > 0, final
         if expected in ("denied", "cancelled"):
             assert_no_file_access()
         elif tracer:
             assert source.name in trace.read_text(), "tracer did not observe the authorized read"
-        assert int(final["final"]["content"]["bytes"]) > 0, final
         assert fixture.read_action(store, session, action, "arguments") == arguments.encode()
         if name != "stop-pending":
             continuation = json.loads(endpoint.requests[1])
