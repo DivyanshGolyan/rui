@@ -170,6 +170,7 @@ pub fn renderActionRead(response: protocol.JsonOut, value: *const @import("actio
     switch (value.status) {
         .pending => |state| try response.appendShape(shapes.pending, .{state}),
         .resolved => |*final| try response.appendShape(shapes.final, .{ final.resolution.position, final.resolution.code.slice(), final.resolution.content.length, final.resolution.content.digest, final.window.offset, final.window.next, final.window.more, final.window.text.slice() }),
+        .resolved_parts => |*final| try response.appendShape(shapes.parts, .{ final.position, final.code.slice(), final.content.length, final.content.digest }),
     }
 }
 

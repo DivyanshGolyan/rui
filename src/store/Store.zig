@@ -1024,15 +1024,19 @@ pub const Store = struct {
     }
 
     pub fn readAction(self: *Store, request: *const @import("../action_read.zig").Request, out: *@import("../action_read.zig").Read) !void {
-        return self.queue().run(readActionHeld, .{ self, request, out });
+        return self.queue().run(readActionHeld, .{ self, request, action_read_domain.Projection.bytes, out });
     }
 
-    fn readActionHeld(self: *Store, request: *const @import("../action_read.zig").Request, out: *@import("../action_read.zig").Read) !void {
+    pub fn readActionForTool(self: *Store, request: *const @import("../action_read.zig").Request, out: *@import("../action_read.zig").Read) !void {
+        return self.queue().run(readActionHeld, .{ self, request, action_read_domain.Projection.model_tool, out });
+    }
+
+    fn readActionHeld(self: *Store, request: *const @import("../action_read.zig").Request, projection: action_read_domain.Projection, out: *@import("../action_read.zig").Read) !void {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: ReadAccess = .open(&entry);
         defer access.deinit();
-        return entry.finish(Ordinary.action_read, action_read_domain.actionRead(&access, request, out));
+        return entry.finish(Ordinary.action_read, action_read_domain.actionRead(&access, request, projection, out));
     }
 
     pub fn actionArguments(self: *Store, session_ref: []const u8, action_id: u64) !ContentReference {

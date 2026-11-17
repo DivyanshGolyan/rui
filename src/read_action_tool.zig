@@ -16,7 +16,7 @@ pub fn run(store: *storage.Store, arena: std.mem.Allocator, input: *const storag
     };
     if (check == .rejected) return fail(store, arena, input, check.rejected, faults);
     const result = try arena.create(action_read.Read);
-    store.readAction(&.{ .session = input.session, .action_id = arguments.action, .offset = arguments.offset }, result) catch |err| switch (err) {
+    store.readActionForTool(&.{ .session = input.session, .action_id = arguments.action, .offset = arguments.offset }, result) catch |err| switch (err) {
         error.ActionNotFound => return fail(store, arena, input, "action names no Action in your own Session", faults),
         error.InvalidCursor => return fail(store, arena, input, "offset must be within the result and on a UTF-8 character boundary; pending Actions require zero", faults),
         else => return err,
