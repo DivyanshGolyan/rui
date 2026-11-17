@@ -403,6 +403,13 @@ fn expectReportedToolNames(value: std.json.Value, expected: []const []const u8) 
     for (expected, value.array.items) |name, actual| try std.testing.expectEqualStrings(name, actual.string);
 }
 
+fn expectReportedToolsField(value: std.json.Value, expected: *const protocol.ToolsField) !void {
+    try std.testing.expectEqual(@as(usize, expected.count), value.array.items.len);
+    var names = expected.iterator();
+    for (value.array.items) |actual| try std.testing.expectEqualStrings(names.next().?, actual.string);
+    try std.testing.expect(names.next() == null);
+}
+
 fn expectFrozenToolNames(storage: *Store, binding: store_core.AttemptBinding, expected: []const []const u8) !void {
     var view: TestingPage = undefined;
     view.open(storage, binding);
@@ -846,14 +853,19 @@ test "stop_action effective offer preserves the historical settings limit" {
             const extras = comptime blk: {
                 @setEvalBranchQuota(1_000_000);
                 var records: [126]tool_defs.Record = undefined;
-                for (&records, 0..) |*record, i| record.* = .{
-                    .name = std.fmt.comptimePrint("stub{d:0>3}", .{i}),
-                    .owner = .mcp,
-                    .server = "docs",
-                    .read_only = true,
-                    .description = "Read a page.",
-                    .input_schema = "{\"type\":\"object\"}",
-                };
+                const remaining_bytes = protocol.max_tool_list_name_bytes - "find_tools".len - "read_action".len;
+                for (&records, 0..) |*record, i| {
+                    const prefix = std.fmt.comptimePrint("stub{d:0>3}", .{i});
+                    const length = remaining_bytes / records.len + @intFromBool(i < remaining_bytes % records.len);
+                    record.* = .{
+                        .name = prefix ++ @as([length - prefix.len]u8, @splat('x')),
+                        .owner = .mcp,
+                        .server = "docs",
+                        .read_only = true,
+                        .description = "Read a page.",
+                        .input_schema = "{\"type\":\"object\"}",
+                    };
+                }
                 break :blk records;
             };
             const records = comptime testingHostToolRecords(&extras);
@@ -884,6 +896,11 @@ test "stop_action effective offer preserves the historical settings limit" {
                             try allowed.insert(record.name);
                             try loaded.insert(record.name);
                         }
+                        if (count == protocol.max_tools and !explicit) {
+                            try std.testing.expectEqual(protocol.max_tool_list_name_bytes, allowed.names.len - (allowed.count - 1));
+                            var overflow = allowed;
+                            try std.testing.expectError(error.InvalidJsonShape, overflow.insert("stop_action"));
+                        }
                         configure.configuration.tools = allowed;
                         configure.configuration.loaded_tools = loaded;
                         const session = (try storage.configure(&configure, .{})).accepted.session;
@@ -896,6 +913,44 @@ test "stop_action effective offer preserves the historical settings limit" {
                         try page.settings(&settings);
                         const expected = count - @as(usize, @intFromBool(!loaded_read)) - @as(usize, @intFromBool(explicit and !loaded_read)) + @as(usize, @intFromBool(!explicit and loaded_read));
                         try std.testing.expectEqual(@as(u64, @intCast(expected)), settings.tool_count);
+                        for ([_]protocol.ReportProfile{ .current, .full }) |profile| {
+                            const bytes = try shared_fixtures.testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, profile);
+                            defer std.testing.allocator.free(bytes);
+                            const report = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
+                            defer report.deinit();
+                            const current = report.value.object.get("session").?.object;
+                            try expectReportedToolsField(current.get("tools").?, &allowed);
+                            try expectReportedToolsField(current.get("loaded_tools").?, &loaded);
+                            if (profile == .full) {
+                                const full = report.value.object.get("full").?.object;
+                                const revisions = full.get("session_revisions").?.array.items;
+                                try std.testing.expectEqual(@as(usize, 1), revisions.len);
+                                try expectReportedToolsField(revisions[0].object.get("tools").?, &allowed);
+                                try expectReportedToolsField(revisions[0].object.get("loaded_tools").?, &loaded);
+                                const operations = full.get("model_operations").?.array.items;
+                                try std.testing.expectEqual(@as(usize, 1), operations.len);
+                                const offered = operations[0].object.get("offered_tools").?.array.items;
+                                try std.testing.expectEqual(expected, offered.len);
+                                var previous: []const u8 = "";
+                                var name_bytes: usize = 0;
+                                var tool: historical_domain.HistoricalTool = .{};
+                                for (offered) |item| {
+                                    const name = item.string;
+                                    try std.testing.expect(std.mem.lessThan(u8, previous, name));
+                                    if (std.mem.eql(u8, name, "stop_action")) {
+                                        try std.testing.expect(loaded_read);
+                                    } else try std.testing.expect(loaded.contains(name));
+                                    try std.testing.expect(try page.nextTool(&tool));
+                                    try std.testing.expectEqualStrings(name, tool.name.slice());
+                                    previous = name;
+                                    name_bytes += name.len;
+                                }
+                                try std.testing.expect(!try page.nextTool(&tool));
+                                if (count == protocol.max_tools and !explicit and loaded_read) {
+                                    try std.testing.expectEqual(@import("../../tool_name.zig").max_offered_list_name_bytes, name_bytes);
+                                }
+                            }
+                        }
                         try std.testing.expect(!storage.isFenced());
                     }
                 }

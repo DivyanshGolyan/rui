@@ -23,7 +23,7 @@ pub fn Reply(comptime Capture: type) type {
         actions: u64 = 0,
         rejected_calls: u64 = 0,
         first: bool = true,
-        tools_json: [tool_name.max_names_json_bytes]u8 = undefined,
+        tools_json: [tool_name.max_offered_names_json_bytes]u8 = undefined,
 
         pub fn missing(reply: *@This(), profile: cli_value.ReportProfile) !void {
             try reply.envelope(profile);
@@ -523,6 +523,9 @@ pub const FullJson = struct {
     const Tools = struct {
         pub const openapi_tools = true;
     };
+    const OfferedTools = struct {
+        pub const openapi_offered_tools = true;
+    };
     pub const Inline = struct {
         pub const openapi_name = "domainreport_full_shapeFullInline";
         const head = .{ "{\"type\":\"text\",\"bytes\":\"", H.decimal, "\",\"sha256\":\"", H{ .hex = 32 }, "\",\"text\":\"" };
@@ -595,7 +598,7 @@ pub const FullJson = struct {
         pub const openapi_name = "domainreport_full_shapeFullOperation";
         const head = .{ "{\"operation\":\"", H.decimal, "\",\"turn\":\"", H.decimal, "\",\"resolution\":" };
         const tail = .{ ",\"interrupted_by\":", H{ .optional_string = idempotency_key.max_bytes }, ",\"settings_revision\":\"", H.decimal, "\",\"request_id\":", H{ .optional_string = 256 }, ",\"reasoning_effort\":", H{ .optional_tag = model_capability.ReasoningEffort }, ",\"offered_tools\":" };
-        pub const json_shape = head ++ .{H{ .optional_json = Resolution }} ++ tail ++ .{ Tools, "}" };
+        pub const json_shape = head ++ .{H{ .optional_json = Resolution }} ++ tail ++ .{ OfferedTools, "}" };
     };
     pub const Call = struct {
         pub const openapi_name = "domainreport_full_shapeFullCall";

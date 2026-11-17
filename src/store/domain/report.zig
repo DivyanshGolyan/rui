@@ -272,7 +272,7 @@ pub const first_message = rsql.Read(.{
     .cardinality = .optional,
 });
 
-pub fn sortedToolNames(names: ?[]const u8, sorted: *[tool_defs.max_tools][]const u8) ![]const []const u8 {
+pub fn sortedToolNames(names: ?[]const u8, sorted: [][]const u8) ![]const []const u8 {
     var count: usize = 0;
     if (names) |joined| {
         var each = std.mem.splitScalar(u8, joined, ',');
@@ -1655,7 +1655,7 @@ const full_operations = rsql.Page(.{
         settings_revision: rsql.Positive,
         request_id: ?Bounded(256),
         reasoning_effort: ?model_capability.ReasoningEffort,
-        offered_tools: ?Bounded(tool_set.max_names_bytes),
+        offered_tools: ?Bounded(tool_set.max_offered_names_bytes),
     },
     .take = takes(Operations.kept_rows),
 });
@@ -1667,7 +1667,7 @@ const Operations = struct {
     // Keep names with each retained row until resolution content can stream after the query.
     // Two retained rows and the decode row fit the Store's existing report scratch.
     pub const kept_rows = 2;
-    pub const State = struct { names: [tool_defs.max_tools][]const u8 = undefined };
+    pub const State = struct { names: [tool_name.max_offered_tools][]const u8 = undefined };
 
     pub fn check(_: *State, row: *const S.Row) error{CorruptStore}!void {
         try checkOutcome(&row.resolution_code, row.resolution_content_id);

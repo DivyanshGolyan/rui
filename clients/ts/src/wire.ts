@@ -3527,7 +3527,7 @@ export interface components {
             request_id: string | null;
             /** @enum {unknown} */
             reasoning_effort: "none" | "low" | "medium" | "high" | "xhigh" | "max" | null;
-            /** @description None repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers. */
+            /** @description None repeated; the names' bytes total at most x-rui-max-bytes. The effective tool offer frozen at this Operation's admission. */
             offered_tools: string[];
         };
         domainreport_full_shapeFullOutcome: {
