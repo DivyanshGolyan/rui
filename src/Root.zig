@@ -35,6 +35,7 @@ pub const MainPresentation = struct {
     close: *const fn (*anyopaque) void,
 };
 main_presentation: ?MainPresentation = null,
+presentation_hold: ?struct { context: *anyopaque, held: *const fn (*anyopaque, u16) bool } = null,
 
 overview: vxfw.Widget,
 overview_keys: ?Keys = null,
@@ -349,6 +350,9 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const size = ctx.max.size();
     self.size = size;
     self.settings_page.narrow = size.width < split_at;
+    if (self.presentation_hold) |hold| if (hold.held(hold.context, size.width)) {
+        return try vxfw.Surface.init(ctx.cell_arena, self.widget(), size);
+    };
     const covering = self.input.layer.signInOpen();
     const children = try ctx.arena.alloc(vxfw.SubSurface, if (covering) 2 else 1);
     var background = self.input;

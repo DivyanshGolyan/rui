@@ -372,6 +372,7 @@ upgrade_guidance: bool = false,
 relaunch_line: [upgrade_status.max_line_bytes]u8 = undefined,
 relaunch_line_len: usize = 0,
 title: session_chrome.Title = .{},
+initial_list_deadline: ?u64 = null,
 jobs: [max_jobs]Job = undefined,
 job_count: usize = 0,
 job: Job = .list,
@@ -429,6 +430,20 @@ fn initScreen(self: *Self, screen: *SessionScreen) !void {
     self.screen_ready = true;
 }
 
+fn initialListHeld(self: *Self, width: u16, now_ms: u64) bool {
+    const deadline = self.initial_list_deadline orelse return false;
+    if (width < Root.split_at or self.state.listed_at_ms != null or self.state.list_stale or hostHeld(self) or now_ms >= deadline) {
+        self.initial_list_deadline = null;
+        return false;
+    }
+    return true;
+}
+
+fn holdInitialPresentation(raw: *anyopaque, width: u16) bool {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    return self.initialListHeld(width, self.animationMs());
+}
+
 fn widget(self: *Self) vxfw.Widget {
     return .{ .userdata = self, .eventHandler = appEvent, .drawFn = appDraw };
 }
@@ -470,7 +485,10 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
             try app.vx.queryColor(app.tty.writer(), .bg);
             try self.paintCursor();
             try ctx.requestFocus(self.widget());
-            if (self.options.open) |reference| try self.appNext(ctx, try self.event(.{ .open = reference }));
+            if (self.options.open) |reference| {
+                self.initial_list_deadline = self.animationMs() + 150;
+                try self.appNext(ctx, try self.event(.{ .open = reference }));
+            }
         },
         .focus_in => try ctx.requestFocus(self.widget()),
         .color_report => |report| if (report.kind == .bg) {
@@ -510,6 +528,7 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
                     try self.dispatch(.all);
                 }
             }
+            if (self.initial_list_deadline != null and self.root.size.width != 0 and !self.initialListHeld(self.root.size.width, self.animationMs())) ctx.redraw = true;
             if (!self.state.upgrading()) try self.appDiscoverUpgrade(ctx);
             const launch = try self.eventResult(.launch_poll);
             try self.appNext(ctx, launch.next);
@@ -1019,7 +1038,7 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
         .caps = .of(.{ .lc_all = init.environ_map.get("LC_ALL"), .lc_ctype = init.environ_map.get("LC_CTYPE"), .lang = init.environ_map.get("LANG"), .no_color = init.environ_map.get("NO_COLOR"), .colorterm = init.environ_map.get("COLORTERM") }),
         .interrupted = interrupted,
     };
-    self.root = .{ .settings_control = self.app_settings_line.widget(), .settings_activate = OverviewLines.Settings.activate, .main_presentation = .{ .context = self, .close = closeMainPresentation }, .overview = self.widget(), .overview_keys = .{ .context = self, .take = appKey }, .list = self.listWidget(), .settings_page = .{ .backend = self.settingsBackend(), .version = @import("transport_options").version }, .input = .{ .area = .list, .layer = if (options.sign_in) .{ .sign_in = .{ .over = .main } } else .main } };
+    self.root = .{ .settings_control = self.app_settings_line.widget(), .settings_activate = OverviewLines.Settings.activate, .main_presentation = .{ .context = self, .close = closeMainPresentation }, .presentation_hold = .{ .context = self, .held = holdInitialPresentation }, .overview = self.widget(), .overview_keys = .{ .context = self, .take = appKey }, .list = self.listWidget(), .settings_page = .{ .backend = self.settingsBackend(), .version = @import("transport_options").version }, .input = .{ .area = .list, .layer = if (options.sign_in) .{ .sign_in = .{ .over = .main } } else .main } };
     self.sign_in = .{ .init = init, .selectors = options.selectors, .activate = hooks.activate, .ready = hooks.ready, .scratch = hooks.scratch, .userdata = self, .on_done = signedIn, .on_close = closeSignIn };
     try self.sign_in.target.set(options.store);
     self.root.sign_in = self.sign_in.widget();
@@ -1178,8 +1197,9 @@ fn eventResult(self: *Self, value: view.Event) !EventResult {
         .list => |since| {
             self.traversal = .init(since);
             self.traversal_archive = self.state.listing_archive.?;
-            self.queueHost();
+            if (self.state.listed_at_ms != null) self.queueHost();
             self.queue(.list);
+            if (self.state.listed_at_ms == null) self.queueHost();
         },
         .read_first_lines => |reads| self.queue(.{ .lines = reads }),
         .create => |binding| self.queue(.{ .create = self.creationSnapshot(binding) }),
@@ -2150,6 +2170,51 @@ const Rig = struct {
     }
 };
 
+test "resumed wide presentation waits for the first live list with bounded fallback" {
+    const Scenario = enum { early, late, unavailable, empty };
+    for ([_]Scenario{ .early, .late, .unavailable, .empty }) |scenario| {
+        var cancellation: client.Cancellation = .{};
+        const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .open = "k7m2qx".* }, fake_operations, &cancellation);
+        defer rig.close();
+        const overview = rig.overview;
+        const chat: vxfw.Text = .{ .text = "Chat witness" };
+        overview.root.session = chat.widget();
+        overview.initial_list_deadline = 150;
+        try std.testing.expect(overview.initialListHeld(140, 149));
+        if (scenario == .late) {
+            try std.testing.expect(!overview.initialListHeld(140, 150));
+        }
+        overview.initial_list_deadline = overview.animationMs() + 60_000;
+        var held = try rig.shown(140, 30);
+        defer held.deinit();
+        try std.testing.expect(std.mem.indexOf(u8, try held.text(), "Loading") == null);
+        try std.testing.expect(std.mem.indexOf(u8, try held.text(), "Chat witness") == null);
+        _ = try overview.event(.{ .tick = test_now_s * 1000 });
+        try std.testing.expectEqual(Job.list, std.meta.activeTag(overview.jobs[0]));
+        try std.testing.expectEqual(Job.host, std.meta.activeTag(overview.jobs[1]));
+        if (scenario == .late) overview.initial_list_deadline = overview.animationMs();
+        if (scenario == .unavailable) overview.host_observation = .unavailable;
+        if (scenario == .late or scenario == .unavailable) {
+            var fallback = try rig.shown(140, 30);
+            defer fallback.deinit();
+            try std.testing.expect(std.mem.indexOf(u8, try fallback.text(), "Loading") != null);
+            try std.testing.expect(std.mem.indexOf(u8, try fallback.text(), "Chat witness") != null);
+        }
+        if (scenario == .unavailable) continue;
+        if (scenario == .empty) Seen.now.listed = 0;
+        try overview.dispatch(.all);
+        try rig.answered();
+        _ = try overview.complete();
+        var live = try rig.shown(140, 30);
+        defer live.deinit();
+        const text = try live.text();
+        try std.testing.expect(std.mem.indexOf(u8, text, "Loading") == null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "Chat witness") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, if (scenario == .empty) "No unarchived Sessions." else "k7m2qx") != null);
+        try std.testing.expect(overview.initial_list_deadline == null);
+    }
+}
+
 test "App overview paints its ground and plain footer" {
     var cancellation: client.Cancellation = .{};
     const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .provider = "codex", .model = "gpt-5.5" }, fake_operations, &cancellation);
@@ -2807,13 +2872,13 @@ test "while a conversation holds the terminal its stop goes first, the listing g
     try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
     overview.opened = "k7m2qx".*;
     try overview.dispatch(.lent);
-    try std.testing.expectEqual(Job.host, std.meta.activeTag(overview.job));
+    try std.testing.expectEqual(Job.list, std.meta.activeTag(overview.job));
     _ = try conversed(overview, .working, .stop);
     try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(2)), overview, Lent.answered);
     try std.testing.expectEqual(Job.stop, std.meta.activeTag(overview.job));
     try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(2)), overview, Lent.answered);
     try std.testing.expectEqual(@as(usize, 1), Seen.now.stops);
-    try std.testing.expectEqual(Job.list, std.meta.activeTag(overview.job));
+    try std.testing.expectEqual(Job.host, std.meta.activeTag(overview.job));
     try rig.lend();
     try std.testing.expect(Seen.now.hosts >= 1 and Seen.now.lists >= 1);
     try std.testing.expectEqual(@as(usize, 0), overview.job_count);
@@ -2828,7 +2893,6 @@ test "while a conversation holds the terminal its stop goes first, the listing g
     defer failing.close();
     try std.testing.expect(try failing.overview.event(.{ .tick = test_now_s * 1000 }) == null);
     try failing.overview.dispatch(.all);
-    try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(2)), failing.overview, Lent.answered);
     try std.testing.expectEqual(Job.list, std.meta.activeTag(failing.overview.job));
     failing.overview.opened = "k7m2qx".*;
     try std.testing.expectError(error.CanonicalStoreFailure, test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(2)), failing.overview, Lent.answered));
@@ -3905,10 +3969,6 @@ test "a listing failure under a conversation ends the overview once the terminal
     rig.overview.hooks.scratch = Scratch.scratch;
     const overview = rig.overview;
     try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
-    try overview.dispatch(.all);
-    try std.testing.expectEqual(Job.host, std.meta.activeTag(overview.job));
-    try rig.answered();
-    try std.testing.expect(try overview.complete() == null);
     try overview.dispatch(.all);
     try std.testing.expectEqual(Job.list, std.meta.activeTag(overview.job));
     try rig.answered();
