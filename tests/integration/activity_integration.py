@@ -85,6 +85,12 @@ def main():
         def do_POST(self):
             json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             self.server.calls = getattr(self.server, "calls", 0) + 1
+            if self.server.calls == 2:
+                self.server.second_arrived.set()
+                assert self.server.second_release.wait(10), "second response was not released"
+            if self.server.calls == 3:
+                self.server.third_arrived.set()
+                assert self.server.third_release.wait(10), "third response was not released"
             body = successful_sse(1, TEXT) if self.server.calls == 2 else sse_tool_calls("activity", CALLS)
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
@@ -102,6 +108,10 @@ def main():
         store = state / "store"
         store.mkdir(mode=0o700)
         endpoint = TestHTTPServer(("127.0.0.1", 0), Handler)
+        endpoint.second_arrived = threading.Event()
+        endpoint.second_release = threading.Event()
+        endpoint.third_arrived = threading.Event()
+        endpoint.third_release = threading.Event()
         worker = threading.Thread(target=endpoint.serve_forever)
         worker.start()
         process = None
@@ -156,15 +166,23 @@ def main():
             assert caller(store, "prefix", pending[0]["position"]) == TEXT.split("\n")[0].encode()
             assert caller(store, "prefix", calls[0]["position"]) == CALLS[0][2].encode()
             message(state, store, "second", SESSION, TEXT)
+            assert endpoint.second_arrived.wait(10), "second model request did not arrive"
             queued_end, queued = history(store)
-            assert queued[-1]["value"]["admission"]["state"] == "queued" and queued[-1]["value"]["admission"]["turn"] is None
+            second = next(r["value"]["admission"] for r in queued if kind(r) == "admission" and r["value"]["admission"]["key"] == "second")
+            assert second["state"] == "applied", second
+            assert kind(queued[-1]) == "user", queued[-1]
+            queued_end = queued[-1]["position"]
+            queued = history(store, queued_end)[1]
+            endpoint.second_release.set()
             action = calls[0]["value"]["call"]["action"]
             exact = subprocess.run([str(sys.argv[1]), "action", "read-arguments", "--store", str(store), "--session", SESSION, "--action", action], capture_output=True, timeout=10)
             assert exact.returncode == 0 and exact.stdout == CALLS[0][2].encode()
-            command("action", "deny", "--store", store, "--record", state / "deny", "--key", "deny", "--session", SESSION, "--action", action)
             wait_for(lambda: observe(store, "first").get("result", {}).get("status") == "completed", "complete Turn")
             complete_end, complete = history(store)
-            assert history(store, pending_end)[1] == pending and history(store, queued_end)[1] == queued
+            pending_again = history(store, pending_end)[1]
+            queued_again = history(store, queued_end)[1]
+            assert pending_again == pending, ("pending snapshot", pending, pending_again)
+            assert queued_again == queued, ("queued snapshot", queued, queued_again)
             results = [r for r in complete if kind(r) == "tool_result"]
             assert len(results) == 18 and len({r["position"] for r in results}) == 1
             assert [int(r["ordinal"]) for r in results] == list(range(1, 19))
@@ -181,7 +199,7 @@ def main():
                 cursor = projected["next"]
                 projected = page(store, cursor["end"], cursor["position"], cursor["ordinal"], cursor["direction"])
             assert page(store, direction="backward")["page"]["call_activity"]["total"] == "0"
-            assert caller(store, "content", results[0]["position"], results[0]["ordinal"]) == b"Permission denied."
+            assert caller(store, "content", results[0]["position"], results[0]["ordinal"]) == b"declined: a new message arrived; ask again if still needed"
             assert history(store, complete_end, direction="backward")[1] == list(reversed(complete))
             assert history(store, position=queued_end)[1] == [r for r in complete if int(r["position"]) > int(queued_end)], "catch-up replayed old group ties"
             for row in complete:
@@ -190,8 +208,10 @@ def main():
             done = [r for r in complete if kind(r) == "turn_ended" and r["value"]["turn_ended"]["ending"] == "done"]
             assert done and len(done) == len([r for r in complete if kind(r) == "assistant" and r["value"]["assistant"]["final"]]), complete
             message(state, store, "third", SESSION, "stopped work")
-            third = wait_for(lambda: (h := history(store)) and (h if len([r for r in h[1] if kind(r) == "call"]) == 36 else None), "later proposals")
+            assert endpoint.third_arrived.wait(10), "third model request did not arrive"
             message(state, store, "excluded", SESSION, "equal queued input")
+            endpoint.third_release.set()
+            third = wait_for(lambda: (h := history(store)) and (h if len([r for r in h[1] if kind(r) == "call"]) == 36 else None), "later proposals")
             stop_session(state, store, "stop", SESSION)
             stopped_end, stopped = wait_for(lambda: (h := history(store)) and (h if any(kind(r) == "turn_ended" and r["value"]["turn_ended"]["ending"] == "stopped" for r in h[1]) else None), "stopped outcome")
             assert history(store, third[0])[1] == third[1]
@@ -325,6 +345,8 @@ def main():
             assert mock_reply(fields["socket"], store, "content", b"p" * 4096 + b"abc", 4105) == b"p" * 4096
             print("activity typed native: model calls/mixed kinds/complete content/proposals/fixed-end/reverse/ties/catch-up/restart/provenance/malformed/truncation passed")
         finally:
+            endpoint.second_release.set()
+            endpoint.third_release.set()
             if process is not None: stop_process(process)
             endpoint.shutdown()
             endpoint.server_close()

@@ -356,7 +356,7 @@ def main(report_source):
         silent = run(installed, "request", "inspect", handle, home=home)
         assert silent["key"] == receipt["context"]["key"], silent
         assert silent["observation"]["target"] == session_b, silent
-        assert silent["observation"].get("result", {}).get("status") != "completed", silent
+        assert silent["observation"]["status"] == "accepted", silent
 
         environment = dict(line.split("=", 1) for line in (workspace / "a-env.txt").read_text().splitlines() if "=" in line)
         assert environment["PATH"] == f"{installed.parent}:{os.environ['PATH']}", environment
@@ -401,13 +401,17 @@ def main(report_source):
         assert len(a_requests) == 3, a_requests
         b_final = wait_for(lambda: (lambda value: value if value["work"]["state"]["kind"] == "finished" and value["pending_messages"] == "0" else None)(
             run(installed, "session", "inspect", "--store", store, "--session", session_b, home=home)), "B's Turn", timeout=20)
-        assert {row["message"] for row in b_final["recent_messages"]} == {receipt["context"]["key"], *self_sends}, b_final
+        b_messages = {row["message"] for row in b_final["recent_messages"]}
+        expected_messages = {receipt["context"]["key"], *self_sends}
+        final_inputs = b_messages - expected_messages
+        assert len(final_inputs) == 1 and next(iter(final_inputs)).startswith("rui.core/action-final/"), b_final
+        assert expected_messages <= b_messages, b_final
         for record, key in zip((state / "b-self.json", generated_self_record), self_sends):
             replay = run(installed, "request", "recover", "--store", store, "--record", record, "--kind", "message", home=home)
             assert replay["answer"]["status"] == "accepted" and replay["answer"]["replayed"] is True, replay
             assert replay["context"]["key"] == key and replay["context"]["session"] == session_b, replay
         b_after = run(installed, "session", "inspect", "--store", store, "--session", session_b, home=home)
-        assert {row["message"] for row in b_after["recent_messages"]} == {receipt["context"]["key"], *self_sends}, b_after
+        assert {row["message"] for row in b_after["recent_messages"]} == b_messages, b_after
         for key in (receipt["context"]["key"], *self_sends):
             local = subprocess.run([str(installed), "request", "read-result", "--store", str(store), "--key", key],
                                    text=True, capture_output=True, timeout=15, env={"PATH": os.environ["PATH"], "HOME": str(home), "RUI_TEST_MODELS_DEV_URL": ""})
@@ -416,7 +420,9 @@ def main(report_source):
         assert [row["message"] for row in a_after["recent_messages"]] == [reply["context"]["key"], ask_key], a_after
         assert "plain reply stays local" not in json.dumps(a_reply_request), a_reply_request
         b_requests = [request for request in endpoint.requests if address_of(request) == session_b]
-        assert sum(bool(tool_outputs(request)) for request in b_requests) == 1, b_requests
+        b_receipts = [item for request in b_requests for item in request["input"]
+                      if item.get("type") == "function_call_output" and item.get("call_id") == "b-reply-call"]
+        assert b_receipts and all(json.loads(item["output"])["execution"] == "background" for item in b_receipts), b_receipts
         rows = {row["reference"]: row for row in run(installed, "session", "list", "--store", store, "--all", home=home)["sessions"]}
         assert (rows[session_a]["label"], rows[session_b]["label"]) == (A_LABEL, B_LABEL), rows
         assert rows[session_b]["first_message"]["sender"] == {"session": session_a}, rows[session_b]
