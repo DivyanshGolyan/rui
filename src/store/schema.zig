@@ -16,7 +16,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631;
-pub const schema_version: u32 = 80;
+pub const schema_version: u32 = 81;
 
 pub const IdentityMismatch = struct {
     saved_selector: Bounded(store_path.max_bytes) = .{},
@@ -59,6 +59,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 78, .digest = 0xa3f9fee49afacee2 },
     .{ .schema_version = 79, .digest = 0x73f89feb47e61ded },
     .{ .schema_version = 80, .digest = 0xa19f085a8611c762 },
+    .{ .schema_version = 81, .digest = 0x3fc38cd4bb9b66b9 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -737,6 +738,36 @@ pub const migrations = [_]Migration{
             "UPDATE session SET creator_ref=parent_ref",
         },
     },
+    .{
+        .from = 80,
+        .sqlite = &.{
+            "ALTER TABLE core_command RENAME TO core_command_before_81",
+            "CREATE TABLE core_command(\n command_key TEXT NOT NULL UNIQUE CHECK(length(CAST(command_key AS BLOB))<=128),\n kind INTEGER NOT NULL CHECK(kind BETWEEN 1 AND 9),\n target TEXT NOT NULL CHECK(length(CAST(target AS BLOB))<=128),\n input_digest BLOB NOT NULL CHECK(length(input_digest)=32),\n primary_content_id INTEGER REFERENCES content(content_id),\n secondary_content_id INTEGER REFERENCES content(content_id),\n accepted INTEGER NOT NULL CHECK(accepted IN (0,1)),\n code TEXT NOT NULL CHECK(length(CAST(code AS BLOB))<=96),\n revision INTEGER NOT NULL CHECK(revision>=0),\n created INTEGER NOT NULL CHECK(created IN (0,1)),\n command_seq INTEGER PRIMARY KEY NOT NULL CHECK(command_seq>0)\n) STRICT",
+            "INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq) SELECT command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq FROM core_command_before_81",
+            "DROP TABLE core_command_before_81",
+            "CREATE INDEX core_command_target_order ON core_command(target,kind,command_seq)",
+            "ALTER TABLE action_stop RENAME TO action_stop_before_81",
+            "CREATE TABLE action_stop(\n stop_key TEXT PRIMARY KEY NOT NULL CHECK(length(CAST(stop_key AS BLOB))<=130),\n source_action_id INTEGER UNIQUE REFERENCES action_operation(action_id),\n source_command_key TEXT UNIQUE REFERENCES core_command(command_key),\n target_action_id INTEGER NOT NULL REFERENCES action_operation(action_id),\n CHECK(source_action_id<>target_action_id),\n CHECK((source_action_id IS NULL)<>(source_command_key IS NULL))\n) STRICT, WITHOUT ROWID",
+            "INSERT INTO action_stop(stop_key,source_action_id,target_action_id) SELECT 'a/'||source_action_id,source_action_id,target_action_id FROM action_stop_before_81",
+            "DROP TABLE action_stop_before_81",
+            "CREATE INDEX action_stop_target ON action_stop(target_action_id)",
+            "CREATE TABLE action_stop_command(\n command_key TEXT PRIMARY KEY NOT NULL REFERENCES core_command(command_key),\n action_id TEXT NOT NULL CHECK(length(CAST(action_id AS BLOB)) BETWEEN 1 AND 20 AND (action_id NOT GLOB '*[^0-9]*' AND length(action_id)=length(CAST(action_id AS BLOB)))),\n resolution_position INTEGER CHECK(resolution_position>0)\n) STRICT, WITHOUT ROWID",
+        },
+        .mysql = &.{
+            "SET @rui_action_stop_kind_ddl=NULL",
+            "SET @rui_action_stop_kind_ddl=(SELECT CONCAT('ALTER TABLE core_command DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`, ADD CHECK(kind BETWEEN 1 AND 9)') FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='core_command' AND tc.CONSTRAINT_TYPE='CHECK' AND LOWER(TRIM(REPLACE(REPLACE(REPLACE(cc.CHECK_CLAUSE,'`',''),'(',''),')','')))='kind between 1 and 8')",
+            "PREPARE rui_action_stop_kind FROM @rui_action_stop_kind_ddl",
+            "EXECUTE rui_action_stop_kind",
+            "DEALLOCATE PREPARE rui_action_stop_kind",
+            "SET @rui_action_stop_kind_ddl=NULL",
+            "ALTER TABLE action_stop RENAME TO action_stop_before_81",
+            "CREATE TABLE action_stop(\n stop_key VARCHAR(130) NOT NULL,\n source_action_id BIGINT,\n source_command_key VARCHAR(128),\n target_action_id BIGINT NOT NULL,\n PRIMARY KEY(stop_key),\n UNIQUE(source_action_id),\n UNIQUE(source_command_key),\n FOREIGN KEY(source_action_id) REFERENCES action_operation(action_id),\n FOREIGN KEY(source_command_key) REFERENCES core_command(command_key),\n FOREIGN KEY(target_action_id) REFERENCES action_operation(action_id),\n CHECK(OCTET_LENGTH(stop_key)<=130),\n CHECK(source_action_id<>target_action_id),\n CHECK((source_action_id IS NULL)<>(source_command_key IS NULL))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
+            "INSERT INTO action_stop(stop_key,source_action_id,target_action_id) SELECT CONCAT('a/',source_action_id),source_action_id,target_action_id FROM action_stop_before_81",
+            "DROP TABLE action_stop_before_81",
+            "CREATE INDEX action_stop_target ON action_stop(target_action_id)",
+            "CREATE TABLE action_stop_command(\n command_key VARCHAR(128) NOT NULL,\n action_id TEXT NOT NULL,\n resolution_position BIGINT,\n PRIMARY KEY(command_key),\n FOREIGN KEY(command_key) REFERENCES core_command(command_key),\n CHECK(OCTET_LENGTH(action_id) BETWEEN 1 AND 20 AND (NOT REGEXP_LIKE(action_id,'[^0-9]','c'))),\n CHECK(resolution_position>0)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
+        },
+    },
 };
 
 comptime {
@@ -1142,7 +1173,7 @@ pub const tables = [_]Table{
         .name = "core_command",
         .columns = &.{
             .{ .name = "command_key", .type = .{ .text = .{ .max = 128 } } },
-            .{ .name = "kind", .type = .int, .check = "kind BETWEEN 1 AND 8" },
+            .{ .name = "kind", .type = .int, .check = "kind BETWEEN 1 AND 9" },
             .{ .name = "target", .type = .{ .text = .{ .max = 128 } } },
             .{ .name = "input_digest", .type = .{ .bytes = .{ .min = 32, .max = 32 } } },
             .{ .name = "primary_content_id", .type = .int, .nullable = true, .holds = .value },
@@ -1678,15 +1709,30 @@ pub const tables = [_]Table{
     .{
         .name = "action_stop",
         .columns = &.{
-            .{ .name = "source_action_id", .type = .int },
+            .{ .name = "stop_key", .type = .{ .text = .{ .max = 130 } } },
+            .{ .name = "source_action_id", .type = .int, .nullable = true },
+            .{ .name = "source_command_key", .type = .{ .text = null }, .nullable = true },
             .{ .name = "target_action_id", .type = .int },
         },
-        .primary_key = &.{"source_action_id"},
+        .primary_key = &.{"stop_key"},
+        .uniques = &.{ &.{"source_action_id"}, &.{"source_command_key"} },
         .foreign_keys = &.{
             references("source_action_id", "action_operation", &.{"action_id"}),
+            references("source_command_key", "core_command", command_reference),
             references("target_action_id", "action_operation", &.{"action_id"}),
         },
-        .checks = &.{"source_action_id<>target_action_id"},
+        .checks = &.{ "source_action_id<>target_action_id", "(source_action_id IS NULL)<>(source_command_key IS NULL)" },
+        .without_rowid = true,
+    },
+    .{
+        .name = "action_stop_command",
+        .columns = &.{
+            .{ .name = "command_key", .type = .{ .text = null } },
+            .{ .name = "action_id", .type = .{ .text = .{ .min = 1, .max = 20 } }, .check = "@charset(action_id,'0-9')" },
+            .{ .name = "resolution_position", .type = .int, .nullable = true, .check = "resolution_position>0" },
+        },
+        .primary_key = &.{"command_key"},
+        .foreign_keys = &.{references("command_key", "core_command", command_reference)},
         .without_rowid = true,
     },
     .{
@@ -2750,7 +2796,12 @@ test "schema 76 migration creates canonical promotion objects on SQLite and MySQ
         for (statements) |statement| {
             if (!std.mem.startsWith(u8, statement, "CREATE ")) continue;
             for (expected) |object| {
-                if (std.mem.eql(u8, object.sql, statement)) {
+                const historical = if (dialect == .sqlite and std.mem.eql(u8, object.name, "core_command"))
+                    try std.mem.replaceOwned(u8, std.testing.allocator, object.sql, "kind BETWEEN 1 AND 9", "kind BETWEEN 1 AND 8")
+                else
+                    null;
+                defer if (historical) |text| std.testing.allocator.free(text);
+                if (std.mem.eql(u8, historical orelse object.sql, statement)) {
                     matched += 1;
                     break;
                 }
@@ -2776,7 +2827,7 @@ test "schema 75 migration creates canonical pin objects on SQLite and MySQL" {
             if (!std.mem.startsWith(u8, statement, "CREATE ")) continue;
             for (expected) |object| {
                 const historical = if (dialect == .sqlite and std.mem.eql(u8, object.name, "core_command"))
-                    try std.mem.replaceOwned(u8, std.testing.allocator, object.sql, "kind BETWEEN 1 AND 8", "kind BETWEEN 1 AND 7")
+                    try std.mem.replaceOwned(u8, std.testing.allocator, object.sql, "kind BETWEEN 1 AND 9", "kind BETWEEN 1 AND 7")
                 else
                     null;
                 defer if (historical) |text| std.testing.allocator.free(text);
@@ -3039,8 +3090,6 @@ test "schema 57 preserves Commands and stop references while adding nullable arc
         "UPDATE session_forward SET suppress_message=-1 WHERE source_id=1",
         "UPDATE session_forward SET suppress_message=2 WHERE source_id=1",
         "UPDATE session_forward SET suppress_message=NULL WHERE source_id=1",
-        "UPDATE core_command SET kind=0 WHERE command_key='archive-request'",
-        "UPDATE core_command SET kind=9 WHERE command_key='archive-request'",
         "UPDATE core_command SET command_key='fixture-stop' WHERE command_key='archive-request'",
         "INSERT INTO session_archive(session_ref,command_key) VALUES('k7m2qx','fixture-stop')",
         "INSERT INTO session_archive(session_ref,command_key) VALUES('rhvzwc','archive-request')",
@@ -3345,4 +3394,41 @@ test "schema 80 creator migration matches canonical SQLite and MySQL column cons
     try std.testing.expect(std.mem.indexOf(u8, canonical_session_mysql, "CHECK(" ++ creator.check.? ++ ")") != null);
     try std.testing.expect(std.mem.indexOf(u8, step.mysql[0], "CHECK(" ++ creator.check.? ++ ")") != null);
     try std.testing.expect(std.mem.indexOf(u8, step.mysql[0], "FOREIGN KEY(creator_ref) REFERENCES session(session_ref)") != null);
+}
+
+test "schema 81 preserves model stop sources and adds exclusive command sources" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [store_path.max_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var path_buffer: [store_path.max_bytes + 32]u8 = undefined;
+    const path = try std.fmt.bufPrintSentinel(&path_buffer, "{s}/stop.sqlite3", .{root}, 0);
+    var raw: ?*c.sqlite3 = null;
+    defer _ = c.sqlite3_close(raw);
+    try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_open(path, &raw));
+    const database = raw.?;
+    try sqlite.exec(database, @embedFile("migration_baseline.sqlite.sql"));
+    try sqlite.exec(database, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
+    try sqlite.exec(database, @embedFile("migration_baseline_rows.sql"));
+    for (migrations) |step| {
+        if (step.from >= 80) break;
+        for (step.sqlite) |statement| try sqlite.exec(database, statement);
+    }
+    try sqlite.exec(database, "INSERT INTO action_stop(source_action_id,target_action_id) SELECT min(action_id),max(action_id) FROM action_operation");
+    try sqlite.exec(database, "CREATE TEMP TABLE old_stops AS SELECT * FROM action_stop");
+    for (migrations[80 - migration_baseline].sqlite) |statement| try sqlite.exec(database, statement);
+    try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT count(*) FROM action_stop"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM old_stops EXCEPT SELECT source_action_id,target_action_id FROM action_stop)"));
+    try sqlite.exec(database, "PRAGMA foreign_keys=ON;PRAGMA legacy_alter_table=OFF");
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM pragma_foreign_key_check"));
+    try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, "UPDATE action_stop SET source_action_id=NULL"));
+    try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, "UPDATE action_stop SET source_command_key=(SELECT command_key FROM core_command LIMIT 1)"));
+    inline for (.{ .sqlite, .mysql }) |dialect| {
+        inline for (comptime objects(dialect)) |object| {
+            if (comptime !std.mem.eql(u8, object.name, "action_stop") and !std.mem.eql(u8, object.name, "action_stop_command")) continue;
+            var found = false;
+            for (if (dialect == .sqlite) migrations[80 - migration_baseline].sqlite else migrations[80 - migration_baseline].mysql) |statement| found = found or std.mem.eql(u8, object.sql, statement);
+            try std.testing.expect(found);
+        }
+    }
 }

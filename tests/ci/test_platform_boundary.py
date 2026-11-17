@@ -254,7 +254,7 @@ class PlatformBoundaryTest(unittest.TestCase):
     def test_mac_specific_paths(self):
         for path in ("src/client.zig", "src/os/socket.zig", "tests/integration/os_semantics.py", "src/host_launch.c",
                      "src/build_transport.sh", "tests/integration/session_list_release_probe.c",
-                     ".github/workflows/qualify-macos.yml", "install.sh", "build/darwin.zig",
+                     ".github/workflows/qualify-macos.yml", "install.sh", "build/darwin.zig", "tests/ci/build_artifact.py",
                      "src/os/process.zig", "src/os/descriptor_limit.zig", "src/h2/Connection.zig",
                      "src/h2/testing/Peer.zig", "tests/integration/terminal_process.py",
                      "tests/integration/terminal_leader.py", "tests/integration/terminal_restoration_cases.py"):
@@ -271,6 +271,24 @@ class PlatformBoundaryTest(unittest.TestCase):
         self.assertFalse(select(["src/turn_policy.zig"], "review", AVAILABLE)["mac_required"])
         self.assertTrue(select(["tests/integration/terminal_leader.py"], "review", AVAILABLE)["mac_required"])
         self.assertFalse(select(["src/os/socket.zig"], "development", AVAILABLE)["mac_required"])
+
+    def test_ci_producer_darwin_policy_requires_native_on_ready_prs(self):
+        from ci_plan import plan
+        from docs_only import ChangeKind
+
+        selected = select(["tests/ci/build_artifact.py"], "review", AVAILABLE)
+        self.assertTrue(selected["mac_required"])
+        self.assertTrue({"check-full", "admission-debug-integration", "test-full"}
+                        <= set(selected["native_targets"]))
+        ready = plan(selected, event_name="pull_request", draft=False,
+                     promotion=False, change_kind=ChangeKind.NORMAL).outputs
+        self.assertTrue(ready["native"])
+        self.assertEqual(ready["native_targets"], selected["native_targets"])
+        draft = plan(selected, event_name="pull_request", draft=True,
+                     promotion=False, change_kind=ChangeKind.NORMAL).outputs
+        self.assertFalse(draft["native"])
+        self.assertEqual(draft["native_targets"], [])
+        self.assertFalse(select(["tests/ci/build_artifact.py"], "development", AVAILABLE)["mac_required"])
 
     def test_client_process_observation_keeps_native_mac_upgrade_on_ready_prs(self):
         from ci_plan import plan

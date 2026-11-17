@@ -47,16 +47,15 @@ pub const SessionControls = struct {
         const self: *SessionControls = @ptrCast(@alignCast(raw));
         const GroupedList = @import("GroupedList.zig");
         const width = @import("widgets/RowInset.zig").contentWidth(ctx.max.width.?);
-        const built = try overview_view.controlSegments(ctx.arena, self.state, .new_session, width, self.caps);
-        const tabs = try overview_view.controlSegments(ctx.arena, self.state, .views, width, self.caps);
-        var regions: std.ArrayList(GroupedList.Region) = .empty;
-        if (tabs.sessions) |at| try regions.append(ctx.arena, .{ .start = at.start, .end = at.end, .target = .sessions, .selected = self.state.selected == .sessions });
-        if (tabs.archived) |at| try regions.append(ctx.arena, .{ .start = at.start, .end = at.end, .target = .archived, .selected = self.state.selected == .archived });
+        const lines = try overview_view.controls(ctx.arena, self.state, width, self.caps);
         const rows = try ctx.arena.create([]const GroupedList.Row);
-        rows.* = try ctx.arena.dupe(GroupedList.Row, &.{
-            .{ .segments = built.segments, .target = .new_session },
-            .{ .segments = tabs.segments, .regions = regions.items },
-        });
+        const projected = try ctx.arena.alloc(GroupedList.Row, lines.len);
+        for (lines, projected) |line, *row| {
+            const regions = try ctx.arena.alloc(GroupedList.Region, line.regions.len);
+            for (line.regions, regions) |region, *target| target.* = .{ .start = region.start, .end = region.end, .target = region.target, .selected = region.selected };
+            row.* = .{ .segments = line.segments, .target = line.target, .regions = regions };
+        }
+        rows.* = projected;
         self.row.rows = .of(rows);
         self.row.selected = if (self.state.selected == .new_session) 0 else null;
         self.row.caps = self.caps;

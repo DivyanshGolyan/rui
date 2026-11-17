@@ -50,13 +50,40 @@ pub fn Watched(comptime Visitor: type) type {
     };
 }
 
+pub const Pressure = struct {
+    read: ?*const model_admission_domain.PartsPressure.Read = null,
+    needed: ?model_admission_domain.PartsPressure.Coverage = null,
+    needed_boundary: u64 = std.math.maxInt(i64),
+
+    fn advance(self: *Pressure, read: *model_admission_domain.CompactionRead, a: *ReadAccess) !void {
+        read.pressure = self.read;
+        read.advance(a) catch |err| {
+            if (err == error.PartsPressureRequired) {
+                self.needed = read.bytes_args;
+                self.needed_boundary = read.boundary;
+            }
+            return err;
+        };
+    }
+};
+
 pub fn readSessionReport(a: *ReadAccess, session_ref: []const u8, profile: cli_value.ReportProfile, watched: anytype) !void {
-    if (!try readHead(a, session_ref, profile, watched)) return;
+    var pressure: Pressure = .{};
+    return readSessionReportWithPressure(a, session_ref, profile, watched, &pressure);
+}
+
+pub fn readSessionReportWithPressure(a: *ReadAccess, session_ref: []const u8, profile: cli_value.ReportProfile, watched: anytype, pressure: *Pressure) !void {
+    if (!try readHeadWithPressure(a, session_ref, profile, watched, pressure)) return;
     if (profile == .full) try report_domain.readFull(a, session_ref, watched);
     try watched.call("tail", .{});
 }
 
 pub noinline fn readHead(a: *ReadAccess, session_ref: []const u8, profile: cli_value.ReportProfile, watched: anytype) !bool {
+    var pressure: Pressure = .{};
+    return readHeadWithPressure(a, session_ref, profile, watched, &pressure);
+}
+
+fn readHeadWithPressure(a: *ReadAccess, session_ref: []const u8, profile: cli_value.ReportProfile, watched: anytype, pressure: *Pressure) !bool {
     var current: CurrentConfiguration = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } };
     var found: store_access.Found = undefined;
     configuration_domain.readSaved(a, session_ref, &current, &found);
@@ -66,7 +93,7 @@ pub noinline fn readHead(a: *ReadAccess, session_ref: []const u8, profile: cli_v
         return false;
     }
     try configuration_domain.checkSaved(&current);
-    try readCurrent(a, session_ref, profile, &current, watched);
+    try readCurrent(a, session_ref, profile, &current, watched, pressure);
     return true;
 }
 
@@ -254,7 +281,7 @@ const ToolNames = struct {
 };
 
 const set_names = rsql.Read(.{
-    .sql = "SELECT " ++ tool_set.namesSql("s.tool_set_id") ++ " AS names," ++ tool_set.namesSql("?2") ++ " AS loaded_names FROM tool_set s WHERE s.tool_set_id=?1",
+    .sql = "SELECT " ++ tool_set.namesSql("s.tool_set_id") ++ " AS names,CASE WHEN ?2=s.tool_set_id THEN NULL ELSE " ++ tool_set.namesSql("?2") ++ " END AS loaded_names FROM tool_set s WHERE s.tool_set_id=?1",
     .Args = struct { set: u64, loaded: u64 },
     .Row = struct { names: ?Bounded(tool_set.max_names_bytes), loaded_names: ?Bounded(tool_set.max_names_bytes) },
     .cardinality = .optional,
@@ -262,7 +289,7 @@ const set_names = rsql.Read(.{
 
 const CurrentScratch = struct { facts: CurrentFacts, tools: ToolNames };
 
-noinline fn readCurrent(a: *ReadAccess, session_ref: []const u8, profile: cli_value.ReportProfile, current: *const CurrentConfiguration, watched: anytype) !void {
+noinline fn readCurrent(a: *ReadAccess, session_ref: []const u8, profile: cli_value.ReportProfile, current: *const CurrentConfiguration, watched: anytype, pressure: *Pressure) !void {
     const policy = model_capability.compactionPolicy(current.model.slice(), current.compaction_trigger, current.output_reservation);
     const scratch = a.store.reportScratch(CurrentScratch);
     const facts = &scratch.facts;
@@ -288,7 +315,7 @@ noinline fn readCurrent(a: *ReadAccess, session_ref: []const u8, profile: cli_va
     a.readEach(selected_active, .{ .session = session_ref }, 1, &facts.active);
     try runCurrent(a);
     if (facts.compound) |compound| try report_domain.verifyFullCompound(a, compound);
-    try facts.compaction.advance();
+    try pressure.advance(&facts.compaction, a);
     try facts.work.advance();
 
     facts.counts.queuePending(a);
@@ -302,7 +329,7 @@ noinline fn readCurrent(a: *ReadAccess, session_ref: []const u8, profile: cli_va
     while (true) {
         try runCurrent(a);
         if (work_more) try facts.work.advance();
-        if (compaction_more) try facts.compaction.advance();
+        if (compaction_more) try pressure.advance(&facts.compaction, a);
         work_more = facts.work.queue(a);
         compaction_more = facts.compaction.queue(a);
         if (!work_more and !compaction_more) break;
@@ -313,7 +340,10 @@ noinline fn readCurrent(a: *ReadAccess, session_ref: []const u8, profile: cli_va
     if (!facts.tools_found.get()) return error.CorruptStore;
     const names = facts.tools;
     const tools = try report_domain.sortedToolNames(if (names.row.names) |*joined| joined.slice() else null, &names.tools);
-    const loaded_tools = try report_domain.sortedToolNames(if (names.row.loaded_names) |*joined| joined.slice() else null, &names.loaded);
+    const loaded_tools = if ((current.loaded_tool_set_id orelse current.tool_set_id) == current.tool_set_id)
+        tools
+    else
+        try report_domain.sortedToolNames(if (names.row.loaded_names) |*joined| joined.slice() else null, &names.loaded);
     const permission_mode = try configuration_domain.permissionMode(current.permission_mode);
     const now_ms = std.math.cast(u64, try store_core.readUnixMilliseconds(a.store.io)) orelse return error.IntegerOutOfRange;
     const work = try facts.work.work(current.created_at, now_ms);

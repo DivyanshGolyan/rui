@@ -587,3 +587,117 @@ test "a Current report's work grows linearly in one Operation's calls, as main's
         }
     }.run);
 }
+
+test "compound report preparation can cancel and restarts stale pressure before visitor output" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try configureTestSession(&storage, "report-pressure-config");
+            try submitTestMessage(&storage, &tmp, "report-pressure-first", "report-pressure-first", session.slice(), "first");
+            const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            const parts: [65]store_testing.MessagePart = @splat(.{ .bytes = "report pressure text" });
+            try store_testing.submitTestMessageParts(&storage, &tmp, "report-pressure-parts", session.slice(), &parts);
+            try settleCallsForTestingWithFaults(&storage, &tmp, first, "report-pressure-answer", &.{}, .{}, "{\"input_tokens\":990,\"output_tokens\":0}");
+
+            var root: [protocol.max_store_bytes]u8 = undefined;
+            const root_length = try tmp.dir.realPath(std.testing.io, &root);
+            var used = std.atomic.Value(u64).init(0);
+            var capture: report_domain.SessionReportCapture = .{ .io = std.testing.io, .writer = null, .budget = .{ .used = &used, .limit = 1024 * 1024 } };
+            try capture.create(root[0..root_length], 73, false);
+            defer capture.deinit();
+            var reply: TestingReportReply = .{ .capture = &capture, .execution = .{ .dispatch_fenced = false, .custody_occupied = 0, .scratch_used_bytes = 0 } };
+            var pressure: session_report_read_domain.Pressure = .{};
+            var token: ?@import("../../change_ring.zig").SessionToken = null;
+            try std.testing.expect(!try storage.readSessionReportStep(session.slice(), .current, &reply, &pressure, &token));
+            try std.testing.expectEqual(@as(u64, 0), capture.length);
+            try std.testing.expectEqual(@as(usize, 0), capture.buffered);
+            const Read = @import("../domain/model_admission.zig").PartsPressure.Read;
+            const mapped = try @import("../../os/pages.zig").Mapped(Read).map();
+            defer mapped.unmap();
+            const read = mapped.value;
+            const coverage = pressure.needed.?;
+            read.init(coverage.session, coverage.covered, coverage.frontier, coverage.results, std.math.maxInt(i64));
+            read.boundary = pressure.needed_boundary;
+            defer read.deinit();
+            var steps: usize = 0;
+            while (read.cursor == null) : (steps += 1) {
+                try std.testing.expect(steps < 16);
+                try std.testing.expect(!try storage.advancePartsPressure(read));
+            }
+            read.deinit();
+            try std.testing.expect(read.cursor == null);
+            try std.testing.expect(!storage.isFenced());
+            read.init(coverage.session, coverage.covered, coverage.frontier, coverage.results, std.math.maxInt(i64));
+            read.boundary = pressure.needed_boundary;
+            while (!try storage.advancePartsPressure(read)) {}
+            pressure.read = read;
+            try submitTestMessage(&storage, &tmp, "report-pressure-later", "report-pressure-later", session.slice(), "later");
+            try std.testing.expect(!try storage.readSessionReportStep(session.slice(), .current, &reply, &pressure, &token));
+            try std.testing.expect(pressure.read == null);
+            try std.testing.expectEqual(@as(u64, 0), capture.length);
+            try std.testing.expectEqual(@as(usize, 0), capture.buffered);
+            const fresh = pressure.needed.?;
+            read.deinit();
+            read.init(fresh.session, fresh.covered, fresh.frontier, fresh.results, std.math.maxInt(i64));
+            read.boundary = pressure.needed_boundary;
+            while (!try storage.advancePartsPressure(read)) {}
+            pressure.read = read;
+            try std.testing.expect(try storage.readSessionReportStep(session.slice(), .current, &reply, &pressure, &token));
+            var report = try capture.seal();
+            defer report.deinit();
+            const body = try std.testing.allocator.alloc(u8, @intCast(report.length));
+            defer std.testing.allocator.free(body);
+            try std.testing.expectEqual(body.len, try report.read(0, body));
+            var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
+            defer parsed.deinit();
+            const fresh_body = try testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024);
+            defer std.testing.allocator.free(fresh_body);
+            try std.testing.expectEqualStrings(fresh_body, body);
+            try std.testing.expect(!storage.isFenced());
+        }
+    }.run);
+}
+
+test "Current reports preserve equal distinct and empty loaded tool names" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            const Variant = struct { tools: []const []const u8, loaded: ?[]const []const u8 };
+            const variants = [_]Variant{
+                .{ .tools = &.{ "bash", "find_tools" }, .loaded = null },
+                .{ .tools = &.{ "bash", "find_tools" }, .loaded = &.{ "bash", "find_tools" } },
+                .{ .tools = &.{ "bash", "find_tools" }, .loaded = &.{"find_tools"} },
+                .{ .tools = &.{}, .loaded = &.{} },
+            };
+            for (variants) |variant| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                var workspace: [protocol.max_workspace_bytes]u8 = undefined;
+                var command = try store_testing.completeConfiguration("report-names-config", "", try store_testing.canonicalCwd(std.testing.io, &workspace), "model-a");
+                command.configuration.tools = try .of(variant.tools);
+                if (variant.loaded) |loaded| command.configuration.loaded_tools = try .of(loaded);
+                const configured = try storage.configure(&command, .{});
+                try std.testing.expect(configured == .accepted);
+                const body = try testingSessionReport(&storage, &tmp, configured.accepted.session.slice(), 1024 * 1024);
+                defer std.testing.allocator.free(body);
+                var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
+                defer parsed.deinit();
+                const session = parsed.value.object.get("session").?.object;
+                const tools = session.get("tools").?.array.items;
+                const loaded = session.get("loaded_tools").?.array.items;
+                const expected = variant.loaded orelse variant.tools;
+                try std.testing.expectEqual(variant.tools.len, tools.len);
+                try std.testing.expectEqual(expected.len, loaded.len);
+                for (tools, variant.tools) |actual, name| try std.testing.expectEqualStrings(name, actual.string);
+                for (loaded, expected) |actual, name| try std.testing.expectEqualStrings(name, actual.string);
+                try std.testing.expect(!storage.isFenced());
+            }
+        }
+    }.run);
+}

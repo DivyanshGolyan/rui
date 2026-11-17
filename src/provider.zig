@@ -6,6 +6,7 @@ const attempt = @import("attempt.zig");
 const transport_policy = @import("transport_policy.zig");
 const codec_abi = @import("codec_abi.zig");
 const codecs = @import("codecs.zig");
+const pages = @import("os/pages.zig");
 
 pub const nghttp2_version = h2.nghttp2_version;
 pub const openssl_version = h2.openssl_version;
@@ -238,6 +239,16 @@ pub const Reactor = struct {
     wake: ?*std.Io.Event = null,
 
     pub fn init(self: *Reactor, allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
+        return self.initWithProxy(allocator, io, options, h2.proxyFromEnvironment());
+    }
+
+    /// Loopback request counters must never inherit a caller's external proxy.
+    pub fn initForTesting(self: *Reactor, allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
+        if (!@import("builtin").is_test) @compileError("test-only direct Reactor initialization");
+        return self.initWithProxy(allocator, io, options, null);
+    }
+
+    fn initWithProxy(self: *Reactor, allocator: std.mem.Allocator, io: std.Io, options: Options, proxy: ?h2.Proxy) !void {
         if (options.inactivity_seconds <= 0) return error.InvalidTransportTimeout;
         const interval_ns = std.math.mul(u64, @intCast(options.inactivity_seconds), std.time.ns_per_s) catch
             return error.InvalidTransportTimeout;
@@ -264,7 +275,7 @@ pub const Reactor = struct {
             .inactivity_ns = interval_ns,
             .connect_timeout_ns = interval_ns,
             .trust = if (options.ca_file) |path| .{ .ca_file = path } else .system,
-            .proxy = h2.proxyFromEnvironment(),
+            .proxy = proxy,
         });
         errdefer self.client.deinit();
         for (options.endpoints.values, &self.endpoints.values) |url, *endpoint| {
@@ -439,8 +450,12 @@ pub const Reactor = struct {
                 return .accept;
             },
             .body => |length| {
-                if (!self.budget.allocate(length)) return .refuse;
-                transfer.response.charged += length;
+                const next = std.math.add(u64, transfer.response.length, length) catch return .refuse;
+                if (next > transfer.response.charged) {
+                    if (!self.budget.allocate(next - transfer.response.charged)) return .refuse;
+                    transfer.response.charged = next;
+                }
+                transfer.response.length = next;
                 return .accept;
             },
             .body_retired => {
@@ -456,6 +471,7 @@ pub const ResponseCapture = struct {
     readonly: ?std.Io.File,
     length: u64 = 0,
     charged: u64 = 0,
+    workspace: []align(std.heap.page_size_min) u8 = &.{},
 
     pub fn init(
         io: std.Io,
@@ -465,6 +481,7 @@ pub const ResponseCapture = struct {
         fail_acquire: bool,
         fail_unlink: bool,
         retained: *?named_scratch.Owner,
+        reserve_bytes: usize,
     ) !ResponseCapture {
         retained.* = null;
         if (fail_acquire) return error.InjectedResponseAcquireFailure;
@@ -493,7 +510,13 @@ pub const ResponseCapture = struct {
             retained.* = .init(io, file, readonly, name, budget, 0, .native);
             return err;
         };
-        return .{ .file = file, .readonly = readonly };
+        errdefer file.close(io);
+        errdefer readonly.close(io);
+        if (reserve_bytes != 0 and !budget.allocate(reserve_bytes)) return error.ResponseScratchExhausted;
+        errdefer budget.release(reserve_bytes);
+        if (reserve_bytes != 0) try file.setLength(io, reserve_bytes);
+        const workspace = try pages.mapWritable(io, file, reserve_bytes);
+        return .{ .file = file, .readonly = readonly, .charged = reserve_bytes, .workspace = workspace };
     }
 
     fn sink(self: *const ResponseCapture, fail_write: bool) h2.Sink {
@@ -502,15 +525,22 @@ pub const ResponseCapture = struct {
 
     pub fn seal(self: *ResponseCapture, io: std.Io, fail: bool, written: u64) !void {
         std.debug.assert(self.readonly != null);
-        self.length = written;
         if (fail) return error.InjectedResponseSealFailure;
-        if (try self.file.length(io) != written) return error.ResponseSealFailed;
-        self.file.close(io);
-        self.file = self.readonly.?;
+        if (self.length != written or self.charged != @max(@as(u64, self.workspace.len), written) or
+            try self.file.length(io) != self.charged) return error.ResponseSealFailed;
+        if (self.workspace.len == 0) {
+            self.file.close(io);
+            self.file = self.readonly.?;
+        } else {
+            // A reserved capture becomes its settlement workspace after parsing.
+            // Keep the existing writable alias; no extra handle survives.
+            self.readonly.?.close(io);
+        }
         self.readonly = null;
     }
 
     pub fn deinit(self: *ResponseCapture, io: std.Io, budget: ScratchBudget) void {
+        if (self.workspace.len != 0) pages.unmapReadOnly(self.workspace);
         self.file.close(io);
         if (self.readonly) |readonly| readonly.close(io);
         budget.release(self.charged);
@@ -524,8 +554,15 @@ pub const SealedResponse = struct {
     length: u64,
     charged: u64,
     budget: ScratchBudget,
+    workspace: []align(std.heap.page_size_min) u8 = &.{},
+
+    pub fn state(self: *const SealedResponse, comptime T: type) *T {
+        std.debug.assert(self.workspace.len >= @sizeOf(T));
+        return @ptrCast(@alignCast(self.workspace.ptr));
+    }
 
     pub fn deinit(self: *SealedResponse) void {
+        if (self.workspace.len != 0) pages.unmapReadOnly(self.workspace);
         self.file.close(self.io);
         self.budget.release(self.charged);
         self.* = undefined;
@@ -644,6 +681,7 @@ pub const Transfer = struct {
         routing: ?Routing = null,
         faults: Faults = .{},
         timing: ?*AttemptTiming = null,
+        response_workspace_bytes: usize = 0,
     };
 
     const RetainedRequest = struct {
@@ -677,6 +715,7 @@ pub const Transfer = struct {
             options.faults.response_acquire,
             options.faults.response_unlink,
             retained_response,
+            options.response_workspace_bytes,
         ) catch return error.ResponseCaptureAcquisitionFailed;
         self.* = .{
             .stream = .idle,
@@ -760,6 +799,7 @@ pub const Transfer = struct {
             .length = self.response.length,
             .charged = self.response.charged,
             .budget = self.reactor.budget,
+            .workspace = self.response.workspace,
         };
     }
 
@@ -1166,6 +1206,7 @@ test "model timings start at handoff and capture only the first HTTP response ev
     transfer.credential = null;
     transfer.request_open = false;
     transfer.response.charged = 0;
+    transfer.response.length = 0;
     var sink: [1]u8 = undefined;
     try std.testing.expectEqual(@as(?u64, null), transfer.timing.?.elapsedMs(.fromNanoseconds(99)));
     for (0..4) |ordinal| {
@@ -1214,4 +1255,107 @@ test "model timings start at handoff and capture only the first HTTP response ev
         Clock.awake_ns = sent_at + 19 * std.time.ns_per_ms + 999_999;
         try std.testing.expectEqual(@as(?u64, 19), transfer.timing.?.elapsedMs(.fromNanoseconds(Clock.awake_ns)));
     }
+}
+
+test "response continuation reservation accounts for bodies below and above its extent" {
+    for ([_]usize{ 0, 128 }) |reserve| for ([_]usize{ 0, 3, 200 }) |body_length| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var root: [protocol.max_store_bytes]u8 = undefined;
+        const path = root[0..try tmp.dir.realPath(std.testing.io, &root)];
+        var used: std.atomic.Value(u64) = .init(17);
+        const budget: ScratchBudget = .{ .used = &used, .limit = 217 };
+        var retained: ?named_scratch.Owner = null;
+        const capture = try ResponseCapture.init(std.testing.io, path, budget, .{ .turn_id = 1, .operation_id = 1, .attempt_ordinal = 1 }, false, false, &retained, reserve);
+        var reactor: Reactor = undefined;
+        reactor.io = std.testing.io;
+        reactor.budget = budget;
+        reactor.listings = .initFill(null);
+        var transfer: Transfer = .{ .stream = .idle, .reactor = &reactor, .request = undefined, .response = capture, .headers = .{}, .credential = null };
+        var owned = true;
+        defer if (owned) transfer.response.deinit(std.testing.io, budget);
+        try std.testing.expectEqual(@as(u64, 17 + reserve), used.load(.acquire));
+        const body: [200]u8 = @splat('r');
+        if (body_length != 0) {
+            try std.testing.expectEqual(h2.Verdict.accept, reactor.observe(&transfer.stream, .{ .body = @intCast(body_length) }));
+            try transfer.response.file.writePositionalAll(std.testing.io, body[0..body_length], 0);
+        }
+        try transfer.response.seal(std.testing.io, false, body_length);
+        var sealed = transfer.takeResponse();
+        owned = false;
+        var sealed_owned = true;
+        defer if (sealed_owned) sealed.deinit();
+        try std.testing.expectEqual(@as(u64, body_length), sealed.length);
+        try std.testing.expectEqual(@as(u64, @max(reserve, body_length)), sealed.charged);
+        try std.testing.expectEqual(@as(u64, 17 + @max(reserve, body_length)), used.load(.acquire));
+        const mapped = try pages.mapReadOnly(std.testing.io, sealed.file, sealed.length);
+        try std.testing.expectEqualSlices(u8, body[0..body_length], mapped);
+        pages.unmapReadOnly(mapped);
+        if (reserve == 0) {
+            try std.testing.expectError(error.NotOpenForWriting, sealed.file.writePositionalAll(std.testing.io, "x", 0));
+        } else {
+            const state = sealed.state([128]u8);
+            state.* = @splat('s');
+            try std.testing.expectEqual(@as(u64, 17 + @max(reserve, body_length)), used.load(.acquire));
+        }
+        sealed.deinit();
+        sealed_owned = false;
+        try std.testing.expectEqual(@as(u64, 17), used.load(.acquire));
+    };
+}
+
+test "response continuation reservation fails before launch and cancellation returns every charge" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root: [protocol.max_store_bytes]u8 = undefined;
+    const path = root[0..try tmp.dir.realPath(std.testing.io, &root)];
+    var used: std.atomic.Value(u64) = .init(17);
+    const budget: ScratchBudget = .{ .used = &used, .limit = 144 };
+    var retained: ?named_scratch.Owner = null;
+    const binding: attempt.AttemptBinding = .{ .turn_id = 1, .operation_id = 1, .attempt_ordinal = 1 };
+    try std.testing.expectError(error.ResponseScratchExhausted, ResponseCapture.init(std.testing.io, path, budget, binding, false, false, &retained, 128));
+    try std.testing.expect(retained == null);
+    try std.testing.expectEqual(@as(u64, 17), used.load(.acquire));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "response-1-1.tmp", .{}));
+    const enough: ScratchBudget = .{ .used = &used, .limit = 145 };
+    var capture = try ResponseCapture.init(std.testing.io, path, enough, binding, false, false, &retained, 128);
+    try std.testing.expectEqual(@as(u64, 145), used.load(.acquire));
+    capture.deinit(std.testing.io, enough);
+    try std.testing.expectEqual(@as(u64, 17), used.load(.acquire));
+    try std.testing.expectError(error.InjectedResponseUnlinkFailure, ResponseCapture.init(std.testing.io, path, enough, binding, false, true, &retained, 128));
+    try std.testing.expect(retained != null);
+    try std.testing.expectEqual(@as(u64, 17), used.load(.acquire));
+    // The failed unlink predates reservation; the existing owner keeps both
+    // aliases and the name until an explicit successful reclamation.
+    retained.?.resources.?.removal = .native;
+    _ = try retained.?.reclaim(path);
+    try std.testing.expectEqual(@as(u64, 17), used.load(.acquire));
+}
+
+test "response continuation reservation rejects a mismatched semantic body length" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root: [protocol.max_store_bytes]u8 = undefined;
+    const path = root[0..try tmp.dir.realPath(std.testing.io, &root)];
+    var used: std.atomic.Value(u64) = .init(17);
+    const budget: ScratchBudget = .{ .used = &used, .limit = 145 };
+    var retained: ?named_scratch.Owner = null;
+    const capture = try ResponseCapture.init(std.testing.io, path, budget, .{ .turn_id = 1, .operation_id = 1, .attempt_ordinal = 1 }, false, false, &retained, 128);
+    var reactor: Reactor = undefined;
+    reactor.io = std.testing.io;
+    reactor.budget = budget;
+    reactor.listings = .initFill(null);
+    var transfer: Transfer = .{ .stream = .idle, .reactor = &reactor, .request = undefined, .response = capture, .headers = .{}, .credential = null };
+    defer transfer.response.deinit(std.testing.io, budget);
+    try std.testing.expectEqual(h2.Verdict.accept, reactor.observe(&transfer.stream, .{ .body = 3 }));
+    try transfer.response.file.writePositionalAll(std.testing.io, "abc", 0);
+    for ([_]u64{ 2, 5 }) |reported| {
+        try std.testing.expectError(error.ResponseSealFailed, transfer.response.seal(std.testing.io, false, reported));
+        try std.testing.expectEqual(@as(u64, 3), transfer.response.length);
+        try std.testing.expect(transfer.response.readonly != null);
+        try std.testing.expectEqual(@as(u64, 145), used.load(.acquire));
+    }
+    try transfer.response.seal(std.testing.io, false, 3);
+    try std.testing.expectEqual(@as(u64, 3), transfer.response.length);
+    try std.testing.expectEqual(@as(u64, 128), transfer.response.charged);
 }

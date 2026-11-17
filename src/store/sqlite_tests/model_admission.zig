@@ -128,7 +128,7 @@ test "complete call outcomes continue once in call order ahead of pending input"
         var call_id: TestingReader = undefined;
         try view.openContent(result.call_id, &call_id);
         var output: TestingReader = undefined;
-        try view.openContent(result.output, &output);
+        try view.openContent(result.output.?, &output);
         var buffer: [128]u8 = undefined;
         const call_id_count = try call_id.read(0, &buffer);
         try std.testing.expectEqualStrings(expected_call_id, buffer[0..call_id_count]);

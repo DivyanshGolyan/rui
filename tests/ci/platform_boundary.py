@@ -44,7 +44,7 @@ MAC_PATHS = (
     "src/*.c", "src/*.h", "src/*.inc", "src/*.patch", "src/*.sh", "tests/integration/*.c",
     ".github/workflows/qualify-macos.yml",
     "install.sh", "release/*",
-    "build/darwin.zig",
+    "build/darwin.zig", "tests/ci/build_artifact.py",
 )
 
 SCANNED = ("src/*.zig", "tests/integration/*.zig", "tests/integration/*.py", "tests/integration/*.sh", "clients/ts/test/*.ts")
