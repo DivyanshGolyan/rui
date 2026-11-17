@@ -140,13 +140,18 @@ test "result parts classify image typed blocks without leaking malformed images"
 }
 
 test "result parts base64 decoder matches standard at every window size" {
-    var random = std.Random.DefaultPrng.init(12345);
+    var random_state: u32 = 12345;
     var input: [128]u8 = undefined;
     var encoded: [172]u8 = undefined;
     var expected: [128]u8 = undefined;
     var actual: [128]u8 = undefined;
     for (0..input.len + 1) |len| {
-        random.random().bytes(input[0..len]);
+        for (input[0..len]) |*byte| {
+            random_state ^= random_state << 13;
+            random_state ^= random_state >> 17;
+            random_state ^= random_state << 5;
+            byte.* = @truncate(random_state);
+        }
         const data = std.base64.standard.Encoder.encode(&encoded, input[0..len]);
         const size = try std.base64.standard.Decoder.calcSizeForSlice(data);
         try std.base64.standard.Decoder.decode(expected[0..size], data);
