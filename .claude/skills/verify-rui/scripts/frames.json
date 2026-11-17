@@ -50,8 +50,8 @@
         "Not confirmed",
         "alt+i info"
       ],
-      "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -100,8 +100,8 @@
         "Sending...",
         "alt+i info"
       ],
-      "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ],
       "expect_next": {
         "Send failure witness": "Not confirmed · ctrl+r retries original"
@@ -162,8 +162,8 @@
         "Not confirmed",
         "alt+i info"
       ],
-      "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -212,8 +212,8 @@
         "Sending...",
         "alt+i info"
       ],
-      "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ],
       "expect_next": {
         "Send failure witness": "Not confirmed · ctrl+r retries original"
@@ -248,8 +248,8 @@
         "enter retry",
         "alt+i info"
       ],
-      "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ],
       "cast": [
         {
@@ -282,8 +282,8 @@
         "enter retry",
         "alt+i info"
       ],
-      "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -306,9 +306,10 @@
       ],
       "note": "Real release HTTP discovery and managed install; divider above Settings with memory or an update, current version hidden",
       "expect_next": {},
-      "expect_regex": [
-        "^[─-]+(?:[┼┤+][^\\n]*)?\\n *Settings +\\d+(?:\\.\\d+)? (?:MB|GB) *(?:[│|][^\\n]*)?$"
+      "expect_sidebar_regex": [
+        " *Settings +\\d+(?:\\.\\d+)? (?:MB|GB) *$"
       ],
+      "expect_sidebar_rule": true,
       "comparison": {
         "before": {
           "expect": [
@@ -316,9 +317,10 @@
             "{upgrade_version}"
           ],
           "expect_next": {},
-          "expect_regex": [
-            "^\\s*Settings\\s+(?:rui \\d+(?:\\.\\d+)? (?:MB|GB)(?: [·.] tools \\d+(?:\\.\\d+)? (?:MB|GB))?\\s+)?{upgrade_version}\\s*(?:│.*)?$"
+          "expect_sidebar_regex": [
+            "^\\s*Settings\\s+(?:rui \\d+(?:\\.\\d+)? (?:MB|GB)(?: [·.] tools \\d+(?:\\.\\d+)? (?:MB|GB))?\\s+)?{upgrade_version} *$"
           ],
+          "expect_sidebar_rule": false,
           "absent": [
             "Notifications",
             "Update to ",
@@ -347,9 +349,10 @@
       ],
       "note": "Real release HTTP discovery and managed install; divider above Settings with memory or an update, current version hidden",
       "expect_next": {},
-      "expect_regex": [
-        "^[─-]+(?:[┼┤+][^\\n]*)?\\n *Settings +Update to {available_version} *(?:[│|][^\\n]*)?$"
+      "expect_sidebar_regex": [
+        " *Settings +Update to {available_version} *$"
       ],
+      "expect_sidebar_rule": true,
       "comparison": {
         "before": {
           "expect": [
@@ -357,9 +360,10 @@
             "{upgrade_version}"
           ],
           "expect_next": {},
-          "expect_regex": [
-            "^\\s*Settings\\s+(?:rui \\d+(?:\\.\\d+)? (?:MB|GB)(?: [·.] tools \\d+(?:\\.\\d+)? (?:MB|GB))?\\s+)?{upgrade_version}\\s*(?:│.*)?$"
+          "expect_sidebar_regex": [
+            "^\\s*Settings\\s+(?:rui \\d+(?:\\.\\d+)? (?:MB|GB)(?: [·.] tools \\d+(?:\\.\\d+)? (?:MB|GB))?\\s+)?{upgrade_version} *$"
           ],
+          "expect_sidebar_rule": false,
           "absent": [
             "Notifications",
             "Update to ",
@@ -388,9 +392,10 @@
       ],
       "note": "Real release HTTP discovery and managed install; divider above Settings with memory or an update, current version hidden",
       "expect_next": {},
-      "expect_regex": [
-        "^[─-]+(?:[┼┤+][^\\n]*)?\\n *Settings +Updating(?:…|\\.\\.\\.) *(?:[│|][^\\n]*)?$"
+      "expect_sidebar_regex": [
+        " *Settings +Updating(?:…|\\.\\.\\.) *$"
       ],
+      "expect_sidebar_rule": true,
       "comparison": {
         "before": {
           "expect": [
@@ -399,9 +404,10 @@
             "Publishing; cancelling no longer rolls back"
           ],
           "expect_next": {},
-          "expect_regex": [
-            "^\\s*Settings\\s+(?:rui \\d+(?:\\.\\d+)? (?:MB|GB)(?: [·.] tools \\d+(?:\\.\\d+)? (?:MB|GB))?\\s+)?{upgrade_version}\\s*(?:│.*)?$"
+          "expect_sidebar_regex": [
+            "^\\s*Settings\\s+(?:rui \\d+(?:\\.\\d+)? (?:MB|GB)(?: [·.] tools \\d+(?:\\.\\d+)? (?:MB|GB))?\\s+)?{upgrade_version} *$"
           ],
+          "expect_sidebar_rule": false,
           "absent": [
             "Notifications",
             "Update to ",
@@ -432,9 +438,10 @@
       ],
       "note": "Real release HTTP discovery and managed install; divider above Settings with memory or an update, current version hidden",
       "expect_next": {},
-      "expect_regex": [
-        "^[─-]+(?:[┼┤+][^\\n]*)?\\n *Settings +Update failed *(?:[│|][^\\n]*)?$"
+      "expect_sidebar_regex": [
+        " *Settings +Update failed *$"
       ],
+      "expect_sidebar_rule": true,
       "comparison": {
         "before": {
           "expect": [
@@ -443,9 +450,10 @@
             "! Couldn't reach GitHub; nothing changed"
           ],
           "expect_next": {},
-          "expect_regex": [
-            "^\\s*Settings\\s+(?:rui \\d+(?:\\.\\d+)? (?:MB|GB)(?: [·.] tools \\d+(?:\\.\\d+)? (?:MB|GB))?\\s+)?{upgrade_version}\\s*(?:│.*)?$"
+          "expect_sidebar_regex": [
+            "^\\s*Settings\\s+(?:rui \\d+(?:\\.\\d+)? (?:MB|GB)(?: [·.] tools \\d+(?:\\.\\d+)? (?:MB|GB))?\\s+)?{upgrade_version} *$"
           ],
+          "expect_sidebar_rule": false,
           "absent": [
             "Notifications",
             "Update to ",
@@ -494,8 +502,8 @@
           ]
         }
       ],
-      "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ],
       "comparison": {
         "before": {
@@ -541,9 +549,10 @@
       ],
       "note": "Real release HTTP discovery and managed install; divider above Settings with memory or an update, current version hidden",
       "expect_next": {},
-      "expect_regex": [
-        "^[─-]+(?:[┼┤+][^\\n]*)?\\n *Settings +\\d+(?:\\.\\d+)? (?:MB|GB) *(?:[│|][^\\n]*)?$"
+      "expect_sidebar_regex": [
+        " *Settings +\\d+(?:\\.\\d+)? (?:MB|GB) *$"
       ],
+      "expect_sidebar_rule": true,
       "comparison": {
         "before": {
           "expect": [
@@ -551,9 +560,10 @@
             "{upgrade_version}"
           ],
           "expect_next": {},
-          "expect_regex": [
-            "^\\s*Settings\\s+(?:rui \\d+(?:\\.\\d+)? (?:MB|GB)(?: [·.] tools \\d+(?:\\.\\d+)? (?:MB|GB))?\\s+)?{upgrade_version}\\s*(?:│.*)?$"
+          "expect_sidebar_regex": [
+            "^\\s*Settings\\s+(?:rui \\d+(?:\\.\\d+)? (?:MB|GB)(?: [·.] tools \\d+(?:\\.\\d+)? (?:MB|GB))?\\s+)?{upgrade_version} *$"
           ],
+          "expect_sidebar_rule": false,
           "absent": [
             "Notifications",
             "Update to ",
@@ -582,9 +592,10 @@
       ],
       "note": "Real release HTTP discovery and managed install; divider above Settings with memory or an update, current version hidden",
       "expect_next": {},
-      "expect_regex": [
-        "^[─-]+(?:[┼┤+][^\\n]*)?\\n *Settings +Update to {available_version} *(?:[│|][^\\n]*)?$"
+      "expect_sidebar_regex": [
+        " *Settings +Update to {available_version} *$"
       ],
+      "expect_sidebar_rule": true,
       "comparison": {
         "before": {
           "expect": [
@@ -592,9 +603,10 @@
             "{upgrade_version}"
           ],
           "expect_next": {},
-          "expect_regex": [
-            "^\\s*Settings\\s+(?:rui \\d+(?:\\.\\d+)? (?:MB|GB)(?: [·.] tools \\d+(?:\\.\\d+)? (?:MB|GB))?\\s+)?{upgrade_version}\\s*(?:│.*)?$"
+          "expect_sidebar_regex": [
+            "^\\s*Settings\\s+(?:rui \\d+(?:\\.\\d+)? (?:MB|GB)(?: [·.] tools \\d+(?:\\.\\d+)? (?:MB|GB))?\\s+)?{upgrade_version} *$"
           ],
+          "expect_sidebar_rule": false,
           "absent": [
             "Notifications",
             "Update to ",
@@ -623,9 +635,10 @@
       ],
       "note": "Real release HTTP discovery and managed install; divider above Settings with memory or an update, current version hidden",
       "expect_next": {},
-      "expect_regex": [
-        "^[─-]+(?:[┼┤+][^\\n]*)?\\n *Settings +Updating(?:…|\\.\\.\\.) *(?:[│|][^\\n]*)?$"
+      "expect_sidebar_regex": [
+        " *Settings +Updating(?:…|\\.\\.\\.) *$"
       ],
+      "expect_sidebar_rule": true,
       "comparison": {
         "before": {
           "expect": [
@@ -634,9 +647,10 @@
             "Publishing; cancelling no longer rolls back"
           ],
           "expect_next": {},
-          "expect_regex": [
-            "^\\s*Settings\\s+(?:rui \\d+(?:\\.\\d+)? (?:MB|GB)(?: [·.] tools \\d+(?:\\.\\d+)? (?:MB|GB))?\\s+)?{upgrade_version}\\s*(?:│.*)?$"
+          "expect_sidebar_regex": [
+            "^\\s*Settings\\s+(?:rui \\d+(?:\\.\\d+)? (?:MB|GB)(?: [·.] tools \\d+(?:\\.\\d+)? (?:MB|GB))?\\s+)?{upgrade_version} *$"
           ],
+          "expect_sidebar_rule": false,
           "absent": [
             "Notifications",
             "Update to ",
@@ -667,9 +681,10 @@
       ],
       "note": "Real release HTTP discovery and managed install; divider above Settings with memory or an update, current version hidden",
       "expect_next": {},
-      "expect_regex": [
-        "^[─-]+(?:[┼┤+][^\\n]*)?\\n *Settings +Update failed *(?:[│|][^\\n]*)?$"
+      "expect_sidebar_regex": [
+        " *Settings +Update failed *$"
       ],
+      "expect_sidebar_rule": true,
       "comparison": {
         "before": {
           "expect": [
@@ -678,9 +693,10 @@
             "! Couldn't reach GitHub; nothing changed"
           ],
           "expect_next": {},
-          "expect_regex": [
-            "^\\s*Settings\\s+(?:rui \\d+(?:\\.\\d+)? (?:MB|GB)(?: [·.] tools \\d+(?:\\.\\d+)? (?:MB|GB))?\\s+)?{upgrade_version}\\s*(?:│.*)?$"
+          "expect_sidebar_regex": [
+            "^\\s*Settings\\s+(?:rui \\d+(?:\\.\\d+)? (?:MB|GB)(?: [·.] tools \\d+(?:\\.\\d+)? (?:MB|GB))?\\s+)?{upgrade_version} *$"
           ],
+          "expect_sidebar_rule": false,
           "absent": [
             "Notifications",
             "Update to ",
@@ -729,8 +745,8 @@
           ]
         }
       ],
-      "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ],
       "comparison": {
         "before": {
@@ -775,8 +791,8 @@
       "absent": [
         "enter open"
       ],
-      "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -787,8 +803,8 @@
       "steps": [{"wait": "+ New Session"}],
       "expect": ["+ New Session", "Settings"],
       "absent": ["Type a task", "enter open"],
-      "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -810,8 +826,8 @@
         "Archived"
       ],
       "absent": [],
-      "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -839,8 +855,8 @@
           ]
         }
       ],
-      "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -869,8 +885,8 @@
         "Type a task",
         "alt+i info"
       ],
-      "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -897,8 +913,8 @@
         "enter retry",
         "alt+i info"
       ],
-      "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -948,8 +964,8 @@
       "expect_background": {
         "› Type a task": "#121933"
       },
-      "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -972,8 +988,8 @@
         "Browsing \u00b7 Esc returns",
         "enter retry"
       ],
-      "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -991,8 +1007,8 @@
         "enter retry",
         "alt+i info"
       ],
-      "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -1021,8 +1037,8 @@
         "Type a task",
         "alt+i info"
       ],
-      "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -1049,8 +1065,8 @@
         "enter retry",
         "alt+i info"
       ],
-      "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -1100,8 +1116,8 @@
       "expect_background": {
         "› Type a task": "#f3eee2"
       },
-      "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -1124,8 +1140,8 @@
         "Browsing \u00b7 Esc returns",
         "enter retry"
       ],
-      "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -1157,8 +1173,8 @@
       "absent": [
         "No Sessions yet."
       ],
-      "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -1239,8 +1255,8 @@
           "dim": false
         }
       ],
-      "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -1292,8 +1308,8 @@
           "min_columns": 140
         }
       ],
-      "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -1338,8 +1354,8 @@
         "code its",
         "append catal"
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ],
       "expect_dim": [
         {
@@ -1402,8 +1418,8 @@
         "code its",
         "append catal"
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ],
       "expect_dim": [
         {
@@ -1460,8 +1476,8 @@
         "Usage:",
         "enter pick"
       ],
-      "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -1533,8 +1549,10 @@
         "append catal"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$",
         "/review +Verify the project and review\\s*$"
+      ],
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -1566,8 +1584,8 @@
         "Unknown command",
         "Usage:"
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -1605,8 +1623,8 @@
         "/clear",
         "alt+i info"
       ],
-      "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -1644,8 +1662,8 @@
         "/clear",
         "alt+i info"
       ],
-      "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -1686,8 +1704,8 @@
         "{session:Archive audit}",
         "Archived Archive audit"
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -1711,8 +1729,8 @@
         "Archive audit",
         "/sessions"
       ],
-      "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -1744,8 +1762,8 @@
       "absent": [
         "Archive audit"
       ],
-      "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -1781,8 +1799,8 @@
         "· archived",
         "[Archived]"
       ],
-      "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -1815,8 +1833,8 @@
       "absent": [
         "· archived"
       ],
-      "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -1860,8 +1878,8 @@
         "Archive audit",
         "No archived Sessions"
       ],
-      "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -1890,8 +1908,8 @@
         "/unarchive",
         "{session:Archive audit}"
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -2067,8 +2085,8 @@
         "enter start",
         "gpt-6.1-sol \u00b7 low"
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -2116,8 +2134,8 @@
         "Configured.",
         "alt+i info"
       ],
-      "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -2189,8 +2207,8 @@
         "enter pick",
         "alt+i info"
       ],
-      "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -2225,8 +2243,8 @@
       "absent": [
         "Type a task"
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -2273,8 +2291,8 @@
         "\u2191 ",
         "Type a task"
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -2327,8 +2345,8 @@
         "gpt-5.5",
         "Type a task"
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -2368,8 +2386,8 @@
       "absent": [
         "Type a task"
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -2418,8 +2436,8 @@
         "\u25be",
         "Filter:"
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -2472,8 +2490,8 @@
         "\u25be",
         "Filter:"
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -2529,8 +2547,8 @@
         "click to change",
         "\u25be"
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -2583,8 +2601,8 @@
         "Type a task",
         "enter start"
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ],
       "sizes": [
         "140x40",
@@ -2662,8 +2680,8 @@
         "Type a task",
         "enter start"
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ],
       "sizes": [
         "140x40",
@@ -2739,8 +2757,8 @@
         "Type a task",
         "enter start"
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ],
       "sizes": [
         "140x40",
@@ -2785,8 +2803,8 @@
       "absent": [
         "Type a task"
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -2881,8 +2899,8 @@
       "absent": [
         "Type a task"
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -2916,8 +2934,8 @@
       "absent": [
         "Type a task"
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -2950,8 +2968,8 @@
       "absent": [
         "Type a task"
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -3009,8 +3027,8 @@
       "absent": [
         "Type a task"
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -3054,8 +3072,8 @@
         "Fail with exit 127 \u00b7 127",
         "Fail with an excerpt \u00b7 1"
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ],
       "expect_next": {
         "\u2713 List project files": "\u00d7 Fail with exit 127",
@@ -3101,8 +3119,8 @@
         "click to change",
         "\u25be"
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -3153,8 +3171,8 @@
         "Fail with exit 127 \u00b7 127",
         "Fail with an excerpt \u00b7 1"
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -3203,8 +3221,8 @@
         "140x40"
       ],
       "note": "10a-tool-open: Ctrl-O selects the lowest tool; output is indented on its band, other rows folded; no extra mark; literal stored envelope in quiet colour",
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ],
       "expect_next": {
         "\u2713 List project files": "\u00d7 Fail with exit 127",
@@ -3314,8 +3332,8 @@
         "Fail with exit 127 \u00b7 127",
         "Fail with an excerpt \u00b7 1"
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ],
       "expect_next": {
         "    src": "\u00d7 Fail with exit 127",
@@ -3366,8 +3384,8 @@
         "140x40"
       ],
       "note": "10c-tool-open-long: twenty quiet stored-result rows, including status and label, then fourteen remaining lines",
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -3419,8 +3437,8 @@
         "140x40"
       ],
       "note": "10d-tool-open-nocolor: the same open tool is indented without selection or output backgrounds; no extra mark; literal stored envelope in quiet colour",
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ],
       "expect_next": {
         "\u2713 List project files": "\u00d7 Fail with exit 127",
@@ -3459,8 +3477,8 @@
         }
       ],
       "expect": "Keep this chat draft",
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -3484,8 +3502,8 @@
         "First line of a multi-line draft",
         "third"
       ],
-      "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -3505,8 +3523,8 @@
       "expect": [
         "\u2193"
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -3530,8 +3548,8 @@
         "The retry loop waits",
         "\u2193"
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -3566,8 +3584,8 @@
         "\u2193",
         "new"
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -3597,8 +3615,8 @@
         "Late request  waits 30 s  fails at once",
         "retry policy notes"
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -3623,8 +3641,8 @@
         "Late request  waits 30 s  fails at once",
         "retry policy notes"
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -3665,8 +3683,8 @@
       "absent": [
         "Waiting"
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -3706,8 +3724,8 @@
       "absent": [
         "No code block in the last answer."
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -3754,8 +3772,8 @@
       "absent": [
         "Waiting"
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -3796,8 +3814,8 @@
           ]
         }
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -3850,8 +3868,8 @@
       "expect_next": {
         "\u25a0 Stop the slow job": "   Stopped"
       },
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -3899,8 +3917,8 @@
         "46x30"
       ],
       "first_frame": true,
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -3912,8 +3930,8 @@
           "wait": "\u25a0 Stopped"
         }
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -3930,8 +3948,8 @@
         "Type a message",
         "enter sends"
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -3955,8 +3973,8 @@
         "enter sends",
         "more lines \u00b7 shift+\u2193"
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -3986,8 +4004,8 @@
       "expect": [
         "Deny"
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -4012,8 +4030,8 @@
       "absent": [
         "more lines \u00b7 shift+\u2193"
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -4036,8 +4054,8 @@
           "wait": "Allow once"
         }
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -4114,8 +4132,8 @@
         "/model",
         "Type a task"
       ],
-      "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -4148,8 +4166,8 @@
         "/configure",
         "code \u00b7 file"
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -4178,8 +4196,8 @@
         "code \u00b7 file",
         "/effort"
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -4225,8 +4243,8 @@
         "/archive",
         "/configure"
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -4241,8 +4259,8 @@
           "wait": "/copy"
         }
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -4302,8 +4320,8 @@
           "foreground": "#d4cebf"
         }
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ],
       "expect_background": {
         "/help           Verify": "#2b2f45"
@@ -4366,8 +4384,8 @@
           "foreground": "#d4cebf"
         }
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ],
       "expect_background": {
         "/help           Verify": "#2b2f45"
@@ -4420,8 +4438,8 @@
           "foreground": "#d4cebf"
         }
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ],
       "expect_background": {
         "/new            start": "#2b2f45"
@@ -4484,8 +4502,8 @@
           "foreground": "#2f2b25"
         }
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ],
       "theme": "day",
       "expect_background": {
@@ -4549,8 +4567,8 @@
           "foreground": "#2f2b25"
         }
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ],
       "theme": "day",
       "expect_background": {
@@ -4604,8 +4622,8 @@
           "foreground": "#2f2b25"
         }
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ],
       "theme": "day",
       "expect_background": {
@@ -4640,8 +4658,8 @@
           "wait": "Usage: /requests"
         }
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -4694,8 +4712,8 @@
           ]
         }
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -4746,8 +4764,8 @@
         "Filter:",
         "\u2191 "
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -4792,8 +4810,8 @@
         "\u2191 ",
         "Type a task"
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -4844,8 +4862,8 @@
         "\u2191 ",
         "Type a task"
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -4880,8 +4898,8 @@
       "absent": [
         "enter start"
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -4915,8 +4933,8 @@
       "absent": [
         "Type a task"
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -4955,8 +4973,8 @@
         "\u2193 0 more",
         "Type a task"
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -5015,8 +5033,8 @@
         "\u2193 0 more",
         "Type a task"
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -5057,8 +5075,8 @@
         "\u2191 0 more",
         "Type a task"
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -5101,8 +5119,8 @@
         "\u2191 0 more",
         "Type a task"
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -5141,8 +5159,8 @@
           "effort": "high"
         }
       ],
-      "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -5168,8 +5186,8 @@
         "+ New Session",
         "alt+i info"
       ],
-      "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -5193,8 +5211,8 @@
         "enter start",
         "gpt-6.1-sol \u00b7 low"
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -5214,8 +5232,8 @@
         "Late request  waits 30 s  fails at once",
         "retry policy notes"
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -5236,8 +5254,8 @@
       "expect": [
         "\u2193"
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -5259,8 +5277,8 @@
         "Late request  waits 30 s  fails at once",
         "retry policy notes"
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -5282,8 +5300,8 @@
       "absent": [
         "Type a task"
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -5309,8 +5327,8 @@
         "140x40"
       ],
       "expect": "Host stopped",
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -5333,8 +5351,8 @@
       "absent": [
         "Type a task"
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -5359,8 +5377,8 @@
         "140x40"
       ],
       "expect": "Detached. Host work continues.",
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -5414,8 +5432,8 @@
           ]
         }
       ],
-      "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -5467,8 +5485,8 @@
           ]
         }
       ],
-      "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -5500,8 +5518,8 @@
       "sizes": [
         "140x40"
       ],
-      "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -5528,8 +5546,8 @@
       "absent": [
         "Opening…"
       ],
-      "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -5560,8 +5578,8 @@
       "absent": [
         "Opening…"
       ],
-      "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -5592,8 +5610,8 @@
       "sizes": [
         "140x40"
       ],
-      "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -5659,8 +5677,8 @@
           ]
         }
       ],
-      "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -5692,8 +5710,8 @@
         "Alternate focus task",
         "The retry draft is ready."
       ],
-      "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -5728,8 +5746,8 @@
         "Current focus task",
         "Opening…"
       ],
-      "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ],
       "cast": [
         {
@@ -5776,8 +5794,8 @@
         "Alternate focus task",
         "The retry draft is ready."
       ],
-      "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -5809,8 +5827,8 @@
       "absent": [
         "Opening…"
       ],
-      "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -5847,8 +5865,8 @@
       "absent": [
         "Opening…"
       ],
-      "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -5886,8 +5904,8 @@
       "absent": [
         "Opening…"
       ],
-      "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -5926,8 +5944,8 @@
       "absent": [
         "Opening…"
       ],
-      "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -5953,8 +5971,8 @@
         "Opening\u2026",
         "Alternate focus audit"
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -5985,8 +6003,8 @@
         "Opening\u2026",
         "Alternate focus audit"
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -6018,8 +6036,8 @@
         "Opening\u2026",
         "Alternate focus audit"
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -6060,8 +6078,8 @@
         "Unknown command",
         "Usage:"
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -6100,8 +6118,8 @@
         "Unknown command",
         "Usage:"
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -6134,8 +6152,10 @@
         "/discarded"
       ],
       "absent_regex": [
-        "^\\s*/discard\\s+",
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^\\s*/discard\\s+"
+      ],
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -6168,8 +6188,10 @@
         "/recovering"
       ],
       "absent_regex": [
-        "^\\s*/recover\\s+",
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+        "^\\s*/recover\\s+"
+      ],
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -6196,8 +6218,8 @@
       "absent": [
         "\u203a /new unexpected"
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -6217,8 +6239,8 @@
           "wait": "Usage: /new"
         }
       ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -6260,8 +6282,8 @@
           ]
         }
       ],
-      "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -6287,8 +6309,8 @@
         "enter retry",
         "alt+i info"
       ],
-      "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -6306,8 +6328,8 @@
         "enter retry",
         "alt+i info"
       ],
-      "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     },
     {
@@ -6333,8 +6355,8 @@
         "enter retry",
         "alt+i info"
       ],
-      "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      "absent_sidebar_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
     }
   ]

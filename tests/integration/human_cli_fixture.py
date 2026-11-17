@@ -9,10 +9,15 @@ import subprocess
 import termios
 import threading
 import time
+import unicodedata
 
-import model_fixture as fixture
 import terminal_process as terminal_process_module
 from terminal_process import answers_to
+
+
+def _fixture():
+    import model_fixture
+    return model_fixture
 
 
 CHOICE = "Allow once    Deny"
@@ -43,7 +48,7 @@ def pick_deny(master):
 
 def run(home, *args, success=True, environment=None, input=None):
     env = {**os.environ, "HOME": str(home), **(environment or {})}
-    result = subprocess.run([str(fixture.RUI), *map(str, args)], env=env, capture_output=True, text=True, timeout=20, input=input)
+    result = subprocess.run([str(_fixture().RUI), *map(str, args)], env=env, capture_output=True, text=True, timeout=20, input=input)
     if success:
         assert result.returncode == 0, (args, result.stdout, result.stderr)
     else:
@@ -56,7 +61,7 @@ CAPTURE_NOTICE = re.compile(r"request: (\S+) \(wait: rui request wait \1; if unc
 
 def admit(home, *args, expect=0, environment=None, input=None, cwd=None):
     env = {**os.environ, "HOME": str(home), **(environment or {})}
-    result = subprocess.run([str(fixture.RUI), *map(str, args)], env=env, capture_output=True,
+    result = subprocess.run([str(_fixture().RUI), *map(str, args)], env=env, capture_output=True,
         text=True, timeout=20, input=input, cwd=cwd)
     assert result.returncode == expect, (args, result.stdout, result.stderr)
     notice = CAPTURE_NOTICE.match(result.stderr)
@@ -137,18 +142,26 @@ def chat_content_row(row):
     return row.removeprefix(" ")
 
 
-def pane_content(row):
+def split_pane_row(row):
     if row.startswith((" ›", " >")):
-        return row
-    rule = re.match(r"^[─-]{2,}[┼┤+]", row)
+        return "", "", row
+    rule = re.match(r"^([─-]{2,})([┼┤+])", row)
     if rule:
-        return row[rule.end():]
+        return rule.group(1), rule.group(2), row[rule.end():]
     divider = row.find("│")
-    if len(row) > 40 and row[40] == "|" and (divider < 0 or divider > 40):
-        divider = 40
+    column = 0
+    for index, char in enumerate(row):
+        if char == "|" and column == 40 and (divider < 0 or index < divider):
+            divider = index
+            break
+        column += 0 if unicodedata.combining(char) else 2 if unicodedata.east_asian_width(char) in ("W", "F") else 1
     if divider >= 0:
-        return row[divider + 1:]
-    return row
+        return row[:divider], row[divider], row[divider + 1:]
+    return "", "", row
+
+
+def pane_content(row):
+    return split_pane_row(row)[2]
 
 
 def conversation_text(frame):
@@ -348,7 +361,7 @@ class AppModelCatalog:
 
     def hold(self, _):
         self.entered.set()
-        fixture.wait_for(self.release.is_set, "initial Model catalog release", timeout=20)
+        _fixture().wait_for(self.release.is_set, "initial Model catalog release", timeout=20)
         return True
 
     def close(self):
@@ -362,7 +375,7 @@ def app_model_open(master, query=b"", *, catalog=None):
     app_settings_open(master)
     shown = model_choice_frame(master, b"\r", query="")
     if catalog is not None:
-        fixture.wait_for(catalog.entered.is_set, "initial Model catalog requested")
+        _fixture().wait_for(catalog.entered.is_set, "initial Model catalog requested")
         catalog.release.set()
         panel_frame(master, lambda screen: not model_choice_shown(screen))
         catalog.close()

@@ -55,7 +55,7 @@ class TerminalProcessTest(unittest.TestCase):
     def test_composer_oracles_follow_the_caret_pane(self):
         from human_cli_fixture import composer_empty, composer_ready
 
-        for prefix in (" ", "list text│ ", "中       │ "):
+        for prefix in (" ", "list text│ ", "中       │ ", " " * 40 + "| ", "中" + " " * 38 + "| "):
             for text, caret in (("café", 6), ("x │ y", 7)):
                 with self.subTest(prefix=prefix, text=text):
                     capture = ScreenCapture(columns=80, rows=4)
@@ -107,6 +107,21 @@ class TerminalProcessTest(unittest.TestCase):
                 self.assertEqual(chat_footer_row(narrow), 3)
                 self.assertIsNone(composer_bounds(horizontal * 20 + "x\n" + horizontal * 20))
 
+    def test_split_pane_row_handles_rendered_dividers_and_unsplit_text(self):
+        from human_cli_fixture import split_pane_row
+
+        for horizontal, vertical, crossing, ending in (("─", "│", "┼", "┤"), ("-", "|", "+", "+")):
+            sidebar = horizontal * 40
+            for glyph, pane in ((crossing, horizontal * 30), (ending, " " * 30)):
+                with self.subTest(glyph=glyph, pane=pane):
+                    self.assertEqual(split_pane_row(sidebar + glyph + pane), (sidebar, glyph, pane))
+            self.assertEqual(split_pane_row(" " * 40 + vertical + " › literal │ +"),
+                             (" " * 40, vertical, " › literal │ +"))
+            self.assertEqual(split_pane_row(horizontal * 46), ("", "", horizontal * 46))
+        self.assertEqual(split_pane_row("中" + " " * 38 + "| pane"), ("中" + " " * 38, "|", " pane"))
+        for text in (" › literal │ + ┼ ┤", " > literal │ +", "   + New Session", "plain | text"):
+            self.assertEqual(split_pane_row(text), ("", "", text))
+
     def test_conversation_keeps_junction_characters_in_chat_text(self):
         from human_cli_fixture import conversation_text
 
@@ -131,7 +146,7 @@ class TerminalProcessTest(unittest.TestCase):
             current.view = SimpleNamespace(cursor=SimpleNamespace(x=len(prefix) + caret, y=1))
             return current
 
-        for prefix in ([" "], ["l", "│", " "], ["中", "", "│", " "]):
+        for prefix in ([" "], ["l", "│", " "], ["中", "", "│", " "], [" "] * 40 + ["|", " "], ["中", ""] + [" "] * 38 + ["|", " "]):
             for prompt in ("› ", "> "):
                 for text in ("", "kept", "café", "é", "Type a task"):
                     normalized = unicodedata.normalize("NFC", text)

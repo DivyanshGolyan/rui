@@ -168,6 +168,26 @@ class UpgradeEmptyChatTest(unittest.TestCase):
             with self.subTest(frame=frame), self.assertRaises(NotReady):
                 self.screen.sidebar()
 
+    def test_sidebar_readiness_uses_real_junctions_and_ignores_chat_versions(self):
+        for horizontal, vertical, crossing, ending in (("─", "│", "┼", "┤"), ("-", "|", "+", "+")):
+            for junction, pane in ((crossing, horizontal * 30), (ending, " " * 30)):
+                frame = "\n".join((horizontal * 40 + junction + pane,
+                                   "  Settings    38 MB".ljust(40) + vertical + " gpt-6-luna 0.76.0"))
+                self.screen.observe = lambda: frame
+                with self.subTest(junction=junction, horizontal=horizontal):
+                    self.assertEqual(frame, self.screen.sidebar())
+            self.screen.observe = lambda: horizontal * 46 + "\n  Settings    38 MB"
+            self.assertEqual(self.screen.observe(), self.screen.sidebar())
+
+    def test_empty_chat_accepts_ascii_and_unsplit_footer_rows(self):
+        for prefix in ("", " " * 40 + "|", " " * 40 + "│"):
+            self.case.json.reset_mock()
+            self.case.json.side_effect = [copy.deepcopy(self.report), copy.deepcopy(self.listing)]
+            frame = prefix + " gpt-6-luna · low"
+            self.screen.observe = lambda: frame
+            with self.subTest(prefix=prefix):
+                self.assertEqual(frame, self.screen.empty_chat(self.case, self.session))
+
     def test_sidebar_update_failure_replaces_memory_with_a_short_label(self):
         for frame in ("Settings    Update failed",
                       "  Settings    Update failed │ chat"):

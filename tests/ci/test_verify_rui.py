@@ -394,6 +394,17 @@ class FramesTest(unittest.TestCase):
                 self.assertEqual(resume.call_count, 2)
                 self.assertTrue(all(call.args[1] is False for call in resume.call_args_list))
 
+    def test_empty_composer_wait_with_clipped_split_rule(self):
+        for bar in ("│", "|"):
+            for draft in ("", " retained | draft"):
+                frame = committed("witness".ljust(40) + bar + " ›" + draft)._replace(cursor=Cursor(43, 0), visible=True)
+                outcomes = []
+                terminal = types.SimpleNamespace(wait=lambda predicate, *_args: outcomes.append(
+                    predicate(types.SimpleNamespace(completed=frame.text, frame=frame))))
+                with self.subTest(bar=bar, draft=draft):
+                    self.helper["frame_wait"](None, terminal, "witness", empty_composer=True)
+                    self.assertEqual(outcomes, [not draft])
+
     def test_empty_composer_wait_rejects_pre_enter_draft_and_accepts_feed_message(self):
         wait = self.helper["frame_wait"]
         samples = [committed("› witness"), committed("› witness\n›"), committed("› witness\n›")]
@@ -1074,7 +1085,7 @@ while True:
         self.assertGreater(len(default["states"]), 25)
 
     def test_regex_absences_validate_and_roundtrip_before_launch(self):
-        pattern = r"^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+        pattern = r"^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd])\b"
         data = self.scenario()
         data["states"][0]["absent_regex"] = [pattern]
         validated = self.helper["validate_scenario"](data)
@@ -1087,7 +1098,7 @@ while True:
 
     def test_regex_absences_reject_dynamic_rows_in_readiness_and_saved_captures(self):
         state = {"name": "no-empty-rows", "steps": [], "expect": ["Settings"],
-                 "absent_regex": [r"^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"]}
+                 "absent_regex": [r"^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd])\b"]}
         clean = " + New Session\n   Existing conversation  3h\n   Settings"
         run = types.SimpleNamespace(meta={"sha": "a" * 40})
         for size in ((140, 40), (46, 30)):
@@ -1142,7 +1153,7 @@ while True:
             if state.get("first_run"):
                 continue
             with self.subTest(raw_id_excluded_in_state=name):
-                self.assertIsNotNone(self.helper["frame_row_failure"](state, " ○ 9xt4vy  now │ chat"))
+                self.assertIsNotNone(self.helper["frame_row_failure"](state, "─" * 20 + "┼" + "─" * 20 + "\n" + " ○ 9xt4vy  now".ljust(20) + "│ chat"))
         for name in ("chat-empty", "start-model", "start-effort", "start-picked"):
             state = states[name]
             steps = state["steps"]
@@ -1150,7 +1161,7 @@ while True:
             self.assertEqual(steps[typed_ready + 1], {"wait": "○ New Session", "min_columns": 140})
             self.assertEqual(state["sizes"], [(140, 40), (46, 30)])
             self.assertIsNone(self.helper["frame_row_failure"](
-                {"name": name, "absent_regex": state["absent_regex"]}, " ○ New Session  now │chat"))
+                {"name": name, "absent_sidebar_regex": state["absent_sidebar_regex"]}, " ○ New Session  now │chat"))
         for name in ("empty-chat-left", "empty-chat-model-left", "empty-chat-two-left"):
             state = states[name]
             self.assertTrue(state["first_frame"])
@@ -2782,8 +2793,8 @@ class UpgradeFramesTest(unittest.TestCase):
                 self.assertFalse(all(text in after_only for text in before["expect"]))
             else:
                 before = state["comparison"]["before"]
-                self.assertTrue(before["expect_regex"])
-                self.assertNotEqual(before["expect_regex"], state["expect_regex"])
+                self.assertTrue(before["expect_sidebar_regex"])
+                self.assertNotEqual(before["expect_sidebar_regex"], state["expect_sidebar_regex"])
                 if state["upgrade"] == "failure":
                     self.assertIn("! Couldn't reach GitHub; nothing changed", before["expect"])
                 if state["upgrade"] == "updating":
@@ -2848,9 +2859,10 @@ class UpgradeFramesTest(unittest.TestCase):
             for prompt, rule in (("›", "─"), (">", "-")):
                 for model in ("gpt-6.1-sol", "gpt-5.5", "vendor/model-v2"):
                     with self.subTest(split=split, prompt=prompt, model=model):
-                        prefix = " Upgrade witness │" if split else ""
+                        prefix = " Upgrade witness " + ("│" if rule == "─" else "|") if split else ""
+                        bottom = rule * (len(prefix) - 1) + ("┼" if rule == "─" else "+") + rule * 30 if split else " " + rule * 30
                         lines = [prefix + " › Upgrade witness", prefix + " " + rule * 30,
-                                 prefix + " " + prompt + " retained draft", prefix + " " + rule * 30,
+                                 prefix + " " + prompt + " retained draft", bottom,
                                  prefix + f" {model} · low"]
                         chat = "\n".join(lines)
                         self.assertTrue(ready(chat))
@@ -2876,7 +2888,69 @@ class UpgradeFramesTest(unittest.TestCase):
                             self.assertFalse(ready(wrong, "Upgrade witness"))
         self.assertFalse(ready("Upgrade witness\nSettings\ngpt-6.1-sol · low"))
         self.assertTrue(ready(" Upgrade witness │ details\n ──────\n › draft\n ──────\n model · low", "Upgrade witness"))
-        self.assertTrue(ready(" 界 │ Upgrade witness │ detail\n    │ ──────\n    │ › draft\n    │ ──────\n    │ model · low", "Upgrade witness"))
+        self.assertTrue(ready(" 界 │ Upgrade witness │ detail\n    │ ──────\n    │ › draft\n────┼──────\n    │ model · low", "Upgrade witness"))
+
+    def test_rendered_junctions_and_content_in_chat_readiness(self):
+        split = self.helper["frame_split_row"]
+        ready = self.helper["frame_chat_ready"]
+        settle = self.helper["frame_failure_settled"]
+        self.assertEqual(split("draft │ content | more + text"), ("", "", "draft │ content | more + text"))
+        for rule, junction, bar in (("─", "┼", "│"), ("-", "+", "|")):
+            boundary = rule * 12 + junction + rule * 20
+            self.assertEqual(split(boundary), (rule * 12, junction, rule * 20))
+            for draft in ("Type a task", "retained │ draft | content + more"):
+                lines = [" witness".ljust(12) + bar + " witness │ content",
+                         "".ljust(12) + bar + " " + rule * 20, "".ljust(12) + bar + " › " + draft,
+                         boundary, "".ljust(12) + bar + " model · low"]
+                screen = "\n".join(lines)
+                with self.subTest(junction=junction, draft=draft):
+                    self.assertTrue(ready(screen, "witness"))
+                    self.assertEqual(ready(screen, empty=True), draft == "Type a task")
+                    self.assertFalse(ready(screen, "missing witness"))
+                    for before in (False, True):
+                        marker = "! Couldn't reach GitHub; nothing changed" if before else "Update failed"
+                        accepted = []
+                        def wait(predicate, _description):
+                            accepted.append(predicate(types.SimpleNamespace(completed=marker + "\n" + screen)))
+                        settle(types.SimpleNamespace(wait=wait), before)
+                        self.assertEqual(accepted, [draft == "Type a task"])
+        self.assertTrue(ready("witness | content\n ───────\n › retained | draft\n ───────\n model · low", "witness"))
+
+    def test_sidebar_rule_junctions_and_legacy_vertical_endings(self):
+        split = self.helper["frame_split_row"]
+        failure = self.helper["frame_row_failure"]
+        for line, separator in (("─" * 20 + "┤ Notifications", "┤"),
+                                ("-" * 20 + "+ Notifications", "+"),
+                                ("─" * 20 + "│ status", "│"),
+                                ("-" * 20 + "| ", "|")):
+            left, found, pane = split(line)
+            with self.subTest(separator=separator):
+                self.assertEqual((left, found, pane), (line[:20], separator, line[21:]))
+                bar = "|" if separator in "+|" else "│"
+                screen = line[:20] + separator + pane + "\n" + " Settings 0.78.10000".ljust(20) + bar + " chat"
+                self.assertIsNone(failure({"expect_sidebar_regex": [r" *Settings +0\.78\.10000 *"]}, screen))
+                result = failure({"expect_sidebar_regex": [r" *Settings +0\.78\.10000 *"],
+                                  "expect_sidebar_rule": True}, screen)
+                self.assertEqual(result is None, separator in "┤+")
+
+    def test_before_upgrade_regex_accepts_ascii_sidebar_divider(self):
+        scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
+        failure = self.helper["frame_row_failure"]
+        for state in (entry for entry in scenario["states"] if entry.get("upgrade") not in (None, "chat")):
+            patterns = [pattern.replace("{upgrade_version}", r"0\.78\.10000") for pattern in state["comparison"]["before"]["expect_sidebar_regex"]]
+            for divider in ("│", "|"):
+                with self.subTest(state=state["name"], divider=divider):
+                    self.assertIsNone(failure({"expect_sidebar_regex": patterns}, "─" * 35 + ("┼" if divider == "│" else "+") + "─" * 20 + "\n" + " Settings rui 7 MB 0.78.10000".ljust(35) + divider + " Type a task"))
+                    self.assertIsNotNone(failure({"expect_sidebar_regex": patterns}, "─" * 35 + ("┼" if divider == "│" else "+") + "─" * 20 + "\n" + " Settings 0.77.10000".ljust(35) + divider + " 0.78.10000"))
+
+    def test_sidebar_absence_regex_rejects_ascii_divider(self):
+        scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
+        pattern = next(pattern for state in scenario["states"] for pattern in state.get("absent_sidebar_regex", [])
+                       if "[0123456789abcdefghjkmnpqrstvwxyz]{6}" in pattern)
+        for divider in ("│", "|"):
+            with self.subTest(divider=divider):
+                self.assertIsNotNone(self.helper["frame_row_failure"](
+                    {"name": "test", "absent_sidebar_regex": [pattern]}, "─" * 20 + "┼" + "─" * 20 + "\n" + " ○ abcdef  now".ljust(20) + divider + " chat"))
 
     def test_upgrade_relaunch_waits_for_the_same_settled_chat_on_both_sides(self):
         drive = self.helper["frame_drive_upgrade"]
@@ -2911,6 +2985,37 @@ class UpgradeFramesTest(unittest.TestCase):
                                                        "frame_steps": lambda *_a, **_k: None}):
                     drive(run, terminal, state, (None, None, version))
                 self.assertEqual(observed, [0, 1, 2, 3])
+
+    def test_upgrade_and_failure_predicates_cover_layouts_and_drafts(self):
+        drive = self.helper["frame_drive_upgrade"]
+        settle = self.helper["frame_failure_settled"]
+        for split in (False, True):
+            for rule, bar, junction in (("─", "│", "┼"), ("-", "|", "+")):
+                for draft in ("Type a task", "retained draft"):
+                    prefix = " ".ljust(20) + bar if split else ""
+                    top = prefix + " " + rule * 20
+                    bottom = rule * 20 + junction + rule * 20 if split else " " + rule * 20
+                    screen = "\n".join([prefix + " Upgrade witness", top, prefix + " › " + draft,
+                                         bottom, prefix + " model · low"])
+                    for before in (False, True):
+                        with self.subTest(split=split, rule=rule, draft=draft, before=before), tempfile.TemporaryDirectory() as directory:
+                            marker = "! Couldn't reach GitHub; nothing changed" if before else "Update failed"
+                            results = []
+                            settle(types.SimpleNamespace(wait=lambda pred, _description: results.append(
+                                pred(types.SimpleNamespace(completed=marker + "\n" + screen)))), before)
+                            self.assertEqual(results, [draft == "Type a task"])
+                            root = Path(directory)
+                            selected = root / ".local/bin/rui"
+                            notice = "\nUpgraded to 0.78.10000" if before else ""
+                            terminal = types.SimpleNamespace(process=types.SimpleNamespace(pid=42),
+                                wait=lambda pred, _description, **_kw: results.append(pred(types.SimpleNamespace(completed=screen + notice))))
+                            run = types.SimpleNamespace(home=root, store=root / "store", meta={"upgrade_previous_instance": "old"},
+                                rui_cmd=lambda *_args: types.SimpleNamespace(returncode=0, stderr="", stdout='{"instance":"new"}'))
+                            state = {"upgrade": "chat", "open": "Upgrade witness", "comparison_side": "before" if before else "after"}
+                            with patch.dict(sys.modules, {"os_semantics": types.SimpleNamespace(process_executable=lambda _pid: selected.resolve())}), \
+                                 patch.dict(drive.__globals__, {"frame_wait": lambda *_a, **_k: None, "frame_steps": lambda *_a, **_k: None}):
+                                drive(run, terminal, state, (None, None, "0.78.10000"))
+                            self.assertTrue(results[-1])
 
     def test_narrow_upgrade_resize_reveals_the_list_without_closing_chat_specimens(self):
         reveal = self.helper["frame_upgrade_viewport"]
@@ -2956,8 +3061,8 @@ class UpgradeFramesTest(unittest.TestCase):
         scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
         row_failure = self.helper["frame_row_failure"]
         for state in (entry for entry in scenario["states"] if entry.get("upgrade") not in (None, "chat")):
-            patterns = [pattern.replace("{available_version}", r"0\.99\.99999") for pattern in state["expect_regex"]]
-            oracle = {"expect_regex": patterns}
+            patterns = [pattern.replace("{available_version}", r"0\.99\.99999") for pattern in state["expect_sidebar_regex"]]
+            oracle = {"expect_sidebar_regex": patterns, "expect_sidebar_rule": True}
             label = {"current": "", "available": "Update to 0.99.99999", "updating": "Updating…", "failure": "Update failed"}[state["upgrade"]]
             for layout in ("chat", "settings", "ascii-chat", "ascii-settings", "overview", "wide-overview", "ascii-overview", "ascii-wide-overview"):
                 rendered = "Updating..." if layout.startswith("ascii") and label == "Updating…" else label
@@ -2980,9 +3085,9 @@ class UpgradeFramesTest(unittest.TestCase):
                     if state["upgrade"] == "available":
                         self.assertIsNotNone(row_failure(oracle, rows.replace("0.99.99999", "0x99x99999")))
         current = next(state for state in scenario["states"] if state["name"] == "sidebar-current")
-        before = {"expect_regex": [pattern.replace("{upgrade_version}", r"0\.78\.10000") for pattern in current["comparison"]["before"]["expect_regex"]]}
-        self.assertIsNone(row_failure(before, " Settings rui 7 MB 0.78.10000 │ Type a task"))
-        self.assertIsNotNone(row_failure(before, " Settings 0.77.10000 │ 0.78.10000"))
+        before = {"expect_sidebar_regex": [pattern.replace("{upgrade_version}", r"0\.78\.10000") for pattern in current["comparison"]["before"]["expect_sidebar_regex"]]}
+        self.assertIsNone(row_failure(before, "─" * 35 + "┼" + "─" * 20 + "\n" + " Settings rui 7 MB 0.78.10000".ljust(35) + "│ Type a task"))
+        self.assertIsNotNone(row_failure(before, "─" * 35 + "┼" + "─" * 20 + "\n" + " Settings 0.77.10000".ljust(35) + "│ 0.78.10000"))
 
     def test_held_upgrade_after_readiness_uses_publication_and_control_not_chat_status(self):
         drive = self.helper["frame_drive_upgrade"]

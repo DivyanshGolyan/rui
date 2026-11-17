@@ -21,6 +21,7 @@ from urllib.parse import quote
 
 import live_engines
 import settings_fixture
+from human_cli_fixture import split_pane_row
 
 import host_process
 import os_semantics
@@ -692,7 +693,7 @@ class TerminalScreen:
 
     def launch_overview(self):
         frame = wait_for(self.observe, "wide launch chat beside the overview", timeout=15,
-                         ready=lambda screen: "+ New Session" in screen and "│" in screen
+                         ready=lambda screen: "+ New Session" in screen and any(split_pane_row(row)[1] for row in screen.splitlines())
                          and "Type a task" in screen and self.capture.draft("", 2))
         assert "Settings" in frame, frame
         self.send("\x1b")
@@ -704,9 +705,9 @@ class TerminalScreen:
                                                   ("+ New Session", "Settings"))
                          and "Notifications" not in screen
                          and "Type a task" not in screen
-                         and not re.search(r"(?m)(?:^|│)\s*[›>](?: |$)", screen))
+                         and not any(re.match(r"\s*[›>](?: |$)", split_pane_row(row)[2]) for row in screen.splitlines()))
         assert "Type a task" not in frame, ("overview has an editor", frame)
-        assert not re.search(r"(?m)(?:^|│)\s*[›>](?: |$)", frame), ("overview has a composer", frame)
+        assert not any(re.match(r"\s*[›>](?: |$)", split_pane_row(row)[2]) for row in frame.splitlines()), ("overview has a composer", frame)
         return frame
 
     def empty_session(self, case, session):
@@ -728,7 +729,7 @@ class TerminalScreen:
     def empty_chat(self, case, session):
         facts = self.empty_session(case, session)
         frame = wait_for(self.observe, "empty chat model facts and chat-only footer", timeout=15,
-                         ready=lambda screen: shown(f"│ {facts['model']} · ", screen)
+                         ready=lambda screen: any(shown(f" {facts['model']} · ", split_pane_row(row)[2]) for row in screen.splitlines())
                          and "alt+i info" not in screen
                          and "Upgraded to " not in screen and " · upgraded to " not in screen)
         return frame
@@ -740,7 +741,8 @@ class TerminalScreen:
         def ready(frame):
             if "Upgraded to " in frame or " · upgraded to " in frame:
                 return False
-            rows = [row.split("│", 1)[0] for row in frame.splitlines()]
+            parts = [split_pane_row(row) for row in frame.splitlines()]
+            rows = [left if divider else pane for left, divider, pane in parts]
             if any(re.search(r"\b(?:0\.\d+\.\d+|unreleased)\b", row) for row in rows):
                 return False
             return any(pattern.fullmatch(row) for row in rows)
