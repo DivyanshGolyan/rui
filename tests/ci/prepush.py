@@ -41,7 +41,7 @@ import build_files
 from caller_errors import inventory_path
 import fixture_user
 from platform_boundary import SCANNED as PLATFORM_SCANNED
-from select_tests import LIVE_MYSQL_DIALECT_TARGETS, changed_paths, matches, select, tree_graph
+from select_tests import CLIENT_LOCALITY_INPUTS, LIVE_MYSQL_DIALECT_TARGETS, changed_paths, matches, select, tree_graph
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "integration"))
 import live_engines
@@ -50,6 +50,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 SOURCE_POLICY = (
+    (CLIENT_LOCALITY_INPUTS, (("test_client_locality.py", "*"),)),
     ((".claude/skills/verify-rui/scripts/frames.json", ".claude/skills/verify-rui/features/*.md"),
      (("test_verify_rui_map.py", "*"),)),
     (("tests/integration/settings_fixture.py",), (("test_settings_fixture.py", "*"),)),
@@ -394,6 +395,8 @@ def checks(paths, available, base, mode="default", mysql=False):
         yield "zig fmt", ["zig", "fmt", "--check", "--ast-check", *zig]
     if any(inventory_path(path) for path in paths):
         yield "caller errors", [sys.executable, "-B", "tests/ci/caller_errors.py"]
+    if any(matches(path, CLIENT_LOCALITY_INPUTS) for path in paths):
+        yield "client locality", [sys.executable, "-B", "tests/ci/client_locality.py"]
     if "src/store/schema.zig" in paths:
         yield "schema number", [sys.executable, "-B", "tests/ci/schema_number.py", "--check"]
     generation = {"openapi.json", *GENERATED[1:], "clients/ts/scripts/generate-settings.mjs"}
