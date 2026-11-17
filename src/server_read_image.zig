@@ -4,6 +4,7 @@ const Host = @import("server_host.zig").Host;
 const store = @import("store.zig");
 const InputCapture = @import("InputCapture.zig");
 const arguments = @import("read_image_arguments.zig");
+const source_file = @import("os/read_image_file.zig");
 const fenceDispatch = @import("server_host.zig").fenceDispatch;
 
 pub const capacity = 16;
@@ -200,7 +201,7 @@ noinline fn prepare(host: *Host, active: *Active) !void {
             try context.host.custody.watchMessages(context.active.token, cutoff);
         }
         fn launch(context: anytype) !void {
-            context.active.source = try @import("read_image_file.zig").open(context.host.io, context.active.input.runner.read_image.workspace.slice(), context.active.path.slice());
+            context.active.source = try source_file.open(context.host.io, context.active.input.runner.read_image.workspace.slice(), context.active.path.slice());
         }
     }.handoff);
     active.length = (try active.source.?.stat(host.io)).size;
@@ -262,7 +263,7 @@ fn advance(io: std.Io, active: *Active) !Progress {
 }
 
 test "read_image custody owns snapshot publication stop background and recovery" {
-    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (!source_file.available) return error.SkipZigTest;
     const testing = store.testing;
     const protocol = @import("protocol.zig");
     const retention = @import("output_retention.zig");

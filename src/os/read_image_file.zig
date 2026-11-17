@@ -1,11 +1,15 @@
 //! Acquire a pinned regular file without opening a special file for I/O.
 const std = @import("std");
 
+/// A safe same-object regular-file opener is currently available through Linux's
+/// O_PATH and procfs. Other platforms fail before acquiring any source handle.
+pub const available = @import("builtin").os.tag == .linux;
+
 /// Owned handle. O_PATH only acquires a reference, including for a device or
 /// FIFO. Reopening its procfs descriptor after checking its immutable inode
 /// kind cannot race with replacement of the caller's pathname.
 pub fn open(io: std.Io, workspace: []const u8, path: []const u8) !std.Io.File {
-    return if (@import("builtin").os.tag == .linux) openLinux(io, workspace, path) else error.SafeImageReadUnsupported;
+    return if (available) openLinux(io, workspace, path) else error.SafeImageReadUnsupported;
 }
 
 fn openLinux(io: std.Io, workspace: []const u8, path: []const u8) !std.Io.File {
@@ -27,7 +31,7 @@ fn openLinux(io: std.Io, workspace: []const u8, path: []const u8) !std.Io.File {
 }
 
 test "read_image regular acquisition rejects directories missing files and devices" {
-    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (!available) return error.SkipZigTest;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
