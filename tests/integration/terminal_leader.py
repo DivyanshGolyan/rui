@@ -28,6 +28,7 @@ def lead(control):
     except OSError as error:
         channel.sendall(frame({"ready": False, "errno": error.errno}))
         return 1
+    os.close(0)
     wake_read, wake_write = os.pipe()
     os.set_blocking(wake_write, False)
     flags = set()
