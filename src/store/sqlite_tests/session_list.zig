@@ -250,7 +250,7 @@ test "a list row whose queue read fails answers main's MessageAdmissionReadFaile
 }
 
 test "a list row whose settings read fails answers SessionReadFailed" {
-    try expectListStepFailure(listStatementForTesting(error.SessionReadFailed, "JOIN message_admission m"), error.SessionReadFailed, .queued);
+    try expectListStepFailure(listStatementForTesting(error.SessionReadFailed, "JOIN message_admission m ON m.admission_id=?3 AND m.session_ref=session.session_ref"), error.SessionReadFailed, .queued);
 }
 
 test "a list row that fails to render reports its error before a later row's failed step" {
@@ -267,7 +267,7 @@ test "a list row that fails to render reports its error before a later row's fai
     try sqlite.exec(storage.sqliteDatabase(), try std.fmt.bufPrintSentinel(&update, "UPDATE session SET label='two'||char(10)||'lines' WHERE session_ref='{s}'", .{first.slice()}, 0));
     try sqlite.exec(storage.sqliteDatabase(), "PRAGMA ignore_check_constraints=OFF");
     var used = std.atomic.Value(u64).init(0);
-    var fault: TestingStatementFault = .{ .sql = listStatementForTesting(error.SessionReadFailed, "JOIN message_admission m") };
+    var fault: TestingStatementFault = .{ .sql = listStatementForTesting(error.SessionReadFailed, "JOIN message_admission m ON m.admission_id=?3 AND m.session_ref=session.session_ref") };
     fault.arm(storage.sqliteDatabase());
     defer fault.disarm(storage.sqliteDatabase());
     try std.testing.expectError(error.CorruptStore, testingSessionList(&storage, &tmp, .{}, &used, 5));

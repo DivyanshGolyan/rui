@@ -515,7 +515,7 @@ test "list rows share chat heading marks except unmarked finished Sessions" {
         _ = try overview.step(&state, .{ .host = .{ .instance = @splat(7), .started_at = 1, .slots = 1, .slots_in_use = 0 } });
         _ = try overview.step(&state, .{ .tick = 100_000 });
         _ = try overview.step(&state, .{ .list = .{ .page = .{
-            .rows = &.{.{ .reference = "k7m2qx".*, .read_version = .{ .instance = @splat(7), .generation = 1 }, .workspace = "/work", .provider = .codex, .label = "Work", .state = case.state, .first = .{ .position = 1, .admission = 1, .sender = null } }},
+            .rows = &.{.{ .reference = "k7m2qx".*, .read_version = .{ .instance = @splat(7), .generation = 1 }, .workspace = "/work", .provider = .codex, .label = "Work", .state = case.state, .state_change_at = 1, .first = .{ .position = 1, .admission = 1, .sender = null } }},
             .answer = .{ .delta = .full, .since = .{ .instance = @splat(7), .generation = 1 } },
         } } });
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
