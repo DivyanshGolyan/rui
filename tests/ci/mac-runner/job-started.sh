@@ -24,9 +24,12 @@ import stat
 import subprocess
 import sys
 
-# This directory and the installed module are root-owned; -I/-S excludes the checkout.
-sys.path.insert(0, str(Path(sys.argv[1]).parent))
-from mac_runner import admission
+# Read the exact root-owned source: never resolve packages or cached bytecode,
+# including leftovers in an installation being adopted or repaired.
+policy_path = Path(sys.argv[1]).with_name("mac_runner.py")
+policy = {"__name__": "installed_mac_runner", "__file__": str(policy_path)}
+exec(compile(policy_path.read_bytes(), str(policy_path), "exec"), policy)
+admission = policy["admission"]
 
 
 def reject(message):

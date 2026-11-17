@@ -280,9 +280,11 @@ Compilation and build-runner cache keys include the actual native-tool identity 
 An administrator signed into `gh` as DivyanshGolyan runs `bash tests/ci/mac-runner/install.sh` on the Apple Silicon Mac with full Xcode selected.
 The script checks native fixture tools, warns about a readable admin home (`--lock-home` sets mode 700), enables approval for all external fork contributors, and installs one runner under hidden standard user `ruici` with a LaunchDaemon at lowered priority.
 Rerunning repairs or updates the installation.
+One root-owned registration record retains the installed name and remote ID across hostname changes and interrupted setup/removal; repair and uninstall check that identity against a fresh API snapshot.
+Conflicting remote identities, missing credentials or damaged configuration preserve local recovery state; an old removal marker never authorizes deleting a new registration.
 `bash tests/ci/mac-runner/install.sh status-token` opens GitHub's fine-grained-token form; select only this repository, then supply the token on stdin to store the status secret.
 The root-owned job-started hook, installed `mac_runner.py` policy and generated allowlist live outside the runner application under the protected `ruici` home.
-Routing and the hook call the same pure admission predicate; the hook imports its protected installed copy, never a job checkout.
+Routing and the hook call the same pure admission predicate; the hook executes the exact protected installed source bytes, avoiding checkout, package and bytecode shadowing.
 Before any job step, the hook rejects another repository, event, actor, triggering actor, fork head or non-allowlisted PR author, independently of workflow routing.
 A nonzero hook exit alone still permits workflow steps using `always()`; on any hook failure, its Bash exit trap kills its direct parent job worker so those steps cannot run.
 This relies on the direct worker-child process relationship checked in `actions/runner` v2.338.2; a rejection can appear in GitHub as a crashed-worker failure.

@@ -58,6 +58,67 @@ def decide(event_name, event, actor, triggering_actor, repository, inputs, switc
     return HOSTED, "Hosted macOS is selected because no rui-mac runner is online and idle."
 
 
+def registration_record(name, runner_id=None):
+    """Name one installation before config, then bind its confirmed remote ID."""
+    record = {"version": 1, "repository": "DivyanshGolyan/rui", "name": name, "id": runner_id}
+    registration_identity(record)
+    return record
+
+
+def registration_identity(record):
+    """Validate the protected identity shared by setup, repair and removal."""
+    if (not isinstance(record, dict) or type(record.get("version")) is not int or record.get("version") != 1
+            or record.get("repository") != "DivyanshGolyan/rui" or "id" not in record):
+        raise ValueError("Missing or invalid installed runner identity")
+    name, runner_id = record.get("name"), record.get("id")
+    if not isinstance(name, str) or not name or any(character in name for character in "\r\n\x00"):
+        raise ValueError("Invalid installed runner name")
+    if runner_id is not None and (type(runner_id) is not int or runner_id <= 0):
+        raise ValueError("Invalid installed runner ID")
+    return name, runner_id
+
+
+def registration_candidate(registration, runners, local_id=None):
+    """Match the installed identity without discarding evidence of a renamed runner."""
+    name, runner_id = registration_identity(registration)
+    if not isinstance(runners, list) or any(
+            not isinstance(row, dict) or type(row.get("id")) is not int or row["id"] <= 0
+            or not isinstance(row.get("name"), str) or not row["name"] for row in runners):
+        raise ValueError("Runner status is unavailable or malformed; preserve the installation and retry.")
+    candidates = [row for row in runners if row["id"] == runner_id or row["name"] == name
+                  or (local_id is not None and row["id"] == local_id)]
+    if not candidates:
+        return None
+    if (len(candidates) != 1 or candidates[0]["name"] != name
+            or (runner_id is not None and candidates[0]["id"] != runner_id)):
+        raise ValueError("The remote runner identity changed or is ambiguous; restore its installed name and ID before repair.")
+    return candidates[0]
+
+
+def removal_action(registration, runners, local, credentials):
+    """Require registration-scoped proof before discarding local recovery state."""
+    try:
+        name, runner_id = registration_identity(registration)
+    except ValueError:
+        return "repair", "Repair the missing or invalid installed runner identity before uninstalling."
+    if local is not None:
+        if (not isinstance(local, dict) or local.get("agentName") != name
+                or not isinstance(local.get("gitHubUrl"), str)
+                or local["gitHubUrl"].rstrip("/") != "https://github.com/DivyanshGolyan/rui"
+                or type(local.get("agentId")) is not int or local["agentId"] <= 0
+                or (runner_id is not None and local["agentId"] != runner_id)):
+            return "repair", "Local runner configuration differs from the installed identity; repair it before removal."
+    try:
+        candidate = registration_candidate(registration, runners, local["agentId"] if local else None)
+    except ValueError as error:
+        return "repair", str(error)
+    if candidate is None:
+        return "cleanup", "The API confirms the installed runner registration is absent; local cleanup may finish."
+    if local is None or local["agentId"] != candidate["id"] or credentials is not True:
+        return "repair", "The installed runner still exists remotely; repair its local configuration and credentials before removal."
+    return "deregister", "Remove the matching installed runner registration before deleting its account and home."
+
+
 def main():
     if sys.argv[1:] == ["allowlist"]:
         print("\n".join(ALLOWLIST))

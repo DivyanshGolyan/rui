@@ -5,6 +5,7 @@ umask 077
 REPOSITORY=DivyanshGolyan/rui
 RUNNER_HOME=/Users/ruici
 RUNNER_DIR=$RUNNER_HOME/actions-runner
+REGISTRATION=$RUNNER_HOME/.rui-runner-registration.json
 PLIST=/Library/LaunchDaemons/com.rui.actions-runner.plist
 LABEL=com.rui.actions-runner
 SCRIPT_DIR=$(cd -- "$(dirname -- "$0")" && pwd -P)
@@ -17,8 +18,112 @@ as_runner() {
         LANG=en_US.UTF-8 TMPDIR="$RUNNER_HOME/tmp/" "$@"
 }
 
+validate_registration_file() {
+    if [[ -e $REGISTRATION || -L $REGISTRATION ]]; then
+        [[ -f $REGISTRATION && ! -L $REGISTRATION \
+            && $(/usr/bin/stat -f '%u' "$REGISTRATION") == 0 \
+            && $(/usr/bin/stat -f '%Lp' "$REGISTRATION") == 600 ]] \
+            || fail 'Registration record must be a root-owned regular file with mode 600.'
+    fi
+}
+
+registration_state() {
+    local stage=$1 operation=$2 allow_new=$3 proposed_name=$4
+    validate_registration_file
+    if [[ ! -e $REGISTRATION && ( -e $RUNNER_DIR/.runner || -L $RUNNER_DIR/.runner ) ]]; then
+        [[ -f $RUNNER_HOME/.rui-runner-account && ! -L $RUNNER_HOME/.rui-runner-account \
+            && $(/usr/bin/stat -f '%u' "$RUNNER_HOME/.rui-runner-account") == 0 \
+            && $(/usr/bin/stat -f '%Lp' "$RUNNER_HOME/.rui-runner-account") == 600 ]] \
+            || fail 'Cannot adopt local runner configuration without its protected account marker.'
+    fi
+    "$(cat "$stage/python-path")" -I -S - "$stage/mac_runner.py" "$REGISTRATION" "$RUNNER_DIR/.runner" "$operation" "$allow_new" "$proposed_name" "$stage/runners.json" <<'PY'
+import json
+import os
+from pathlib import Path
+import sys
+import tempfile
+
+source, record_path, local_path, operation, allow_new, proposed, runners_path = sys.argv[1:]
+policy = {"__name__": "rui_mac_runner_policy"}
+# Execute these exact staged source bytes; never search adjacent packages or pyc.
+exec(compile(Path(source).read_bytes(), source, "exec"), policy)
+record_path, local_path = Path(record_path), Path(local_path)
+
+
+def save(record):
+    fd, temporary = tempfile.mkstemp(prefix=".rui-runner-registration.", dir=record_path.parent)
+    try:
+        with os.fdopen(fd, "w") as stream:
+            json.dump(record, stream)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, record_path)
+        directory = os.open(record_path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def local_registration():
+    if local_path.is_symlink() or not local_path.is_file():
+        raise ValueError("Missing regular local runner configuration")
+    local = json.loads(local_path.read_text())
+    if local.get("gitHubUrl", "").rstrip("/") != "https://github.com/DivyanshGolyan/rui":
+        raise ValueError("Local runner configuration belongs to a different repository")
+    return policy["registration_record"](local.get("agentName"), local.get("agentId"))
+
+
+try:
+    if record_path.exists():
+        record = json.loads(record_path.read_text())
+        name, runner_id = policy["registration_identity"](record)
+    elif local_path.exists() or local_path.is_symlink():
+        record = local_registration()
+        name, runner_id = policy["registration_identity"](record)
+        if runner_id is None:
+            raise ValueError("Local runner configuration has no registration ID")
+        save(record)
+    elif operation == "prepare" and allow_new == "true":
+        record = policy["registration_record"](proposed)
+        name, runner_id = policy["registration_identity"](record)
+        save(record)
+    else:
+        raise ValueError("Installed registration identity is missing; restore its record or local .runner before repair")
+    if operation in ("prepare", "intent"):
+        local_id = None
+        if local_path.exists() or local_path.is_symlink():
+            local_name, local_id = policy["registration_identity"](local_registration())
+            if local_name != name or local_id is None:
+                raise ValueError("Local configuration differs from the installed registration name")
+        # Keep the prior ID until its exact remote identity is confirmed. A renamed
+        # or replaced registration must not be forgotten by name-based --replace.
+        try:
+            policy["registration_candidate"](record, json.loads(Path(runners_path).read_text()), local_id)
+        except ValueError as error:
+            raise ValueError(f"{error}; restore the exact GitHub runner identity before repair") from error
+    if operation == "intent":
+        save(policy["registration_record"](name))
+    elif operation == "complete":
+        installed = local_registration()
+        installed_name, installed_id = policy["registration_identity"](installed)
+        if installed_name != name or installed_id is None:
+            raise ValueError("Configured runner does not match the installation intent")
+        save(installed)
+    elif operation != "prepare":
+        raise ValueError("Unknown registration operation")
+    print(name)
+except (OSError, ValueError, TypeError, AttributeError, KeyError) as error:
+    raise SystemExit(f"Registration identity unavailable: {error}. Preserve this installation and restore its exact recorded identity before retrying.")
+PY
+}
+
 root_install() {
-    local stage=$1 uid password directory runner_name python_path account_home
+    local stage=$1 uid password directory runner_name python_path account_home new_install=false
     [[ $EUID == 0 && -d $stage ]] || fail 'Internal setup requires root and a staging directory.'
     runner_name=$(cat "$stage/runner-name")
     python_path=$(cat "$stage/python-path")
@@ -35,10 +140,13 @@ root_install() {
         fi
         ! /usr/bin/id -Gn ruici | /usr/bin/tr ' ' '\n' | /usr/bin/grep -qx admin || fail 'Existing ruici must not be an administrator.'
     else
+        [[ -e $RUNNER_HOME ]] || new_install=true
         /bin/mkdir -p "$RUNNER_HOME"
         /usr/sbin/chown root:wheel "$RUNNER_HOME"
         /bin/chmod -N "$RUNNER_HOME"
         /bin/chmod 755 "$RUNNER_HOME"
+        # Persist new-install intent before creating even a partial account record.
+        runner_name=$(registration_state "$stage" prepare "$new_install" "$runner_name")
         [[ ! -L $RUNNER_HOME/.rui-runner-account ]] || fail 'Account marker is a symlink.'
         uid=499
         while [[ -n $(/usr/bin/dscl . -search /Users UniqueID "$uid") ]]; do
@@ -50,6 +158,12 @@ root_install() {
         /bin/chmod 600 "$RUNNER_HOME/.rui-runner-account"
         /usr/bin/dscl . -create /Users/ruici
     fi
+    /bin/mkdir -p "$RUNNER_HOME"
+    /usr/sbin/chown root:wheel "$RUNNER_HOME"
+    /bin/chmod -N "$RUNNER_HOME"
+    /bin/chmod 755 "$RUNNER_HOME"
+    # Repairs preserve the installed name even after LocalHostName changes.
+    runner_name=$(registration_state "$stage" prepare "$new_install" "$runner_name")
     if ! /usr/bin/dscl . -read /Users/ruici UniqueID >/dev/null 2>&1; then
         [[ -f $RUNNER_HOME/.rui-runner-account && ! -L $RUNNER_HOME/.rui-runner-account \
             && $(/usr/bin/stat -f '%u' "$RUNNER_HOME/.rui-runner-account") == 0 ]] \
@@ -103,14 +217,9 @@ root_install() {
     /bin/rm -f "$RUNNER_HOME/.rui-runner-hooks/registration-token"
     /usr/bin/install -o ruici -g staff -m 600 "$stage/token" "$RUNNER_HOME/.rui-runner-hooks/registration-token"
     trap '/bin/rm -f "$RUNNER_HOME/.rui-runner-hooks/registration-token"' EXIT
-    if [[ -f $RUNNER_DIR/.runner ]]; then
-        "$python_path" -I -S - "$RUNNER_DIR/.runner" "$runner_name" <<'PY'
-import json, sys
-with open(sys.argv[1]) as stream:
-    settings = json.load(stream)
-if settings.get("gitHubUrl", "").rstrip("/") != "https://github.com/DivyanshGolyan/rui" or settings.get("agentName") != sys.argv[2]:
-    raise SystemExit("Existing runner has a different repository or name; uninstall it first.")
-PY
+    /bin/rm -f "$RUNNER_HOME/.rui-runner-deregistered"
+    runner_name=$(registration_state "$stage" intent false "$runner_name")
+    if [[ -e $RUNNER_DIR/.runner || -L $RUNNER_DIR/.runner ]]; then
         # Runner-owned removal resets local credentials. --replace repairs the same
         # remote name even when an old local registration was deleted on GitHub.
         # The inner bash expands these variables after switching to ruici.
@@ -122,6 +231,7 @@ PY
     # shellcheck disable=SC2016
     as_runner /bin/bash -c 'cd "$1"; token=$(cat "$2"); exec ./config.sh --unattended --url https://github.com/DivyanshGolyan/rui --token "$token" --name "$3" --labels rui-mac --work _work --replace' \
         bash "$RUNNER_DIR" "$RUNNER_HOME/.rui-runner-hooks/registration-token" "$runner_name"
+    runner_name=$(registration_state "$stage" complete false "$runner_name")
     /bin/rm -f "$RUNNER_HOME/.rui-runner-hooks/registration-token"
     trap - EXIT
     # Preserve runner-managed environment entries while repairing this one hook setting.
@@ -277,6 +387,18 @@ curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
     "$(cat "$stage/download-url")" -o "$stage/runner.tar.gz"
 actual=$(/usr/bin/shasum -a 256 "$stage/runner.tar.gz")
 [[ ${actual%% *} == "$(cat "$stage/expected-sha256")" ]] || fail 'Runner archive SHA256 mismatch.'
+# Preserve any prior ID whose remote name changed instead of replacing its evidence.
+gh api "repos/$REPOSITORY/actions/runners" --paginate --slurp > "$stage/runner-pages.json"
+python3 - "$stage" <<'PY'
+import json
+from pathlib import Path
+import sys
+stage = Path(sys.argv[1])
+pages = json.loads((stage / "runner-pages.json").read_text())
+if not isinstance(pages, list) or not pages or any(not isinstance(page, dict) or not isinstance(page.get("runners"), list) for page in pages):
+    raise SystemExit("Cannot read the repository runner list; preserving local installation")
+(stage / "runners.json").write_text(json.dumps([runner for page in pages for runner in page["runners"]]))
+PY
 gh api --method POST "repos/$REPOSITORY/actions/runners/registration-token" --jq .token > "$stage/token"
 /bin/chmod 600 "$stage/token"
 [[ -s $stage/token ]] || fail 'No runner registration token was returned.'

@@ -250,6 +250,51 @@ class HookTest(unittest.TestCase):
             self.assertIn("allowlisted", result.stderr)
             self.assertNotIn("ALWAYS_STEP_RAN", result.stdout)
 
+    def test_exact_policy_source_ignores_installed_package_and_bytecode_collisions(self):
+        source = (ROOT / "tests/ci/mac-runner/job-started.sh").read_text()
+        loader = source.split('policy_path = ', 1)[1].split('admission = policy["admission"]', 1)[0]
+        loader = 'policy_path = ' + loader + 'admission = policy["admission"]'
+        unsafe = 'sys.path.insert(0, str(Path(sys.argv[1]).parent))\nfrom mac_runner import admission'
+        accept = 'def admission(*args): return True, "Accepted."\n'
+        for collision in ("package", "bytecode"):
+            with self.subTest(collision=collision), tempfile.TemporaryDirectory() as directory:
+                temp = Path(directory)
+                policy = temp / "policy"
+                policy.mkdir()
+                module = policy / "mac_runner.py"
+                module.write_text((ROOT / "tests/ci/mac_runner.py").read_text())
+                hook = policy / "job-started.sh"
+                (policy / "allowlist").write_text("\n".join(mac_runner.ALLOWLIST))
+                if collision == "package":
+                    (policy / "mac_runner").mkdir()
+                    (policy / "mac_runner" / "__init__.py").write_text(accept)
+                else:
+                    writable = temp / "writable-bytecode"
+                    writable.mkdir()
+                    (policy / "__pycache__").symlink_to(writable, target_is_directory=True)
+                    # Forge a timestamp/size-valid cache using the hook's interpreter.
+                    forge = ("import importlib.util,marshal,pathlib,py_compile,sys; "
+                             "p=pathlib.Path(sys.argv[1]); c=pathlib.Path(importlib.util.cache_from_source(str(p))); "
+                             "py_compile.compile(str(p),cfile=str(c),doraise=True); "
+                             "c.write_bytes(c.read_bytes()[:16]+marshal.dumps(compile(sys.argv[2],str(p),'exec')))")
+                    path = re.search(r"^export PATH=(.*)$", source, re.M).group(1)
+                    subprocess.run(["python3", "-I", "-S", "-c", forge, str(module), accept],
+                                   env=dict(os.environ, PATH=path), check=True)
+                event = temp / "event"
+                event.write_text(json.dumps({"repository": {"full_name": REPO}, "sender": {"login": OTHER}}))
+                env = dict(os.environ, HOME=str(temp), GITHUB_REPOSITORY=REPO,
+                           GITHUB_EVENT_NAME="workflow_dispatch", GITHUB_ACTOR=OTHER,
+                           GITHUB_TRIGGERING_ACTOR=TRUSTED, GITHUB_EVENT_PATH=str(event))
+                hook.write_text(source)
+                result = self.supervise(hook, env)
+                self.assertEqual(result.returncode, -signal.SIGKILL, result.stderr)
+                self.assertIn("allowlisted", result.stderr)
+                # Restoring ordinary import proves that each collision can admit it.
+                hook.write_text(source.replace(loader, unsafe))
+                result = self.supervise(hook, env)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("ALWAYS_STEP_RAN", result.stdout)
+
     def test_hook_failure_cannot_continue_to_an_always_step(self):
         source = (ROOT / "tests/ci/mac-runner/job-started.sh").read_text()
         with tempfile.TemporaryDirectory() as directory:
@@ -273,6 +318,7 @@ class HookTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             temp = Path(directory)
             allowlist = temp / "allowlist"
+            (temp / "mac_runner.py").write_text((ROOT / "tests/ci/mac_runner.py").read_text())
             allowlist.write_text("\n".join(mac_runner.ALLOWLIST))
             event = temp / "event"
             event.write_text(json.dumps({"repository": {"full_name": REPO}, "sender": {"login": TRUSTED}}))
@@ -292,6 +338,151 @@ class HookTest(unittest.TestCase):
                 with self.assertRaises(SystemExit):
                     exec(compile(source, "hook", "exec"), {"__name__": "hook"})
                 du.assert_not_called()
+
+
+class RegistrationTest(unittest.TestCase):
+    def test_record_validation(self):
+        valid = mac_runner.registration_record("old-host-rui", 7)
+        self.assertEqual(mac_runner.registration_identity(valid), ("old-host-rui", 7))
+        for change in ({"version": True}, {"version": 2}, {"repository": "other/repo"}, {"name": ""},
+                       {"name": "bad\nname"}, {"id": True}, {"id": 0}, {"id": -1}, {"id": "7"}):
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                mac_runner.registration_identity(dict(valid, **change))
+        for value in (None, {}, "bad"):
+            with self.assertRaises(ValueError):
+                mac_runner.registration_identity(value)
+        with self.assertRaises(ValueError):
+            mac_runner.registration_record("", 7)
+
+    def test_removal_domain_uses_installed_identity(self):
+        remote = [[], [{"id": 7, "name": "old-host-rui"}], [{"id": 7, "name": "renamed-remotely"}],
+                  [{"id": 8, "name": "old-host-rui"}], [{"id": 8, "name": "another-runner"}],
+                  [{"id": 7, "name": "old-host-rui"}, {"id": 8, "name": "old-host-rui"}]]
+        matching = {"agentName": "old-host-rui", "agentId": 7, "gitHubUrl": "https://github.com/DivyanshGolyan/rui"}
+        locals_ = [None, matching, dict(matching, agentId=8), dict(matching, agentName="new-host-rui"),
+                   dict(matching, gitHubUrl="https://github.com/other/repo"), dict(matching, gitHubUrl=None)]
+        for registered_id, state, local_index, credentials in itertools.product([None, 7], range(6), range(6), [False, True]):
+            record = mac_runner.registration_record("old-host-rui", registered_id)
+            local = locals_[local_index]
+            # Independent expected table; no current hostname participates in identity.
+            local_valid = local_index in (0, 1) or (registered_id is None and local_index == 2)
+            if (not local_valid or state == 5 or (state == 2 and (registered_id == 7 or local_index == 1))
+                    or (registered_id is None and state == 4 and local_index == 2)
+                    or (registered_id == 7 and state == 3)):
+                expected = "repair"
+            elif state in (0, 4) or (registered_id is None and state == 2):
+                expected = "cleanup"
+            elif local_index == 1 and credentials and state == 1:
+                expected = "deregister"
+            elif registered_id is None and state == 3 and local_index == 2 and credentials:
+                expected = "deregister"
+            else:
+                expected = "repair"
+            result, reason = mac_runner.removal_action(record, remote[state], local, credentials)
+            self.assertEqual(result, expected, (record, state, local_index, credentials))
+            self.assertTrue(reason.endswith("."))
+
+    def test_malformed_or_unscoped_removal_inputs_preserve_recovery(self):
+        record = mac_runner.registration_record("old-host-rui", 7)
+        for snapshot in (None, {}, [None], [{"id": True, "name": "old-host-rui"}],
+                         [{"id": 7}], [{"id": 7, "name": ""}]):
+            self.assertEqual(mac_runner.removal_action(record, snapshot, None, False)[0], "repair")
+        for bad in (None, {}, dict(record, repository="another/repo")):
+            self.assertEqual(mac_runner.removal_action(bad, [], None, False)[0], "repair")
+        local = {"agentName": "old-host-rui", "agentId": 7, "gitHubUrl": "https://github.com/DivyanshGolyan/rui"}
+        for credentials in (None, "true", 1, False):
+            self.assertEqual(mac_runner.removal_action(record, [{"id": 7, "name": "old-host-rui"}], local, credentials)[0], "repair")
+
+    def test_installer_record_journey_preserves_identity_before_effects(self):
+        install = (ROOT / "tests/ci/mac-runner/install.sh").read_text()
+        source = next(code for code in re.findall(r"<<'PY'\n(.*?)\nPY", install, re.S)
+                      if "def local_registration" in code)
+        with tempfile.TemporaryDirectory() as directory:
+            temp = Path(directory)
+            record, local, runners = (temp / name for name in ("record", ".runner", "runners"))
+            runners.write_text("[]")
+            def step(operation, allow_new="false", proposed="new-host-rui"):
+                return subprocess.run([sys.executable, "-I", "-S", "-", str(ROOT / "tests/ci/mac_runner.py"),
+                                       str(record), str(local), operation, allow_new, proposed, str(runners)],
+                                      input=source, capture_output=True, text=True)
+            self.assertEqual(step("prepare", "true", "old-host-rui").returncode, 0)
+            self.assertEqual(json.loads(record.read_text()), mac_runner.registration_record("old-host-rui"))
+            local.write_text(json.dumps({"gitHubUrl": "https://github.com/DivyanshGolyan/rui", "agentName": "old-host-rui", "agentId": 7}))
+            self.assertEqual(step("complete").returncode, 0)
+            runners.write_text(json.dumps([{"id": 7, "name": "old-host-rui"}]))
+            self.assertEqual(step("prepare").stdout.strip(), "old-host-rui")
+            self.assertEqual(json.loads(record.read_text())["id"], 7)
+            # Refuse both remote rename and replacement before clearing the prior ID.
+            original = record.read_bytes()
+            for remote in ([{"id": 7, "name": "remote-rename"}], [{"id": 8, "name": "old-host-rui"}]):
+                runners.write_text(json.dumps(remote))
+                for operation in ("prepare", "intent"):
+                    self.assertNotEqual(step(operation).returncode, 0)
+                    self.assertEqual(record.read_bytes(), original)
+            runners.write_text(json.dumps([{"id": 7, "name": "old-host-rui"}]))
+            self.assertEqual(step("intent").returncode, 0)
+            self.assertIsNone(json.loads(record.read_text())["id"])
+            local.write_text(json.dumps({"gitHubUrl": "https://github.com/DivyanshGolyan/rui", "agentName": "old-host-rui", "agentId": 9}))
+            self.assertEqual(step("complete").returncode, 0)
+            self.assertEqual(json.loads(record.read_text()), mac_runner.registration_record("old-host-rui", 9))
+            local.unlink()
+            record.unlink()
+            self.assertNotEqual(step("prepare").returncode, 0)
+        first_intent = install.index('runner_name=$(registration_state "$stage" prepare')
+        self.assertLess(first_intent, install.index('/usr/bin/dscl . -create /Users/ruici\n'))
+        self.assertLess(install.index('registration_state "$stage" intent'), install.index('./config.sh remove --local'))
+
+    def test_uninstaller_adapter_rechecks_local_state_and_ignores_old_receipts(self):
+        uninstall = (ROOT / "tests/ci/mac-runner/uninstall.sh").read_text()
+        source = next(code for code in re.findall(r"<<'PY'\n(.*?)\nPY", uninstall, re.S)
+                      if 'action, reason = policy["removal_action"]' in code)
+        with tempfile.TemporaryDirectory() as directory:
+            temp = Path(directory)
+            record, local, runners = (temp / name for name in ("record", ".runner", "runners"))
+            record.write_text(json.dumps(mac_runner.registration_record("old-host-rui", 7)))
+            original = record.read_bytes()
+            matching = {"gitHubUrl": "https://github.com/DivyanshGolyan/rui", "agentName": "old-host-rui", "agentId": 7}
+            runners.write_text(json.dumps([{"id": 7, "name": "old-host-rui"}]))
+            (temp / ".rui-runner-deregistered").touch()
+            def step(credentials):
+                result = subprocess.run([sys.executable, "-I", "-S", "-", str(ROOT / "tests/ci/mac_runner.py"),
+                                         str(record), str(local), str(runners), credentials],
+                                        input=source, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                return result.stdout.strip()
+            local.write_text(json.dumps(matching))
+            self.assertEqual(step("true"), "deregister")
+            # Changes during bootout must prevent the SDK's silent local-only removal.
+            for changed, credentials in [(None, "true"), (matching, "false"), (dict(matching, agentId=8), "true")]:
+                if changed is None:
+                    local.unlink(missing_ok=True)
+                else:
+                    local.write_text(json.dumps(changed))
+                self.assertEqual(step(credentials), "repair")
+                self.assertEqual(record.read_bytes(), original)
+            local.unlink()
+            runners.write_text("[]")
+            self.assertEqual(step("false"), "cleanup")
+            record.unlink()
+            self.assertEqual(step("false"), "repair")
+        calls = [match.start() for match in re.finditer(re.escape('action=$(removal_decision "$stage")'), uninstall)]
+        self.assertEqual(len(calls), 2)
+        stop = uninstall.index('/bin/launchctl bootout', uninstall.index('case $action in'))
+        self.assertLess(calls[0], stop)
+        self.assertLess(stop, calls[1])
+        self.assertLess(calls[1], uninstall.index('./config.sh remove --unattended'))
+
+    def test_interrupted_removal_reinstall_and_missing_configuration(self):
+        old = mac_runner.registration_record("old-host-rui", 7)
+        self.assertEqual(mac_runner.removal_action(old, [{"id": 7, "name": "old-host-rui"}], None, False)[0], "repair")
+        self.assertEqual(mac_runner.removal_action(old, [], None, False)[0], "cleanup")
+        # A new registration replaces the old identity; a stale receipt cannot authorize cleanup.
+        intent = mac_runner.registration_record("old-host-rui")
+        fresh = mac_runner.registration_record("old-host-rui", 9)
+        self.assertEqual(mac_runner.removal_action(intent, [{"id": 9, "name": "old-host-rui"}], None, False)[0], "repair")
+        self.assertEqual(mac_runner.removal_action(fresh, [{"id": 9, "name": "old-host-rui"}], None, False)[0], "repair")
+        for record, snapshot in [(None, []), (old, None), (old, [{}]), (old, [{"id": True, "name": "old-host-rui"}])]:
+            self.assertEqual(mac_runner.removal_action(record, snapshot, None, False)[0], "repair")
 
 
 if __name__ == "__main__":
