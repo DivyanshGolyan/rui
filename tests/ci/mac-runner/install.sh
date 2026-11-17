@@ -72,7 +72,7 @@ def save(record):
 def local_registration():
     if local_path.is_symlink() or not local_path.is_file():
         raise ValueError("Missing regular local runner configuration")
-    local = json.loads(local_path.read_text())
+    local = json.loads(local_path.read_text(encoding="utf-8-sig"))
     if local.get("gitHubUrl", "").rstrip("/") != "https://github.com/DivyanshGolyan/rui":
         raise ValueError("Local runner configuration belongs to a different repository")
     return policy["registration_record"](local.get("agentName"), local.get("agentId"))
@@ -164,7 +164,8 @@ root_install() {
     /bin/chmod 755 "$RUNNER_HOME"
     # Repairs preserve the installed name even after LocalHostName changes.
     runner_name=$(registration_state "$stage" prepare "$new_install" "$runner_name")
-    if ! /usr/bin/dscl . -read /Users/ruici UniqueID >/dev/null 2>&1; then
+    # dscl exits 0 for a missing key ("No such key: UniqueID"), so check its output.
+    if [[ $(/usr/bin/dscl . -read /Users/ruici UniqueID 2>/dev/null) != 'UniqueID: '* ]]; then
         [[ -f $RUNNER_HOME/.rui-runner-account && ! -L $RUNNER_HOME/.rui-runner-account \
             && $(/usr/bin/stat -f '%u' "$RUNNER_HOME/.rui-runner-account") == 0 ]] \
             || fail 'Cannot repair ruici without its root-owned account marker.'
