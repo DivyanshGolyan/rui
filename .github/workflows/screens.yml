@@ -133,7 +133,8 @@ jobs:
           if [ -n "$remote" ]; then
             git fetch --no-tags origin refs/heads/pr-screens:refs/remotes/origin/pr-screens
           fi
-          if [ -n "$remote" ] && git cat-file -e "origin/pr-screens:main/$BASE/shots.json" 2>/dev/null; then
+          if [ -n "$remote" ] && git cat-file -e "origin/pr-screens:main/$BASE/shots.json" 2>/dev/null &&
+             git cat-file -e "origin/pr-screens:main/$BASE/shots-meta.json" 2>/dev/null; then
             git archive origin/pr-screens "main/$BASE" > "$RUNNER_TEMP/cached-baseline.tar"
             echo 'missing=false' >> "$GITHUB_OUTPUT"
           else
@@ -246,7 +247,12 @@ jobs:
           V="$PWD/.claude/skills/verify-rui/scripts/verify-rui"
           export VERIFY_RUI_CACHE="$RUNNER_TEMP/screens-baseline-build/cache"
           build_id=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["sha"])' "$RUNNER_TEMP/screens-baseline-build/build.json")
-          "$V" shots "$build_id" --shard "$SHARD/4" --out "$RUNNER_TEMP/baseline-shard" || test -f "$RUNNER_TEMP/baseline-shard/shots.json"
+          if "$V" shots "$build_id" --shard "$SHARD/4" --out "$RUNNER_TEMP/baseline-shard"; then
+            echo success > "$RUNNER_TEMP/baseline-shard/verdict"
+          else
+            test -f "$RUNNER_TEMP/baseline-shard/shots.json"
+            echo failure > "$RUNNER_TEMP/baseline-shard/verdict"
+          fi
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: ${{ always() }}
         with:
@@ -315,7 +321,12 @@ jobs:
           mkdir -p "$RUNNER_TEMP/results"
           export VERIFY_RUI_CACHE="$RUNNER_TEMP/screens-build/cache"
           build_id=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["sha"])' "$RUNNER_TEMP/screens-build/build.json")
-          "$V" shots "$build_id" --shard "$SHARD/4" --out "$RUNNER_TEMP/results/head" || test -f "$RUNNER_TEMP/results/head/shots.json"
+          if "$V" shots "$build_id" --shard "$SHARD/4" --out "$RUNNER_TEMP/results/head"; then
+            echo success > "$RUNNER_TEMP/results/verdict"
+          else
+            test -f "$RUNNER_TEMP/results/head/shots.json"
+            echo failure > "$RUNNER_TEMP/results/verdict"
+          fi
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: ${{ always() }}
         with:
@@ -363,29 +374,54 @@ jobs:
         run: |
           set -euo pipefail
           V="$PWD/.claude/skills/verify-rui/scripts/verify-rui"
+          candidate_ok=true
+          baseline_ok=true
           shards=()
           for number in 1 2 3 4; do
             shard="$RUNNER_TEMP/shards/screens-$number-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
             test -f "$shard/head/shots.json"
-            shards+=("$shard")
+            case "$(cat "$shard/verdict")" in
+              success) ;;
+              failure) candidate_ok=false ;;
+              *) exit 1 ;;
+            esac
+            shards+=("$shard/head")
           done
           if [ -n "$BASE" ]; then
+            base_shards=()
             if [ "$BASELINE_MISSING" = false ]; then
-              mkdir -p "$RUNNER_TEMP/baseline"
-              tar -xf "$RUNNER_TEMP/cached-baseline.tar" -C "$RUNNER_TEMP/baseline" --strip-components=2
+              mkdir -p "$RUNNER_TEMP/cached-baseline"
+              tar -xf "$RUNNER_TEMP/cached-baseline.tar" -C "$RUNNER_TEMP/cached-baseline" --strip-components=2
+              test -f "$RUNNER_TEMP/cached-baseline/shots-meta.json"
+              base_shards+=("$RUNNER_TEMP/cached-baseline")
             else
-              base_shards=()
               for number in 1 2 3 4; do
                 shard="$RUNNER_TEMP/baseline-shards/screens-baseline-$number-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
                 test -f "$shard/shots.json"
+                case "$(cat "$shard/verdict")" in
+                  success) ;;
+                  failure) baseline_ok=false ;;
+                  *) exit 1 ;;
+                esac
                 base_shards+=("$shard")
               done
-              "$V" shots-merge "${base_shards[@]}" --out "$RUNNER_TEMP/baseline" || test -f "$RUNNER_TEMP/baseline/shots.json"
             fi
-            "$V" shots-merge "${shards[0]}/head" "${shards[1]}/head" "${shards[2]}/head" "${shards[3]}/head" --out "$RUNNER_TEMP/merged" --baseline "$RUNNER_TEMP/baseline" || test -f "$RUNNER_TEMP/merged/diff.json"
+            if ! "$V" shots-merge "${base_shards[@]}" --out "$RUNNER_TEMP/baseline"; then
+              baseline_ok=false
+              test -f "$RUNNER_TEMP/baseline/shots.json"
+            fi
+            if ! "$V" shots-merge "${shards[@]}" --out "$RUNNER_TEMP/merged" --baseline "$RUNNER_TEMP/baseline"; then
+              candidate_ok=false
+              test -f "$RUNNER_TEMP/merged/diff.json"
+            fi
           else
-            "$V" shots-merge "${shards[0]}/head" "${shards[1]}/head" "${shards[2]}/head" "${shards[3]}/head" --out "$RUNNER_TEMP/merged" || test -f "$RUNNER_TEMP/merged/shots.json"
+            if ! "$V" shots-merge "${shards[@]}" --out "$RUNNER_TEMP/merged"; then
+              candidate_ok=false
+              test -f "$RUNNER_TEMP/merged/shots.json"
+            fi
           fi
+          echo "candidate_ok=$candidate_ok" >> "$GITHUB_OUTPUT"
+          echo "baseline_ok=$baseline_ok" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: ${{ always() }}
         with:
@@ -403,6 +439,8 @@ jobs:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           STARTED: ${{ needs.select.outputs.started }}
           BASELINE_MISSING: ${{ needs.baseline_probe.outputs.missing }}
+          CANDIDATE_OK: ${{ steps.merge.outputs.candidate_ok }}
+          BASELINE_OK: ${{ steps.merge.outputs.baseline_ok }}
         run: |
           set -euo pipefail
           if [ -n "$PR" ]; then
@@ -452,22 +490,18 @@ jobs:
                   target.parent.mkdir(parents=True, exist_ok=True)
                   shutil.copy2(src, target)
           PY_MEDIA
-            if python3 - "$RUNNER_TEMP/baseline/shots.json" <<'PY_BASE'
-          import json, sys
-          sys.exit(any(not item['ok'] for item in json.load(open(sys.argv[1]))))
-          PY_BASE
-            then
+            if [ "$BASELINE_OK" = true ]; then
               mkdir -p "$RUNNER_TEMP/published/main/$BASE"
               cp -a "$RUNNER_TEMP/baseline/." "$RUNNER_TEMP/published/main/$BASE/"
+            else
+              rm -rf "$RUNNER_TEMP/published/main/$BASE"
             fi
           else
-            if python3 - "$RUNNER_TEMP/merged/shots.json" <<'PY_HEAD'
-          import json, sys
-          sys.exit(any(not item['ok'] for item in json.load(open(sys.argv[1]))))
-          PY_HEAD
-            then
+            if [ "$CANDIDATE_OK" = true ]; then
               mkdir -p "$RUNNER_TEMP/published/main/$HEAD_SHA"
               cp -a "$RUNNER_TEMP/merged/." "$RUNNER_TEMP/published/main/$HEAD_SHA/"
+            else
+              rm -rf "$RUNNER_TEMP/published/main/$HEAD_SHA"
             fi
           fi
           mkdir -p "$RUNNER_TEMP/published/main"
@@ -498,16 +532,8 @@ jobs:
           if [ -n "$PR" ]; then
             cd "$GITHUB_WORKSPACE"
             python3 tests/ci/screens_comment.py --diff "$RUNNER_TEMP/merged/diff.json" --repo "$GITHUB_REPOSITORY" --pr "$PR" --head "$HEAD_SHA" --base "$BASE" --shots "$RUNNER_TEMP/merged/shots.json" --baseline-shots "$RUNNER_TEMP/baseline/shots.json"
-            python3 - "$RUNNER_TEMP/merged/diff.json" <<'PY'
-          import json, sys
-          sys.exit(bool(json.load(open(sys.argv[1]))['failed']))
-          PY
-          else
-            python3 - "$RUNNER_TEMP/merged/shots.json" <<'PY'
-          import json, sys
-          sys.exit(any(not item['ok'] for item in json.load(open(sys.argv[1]))))
-          PY
           fi
+          test "$CANDIDATE_OK" = true && test "$BASELINE_OK" = true
   cleanup:
     needs: select
     if: ${{ needs.select.outputs.close == 'true' }}

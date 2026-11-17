@@ -1,8 +1,10 @@
 """Contract checks for the screen workflow's artifact and writer wiring."""
 import json
+import os
 import pathlib
 import subprocess
 import sys
+import tarfile
 import tempfile
 import textwrap
 import unittest
@@ -56,6 +58,99 @@ class ScreensWorkflowTest(unittest.TestCase):
         for cache in ('screens-build', 'screens-baseline-build'):
             self.assertEqual(workflow.count('export VERIFY_RUI_CACHE="$RUNNER_TEMP/' + cache + '/cache"'), 2)
 
+    def test_capture_verdicts_reach_publication_for_candidate_and_baseline(self):
+        workflow = WORKFLOW.read_text()
+        merge = workflow.split('      - name: Merge captures\n', 1)[1].split('      - uses: actions/upload-artifact@', 1)[0]
+        script = textwrap.dedent(merge.split('        run: |\n', 1)[1])
+        repo = WORKFLOW.parents[2]
+        for side in ('candidate', 'baseline'):
+            for failure in ('none', 'record', 'run', 'exit'):
+                for with_base in ((True, False) if side == 'candidate' else (True,)):
+                    with self.subTest(side=side, failure=failure, with_base=with_base), tempfile.TemporaryDirectory() as tmp:
+                        root = pathlib.Path(tmp)
+                        for number in range(1, 5):
+                            for kind in ('candidate', 'baseline'):
+                                shard = (root / ('shards' if kind == 'candidate' else 'baseline-shards') /
+                                         (f'screens-{number}-1-1' if kind == 'candidate' else f'screens-baseline-{number}-1-1'))
+                                capture = shard / 'head' if kind == 'candidate' else shard
+                                capture.mkdir(parents=True)
+                                broken = kind == side and number == 1
+                                record = {'name': f'screen-{number}', 'size': '80x24',
+                                          'ok': not (broken and failure == 'record'),
+                                          'reason': 'failed' if broken and failure == 'record' else None,
+                                          'fingerprint': 'same', 'files': {}}
+                                (capture / 'shots.json').write_text(json.dumps([record]))
+                                (capture / 'shots-meta.json').write_text(json.dumps({'failed': broken and failure == 'run'}))
+                                (shard / 'verdict').write_text('failure' if broken and failure == 'exit' else 'success')
+                        output = root / 'outputs'
+                        env = {**os.environ, 'RUNNER_TEMP': tmp, 'GITHUB_RUN_ID': '1',
+                               'GITHUB_RUN_ATTEMPT': '1', 'GITHUB_OUTPUT': str(output),
+                               'BASE': 'base' if with_base else '', 'BASELINE_MISSING': 'true'}
+                        result = subprocess.run(['bash', '-c', script], cwd=repo, env=env, capture_output=True, text=True)
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        verdicts = dict(line.split('=', 1) for line in output.read_text().splitlines())
+                        self.assertEqual(verdicts['baseline_ok'], 'false' if side == 'baseline' and failure != 'none' else 'true')
+                        candidate_failed = (side == 'candidate' and failure != 'none') or (side == 'baseline' and failure == 'record')
+                        self.assertEqual(verdicts['candidate_ok'], 'false' if candidate_failed else 'true')
+        publish = workflow.split('      - name: Publish screenshots and update comment', 1)[1].split('  cleanup:', 1)[0]
+        self.assertIn('if [ "$BASELINE_OK" = true ]; then', publish)
+        self.assertIn('if [ "$CANDIDATE_OK" = true ]; then', publish)
+        self.assertIn('test "$CANDIDATE_OK" = true && test "$BASELINE_OK" = true', publish)
+        self.assertNotIn("item['ok']", publish)
+        self.assertNotIn("['failed']", publish.split('          PY_MEDIA', 1)[1])
+
+    def test_cached_baseline_is_rechecked_by_merge_owner(self):
+        workflow = WORKFLOW.read_text()
+        merge = workflow.split('      - name: Merge captures\n', 1)[1].split('      - uses: actions/upload-artifact@', 1)[0]
+        script = textwrap.dedent(merge.split('        run: |\n', 1)[1])
+        for failed in (False, True):
+            with self.subTest(failed=failed), tempfile.TemporaryDirectory() as tmp:
+                root = pathlib.Path(tmp)
+                record = {'name': 'screen', 'size': '80x24', 'ok': True, 'reason': None,
+                          'fingerprint': 'same', 'files': {}}
+                for number in range(1, 5):
+                    shard = root / f'shards/screens-{number}-1-1'
+                    (shard / 'head').mkdir(parents=True)
+                    (shard / 'head/shots.json').write_text(json.dumps([record] if number == 1 else []))
+                    (shard / 'head/shots-meta.json').write_text(json.dumps({'failed': False}))
+                    (shard / 'verdict').write_text('success')
+                cached = root / 'source/main/base'
+                cached.mkdir(parents=True)
+                (cached / 'shots.json').write_text(json.dumps([record]))
+                (cached / 'shots-meta.json').write_text(json.dumps({'failed': failed}))
+                with tarfile.open(root / 'cached-baseline.tar', 'w') as archive:
+                    archive.add(cached, arcname='main/base')
+                output = root / 'outputs'
+                env = {**os.environ, 'RUNNER_TEMP': tmp, 'GITHUB_RUN_ID': '1', 'GITHUB_RUN_ATTEMPT': '1',
+                       'GITHUB_OUTPUT': str(output), 'BASE': 'base', 'BASELINE_MISSING': 'false'}
+                result = subprocess.run(['bash', '-c', script], cwd=WORKFLOW.parents[2], env=env, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                verdicts = dict(line.split('=', 1) for line in output.read_text().splitlines())
+                self.assertEqual(verdicts, {'candidate_ok': 'true', 'baseline_ok': 'false' if failed else 'true'})
+
+    def test_policy_actionlint_applies_only_workflow_specific_ignores(self):
+        self.assertEqual(WORKFLOW.read_text().count('queue: max'), 2)
+        policy = (WORKFLOW.parent / 'check.yml').read_text()
+        step = policy.split('      - name: Validate workflows with pinned-linter compatibility exceptions\n', 1)[1].split('  linux_build:\n', 1)[0]
+        script = textwrap.dedent(step.split('        run: |\n', 1)[1])
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            linter = root / 'actionlint'
+            linter.write_text('#!' + sys.executable + '\nimport json, os, sys\nwith open(os.environ["LINT_LOG"], "a") as f: f.write(json.dumps(sys.argv[1:]) + "\\n")\n')
+            linter.chmod(0o755)
+            log = root / 'calls'
+            env = {**os.environ, 'PATH': str(root) + os.pathsep + os.environ['PATH'], 'LINT_LOG': str(log)}
+            subprocess.run(['bash', '-c', script], cwd=WORKFLOW.parents[2], env=env, check=True)
+            calls = [json.loads(line) for line in log.read_text().splitlines()]
+        by_name = {pathlib.Path(call[-1]).name: call[1:-1] for call in calls}
+        self.assertEqual(set(by_name), {path.name for path in WORKFLOW.parent.glob('*.yml')})
+        cache = ['-ignore', r'^unexpected key "cache-mode" for "workflow" section\.']
+        queue = ['-ignore', r'^unexpected key "queue" for "concurrency" section\.']
+        for name, args in by_name.items():
+            expected = (cache if name in ('qualify-macos.yml', 'previous-release-upgrade.yml', 'release.yml', 'screens.yml') else [])
+            expected += queue if name == 'screens.yml' else []
+            self.assertEqual(args, expected, name)
+
     def test_write_jobs_are_serialized_and_publisher_uses_default_branch(self):
         workflow = WORKFLOW.read_text()
         publish = workflow.split('  screens:\n', 1)[1].split('  cleanup:\n', 1)[0]
@@ -83,13 +178,6 @@ class ScreensWorkflowTest(unittest.TestCase):
         self.assertEqual(workflow.count('remote=$(git ls-remote --refs origin refs/heads/pr-screens)'), 3)
         self.assertEqual(workflow.count('push --force-with-lease='), 2)
         self.assertNotIn('if ! git fetch --no-tags origin refs/heads/pr-screens', workflow)
-
-    def test_linter_exception_is_scoped_to_screen_workflow_and_queue(self):
-        check = (WORKFLOW.parent / 'check.yml').read_text()
-        self.assertIn('elif [ "$workflow" = .github/workflows/screens.yml ]; then', check)
-        self.assertIn('unexpected key "queue" for "concurrency" section', check)
-        workflow = WORKFLOW.read_text()
-        self.assertEqual(workflow.count('queue: max'), 2)
 
     def test_publisher_includes_other_sizes_for_changed_states_only(self):
         workflow = WORKFLOW.read_text()
