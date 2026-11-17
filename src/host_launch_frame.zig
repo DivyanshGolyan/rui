@@ -29,7 +29,7 @@ pub fn accept(bytes: []const u8) error{SettingsInvalid}!void {
 
 pub fn inspect(bytes: []const u8) error{SettingsInvalid}!View {
     if (bytes.len < prefix_bytes or bytes.len > max_bytes or !std.mem.eql(u8, bytes[0..magic.len], magic)) return error.SettingsInvalid;
-    const intent = std.meta.intToEnum(ProviderIntent, bytes[magic.len]) catch return error.SettingsInvalid;
+    const intent = std.enums.fromInt(ProviderIntent, bytes[magic.len]) orelse return error.SettingsInvalid;
     const directory_len = std.mem.readInt(u32, bytes[magic.len + 1 ..][0..4], .little);
     const document_len = std.mem.readInt(u64, bytes[magic.len + 5 ..][0..8], .little);
     if (directory_len == 0 or directory_len > protocol.max_store_bytes or document_len > hs.max_composed_document_bytes) return error.SettingsInvalid;
@@ -51,7 +51,7 @@ pub fn freeze(gpa: std.mem.Allocator, directory: []const u8, settings: *const hs
     const bytes = try gpa.alloc(u8, prefix_bytes + directory.len + @as(usize, @intCast(document_len)));
     errdefer secret_value.wipeAndFree(gpa, bytes, .of(u8), @returnAddress());
     @memcpy(bytes[0..magic.len], magic);
-    bytes[magic.len] = @intFromEnum(intent);
+    bytes[magic.len] = @backingInt(intent);
     std.mem.writeInt(u32, bytes[magic.len + 1 ..][0..4], @intCast(directory.len), .little);
     std.mem.writeInt(u64, bytes[magic.len + 5 ..][0..8], document_len, .little);
     @memcpy(bytes[prefix_bytes..][0..directory.len], directory);
@@ -88,8 +88,16 @@ test "frozen launch frame preserves OS-byte selector intent and file-origin sche
         defer owned.deinit(gpa);
         b.* = .{};
         defer b.deinit();
-        try std.testing.expectEqual(intent, try decode(owned.bytes, "/host-\xff", b, gpa, struct { fn check(_: std.mem.Allocator, _: std.json.ObjectMap) error{OutOfMemory}!?[]const u8 { return null; } }.check, &failure));
-        try std.testing.expectError(error.SettingsInvalid, decode(owned.bytes, "/other", b, gpa, struct { fn check(_: std.mem.Allocator, _: std.json.ObjectMap) error{OutOfMemory}!?[]const u8 { return null; } }.check, &failure));
+        try std.testing.expectEqual(intent, try decode(owned.bytes, "/host-\xff", b, gpa, struct {
+            fn check(_: std.mem.Allocator, _: std.json.ObjectMap) error{OutOfMemory}!?[]const u8 {
+                return null;
+            }
+        }.check, &failure));
+        try std.testing.expectError(error.SettingsInvalid, decode(owned.bytes, "/other", b, gpa, struct {
+            fn check(_: std.mem.Allocator, _: std.json.ObjectMap) error{OutOfMemory}!?[]const u8 {
+                return null;
+            }
+        }.check, &failure));
         try std.testing.expectError(error.SettingsInvalid, inspect(owned.bytes[0 .. owned.bytes.len - 1]));
         const tag = owned.bytes[0];
         owned.bytes[0] = '!';

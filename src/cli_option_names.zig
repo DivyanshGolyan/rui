@@ -39,6 +39,8 @@ pub const names = [_][]const u8{
     "reload-skills",
     "session",
     "settings",
+    @import("host_launch_frame.zig").input_option,
+    @import("host_launch_frame.zig").check_option,
     "since",
     "store",
     "store-hex",

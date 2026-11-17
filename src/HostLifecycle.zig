@@ -440,7 +440,7 @@ test "upgrade public commands preserve semantic sources and Host directory routi
             const argv = try arguments(arena.allocator(), "/target/bin/rui", request, command);
             try std.testing.expectEqualStrings("/target/bin/rui", argv[0]);
             try std.testing.expectEqualStrings("host", argv[1]);
-            const at: usize = if (command == .check) 4 else 3;
+            const at: usize = if (command == .status) 3 else 5;
             try std.testing.expectEqualStrings("--store", argv[at]);
             try std.testing.expectEqualStrings(request.dir, argv[at + 1]);
             var offset = at + 2;

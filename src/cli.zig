@@ -4415,7 +4415,7 @@ const LaunchFixture = struct {
         const self = cast(raw);
         if (fd == self.report_fd) {
             self.report_reads += 1;
-            if (self.delay_refusal) return -@as(isize, @intFromEnum(std.posix.E.AGAIN));
+            if (self.delay_refusal) return -@as(isize, @backingInt(std.posix.E.AGAIN));
             if (self.report_reads != 1) return 0;
             const failure: ?start_report.Failure = switch (self.scenario) {
                 .competitor => .init(.store_locked, "another Host owns this Store"),
@@ -4430,7 +4430,7 @@ const LaunchFixture = struct {
             return 0;
         }
         self.reads += 1;
-        if (self.delay_refusal and self.scenario == .competitor) return -@as(isize, @intFromEnum(std.posix.E.AGAIN));
+        if (self.delay_refusal and self.scenario == .competitor) return -@as(isize, @backingInt(std.posix.E.AGAIN));
         switch (self.scenario) {
             .migration_success, .migration_timeout, .migration_both, .migration_eof, .migration_final => {
                 const text: []const u8 = switch (self.scenario) {
@@ -4452,13 +4452,13 @@ const LaunchFixture = struct {
             },
             else => {},
         }
-        if (self.scenario == .timeout or self.scenario == .interrupted) return -@as(isize, @intFromEnum(std.posix.E.AGAIN)); // EAGAIN, not EOF.
+        if (self.scenario == .timeout or self.scenario == .interrupted) return -@as(isize, @backingInt(std.posix.E.AGAIN)); // EAGAIN, not EOF.
         if (self.scenario == .closed) return 0;
         if (self.scenario == .full and self.reads == 1) {
             @memset(bytes, 'x');
             return @intCast(bytes.len);
         }
-        if (self.reads == 1 and (self.scenario == .success or self.scenario == .invalid_url or self.scenario == .missing_key)) return -@as(isize, @intFromEnum(std.posix.E.AGAIN));
+        if (self.reads == 1 and (self.scenario == .success or self.scenario == .invalid_url or self.scenario == .missing_key)) return -@as(isize, @backingInt(std.posix.E.AGAIN));
         const text = switch (self.scenario) {
             .refusal => if (self.reads == 1) refusal else "",
             .identity => if (self.reads == 1) identity else "",

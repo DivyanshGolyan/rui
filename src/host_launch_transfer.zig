@@ -12,7 +12,7 @@ pub const Ops = struct {
     write: *const fn (?*anyopaque, c_int, []const u8) isize = nativeWrite,
     pub fn nativeRead(_: ?*anyopaque, fd: c_int, bytes: []u8) isize {
         const count = std.c.read(fd, bytes.ptr, bytes.len);
-        return if (count >= 0) count else -@as(isize, @intFromEnum(std.posix.errno(count)));
+        return if (count >= 0) count else -@as(isize, @backingInt(std.posix.errno(count)));
     }
     fn nativeWrite(_: ?*anyopaque, fd: c_int, bytes: []const u8) isize {
         return @intCast(rui_write_launch_input(fd, bytes.ptr, bytes.len));
@@ -57,17 +57,17 @@ pub const Transfer = struct {
                 result.counts[i] = @intCast(count);
                 result.closed[i] = count == 0;
                 result.progressed = result.progressed or count > 0;
-            } else if (-count != @intFromEnum(std.posix.E.AGAIN) and -count != @intFromEnum(std.posix.E.INTR)) return error.InputOutput;
+            } else if (-count != @backingInt(std.posix.E.AGAIN) and -count != @backingInt(std.posix.E.INTR)) return error.InputOutput;
         }
         if (self.input >= 0 and self.offset < self.bytes.len) {
             const count = ops.write(ops.context, self.input, self.bytes[self.offset..][0..@min(16384, self.bytes.len - self.offset)]);
             if (count > 0) {
                 self.offset += @intCast(count);
                 result.progressed = true;
-            } else if (count == 0 or -count == @intFromEnum(std.posix.E.PIPE)) {
+            } else if (count == 0 or -count == @backingInt(std.posix.E.PIPE)) {
                 self.closed_early = true;
                 self.deinit();
-            } else if (-count != @intFromEnum(std.posix.E.AGAIN) and -count != @intFromEnum(std.posix.E.INTR)) return error.InputOutput;
+            } else if (-count != @backingInt(std.posix.E.AGAIN) and -count != @backingInt(std.posix.E.INTR)) return error.InputOutput;
         }
         if (self.input >= 0 and self.offset == self.bytes.len) self.deinit();
         return result;
