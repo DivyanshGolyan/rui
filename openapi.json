@@ -15367,6 +15367,17 @@
               "max",
               null
             ]
+          },
+          "offered_tools": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{1,64}$"
+            },
+            "maxItems": 129,
+            "uniqueItems": true,
+            "x-rui-max-bytes": 4107,
+            "description": "None repeated; the names' bytes total at most x-rui-max-bytes. The effective tool offer frozen at this Operation's admission."
           }
         },
         "required": [
@@ -15376,7 +15387,8 @@
           "interrupted_by",
           "settings_revision",
           "request_id",
-          "reasoning_effort"
+          "reasoning_effort",
+          "offered_tools"
         ],
         "additionalProperties": false
       },

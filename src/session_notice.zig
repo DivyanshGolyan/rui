@@ -8,28 +8,48 @@ pub const Failure = struct { line: []const u8, key: Key };
 
 pub const Key = enum { retry, discard, status };
 
-pub fn key(held: Held) ?Key {
-    if (held.failure) |failure| return failure.key;
-    return switch (held.state) {
-        .not_started, .unconfirmed => .retry,
-        .submitting => null,
-        .rejected => .discard,
-    };
-}
+pub const Presentation = struct {
+    note: ?[]const u8 = null,
+    status: ?[]const u8 = null,
+    action: ?Key = null,
+    details: bool = false,
+    details_available: bool = false,
+    repair_details: bool = false,
+    in_flight: bool = false,
+};
 
 pub const too_large = "! Environment too large; nothing sent · details";
 
-pub fn status(opening: bool, waiting: bool, held: ?Held) ?[]const u8 {
-    if (opening) return "Opening…";
-    if (waiting) return "";
-    const original = held orelse return null;
-    if (original.failure) |failure| return failure.line;
-    return switch (original.state) {
-        .not_started => "Not sent · ctrl+r retries original",
-        .submitting => "Sending…",
-        .unconfirmed => if (original.kind == .decision) "! Decision not confirmed · ctrl+r retries original" else "! Not confirmed · ctrl+r retries original",
-        .rejected => "Rejected · /discard",
-    };
+pub fn presentation(opening: bool, waiting: bool, held: ?Held) Presentation {
+    var result: Presentation = .{};
+    if (held) |original| {
+        const shown: struct { line: ?[]const u8, action: ?Key } = if (original.failure) |failure|
+            .{ .line = failure.line, .action = failure.key }
+        else switch (original.state) {
+            .not_started => .{ .line = "Not sent · ctrl+r retries original", .action = .retry },
+            .submitting => .{ .line = if (original.kind == .decision) "Sending…" else null, .action = null },
+            .unconfirmed => .{ .line = if (original.kind == .decision) "! Decision not confirmed · ctrl+r retries original" else "Not confirmed · ctrl+r retries original", .action = .retry },
+            .rejected => .{ .line = "Rejected · /discard", .action = .discard },
+        };
+        if (original.kind == .message) result.note = shown.line else result.status = shown.line;
+        result.action = shown.action;
+        result.details = original.state != .submitting;
+        result.details_available = true;
+        result.repair_details = result.details and original.failure != null and shown.action == .status;
+        result.in_flight = original.kind == .decision and original.state == .submitting;
+    }
+    if (opening) {
+        result.status = "Opening…";
+        result.in_flight = true;
+    } else if (waiting) {
+        result.status = "";
+        result.in_flight = false;
+    }
+    return result;
+}
+
+pub fn key(held: Held) ?Key {
+    return presentation(false, false, held).action;
 }
 
 pub const Action = struct {
@@ -91,23 +111,48 @@ test "a Session link leaves only where Esc would, and never past a waiting Actio
     try std.testing.expectEqualStrings("Links open once the command ends.", follow(null, false, true, false, true).stay);
 }
 
-test "the status says the opening first, nothing over a waiting Action, then the original's progress" {
-    const unconfirmed: Held = .{ .kind = .decision, .state = .unconfirmed };
-    try std.testing.expectEqualStrings("Opening…", status(true, true, unconfirmed).?);
-    try std.testing.expectEqualStrings("", status(false, true, unconfirmed).?);
-    try std.testing.expectEqual(@as(?[]const u8, null), status(false, false, null));
-    try std.testing.expectEqualStrings("! Decision not confirmed · ctrl+r retries original", status(false, false, unconfirmed).?);
-    try std.testing.expectEqualStrings("! Not confirmed · ctrl+r retries original", status(false, false, .{ .kind = .message, .state = .unconfirmed }).?);
-    try std.testing.expectEqualStrings("Not sent · ctrl+r retries original", status(false, false, .{ .kind = .message, .state = .not_started }).?);
-    try std.testing.expectEqualStrings("Rejected · /discard", status(false, false, .{ .kind = .decision, .state = .rejected }).?);
-    const refused: Failure = .{ .line = too_large, .key = .status };
-    try std.testing.expectEqualStrings(too_large, status(false, false, .{ .kind = .message, .state = .not_started, .failure = refused }).?);
-    try std.testing.expectEqualStrings("Opening…", status(true, false, .{ .kind = .message, .state = .not_started, .failure = refused }).?);
-    try std.testing.expectEqual(@as(?Key, .status), key(.{ .kind = .message, .state = .not_started, .failure = refused }));
-    try std.testing.expectEqual(@as(?Key, .retry), key(.{ .kind = .message, .state = .not_started }));
-    try std.testing.expectEqual(@as(?Key, .retry), key(unconfirmed));
-    try std.testing.expectEqual(@as(?Key, .discard), key(.{ .kind = .decision, .state = .rejected }));
-    try std.testing.expectEqual(@as(?Key, null), key(.{ .kind = .message, .state = .submitting }));
+test "original presentation preserves placement actions repair and opening precedence" {
+    try std.testing.expectEqualDeep(Presentation{}, presentation(false, false, null));
+    for ([_]submission.Kind{ .message, .decision }) |kind| {
+        for ([_]submission.State{ .not_started, .submitting, .unconfirmed, .rejected }) |state| {
+            const held: Held = .{ .kind = kind, .state = state };
+            const shown = presentation(false, false, held);
+            try std.testing.expect(shown.details_available);
+            try std.testing.expectEqual(state != .submitting, shown.details);
+            try std.testing.expect(!shown.repair_details);
+            try std.testing.expectEqual(kind == .decision and state == .submitting, shown.in_flight);
+            const words: ?[]const u8 = switch (state) {
+                .not_started => "Not sent · ctrl+r retries original",
+                .submitting => if (kind == .decision) "Sending…" else null,
+                .unconfirmed => if (kind == .decision) "! Decision not confirmed · ctrl+r retries original" else "Not confirmed · ctrl+r retries original",
+                .rejected => "Rejected · /discard",
+            };
+            const line = if (kind == .message) shown.note else shown.status;
+            try std.testing.expectEqual(words == null, line == null);
+            if (words) |expected| try std.testing.expectEqualStrings(expected, line.?);
+            try std.testing.expect((if (kind == .message) shown.status else shown.note) == null);
+            const action: ?Key = switch (state) {
+                .not_started, .unconfirmed => .retry,
+                .submitting => null,
+                .rejected => .discard,
+            };
+            try std.testing.expectEqual(action, shown.action);
+            try std.testing.expectEqual(action, key(held));
+        }
+        const refused: Held = .{ .kind = kind, .state = .not_started, .failure = .{ .line = too_large, .key = .status } };
+        const shown = presentation(false, false, refused);
+        try std.testing.expectEqualStrings(too_large, (if (kind == .message) shown.note else shown.status).?);
+        try std.testing.expect(shown.details and shown.details_available and shown.repair_details);
+        try std.testing.expectEqual(@as(?Key, .status), shown.action);
+        try std.testing.expectEqual(@as(?Key, .status), key(refused));
+        const opening = presentation(true, true, refused);
+        try std.testing.expectEqualStrings("Opening…", opening.status.?);
+        try std.testing.expect(opening.in_flight);
+        if (kind == .message) try std.testing.expectEqualStrings(too_large, opening.note.?);
+        const waiting = presentation(false, true, refused);
+        try std.testing.expectEqualStrings("", waiting.status.?);
+        try std.testing.expect(!waiting.in_flight);
+    }
 }
 
 test "Enter in the draft says the most pressing reason it sent nothing" {

@@ -598,11 +598,17 @@ fn chromeClick(comptime click: Click) *const fn (*anyopaque, *vxfw.EventContext)
                 .footer_pick => if (self.app_info.standaloneOpen()) {
                     try self.app_info.standaloneWidget().handleEvent(ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
                 },
-                .details => try self.showSubmissionFailure(),
+                .details => {
+                    try self.showSubmissionFailure();
+                    try self.app_hooks.root.focusInput(ctx);
+                },
                 .needs => if (self.heldOriginal()) |held| if (session_notice.key(held)) |key| switch (key) {
                     .retry => try self.perform(.recover),
                     .discard => try self.clickCommand("/discard"),
-                    .status => try self.showSubmissionFailure(),
+                    .status => {
+                        try self.showSubmissionFailure();
+                        try self.app_hooks.root.focusInput(ctx);
+                    },
                 },
             }
             self.dirty = true;
@@ -617,6 +623,10 @@ fn clickCommand(self: *Self, text: []const u8) !void {
 }
 
 fn sayBusy(self: *Self, action: ?session_notice.Action, letter: bool) void {
+    if (self.submission.messageHeld() and self.submission.intent == null) {
+        self.refreshAcceptedMessage();
+        return;
+    }
     const phase = self.upgradePhase();
     const command = self.input.queuedCommand() != null or self.inspection.command_running;
     self.notice = if (phase != .active and !command) session_upgrade.refusal(phase) else session_notice.busy(.{ .command = self.commandActive(), .held = self.heldOriginal(), .preparing = self.reading.phase == .permission, .action = action, .letter = letter });
@@ -802,11 +812,11 @@ fn appKey(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event, delivery:
         .choice = if (self.app_info.standaloneField() == null) .closed else if (self.app_info.standaloneOpen()) .shown else .pending,
         .has_effort = self.hasEffort(),
         .saving = self.app_info.pending != null,
-        .details = self.submission.view() != null,
+        .details = session_notice.presentation(false, false, self.heldOriginal()).details_available,
         .draft_empty = self.input.composition().bytes.len == 0,
         .host_startable = if (self.app_hooks.host) |host| host.startable(host.context) else false,
         .shown_row = accepted != null,
-        .send = .{ .host_held = self.hostHeld(), .opening = self.reading.opening, .preparing = self.reading.phase == .permission, .command_active = self.commandActive(), .submitting = self.submission.intent != null },
+        .send = .{ .host_held = self.hostHeld(), .opening = self.reading.opening, .preparing = self.reading.phase == .permission, .command_active = self.commandActive(), .submitting = self.submission.intent != null or self.submission.messageHeld() },
     }, input);
     switch (take) {
         .taken => {},
@@ -983,6 +993,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
         .attention = attention.fg,
         .failure = failure.fg,
         .band = style.of(self.app_caps, .{ .background = .bar }).bg,
+        .user_band = style.of(self.app_caps, .{ .background = .user_message }).bg,
         .selection = style.of(self.app_caps, .{ .background = .selection }).bg,
     };
     const facts_style = quiet;
@@ -1003,6 +1014,13 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     self.app_content.hover_style = hover;
     self.app_content.colours = colours;
     self.app_content.method = self.app_caps.width;
+    const original_presentation = session_notice.presentation(self.reading.opening, self.app_consent.request != null, self.heldOriginal());
+    const message_note = original_presentation.note;
+    self.app_content.message_note = if (message_note) |note| .{ .key = self.submission.messageKey().?, .text = note } else null;
+    self.app_content.pending = if (self.submission.messageText()) |text|
+        (if (!self.submission.messageProjected() and (screen.feed.at_end or (self.reading.opening and screen.anchor.following()))) .{ .text = text, .note = message_note } else null)
+    else
+        null;
     self.app_document.style = normal;
     self.app_document.colours = colours;
     self.app_document.hover_style = hover;
@@ -1044,8 +1062,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     chrome.facts.focus = if (self.app_hooks.root.input.mainFocused()) self.app_hooks.root.input.field else null;
     chrome.marker.method = self.app_caps.width;
     chrome.marker.style = .{ .reverse = true };
-    const held = self.heldOriginal();
-    const send = session_chrome.send(session_notice.status(self.reading.opening, self.app_consent.request != null, held), self.reading.opening or (held != null and held.?.state == .submitting));
+    const send = session_chrome.send(original_presentation.status, original_presentation.in_flight);
     const list_visible = self.app_hooks.root.listVisible();
     chrome.place(&self.app_screen, &self.app_input, .{
         .list_visible = list_visible,
@@ -1056,7 +1073,8 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
         .needs_key = if (send.needs) |needs| session_chrome.needsKey(needs) else "",
         .progress = if (self.upgradePhase() == .reobserving) session_upgrade.rereading else send.progress,
         .stoppable = said.stoppable,
-        .details = held != null and held.?.state != .submitting,
+        .details = original_presentation.details,
+        .repair_details = original_presentation.repair_details,
         .facts = .{ .current = self.footerFacts(), .name = self.session, .archive = self.line.archive_state },
         .notice = self.shown_notice.current(now_ms) orelse said.notice,
         .overview = said.text,
@@ -1487,6 +1505,7 @@ pub fn back(self: *Self, room: bool) Back {
     const recovery: original_state.Recovery = if (self.submission.view() != null) self.submission.recovery() else .none;
     if (recovery != .none and !room) return .{ .ended = .detached };
     self.submission.close();
+    self.submission.disposeMessage();
     return .{ .overview = recovery };
 }
 
@@ -1508,6 +1527,7 @@ pub fn leave(self: *Self, ended: anyerror!Outcome, restored: anyerror!void) Depa
 pub fn settleDeparture(self: *Self, ended: anyerror!Outcome, restored: anyerror!void) Departure {
     const settled = self.settle(restored);
     self.submission.close();
+    self.submission.disposeMessage();
     const cause: ?anyerror = if (ended) |_| null else |err| err;
     const plan = departure.exit(settled, cause, self.submission.view() != null);
     const action_view = self.screen.action_view != null;
@@ -2257,16 +2277,26 @@ fn recover(self: *Self, key: ?[]const u8) !void {
     }
     if (self.submission.intent != null or key != null) {
         try self.submission.requestRecovery(key);
+    } else if (self.submission.messageHeld()) {
+        self.refreshAcceptedMessage();
     } else if (self.retryable()) |fence| {
         self.retry_fence = fence;
     }
+}
+
+fn refreshAcceptedMessage(self: *Self) void {
+    self.reading.opening = true;
+    self.reading.fills = .{};
+    self.poll_at = 0;
+    self.notice = "Message accepted; refreshing conversation. Draft retained.";
+    self.dirty = true;
 }
 
 fn retryable(self: *const Self) ?RetryFence {
     const ending = self.live.latest_ending orelse return null;
     if (ending.cause.key == null or self.hostHeld()) return null;
     if (self.live.work.state.progress() != null or self.live.queued.count != 0) return null;
-    if (self.submission.intent != null or self.submission.task.thread != null or
+    if (self.submission.intent != null or self.submission.messageHeld() or self.submission.task.thread != null or
         self.waitingAction() != null or self.live.work.first_action != null or
         self.reading.prepared_action != null or self.reading.opening or
         self.reading.phase == .permission or self.commandActive() or
@@ -2367,11 +2397,17 @@ fn withdrawDecided(self: *Self) void {
 }
 
 fn beginMessage(self: *Self, intent: Submission.Intent) !void {
-    if (!try self.beginSubmission(intent)) return;
+    const begun = self.beginSubmission(intent) catch |err| {
+        try self.jumpToEnd();
+        self.screen.anchor.follow();
+        return err;
+    };
+    if (!begun) return;
     self.admission.sent += 1;
     self.inspection.status_requested = false;
     self.dropMessageRequest();
     try self.jumpToEnd();
+    self.screen.anchor.follow();
 }
 
 fn inspectionQueued(self: *const Self) bool {
@@ -2679,6 +2715,7 @@ fn beginSubmission(self: *Self, intent: Submission.Intent) !bool {
         self.notice = session_upgrade.refusal(phase);
         return false;
     }
+    self.submission.retain_message = true;
     try self.submission.begin(intent);
     return true;
 }
@@ -2696,7 +2733,7 @@ fn presentAdmission(self: *Self, end: AdmissionEnd) !void {
     switch (end) {
         .accepted => |accepted| {
             self.poll_at = 0;
-            if (accepted.confirmed) self.notice = if (accepted.kind == .decision) "  • Decision confirmed." else "  • Original confirmed.";
+            if (accepted.confirmed and accepted.kind == .decision) self.notice = "  • Decision confirmed.";
         },
         .rejected => |rejected| {
             var writer = std.Io.Writer.fixed(&self.failure_buffer);
@@ -2844,11 +2881,12 @@ fn showStaged(self: *Self) !void {
                 target_count += 1;
             }
         }
-        const entry: feed_window.Entry = .{ .key = row.key, .text = feed_window.Text.fromDocument(document), .tight = row.tight, .provisional = row.provisional, .messages = targets[0..target_count] };
+        const entry: feed_window.Entry = .{ .key = row.key, .text = feed_window.Text.fromDocument(document), .tight = row.tight, .provisional = row.provisional, .messages = targets[0..target_count], .message_key = row.message_key };
         if (!self.insertFeed(entry, backward)) {
             complete = false;
             break;
         }
+        if (entry.text.bytes.len != 0) if (entry.message_key) |key| self.submission.observeMessage(key);
         inserted += 1;
     }
     if (!complete and inserted == 0) self.reading.fills = self.reading.fills.failed(read, page);
@@ -4491,7 +4529,7 @@ fn captureInfo(held: *HeldFrontend, label: []const u8) !void {
     const self = &held.self;
     const session = &self.inspection.sessions[if (self.inspection.status) |shown| ~shown else 0];
     status_page.sample(session);
-    session.tools.remove(.web_search);
+    session.tools = try @import("command_input.zig").ToolsField.of(&.{"bash"});
     try session.model.set("gpt-5.5");
     try session.label.set(label);
     self.job.status_taken = session;
@@ -5801,10 +5839,14 @@ const ChromeFixture = struct {
     }
 
     fn rows(fixture: *ChromeFixture) ![24][]const u8 {
+        return fixture.rowsAtWidth(80);
+    }
+
+    fn rowsAtWidth(fixture: *ChromeFixture, width: u16) ![24][]const u8 {
         const arena = fixture.arena.allocator();
-        const surface = try fixture.draw();
-        var screen: vaxis.Screen = try .init(arena, .{ .rows = 24, .cols = 80, .x_pixel = 0, .y_pixel = 0 });
-        const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 80, .height = 24, .screen = &screen };
+        const surface = try fixture.widget.draw(.{ .arena = arena, .cell_arena = arena, .min = .{}, .max = .{ .width = width, .height = 24 }, .cell_size = .{} });
+        var screen: vaxis.Screen = try .init(arena, .{ .rows = 24, .cols = width, .x_pixel = 0, .y_pixel = 0 });
+        const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 24, .screen = &screen };
         try surface.render(window, fixture.self.app_input.composer.widget());
         var result: [24][]const u8 = undefined;
         for (&result, 0..) |*line, row| {
@@ -5931,7 +5973,78 @@ test "App Session shows the newest waiting Message as ◌ [N ·] its first line,
     try std.testing.expect(ChromeFixture.find(&(try fixture.rows()), "◌") == null);
 }
 
-test "App Session's frame after Enter shows the Message as sending, the same frame that clears the composer" {
+test "SessionFrontend optimistic submission keeps input rows fixed" {
+    for ([_]u16{ 46, 140 }) |width| {
+        var fixture: ChromeFixture = undefined;
+        try fixture.init();
+        defer fixture.deinit();
+        const self = fixture.self;
+        const idle = try fixture.rowsAtWidth(width);
+        const original = self.input.submitText("original model input");
+        self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty, .intent = .{ .message = original }, .state = .submitting, .key = @splat('K') };
+        defer self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty };
+        const pending = try fixture.rowsAtWidth(width);
+        try std.testing.expect(ChromeFixture.find(&pending, "› original model input") != null);
+        var messages: usize = 0;
+        for (pending) |line| {
+            messages += std.mem.count(u8, line, "original model input");
+            try std.testing.expect(std.mem.indexOf(u8, line, "Sending") == null);
+        }
+        try std.testing.expectEqual(@as(usize, 1), messages);
+        try std.testing.expect(std.mem.startsWith(u8, idle[20], "─"));
+        for (idle[20..24], pending[20..24]) |before, during| try std.testing.expectEqualStrings(before, during);
+        self.submission.state = .unconfirmed;
+        const unconfirmed = try fixture.rowsAtWidth(width);
+        errdefer for (unconfirmed, 0..) |line, row| std.debug.print("optimistic width={d} row={d}: {s}\n", .{ width, row, line });
+        const message_row = ChromeFixture.find(&unconfirmed, "› original model input");
+        const note_row = ChromeFixture.find(&unconfirmed, "Not confirmed · ctrl+r retries original");
+        try std.testing.expect(message_row != null);
+        try std.testing.expect(note_row != null);
+        try std.testing.expect(note_row.? > message_row.? and note_row.? < 20);
+        for (idle[20..23], unconfirmed[20..23]) |before, after| try std.testing.expectEqualStrings(before, after);
+        try std.testing.expectEqualStrings("original model input", try self.input.message(original));
+        self.submission.state = .rejected;
+        const rejected = try fixture.rowsAtWidth(width);
+        try std.testing.expect(ChromeFixture.find(&rejected, "› original model input") != null);
+        const rejected_note = ChromeFixture.find(&rejected, "Rejected · /discard");
+        try std.testing.expect(rejected_note != null);
+        try std.testing.expect(rejected_note.? < 20);
+        for (idle[20..23], rejected[20..23]) |before, after| try std.testing.expectEqualStrings(before, after);
+        _ = self.input.append("next draft");
+        _ = try fixture.rowsAtWidth(width);
+        try std.testing.expectEqualStrings("next draft", self.input.composition().bytes);
+        try std.testing.expectEqualStrings("original model input", try self.input.message(original));
+    }
+}
+
+test "App Session accepted message refresh keeps the next draft intact without projection" {
+    var fixture: ChromeFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const self = fixture.self;
+    const original = self.input.submitText("accepted original");
+    self.submission.settled_message = .{ .ticket = original, .key = @splat('K') };
+    self.submission.accepted = .{ .kind = .message, .key = @splat('K') };
+    defer self.submission.disposeMessage();
+    _ = self.input.append("next draft");
+    self.screen.feed.at_end = false;
+    self.reading.opening = false;
+    try fixture.press(.{ .codepoint = vaxis.Key.enter });
+    try std.testing.expect(self.reading.opening);
+    try std.testing.expectEqualStrings("next draft", self.input.composition().bytes);
+    try std.testing.expectEqualStrings("accepted original", self.submission.messageText().?);
+    try std.testing.expect(self.submission.intent == null and self.submission.task.thread == null);
+    self.reading.opening = false;
+    try fixture.press(.{ .codepoint = 'r', .mods = .{ .ctrl = true } });
+    try std.testing.expect(self.reading.opening);
+    try std.testing.expectEqualStrings("next draft", self.input.composition().bytes);
+    try std.testing.expectEqualStrings("accepted original", self.submission.messageText().?);
+    try std.testing.expect(self.submission.retry == null);
+    const shown = try fixture.rows();
+    try std.testing.expect(ChromeFixture.find(&shown, "› accepted original") != null);
+}
+
+test "App Session frame after Enter shows the optimistic Message and clears the composer" {
     var fixture: ChromeFixture = undefined;
     try fixture.init();
     defer fixture.deinit();
@@ -5949,7 +6062,8 @@ test "App Session's frame after Enter shows the Message as sending, the same fra
     try fixture.press(.{ .codepoint = vaxis.Key.enter });
     const shown = try fixture.rows();
     try std.testing.expectEqualStrings("", self.input.composition().bytes);
-    try std.testing.expect(ChromeFixture.find(&shown, "Sending…") != null);
+    try std.testing.expect(ChromeFixture.find(&shown, "› hi") != null);
+    for (shown) |line| try std.testing.expect(std.mem.indexOf(u8, line, "Sending") == null);
     try std.testing.expectEqual(session_chrome.Tone.quiet, self.chrome.status.bar.tone);
 }
 
@@ -5977,17 +6091,37 @@ test "App Session's status bar never says Sent: an accepted Message's row is its
     for (browsing) |row| try std.testing.expect(std.mem.indexOf(u8, row, "Sent") == null);
 }
 
-test "App Session's Ctrl-X while the Session opens says why it stopped nothing, over Opening…, until the next key" {
-    var fixture: ChromeFixture = undefined;
-    try fixture.init();
-    defer fixture.deinit();
-    const self = fixture.self;
-    self.reading.opening = true;
-    try std.testing.expect(ChromeFixture.find(&try fixture.rows(), "Opening…") != null);
-    try fixture.press(.{ .codepoint = 'x', .mods = .{ .ctrl = true } });
-    try std.testing.expect(ChromeFixture.findEnding(&try fixture.rows(), "Session is opening.") != null);
-    try fixture.press(.{ .codepoint = 'a', .text = "a" });
-    try std.testing.expect(ChromeFixture.find(&try fixture.rows(), "Opening…") != null);
+test "SessionFrontend Ctrl-X opening notice overrides progress until next key without moving rows" {
+    for ([_]u16{ 46, 140 }) |width| {
+        var fixture: ChromeFixture = undefined;
+        try fixture.init();
+        defer fixture.deinit();
+        const self = fixture.self;
+        self.reading.opening = true;
+        const opening = try fixture.rowsAtWidth(width);
+        try std.testing.expectEqual(@as(?usize, 23), ChromeFixture.findEnding(&opening, "Opening…"));
+        try std.testing.expectEqualStrings("", self.chrome.status.bar.left);
+        try fixture.press(.{ .codepoint = 'x', .mods = .{ .ctrl = true } });
+        const stopped = try fixture.rowsAtWidth(width);
+        try std.testing.expectEqual(@as(?usize, 23), ChromeFixture.findEnding(&stopped, "Session is opening."));
+        for (stopped) |line| try std.testing.expect(std.mem.indexOf(u8, line, "Opening…") == null);
+        for (opening[0..23], stopped[0..23]) |before, during| try std.testing.expectEqualStrings(before, during);
+        try std.testing.expect(self.reading.opening);
+        try std.testing.expect(!self.chrome.stoppable);
+        try std.testing.expect(self.submission.intent == null and self.submission.task.thread == null);
+        const retained = try fixture.rowsAtWidth(width);
+        try std.testing.expectEqual(@as(?usize, 23), ChromeFixture.findEnding(&retained, "Session is opening."));
+        try std.testing.expectEqualStrings("Session is opening.", self.shown_notice.current(self.nowMs()).?);
+        try fixture.press(.{ .codepoint = 'a', .text = "a" });
+        const resumed = try fixture.rowsAtWidth(width);
+        try std.testing.expectEqual(@as(?usize, 23), ChromeFixture.findEnding(&resumed, "Opening…"));
+        for (resumed) |line| try std.testing.expect(std.mem.indexOf(u8, line, "Session is opening.") == null);
+        for (opening[0..21], resumed[0..21]) |before, after| try std.testing.expectEqualStrings(before, after);
+        try std.testing.expectEqualStrings(opening[22], resumed[22]);
+        try std.testing.expectEqualStrings("a", self.input.composition().bytes);
+        try std.testing.expect(self.shown_notice.current(self.nowMs()) == null);
+        try std.testing.expect(self.reading.opening);
+    }
 }
 
 test "App Session's facts row ends with the archive badge while the Session is archived or archiving" {
@@ -6045,25 +6179,24 @@ test "App Session Footer notice replaces the stop hint without changing stoppabi
     try std.testing.expect(ChromeFixture.findEnding(&try fixture.rows(), "Port overview to vxfw finished") != null);
 }
 
-test "App Session's last row says the send state, which stays past a key and five seconds" {
+test "App Session retains Permission Decision state past a key and five seconds" {
     var fixture: ChromeFixture = undefined;
     try fixture.init();
     defer fixture.deinit();
     const self = fixture.self;
-    const original = self.input.submitText("original model input");
-    self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty, .intent = .{ .message = original }, .state = .submitting, .key = @splat('K') };
+    self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty, .intent = .{ .decision = .{ .action = 19, .decision = .allow_once } }, .state = .submitting, .key = @splat('K') };
     defer self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty };
-    try std.testing.expect(ChromeFixture.find(&try fixture.rows(), "Sending…") != null);
+    try std.testing.expect(ChromeFixture.findEnding(&try fixture.rows(), "Sending…") != null);
     self.submission.state = .unconfirmed;
     self.shown_notice.show("Copied 3 lines", ChromeFixture.now() - 6_000);
     try fixture.press(.{ .codepoint = 'a', .text = "a" });
     const unconfirmed = try fixture.rows();
-    try std.testing.expect(ChromeFixture.find(&unconfirmed, "! Not confirmed") != null);
+    try std.testing.expect(ChromeFixture.find(&unconfirmed, "! Decision not confirmed") != null);
     try std.testing.expect(std.mem.endsWith(u8, unconfirmed[22], "ctrl+r retries original"));
     try std.testing.expectEqualStrings("ctrl+r retries original", self.chrome.status.key.label);
 }
 
-test "App Session's last row keeps a rejection's code until /discard, past a key and five seconds" {
+test "SessionFrontend attached rejection keeps its code until discard past a key and five seconds" {
     var fixture: ChromeFixture = undefined;
     try fixture.init();
     defer fixture.deinit();
@@ -6077,14 +6210,210 @@ test "App Session's last row keeps a rejection's code until /discard, past a key
     try fixture.press(.{ .codepoint = 'a', .text = "a" });
     self.shown_notice.show("Copied 3 lines", ChromeFixture.now() - 6_000);
     const rejected = try fixture.rows();
-    try std.testing.expect(ChromeFixture.find(&rejected, "! Input rejected: message_too_long") != null);
-    try std.testing.expect(std.mem.endsWith(u8, rejected[22], "/discard"));
-    try std.testing.expectEqualStrings("/discard", self.chrome.status.key.label);
+    const note = ChromeFixture.find(&rejected, "! Input rejected: message_too_long");
+    try std.testing.expect(note != null);
+    try std.testing.expect(note.? < 20);
+    try std.testing.expect(std.mem.endsWith(u8, rejected[note.?], "/discard"));
+    try std.testing.expectEqualStrings("", self.chrome.status.bar.left);
+    try std.testing.expectEqualStrings("", self.chrome.status.key.label);
     self.submission.key = @splat('L');
-    try std.testing.expect(ChromeFixture.find(&try fixture.rows(), "Rejected") != null);
+    const changed_key = try fixture.rows();
+    try std.testing.expect(ChromeFixture.find(&changed_key, "Rejected") != null);
+    for (changed_key) |line| try std.testing.expect(std.mem.indexOf(u8, line, "message_too_long") == null);
+    self.submission.key = @splat('K');
+    self.submission.state = .unconfirmed;
+    const changed_state = try fixture.rows();
+    try std.testing.expect(ChromeFixture.find(&changed_state, "Not confirmed") != null);
+    for (changed_state) |line| try std.testing.expect(std.mem.indexOf(u8, line, "message_too_long") == null);
 }
 
-test "App Session keeps a refused environment and its repair details separate from chat info" {
+test "SessionFrontend submission presentation domain keeps Message notes separate from Decision state" {
+    const Case = struct { state: Submission.State, rejection: bool = false, environment: bool = false };
+    const cases = [_]Case{
+        .{ .state = .not_started },
+        .{ .state = .submitting },
+        .{ .state = .unconfirmed },
+        .{ .state = .rejected },
+        .{ .state = .rejected, .rejection = true },
+        .{ .state = .not_started, .environment = true },
+    };
+    for ([_]u16{ 46, 140 }) |width| for ([_]Submission.Kind{ .message, .decision }) |kind| for (cases) |case| {
+        errdefer std.debug.print("presentation width={d} kind={s} state={s} rejection={} environment={}\n", .{ width, @tagName(kind), @tagName(case.state), case.rejection, case.environment });
+        var fixture: ChromeFixture = undefined;
+        try fixture.init();
+        defer fixture.deinit();
+        const self = fixture.self;
+        const original = if (kind == .message) self.input.submitText("matrix original") else null;
+        self.submission.intent = if (original) |ticket|
+            .{ .message = ticket }
+        else
+            .{ .decision = .{ .action = 19, .decision = .allow_once } };
+        self.submission.state = case.state;
+        self.submission.key = @splat('K');
+        if (case.rejection) {
+            var code: protocol.Bounded(protocol.max_code_bytes) = .{};
+            try code.set("x\x1b");
+            try self.presentAdmission(.{ .rejected = .{ .kind = kind, .code = code } });
+        } else if (case.environment) {
+            try self.presentAdmission(.{ .failed = .{ .err = error.EnvironmentTooLarge } });
+        }
+        _ = self.input.append("next draft");
+        self.input.editors[self.input.active].setCursor(4);
+        const cursor = self.input.composition().cursor;
+        const shown = try fixture.rowsAtWidth(width);
+        const expected: ?[]const u8 = if (case.environment)
+            "! Environment too large; nothing sent"
+        else if (case.rejection)
+            (if (kind == .message) "! Input rejected: x\\x1b" else "! Decision rejected: x\\x1b")
+        else switch (case.state) {
+            .not_started => "Not sent",
+            .submitting => if (kind == .message) null else "Sending…",
+            .unconfirmed => if (kind == .message) "Not confirmed" else "! Decision not confirmed",
+            .rejected => "Rejected",
+        };
+        if (kind == .message) {
+            const message_row = ChromeFixture.find(&shown, "› matrix original");
+            try std.testing.expect(message_row != null);
+            var copies: usize = 0;
+            for (shown) |line| {
+                copies += std.mem.count(u8, line, "matrix original");
+                try std.testing.expect(std.mem.indexOf(u8, line, "Sending") == null);
+            }
+            try std.testing.expectEqual(@as(usize, 1), copies);
+            try std.testing.expectEqualStrings("", self.chrome.status.bar.left);
+            try std.testing.expectEqualStrings("", self.chrome.status.key.label);
+            if (expected) |prefix| {
+                const note_row = ChromeFixture.find(&shown, prefix);
+                try std.testing.expect(note_row != null);
+                try std.testing.expect(note_row.? > message_row.? and note_row.? < 20);
+            } else try std.testing.expect(self.app_content.pending.?.note == null);
+        } else {
+            for (shown) |line| try std.testing.expect(std.mem.indexOf(u8, line, "matrix original") == null);
+            try std.testing.expect(self.app_content.pending == null);
+            if (expected) |prefix| {
+                var found = false;
+                for (shown) |line| if (std.mem.indexOf(u8, line, prefix) != null) {
+                    found = true;
+                };
+                try std.testing.expect(found);
+                if (case.state != .submitting) try std.testing.expect(std.mem.startsWith(u8, self.chrome.status.bar.left, prefix));
+            }
+        }
+        if (case.environment) for (shown) |line| try std.testing.expect(std.mem.indexOf(u8, line, "ctrl+r") == null);
+        if (case.rejection) {
+            var codes: usize = 0;
+            for (shown) |line| codes += std.mem.count(u8, line, "x\\x1b");
+            try std.testing.expectEqual(@as(usize, 1), codes);
+        }
+        if (case.state == .submitting) try std.testing.expectEqualStrings("", self.chrome.details.label);
+        if (case.environment) try std.testing.expectEqualStrings("alt+d details", self.chrome.details.label);
+        try fixture.press(.{ .codepoint = 'd', .mods = .{ .alt = true } });
+        try std.testing.expectEqual(Screen.ViewKind.details, self.screen.view);
+        try std.testing.expectEqualStrings("next draft", self.input.composition().bytes);
+        try std.testing.expectEqual(cursor, self.input.composition().cursor);
+        if (original) |ticket| try std.testing.expectEqualStrings("matrix original", try self.input.message(ticket));
+    };
+}
+
+test "SessionFrontend actionable repair details remain drawn beside a folder at both widths" {
+    const Locate = struct {
+        const Point = struct { row: i16, col: i16 };
+
+        fn widget(surface: vxfw.Surface, target: vxfw.Widget) ?Point {
+            if (surface.widget.eql(target) and surface.size.width != 0 and surface.size.height != 0)
+                return .{ .row = 0, .col = 0 };
+            for (surface.children) |child| {
+                if (@This().widget(child.surface, target)) |point| return .{
+                    .row = point.row + @as(i16, @intCast(child.origin.row)),
+                    .col = point.col + @as(i16, @intCast(child.origin.col)),
+                };
+            }
+            return null;
+        }
+    };
+    for ([_]u16{ 46, 140 }) |width| for ([_]Submission.Kind{ .message, .decision }) |kind| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        held.size = .{ .width = width, .height = 30 };
+        const self = &held.self;
+        self.files.details = try held.tmp.dir.createFile(std.testing.io, "folder-repair-details", .{ .read = true });
+        defer self.files.details.close(std.testing.io);
+        self.line.read = .{ .revision = 1, .end = 0 };
+        try self.line.model.set("gpt-5.5");
+        self.line.effort = .high;
+        self.line.folder = .{};
+        try self.line.folder.?.set("/work/project");
+        self.hint = .absent;
+        var environ: std.process.Environ.Map = .init(std.testing.allocator);
+        defer environ.deinit();
+        const big: [200]u8 = @splat('x');
+        try environ.put("BIG_TOKEN", &big);
+        self.submission.environment = .{ .map = &environ };
+        defer self.submission.environment = .empty;
+        const original = if (kind == .message) self.input.submitText("original model input") else null;
+        self.submission.intent = if (original) |ticket|
+            .{ .message = ticket }
+        else
+            .{ .decision = .{ .action = 19, .decision = .allow_once } };
+        self.submission.key = @splat('K');
+        self.submission.state = .not_started;
+        try self.presentAdmission(.{ .failed = .{ .err = error.EnvironmentTooLarge } });
+        try held.keys("kept draft\x1b[D");
+        const cursor = self.input.composition().cursor;
+        const shown = try held.shown();
+        try std.testing.expect(std.mem.indexOf(u8, shown, "alt+d details") != null);
+        if (kind == .message) {
+            try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, shown, "original model input"));
+            try std.testing.expect(std.mem.indexOf(u8, shown, "Environment too large") != null);
+            try std.testing.expect(std.mem.indexOf(u8, shown, "ctrl+r") == null);
+            try std.testing.expectEqualStrings("", self.chrome.status.bar.left);
+        } else {
+            try std.testing.expect(std.mem.indexOf(u8, shown, "Environment too large") != null);
+        }
+        const draw_ctx: vxfw.DrawContext = .{
+            .arena = held.arena.allocator(),
+            .cell_arena = held.arena.allocator(),
+            .min = .{},
+            .max = held.size,
+            .cell_size = .{},
+        };
+        const frame = try held.root.widget().draw(draw_ctx);
+        const at = Locate.widget(frame, self.chrome.details.widget());
+        try std.testing.expect(at != null);
+        var ctx = held.context();
+        for ([_]vaxis.Mouse.Type{ .press, .release }) |mouse_type| {
+            try @import("testing/app_events.zig").mouse(&ctx, frame, .{
+                .row = at.?.row,
+                .col = at.?.col,
+                .button = .left,
+                .type = mouse_type,
+                .mods = .{},
+            });
+        }
+        try std.testing.expectEqual(Screen.ViewKind.details, self.screen.view);
+        const repair = try held.arena.allocator().dupe(u8, self.screen.browsing.text());
+        try std.testing.expect(std.mem.indexOf(u8, repair, &self.submission.key) != null);
+        if (kind == .message) {
+            try std.testing.expect(std.mem.indexOf(u8, repair, "BIG_TOKEN") != null);
+            try std.testing.expect(std.mem.indexOf(u8, repair, "Unset or shorten them in another shell") != null);
+            try std.testing.expect(std.mem.indexOf(u8, repair, "rui request recover") != null);
+            try std.testing.expect(std.mem.indexOf(u8, repair, "Ctrl-R retries this exact original") == null);
+            try std.testing.expectEqualStrings("original model input", try self.input.message(original.?));
+        }
+        try std.testing.expectEqualStrings("kept draft", self.input.composition().bytes);
+        try std.testing.expectEqual(cursor, self.input.composition().cursor);
+        _ = try held.root.widget().draw(draw_ctx);
+        try held.keys("\x1b");
+        try std.testing.expectEqual(Screen.ViewKind.feed, self.screen.view);
+        try held.keys("\x1bd");
+        try std.testing.expectEqual(Screen.ViewKind.details, self.screen.view);
+        try std.testing.expectEqualStrings(repair, self.screen.browsing.text());
+        try std.testing.expectEqualStrings("kept draft", self.input.composition().bytes);
+        try std.testing.expectEqual(cursor, self.input.composition().cursor);
+    };
+}
+
+test "SessionFrontend keeps refused environment diagnosis attached and repair details separate from chat info" {
     const held = try HeldFrontend.create();
     defer held.destroy();
     held.self.files.details = try held.tmp.dir.createFile(std.testing.io, "details", .{ .read = true });
@@ -6101,9 +6430,11 @@ test "App Session keeps a refused environment and its repair details separate fr
     held.self.submission.key = @splat('K');
     try held.self.presentAdmission(.{ .failed = .{ .err = error.EnvironmentTooLarge } });
     held.self.dirty = true;
-    try held.settle();
-    const bar = (try rowWith(held, "Environment too large")).?;
-    try std.testing.expectEqualStrings("! Environment too large; nothing sent", bar);
+    const attached = try rowWith(held, "Environment too large");
+    try std.testing.expect(attached != null);
+    try std.testing.expectEqualStrings("   ! Environment too large; nothing sent · details", attached.?);
+    try std.testing.expectEqualStrings("", held.self.chrome.status.bar.left);
+    try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "original model input") != null);
     try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "details") != null);
     try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "ctrl+r") == null);
     try held.self.showSubmissionFailure();
@@ -6366,7 +6697,7 @@ test "SessionFrontend failed historical fills retain the edge while scans approv
 const FeedFixture = struct {
     held: *HeldFrontend,
     file: std.Io.File,
-    const Row = struct { key: u64, text: []const u8, provisional: bool = false, target: ?View.Collapsed = null };
+    const Row = struct { key: u64, text: []const u8, provisional: bool = false, target: ?View.Collapsed = null, message_key: ?[36]u8 = null };
 
     fn create() !FeedFixture {
         return createWithDrafts("unused", null);
@@ -6397,7 +6728,7 @@ const FeedFixture = struct {
         var offset: u64 = 0;
         for (rows, 0..) |row, i| {
             try self.file.writePositionalAll(std.testing.io, row.text, offset);
-            frontend.job.result.rows[i] = .{ .key = .{ .position = row.key }, .offset = offset, .length = row.text.len, .tight = false, .provisional = row.provisional };
+            frontend.job.result.rows[i] = .{ .key = .{ .position = row.key }, .offset = offset, .length = row.text.len, .tight = false, .provisional = row.provisional, .message_key = row.message_key };
             if (row.target) |target| {
                 frontend.job.result.rows[i].collapsed_targets[0] = target;
                 frontend.job.result.rows[i].collapsed_count = 1;
@@ -6426,6 +6757,51 @@ fn firstRows(text: []const u8, count: usize) []const u8 {
     var end: usize = 0;
     for (0..count) |_| end = 1 + (std.mem.indexOfScalarPos(u8, text, end, '\n') orelse return text);
     return text[0..end];
+}
+
+test "SessionFrontend canonical insertion retires accepted message custody only for its key" {
+    const fixture = try FeedFixture.create();
+    defer fixture.destroy();
+    const self = &fixture.held.self;
+    const original = self.input.submitText("accepted keyed original");
+    self.submission.settled_message = .{ .ticket = original, .key = @splat('K') };
+    defer self.submission.disposeMessage();
+    _ = self.input.append("next draft");
+    try fixture.page(.opening, &.{.{ .key = 10, .text = "other message\n", .message_key = @splat('J') }}, true, true);
+    try std.testing.expect(self.submission.messageHeld());
+    try std.testing.expectEqualStrings("accepted keyed original", self.submission.messageText().?);
+    try fixture.page(.opening, &.{.{ .key = 11, .text = "› accepted keyed original\n", .message_key = @splat('K') }}, true, true);
+    try std.testing.expect(!self.submission.messageHeld());
+    try std.testing.expect(self.input.submitted == null);
+    try std.testing.expectEqualStrings("next draft", self.input.composition().bytes);
+    const shown = try fixture.held.shown();
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, shown, "accepted keyed original"));
+}
+
+test "SessionFrontend canonical message replaces unknown echo while preserving attached recovery" {
+    const fixture = try FeedFixture.create();
+    defer fixture.destroy();
+    const self = &fixture.held.self;
+    const original = self.input.submitText("keyed original");
+    self.submission.intent = .{ .message = original };
+    self.submission.key = @splat('K');
+    self.submission.state = .unconfirmed;
+    self.submission.publication = .published;
+    defer {
+        self.submission.intent = null;
+        self.input.release(original) catch unreachable;
+    }
+    try fixture.page(.opening, &.{.{ .key = 10, .text = "› keyed original\n", .message_key = @splat('K') }}, true, true);
+    try std.testing.expect(self.submission.messageProjected());
+    try std.testing.expect(self.submission.view() != null);
+    const shown = try fixture.held.shown();
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, shown, "keyed original"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, shown, "Not confirmed · ctrl+r retries original"));
+    self.screen.feed.trim(self.screen.feed.count, 0);
+    self.screen.feed.at_end = true;
+    const evicted = try fixture.held.shown();
+    try std.testing.expect(std.mem.indexOf(u8, evicted, "keyed original") == null);
+    try std.testing.expectEqualStrings("keyed original", try self.input.message(original));
 }
 
 test "SessionFrontend feed keeps following when full rows leave no room inside the margins" {
@@ -6828,11 +7204,16 @@ test "failed reply stale pre-admission scan must not authorize a fresh Ctrl-R af
     try self.settleMessageForRetryTest(true);
     try std.testing.expect(self.submission.intent == null);
     try std.testing.expect(!self.reader.completed());
+    const admitted_key = self.submission.accepted.?.key;
+    try std.testing.expect(self.submission.messageHeld());
     Worker.release.store(true, .release);
     try test_poll.waitUntil(self.init.io, test_poll.after(self.init.io, .fromSeconds(2)), &self.reader, RetrySettlementWorker.completed);
     try self.settleReader();
     try std.testing.expectEqualDeep(ending, self.live.latest_ending.?);
     try std.testing.expect(self.live.work.state == .idle and self.live.queued.count == 0);
+    try fixture.page(.fill_below, &.{.{ .key = 37, .text = "› new Message\n", .message_key = admitted_key }}, false, true);
+    try std.testing.expect(!self.submission.messageHeld());
+    try std.testing.expectEqualDeep(ending, self.live.latest_ending.?);
     const io = self.init.io;
     var tmp = try @import("socket_fixture.zig").Directory.init();
     defer tmp.cleanup();
@@ -6904,6 +7285,9 @@ test "failed reply retry completion before newer Message admission sends once an
     try self.settleMessageForRetryTest(true);
     try std.testing.expect(self.submission.intent == null);
     try std.testing.expectEqualSlices(u8, &retry_key, &self.submission.accepted.?.key);
+    try std.testing.expect(self.submission.messageHeld());
+    try fixture.page(.fill_below, &.{.{ .key = 37, .text = RetryFenceWorker.text, .message_key = retry_key }}, false, true);
+    try std.testing.expect(!self.submission.messageHeld());
     try held.keys("new Message\r");
     const newer_key = self.submission.key;
     try std.testing.expect(!std.mem.eql(u8, &retry_key, &newer_key));
@@ -7971,7 +8355,7 @@ test "failed reply retry settlement propagates transport errors and unexpected a
 
 test "SessionFrontend fixed and growing end replay cycles count arrivals once across reader pages" {
     const Host = struct {
-        fn respond(listener: *std.Io.net.Server, bytes: []const u8) !void {
+        fn respond(listener: *std.Io.net.Server, bytes: []const u8, content: bool) !void {
             const io = std.testing.io;
             var fds = [_]std.posix.pollfd{.{ .fd = listener.socket.handle, .events = std.posix.POLL.IN, .revents = 0 }};
             if (try std.posix.poll(&fds, 2000) == 0) return error.TestUnexpectedResult;
@@ -7989,10 +8373,10 @@ test "SessionFrontend fixed and growing end replay cycles count arrivals once ac
                     if (used == end + 4 + try std.fmt.parseInt(usize, request[start..finish], 10)) break;
                 }
             }
-            try std.testing.expectStringStartsWith(request[0..used], "POST /v1/activity-page HTTP/1.1\r\n");
+            try std.testing.expectStringStartsWith(request[0..used], if (content) "POST /v1/activity-content HTTP/1.1\r\n" else "POST /v1/activity-page HTTP/1.1\r\n");
             var header: [256]u8 = undefined;
             var writer = peer.writer(io, &.{});
-            try writer.interface.writeAll(try std.fmt.bufPrint(&header, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\n\r\n", .{bytes.len}));
+            try writer.interface.writeAll(try std.fmt.bufPrint(&header, "HTTP/1.1 200 OK\r\nContent-Type: {s}\r\nContent-Length: {d}\r\n{s}Connection: close\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\n\r\n", .{ if (content) "application/octet-stream" else "application/json", bytes.len, if (content) "X-Rui-Content-Bytes: 0\r\nX-Rui-Next-Offset: 0\r\n" else "" }));
             try writer.interface.writeAll(bytes);
         }
         fn page(frontend: *Self, listener: *std.Io.net.Server, read: feed_reads.Read, first: u64, last: u64, end: u64) !void {
@@ -8015,13 +8399,14 @@ test "SessionFrontend fixed and growing end replay cycles count arrivals once ac
             var buffer: [16384]u8 = undefined;
             var out = std.Io.Writer.fixed(&buffer);
             try activity_reply.writePage(&out, &facts);
-            try respond(listener, out.buffered());
+            try respond(listener, out.buffered(), false);
             if (read == .opening and facts.more) {
                 const endings: protocol.ActivityFacts = .{ .end = end, .direction = .backward, .work = facts.work };
                 var ending_out = std.Io.Writer.fixed(&buffer);
                 try activity_reply.writePage(&ending_out, &endings);
-                try respond(listener, ending_out.buffered());
+                try respond(listener, ending_out.buffered(), false);
             }
+            if (first == 1) try respond(listener, "", true);
             try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(2)), frontend, struct {
                 fn complete(self: *Self) bool {
                     return self.reader.completed();
@@ -8430,7 +8815,7 @@ test "chat info Configure and Copy admission either owns work or refuses before 
             return null;
         }
     };
-    const edits: []const ChatInfo.Edit = &.{ .{ .effort = .low }, .{ .permission = .ask }, .{ .tools = .{} }, .{ .model = "gpt-6-luna" }, .{ .label = "Renamed" } };
+    const edits: []const ChatInfo.Edit = &.{ .{ .effort = .low }, .{ .permission = .ask }, .{ .tools = .{ .allowed = try .of(&.{ "bash", "none" }), .loaded = try .of(&.{"none"}) } }, .{ .model = "gpt-6-luna" }, .{ .label = "Renamed" } };
     for (std.enums.values(Hold)) |hold| for (0..edits.len + 1) |effect| {
         const held = try HeldFrontend.create();
         defer held.destroy();
@@ -8818,7 +9203,7 @@ test "chat info repair details never overwrite the active reader staging file" {
     try std.testing.expect(self.reader.thread != null and !self.reader.completed());
 }
 
-test "chat input surface grows with draft while rules and footer stay plain in both themes" {
+test "chat input stays untinted and bottom anchored with fixed rules at 140 and 46 columns" {
     for ([_]vxfw.Size{ .{ .width = 140, .height = 40 }, .{ .width = 46, .height = 30 } }) |size| {
         for ([_]?overview_view.Rgb{ null, .{ 255, 255, 255 } }) |background| {
             for ([_]overview_view.Caps.Depth{ .direct, .indexed, .none }) |depth| {
@@ -8837,11 +9222,17 @@ test "chat input surface grows with draft while rules and footer stay plain in b
                         const surface = try held.draw();
                         var rendered: vaxis.Screen = try .init(held.arena.allocator(), .{ .rows = size.height, .cols = size.width, .x_pixel = 0, .y_pixel = 0 });
                         try surface.render(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = size.width, .height = size.height, .screen = &rendered }, held.self.app_input.composer.widget());
-                        const input_style = style.of(held.self.app_caps, .{ .background = .input_surface });
-                        const quiet_input = style.of(held.self.app_caps, .{ .colour = .quiet, .background = .input_surface });
+                        const input_style = style.of(held.self.app_caps, .{});
+                        const quiet_input = style.of(held.self.app_caps, .{ .colour = .quiet });
                         const plain = style.of(held.self.app_caps, .{ .colour = .quiet });
                         const rows: u16 = if (draft.len == 0) 1 else 3;
                         const first = size.height - rows - 2;
+                        try std.testing.expectEqualStrings("─", rendered.readCell(0, first - 1).?.char.grapheme);
+                        try std.testing.expectEqualStrings("─", rendered.readCell(0, size.height - 2).?.char.grapheme);
+                        if (!list_focused) {
+                            try std.testing.expectEqual(@as(u16, size.height - 3), rendered.cursor.row);
+                            try std.testing.expectEqual(vaxis.Cell.CursorShape.block_blink, rendered.cursor_shape);
+                        }
                         for (0..size.width) |col| {
                             for (first..first + rows) |row| {
                                 const actual = rendered.readCell(@intCast(col), @intCast(row)).?.style.bg;

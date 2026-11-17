@@ -5,6 +5,282 @@
   ],
   "states": [
     {
+      "name": "send-optimistic-night",
+      "note": "A real client Message stays in the feed while its fixture-owned Host is suspended; capture before the admission deadline with an empty composer",
+      "theme": "night",
+      "open": "Night optimistic witness",
+      "cast": [
+        {
+          "label": "Night optimistic witness",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "messages": [
+            "Earlier conversation witness"
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "text": "Optimistic send witness"
+        },
+        {
+          "wait": "Optimistic send witness"
+        },
+        {
+          "host": "suspend"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Optimistic send witness",
+          "empty_composer": true,
+          "timeout": 3
+        }
+      ],
+      "expect": [
+        "Optimistic send witness",
+        "alt+i info"
+      ],
+      "absent": [
+        "Sending…",
+        "Sending...",
+        "Not confirmed"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      ]
+    },
+    {
+      "name": "send-failed-night",
+      "note": "A real client Message stays in the feed while its fixture-owned Host is suspended; admission timeout attaches retry to the original Message",
+      "theme": "night",
+      "open": "Night failed witness",
+      "cast": [
+        {
+          "label": "Night failed witness",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "messages": [
+            "Earlier conversation witness"
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "text": "Send failure witness"
+        },
+        {
+          "wait": "Send failure witness"
+        },
+        {
+          "host": "suspend"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Not confirmed · ctrl+r retries original",
+          "empty_composer": true,
+          "timeout": 12
+        }
+      ],
+      "expect": [
+        "Send failure witness",
+        "Not confirmed · ctrl+r retries original",
+        "alt+i info"
+      ],
+      "absent": [
+        "Sending…",
+        "Sending..."
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      ],
+      "expect_next": {
+        "Send failure witness": "Not confirmed · ctrl+r retries original"
+      },
+      "expect_style": [
+        {
+          "text": "Not confirmed · ctrl+r retries original",
+          "foreground": "#a2a3bc"
+        }
+      ],
+      "expect_background": {
+        "Not confirmed · ctrl+r retries original": "#121933"
+      }
+    },
+    {
+      "name": "send-optimistic-day",
+      "note": "A real client Message stays in the feed while its fixture-owned Host is suspended; capture before the admission deadline with an empty composer",
+      "theme": "day",
+      "open": "Day optimistic witness",
+      "cast": [
+        {
+          "label": "Day optimistic witness",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "messages": [
+            "Earlier conversation witness"
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "text": "Optimistic send witness"
+        },
+        {
+          "wait": "Optimistic send witness"
+        },
+        {
+          "host": "suspend"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Optimistic send witness",
+          "empty_composer": true,
+          "timeout": 3
+        }
+      ],
+      "expect": [
+        "Optimistic send witness",
+        "alt+i info"
+      ],
+      "absent": [
+        "Sending…",
+        "Sending...",
+        "Not confirmed"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      ]
+    },
+    {
+      "name": "send-failed-day",
+      "note": "A real client Message stays in the feed while its fixture-owned Host is suspended; admission timeout attaches retry to the original Message",
+      "theme": "day",
+      "open": "Day failed witness",
+      "cast": [
+        {
+          "label": "Day failed witness",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "messages": [
+            "Earlier conversation witness"
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "text": "Send failure witness"
+        },
+        {
+          "wait": "Send failure witness"
+        },
+        {
+          "host": "suspend"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Not confirmed · ctrl+r retries original",
+          "empty_composer": true,
+          "timeout": 12
+        }
+      ],
+      "expect": [
+        "Send failure witness",
+        "Not confirmed · ctrl+r retries original",
+        "alt+i info"
+      ],
+      "absent": [
+        "Sending…",
+        "Sending..."
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      ],
+      "expect_next": {
+        "Send failure witness": "Not confirmed · ctrl+r retries original"
+      },
+      "expect_style": [
+        {
+          "text": "Not confirmed · ctrl+r retries original",
+          "foreground": "#6a6253"
+        }
+      ],
+      "expect_background": {
+        "Not confirmed · ctrl+r retries original": "#f3eee2"
+      }
+    },
+    {
+      "name": "chatfeed-night-blank-line",
+      "note": "One sent multiline Message retains its interior blank row inside an uninterrupted user tint band, with time on its first line",
+      "theme": "night",
+      "open": "Blank line witness",
+      "steps": [
+        {
+          "wait": "second line"
+        }
+      ],
+      "expect": [
+        "first line",
+        "second line",
+        "alt+i info"
+      ],
+      "absent": [
+        "Browsing · Esc returns",
+        "enter retry"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      ],
+      "cast": [
+        {
+          "label": "Blank line witness",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "messages": [
+            "first line\n\nsecond line"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "chatfeed-day-blank-line",
+      "note": "One sent multiline Message retains its interior blank row inside an uninterrupted user tint band, with time on its first line",
+      "theme": "day",
+      "open": "Blank line witness",
+      "steps": [
+        {
+          "wait": "second line"
+        }
+      ],
+      "expect": [
+        "first line",
+        "second line",
+        "alt+i info"
+      ],
+      "absent": [
+        "Browsing · Esc returns",
+        "enter retry"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
+      ]
+    },
+    {
       "name": "sidebar-current",
       "theme": "night",
       "upgrade": "current",
@@ -526,7 +802,7 @@
     },
     {
       "name": "inputtint-night-empty",
-      "note": "Input surface, plain footer and ink-wash selection; colour-only changes are asserted by style-role tests",
+      "note": "Untinted input, plain footer and ink-wash selection; colour-only changes are asserted by style-role tests",
       "theme": "night",
       "open": "Input tint chat",
       "steps": [],
@@ -535,7 +811,7 @@
         "alt+i info"
       ],
       "absent": [
-        "Browsing · Esc returns",
+        "Browsing \u00b7 Esc returns",
         "enter retry"
       ],
       "cast": [
@@ -554,7 +830,7 @@
     },
     {
       "name": "inputtint-night-draft",
-      "note": "Input surface, plain footer and ink-wash selection; colour-only changes are asserted by style-role tests",
+      "note": "Untinted input, plain footer and ink-wash selection; colour-only changes are asserted by style-role tests",
       "theme": "night",
       "open": "Input tint chat",
       "steps": [
@@ -573,7 +849,7 @@
         "Third draft row"
       ],
       "absent": [
-        "Browsing · Esc returns",
+        "Browsing \u00b7 Esc returns",
         "enter retry",
         "Type a task"
       ],
@@ -641,7 +917,7 @@
         "enter start"
       ],
       "expect_background": {
-        "› Type a task": "#1a2246"
+        "› Type a task": "#121933"
       },
       "absent_regex": [
         "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
@@ -649,7 +925,7 @@
     },
     {
       "name": "inputtint-night-chat-selected",
-      "note": "Input surface, plain footer and ink-wash selection; colour-only changes are asserted by style-role tests",
+      "note": "Untinted input, plain footer and ink-wash selection; colour-only changes are asserted by style-role tests",
       "theme": "night",
       "open": "Input tint chat",
       "steps": [
@@ -664,7 +940,7 @@
         "Settings"
       ],
       "absent": [
-        "Browsing · Esc returns",
+        "Browsing \u00b7 Esc returns",
         "enter retry"
       ],
       "absent_regex": [
@@ -673,7 +949,7 @@
     },
     {
       "name": "inputtint-day-empty",
-      "note": "Input surface, plain footer and ink-wash selection; colour-only changes are asserted by style-role tests",
+      "note": "Untinted input, plain footer and ink-wash selection; colour-only changes are asserted by style-role tests",
       "theme": "day",
       "open": "Input tint chat",
       "steps": [],
@@ -682,7 +958,7 @@
         "alt+i info"
       ],
       "absent": [
-        "Browsing · Esc returns",
+        "Browsing \u00b7 Esc returns",
         "enter retry"
       ],
       "absent_regex": [
@@ -691,7 +967,7 @@
     },
     {
       "name": "inputtint-day-draft",
-      "note": "Input surface, plain footer and ink-wash selection; colour-only changes are asserted by style-role tests",
+      "note": "Untinted input, plain footer and ink-wash selection; colour-only changes are asserted by style-role tests",
       "theme": "day",
       "open": "Input tint chat",
       "steps": [
@@ -710,7 +986,7 @@
         "Third draft row"
       ],
       "absent": [
-        "Browsing · Esc returns",
+        "Browsing \u00b7 Esc returns",
         "enter retry",
         "Type a task"
       ],
@@ -778,7 +1054,7 @@
         "enter start"
       ],
       "expect_background": {
-        "› Type a task": "#e6ddc8"
+        "› Type a task": "#f3eee2"
       },
       "absent_regex": [
         "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:│.*)?$"
@@ -786,7 +1062,7 @@
     },
     {
       "name": "inputtint-day-chat-selected",
-      "note": "Input surface, plain footer and ink-wash selection; colour-only changes are asserted by style-role tests",
+      "note": "Untinted input, plain footer and ink-wash selection; colour-only changes are asserted by style-role tests",
       "theme": "day",
       "open": "Input tint chat",
       "steps": [
@@ -801,7 +1077,7 @@
         "Settings"
       ],
       "absent": [
-        "Browsing · Esc returns",
+        "Browsing \u00b7 Esc returns",
         "enter retry"
       ],
       "absent_regex": [
@@ -4303,7 +4579,7 @@
       "expect": [
         "Effort",
         "Permissions",
-        "Tools",
+        "Allowed tools",
         "Folder",
         "Model",
         "Copy last answer",
@@ -5850,6 +6126,118 @@
         {
           "wait": "Usage: /new"
         }
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      ]
+    },
+    {
+      "name": "chatfeed-night-empty",
+      "note": "Real user messages across a recorded minute boundary, a Bash tool row and a bottom-anchored input",
+      "theme": "night",
+      "open": "Chatfeed witness",
+      "steps": [
+        {
+          "sleep": 61
+        },
+        {
+          "send": {
+            "to": "Chatfeed witness",
+            "text": "Next minute witness"
+          }
+        },
+        {
+          "wait": "Next minute witness"
+        }
+      ],
+      "expect": [
+        "Next minute witness",
+        "alt+i info"
+      ],
+      "absent": [
+        "Browsing \u00b7 Esc returns",
+        "enter retry"
+      ],
+      "cast": [
+        {
+          "label": "Chatfeed witness",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "messages": [
+            "First minute witness",
+            "tool demonstration"
+          ]
+        }
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      ]
+    },
+    {
+      "name": "chatfeed-night-draft",
+      "note": "Real user messages across a recorded minute boundary, a Bash tool row and a bottom-anchored input",
+      "theme": "night",
+      "open": "Chatfeed witness",
+      "steps": [
+        {
+          "text": "Retained chatfeed draft"
+        },
+        {
+          "wait": "Retained chatfeed draft"
+        }
+      ],
+      "expect": [
+        "Next minute witness",
+        "alt+i info",
+        "Retained chatfeed draft"
+      ],
+      "absent": [
+        "Browsing \u00b7 Esc returns",
+        "enter retry"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      ]
+    },
+    {
+      "name": "chatfeed-day-empty",
+      "note": "Real user messages across a recorded minute boundary, a Bash tool row and a bottom-anchored input",
+      "theme": "day",
+      "open": "Chatfeed witness",
+      "steps": [],
+      "expect": [
+        "Next minute witness",
+        "alt+i info"
+      ],
+      "absent": [
+        "Browsing \u00b7 Esc returns",
+        "enter retry"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
+      ]
+    },
+    {
+      "name": "chatfeed-day-draft",
+      "note": "Real user messages across a recorded minute boundary, a Bash tool row and a bottom-anchored input",
+      "theme": "day",
+      "open": "Chatfeed witness",
+      "steps": [
+        {
+          "text": "Retained chatfeed draft"
+        },
+        {
+          "wait": "Retained chatfeed draft"
+        }
+      ],
+      "expect": [
+        "Next minute witness",
+        "alt+i info",
+        "Retained chatfeed draft"
+      ],
+      "absent": [
+        "Browsing \u00b7 Esc returns",
+        "enter retry"
       ],
       "absent_regex": [
         "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *(?:\u2502.*)?$"
