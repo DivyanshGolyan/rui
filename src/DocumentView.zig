@@ -283,9 +283,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
             const cells = surface.buffer[index * width ..][0..width];
             const line = if (rows.next()) |position| self.document.selectionLine(self.layout(), position) else null;
             (selecting.Row{ .document = self.document, .cells = cells, .line = line }).covered(range, columns);
-            for (cells, columns) |*cell, selected| {
-                if (selected) cell.style.reverse = true;
-            }
+            selecting.highlight(cells, columns);
         }
     };
     return surface;

@@ -442,9 +442,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
                 const position = (rows.next() orelse break) orelse continue;
                 const cells = surface.buffer[row * self.size.width ..][0..self.size.width];
                 (Row{ .document = &self.window.document, .cells = cells, .line = self.window.document.selectionLine(self.layout(), position) }).covered(range, columns);
-                for (cells, columns) |*cell, selected| if (selected) {
-                    cell.style.reverse = true;
-                };
+                selecting.highlight(cells, columns);
             }
         }
     }
