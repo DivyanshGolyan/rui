@@ -273,7 +273,7 @@ The allowlist lives in [mac_runner.py](../../tests/ci/mac_runner.py).
 Fork PRs, including NimishGolyan/rui, stay hosted.
 Promotion, compile-only main builds, macOS qualification and the existing cache-execution checks keep their hosted runners; hosted-VM measurements therefore remain comparable.
 The routing job reads `GET /repos/{repo}/actions/runners` with the repository secret `MAC_RUNNER_STATUS_TOKEN`, a fine-grained PAT limited to this repository with Administration: read.
-An online, idle runner labelled `rui-mac` selects the Mac; a missing secret, API error, ten-second timeout, malformed response, busy/offline runner or `RUI_MAC_RUNNER=off` selects `macos-15`.
+An online `rui-mac` selects the Mac when idle or when its queued jobs are fewer than hosted queued jobs plus one if at least five hosted jobs are running; ties select `macos-15`. If queue data is unavailable, only an idle Mac is selected; unavailable runner status, an offline runner or `RUI_MAC_RUNNER=off` selects hosted macOS.
 This is a snapshot, not a reservation: after choosing the Mac, jobs queue for its one runner process; a later disconnect does not reroute that run.
 The Mac restores caches but never publishes them to GitHub.
 Compilation and build-runner cache keys include the actual native-tool identity (including Xcode and SDK); compiler/package caches have their existing platform/dependency keys.
