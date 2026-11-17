@@ -102,7 +102,7 @@ test "read_image portable acquisition reads regular relative absolute and symlin
     const status_flags = std.c.fcntl(file.handle, std.c.F.GETFL);
     try std.testing.expect(status_flags >= 0);
     const nonblock: c_int = @bitCast(std.c.O{ .NONBLOCK = true });
-    try std.testing.expect(status_flags & nonblock != 0);
+    try std.testing.expectEqual(nonblock, status_flags & nonblock);
     var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const absolute = path[0..try tmp.dir.realPathFile(io, "regular", &path)];
     const direct = try openPortable(io, .{ .handle = -1 }, absolute);
