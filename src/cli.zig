@@ -1100,14 +1100,9 @@ fn hostSettings(init: std.process.Init, command: cli_args.Command, parsed: *cons
             };
             defer frozen.deinit(init.gpa);
             settings.deinit();
-            const intent = try host_start.decodeStart(init, frozen.bytes, selected, settings, &failure);
-            host_start.finishDetached(init, settings, intent, fixtures, &failure) catch |err| {
-                if (err == error.SettingsInvalid) return writeRefusal(init.io, &failure, .invalid);
-                return err;
-            };
-            _ = try finishHostAdmission(init, selected, settings, fixtures, &failure);
+            _ = try admitHost(init, .{ .frozen = frozen.bytes }, selected, settings, &fixtures, &failure, .detached);
             try std.Io.File.stdout().writeStreamingAll(init.io, frozen.bytes);
-        } else _ = try admitHost(init, parsed, selected, settings, &fixtures, &failure, .detached);
+        } else _ = try admitHost(init, .{ .layered = parsed }, selected, settings, &fixtures, &failure, .detached);
         return;
     }
     const result = if (command == .host_settings)
@@ -2133,22 +2128,23 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
             return writeRefusal(io, &preparation_failure, .invalid);
         };
         defer frozen.deinit(init.gpa);
-        const intent = host_start.decodeStart(init, frozen.bytes, selected, settings, &preparation_failure) catch |err| {
-            if (err == error.SettingsInvalid) return writeRefusal(io, &preparation_failure, .invalid);
-            return err;
-        };
-        try host_start.finishDetached(init, settings, intent, tuning.fixtures, &preparation_failure);
         tuning.admitted_directory = selected;
-        break :frozen try finishHostAdmission(init, selected, settings, tuning.fixtures, &preparation_failure);
-    } else try admitHost(init, parsed, selected, settings, &tuning.fixtures, &preparation_failure, .foreground);
+        break :frozen try admitHost(init, .{ .frozen = frozen.bytes }, selected, settings, &tuning.fixtures, &preparation_failure, .detached);
+    } else try admitHost(init, .{ .layered = parsed }, selected, settings, &tuning.fixtures, &preparation_failure, .foreground);
     var failure: ?start_report.Failure = null;
     return finishServe(io, host_start.shutdownPolicy(settings), host_start.storeKind(settings), &failure, server.serve(io, std.heap.c_allocator, selected, prepared, tuning, &failure));
 }
 
 /// Shared by serve and settings --check: intake, then the proxy precondition,
 /// then Store selection and preparation. Refusals are reported here.
-fn admitHost(init: std.process.Init, parsed: *const cli_args.Parsed, selected: []const u8, settings: *host_settings.Settings, fixtures: *providers.Fixtures, failure: *start_report.Failure, admission: host_start.Admission) !host_settings.Prepared {
-    host_start.intake(init, parsed, selected, settings, fixtures, failure, admission) catch |err| {
+const HostAdmissionSource = union(enum) { layered: *const cli_args.Parsed, frozen: []const u8 };
+
+fn admitHost(init: std.process.Init, source: HostAdmissionSource, selected: []const u8, settings: *host_settings.Settings, fixtures: *providers.Fixtures, failure: *start_report.Failure, admission: host_start.Admission) !host_settings.Prepared {
+    const intake = switch (source) {
+        .layered => |parsed| host_start.intake(init, parsed, selected, settings, fixtures, failure, admission),
+        .frozen => |bytes| host_start.intakeFrozen(init, bytes, selected, settings, fixtures.*, failure),
+    };
+    intake catch |err| {
         if (err == error.SettingsInvalid) return writeRefusal(init.io, failure, caller_exit.knownError(err));
         return err;
     };

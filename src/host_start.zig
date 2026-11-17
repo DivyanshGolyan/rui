@@ -1619,6 +1619,11 @@ pub fn decodeStart(init: std.process.Init, bytes: []const u8, selected: []const 
     return intent;
 }
 
+pub fn intakeFrozen(init: std.process.Init, bytes: []const u8, selected: []const u8, settings: *hs.Settings, fixtures: providers.Fixtures, failure: *start_report.Failure) !void {
+    const intent = try decodeStart(init, bytes, selected, settings, failure);
+    try finishDetached(init, settings, intent, fixtures, failure);
+}
+
 pub fn finishDetached(init: std.process.Init, settings: *hs.Settings, intent: ProviderIntent, fixtures: providers.Fixtures, failure: *start_report.Failure) !void {
     try finishSources(init, settings, intent, failure);
     try resolveProviders(init, settings, fixtures, failure);
