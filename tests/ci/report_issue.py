@@ -31,7 +31,10 @@ COMMAND = re.compile(r"^error: process (?:exited with code \d+|terminated with s
                      r"failed command: (.+)$", re.M)
 SCRIPT = re.compile(r"tests/integration/[\w./-]+\.py")
 FAILED_COMMAND = re.compile(r"^failed command: (.+)$", re.M)
-ZIG_CRASH = re.compile(r"^error: '(.+?)' (terminated with signal \w+|failed)", re.M)
+# A terminal launcher emits the same envelope, retaining an assertion error
+# when its process supplies one instead of a signal. The name can itself
+# contain a quoted failure phrase, so its closing delimiter is the last one.
+ZIG_CRASH = re.compile(r"^error: '(.+)' (terminated with signal \w+|failed(?: \([\w.]+\))?)", re.M)
 # A failing assertion can print its diagnostics between the test's name and its
 # FAIL record; the record never lies past the next numbered test.
 ZIG_FAIL = re.compile(r"^\d+/\d+ (\S[^\n]*?)\.\.\.(?:(?!\n\d+/\d+ ).)*?FAIL \((\w+)\)$", re.M | re.S)
@@ -73,8 +76,14 @@ def untimed(log):
     return STAMP.sub("", log.lstrip("﻿"))
 
 
+def fixture_path(script):
+    path = Path(os.path.normpath(script))
+    return path.as_posix() if path.is_relative_to("tests/integration") else None
+
+
 def fixtures(check_sh=Path("tests/integration/check.sh")):
-    return {name: f"tests/integration/{script}" for name, script in FIXTURE.findall(check_sh.read_text())}
+    return {name: path for name, script in FIXTURE.findall(check_sh.read_text())
+            if (path := fixture_path(f"tests/integration/{script}"))}
 
 
 def tracebacks(log):
@@ -169,8 +178,8 @@ def failure_causes(log, cases, keep_unexplained=False):
     for command in COMMAND.findall(log):
         if "check.sh" in command or not (script := SCRIPT.search(command)):
             continue
-        path = script[0]
-        found.append(fixture_cause(path, (log,)) or Cause(f"{path}: exit without a parsed traceback", [path]))
+        if path := fixture_path(script[0]):
+            found.append(fixture_cause(path, (log,)) or Cause(f"{path}: exit without a parsed traceback", [path]))
     for crash in ZIG_CRASH.finditer(log):
         test, how = crash.groups()
         following = log[crash.end():].split("\n")[1:4]

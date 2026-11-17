@@ -77,6 +77,7 @@ pub const Colours = struct {
 
 pub const RetainedStyle = u16;
 const body_bit: RetainedStyle = 1 << 8;
+const exit_bit: RetainedStyle = 1 << 9;
 const AllText = struct {
     pub fn includes(_: *@This(), _: usize) bool {
         return true;
@@ -144,7 +145,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
         style: RetainedStyle = 0,
         control: [8]u8 = undefined,
         control_length: usize = 0,
-        link: enum { none, address, text } = .none,
+        link: enum { none, address, text, exit_text } = .none,
         address_length: usize = 0,
         length: usize = 0,
         origin: u64 = 0,
@@ -177,7 +178,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                         self.control_length = 0;
                     } else if (std.mem.eql(u8, self.control[0..self.control_length], TerminalText.link_end)) {
                         std.debug.assert(self.link == .address);
-                        self.link = if (self.address_length == 0) .none else .text;
+                        self.link = if (self.address_length == 0) .none else if (self.address_length == tool_fold.exit_uri.len and std.mem.endsWith(u8, self.text(), tool_fold.exit_uri)) .exit_text else .text;
                         self.control_length = 0;
                     }
                     start = index + 1;
@@ -216,6 +217,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
         fn cellValue(self: *const Self) RetainedStyle {
             const index: u8 = switch (self.link) {
                 .none => return self.style,
+                .exit_text => return (self.style & ~foreground_mask) | (@as(RetainedStyle, 2) << 3) | exit_bit,
                 .address => address_index,
                 .text => if (self.style & 4 != 0 and foregroundIndex(self.style) >= 1 and foregroundIndex(self.style) <= 4) return self.style else linked_index,
             };
@@ -370,6 +372,11 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             return self.markerAt(offset) == .heading;
         }
 
+        pub fn toolRow(self: *const Self, offset: usize) bool {
+            const marker = self.markerAt(offset) orelse return false;
+            return marker == .heading or marker == .row;
+        }
+
         fn headingOpen(self: *const Self, offset: usize) bool {
             return self.markerAt(self.nextLine(offset) orelse return false) == .output;
         }
@@ -415,6 +422,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
         fn lineKind(self: *const Self, offset: usize, mark: ?LineMarker) Line {
             if (mark) |value| switch (value.marker) {
                 .output => return .output,
+                .row => {},
                 .heading => if (self.headingOpen(offset)) return .selected,
             };
             if (styled and offset < self.length and foregroundIndex(self.styles[offset]) == code_index) return .code;
@@ -442,6 +450,22 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                 if (commit) _ = self.printRange(line.child(.{ .width = indent, .height = 1 }), offset, leading, .word, false, true, colour, plain, colours);
                 return rowsUsed(self.printRange(line.child(.{ .x_off = indent }), leading, end, .word, false, commit, colour, plain, colours));
             }
+            // The retained exit field is semantic heading data, never inferred from label text.
+            if (styled) for (self.styles[content_start..end], content_start..) |value, index| {
+                if (value & exit_bit == 0) continue;
+                if (commit) {
+                    const line = window.child(.{ .y_off = row, .height = 1 });
+                    const exit_width = display_text.width(self.bytes[index..end], .{ .viewport = self.width_method });
+                    if (line.width < exit_width) {
+                        self.printTruncated(line, index, end, colour, plain, colours);
+                    } else {
+                        const label_width = line.width - exit_width -| 1;
+                        self.printTruncated(line.child(.{ .width = label_width }), content_start, index, colour, plain, colours);
+                        _ = self.printRange(line.child(.{ .x_off = line.width - exit_width, .width = exit_width }), index, end, .none, false, true, colour, plain, colours);
+                    }
+                }
+                return 1;
+            };
             var user = false;
             var single = styled and end != offset;
             var note: ?struct { start: usize, end: usize } = null;
@@ -463,27 +487,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             if (single) {
                 if (commit) {
                     const line = body.child(.{ .y_off = row, .height = 1 });
-                    const text_bytes = self.bytes[offset..shown];
-                    var whole: usize = 0;
-                    var measured = unicode.graphemeIterator(text_bytes);
-                    while (measured.next()) |cluster| {
-                        if (!self.hidden(offset + cluster.start)) whole += gwidth.gwidth(cluster.bytes(text_bytes), self.width_method);
-                    }
-                    if (whole <= line.width) {
-                        _ = self.printRange(line, offset, shown, .none, false, true, colour, plain, colours);
-                    } else if (line.width != 0) {
-                        var clusters = unicode.graphemeIterator(text_bytes);
-                        var used: u16 = 0;
-                        var cut = offset;
-                        while (clusters.next()) |cluster| {
-                            const width = if (self.hidden(offset + cluster.start)) 0 else gwidth.gwidth(cluster.bytes(text_bytes), self.width_method);
-                            if (used + width > line.width - 1) break;
-                            used += width;
-                            cut = offset + cluster.start + cluster.len;
-                        }
-                        _ = self.printRange(line, offset, cut, .none, false, true, colour, plain, colours);
-                        _ = line.child(.{ .x_off = used, .width = 1 }).print(&.{.{ .text = "…", .style = self.segmentStyle(offset, colour, plain, colours) }}, .{ .wrap = .none });
-                    }
+                    self.printTruncated(line, offset, shown, colour, plain, colours);
                 }
                 return 1;
             }
@@ -495,6 +499,30 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                 _ = quote_mark.printSegment(.{ .text = "┆", .style = self.segmentStyle(content_start + split.bytes - 2, colour, plain, colours) }, .{ .wrap = .none });
             };
             return rows;
+        }
+
+        fn printTruncated(self: *const Self, line: vaxis.Window, from: usize, end: usize, colour: bool, plain: vaxis.Style, colours: Colours) void {
+            const text_bytes = self.bytes[from..end];
+            var whole: usize = 0;
+            var measured = unicode.graphemeIterator(text_bytes);
+            while (measured.next()) |cluster| {
+                if (!self.hidden(from + cluster.start)) whole += gwidth.gwidth(cluster.bytes(text_bytes), self.width_method);
+            }
+            if (whole <= line.width) {
+                _ = self.printRange(line, from, end, .none, false, true, colour, plain, colours);
+            } else if (line.width != 0) {
+                var clusters = unicode.graphemeIterator(text_bytes);
+                var used: u16 = 0;
+                var cut = from;
+                while (clusters.next()) |cluster| {
+                    const width = if (self.hidden(from + cluster.start)) 0 else gwidth.gwidth(cluster.bytes(text_bytes), self.width_method);
+                    if (used + width > line.width - 1) break;
+                    used += width;
+                    cut = from + cluster.start + cluster.len;
+                }
+                _ = self.printRange(line, from, cut, .none, false, true, colour, plain, colours);
+                _ = line.child(.{ .x_off = used, .width = 1 }).print(&.{.{ .text = "…", .style = self.segmentStyle(from, colour, plain, colours) }}, .{ .wrap = .none });
+            }
         }
 
         fn printRange(self: *const Self, window: vaxis.Window, from: usize, end: usize, wrap: @FieldType(vaxis.PrintOptions, "wrap"), notes: bool, commit: bool, colour: bool, plain: vaxis.Style, colours: Colours) vaxis.Window.PrintResult {
@@ -1586,4 +1614,81 @@ test "quote body extraction metadata leaves grapheme layout and visual styles un
         try std.testing.expectEqualDeep(b, a);
         try std.testing.expectEqualDeep(expected.cells[0 .. width * 14], actual.cells[0 .. width * 14]);
     };
+}
+
+test "tool exit field aligns quietly and truncates only the label across scripts widths colours and splits" {
+    const View = @import("session_view.zig");
+    const Sink = struct {
+        writer: *std.Io.Writer,
+        pub fn feed(self: @This(), bytes: []const u8) !void {
+            try self.writer.writeAll(bytes);
+        }
+    };
+    const plain: vaxis.Style = .{ .fg = .{ .index = 255 } };
+    const colours: Colours = .{ .quiet = .{ .index = 63 }, .failure = .{ .index = 64 } };
+    for (std.enums.values(Method)) |method| for ([_]bool{ false, true }) |colour| {
+        for ([_][]const u8{ "Check exit 127", "漢字 é 🧑‍🌾" }) |label| {
+            var description: @import("protocol.zig").Bounded(@import("protocol.zig").max_tool_description_bytes) = .{};
+            try description.set(label);
+            var storage: [512]u8 = undefined;
+            var writer = std.Io.Writer.fixed(&storage);
+            try writer.writeAll(tool_fold.heading_marker);
+            try View.toolResult(.{ .description = description, .code = .failed, .publication_position = null }, .{ .exit = 127 }, Sink{ .writer = &writer }, colour);
+            const input = writer.buffered();
+            for (0..input.len + 1) |split| {
+                var document: Sized(512, true) = .{ .width_method = method, .sidenotes = true };
+                try document.append(input[0..split]);
+                try document.append(input[split..]);
+                try document.prepare();
+                for (0..81) |width_value| {
+                    const width: u16 = @intCast(width_value);
+                    var screen: TestScreen = undefined;
+                    const window = screen.window(width, 2);
+                    window.screen.width_method = method;
+                    window.fill(.{ .style = plain });
+                    try std.testing.expectEqual(@as(u16, 1), document.printLine(window, 0, 0, true, colour, plain, colours));
+                    try std.testing.expectEqual(@as(u16, 1), document.lineRows(.{ .width = width, .method = method }, 0));
+                    if (width >= 8) {
+                        for ("exit 127", 0..) |byte, at| {
+                            const cell = screen.screen.readCell(width - 8 + @as(u16, @intCast(at)), 0).?;
+                            try std.testing.expectEqualStrings(&.{byte}, cell.char.grapheme);
+                            try std.testing.expectEqual(if (colour) colours.quiet else plain.fg, cell.style.fg);
+                            try std.testing.expectEqualStrings("", cell.link.uri);
+                        }
+                        if (width > 8) try std.testing.expectEqualStrings(" ", screen.screen.readCell(width - 9, 0).?.char.grapheme);
+                        if (width == 12) try std.testing.expectEqualStrings("…", screen.screen.readCell(2, 0).?.char.grapheme);
+                        if (width == 80) {
+                            var row: [256]u8 = undefined;
+                            try std.testing.expect(std.mem.startsWith(u8, screen.row(0, &row), "× "));
+                        }
+                    } else if (width != 0) {
+                        for (0..width - 1) |at| try std.testing.expectEqualStrings("exit 127"[at..][0..1], screen.screen.readCell(@intCast(at), 0).?.char.grapheme);
+                        try std.testing.expectEqualStrings("…", screen.screen.readCell(width - 1, 0).?.char.grapheme);
+                    }
+                }
+            }
+        }
+    };
+}
+
+test "tool exit field keeps ASCII headings readable without colour and open output directly below" {
+    var document: Sized(256, true) = .{};
+    try document.append(tool_fold.heading_marker ++ "x Run tests" ++ tool_fold.exit_open ++ "exit 127" ++ TerminalText.link_close ++ "\n" ++ tool_fold.output_marker ++ "    saved output\n");
+    try document.prepare();
+    try std.testing.expect(document.toolIsOpen(0));
+    var screen: TestScreen = undefined;
+    var row: [128]u8 = undefined;
+    const plain: vaxis.Style = .{ .fg = .{ .index = 255 }, .bg = .{ .index = 19 } };
+    const colours: Colours = .{ .quiet = .{ .index = 63 }, .selection = .{ .index = 64 }, .band = .{ .index = 65 } };
+    for ([_]bool{ false, true }) |colour| {
+        const window = screen.window(32, 3);
+        window.fill(.{ .style = plain });
+        _ = document.draw(window, .{}, true, colour, plain, colours);
+        try std.testing.expectEqualStrings("x Run tests             exit 127", screen.row(0, &row));
+        try std.testing.expectEqualStrings("    saved output", screen.row(1, &row));
+        for (0..32) |column| {
+            try std.testing.expectEqual(if (colour) colours.selection else plain.bg, screen.screen.readCell(@intCast(column), 0).?.style.bg);
+            try std.testing.expectEqual(if (colour) colours.band else plain.bg, screen.screen.readCell(@intCast(column), 1).?.style.bg);
+        }
+    }
 }

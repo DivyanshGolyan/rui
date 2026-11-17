@@ -109,14 +109,14 @@ class PeerModel(TestHTTPServer):
                       "cat > b-report.txt; " +
                       send + "< b-report.txt > b-reply.json 2> b-reply.err")
             return bash_call("b-reply", (
-                'printf "%s\\n" "$HOME"/.config/rui/requests/* > b-captures-before; '
+                'printf "%s\\n" "$HOME"/.config/rui/requests/*.json > b-captures-before; '
                 f'printf %s "self report explicit" | rui session send --store "$RUI_STORE/." --to {address} '
                 f"--record {shlex.quote(str(self.workspace.parent / 'b-self.json'))} --key self-send > b-self.out 2> b-self.err; "
                 "echo $? > b-self.status; "
                 f"printf %s 'self report generated' | rui session send --to {address} "
                 "> b-self-generated.out 2> b-self-generated.err; "
                 "echo $? > b-self-generated.status; "
-                'printf "%s\\n" "$HOME"/.config/rui/requests/* > b-captures-after.part && mv b-captures-after.part b-captures-after; '
+                'printf "%s\\n" "$HOME"/.config/rui/requests/*.json > b-captures-after.part && mv b-captures-after.part b-captures-after; '
                 "i=0; while [ ! -e b-release ] && [ $i -lt 400 ]; do sleep 0.05; i=$((i+1)); done; [ -e b-release ] || exit 124; "
                 + report
             ), stdin=REPORT)
@@ -309,6 +309,7 @@ def main(report_source):
         after = set((workspace / "b-captures-after").read_text().splitlines())
         assert len(after - before) == 1, (before, after)
         generated_self_record = pathlib.Path(next(iter(after - before)))
+        assert pathlib.Path(str(generated_self_record) + ".routing").is_file(), generated_self_record
         assert json.loads(generated_self_record.read_text())["sender"] == own_sender
         wait_for(lambda: run(installed, "session", "inspect", "--store", store, "--session", session_a, home=home)["work"]["state"]["kind"] == "finished", "A's first Turn while B is held", timeout=20)
         assert endpoint.a_continued.is_set() and not (workspace / "b-reply.json").exists()
@@ -355,7 +356,7 @@ def main(report_source):
         silent = run(installed, "request", "inspect", handle, home=home)
         assert silent["key"] == receipt["context"]["key"], silent
         assert silent["observation"]["target"] == session_b, silent
-        assert silent["observation"].get("result", {}).get("status") != "completed", silent
+        assert silent["observation"]["status"] == "accepted", silent
 
         environment = dict(line.split("=", 1) for line in (workspace / "a-env.txt").read_text().splitlines() if "=" in line)
         assert environment["PATH"] == f"{installed.parent}:{os.environ['PATH']}", environment
@@ -400,13 +401,17 @@ def main(report_source):
         assert len(a_requests) == 3, a_requests
         b_final = wait_for(lambda: (lambda value: value if value["work"]["state"]["kind"] == "finished" and value["pending_messages"] == "0" else None)(
             run(installed, "session", "inspect", "--store", store, "--session", session_b, home=home)), "B's Turn", timeout=20)
-        assert {row["message"] for row in b_final["recent_messages"]} == {receipt["context"]["key"], *self_sends}, b_final
+        b_messages = {row["message"] for row in b_final["recent_messages"]}
+        expected_messages = {receipt["context"]["key"], *self_sends}
+        final_inputs = b_messages - expected_messages
+        assert len(final_inputs) == 1 and next(iter(final_inputs)).startswith("rui.core/action-final/"), b_final
+        assert expected_messages <= b_messages, b_final
         for record, key in zip((state / "b-self.json", generated_self_record), self_sends):
             replay = run(installed, "request", "recover", "--store", store, "--record", record, "--kind", "message", home=home)
             assert replay["answer"]["status"] == "accepted" and replay["answer"]["replayed"] is True, replay
             assert replay["context"]["key"] == key and replay["context"]["session"] == session_b, replay
         b_after = run(installed, "session", "inspect", "--store", store, "--session", session_b, home=home)
-        assert {row["message"] for row in b_after["recent_messages"]} == {receipt["context"]["key"], *self_sends}, b_after
+        assert {row["message"] for row in b_after["recent_messages"]} == b_messages, b_after
         for key in (receipt["context"]["key"], *self_sends):
             local = subprocess.run([str(installed), "request", "read-result", "--store", str(store), "--key", key],
                                    text=True, capture_output=True, timeout=15, env={"PATH": os.environ["PATH"], "HOME": str(home), "RUI_TEST_MODELS_DEV_URL": ""})
@@ -415,7 +420,9 @@ def main(report_source):
         assert [row["message"] for row in a_after["recent_messages"]] == [reply["context"]["key"], ask_key], a_after
         assert "plain reply stays local" not in json.dumps(a_reply_request), a_reply_request
         b_requests = [request for request in endpoint.requests if address_of(request) == session_b]
-        assert sum(bool(tool_outputs(request)) for request in b_requests) == 1, b_requests
+        b_receipts = [item for request in b_requests for item in request["input"]
+                      if item.get("type") == "function_call_output" and item.get("call_id") == "b-reply-call"]
+        assert b_receipts and all(json.loads(item["output"])["execution"] == "background" for item in b_receipts), b_receipts
         rows = {row["reference"]: row for row in run(installed, "session", "list", "--store", store, "--all", home=home)["sessions"]}
         assert (rows[session_a]["label"], rows[session_b]["label"]) == (A_LABEL, B_LABEL), rows
         assert rows[session_b]["first_message"]["sender"] == {"session": session_a}, rows[session_b]

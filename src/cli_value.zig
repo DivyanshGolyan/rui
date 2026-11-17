@@ -13,31 +13,7 @@ pub const ReasoningChoice = blk: {
     break :blk @Enum(u8, .exhaustive, tags, &values);
 };
 
-pub const CommandKind = enum {
-    configure,
-    message,
-    session_stop,
-    session_archive,
-    model_interruption,
-    permission_decision,
-    session_pin,
-    action_background,
-    session_group,
-
-    pub fn route(self: CommandKind) []const u8 {
-        return switch (self) {
-            .configure => "/v1/configure",
-            .message => "/v1/message",
-            .session_stop => "/v1/control/session-stop",
-            .session_archive => "/v1/control/session-archive",
-            .session_pin => "/v1/control/session-pin",
-            .session_group => "/v1/control/session-group",
-            .model_interruption => "/v1/control/model-interruption",
-            .permission_decision => "/v1/control/permission-decision",
-            .action_background => "/v1/control/action-background",
-        };
-    }
-};
+pub const CommandKind = @import("command_spec.zig").CommandKind;
 
 pub const RecoveryKind = blk: {
     const source = @typeInfo(CommandKind).@"enum";

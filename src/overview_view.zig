@@ -123,6 +123,9 @@ pub const keys: keymap.Keymap(Action) = .init(.{
     .down = .next,
     .left = null,
     .right = .open_session,
+    // Focus order's keys, which `app_input.keys` takes first.
+    .tab = null,
+    .shift_tab = null,
     .shift_up = .select_previous,
     .shift_down = .select_next,
     .page_up = null,
@@ -133,7 +136,7 @@ pub const keys: keymap.Keymap(Action) = .init(.{
 });
 
 test "keys list covers both screens without unbound or duplicate keys" {
-    try std.testing.expectEqual(@as(?keymap.ListError, null), keymap.listError(.{ keys, @import("session_keys.zig").keys }));
+    try std.testing.expectEqual(@as(?keymap.ListError, null), keymap.listError(.{ keys, @import("session_keys.zig").keys, @import("app_input.zig").keys }));
 }
 
 pub const Input = union(enum) { action: Action, enter, left, ignored };
@@ -143,6 +146,7 @@ pub const InputDelivery = struct {
     row: ?RowInput = null,
     under: bool = false,
     pasted: bool = false,
+    wide: bool = false,
 };
 
 pub const Delta = enum {
@@ -174,6 +178,7 @@ pub const Listed = struct {
     pin_order: ?@import("session_pin.zig").PinOrder = null,
     group: ?session_group.Brief = null,
     group_manual: bool = false,
+    created_at: u64 = 0,
     workspace: []const u8,
     provider: Provider,
     label: ?[]const u8 = null,
@@ -196,6 +201,7 @@ pub const Listed = struct {
             .pin_order = row.pin_order,
             .group = row.group,
             .group_manual = row.group_manual,
+            .created_at = row.created_at,
             .workspace = row.workspace.slice(),
             .provider = row.provider,
             .label = if (row.label) |*text| text.slice() else null,
@@ -304,8 +310,12 @@ pub const CreateResult = union(enum) {
 
 pub const Event = union(enum) {
     input: InputDelivery,
+    list_settled: struct { wide: bool, focused: bool },
 
     resized: Size,
+    launch_start: struct { explicit_session: bool, restoring: bool },
+    launch_size: struct { size: Size, wide: bool },
+    launch_poll,
 
     tick: u64,
     list: ListReply,
@@ -571,6 +581,8 @@ pub const Size = struct { width: u16 = 0, height: u16 = 0 };
 pub const IntentAdmission = enum { admitted, refused };
 
 pub const Effects = struct {
+    browse_open: bool = false,
+    redraw: bool = false,
     intent_admission: IntentAdmission = .refused,
     items: [3]Effect = undefined,
     len: usize = 0,
@@ -638,6 +650,7 @@ pub const Row = struct {
     pin_order: ?@import("session_pin.zig").PinOrder = null,
     group: ?session_group.Brief = null,
     group_manual: bool = false,
+    created_at: u64 = 0,
 
     workspace: u32,
     provider: ?Provider = null,
@@ -693,6 +706,8 @@ pub const State = struct {
     lines: Vec(Bounded(max_line_bytes)) = .{},
 
     selected: Selection = .new_session,
+    /// Coalesce moves until the existing application tick; no feed cache.
+    browse_pending: bool = false,
 
     conversing: ?Reference = null,
     read_instance: ?[16]u8 = null,
@@ -712,6 +727,7 @@ pub const State = struct {
     default: ?Default = null,
 
     size: Size = .{},
+    launch: enum { sizing, waiting, creating, done } = .done,
 
     host_line: bool = false,
 
@@ -836,6 +852,10 @@ pub const State = struct {
         if (self.selected != .session) return null;
         const row = self.find(self.selected.session) orelse return null;
         return if (visible(self, row)) row else null;
+    }
+
+    pub fn hidesOverview(self: *const State) bool {
+        return self.launch == .waiting or self.launch == .creating;
     }
 
     pub fn creating(self: *const State) bool {
@@ -1212,19 +1232,33 @@ fn lookup(keyed: []const Keyed, ref: Reference) ?u32 {
 pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
     var effects: Effects = .{};
     switch (event) {
-        .input => |input| try listInput(state, input, &effects),
+        .input => |input| {
+            if (input.key != .ignored) state.launch = .done;
+            try listInput(state, input, &effects);
+        },
+        .list_settled => |frame| {
+            const pending = state.browse_pending;
+            state.browse_pending = false;
+            if (pending and frame.wide and frame.focused) try activateList(state, .browse, &effects);
+        },
         .tick => |now_ms| try tick(state, now_ms, &effects),
-        .list => |reply| switch (reply) {
-            .page => |page| try listPage(state, page, &effects),
-            .failed => {
-                std.debug.assert(state.listing);
-                state.listing = false;
-                state.pending.items.len = 0;
-                state.list_stale = true;
-            },
+        .list => |reply| {
+            switch (reply) {
+                .page => |page| try listPage(state, page, &effects),
+                .failed => {
+                    std.debug.assert(state.listing);
+                    state.listing = false;
+                    state.pending.items.len = 0;
+                    state.list_stale = true;
+                },
+            }
+            if (state.listed_at_ms == null and state.list_stale and (state.launch == .sizing or state.launch == .waiting)) state.launch = .done;
         },
         .first_line => |result| try firstLine(state, result),
-        .clicked => |input| if (!state.creating()) try activate(state, input.target, &effects),
+        .clicked => |input| {
+            state.launch = .done;
+            if (!state.creating()) try activate(state, input.target, &effects);
+        },
         .unconfirmed => |left| {
             std.debug.assert(canHoldSend(state));
             state.requests[state.request_count] = .{ .kind = .send, .session = left.reference, .status = .unknown, .sent = left.recovery };
@@ -1331,6 +1365,7 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
             state.next_list_ms = 0;
         },
         .created => |result| {
+            if (state.launch == .creating) state.launch = .done;
             const at = state.pendingAt(.create, null).?;
             switch (result) {
                 .created => |created| {
@@ -1364,6 +1399,27 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
             state.releaseModels();
         },
         .resized => |size| state.size = size,
+        .launch_start => |startup| {
+            if (!startup.explicit_session and !startup.restoring and !state.left and state.conversing == null) state.launch = .sizing;
+        },
+        .launch_size => |frame| {
+            state.size = frame.size;
+            if (state.launch == .sizing and frame.size.width != 0) state.launch = if (frame.wide) .waiting else .done;
+        },
+        .launch_poll => {
+            if (state.launch == .waiting and state.listed_at_ms != null and !state.list_stale) {
+                if (newestEmpty(state)) |reference| {
+                    state.launch = .done;
+                    state.selected = .{ .session = reference };
+                    effects.add(.{ .open = reference });
+                } else {
+                    state.selected = .new_session;
+                    try enter(state, &effects);
+                    state.launch = if (state.pendingAt(.create, null) != null) .creating else .done;
+                }
+                effects.redraw = true;
+            }
+        },
         .observed => |read| try state.observe(read),
         .conversation => |ref| {
             const selected_at = if (state.selected == .session) position(state, state.selected.session) else null;
@@ -1377,6 +1433,7 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
             effects.add(.{ .open = ref });
         },
         .host => |facts| {
+            if (facts == null) state.launch = .done;
             state.host = facts;
             if (facts) |host| {
                 if (state.read_instance) |known| if (!std.mem.eql(u8, &known, &host.instance)) {
@@ -1533,6 +1590,7 @@ fn listPage(state: *State, page: Page, effects: *Effects) error{OutOfMemory}!voi
             .pin_order = listed.pin_order,
             .group = listed.group,
             .group_manual = listed.group_manual,
+            .created_at = listed.created_at,
             .workspace = try state.intern(listed.workspace),
             .provider = listed.provider,
             .label = if (listed.label) |text| labelOf(text) else null,
@@ -1595,6 +1653,7 @@ fn commit(state: *State, answer: Answer) error{OutOfMemory}!void {
         const same = if (incoming.first) |first| if (row.first) |known| first.admission == known.admission else false else false;
         row.archive_state = incoming.archive_state;
         row.pin_order = incoming.pin_order;
+        row.created_at = incoming.created_at;
         row.workspace = incoming.workspace;
         row.provider = incoming.provider;
         row.label = incoming.label;
@@ -1949,11 +2008,15 @@ fn listInput(state: *State, delivery: InputDelivery, effects: *Effects) error{Ou
         return;
     }
     if (delivery.under or state.creating()) return;
+    const before = state.selected;
     switch (input) {
         .ignored => unreachable,
-        .enter => if (delivery.row) |row| try activate(state, row.target, effects) else switch (state.selected) {
-            .session, .group => {},
-            else => try enter(state, effects),
+        .enter => {
+            state.browse_pending = false;
+            if (delivery.row) |row| try activate(state, row.target, effects) else switch (state.selected) {
+                .session, .group => {},
+                else => try enter(state, effects),
+            }
         },
         .left => if (delivery.row) |row| {
             const request: ?GroupRequest = switch (row.target) {
@@ -1970,11 +2033,14 @@ fn listInput(state: *State, delivery: InputDelivery, effects: *Effects) error{Ou
         },
         .action => |action| switch (action) {
             .exit => unreachable,
-            .open_session => if (delivery.row) |row| {
-                try activate(state, if (row.target == .group) .{ .group = collapseRequest(row.target.group, false) } else row.target, effects);
-            } else switch (state.selected) {
-                .sessions => state.selected = .archived,
-                .new_session, .archived, .settings, .group, .session => {},
+            .open_session => {
+                state.browse_pending = false;
+                if (delivery.row) |row| {
+                    try activate(state, if (row.target == .group) .{ .group = collapseRequest(row.target.group, false) } else row.target, effects);
+                } else switch (state.selected) {
+                    .sessions => state.selected = .archived,
+                    .new_session, .archived, .settings, .group, .session => {},
+                }
             },
             .clear => {
                 state.notice = null;
@@ -1991,6 +2057,9 @@ fn listInput(state: *State, delivery: InputDelivery, effects: *Effects) error{Ou
                 select(state, action);
             },
         },
+    }
+    if (input == .action and (input.action == .previous or input.action == .next)) {
+        state.browse_pending = delivery.wide and (state.browse_pending or !std.meta.eql(before, state.selected));
     }
 }
 
@@ -2027,7 +2096,15 @@ fn adjacentSession(state: *State, direction: Action, effects: *Effects) error{Ou
 }
 
 fn enter(state: *State, effects: *Effects) error{OutOfMemory}!void {
+    try activateList(state, .enter, effects);
+}
+
+/// Enter activates any row; Right (`open_session`) and a settled browse
+/// act only on a Session row.
+const ListIntent = enum { enter, open_session, browse };
+fn activateList(state: *State, intent: ListIntent, effects: *Effects) error{OutOfMemory}!void {
     if (state.creating()) return;
+    if (intent != .enter and state.selected != .session) return;
     if (state.selected == .settings) {
         effects.add(.open_settings);
         return;
@@ -2036,7 +2113,7 @@ fn enter(state: *State, effects: *Effects) error{OutOfMemory}!void {
     if (state.selected == .sessions) return selectView(state, .active, effects);
     if (state.selected == .archived) return selectView(state, .archived, effects);
     if (state.selected == .session) if (state.conversing) |open| if (std.mem.eql(u8, &state.selected.session, &open)) {
-        effects.add(.focus_chat);
+        if (intent != .browse) effects.add(.focus_chat);
         return;
     };
     if (!admitHostRequest(state)) return;
@@ -2048,6 +2125,7 @@ fn enter(state: *State, effects: *Effects) error{OutOfMemory}!void {
         .settings, .sessions, .archived, .group => unreachable,
         .session => if (state.selectedRow()) |row| {
             effects.add(.{ .open = row.reference });
+            effects.browse_open = intent == .browse;
         },
         .new_session => {
             if (state.request(.create, null)) effects.add(.{ .create = state.nextStart() });
@@ -2886,10 +2964,19 @@ pub fn listSegments(arena: Allocator, state: *const State, item: Item, width: u1
     return result;
 }
 
+pub fn newestEmpty(state: *const State) ?Reference {
+    var newest: ?*const Row = null;
+    for (state.rows.items) |*row| {
+        if (!row.listed or row.archive_state == .archived or row.first != null) continue;
+        if (newest == null or row.created_at > newest.?.created_at or
+            (row.created_at == newest.?.created_at and std.mem.order(u8, &row.reference, &newest.?.reference) == .gt)) newest = row;
+    }
+    return if (newest) |row| row.reference else null;
+}
+
 pub fn footerRight(state: *const State) []const u8 {
     if (state.upgrade.takesEscape()) return "esc cancels";
-    if (state.creating() or (state.holdsHost() and state.selected != .settings)) return "";
-    return "enter open";
+    return "";
 }
 
 pub fn footerNotice(state: *const State) ?[]const u8 {
@@ -4499,7 +4586,7 @@ test "the overview's rows draw an empty Store" {
         const text = try screenText(&state, width, 24, .{});
         defer std.testing.allocator.free(text);
         try std.testing.expect(std.mem.startsWith(u8, text, "  + New Session") and std.mem.indexOf(u8, text, "Archived\n") != null);
-        try std.testing.expectEqualStrings("enter open", footerRight(&state));
+        try std.testing.expectEqualStrings("", footerRight(&state));
         try std.testing.expect(std.mem.indexOf(u8, text, "new Session ·") == null);
     }
 }
@@ -5130,7 +5217,7 @@ test "overview Footer reserves the Upgrade cancellation key before clipping prog
         .{ .run = .{ .installing = .{ .found = found, .step = .publishing } }, .right = "" },
         .{ .run = .{ .installing = .{ .found = found, .step = .restarting } }, .right = "" },
         .{ .run = .cancelling, .right = "esc cancels" },
-        .{ .run = .{ .ended = .{ .how = .cancelled, .outcome = .unchanged } }, .right = "enter open" },
+        .{ .run = .{ .ended = .{ .how = .cancelled, .outcome = .unchanged } }, .right = "" },
     };
     for (cases) |case| {
         state.upgrade.run = case.run;
@@ -5962,6 +6049,90 @@ test "Overview list Right does not create or open Settings and clicks share resu
     try std.testing.expectEqual(@as(usize, 1), resumes);
 }
 
+test "Overview browse settles only the last wide list move and never activates controls" {
+    const rows = [_]Listed{
+        session("aaaaaa", .{ .idle = ago(1) }, .{ .label = "One" }),
+        session("bbbbbb", .{ .idle = ago(2) }, .{ .label = "Two" }),
+        session("cccccc", .{ .idle = ago(3) }, .{ .label = "Three" }),
+        session("dddddd", .{ .idle = ago(4) }, .{ .label = "Four" }),
+    };
+    for ([_]bool{ false, true }) |wide| for (std.enums.values(enum { chat, new_session, settings, rapid })) |landing| {
+        var state = try opened(&rows);
+        defer state.deinit();
+        _ = try step(&state, .{ .conversation = "aaaaaa".* });
+        state.selected = .{ .session = "aaaaaa".* };
+        if (landing == .settings) state.selected = .{ .session = "dddddd".* };
+        const moves: usize = if (landing == .rapid) 3 else 1;
+        var reads: usize = 0;
+        for (0..moves) |_| {
+            const effects = try step(&state, .{ .input = .{ .wide = wide, .key = .{ .action = if (landing == .new_session) .previous else .next } } });
+            for (effects.slice()) |effect| {
+                if (effect == .open) reads += 1;
+                try std.testing.expect(effect != .create and effect != .open_settings);
+            }
+        }
+        try std.testing.expectEqual(@as(usize, 0), reads);
+        const settled = try step(&state, .{ .list_settled = .{ .wide = wide, .focused = true } });
+        for (settled.slice()) |effect| {
+            if (effect == .open) {
+                reads += 1;
+                try std.testing.expectEqualStrings(if (landing == .rapid) "dddddd" else "bbbbbb", &effect.open);
+            }
+            try std.testing.expect(effect != .create and effect != .open_settings and effect != .focus_chat);
+        }
+        const expected = wide and (landing == .chat or landing == .rapid);
+        try std.testing.expectEqual(@as(usize, @intFromBool(expected)), reads);
+        try std.testing.expectEqual(expected, settled.browse_open);
+        try std.testing.expectEqual(@as(usize, 0), (try step(&state, .{ .list_settled = .{ .wide = wide, .focused = true } })).len);
+    };
+}
+
+test "Overview browse explicit Enter and Right share activation and focus departure cancels settle" {
+    for ([_]bool{ false, true }) |wide| for ([_]Input{ .enter, .{ .action = .open_session } }) |key| for ([_]Selection{ .new_session, .settings, .{ .session = "b2c3d4".* }, .{ .session = "g7h8j9".* } }) |selection| {
+        var state = try opened(&mixed);
+        defer state.deinit();
+        _ = try step(&state, .{ .conversation = "b2c3d4".* });
+        state.selected = selection;
+        state.browse_pending = true;
+        const effects = try step(&state, .{ .input = .{ .wide = wide, .key = key, .row = testRowInput(&state) } });
+        try std.testing.expect(!state.browse_pending and !effects.browse_open);
+        const expected: std.meta.Tag(Effect) = switch (selection) {
+            .sessions, .archived, .group => unreachable,
+            .new_session => if (key == .enter) .new_session else continue,
+            .settings => if (key == .enter) .open_settings else continue,
+            .session => |reference| if (std.mem.eql(u8, &reference, "b2c3d4")) .focus_chat else .open,
+        };
+        var count: usize = 0;
+        for (effects.slice()) |effect| if (std.meta.activeTag(effect) == expected) {
+            count += 1;
+        };
+        try std.testing.expectEqual(@as(usize, 1), count);
+    };
+    var state = try opened(&mixed);
+    defer state.deinit();
+    _ = try step(&state, .{ .input = .{ .wide = true, .key = .{ .action = .next } } });
+    try std.testing.expect(state.browse_pending);
+    const cancelled = try step(&state, .{ .list_settled = .{ .wide = true, .focused = false } });
+    try std.testing.expectEqual(@as(usize, 0), cancelled.len);
+    try std.testing.expect(!state.browse_pending);
+}
+
+test "Overview browse New Session never activates until Enter and remains reachable from chat lists" {
+    for ([_]bool{ false, true }) |wide| {
+        var state = try opened(&mixed);
+        defer state.deinit();
+        state.selected = .new_session;
+        state.browse_pending = true;
+        const settled = try step(&state, .{ .list_settled = .{ .wide = wide, .focused = true } });
+        try std.testing.expectEqual(@as(usize, 0), settled.len);
+        _ = try step(&state, .{ .conversation = "b2c3d4".* });
+        _ = try step(&state, .{ .input = .{ .wide = wide, .key = .{ .action = .first } } });
+        try std.testing.expect(state.selected == .new_session);
+        _ = try step(&state, .{ .input = .{ .wide = wide, .key = .{ .action = .previous } } });
+        try std.testing.expect(state.selected == .new_session);
+    }
+}
+
 test "the shared row fitter translates source marks through normalization and clipping" {
     const Case = struct {
         text: []const u8,
@@ -6689,4 +6860,162 @@ test "session groups unavailable keyboard row targets require a drawn capture" {
         state.selected = selection;
         try expectEffects(&.{}, try step(&state, .{ .input = .{ .key = key } }));
     };
+}
+
+test "launch core creation outcomes reveal or open exactly once" {
+    const Outcome = enum { accepted, refused, unconfirmed };
+    for (std.enums.values(Outcome)) |outcome| {
+        var state = try opened(&.{});
+        defer state.deinit();
+        state.launch = .sizing;
+        try expectEffects(&.{}, try step(&state, .{ .launch_size = .{ .size = .{ .width = 140, .height = 40 }, .wide = true } }));
+        try std.testing.expect(state.hidesOverview());
+        const admitted = try step(&state, .launch_poll);
+        try expectEffects(&.{.{ .create = null }}, admitted);
+        try std.testing.expect(admitted.redraw);
+        try std.testing.expect(state.hidesOverview());
+        const answered = try step(&state, .{ .created = switch (outcome) {
+            .accepted => .{ .created = .{ .reference = "abcdef".*, .handle = "created" } },
+            .refused => .{ .failed = "model_required" },
+            .unconfirmed => .{ .unconfirmed = "unknown-create" },
+        } });
+        try expectEffects(if (outcome == .accepted) &.{ .{ .open = "abcdef".* }, .list_models } else &.{}, answered);
+        try std.testing.expect(!state.hidesOverview());
+        try std.testing.expectEqual(.done, state.launch);
+        switch (outcome) {
+            .accepted => try std.testing.expectEqual(@as(usize, 0), state.request_count),
+            .refused => try std.testing.expect(std.mem.indexOf(u8, state.notice.?.text(), "Not created") != null),
+            .unconfirmed => {
+                try std.testing.expectEqual(.unknown, state.requests[0].status);
+                try std.testing.expect(state.creating());
+                try std.testing.expectEqualStrings("! Creation unsure; details on exit", state.notice.?.text());
+            },
+        }
+        try expectEffects(&.{}, try step(&state, .launch_poll));
+    }
+}
+
+test "launch core reopens newest active empty Session" {
+    var older = session("aaaaaa", .{ .idle = ago(1) }, .{ .first = null });
+    var newest = session("bbbbbb", .{ .idle = ago(1) }, .{ .first = null });
+    var archived = session("cccccc", .{ .idle = ago(1) }, .{ .first = null, .archive_state = .archived });
+    var populated = session("dddddd", .{ .idle = ago(1) }, .{});
+    older.created_at = 1;
+    newest.created_at = 2;
+    archived.created_at = 3;
+    populated.created_at = 4;
+    var state = try opened(&.{ older, newest, archived, populated });
+    defer state.deinit();
+    state.launch = .sizing;
+    _ = try step(&state, .{ .launch_size = .{ .size = .{ .width = 140, .height = 40 }, .wide = true } });
+    const opened_effect = try step(&state, .launch_poll);
+    try expectEffects(&.{ .{ .open = "bbbbbb".* }, .list_models }, opened_effect);
+    try std.testing.expect(opened_effect.redraw);
+    try std.testing.expectEqual(@as(usize, 0), state.request_count);
+    try std.testing.expect(!state.hidesOverview());
+    try expectEffects(&.{}, try step(&state, .launch_poll));
+}
+
+test "launch core exposes overview after unsuccessful first listing" {
+    for ([_]bool{ false, true }) |first_frame| {
+        var state = try testState();
+        defer state.deinit();
+        state.launch = .sizing;
+        if (first_frame) _ = try step(&state, .{ .launch_size = .{ .size = .{ .width = 140, .height = 40 }, .wide = true } });
+        _ = try step(&state, .{ .tick = test_now_s * 1000 });
+        try expectEffects(&.{}, try step(&state, .{ .list = .failed }));
+        try std.testing.expectEqual(.done, state.launch);
+        try std.testing.expect(!state.hidesOverview());
+        _ = try step(&state, .{ .launch_size = .{ .size = .{ .width = 140, .height = 40 }, .wide = true } });
+        try expectEffects(&.{}, try step(&state, .launch_poll));
+    }
+}
+
+test "launch core exposes overview after an invalid first listing" {
+    var state = try testState();
+    defer state.deinit();
+    state.launch = .sizing;
+    _ = try step(&state, .{ .launch_size = .{ .size = .{ .width = 140, .height = 40 }, .wide = true } });
+    _ = try step(&state, .{ .tick = test_now_s * 1000 });
+    const wrong: Token = .{ .instance = @splat(0xff), .generation = 1 };
+    _ = try step(&state, .{ .list = .{ .page = .{ .rows = &.{}, .answer = .{ .delta = .full, .since = wrong } } } });
+    try std.testing.expect(state.list_stale);
+    try std.testing.expectEqual(.done, state.launch);
+    try std.testing.expect(!state.hidesOverview());
+}
+
+test "launch core exposes overview when Host becomes unavailable" {
+    for ([_]bool{ false, true }) |first_frame| {
+        var state = try testState();
+        defer state.deinit();
+        state.launch = .sizing;
+        if (first_frame) _ = try step(&state, .{ .launch_size = .{ .size = .{ .width = 140, .height = 40 }, .wide = true } });
+        try expectEffects(&.{}, try step(&state, .{ .host = null }));
+        try std.testing.expectEqual(.done, state.launch);
+        try std.testing.expect(!state.hidesOverview());
+        _ = try step(&state, .{ .launch_size = .{ .size = .{ .width = 140, .height = 40 }, .wide = true } });
+        try expectEffects(&.{}, try step(&state, .launch_poll));
+    }
+}
+
+test "launch core exposes overview when Host is lost during creation" {
+    var state = try opened(&.{});
+    defer state.deinit();
+    state.launch = .sizing;
+    _ = try step(&state, .{ .launch_size = .{ .size = .{ .width = 140, .height = 40 }, .wide = true } });
+    _ = try step(&state, .launch_poll);
+    try std.testing.expect(state.hidesOverview());
+    _ = try step(&state, .{ .host = null });
+    try std.testing.expectEqual(.done, state.launch);
+    try std.testing.expect(!state.hidesOverview());
+    try std.testing.expect(state.creating());
+    _ = try step(&state, .{ .created = .{ .unconfirmed = "lost-create" } });
+    try std.testing.expectEqualStrings("! Creation unsure; details on exit", state.notice.?.text());
+}
+
+test "launch core leaves narrow overview alone after widening" {
+    var state = try opened(&.{});
+    defer state.deinit();
+    state.launch = .sizing;
+    _ = try step(&state, .{ .launch_size = .{ .size = .{ .width = 46, .height = 30 }, .wide = false } });
+    try std.testing.expectEqual(.done, state.launch);
+    try std.testing.expect(!state.hidesOverview());
+    _ = try step(&state, .{ .launch_size = .{ .size = .{ .width = 140, .height = 30 }, .wide = true } });
+    try expectEffects(&.{}, try step(&state, .launch_poll));
+    try std.testing.expectEqual(@as(usize, 0), state.request_count);
+}
+
+test "launch admission belongs to bare app startup" {
+    var state = try testState();
+    defer state.deinit();
+    _ = try step(&state, .{ .launch_size = .{ .size = .{ .width = 140, .height = 40 }, .wide = true } });
+    try std.testing.expectEqual(.done, state.launch);
+    _ = try step(&state, .{ .launch_start = .{ .explicit_session = true, .restoring = false } });
+    _ = try step(&state, .{ .launch_size = .{ .size = .{ .width = 140, .height = 40 }, .wide = true } });
+    try std.testing.expectEqual(.done, state.launch);
+    _ = try step(&state, .{ .launch_start = .{ .explicit_session = false, .restoring = true } });
+    _ = try step(&state, .{ .launch_size = .{ .size = .{ .width = 140, .height = 40 }, .wide = true } });
+    try std.testing.expectEqual(.done, state.launch);
+    _ = try step(&state, .{ .launch_start = .{ .explicit_session = false, .restoring = false } });
+    _ = try step(&state, .{ .launch_size = .{ .size = .{ .width = 140, .height = 40 }, .wide = true } });
+    try std.testing.expectEqual(.waiting, state.launch);
+}
+
+test "session groups wide browse settles visible members without activating headers or collapsed children" {
+    var state = try opened(&.{
+        session("aaaaaa", .{ .finished = ago(2) }, .{ .label = "Hidden", .group = testGroup(7, "Collapsed", true), .group_manual = true }),
+        session("bbbbbb", .{ .finished = ago(3) }, .{ .label = "Visible", .group = testGroup(8, "Expanded", false), .group_manual = true }),
+    });
+    defer state.deinit();
+    state.selected = .{ .group = 7 };
+    try expectEffects(&.{}, try step(&state, .{ .input = .{ .wide = true, .key = .{ .action = .next } } }));
+    try std.testing.expectEqual(@as(u64, 8), state.selected.group);
+    try expectEffects(&.{}, try step(&state, .{ .list_settled = .{ .wide = true, .focused = true } }));
+    try std.testing.expectEqual(@as(usize, 0), state.request_count);
+    try expectEffects(&.{}, try step(&state, .{ .input = .{ .wide = true, .key = .{ .action = .next } } }));
+    try std.testing.expectEqualStrings("bbbbbb", &state.selected.session);
+    const settled = try step(&state, .{ .list_settled = .{ .wide = true, .focused = true } });
+    try expectEffects(&.{ .{ .open = "bbbbbb".* }, .list_models }, settled);
+    try std.testing.expect(settled.browse_open);
+    try std.testing.expectEqual(@as(usize, 0), state.request_count);
 }

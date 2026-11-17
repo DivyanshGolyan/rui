@@ -741,6 +741,14 @@ pub const Store = struct {
         return self.noteControl(transition.apply(self, command_domain.DecidePermission, .{ .command = command }, faults) catch .infrastructure_failure);
     }
 
+    pub fn declineForMessage(self: *Store, command: *const command_input.PermissionDecisionCommand, faults: Faults) PermissionDecisionReply {
+        return self.queue().write(declineForMessageHeld, .{ self, command, faults });
+    }
+
+    fn declineForMessageHeld(self: *Store, command: *const command_input.PermissionDecisionCommand, faults: Faults) PermissionDecisionReply {
+        return self.noteControl(transition.apply(self, command_domain.DecidePermission, .{ .command = command, .denial_reason = "declined: a new message arrived; ask again if still needed" }, faults) catch .infrastructure_failure);
+    }
+
     pub fn backgroundAction(self: *Store, source: action_control_domain.Control.Source, faults: Faults) @import("../action_control.zig").Reply {
         EntryTrace.fromControl(faults.control_trace).mark(.requested);
         return self.queue().write(backgroundActionHeld, .{ self, source, faults });
@@ -1122,17 +1130,35 @@ pub const Store = struct {
         context: anytype,
         comptime handoff: anytype,
     ) !void {
-        try self.queue().callHeld(withActionDispatchHandoffHeld, .{ self, binding });
+        _ = try self.queue().callHeld(withActionDispatchHandoffHeld, .{ self, binding });
         defer self.queue().release();
         try handoff(context);
     }
 
-    fn withActionDispatchHandoffHeld(self: *Store, binding: ActionAttemptBinding) !void {
+    pub fn withActionLaunchHandoff(self: *Store, binding: ActionAttemptBinding, context: anytype, comptime handoff: anytype) !void {
+        const cutoff = try self.queue().callHeld(withActionDispatchHandoffHeld, .{ self, binding });
+        defer self.queue().release();
+        try handoff(context, cutoff);
+    }
+
+    fn withActionDispatchHandoffHeld(self: *Store, binding: ActionAttemptBinding) !u64 {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: ReadAccess = .open(&entry);
         defer access.deinit();
-        try entry.finish(Ordinary.action_dispatch, action_domain.validateActionDispatch(&access, binding));
+        return entry.finish(Ordinary.action_dispatch, action_domain.validateActionDispatch(&access, binding));
+    }
+
+    pub fn messageAfterActionLaunch(self: *Store, binding: ActionAttemptBinding, cutoff: u64) !bool {
+        return self.queue().run(messageAfterActionLaunchHeld, .{ self, binding, cutoff });
+    }
+
+    fn messageAfterActionLaunchHeld(self: *Store, binding: ActionAttemptBinding, cutoff: u64) !bool {
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: ReadAccess = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.none, action_domain.messageAfterLaunch(&access, binding, cutoff));
     }
 
     pub fn settleActionAttempt(
@@ -1260,6 +1286,16 @@ pub const Store = struct {
 
     fn settleSkillToolHeld(self: *Store, binding: ActionAttemptBinding, allocator: std.mem.Allocator, captured: *const skills_domain.Capture, faults: Faults) !bool {
         return transition.apply(self, skills_domain.SettleTool, .{ .binding = binding, .allocator = allocator, .captured = captured }, faults);
+    }
+
+    pub fn stopAction(self: *Store, source: ActionAttemptBinding, target: u64, faults: Faults) !@import("domain/action_stop.zig").Outcome {
+        return self.queue().write(stopActionHeld, .{ self, source, target, faults });
+    }
+
+    fn stopActionHeld(self: *Store, source: ActionAttemptBinding, target: u64, faults: Faults) !@import("domain/action_stop.zig").Outcome {
+        const result = try transition.apply(self, @import("domain/action_stop.zig").Stop, .{ .source = source, .target = target }, faults);
+        if (result == .selected or result == .pending) _ = @as(*OutOfLine, @fieldParentPtr("ring", self.changes)).control_generation.fetchAdd(1, .release);
+        return result;
     }
 
     pub fn failCoreCall(self: *Store, binding: ActionAttemptBinding, result: []const u8, faults: Faults) !bool {
@@ -1586,7 +1622,7 @@ const scratch_align = @max(@alignOf(configuration_domain.ConfigurationReads), @a
 const accepted_settlement_growth = 14352;
 
 comptime {
-    if (@sizeOf(configuration_domain.ConfigurationReads) != 16464 or scratch_bytes != 19032)
+    if (@sizeOf(configuration_domain.ConfigurationReads) != 16464 or scratch_bytes != 19048)
         @compileError(std.fmt.comptimePrint("the Store's scratch is {d} bytes and the configure reads {d}; restate them here", .{ scratch_bytes, @sizeOf(configuration_domain.ConfigurationReads) }));
     if (scratch_bytes - 4888 > accepted_settlement_growth) @compileError("the settlement batch outgrew what the owner accepted");
 }
@@ -1595,7 +1631,7 @@ comptime {
 /// which the kernel faults in only as they are written: an idle Host keeps
 /// none of the ring's 88 KiB resident. A configure, a creating Message or
 /// a success settlement writes the scratch's pages once, and they stay
-/// resident for the Store's life: at most 19032 bytes, a settlement
+/// resident for the Store's life: at most 19048 bytes, a settlement
 /// batch's size; a configure uses 14968.
 /// Not `Allocator.create`, whose ReleaseSafe 0xAA fill would write every
 /// page now.

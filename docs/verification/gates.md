@@ -19,6 +19,7 @@ Anything else runs through `python3 tests/integration/host_process.py exec COMMA
 Entering stops a root process with that instruction, whether a build step or a person launched it.
 It also replaces the process environment with the variables `INHERITED` names there (PATH, HOME, TMPDIR, locale and named fixture inputs, each with its reason) plus `TERM=xterm-256color`, so a caller's `RUI_*`, TLS trust or proxy settings cannot change what a fixture proves.
 A fixture sets its own variables after entering, and its children inherit only those.
+`host_process.py exec-mysql COMMAND...` additionally holds the shared MySQL socket lease across exec; the TypeScript process tests use it to exclude the Store shard-zero prelude of server-global tests, two long history fixtures and the exact session Handler-read comparison.
 Importing host_process changes nothing, so tests/ci and fixture libraries can use it freely.
 `FixtureEntryTest` in [test_harness_contracts.py](../../tests/ci/test_harness_contracts.py) finds every fixture entry (each shell script, and each Python module with a main block), runs it with root simulated and requires that refusal.
 It also requires that every `measure-*` step goes through the exec entry.
@@ -116,14 +117,19 @@ Syntax checks, probe compilation and unrelated product tests do not qualify a re
 
 `check` runs formatting, ReleaseSafe native tests and process integrations, a Debug artifact and recovery smoke, ReleaseSmall deliverables and, on x86-64 Linux, `stack-frames`.
 Required functional assertions stay required when their fixture changes.
-Native and process suites run concurrently, except short-deadline Host-startup and Debug smoke cases, which follow the parallel batch.
+Native, Store and process suites run concurrently, except short-deadline Host-startup and Debug smoke cases, which follow the parallel batch.
+The Store unit root compiles once and runs as four concurrent processes through [the shared shard launcher](../../tests/ci/store_shards.py); native and each Store process retain separate 1200-second deadlines.
+Shard zero first runs the seven tests that change MySQL server-global settings, the two long admission-history fixtures and the exact session Handler-read comparison under an exclusive socket lease, then releases the other shards. The history fixtures retain their 300-second test deadline and avoid competing MySQL clients during setup/replay. The Handler test already reads the Store connection's session counters; its exclusive window also excludes peer DDL that could add internal dictionary reads through shared metadata caches. Its warm-up and strict equality remain unchanged. Native and live MySQL process fixtures share the ordinary phase.
+[Native unit roots](../../tests/ci/unit-roots.md) owns timing-based assignment, MySQL isolation and record aggregation.
+Explicit `-Dtest-filter` runs retain one filtered aggregate process.
 The Debug smoke covers streamed-capture failure and recovery, Store-lease exclusion, committed-but-lost Message replies, changed-source capture preservation and same-key configuration and Message replay after a Host crash.
 
 Human CLI caller, renderer, terminal-restoration and canonical-failure cases run as separate parallel peers in `check` and the `callers` partition.
 The driver waits for every peer before isolated cases and fails if any peer fails.
 The unsplit serial gate retains its original case order and assertions.
 
-`zig build check-full` runs routine native tests and process integrations serially after formatting and production builds.
+`zig build check-full` runs the native/Store unit group before its serial process integrations, after formatting and production builds.
+Within that group native and the four Store shard processes overlap, with the same per-process deadlines and MySQL isolation as `test` and `check`.
 Selected CI runs it on Linux for build or dependency changes; promotion runs it on macOS, and manual qualification runs it on request.
 Run the unsplit default locally for release qualification and isolated process-latency claims.
 It is not an every-edit gate.
@@ -131,7 +137,7 @@ Serial execution reduces unrelated load but does not establish scheduler order; 
 
 Linux Selected CI and each platform's qualification run the full gate as `-Dcheck-part=execution` and `-Dcheck-part=callers` on two isolated runners at the same revision.
 Both must pass.
-The execution partition overlaps native tests with its serial process fixtures; the unsplit gate remains serial.
+The execution partition overlaps the native/Store unit group with its serial process fixtures; the unsplit gate finishes the group before starting those fixtures.
 Their disjoint fixtures cover the full gate once; callers run Host-process, allocator, launch and Debug smoke cases serially after the parallel batch.
 [qualification.py](../../tests/ci/qualification.py) packs other Linux targets so a Selected run never exceeds ten shards.
 A long gate (`check`, `check-full`, `test`, `stack-frames`) runs alone, and beside one the short targets share three shards: they end inside the gate's run, so more shards would only repeat setup.
@@ -204,6 +210,11 @@ Setup/fetch, cache uploads, linter installation, shard restore/rebuild and subse
 Where the measured save window cannot fit, including short-budget unit/typecheck/proof/codegen jobs, compilation retains only its unchanged job deadline. Saves still run on step failure; on a job timeout they run only if GitHub allows them. Hard runner loss, forced cancellation or an upload failure can also prevent publication.
 Partial Zig compilation caches are safe to restore: [Zig's content-addressed cache validates hashed inputs and manifests, treating incomplete manifests as misses](https://github.com/ziglang/zig/blob/0.17.1/lib/std/Build/Cache.zig).
 That safety argument is source inspection, not a claim of native interrupted-build qualification; cached output never substitutes for test execution.
+
+Linux x86_64 pull requests use `-Dpr-ci=true`: both `rui-pr-check` and the synthetic-release `rui-upgrade-release-fixture` are ReleaseSafe integration products built without LLVM through `product.addIntegrationRui`.
+The upgrade fixture uses the same production sources with a synthetic release identity; its archive size and checksum are derived from the supplied binary.
+In PR mode only, that fixture also strips debug data, matching shipped Linux archive packaging and avoiding unnecessary checksum and extraction work in native publication tests.
+Promotion, release and default local builds retain Zig's default backend, as does the production binary used by `stack-frames`.
 
 Each platform builds its target closure once with `ci-build -Dci-targets=...`.
 On Linux and macOS, when the selection compiles the single-threaded unit test binary alongside other gates, one producer builds only that binary (`-Dci-part=unit`) and another builds the rest (`-Dci-part=rest`); build.zig refuses a split whose selection never reaches the unit compile.

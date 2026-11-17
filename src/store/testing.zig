@@ -520,6 +520,7 @@ fn dropBackgroundUpgradeShape(storage: *Store) !void {
     try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM session_pin_command", .{}));
     try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM session_pin WHERE command_key IS NOT NULL", .{}));
     try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM action_control_command", .{}));
+    try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM action_stop", .{}));
     try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM action_operation WHERE background_content_id IS NOT NULL OR background_position IS NOT NULL OR background_at IS NOT NULL", .{}));
     try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM session_stop WHERE action_cutoff<>0", .{}));
     try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM message_admission WHERE source_action_id IS NOT NULL", .{}));
@@ -547,6 +548,7 @@ fn dropBackgroundUpgradeShape(storage: *Store) !void {
         try Native.exec(storage, "DEALLOCATE PREPARE rui_rewind");
         try Native.exec(storage, "SET @rui_rewind_ddl=NULL");
     }
+    try Native.exec(storage, "DROP TABLE action_stop");
     try dropFinalInputUpgradeShape(storage);
     try Native.exec(storage, "DROP TABLE action_control_command");
     if (storage.engine == .mysql) {

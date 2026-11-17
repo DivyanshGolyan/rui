@@ -5,10 +5,49 @@
   ],
   "states": [
     {
+      "name": "wide-launch",
+      "note": "Bare launch opens an empty chat beside the list at wide widths",
+      "open": "overview",
+      "steps": [
+        {
+          "wait": "+ New Session"
+        },
+        {
+          "wait": "Type a task",
+          "min_columns": 100
+        }
+      ],
+      "expect": [
+        "Type a task"
+      ],
+      "absent": [
+        "enter open"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
+    },
+    {
+      "name": "narrow-launch",
+      "note": "Bare narrow launch opens the full overview without an open hint",
+      "open": "overview",
+      "sizes": ["46x30"],
+      "steps": [{"wait": "+ New Session"}],
+      "expect": ["+ New Session", "Settings"],
+      "absent": ["Type a task", "enter open"],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
+    },
+    {
       "name": "archived-row-none",
       "note": "Archived stays available with nothing archived",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"gone": "Type a task"},
         {
           "wait": "+ New Session"
         }
@@ -113,6 +152,10 @@
       "theme": "night",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"gone": "Type a task"},
         {
           "wait": "Input tint chat"
         },
@@ -246,6 +289,10 @@
       "theme": "day",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"gone": "Type a task"},
         {
           "wait": "Input tint chat"
         },
@@ -314,6 +361,10 @@
         }
       ],
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"gone": "Type a task"},
         {
           "wait": "You wrote"
         }
@@ -364,6 +415,10 @@
         }
       ],
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"gone": "Type a task"},
         {
           "wait": "Agent working"
         },
@@ -856,6 +911,10 @@
       "note": "Sessions and Archived tabs stay below the separate New Session action",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"gone": "Type a task"},
         {
           "wait": "Archived"
         }
@@ -877,6 +936,10 @@
       "note": "Down from New Session selects Sessions; Right selects Archived, Left returns to Sessions",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"gone": "Type a task"},
         {
           "wait": "Archived"
         },
@@ -906,6 +969,10 @@
       "note": "Enter on Archived opens the existing archived view: plain names, no archived marker",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"gone": "Type a task"},
         {
           "wait": "Archived"
         },
@@ -939,6 +1006,10 @@
       "note": "A click on Archived opens the archived view",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"gone": "Type a task"},
         {
           "wait": "Archived"
         },
@@ -969,6 +1040,10 @@
       "note": "Esc in the archived view returns to the usual list",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"gone": "Type a task"},
         {
           "wait": "Archived"
         },
@@ -994,10 +1069,10 @@
       ],
       "expect": [
         "+ New Session",
-        "Archived",
-        "enter open"
+        "Archived"
       ],
       "absent": [
+        "enter open",
         "Archive audit",
         "No archived Sessions"
       ],
@@ -1192,13 +1267,18 @@
       "name": "start-empty",
       "note": "01-overview-empty: pinned actions without an editor or copied chat facts",
       "open": "overview",
-      "steps": [],
+      "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"gone": "Type a task"}
+      ],
       "expect": [
         "+ New Session",
-        "Settings",
-        "enter open"
+        "Settings"
       ],
       "absent": [
+        "enter open",
         "Type a task",
         "enter start",
         "gpt-6.1-sol \u00b7 low"
@@ -1212,6 +1292,10 @@
       "note": "01a-new-empty-chat: New Session opens the only input and its Session footer facts",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"gone": "Type a task"},
         {
           "keys": [
             "Home",
@@ -1288,6 +1372,10 @@
       "note": "App settings by selecting the list's Settings row (End) and pressing Enter",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"gone": "Type a task"},
         {
           "keys": [
             "End",
@@ -1320,6 +1408,10 @@
       "note": "Open Settings from the overview, move to Model, and open the shared choice",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"gone": "Type a task"},
         {
           "keys": [
             "End",
@@ -1364,6 +1456,10 @@
       "note": "Filter the shared settings Model choice by typing sol",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"gone": "Type a task"},
         {
           "keys": [
             "End",
@@ -1414,6 +1510,10 @@
       "note": "Pointer over Notifications; L2 SGR motion, selection unchanged",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"gone": "Type a task"},
         {
           "keys": [
             "End",
@@ -1451,6 +1551,10 @@
       "note": "Empty-chat model word opens the shared Model choice alone above the input",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"gone": "Type a task"},
         {
           "keys": [
             "Home",
@@ -1497,6 +1601,10 @@
       "note": "Tab Tab Enter opens the shared Effort choice alone above the input",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"gone": "Type a task"},
         {
           "keys": [
             "Home",
@@ -1547,6 +1655,10 @@
       "note": "Picking xhigh in the empty-chat Effort choice saves this Session\u2019s effort and closes the choice",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"gone": "Type a task"},
         {
           "keys": [
             "Home",
@@ -1610,6 +1722,10 @@
         }
       ],
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"gone": "Type a task"},
         {
           "wait": "Existing conversation"
         },
@@ -1628,16 +1744,16 @@
           ]
         },
         {
-          "wait": "enter open"
+          "gone": "Type a task"
         }
       ],
       "expect": [
         "+ New Session",
         "Settings",
-        "enter open",
         "Existing conversation"
       ],
       "absent": [
+        "enter open",
         "Type a task",
         "enter start"
       ],
@@ -1655,6 +1771,10 @@
       "note": "Picking a different model without sending a Message still leaves no empty overview row",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"gone": "Type a task"},
         {
           "wait": "Existing conversation"
         },
@@ -1703,16 +1823,16 @@
           ]
         },
         {
-          "wait": "enter open"
+          "gone": "Type a task"
         }
       ],
       "expect": [
         "+ New Session",
         "Settings",
-        "enter open",
         "Existing conversation"
       ],
       "absent": [
+        "enter open",
         "Type a task",
         "enter start"
       ],
@@ -1740,6 +1860,10 @@
         }
       ],
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"gone": "Type a task"},
         {
           "wait": "Existing second conversation"
         },
@@ -1758,7 +1882,7 @@
           ]
         },
         {
-          "wait": "enter open"
+          "gone": "Type a task"
         },
         {
           "keys": [
@@ -1775,17 +1899,17 @@
           ]
         },
         {
-          "wait": "enter open"
+          "gone": "Type a task"
         }
       ],
       "expect": [
         "+ New Session",
         "Settings",
-        "enter open",
         "Existing conversation",
         "Existing second conversation"
       ],
       "absent": [
+        "enter open",
         "Type a task",
         "enter start"
       ],
@@ -1803,6 +1927,10 @@
       "note": "Click the pinned Settings row using terminal mouse modes",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"gone": "Type a task"},
         {
           "wait": "Settings"
         },
@@ -1840,6 +1968,10 @@
       "note": "02-overview",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"gone": "Type a task"},
         {
           "wait": "Schema migration"
         },
@@ -1932,6 +2064,10 @@
       "note": "Pointer over Release notes for 0.60; L2 SGR motion, selection unchanged",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"gone": "Type a task"},
         {
           "wait": "Schema migration"
         },
@@ -1963,6 +2099,10 @@
       "note": "Pointer over Settings; L2 SGR motion, selection unchanged",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"gone": "Type a task"},
         {
           "wait": "Schema migration"
         },
@@ -1993,6 +2133,10 @@
       "note": "03-overview-busy: one-line working Sessions",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"gone": "Type a task"},
         {
           "send": {
             "to": "Benchmark idle memory",
@@ -2068,8 +2212,10 @@
       ],
       "expect": [
         "\u2713 List project files",
-        "\u00d7 Fail with exit 127 \u00b7 127",
-        "\u00d7 Fail with an excerpt \u00b7 1",
+        "\u00d7 Fail with exit 127",
+        "exit 127",
+        "\u00d7 Fail with an excerpt",
+        "exit 1",
         "The project has a README",
         "retry policy notes"
       ],
@@ -2078,11 +2224,17 @@
         "Type a message",
         "enter sends",
         "Type a task",
-        "enter start"
+        "enter start",
+        "Fail with exit 127 \u00b7 127",
+        "Fail with an excerpt \u00b7 1"
       ],
       "absent_regex": [
         "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
-      ]
+      ],
+      "expect_next": {
+        "\u2713 List project files": "\u00d7 Fail with exit 127",
+        "\u00d7 Fail with exit 127": "\u00d7 Fail with an excerpt"
+      }
     },
     {
       "name": "chat-effort",
@@ -2158,8 +2310,10 @@
       ],
       "expect": [
         "\u2713 List project files",
-        "\u00d7 Fail with exit 127 \u00b7 127",
-        "\u00d7 Fail with an excerpt \u00b7 1",
+        "\u00d7 Fail with exit 127",
+        "exit 127",
+        "\u00d7 Fail with an excerpt",
+        "exit 1",
         "The project has a README",
         "retry policy notes",
         "Fail with an excerpt"
@@ -2169,7 +2323,9 @@
         "Type a message",
         "enter sends",
         " \u00b7 exit 127",
-        " \u00b7 exit 1"
+        " \u00b7 exit 1",
+        "Fail with exit 127 \u00b7 127",
+        "Fail with an excerpt \u00b7 1"
       ],
       "absent_regex": [
         "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
@@ -2207,8 +2363,10 @@
       ],
       "expect": [
         "\u2713 List project files",
-        "\u00d7 Fail with exit 127 \u00b7 127",
-        "\u00d7 Fail with an excerpt \u00b7 1",
+        "\u00d7 Fail with exit 127",
+        "exit 127",
+        "\u00d7 Fail with an excerpt",
+        "exit 1",
         "    Bash failed. Exit code: 1.",
         "    stderr:",
         "    usage: example",
@@ -2221,6 +2379,14 @@
       "note": "10a-tool-open: Ctrl-O selects the lowest tool; output is indented on its band, other rows folded; no extra mark; literal stored envelope in quiet colour",
       "absent_regex": [
         "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ],
+      "expect_next": {
+        "\u2713 List project files": "\u00d7 Fail with exit 127",
+        "\u00d7 Fail with exit 127": "\u00d7 Fail with an excerpt"
+      },
+      "absent": [
+        "Fail with exit 127 \u00b7 127",
+        "Fail with an excerpt \u00b7 1"
       ]
     },
     {
@@ -2302,8 +2468,10 @@
         "    stdout:",
         "    README.md",
         "    src",
-        "\u00d7 Fail with exit 127 \u00b7 127",
-        "\u00d7 Fail with an excerpt \u00b7 1",
+        "\u00d7 Fail with exit 127",
+        "exit 127",
+        "\u00d7 Fail with an excerpt",
+        "exit 1",
         "    Bash failed. Exit code: 1.",
         "    stderr:",
         "    usage: example",
@@ -2316,11 +2484,17 @@
       "note": "10b-tool-open-two: open the literal excerpt, scroll twelve rows from the narrow tail to select List, then show both quiet stored results before and after the sidebar appears",
       "absent": [
         " \u00b7 exit 127",
-        " \u00b7 exit 1"
+        " \u00b7 exit 1",
+        "Fail with exit 127 \u00b7 127",
+        "Fail with an excerpt \u00b7 1"
       ],
       "absent_regex": [
         "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
-      ]
+      ],
+      "expect_next": {
+        "    src": "\u00d7 Fail with exit 127",
+        "\u00d7 Fail with exit 127": "\u00d7 Fail with an excerpt"
+      }
     },
     {
       "name": "tool-open-long",
@@ -2405,8 +2579,10 @@
       ],
       "expect": [
         "\u2713 List project files",
-        "\u00d7 Fail with exit 127 \u00b7 127",
-        "\u00d7 Fail with an excerpt \u00b7 1",
+        "\u00d7 Fail with exit 127",
+        "exit 127",
+        "\u00d7 Fail with an excerpt",
+        "exit 1",
         "    Bash failed. Exit code: 1.",
         "    stderr:",
         "    usage: example",
@@ -2419,6 +2595,14 @@
       "note": "10d-tool-open-nocolor: the same open tool is indented without selection or output backgrounds; no extra mark; literal stored envelope in quiet colour",
       "absent_regex": [
         "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ],
+      "expect_next": {
+        "\u2713 List project files": "\u00d7 Fail with exit 127",
+        "\u00d7 Fail with exit 127": "\u00d7 Fail with an excerpt"
+      },
+      "absent": [
+        "Fail with exit 127 \u00b7 127",
+        "Fail with an excerpt \u00b7 1"
       ]
     },
     {
@@ -2437,7 +2621,7 @@
           ]
         },
         {
-          "wait": "enter open"
+          "gone": "Type a task"
         },
         {
           "keys": [
@@ -3035,6 +3219,10 @@
       "note": "Shared key reference, aligned pairs at 140 and one column at 46",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"gone": "Type a task"},
         {
           "keys": [
             "End",
@@ -3062,17 +3250,17 @@
       "expect": [
         "enter    open / send",
         "esc      back",
-        "\u21e7enter   new line",
+        "⇧enter   new line",
         "ctrl+x   stop",
-        "\u2191\u2193       scroll",
+        "↑↓       scroll",
         "ctrl+o   tool output",
         "ctrl+p   earlier message",
         "ctrl+r   retry",
         "/        skills",
         "alt+a    archive",
         "ctrl+c   leave",
-        "next panel/footer field",
-        "previous panel/footer field",
+        "next focus",
+        "previous focus",
         "list/chat · info actions"
       ],
       "absent": [
@@ -3084,8 +3272,8 @@
         "Esc returns",
         "Browsing",
         "Keys",
-        "\u2191\u2193 \u00b7 enter change \u00b7 esc close",
-        "\u2039 Rui \u00b7 settings",
+        "↑↓ · enter change · esc close",
+        "‹ Rui · settings",
         "ctrl+g",
         "ctrl+d",
         "ctrl+n",
@@ -3101,7 +3289,7 @@
         "Type a task"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -3173,6 +3361,10 @@
       "note": "The list ignores printable input and has no command path",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"gone": "Type a task"},
         {
           "text": "/nope"
         },
@@ -3191,15 +3383,15 @@
           ]
         },
         {
-          "wait": "enter open"
+          "gone": "Type a task"
         }
       ],
       "expect": [
         "+ New Session",
-        "Settings",
-        "enter open"
+        "Settings"
       ],
       "absent": [
+        "enter open",
         "Type a task",
         "/nope",
         "Unknown command",
@@ -3737,6 +3929,10 @@
       "note": "App settings inline Model value editor with compact matches",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"gone": "Type a task"},
         {
           "keys": [
             "End",
@@ -3779,6 +3975,10 @@
       "note": "App settings Model inline value filtered by ter; no separate Filter row",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"gone": "Type a task"},
         {
           "keys": [
             "End",
@@ -3827,6 +4027,10 @@
       "note": "48-new-chat-draft: task typing happens only after New Session opens",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"gone": "Type a task"},
         {
           "keys": [
             "Home",
@@ -3859,6 +4063,10 @@
       "note": "50c-long-label",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"gone": "Type a task"},
         {
           "wait": "Migrate the billing"
         }
@@ -3890,6 +4098,10 @@
       "note": "51-many-sessions",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"gone": "Type a task"},
         {
           "wait": "Batch job"
         }
@@ -3926,6 +4138,10 @@
       "note": "51a-many-sessions-middle",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"gone": "Type a task"},
         {
           "wait": "Batch job"
         },
@@ -3982,6 +4198,10 @@
       "note": "51b-many-sessions-end",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"gone": "Type a task"},
         {
           "wait": "Batch job"
         },
@@ -4001,12 +4221,12 @@
       ],
       "expect": [
         "Settings",
-        "enter open",
         "\u2191",
         "more",
         "+ New Session"
       ],
       "absent": [
+        "enter open",
         "\u2193",
         "\u2191 0 more",
         "Type a task"
@@ -4020,6 +4240,10 @@
       "note": "51c-many-sessions-pinned-end",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"gone": "Type a task"},
         {
           "wait": "Batch job"
         },
@@ -4124,14 +4348,19 @@
       "name": "day-start",
       "note": "70-light-overview",
       "open": "overview",
-      "steps": [],
+      "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"gone": "Type a task"}
+      ],
       "theme": "day",
       "expect": [
         "+ New Session",
-        "Settings",
-        "enter open"
+        "Settings"
       ],
       "absent": [
+        "enter open",
         "Type a task",
         "enter start",
         "gpt-6.1-sol \u00b7 low"
@@ -4211,6 +4440,10 @@
       "note": "60-host-down-overview",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"gone": "Type a task"},
         {
           "host": "pause"
         },
@@ -4257,6 +4490,10 @@
       "note": "61-host-back",
       "open": "overview",
       "steps": [
+        {"wait": "+ New Session"},
+        {"wait": "Type a task", "min_columns": 100},
+        {"keys": ["Esc"]},
+        {"gone": "Type a task"},
         {
           "host": "start"
         },
@@ -4599,6 +4836,365 @@
       ]
     },
     {
+      "name": "focus-seed-earlier",
+      "note": "Keep the two fixture completion seconds distinct so newest-first order has no random-ID tie.",
+      "sizes": [
+        "140x40"
+      ],
+      "cast": [
+        {
+          "label": "Alternate focus audit",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "messages": [
+            "Alternate focus task: Give a chat info specimen summarizing the retry deadline fix."
+          ]
+        }
+      ],
+      "open": "Alternate focus audit",
+      "steps": [
+        {
+          "wait": "The retry draft is ready."
+        },
+        {
+          "sleep": 1.2
+        }
+      ],
+      "expect": [
+        "Alternate focus task",
+        "The retry draft is ready."
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
+    },
+    {
+      "name": "focus-browse-wide",
+      "note": "Wide keyboard list selection settles through the existing open transition; the highlighted other chat is already in the main pane.",
+      "sizes": [
+        "140x40"
+      ],
+      "open": "Current focus audit",
+      "steps": [
+        {
+          "wait": "The retry draft is ready."
+        },
+        {
+          "keys": [
+            "Left",
+            "Home",
+            "Down",
+            "Down",
+            "Down"
+          ]
+        },
+        {
+          "sleep": 0.3
+        }
+      ],
+      "expect": [
+        "Alternate focus task",
+        "The retry draft is ready."
+      ],
+      "absent": [
+        "Current focus task",
+        "Opening…"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ],
+      "cast": [
+        {
+          "label": "Current focus audit",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "messages": [
+            "Current focus task: Give a chat info specimen summarizing the retry deadline fix."
+          ]
+        }
+      ]
+    },
+    {
+      "name": "focus-browse-narrow",
+      "note": "Narrow Down selects only: the chat feed stays closed until explicit activation.",
+      "sizes": [
+        "46x30"
+      ],
+      "open": "Current focus audit",
+      "steps": [
+        {
+          "wait": "The retry draft is ready."
+        },
+        {
+          "keys": [
+            "Left",
+            "Home",
+            "Down",
+            "Down",
+            "Down"
+          ]
+        },
+        {
+          "sleep": 0.2
+        }
+      ],
+      "expect": [
+        "Alternate focus audit",
+        "Settings"
+      ],
+      "absent": [
+        "enter open",
+        "Current focus task",
+        "Alternate focus task",
+        "The retry draft is ready."
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
+    },
+    {
+      "name": "focus-tab-list",
+      "note": "List focus: selected row, quiet chat prompt and no caret.",
+      "sizes": [
+        "140x40"
+      ],
+      "open": "Current focus audit",
+      "steps": [
+        {
+          "wait": "The retry draft is ready."
+        },
+        {
+          "keys": [
+            "Left"
+          ]
+        },
+        {
+          "sleep": 0.2
+        }
+      ],
+      "expect": [
+        "Current focus task",
+        "The retry draft is ready.",
+        "Settings",
+        "gpt-6.1-sol"
+      ],
+      "absent": [
+        "Opening…"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
+    },
+    {
+      "name": "focus-tab-settings",
+      "note": "Tab from the list visits the drawn Settings row before the main pane.",
+      "sizes": [
+        "140x40"
+      ],
+      "open": "Current focus audit",
+      "steps": [
+        {
+          "wait": "The retry draft is ready."
+        },
+        {
+          "keys": [
+            "Left"
+          ]
+        },
+        {
+          "keys": [
+            "Tab"
+          ]
+        },
+        {
+          "sleep": 0.2
+        }
+      ],
+      "expect": [
+        "Current focus task",
+        "The retry draft is ready.",
+        "Settings",
+        "gpt-6.1-sol"
+      ],
+      "absent": [
+        "Opening…"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
+    },
+    {
+      "name": "focus-tab-input",
+      "note": "Next Tab visits the chat input, restoring its prompt and caret.",
+      "sizes": [
+        "140x40"
+      ],
+      "open": "Current focus audit",
+      "steps": [
+        {
+          "wait": "The retry draft is ready."
+        },
+        {
+          "keys": [
+            "Left"
+          ]
+        },
+        {
+          "keys": [
+            "Tab",
+            "Tab"
+          ]
+        },
+        {
+          "sleep": 0.2
+        }
+      ],
+      "expect": [
+        "Current focus task",
+        "The retry draft is ready.",
+        "Settings",
+        "gpt-6.1-sol"
+      ],
+      "absent": [
+        "Opening…"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
+    },
+    {
+      "name": "focus-tab-model",
+      "note": "Next Tab visits the first footer button, Model; draft and feed are unchanged.",
+      "sizes": [
+        "140x40"
+      ],
+      "open": "Current focus audit",
+      "steps": [
+        {
+          "wait": "The retry draft is ready."
+        },
+        {
+          "keys": [
+            "Left"
+          ]
+        },
+        {
+          "keys": [
+            "Tab",
+            "Tab",
+            "Tab"
+          ]
+        },
+        {
+          "sleep": 0.2
+        }
+      ],
+      "expect": [
+        "Current focus task",
+        "The retry draft is ready.",
+        "Settings",
+        "gpt-6.1-sol"
+      ],
+      "absent": [
+        "Opening…"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
+    },
+    {
+      "name": "focus-tab-narrow-input",
+      "note": "Narrow chat: only drawn controls are in the order; the input holds focus first.",
+      "sizes": [
+        "46x30"
+      ],
+      "open": "Current focus audit",
+      "steps": [
+        {
+          "wait": "The retry draft is ready."
+        },
+        {
+          "sleep": 0.2
+        }
+      ],
+      "expect": [
+        "Current focus task",
+        "The retry draft is ready."
+      ],
+      "absent": [
+        "Opening\u2026",
+        "Alternate focus audit"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ]
+    },
+    {
+      "name": "focus-tab-narrow-back",
+      "note": "Narrow Tab from the input visits the drawn back button; the hidden list is not in the order.",
+      "sizes": [
+        "46x30"
+      ],
+      "open": "Current focus audit",
+      "steps": [
+        {
+          "wait": "The retry draft is ready."
+        },
+        {
+          "keys": [
+            "Tab"
+          ]
+        },
+        {
+          "sleep": 0.2
+        }
+      ],
+      "expect": [
+        "Current focus task",
+        "The retry draft is ready."
+      ],
+      "absent": [
+        "Opening\u2026",
+        "Alternate focus audit"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ]
+    },
+    {
+      "name": "focus-tab-narrow-model",
+      "note": "Narrow second Tab visits the footer Model button; draft and feed are unchanged.",
+      "sizes": [
+        "46x30"
+      ],
+      "open": "Current focus audit",
+      "steps": [
+        {
+          "wait": "The retry draft is ready."
+        },
+        {
+          "keys": [
+            "Tab",
+            "Tab"
+          ]
+        },
+        {
+          "sleep": 0.2
+        }
+      ],
+      "expect": [
+        "Current focus task",
+        "The retry draft is ready."
+      ],
+      "absent": [
+        "Opening\u2026",
+        "Alternate focus audit"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ]
+    },
+    {
       "name": "appcmds-skill-without-preview",
       "note": "Whole-line bracketed paste uses normal Message admission, never the suggestion preview",
       "open": "Skill catalog authority",
@@ -4851,6 +5447,9 @@
         "Input renderer tests",
         "Verify renderer input",
         "Settings"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -4886,6 +5485,9 @@
       "absent": [
         "Input renderer tests",
         "Verify renderer input"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -4938,6 +5540,9 @@
         "Input renderer tests",
         "Verify renderer input",
         "Settings"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -4960,6 +5565,9 @@
       "expect": [
         "Ready.",
         "alt+i info"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     }
   ]

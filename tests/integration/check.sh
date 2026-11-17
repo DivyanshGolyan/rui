@@ -23,7 +23,7 @@ if [ "${3:-}" = parallel ]; then
     preference_policy_actor=$8
     terminal_notice=$9
     mysql_launch_admin=${10}
-    shift 10 # Remaining arguments are additional native unit roots, in run order.
+    store_binary=${11:-}
 else
     host_status_actor=$3
     session_list_client=$4
@@ -74,38 +74,6 @@ cases() {
     run_case isolated admission-debug sh "$directory/admission_integration.sh" "$debug" artifact-smoke
     run_case isolated host-process python3 "$directory/host_process_test.py"
     run_case isolated host-allocator python3 "$directory/host_allocator_test.py" "$release_safe"
-}
-
-with_deadline() {
-    python3 - "$@" <<'PY'
-import subprocess
-import sys
-import time
-
-seconds, command = float(sys.argv[1]), sys.argv[2:]
-# All unit roots share the original native case's 1200 s budget. The fixture
-# boundary execs each root, so killing the active child still kills the binary.
-if "--unit-roots" in command:
-    split = command.index("--unit-roots")
-    if split + 1 == len(command):
-        sys.exit("No unit roots supplied")
-    commands = [command[:split] + [binary] for binary in command[split + 1:]]
-else:
-    commands = [command]
-deadline = time.monotonic() + seconds
-for command in commands:
-    process = subprocess.Popen(command)
-    try:
-        status = process.wait(timeout=max(0, deadline - time.monotonic()))
-    except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait()
-        print(f"\nKilled after {seconds:.0f} s: the last test named above stalled.", flush=True)
-        sys.exit(124)
-    if status:
-        sys.exit(status)
-
-PY
 }
 
 run_timed() (
@@ -170,8 +138,14 @@ if [ "$part" = parallel ] || [ "$part" = callers ]; then
     names=
     phase=batch
     if [ "$part" = parallel ]; then
+        unit_mode=aggregate
+        if [ -n "$store_binary" ]; then unit_mode=native; fi
+        # Give Store's exclusive prelude the first chance at the server lease.
+        if [ -n "$store_binary" ]; then
+            run_case execution store python3 "$directory/host_process.py" exec env RUI_TEST_EXACT_INACTIVITY=0 python3 "$directory/../ci/store_shards.py" run "$store_binary" --timeout 1200
+        fi
         if [ -n "$test_binary" ]; then
-            run_case execution native with_deadline 1200 python3 "$directory/host_process.py" exec env RUI_TEST_EXACT_INACTIVITY=0 --unit-roots "$test_binary" "$@"
+            run_case execution native python3 "$directory/host_process.py" exec env RUI_TEST_EXACT_INACTIVITY=0 python3 "$directory/../ci/store_shards.py" "$unit_mode" "$test_binary" --timeout 1200
         fi
     fi
     cases

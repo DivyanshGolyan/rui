@@ -448,7 +448,7 @@ pub const Window = struct {
         if (self.entries[index].length == 0) return 0;
         var next = index + 1;
         while (next < self.count and self.entries[next].length == 0) : (next += 1) {}
-        return @intFromBool(next < self.count and View.gap(self.entries[index].tight, self.entries[next].tight));
+        return @intFromBool(next < self.count and View.gap(self.entries[index].tight, self.entries[next].tight, self.document.toolRow(self.entries[index].offset) and self.document.toolRow(self.entries[next].offset)));
     }
 
     pub fn indexOf(self: *const Window, key: Key) ?usize {
@@ -1210,4 +1210,57 @@ test "quote body extraction keeps actual UserBody preview prefixes beside inline
     const expected = try std.mem.concat(gpa, u8, &.{ source[0..200], "\n", source[0..200], "\n" });
     defer gpa.free(expected);
     try std.testing.expectEqualStrings(expected, whole.text.bytes);
+}
+
+test "feed_window consecutive tool rows stay adjacent folded or open across every outcome and page seam" {
+    const fold = @import("tool_fold.zig");
+    const protocol = @import("protocol.zig");
+    const Sink = struct {
+        document: *viewport.Sized(1024, true),
+        pub fn feed(self: @This(), bytes: []const u8) !void {
+            try self.document.append(bytes);
+        }
+    };
+    for (std.enums.values(protocol.ToolPresentation.Code)) |a| for (std.enums.values(protocol.ToolPresentation.Code)) |b| {
+        for ([_]bool{ false, true }) |open| for ([_]bool{ false, true }) |hosted| {
+            var first: viewport.Sized(1024, true) = .{};
+            var second: viewport.Sized(1024, true) = .{};
+            try first.append(if (hosted) fold.row_marker else fold.heading_marker);
+            try View.toolResult(.{ .description = null, .code = a, .publication_position = null }, .{}, Sink{ .document = &first }, false);
+            if (open) try first.append(fold.output_marker ++ "    saved output\n");
+            try second.append(fold.heading_marker);
+            try View.toolResult(.{ .description = null, .code = b, .publication_position = null }, .{}, Sink{ .document = &second }, false);
+            try first.prepare();
+            try second.prepare();
+            var window: Window = .{};
+            try window.append(&.{.{ .key = .{ .position = 30 }, .text = Text.fromDocument(&second), .tight = b == .succeeded }});
+            try window.prepend(&.{.{ .key = .{ .position = 20 }, .text = .{ .bytes = "" }, .provisional = true }});
+            try window.prepend(&.{.{ .key = .{ .position = 10 }, .text = Text.fromDocument(&first), .tight = a == .succeeded }});
+            try window.append(&.{.{ .key = .{ .position = 40 }, .text = Text.fromDocument(&second), .tight = b == .succeeded }});
+            try testing.expectEqual(@as(u1, 0), window.gapAfter(0));
+            try testing.expectEqual(@as(u1, 0), window.gapAfter(2));
+            _ = window.heights(.{ .width = 40, .method = .unicode });
+            var screen: TestScreen = .{};
+            window.draw(.{ .first = 0 }, screen.window(40, 8), false, .{}, .{});
+            var row: [128]u8 = undefined;
+            if (open) try testing.expectEqualStrings("    saved output", screen.row(1, &row));
+            const next_row: u16 = if (open) 2 else 1;
+            try testing.expect(std.mem.endsWith(u8, screen.row(next_row, &row), "Tool call") or std.mem.indexOf(u8, screen.row(next_row, &row), "Tool call · ") != null);
+            var other: [128]u8 = undefined;
+            try testing.expectEqualStrings(screen.row(next_row, &row), screen.row(next_row + 1, &other));
+        };
+    };
+    for ([_][]const u8{ "user\n", "assistant\n" }) |message| {
+        var tool: viewport.Sized(128, true) = .{};
+        try tool.append(fold.heading_marker ++ "× Tool\n");
+        try tool.prepare();
+        var window: Window = .{};
+        try window.append(&.{
+            .{ .key = .{ .position = 1 }, .text = .{ .bytes = message } },
+            .{ .key = .{ .position = 2 }, .text = Text.fromDocument(&tool) },
+            .{ .key = .{ .position = 3 }, .text = .{ .bytes = message } },
+        });
+        try testing.expectEqual(@as(u1, 1), window.gapAfter(0));
+        try testing.expectEqual(@as(u1, 1), window.gapAfter(1));
+    }
 }

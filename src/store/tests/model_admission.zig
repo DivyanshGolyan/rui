@@ -550,6 +550,7 @@ test "the dispatch work read answers as each admission owner does, in every stat
             try WorkParity.idle(&storage);
             try std.testing.expect((try storage.dispatchWork(false, .{ .free_credit = .one, .mcp_open = true })).retry);
 
+            try submitTestMessage(&storage, &tmp, "parity-more", "parity-more", session.slice(), "more");
             try settleTwoActionsForTesting(&storage, &tmp, first, "parity-config");
             try WorkParity.idle(&storage);
             try std.testing.expect(!(try storage.dispatchWork(false, .{ .free_credit = .one, .mcp_open = true })).retry);
@@ -557,7 +558,6 @@ test "the dispatch work read answers as each admission owner does, in every stat
             var scheduled: ?u64 = 0;
             try std.testing.expect((try storage.tryAdmitNextModelRetry(ActiveOperationFilter.empty(), .{}, &scheduled)) == null);
             try std.testing.expectEqual(@as(?u64, null), scheduled);
-            try submitTestMessage(&storage, &tmp, "parity-more", "parity-more", session.slice(), "more");
             const last_action = try store_testing.queryU64(&storage, "SELECT max(action_id) FROM action_operation", .{});
             try denyForTesting(&storage, session.slice(), "parity-deny", last_action - 1);
             try WorkParity.idle(&storage);

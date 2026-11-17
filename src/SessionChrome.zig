@@ -70,7 +70,7 @@ facts: struct {
     back: Chip,
     model: Chip,
     effort: Chip,
-    focus: chrome.FooterFocus = .input,
+    focus: ?chrome.FooterFocus = .input,
     selected: vaxis.Style = .{ .reverse = true },
 },
 activity: ActivityBlock,

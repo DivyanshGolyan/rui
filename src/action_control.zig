@@ -47,3 +47,30 @@ test "promotion preserves fulfillment and stop without reserving capacity" {
         try std.testing.expectEqual(Rejection.action_not_backgroundable, core.refused);
     }
 }
+
+pub const StopFacts = struct {
+    final_position: ?u64,
+    stop_selected: bool,
+};
+
+pub const StopChoice = union(enum) {
+    final: u64,
+    pending,
+    select,
+};
+
+/// Select the already committed Resolution before considering another stop.
+pub fn chooseStop(facts: StopFacts) StopChoice {
+    if (facts.final_position) |position| return .{ .final = position };
+    if (facts.stop_selected) return .pending;
+    return .select;
+}
+
+test "Action stop keeps an existing Resolution and selects an unresolved Action once" {
+    for ([_]bool{ false, true }) |selected| {
+        const finished = chooseStop(.{ .final_position = 27, .stop_selected = selected });
+        try std.testing.expectEqual(@as(u64, 27), finished.final);
+        const running = chooseStop(.{ .final_position = null, .stop_selected = selected });
+        try std.testing.expect(if (selected) running == .pending else running == .select);
+    }
+}

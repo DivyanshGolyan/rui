@@ -40,7 +40,6 @@ submitted: ?struct { bank: u1, literal: bool, length: usize } = null,
 serial: u64 = 0,
 recall: Recall = .{},
 revision: u64 = 0,
-completion: ?Editor.Completion = null,
 
 pub fn init(self: *Self) void {
     self.* = .{};
@@ -48,14 +47,7 @@ pub fn init(self: *Self) void {
 }
 
 fn empty(self: *Self, bank: u1) Editor {
-    var editor: Editor = .init(&self.banks[bank]);
-    editor.completion = self.completion;
-    return editor;
-}
-
-pub fn complete(self: *Self, completion: Editor.Completion) void {
-    self.completion = completion;
-    for (&self.editors) |*editor| editor.completion = completion;
+    return .init(&self.banks[bank]);
 }
 
 pub fn append(self: *Self, text: []const u8) Editor.KeyOutcome {
@@ -300,7 +292,7 @@ fn checked(self: *const Self, ticket: Ticket) !@TypeOf(self.submitted.?) {
     return self.submitted orelse error.NoSubmission;
 }
 
-test "SessionInput snapshot restore keeps recall anchor completion and submitted loan independent" {
+test "SessionInput snapshot restore keeps recall anchor and submitted loan independent" {
     const gpa = std.testing.allocator;
     const input = try gpa.create(Self);
     defer gpa.destroy(input);
@@ -325,12 +317,6 @@ test "SessionInput snapshot restore keeps recall anchor completion and submitted
     const step = input.nextStep().?;
     input.clear();
     _ = input.typed("discarded");
-    const Completion = struct {
-        fn add(_: *const anyopaque, draft: []const u8, _: usize) ?Editor.Replacement {
-            return .append(draft, "!");
-        }
-    };
-    input.complete(.{ .context = &{}, .add = Completion.add });
     input.restore(saved);
     try std.testing.expectEqualStrings("aéZ", input.composition().bytes);
     try std.testing.expectEqual(@as(usize, "aé".len), input.composition().cursor);
@@ -341,8 +327,9 @@ test "SessionInput snapshot restore keeps recall anchor completion and submitted
     try std.testing.expectEqualStrings("aéZ", input.composition().bytes);
     try std.testing.expectEqual(.queued, input.press(true));
     try std.testing.expectEqual(found.at, input.nextStep().?.from.?);
-    _ = input.typed("\t");
-    try std.testing.expectEqualStrings("aéZ!", input.composition().bytes);
+    try std.testing.expectEqual(.redraw, input.typed("\t").editor);
+    try std.testing.expectEqualStrings("aé\tZ", input.composition().bytes);
+    try std.testing.expectEqual(@as(usize, "aé\t".len), input.composition().cursor);
     try std.testing.expectEqual(null, input.snapshot().anchor);
 }
 
@@ -471,41 +458,6 @@ test "a recall step lands only on the draft it began from, one at a time" {
     try std.testing.expect(input.recall.shown == null);
     _ = input.press(false);
     try std.testing.expect(input.nextStep() == null);
-}
-
-test "Tab puts in the list's first word at the draft's end and adds a tab anywhere else" {
-    const List = struct {
-        fn add(_: *const anyopaque, draft: []const u8, caret: usize) ?Editor.Replacement {
-            const completion = @import("skill_completion.zig");
-            var reads: completion.Reads = .{};
-            var rows: completion.Rows = .{};
-            const shown = reads.shown(&rows, draft, caret, 1, .{}, null) orelse
-                return if (slash_commands.suggest(draft, .{}) != null) .append(draft, "") else null;
-            const change = completion.edit(draft, caret, &shown);
-            return .{ .start = change.start, .end = change.end, .text = change.text };
-        }
-    };
-    const cases = [_]struct { typed: []const u8, shown: []const u8 }{
-        .{ .typed = "/ef\t", .shown = "/effort " },
-        .{ .typed = "/ef\x1b[D\x1b[D\t", .shown = "/effort " },
-        .{ .typed = "/cop\t", .shown = "/copy " },
-        .{ .typed = "/s\t", .shown = "/setup " },
-        .{ .typed = "/s\t\t", .shown = "/setup --model " },
-        .{ .typed = "/zz\t", .shown = "/zz" },
-        .{ .typed = "/copy \t", .shown = "/copy code" },
-        .{ .typed = "/rename \t", .shown = "/rename \t" },
-        .{ .typed = "//c\t", .shown = "//c\t" },
-        .{ .typed = "hi\t", .shown = "hi\t" },
-        .{ .typed = "\t", .shown = "\t" },
-    };
-    for (cases) |case| {
-        var input: Self = undefined;
-        input.init();
-        input.complete(.{ .context = &{}, .add = List.add });
-        _ = input.typed(case.typed);
-        try std.testing.expectEqualStrings(case.shown, input.composition().bytes);
-        try std.testing.expectEqual(case.shown.len, input.composition().cursor);
-    }
 }
 
 test "SessionInput retry loan preserves the whole active editor and recall even on scratch failure" {

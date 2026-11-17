@@ -64,7 +64,7 @@ def click_label(screen, frame, label):
 
 
 def is_overview(frame):
-    return "+ New Session" in frame and "Settings" in frame and "enter open" in frame and "Type a task" not in frame and not any(line.startswith(" ‹ ") for line in frame.split("\n"))
+    return "+ New Session" in frame and "Settings" in frame and "enter open" not in frame and "Type a task" not in frame and not any(line.startswith(" ‹ ") for line in frame.split("\n"))
 
 
 def conversation_of(label):
@@ -170,8 +170,9 @@ def empty_list():
             frame = screen.wait(lambda frame: "+ New Session" in frame and "No unarchived Sessions." in frame,
                                 "listed empty view")
             assert "Type a task" not in frame, frame
-            known = set()
-            abandoned = set()
+            known = {row["reference"] for row in json.loads(w.run("session", "list", "--store", w.store, "--all"))["sessions"]}
+            assert len(known) == (1 if columns >= 100 else 0), known
+            abandoned = set(known)
             for gesture in ("click", "Enter"):
                 before = set((w.home / ".config/rui/requests").glob("*.json"))
                 if gesture == "click":
@@ -215,6 +216,39 @@ def empty_list():
         print(f"overview clicks: {columns} columns: empty chats stay stored but vanish on leave; only the original sent Session becomes a named row", flush=True)
 
 
+def wide_launch_reuses_empty():
+    with world("launch-reuse") as w:
+        for _ in range(2):
+            with w.overview(columns=140, rows=30, keep_launch=True) as screen:
+                screen.keys(b"hello")
+                screen.wait(lambda _: screen.capture.draft("hello", 7), "typing reaches the launch input")
+                screen.keys(b"\x7f" * 5)
+                screen.wait(lambda _: screen.capture.draft("", 2), "empty launch draft")
+                back_to_overview(screen)
+            rows = json.loads(w.run("session", "list", "--store", w.store, "--all"))["sessions"]
+            references = {row["reference"] for row in rows}
+            assert len(references) == 1, rows
+            if _ == 0:
+                original = references
+            else:
+                assert references == original, (original, references)
+        report = w.inspect(next(iter(original)))
+        assert report["selected_message"] is None and report["recent_messages"] == [], report
+    print("wide launch: reopening reuses the saved empty Session", flush=True)
+
+
+def narrow_launch_resize():
+    with world("launch-resize") as w, w.overview(columns=46, rows=30) as screen:
+        assert is_overview(screen.text), screen.text
+        screen.resize(140, 30)
+        frame = screen.wait(lambda frame: is_overview(frame) and any(len(line) >= 140 for line in frame.split("\n")),
+                            "widening retains the full overview")
+        assert "Type a task" not in frame, frame
+        rows = json.loads(w.run("session", "list", "--store", w.store, "--all"))["sessions"]
+        assert not rows, rows
+    print("narrow launch: widening leaves the overview open", flush=True)
+
+
 def new_chat_aliases():
     with world("new-chat-aliases", {"old task": answer("old", "Old answer retained")}) as w:
         old = w.session("--label", "Old unchanged", "--reasoning-effort", "high")
@@ -248,4 +282,6 @@ def cases():
     opening_and_views()
     flat_list()
     empty_list()
+    wide_launch_reuses_empty()
+    narrow_launch_resize()
     new_chat_aliases()

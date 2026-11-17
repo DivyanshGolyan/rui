@@ -2,6 +2,7 @@ const std = @import("std");
 const model_catalog = @import("model_catalog.zig");
 const session_settings = @import("session_settings.zig");
 const protocol = @import("protocol.zig");
+const command_spec = @import("command_spec.zig");
 const wire_request = @import("wire_request.zig");
 const model_list = @import("model_list.zig");
 const store = @import("store.zig");
@@ -59,6 +60,33 @@ fn jsonReply(comptime shapes: anytype) Reply {
     return .{ .json = S.schema };
 }
 
+// Schema vocabulary stays with the OpenAPI writer; the spec owns its composition.
+const CommandSchema = struct {
+    pub const Wire = protocol;
+    pub const Configuration = configurationShape("Configuration");
+    pub const Sender = SenderSchema;
+    pub const Content = ContentSchema;
+    pub const Optional = optionalMember;
+};
+
+fn commandRoute(comptime kind: protocol.CommandKind) Route {
+    const facts = command_spec.spec(kind);
+    const shapes = facts.Request.schema(CommandSchema).values;
+    const variants = comptime variants: {
+        var values: [shapes.len]Variant = undefined;
+        for (shapes, 0..) |shape, index| values[index] = variant(shape, facts.Request.examples);
+        break :variants values;
+    };
+    return .{
+        .path = facts.route,
+        .kind = @field(protocol.Kind, @tagName(kind)),
+        .summary = facts.summary,
+        .variants = &variants,
+        .reply = jsonReply(facts.replyShapes(protocol).values),
+        .conflict = jsonReply(.{facts.Reply(protocol).conflict}),
+    };
+}
+
 pub const routes = [_]Route{
     .{
         .path = "/v1/host-info",
@@ -81,89 +109,15 @@ pub const routes = [_]Route{
         .variants = &.{variant(protocol.host_pause_request, .{})},
         .reply = jsonReply(.{protocol.host_pause_reply}),
     },
-    .{
-        .path = protocol.CommandKind.configure.route(),
-        .kind = .configure,
-        .summary = "Creates or reconfigures a Session. Retried by its key.",
-        .variants = &.{variant(protocol.configure_request.head ++ .{Configuration} ++ .{
-            Optional(protocol.configure_request.reload_skills),
-            Optional(protocol.configure_request.require_model),
-            Optional(protocol.configure_request.preset),
-        } ++ protocol.configure_request.tail, .{})},
-        .reply = jsonReply(.{ protocol.configuration_reply.accepted, protocol.configuration_reply.accepted_skills, protocol.configuration_reply.rejected }),
-        .conflict = jsonReply(.{protocol.configuration_reply.conflict}),
-    },
-    .{
-        .path = protocol.CommandKind.message.route(),
-        .kind = .message,
-        .summary = "Sends a Message to a Session, or creates the Session when `session` is empty. Retried by its key. Each `/name` word in the text that names a skill in the recipient's catalog appends that skill to what the model reads; the text is saved as written. Only an empty `session` carries (and requires) `configuration`; `require_model` is allowed only with it. The body starts with the client environment, `X-Rui-Environment-Bytes` long, before the JSON.",
-        .variants = &.{variant(protocol.message_request.head ++ .{Sender} ++ protocol.message_request.sender_handle ++ .{
-            Optional(protocol.message_request.configuration ++ .{MessageConfiguration}),
-        } ++ protocol.message_request.text ++ .{Content} ++ protocol.message_request.text_tail ++ .{
-            Optional(protocol.message_request.require_model),
-        } ++ protocol.message_request.tail, .{
-            .{ 2, "\"\"", "\"aaaaaa\"" },
-            .{ 3, "{\"store\":\"/s\",\"session\":\"aaaaaa\"}", "null" },
-        })},
-        .reply = jsonReply(.{ protocol.message_reply.accepted, protocol.message_reply.rejected }),
-        .conflict = jsonReply(.{protocol.message_reply.conflict}),
-    },
-    .{
-        .path = protocol.CommandKind.session_stop.route(),
-        .kind = .session_stop,
-        .summary = "Stops a Session's current and queued work. Retried by its key.",
-        .variants = &.{variant(protocol.session_stop_request, .{})},
-        .reply = jsonReply(.{ protocol.session_stop_reply.accepted, protocol.session_stop_reply.rejected }),
-        .conflict = jsonReply(.{protocol.session_stop_reply.conflict}),
-    },
-    .{
-        .path = protocol.CommandKind.session_archive.route(),
-        .kind = .session_archive,
-        .summary = "Archives or restores a Session. Archiving stops current and queued work. Retried by its key.",
-        .variants = &.{variant(protocol.session_archive_request.head ++ .{Optional(protocol.session_archive_request.archived)} ++ protocol.session_archive_request.tail, .{})},
-        .reply = jsonReply(.{ protocol.session_archive_reply.accepted, protocol.session_archive_reply.rejected }),
-        .conflict = jsonReply(.{protocol.session_archive_reply.conflict}),
-    },
-    .{
-        .path = protocol.CommandKind.session_pin.route(),
-        .kind = .session_pin,
-        .summary = "Pins or unpins a Session without changing its work. Retried by its key.",
-        .variants = &.{variant(protocol.session_pin_request.all, .{})},
-        .reply = jsonReply(.{ protocol.session_pin_reply.accepted, protocol.session_pin_reply.rejected }),
-        .conflict = jsonReply(.{protocol.session_pin_reply.conflict}),
-    },
-    .{
-        .path = protocol.CommandKind.session_group.route(),
-        .kind = .session_group,
-        .summary = "Assigns, leaves, automatically groups, renames or folds a Session group. Retried by its key.",
-        .variants = &.{ variant(protocol.session_group_request.assign, .{}), variant(protocol.session_group_request.leave, .{}), variant(protocol.session_group_request.automatic, .{}), variant(protocol.session_group_request.rename, .{}), variant(protocol.session_group_request.collapse, .{}), variant(protocol.session_group_request.rename_current, .{}) },
-        .reply = jsonReply(.{ protocol.session_group_reply.accepted, protocol.session_group_reply.rejected }),
-        .conflict = jsonReply(.{protocol.session_group_reply.conflict}),
-    },
-    .{
-        .path = protocol.CommandKind.model_interruption.route(),
-        .kind = .model_interruption,
-        .summary = "Interrupts one model Operation. Retried by its key.",
-        .variants = &.{variant(protocol.model_interruption_request, .{})},
-        .reply = jsonReply(.{ protocol.model_interruption_reply.accepted, protocol.model_interruption_reply.rejected }),
-        .conflict = jsonReply(.{protocol.model_interruption_reply.conflict}),
-    },
-    .{
-        .path = protocol.CommandKind.permission_decision.route(),
-        .kind = .permission_decision,
-        .summary = "Allows or denies one Action that waits for permission. Retried by its key.",
-        .variants = &.{variant(protocol.permission_decision_request, .{})},
-        .reply = jsonReply(.{ protocol.permission_decision_reply.accepted, protocol.permission_decision_reply.rejected }),
-        .conflict = jsonReply(.{protocol.permission_decision_reply.conflict}),
-    },
-    .{
-        .path = protocol.CommandKind.action_background.route(),
-        .kind = .action_background,
-        .summary = "Promotes the same Action to Session-owned background work and returns its immutable call receipt selection. Completion is read explicitly with read-action; no final input or model wake is delivered. Retried by its key.",
-        .variants = &.{variant(protocol.action_background_request, .{})},
-        .reply = jsonReply(.{ protocol.action_background_reply.accepted, protocol.action_background_reply.rejected }),
-        .conflict = jsonReply(.{protocol.action_background_reply.conflict}),
-    },
+    commandRoute(.configure),
+    commandRoute(.message),
+    commandRoute(.session_stop),
+    commandRoute(.session_archive),
+    commandRoute(.session_pin),
+    commandRoute(.session_group),
+    commandRoute(.model_interruption),
+    commandRoute(.permission_decision),
+    commandRoute(.action_background),
     .{
         .path = "/v1/read-action",
         .kind = .read_action,
@@ -312,7 +266,7 @@ fn isOptional(comptime part: anytype) bool {
     return @TypeOf(part) == type and @hasDecl(part, "optional_shape");
 }
 
-const Sender = struct {
+const SenderSchema = struct {
     pub fn openapi_inline(d: *Document) !Value {
         return d.nullable(try d.shapeSchema(protocol.message_request.sender));
     }
@@ -344,7 +298,7 @@ fn BoundedListOf(comptime item: anytype, comptime capacity: usize, comptime uniq
     };
 }
 
-const Content = struct {
+const ContentSchema = struct {
     pub fn openapi_inline(d: *Document) !Value {
         return d.object(.{ .type = Value{ .string = "string" }, .description = Value{ .string = "Text of any length, saved as content." } });
     }
@@ -433,7 +387,8 @@ const SchemaObject = struct {
 };
 
 const Configuration = configurationShape("Configuration");
-const MessageConfiguration = Configuration;
+const Content = ContentSchema;
+const optionalMember = Optional;
 
 const ConversationItem = struct {
     pub fn openapi_inline(d: *Document) !Value {
@@ -466,17 +421,7 @@ fn observationSchema(d: *Document) anyerror!Value {
     kinds[0] = try d.shapeSchema(o.absent);
     kinds[kinds.len - 1] = try d.shapeSchema(o.not_modified);
     inline for (comptime std.meta.tags(protocol.CommandKind), 1..) |kind, index| {
-        const bodies = switch (kind) {
-            .configure => .{ .{}, o.revision },
-            .message => o.message_variants,
-            .session_stop => .{ .{}, o.session_stop },
-            .session_archive => .{ .{}, o.session_archive },
-            .session_pin => .{ .{}, o.session_pin },
-            .session_group => .{ .{}, .{} },
-            .model_interruption => .{ .{}, o.model_interruption },
-            .permission_decision => .{ .{}, o.permission_decision },
-            .action_background => .{ o.action_target, o.action_target ++ o.action_selection },
-        };
+        const bodies = command_spec.spec(kind).Observation.shapes(protocol).values;
         var variants: [2 * bodies.len]Value = undefined;
         inline for (bodies, 0..) |body, at| {
             variants[2 * at] = try d.shapeSchema(tuple(o.head(kind)) ++ body ++ o.tail);

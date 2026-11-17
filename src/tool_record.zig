@@ -22,6 +22,9 @@ pub const read_action_schema = "{\"type\":\"object\",\"properties\":{" ++
     std.fmt.comptimePrint("\"offset\":{{\"type\":\"string\",\"pattern\":\"^(0|[1-9][0-9]*)$\",\"maxLength\":10,\"description\":\"UTF-8 byte cursor, at most {d}; omitted means zero. Pending Actions require zero.\"}}", .{@import("content_string.zig").max_bytes}) ++
     "},\"required\":[\"action\"],\"additionalProperties\":false}";
 
+pub const stop_action_description = "Stop an Action in your own Session by its decimal Action ID. Returns its final Resolution once it has ended.";
+pub const stop_action_schema = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"pattern\":\"^[1-9][0-9]*$\",\"maxLength\":19}},\"required\":[\"action\"],\"additionalProperties\":false}";
+
 pub const read_transcript_description = "Read any Rui Session's public transcript, newest first. Omit id to read your own. Outline lines give entry addresses, kinds, people or tools, call notes, result codes, byte sizes and quoted first-line previews (at most 100 bytes). Use before to page older entries. Open an entry with full and continue its 16 KiB text windows with offset; call entries show the tool name and arguments JSON. Use query for ASCII-case-insensitive word search with quoted snippets; query cannot be combined with full. Private content is never shown.";
 const transcript_kind_schema = blk: {
     var names: []const u8 = "";
@@ -291,6 +294,13 @@ pub const read_action_record: Record = .{
     .input_schema = read_action_schema,
 };
 
+pub const stop_action_record: Record = .{
+    .name = "stop_action",
+    .owner = .rui,
+    .description = stop_action_description,
+    .input_schema = stop_action_schema,
+};
+
 pub const read_transcript_record: Record = .{
     .name = "read_transcript",
     .owner = .rui,
@@ -364,6 +374,7 @@ pub const built_in_rows = std.enums.EnumArray(Tool, BuiltInRow).init(.{
     .read_transcript = .{ .record = &read_transcript_record, .runner = .core },
     .skill = .{ .record = &skill_record, .runner = .core },
     .start_agent = .{ .record = &start_agent_record, .runner = .core },
+    .stop_action = .{ .record = &stop_action_record, .runner = .core },
     .web_search = .{ .record = &web_search_record, .runner = .provider },
 });
 

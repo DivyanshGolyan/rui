@@ -26,6 +26,7 @@ pub const Call = union(Tool) {
     read_transcript: ?Bounded(session_id.bytes),
     skill,
     start_agent,
+    stop_action,
     web_search: WebSearchCall,
 };
 
@@ -67,6 +68,11 @@ pub fn describe(call: Call) Description {
         .skill => blk: {
             var out: Description = .{};
             out.set("Use skills") catch unreachable;
+            break :blk out;
+        },
+        .stop_action => blk: {
+            var out: Description = .{};
+            out.set("Stop an Action") catch unreachable;
             break :blk out;
         },
         .start_agent => blk: {
@@ -220,6 +226,7 @@ pub const CallFacts = struct {
         if (self.read_transcript) return describe(.{ .read_transcript = self.transcript_id });
         if (self.tool) |*selected| if (selected.runner() == .core) {
             if (std.mem.eql(u8, selected.name, "read_action")) return describe(.read_action);
+            if (std.mem.eql(u8, selected.name, "stop_action")) return describe(.stop_action);
             if (std.mem.eql(u8, selected.name, start_agent_record.name)) return describe(.start_agent);
         };
         return null;

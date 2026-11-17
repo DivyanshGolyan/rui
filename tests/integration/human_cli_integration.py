@@ -968,25 +968,37 @@ def saved_capture_cases(state, store, workspace):
 #include <dlfcn.h>
 #include <errno.h>
 #include <sys/stat.h>
+#include <stdlib.h>
 #include <unistd.h>
 int fsync(int fd) {
     struct stat value;
-    if (!fstat(fd, &value) && S_ISDIR(value.st_mode)) { errno = EIO; return -1; }
+    static int directories;
+    if (!fstat(fd, &value) && S_ISDIR(value.st_mode) &&
+        ++directories == atoi(getenv("RUI_TEST_CAPTURE_SYNC_AT"))) { errno = EIO; return -1; }
     int (*real_sync)(int) = dlsym(RTLD_NEXT, "fsync");
     return real_sync(fd);
 }
 """)
         subprocess.run(os_semantics.shared_library_command(source, library), check=True)
-        before = set(json.loads(run(home, "request", "list")))
-        failed = subprocess.run([str(fixture.RUI), *map(str, args)],
-            env={**os.environ, "HOME": str(home), os_semantics.PRELOAD: str(library)},
-            capture_output=True, text=True, timeout=20)
-        assert failed.returncode == 1 and "[internal_unexpected]" in failed.stderr, failed
-        assert failed.stdout == "", failed.stdout
-        uncertain, = set(json.loads(run(home, "request", "list"))) - before
-        assert fixture.command("request", "inspect", "--store", store,
-            "--key", uncertain)["observation"]["status"] == "absent"
-        assert json.loads(run(home, "request", "recover", uncertain))["answer"]["replayed"] is False
+        # Routing must be durable before the immutable request is published.
+        # The second sync seals that request; its failure must retain both files.
+        for sync_at in (1, 2):
+            before = set(json.loads(run(home, "request", "list")))
+            failed = subprocess.run([str(fixture.RUI), *map(str, args)],
+                env={**os.environ, "HOME": str(home), os_semantics.PRELOAD: str(library),
+                     "RUI_TEST_CAPTURE_SYNC_AT": str(sync_at)},
+                capture_output=True, text=True, timeout=20)
+            assert failed.returncode == 1 and "[internal_unexpected]" in failed.stderr, failed
+            assert failed.stdout == "", failed.stdout
+            added = set(json.loads(run(home, "request", "list"))) - before
+            if sync_at == 1:
+                assert not added, added
+            else:
+                uncertain, = added
+                assert (records / f"{uncertain}.json.routing").is_file()
+                assert fixture.command("request", "inspect", "--store", store,
+                    "--key", uncertain)["observation"]["status"] == "absent"
+                assert json.loads(run(home, "request", "recover", uncertain))["answer"]["replayed"] is False
     else:
         print("capture directory-sync injection: unavailable outside Linux", flush=True)
 
@@ -1876,8 +1888,9 @@ def main(selected="all"):
     sibling_arguments = json.dumps({"cmd": f"touch {shlex.quote(str(sibling_started))}; "
         f"while [ ! -e {shlex.quote(str(sibling_release))} ]; do sleep 0.05; done; "
         "printf y >> sibling-effect", "description": "Write delayed sibling effect", "timeout_ms": None}, separators=(",", ":"))
+    first_call_release = threading.Event()
     endpoint = fixture.SuccessEndpoint([
-        fixture.sse_tool_calls("human-calls", [("bash", control_call, control_arguments)]),
+        (fixture.ResponseSpec(fixture.sse_tool_calls("human-calls", [("bash", control_call, control_arguments)]), {}), first_call_release),
         fixture.sse_answer("human-answer", "human-reason", "human-message", "first answer")[0],
         fixture.sse_answer("second-answer", "second-reason", "second-message", "second answer")[0],
         fixture.sse_tool_calls("sibling-calls", [("bash", "pending-call", arguments),
@@ -2382,6 +2395,9 @@ def main(selected="all"):
         assert record.read_bytes() == captured
         assert len(endpoint.requests) == 1, endpoint.requests
 
+        queued = admit(home, "session", "send", "--to", session,
+            input="queued behind permission")["request"]
+        first_call_release.set()
         attention = fixture.wait_for(lambda: (value if (value := fixture.observe(store, first))["state"]
             == "waiting_for_permission" else None), "first request attention")
         assert attention["work"]["state"]["kind"] == "approval", attention
@@ -2389,8 +2405,6 @@ def main(selected="all"):
         blocked = fixture.command("session", "inspect", "--store", store, "--session", session)
         assert blocked["selected_message"] == first and blocked["work"]["state"]["kind"] == "approval", blocked
         assert [entry["action"] for entry in blocked["actionable_permissions"]] == [action], blocked
-        queued = admit(home, "session", "send", "--to", session,
-            input="queued behind permission")["request"]
         queued_fact = fixture.command("request", "inspect", "--store", store, "--key", queued)["observation"]
         assert queued_fact["status"] == "accepted" and "result" not in queued_fact, queued_fact
         assert queued_fact["state"] == "waiting_for_permission" and "binding" not in queued_fact, queued_fact
@@ -2480,7 +2494,7 @@ def main(selected="all"):
             keys = keyed_frame(master, b"\x1b[B" * 6 + b"\r", lambda screen, x, y: "earlier message" in screen)
             for expected in ('enter    open / send', 'esc      back', '⇧enter   new line', 'ctrl+x   stop', '↑↓       scroll', 'ctrl+o   tool output', 'ctrl+p   earlier message', 'ctrl+r   retry', '/        skills', 'alt+a    archive', 'ctrl+c   leave'):
                 assert expected in keys, (expected, keys)
-            for key, meaning in (('tab', 'next panel/footer field'), ('⇧tab', 'previous panel/footer field'), ('←→', 'list/chat · info actions')):
+            for key, meaning in (('tab', 'next focus'), ('⇧tab', 'previous focus'), ('←→', 'list/chat · info actions')):
                 assert any(key in row and meaning in row for row in keys.splitlines()), (key, meaning, keys)
             assert all(stale not in keys for stale in ("/help", "Commands", "Marks", "Esc returns", "Ctrl-X twice", "shift+enter or ctrl+j", "‹ Rui · settings", 'ctrl+g', 'ctrl+d', 'ctrl+n', 'ctrl+end', 'ctrl+c/d', 'pgup/pgdn', 'first session', 'latest / last', 'scroll / select')), keys
             settings = keyed_frame(master, b"\x1b", lambda screen, x, y: "Notifications" in screen and "Version" in screen)
@@ -3174,6 +3188,7 @@ def main(selected="all"):
         print("human CLI: saved recovery, one-shot observation/re-entry, exact PTY approval, bounded input and Host restart passed")
     finally:
         dispose_all(
+            first_call_release.set,
             sibling_release.touch,
             lambda: failure_release.set() if failure_release is not None else None,
             lambda: stop_release.set() if stop_release is not None else None,

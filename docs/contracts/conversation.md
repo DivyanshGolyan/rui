@@ -17,9 +17,9 @@ Admission can precede projection, as the pending-message rules below specify.
 
 Messages are immutable admissions ordered within their Session.
 A background Action’s final input uses this same queue, with Host-recorded Action provenance and a reference to its sole Resolution.
-Session stop wins over its selected background Actions: their final stopped Resolutions remain recorded exactly once, but are not admitted as input and start no Turn. A final input admitted before the stop remains admitted; ordinary stop exclusion governs any unselected input.
+Session stop and per-Action stop win over their selected background Actions: their final stopped Resolutions remain recorded exactly once, but are not admitted as input and start no Turn. A final input admitted before the stop remains admitted; ordinary stop exclusion governs any unselected input.
 An unsettled owed stop from an attached parent already has stop authority, before the child’s `session_stop` row is recorded. The same stopped predicate governs Action eligibility, final input admission, pending input selection and binding, and Tool Call continuation. It excludes person, peer and Action input at that boundary without changing an in-flight request.
-Host death ends an unresolved background Action with an ordinary final Resolution, delivered exactly once through this queue unless a saved stop suppresses its source. Execution is never resumed or retried.
+Host death ends an unresolved background Action with a final Resolution, delivered exactly once through this queue unless a saved stop suppresses its source. A saved per-Action stop resolves as cancelled after restart. Execution is never resumed or retried.
 An admission waiting for processing has no result-producing Turn binding.
 When no Turn is active, core takes the queued admission-order prefix to begin a Turn; admission of new input may perform that transition in the same transaction.
 The oldest selected message initiates the Turn.

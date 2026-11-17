@@ -8,8 +8,133 @@ const store_testing = @import("testing.zig");
 const mysql_connection = @import("wire/mysql_connection.zig");
 const mysql = mysql_connection.mysql;
 
-const database = "rui_dialect_check";
-const oracle_database = "rui_dialect_check_oracle";
+const database_sql = "{[database]s}";
+const oracle_database_sql = "{[oracle]s}";
+
+// The launcher namespaces every process, including native shadow PREPARE checks.
+// SQL generators keep named placeholders until their owning call formats them.
+const DatabaseNames = struct {
+    database: []const u8 = "rui_dialect_check",
+    oracle: []const u8 = "rui_dialect_check_oracle",
+    migrated: []const u8 = "rui_migration_migrated",
+    fresh: []const u8 = "rui_migration_fresh",
+    offer: []const u8 = "rui_offer_migration",
+    effort: []const u8 = "rui_effort_migration",
+    projection: []const u8 = "rui_obligation_projection_parity",
+};
+
+var names: DatabaseNames = .{};
+var name_buffers: [@typeInfo(DatabaseNames).@"struct".field_names.len][64]u8 = undefined;
+
+fn qualifiedDatabase(buffer: []u8, base: []const u8, namespace: ?[]const u8) ![]const u8 {
+    const suffix = namespace orelse return base;
+    // Leave room for every base and the migration fixture's derived _oracle.
+    if (suffix.len == 0 or suffix.len > 31) return error.InvalidMysqlTestNamespace;
+    for (suffix) |c| if (!std.ascii.isAlphanumeric(c) and c != '_') return error.InvalidMysqlTestNamespace;
+    return std.fmt.bufPrint(buffer, "{s}_{s}", .{ base, suffix });
+}
+
+fn configureNames(namespace: ?[]const u8) !void {
+    const defaults: DatabaseNames = .{};
+    inline for (@typeInfo(DatabaseNames).@"struct".field_names, 0..) |field, i| {
+        @field(names, field) = try qualifiedDatabase(&name_buffers[i], @field(defaults, field), namespace);
+    }
+}
+
+// configured() validates the namespace before deriving either schema or user names.
+// A hash fits the account's stricter 32-character limit with the existing prefix.
+fn conformanceUser(buffer: []u8, namespace: ?[]const u8) ![]const u8 {
+    const suffix = namespace orelse return "rui_conformance";
+    return std.fmt.bufPrint(buffer, "rui_conformance_{x:0>16}", .{std.hash.Wyhash.hash(0, suffix)});
+}
+
+test "MySQL conformance account namespace preserves defaults and separates concurrent processes" {
+    var buffer: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("rui_conformance", try conformanceUser(&buffer, null));
+    const namespaces = [_][]const u8{ "n123", "s123_0", "s123_1", "s124_0", "u123" };
+    var users: [namespaces.len][32]u8 = undefined;
+    for (namespaces, 0..) |namespace, i| {
+        const user = try conformanceUser(&users[i], namespace);
+        try std.testing.expectEqual(@as(usize, 32), user.len);
+        try std.testing.expect(std.mem.startsWith(u8, user, "rui_conformance_"));
+        try std.testing.expectEqualStrings(user, try conformanceUser(&buffer, namespace));
+        for (users[0..i]) |previous| try std.testing.expect(!std.mem.eql(u8, user, &previous));
+    }
+}
+
+fn SqlNames(comptime text: []const u8) type {
+    comptime {
+        @setEvalBranchQuota(10000 + text.len * 100);
+        var fields: []const []const u8 = &.{};
+        for (@typeInfo(DatabaseNames).@"struct".field_names) |field| {
+            if (std.mem.indexOf(u8, text, "{[" ++ field ++ "]s}") != null) fields = fields ++ .{field};
+        }
+        const types: [fields.len]type = @splat([]const u8);
+        return @Struct(.auto, null, fields, &types, &@splat(.{}));
+    }
+}
+
+fn sqlNames(comptime text: []const u8, values: DatabaseNames) SqlNames(text) {
+    var args: SqlNames(text) = undefined;
+    inline for (@typeInfo(SqlNames(text)).@"struct".field_names) |field| {
+        @field(args, field) = @field(values, field);
+    }
+    return args;
+}
+
+fn setupNamed(comptime text: []const u8) !void {
+    const sql = try std.fmt.allocPrint(std.testing.allocator, text, sqlNames(text, names));
+    defer std.testing.allocator.free(sql);
+    try setup(sql);
+}
+
+fn restoreNamed(comptime text: []const u8) void {
+    const sql = std.fmt.allocPrint(std.testing.allocator, text, sqlNames(text, names)) catch |err|
+        return finishRestoration(err, text, RestoreLog{});
+    defer std.testing.allocator.free(sql);
+    restore(sql);
+}
+
+fn ddlNamed(name: []const u8, comptime text: []const u8) !void {
+    const sql = try std.fmt.allocPrint(std.testing.allocator, text, sqlNames(text, names));
+    defer std.testing.allocator.free(sql);
+    try ddl(name, sql);
+}
+
+fn writeResultNamed(comptime text: []const u8, out: *std.Io.Writer) !void {
+    const sql = try std.fmt.allocPrint(std.testing.allocator, text, sqlNames(text, names));
+    defer std.testing.allocator.free(sql);
+    try writeResult(sql, out);
+}
+
+test "MySQL test schema namespace preserves defaults and separates concurrent processes" {
+    const defaults: DatabaseNames = .{};
+    inline for (@typeInfo(DatabaseNames).@"struct".field_names) |field| {
+        const base = @field(defaults, field);
+        var native: [64]u8 = undefined;
+        var shard0: [64]u8 = undefined;
+        var shard1: [64]u8 = undefined;
+        try std.testing.expectEqualStrings(base, try qualifiedDatabase(&native, base, null));
+        const n = try qualifiedDatabase(&native, base, "n123");
+        const s0 = try qualifiedDatabase(&shard0, base, "s123_0");
+        const s1 = try qualifiedDatabase(&shard1, base, "s123_1");
+        try std.testing.expect(!std.mem.eql(u8, n, s0));
+        try std.testing.expect(!std.mem.eql(u8, n, s1));
+        try std.testing.expect(!std.mem.eql(u8, s0, s1));
+        try std.testing.expectEqualStrings(base, s0[0..base.len]);
+        try std.testing.expectEqualStrings("_s123_0", s0[base.len..]);
+        const maximum = try qualifiedDatabase(&shard0, base, "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx");
+        try std.testing.expect(maximum.len <= 64);
+        if (comptime std.mem.eql(u8, field, "migrated")) try std.testing.expect(maximum.len + "_oracle".len <= 64);
+    }
+    const sql = try std.fmt.allocPrint(std.testing.allocator, "USE " ++ database_sql ++ ";SELECT * FROM " ++ oracle_database_sql ++ ".touched_oracle", sqlNames("USE " ++ database_sql ++ ";SELECT * FROM " ++ oracle_database_sql ++ ".touched_oracle", .{ .database = "rui_dialect_check_s123_0", .oracle = "rui_dialect_check_oracle_s123_0" }));
+    defer std.testing.allocator.free(sql);
+    try std.testing.expectEqualStrings("USE rui_dialect_check_s123_0;SELECT * FROM rui_dialect_check_oracle_s123_0.touched_oracle", sql);
+    var buffer: [64]u8 = undefined;
+    for ([_][]const u8{ "", "bad-name", "bad.name", "bad'name", "a/b", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" }) |invalid| {
+        try std.testing.expectError(error.InvalidMysqlTestNamespace, qualifiedDatabase(&buffer, "rui_fixture", invalid));
+    }
+}
 
 const State = enum { unopened, absent, open, broken };
 
@@ -21,6 +146,7 @@ var driver: mysql_connection.Connection = undefined;
 var ddl_refusals: std.Io.Writer.Allocating = .init(std.heap.page_allocator);
 var socket_buffer: [std.Io.net.UnixAddress.max_len]u8 = undefined;
 var password_buffer: [mysql.max_password_bytes]u8 = undefined;
+var conformance_user_buffer: [32]u8 = undefined;
 var record_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
 var record_path: ?[]const u8 = null;
 var done: struct {
@@ -39,7 +165,7 @@ var done: struct {
     }
 } = .{};
 
-pub const Config = struct { socket: []const u8, password: []const u8, record: ?[]const u8 };
+pub const Config = struct { socket: []const u8, password: []const u8, record: ?[]const u8, conformance_user: []const u8 };
 
 fn configured() !?Config {
     var environ = try std.testing.environ.createMap(std.heap.page_allocator);
@@ -51,6 +177,9 @@ fn configured() !?Config {
     if (socket.?.len > socket_buffer.len or password.?.len > password_buffer.len) return error.MysqlConfigTooLong;
     @memcpy(socket_buffer[0..socket.?.len], socket.?);
     @memcpy(password_buffer[0..password.?.len], password.?);
+    const namespace = environ.get("RUI_UNIT_MYSQL_NAMESPACE");
+    try configureNames(namespace);
+    const conformance_user = try conformanceUser(&conformance_user_buffer, namespace);
     const record = environ.get("RUI_TEST_MYSQL_RECORD");
     if (record) |path| {
         if (path.len > record_buffer.len) return error.MysqlConfigTooLong;
@@ -60,6 +189,7 @@ fn configured() !?Config {
         .socket = socket_buffer[0..socket.?.len],
         .password = password_buffer[0..password.?.len],
         .record = if (record) |path| record_buffer[0..path.len] else null,
+        .conformance_user = conformance_user,
     };
 }
 
@@ -113,14 +243,14 @@ fn connection() ?*mysql_connection.Connection {
 }
 
 fn bootstrap() !void {
-    try setup("DROP DATABASE IF EXISTS " ++ database ++ ";DROP DATABASE IF EXISTS " ++ oracle_database ++
-        ";CREATE DATABASE " ++ database ++ ";CREATE DATABASE " ++ oracle_database ++ ";USE " ++ database);
+    try setupNamed("DROP DATABASE IF EXISTS " ++ database_sql ++ ";DROP DATABASE IF EXISTS " ++ oracle_database_sql ++
+        ";CREATE DATABASE " ++ database_sql ++ ";CREATE DATABASE " ++ oracle_database_sql ++ ";USE " ++ database_sql);
     for (schema.mysql_session) |text| try setup(text);
     const objects = comptime schema.objects(.mysql);
     for (objects) |object| try ddl(object.name, object.sql);
-    try ddl("touch oracle", "CREATE TABLE " ++ oracle_database ++ ".touched_oracle" ++ touch_oracle_definition);
-    const triggers = comptime sqlite.touchOracleTriggers(.mysql, oracle_database ++ ".touched_oracle");
-    for (triggers) |text| try ddl("touch oracle", text);
+    try ddlNamed("touch oracle", "CREATE TABLE " ++ oracle_database_sql ++ ".touched_oracle" ++ touch_oracle_definition);
+    const triggers = comptime sqlite.touchOracleTriggers(.mysql, oracle_database_sql ++ ".touched_oracle");
+    inline for (triggers) |text| try ddlNamed("touch oracle", text);
 }
 
 fn setup(text: []const u8) !void {
@@ -159,7 +289,7 @@ const TestRestoreReport = struct {
     }
 
     fn body(self: *TestRestoreReport, result: anyerror!void, restoration: anyerror!void) !void {
-        defer finishRestoration(restoration, "USE " ++ database, self);
+        defer finishRestoration(restoration, "USE restoration_fixture", self);
         return result;
     }
 };
@@ -178,7 +308,7 @@ test "MySQL restoration reports every transport failure and keeps a body failure
             if (body_failed) try std.testing.expectError(error.InjectedMigrationBodyFailure, outcome) else try outcome;
             try std.testing.expectEqual(@as(usize, 1), report.failures);
             try std.testing.expectEqual(transport_error, report.cause.?);
-            try std.testing.expectEqualStrings("USE " ++ database, report.text);
+            try std.testing.expectEqualStrings("USE restoration_fixture", report.text);
             try std.testing.expectEqual(State.broken, state);
         }
     }
@@ -343,11 +473,11 @@ test "PREPARE on the check's database refuses what MySQL 8.4 refuses" {
     writeRecord();
 }
 
-const migrated_database = "rui_migration_migrated";
-const fresh_database = "rui_migration_fresh";
+const migrated_database_sql = "{[migrated]s}";
+const fresh_database_sql = "{[fresh]s}";
 
 fn load(comptime name: []const u8, text: []const u8, unchecked: bool) !void {
-    try setup("USE " ++ name);
+    try setupNamed("USE " ++ name);
     if (unchecked) try setup("SET FOREIGN_KEY_CHECKS=0");
     defer if (unchecked) restore("SET FOREIGN_KEY_CHECKS=1");
     if (try run(text)) |refused| {
@@ -398,7 +528,7 @@ fn rowQueries(comptime name: []const u8) []const []const u8 {
 fn expectCatalog(comptime name: []const u8) !void {
     var lines: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer lines.deinit();
-    try writeResult(comptime schema.catalogSql("'" ++ name ++ "'"), &lines.writer);
+    try writeResultNamed(comptime schema.catalogSql("'" ++ name ++ "'"), &lines.writer);
     var sum: u64 = 0;
     var rows = std.mem.splitScalar(u8, lines.written(), '\n');
     while (rows.next()) |row| {
@@ -432,8 +562,8 @@ fn expectSameResults(comptime migrated: []const []const u8, comptime fresh: []co
         defer left_result.deinit();
         var right_result: std.Io.Writer.Allocating = .init(std.testing.allocator);
         defer right_result.deinit();
-        try writeResult(left, &left_result.writer);
-        try writeResult(right, &right_result.writer);
+        try writeResultNamed(left, &left_result.writer);
+        try writeResultNamed(right, &right_result.writer);
         std.testing.expectEqualStrings(right_result.written(), left_result.written()) catch |err| {
             std.log.err("MySQL migration check: a migrated Store differs from a fresh one at\n  {s}", .{left});
             return err;
@@ -446,37 +576,37 @@ test "a MySQL Store at the migration baseline with its rows takes every migratio
     mutex.lockUncancelable(io);
     defer mutex.unlock(io);
     _ = connection() orelse return if (state == .absent) error.SkipZigTest else error.MysqlUnavailable;
-    defer restore("USE " ++ database);
-    try setup("DROP DATABASE IF EXISTS " ++ migrated_database ++ ";DROP DATABASE IF EXISTS " ++ fresh_database ++
-        ";CREATE DATABASE " ++ migrated_database ++ ";CREATE DATABASE " ++ fresh_database);
-    try load(migrated_database, store_testing.baseline_mysql_ddl, false);
-    try load(migrated_database, store_testing.baseline_rows, true);
+    defer restoreNamed("USE " ++ database_sql);
+    try setupNamed("DROP DATABASE IF EXISTS " ++ migrated_database_sql ++ ";DROP DATABASE IF EXISTS " ++ fresh_database_sql ++
+        ";CREATE DATABASE " ++ migrated_database_sql ++ ";CREATE DATABASE " ++ fresh_database_sql);
+    try load(migrated_database_sql, store_testing.baseline_mysql_ddl, false);
+    try load(migrated_database_sql, store_testing.baseline_rows, true);
     const selector = "/mysql-migration-store";
-    try load(migrated_database, std.fmt.comptimePrint(
+    try load(migrated_database_sql, std.fmt.comptimePrint(
         "INSERT INTO store_meta(meta_key,meta_value) VALUES('format','{d}'),('wire_version','7'),('store_selector','{s}')",
         .{ schema.migration_baseline, selector },
     ), false);
-    try load(migrated_database, schema.mysqlMigrationFrom(schema.migration_baseline).?, false);
-    try load(fresh_database, schema.ddl(.mysql), false);
-    try load(fresh_database, store_testing.expected_mysql_rows, true);
-    try load(fresh_database, std.fmt.comptimePrint(
+    try load(migrated_database_sql, schema.mysqlMigrationFrom(schema.migration_baseline).?, false);
+    try load(fresh_database_sql, schema.ddl(.mysql), false);
+    try load(fresh_database_sql, store_testing.expected_mysql_rows, true);
+    try load(fresh_database_sql, std.fmt.comptimePrint(
         "INSERT INTO store_meta(meta_key,meta_value) VALUES('format','{d}'),('store_selector','{s}')",
         .{ schema.schema_version, selector },
     ), false);
-    try expectSameResults(comptime &shapeQueries(migrated_database), comptime &shapeQueries(fresh_database));
-    try expectSameResults(comptime rowQueries(migrated_database), comptime rowQueries(fresh_database));
-    try expectCatalog(fresh_database);
-    try expectCatalog(migrated_database);
+    try expectSameResults(comptime &shapeQueries(migrated_database_sql), comptime &shapeQueries(fresh_database_sql));
+    try expectSameResults(comptime rowQueries(migrated_database_sql), comptime rowQueries(fresh_database_sql));
+    try expectCatalog(fresh_database_sql);
+    try expectCatalog(migrated_database_sql);
 
     const config = (try configured()).?;
     const probe = try std.testing.allocator.create(mysql_connection.Connection);
     defer std.testing.allocator.destroy(probe);
     var refusal: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer refusal.deinit();
-    try probe.open(.{ .address = .{ .unix_socket = config.socket }, .user = "root", .password = config.password, .database = migrated_database }, &refusal.writer);
+    try probe.open(.{ .address = .{ .unix_socket = config.socket }, .user = "root", .password = config.password, .database = names.migrated }, &refusal.writer);
     defer probe.close();
     var found: u32 = 0;
-    const opened = try @import("engine/mysql_open.zig").open(probe, io, .{ .database = migrated_database, .found_schema_version = &found }, selector);
+    const opened = try @import("engine/mysql_open.zig").open(probe, io, .{ .database = names.migrated, .found_schema_version = &found }, selector);
     try std.testing.expectEqual(schema.schema_version, found);
     try std.testing.expect(opened.epoch > 0);
     try std.testing.expect(validStoreId(&opened.store_id));
@@ -489,19 +619,19 @@ test "model call timing MySQL format 68 migration preserves format 67 resolution
     mutex.lockUncancelable(io);
     defer mutex.unlock(io);
     _ = connection() orelse return if (state == .absent) error.SkipZigTest else error.MysqlUnavailable;
-    defer restore("USE " ++ database);
-    try setup("DROP DATABASE IF EXISTS " ++ migrated_database ++ ";CREATE DATABASE " ++ migrated_database);
-    try load(migrated_database, store_testing.baseline_mysql_ddl, false);
-    try load(migrated_database, store_testing.baseline_rows, true);
+    defer restoreNamed("USE " ++ database_sql);
+    try setupNamed("DROP DATABASE IF EXISTS " ++ migrated_database_sql ++ ";CREATE DATABASE " ++ migrated_database_sql);
+    try load(migrated_database_sql, store_testing.baseline_mysql_ddl, false);
+    try load(migrated_database_sql, store_testing.baseline_rows, true);
     inline for (schema.migrations[0 .. 67 - schema.migration_baseline]) |step| {
-        try load(migrated_database, schema.mysqlMigration(step.from), false);
+        try load(migrated_database_sql, schema.mysqlMigration(step.from), false);
     }
     const facts = "SELECT operation_id,attempt_ordinal,resolution_code,resolved_at FROM model_operation ORDER BY operation_id";
     var before: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer before.deinit();
     try writeResult(facts, &before.writer);
     try std.testing.expect(before.written().len > 0);
-    try load(migrated_database, schema.mysqlMigration(67), false);
+    try load(migrated_database_sql, schema.mysqlMigration(67), false);
     var after: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer after.deinit();
     try writeResult(facts, &after.writer);
@@ -510,8 +640,8 @@ test "model call timing MySQL format 68 migration preserves format 67 resolution
     defer timings.deinit();
     try writeResult("SELECT count(*) FROM model_operation WHERE latency_ms IS NOT NULL OR first_event_ms IS NOT NULL", &timings.writer);
     try std.testing.expectEqualStrings("\n 1:0", timings.written());
-    try load(migrated_database, schema.mysqlMigrationFrom(68).?, false);
-    try expectCatalog(migrated_database);
+    try load(migrated_database_sql, schema.mysqlMigrationFrom(68).?, false);
+    try expectCatalog(migrated_database_sql);
     done.migrations += 1;
     writeRecord();
 }
@@ -521,20 +651,20 @@ test "schema 55 migrates recovery index and wire 8 together to the current schem
     mutex.lockUncancelable(io);
     defer mutex.unlock(io);
     _ = connection() orelse return if (state == .absent) error.SkipZigTest else error.MysqlUnavailable;
-    defer restore("USE " ++ database);
-    try setup("DROP DATABASE IF EXISTS " ++ migrated_database ++ ";CREATE DATABASE " ++ migrated_database);
-    try load(migrated_database, store_testing.baseline_mysql_ddl, false);
-    try load(migrated_database, store_testing.baseline_rows, true);
+    defer restoreNamed("USE " ++ database_sql);
+    try setupNamed("DROP DATABASE IF EXISTS " ++ migrated_database_sql ++ ";CREATE DATABASE " ++ migrated_database_sql);
+    try load(migrated_database_sql, store_testing.baseline_mysql_ddl, false);
+    try load(migrated_database_sql, store_testing.baseline_rows, true);
     inline for (schema.migrations) |step| {
-        if (step.from < 55) try load(migrated_database, schema.mysqlMigration(step.from), false);
+        if (step.from < 55) try load(migrated_database_sql, schema.mysqlMigration(step.from), false);
     }
-    try load(migrated_database, "INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version','8'),('format','55')", false);
-    try load(migrated_database, schema.mysqlMigrationFrom(55).?, false);
+    try load(migrated_database_sql, "INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version','8'),('format','55')", false);
+    try load(migrated_database_sql, schema.mysqlMigrationFrom(55).?, false);
     var result: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer result.deinit();
     try writeResult("SELECT meta_value FROM store_meta WHERE meta_key='wire_version'", &result.writer);
     try std.testing.expectEqualStrings("", result.written());
-    try expectCatalog(migrated_database);
+    try expectCatalog(migrated_database_sql);
     done.migrations += 1;
     writeRecord();
 }
@@ -553,14 +683,14 @@ test "skills schema 56 wire 9 MySQL migration preserves ordinary rows and reache
     mutex.lockUncancelable(io);
     defer mutex.unlock(io);
     _ = connection() orelse return if (state == .absent) error.SkipZigTest else error.MysqlUnavailable;
-    defer restore("USE " ++ database);
-    try setup("DROP DATABASE IF EXISTS " ++ migrated_database ++ ";CREATE DATABASE " ++ migrated_database);
-    try load(migrated_database, store_testing.baseline_mysql_ddl, false);
-    try load(migrated_database, store_testing.baseline_rows, true);
+    defer restoreNamed("USE " ++ database_sql);
+    try setupNamed("DROP DATABASE IF EXISTS " ++ migrated_database_sql ++ ";CREATE DATABASE " ++ migrated_database_sql);
+    try load(migrated_database_sql, store_testing.baseline_mysql_ddl, false);
+    try load(migrated_database_sql, store_testing.baseline_rows, true);
     inline for (schema.migrations) |step| {
-        if (step.from < 56) try load(migrated_database, schema.mysqlMigration(step.from), false);
+        if (step.from < 56) try load(migrated_database_sql, schema.mysqlMigration(step.from), false);
     }
-    try load(migrated_database, "INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version','9'),('format','56')", false);
+    try load(migrated_database_sql, "INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version','9'),('format','56')", false);
     var old_wire: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer old_wire.deinit();
     try writeResult("SELECT meta_value FROM store_meta WHERE meta_key='wire_version'", &old_wire.writer);
@@ -575,7 +705,7 @@ test "skills schema 56 wire 9 MySQL migration preserves ordinary rows and reache
     defer before.deinit();
     try writeResult(ordinary_rows, &before.writer);
     try std.testing.expect(before.written().len > 100);
-    try load(migrated_database, schema.mysqlMigrationFrom(56).?, false);
+    try load(migrated_database_sql, schema.mysqlMigrationFrom(56).?, false);
     var result: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer result.deinit();
     try writeResult("SELECT meta_value FROM store_meta WHERE meta_key='wire_version'", &result.writer);
@@ -588,7 +718,7 @@ test "skills schema 56 wire 9 MySQL migration preserves ordinary rows and reache
     defer provenance.deinit();
     try writeResult("SELECT count(*) FROM conversation_entry WHERE source_catalog_position IS NULL AND turn_id IS NOT NULL", &provenance.writer);
     try std.testing.expectEqualStrings("\n 1:3", provenance.written());
-    try expectCatalog(migrated_database);
+    try expectCatalog(migrated_database_sql);
     done.migrations += 1;
     writeRecord();
 }
@@ -598,15 +728,15 @@ test "skills schema 58 wire 10 MySQL migration preserves archive refusal and ord
     mutex.lockUncancelable(io);
     defer mutex.unlock(io);
     _ = connection() orelse return if (state == .absent) error.SkipZigTest else error.MysqlUnavailable;
-    defer restore("USE " ++ database);
-    try setup("DROP DATABASE IF EXISTS " ++ migrated_database ++ ";CREATE DATABASE " ++ migrated_database);
-    try load(migrated_database, store_testing.baseline_mysql_ddl, false);
-    try load(migrated_database, store_testing.baseline_rows, true);
+    defer restoreNamed("USE " ++ database_sql);
+    try setupNamed("DROP DATABASE IF EXISTS " ++ migrated_database_sql ++ ";CREATE DATABASE " ++ migrated_database_sql);
+    try load(migrated_database_sql, store_testing.baseline_mysql_ddl, false);
+    try load(migrated_database_sql, store_testing.baseline_rows, true);
     inline for (schema.migrations) |step| {
-        if (step.from < 58) try load(migrated_database, schema.mysqlMigration(step.from), false);
+        if (step.from < 58) try load(migrated_database_sql, schema.mysqlMigration(step.from), false);
     }
-    try load(migrated_database, "INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version','10'),('format','58')", false);
-    try load(migrated_database, "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) VALUES" ++
+    try load(migrated_database_sql, "INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version','10'),('format','58')", false);
+    try load(migrated_database_sql, "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) VALUES" ++
         "('skills-58-archive',6,'rhvzwc',X'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',1,'',0,0,1000)," ++
         "('skills-58-refusal',2,'absent',X'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',0,'unknown_session',0,0,1001);" ++
         "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,position,admission_cutoff,stopped_at,parent_caused) VALUES('skills-58-archive','rhvzwc',NULL,2,0,1793781800,0);" ++
@@ -636,7 +766,7 @@ test "skills schema 58 wire 10 MySQL migration preserves archive refusal and ord
     defer before.deinit();
     try writeResult(ordinary_rows, &before.writer);
     try std.testing.expect(before.written().len > 100);
-    try load(migrated_database, schema.mysqlMigrationFrom(58).?, false);
+    try load(migrated_database_sql, schema.mysqlMigrationFrom(58).?, false);
     var result: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer result.deinit();
     try writeResult("SELECT meta_value FROM store_meta WHERE meta_key='wire_version'", &result.writer);
@@ -653,7 +783,7 @@ test "skills schema 58 wire 10 MySQL migration preserves archive refusal and ord
     defer provenance.deinit();
     try writeResult("SELECT count(*) FROM conversation_entry WHERE source_catalog_position IS NULL AND turn_id IS NOT NULL", &provenance.writer);
     try std.testing.expectEqualStrings("\n 1:3", provenance.written());
-    try expectCatalog(migrated_database);
+    try expectCatalog(migrated_database_sql);
     done.migrations += 1;
     writeRecord();
 }
@@ -712,16 +842,16 @@ test "frozen context window schema 69 MySQL migration pins legacy policy and pre
     mutex.lockUncancelable(io);
     defer mutex.unlock(io);
     _ = connection() orelse return if (state == .absent) error.SkipZigTest else error.MysqlUnavailable;
-    defer restore("USE " ++ database);
-    try setup("DROP DATABASE IF EXISTS " ++ migrated_database ++ ";CREATE DATABASE " ++ migrated_database);
-    try load(migrated_database, store_testing.baseline_mysql_ddl, false);
-    try load(migrated_database, store_testing.baseline_rows, true);
+    defer restoreNamed("USE " ++ database_sql);
+    try setupNamed("DROP DATABASE IF EXISTS " ++ migrated_database_sql ++ ";CREATE DATABASE " ++ migrated_database_sql);
+    try load(migrated_database_sql, store_testing.baseline_mysql_ddl, false);
+    try load(migrated_database_sql, store_testing.baseline_rows, true);
     inline for (schema.migrations) |step| {
-        if (step.from < 68) try load(migrated_database, schema.mysqlMigration(step.from), false);
+        if (step.from < 68) try load(migrated_database_sql, schema.mysqlMigration(step.from), false);
     }
-    try load(migrated_database, @embedFile("migration_window_rows.sql"), false);
-    try load(migrated_database, "INSERT INTO store_meta(meta_key,meta_value) VALUES('format','68'),('wire_version','" ++ wire_version ++ "')", false);
-    try load(migrated_database, schema.mysqlMigrationFrom(68).?, false);
+    try load(migrated_database_sql, @embedFile("migration_window_rows.sql"), false);
+    try load(migrated_database_sql, "INSERT INTO store_meta(meta_key,meta_value) VALUES('format','68'),('wire_version','" ++ wire_version ++ "')", false);
+    try load(migrated_database_sql, schema.mysqlMigrationFrom(68).?, false);
     try expectSameResults(&.{
         "SELECT operation_id,context_window FROM model_operation ORDER BY operation_id",
         "SELECT operation_id,tool_set_id FROM model_operation ORDER BY operation_id",
@@ -729,7 +859,7 @@ test "frozen context window schema 69 MySQL migration pins legacy policy and pre
         "SELECT operation_id,latency_ms,first_event_ms FROM model_operation ORDER BY operation_id",
         "SELECT operation_id FROM model_operation WHERE operation_id=3 AND resolution_code IS NULL AND retry_due_at_ms=0 AND attempt_at=1",
         "SELECT operation_id FROM model_operation WHERE operation_id=4 AND resolution_code='context_overflow' AND history_floor=3 AND history_level=2 AND history_dropped=4 AND output_reservation=8",
-        "SELECT IS_NULLABLE,COLUMN_DEFAULT FROM information_schema.columns WHERE table_schema='" ++ migrated_database ++ "' AND table_name='model_operation' AND column_name='context_window'",
+        "SELECT IS_NULLABLE,COLUMN_DEFAULT FROM information_schema.columns WHERE table_schema='" ++ migrated_database_sql ++ "' AND table_name='model_operation' AND column_name='context_window'",
     }, &.{
         "SELECT 1,1050000 UNION ALL SELECT 2,128000 UNION ALL SELECT 3,1050000 UNION ALL SELECT 4,128000",
         "SELECT 1,4 UNION ALL SELECT 2,2 UNION ALL SELECT 3,2 UNION ALL SELECT 4,2",
@@ -739,7 +869,7 @@ test "frozen context window schema 69 MySQL migration pins legacy policy and pre
         "SELECT 4",
         "SELECT 'NO',NULL",
     });
-    try expectCatalog(migrated_database);
+    try expectCatalog(migrated_database_sql);
     done.migrations += 1;
     writeRecord();
 }
@@ -749,16 +879,16 @@ test "schema 74 MySQL migration deletes the saved wire label, and the Store open
     mutex.lockUncancelable(io);
     defer mutex.unlock(io);
     _ = connection() orelse return if (state == .absent) error.SkipZigTest else error.MysqlUnavailable;
-    defer restore("USE " ++ database);
-    try setup("DROP DATABASE IF EXISTS " ++ migrated_database ++ ";CREATE DATABASE " ++ migrated_database);
-    try load(migrated_database, store_testing.baseline_mysql_ddl, false);
-    try load(migrated_database, store_testing.baseline_rows, true);
+    defer restoreNamed("USE " ++ database_sql);
+    try setupNamed("DROP DATABASE IF EXISTS " ++ migrated_database_sql ++ ";CREATE DATABASE " ++ migrated_database_sql);
+    try load(migrated_database_sql, store_testing.baseline_mysql_ddl, false);
+    try load(migrated_database_sql, store_testing.baseline_rows, true);
     inline for (schema.migrations) |step| {
-        if (step.from < 73) try load(migrated_database, schema.mysqlMigration(step.from), false);
+        if (step.from < 73) try load(migrated_database_sql, schema.mysqlMigration(step.from), false);
     }
     const selector = "/mysql-wire-retirement";
-    try load(migrated_database, "INSERT INTO store_meta(meta_key,meta_value) VALUES('format','73'),('wire_version','16'),('store_selector','" ++ selector ++ "')", false);
-    try load(migrated_database, schema.mysqlMigration(73), false);
+    try load(migrated_database_sql, "INSERT INTO store_meta(meta_key,meta_value) VALUES('format','73'),('wire_version','16'),('store_selector','" ++ selector ++ "')", false);
+    try load(migrated_database_sql, schema.mysqlMigration(73), false);
     try expectSameResults(&.{
         "SELECT count(*) FROM store_meta WHERE meta_key='wire_version'",
         "SELECT meta_value FROM store_meta WHERE meta_key='format'",
@@ -768,19 +898,19 @@ test "schema 74 MySQL migration deletes the saved wire label, and the Store open
         "SELECT '73'",
         "SELECT 1",
     });
-    try load(migrated_database, schema.mysqlMigrationFrom(73).?, false);
-    try expectCatalog(migrated_database);
+    try load(migrated_database_sql, schema.mysqlMigrationFrom(73).?, false);
+    try expectCatalog(migrated_database_sql);
     const config = (try configured()).?;
     const probe = try std.testing.allocator.create(mysql_connection.Connection);
     defer std.testing.allocator.destroy(probe);
     var refusal: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer refusal.deinit();
-    try probe.open(.{ .address = .{ .unix_socket = config.socket }, .user = "root", .password = config.password, .database = migrated_database }, &refusal.writer);
+    try probe.open(.{ .address = .{ .unix_socket = config.socket }, .user = "root", .password = config.password, .database = names.migrated }, &refusal.writer);
     defer probe.close();
     var found: u32 = 0;
-    _ = try @import("engine/mysql_open.zig").open(probe, io, .{ .database = migrated_database, .found_schema_version = &found }, selector);
+    _ = try @import("engine/mysql_open.zig").open(probe, io, .{ .database = names.migrated, .found_schema_version = &found }, selector);
     try std.testing.expectEqual(schema.schema_version, found);
-    try expectSameResults(&.{"SELECT count(*) FROM " ++ migrated_database ++ ".store_meta WHERE meta_key='wire_version'"}, &.{"SELECT 0"});
+    try expectSameResults(&.{"SELECT count(*) FROM " ++ migrated_database_sql ++ ".store_meta WHERE meta_key='wire_version'"}, &.{"SELECT 0"});
     done.migrations += 1;
     writeRecord();
 }
@@ -790,15 +920,15 @@ test "schema 72 MySQL migration updates the saved wire label and preserves ordin
     mutex.lockUncancelable(io);
     defer mutex.unlock(io);
     _ = connection() orelse return if (state == .absent) error.SkipZigTest else error.MysqlUnavailable;
-    defer restore("USE " ++ database);
-    try setup("DROP DATABASE IF EXISTS " ++ migrated_database ++ ";CREATE DATABASE " ++ migrated_database);
-    try load(migrated_database, store_testing.baseline_mysql_ddl, false);
-    try load(migrated_database, store_testing.baseline_rows, true);
+    defer restoreNamed("USE " ++ database_sql);
+    try setupNamed("DROP DATABASE IF EXISTS " ++ migrated_database_sql ++ ";CREATE DATABASE " ++ migrated_database_sql);
+    try load(migrated_database_sql, store_testing.baseline_mysql_ddl, false);
+    try load(migrated_database_sql, store_testing.baseline_rows, true);
     inline for (schema.migrations) |step| {
-        if (step.from < 71) try load(migrated_database, schema.mysqlMigration(step.from), false);
+        if (step.from < 71) try load(migrated_database_sql, schema.mysqlMigration(step.from), false);
     }
-    try load(migrated_database, "INSERT INTO store_meta(meta_key,meta_value) VALUES('format','71'),('wire_version','15')", false);
-    try load(migrated_database, schema.mysqlMigration(71), false);
+    try load(migrated_database_sql, "INSERT INTO store_meta(meta_key,meta_value) VALUES('format','71'),('wire_version','15')", false);
+    try load(migrated_database_sql, schema.mysqlMigration(71), false);
     try expectSameResults(&.{
         "SELECT meta_value FROM store_meta WHERE meta_key='wire_version'",
         "SELECT meta_value FROM store_meta WHERE meta_key='format'",
@@ -808,8 +938,8 @@ test "schema 72 MySQL migration updates the saved wire label and preserves ordin
         "SELECT '71'",
         "SELECT 1",
     });
-    try load(migrated_database, schema.mysqlMigrationFrom(71).?, false);
-    try expectCatalog(migrated_database);
+    try load(migrated_database_sql, schema.mysqlMigrationFrom(71).?, false);
+    try expectCatalog(migrated_database_sql);
     done.migrations += 1;
     writeRecord();
 }
@@ -819,15 +949,15 @@ test "schema 71 MySQL migration updates the saved wire label and preserves ordin
     mutex.lockUncancelable(io);
     defer mutex.unlock(io);
     _ = connection() orelse return if (state == .absent) error.SkipZigTest else error.MysqlUnavailable;
-    defer restore("USE " ++ database);
-    try setup("DROP DATABASE IF EXISTS " ++ migrated_database ++ ";CREATE DATABASE " ++ migrated_database);
-    try load(migrated_database, store_testing.baseline_mysql_ddl, false);
-    try load(migrated_database, store_testing.baseline_rows, true);
+    defer restoreNamed("USE " ++ database_sql);
+    try setupNamed("DROP DATABASE IF EXISTS " ++ migrated_database_sql ++ ";CREATE DATABASE " ++ migrated_database_sql);
+    try load(migrated_database_sql, store_testing.baseline_mysql_ddl, false);
+    try load(migrated_database_sql, store_testing.baseline_rows, true);
     inline for (schema.migrations) |step| {
-        if (step.from < 70) try load(migrated_database, schema.mysqlMigration(step.from), false);
+        if (step.from < 70) try load(migrated_database_sql, schema.mysqlMigration(step.from), false);
     }
-    try load(migrated_database, "INSERT INTO store_meta(meta_key,meta_value) VALUES('format','70'),('wire_version','14')", false);
-    try load(migrated_database, schema.mysqlMigration(70), false);
+    try load(migrated_database_sql, "INSERT INTO store_meta(meta_key,meta_value) VALUES('format','70'),('wire_version','14')", false);
+    try load(migrated_database_sql, schema.mysqlMigration(70), false);
     try expectSameResults(&.{
         "SELECT meta_value FROM store_meta WHERE meta_key='wire_version'",
         "SELECT meta_value FROM store_meta WHERE meta_key='format'",
@@ -837,8 +967,8 @@ test "schema 71 MySQL migration updates the saved wire label and preserves ordin
         "SELECT '70'",
         "SELECT 1",
     });
-    try load(migrated_database, schema.mysqlMigrationFrom(70).?, false);
-    try expectCatalog(migrated_database);
+    try load(migrated_database_sql, schema.mysqlMigrationFrom(70).?, false);
+    try expectCatalog(migrated_database_sql);
     done.migrations += 1;
     writeRecord();
 }
@@ -851,16 +981,16 @@ test "schema 70 MySQL migration updates the saved wire label and preserves ordin
         mutex.lockUncancelable(io);
         defer mutex.unlock(io);
         _ = connection() orelse return if (state == .absent) error.SkipZigTest else error.MysqlUnavailable;
-        defer restore("USE " ++ database);
-        try setup("DROP DATABASE IF EXISTS " ++ migrated_database ++ ";CREATE DATABASE " ++ migrated_database);
-        try load(migrated_database, store_testing.baseline_mysql_ddl, false);
-        try load(migrated_database, store_testing.baseline_rows, true);
+        defer restoreNamed("USE " ++ database_sql);
+        try setupNamed("DROP DATABASE IF EXISTS " ++ migrated_database_sql ++ ";CREATE DATABASE " ++ migrated_database_sql);
+        try load(migrated_database_sql, store_testing.baseline_mysql_ddl, false);
+        try load(migrated_database_sql, store_testing.baseline_rows, true);
         inline for (schema.migrations) |step| {
-            if (step.from < 69) try load(migrated_database, schema.mysqlMigration(step.from), false);
+            if (step.from < 69) try load(migrated_database_sql, schema.mysqlMigration(step.from), false);
         }
-        try load(migrated_database, "UPDATE session SET parent_ref='d8mv7p' WHERE session_ref='brhkcj'", false);
-        try load(migrated_database, "INSERT INTO store_meta(meta_key,meta_value) VALUES('format','69'),('wire_version','13'),('store_selector','/mysql-wire-migration')", false);
-        try load(migrated_database, schema.mysqlMigration(69), false);
+        try load(migrated_database_sql, "UPDATE session SET parent_ref='d8mv7p' WHERE session_ref='brhkcj'", false);
+        try load(migrated_database_sql, "INSERT INTO store_meta(meta_key,meta_value) VALUES('format','69'),('wire_version','13'),('store_selector','/mysql-wire-migration')", false);
+        try load(migrated_database_sql, schema.mysqlMigration(69), false);
         try expectSameResults(&.{
             "SELECT meta_value FROM store_meta WHERE meta_key='wire_version'",
             "SELECT meta_value FROM store_meta WHERE meta_key='format'",
@@ -870,10 +1000,10 @@ test "schema 70 MySQL migration updates the saved wire label and preserves ordin
             "SELECT '69'",
             "SELECT 1",
         });
-        try load(migrated_database, schema.mysqlMigrationFrom(69).?, false);
-        try expectCatalog(migrated_database);
-        try setup("DROP DATABASE IF EXISTS " ++ migrated_database ++ "_oracle;CREATE DATABASE " ++ migrated_database ++ "_oracle;CREATE TABLE " ++ migrated_database ++ "_oracle.touched_oracle" ++ touch_oracle_definition);
-        for (comptime sqlite.touchOracleTriggers(.mysql, migrated_database ++ "_oracle.touched_oracle")) |text| try setup(text);
+        try load(migrated_database_sql, schema.mysqlMigrationFrom(69).?, false);
+        try expectCatalog(migrated_database_sql);
+        try setupNamed("DROP DATABASE IF EXISTS " ++ migrated_database_sql ++ "_oracle;CREATE DATABASE " ++ migrated_database_sql ++ "_oracle;CREATE TABLE " ++ migrated_database_sql ++ "_oracle.touched_oracle" ++ touch_oracle_definition);
+        inline for (comptime sqlite.touchOracleTriggers(.mysql, migrated_database_sql ++ "_oracle.touched_oracle")) |text| try setupNamed(text);
         done.migrations += 1;
         writeRecord();
     }
@@ -884,7 +1014,7 @@ test "schema 70 MySQL migration updates the saved wire label and preserves ordin
             .address = .{ .unix_socket = config.socket },
             .user = "root",
             .password = config.password,
-            .database = migrated_database,
+            .database = names.migrated,
         } }, "/mysql-wire-migration", .{});
         defer storage.close() catch unreachable;
         try @import("tests.zig").expectWireMigrationFacts(&storage, &tmp);
@@ -896,10 +1026,10 @@ test "schema 65 MySQL migration freezes each Operation offer and preserves Sessi
     mutex.lockUncancelable(io);
     defer mutex.unlock(io);
     _ = connection() orelse return if (state == .absent) error.SkipZigTest else error.MysqlUnavailable;
-    defer restore("USE " ++ database);
-    const name = "rui_offer_migration";
-    try setup("DROP DATABASE IF EXISTS " ++ name ++ ";CREATE DATABASE " ++ name);
-    defer restore("DROP DATABASE IF EXISTS " ++ name);
+    defer restoreNamed("USE " ++ database_sql);
+    const name = "{[offer]s}";
+    try setupNamed("DROP DATABASE IF EXISTS " ++ name ++ ";CREATE DATABASE " ++ name);
+    defer restoreNamed("DROP DATABASE IF EXISTS " ++ name);
     try load(name, store_testing.baseline_mysql_ddl, false);
     try load(name, store_testing.baseline_rows, true);
     inline for (schema.migrations) |step| {
@@ -909,10 +1039,10 @@ test "schema 65 MySQL migration freezes each Operation offer and preserves Sessi
     try load(name, schema.mysqlMigration(64), false);
     var rows: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer rows.deinit();
-    try writeResult("SELECT operation_id,tool_set_id FROM " ++ name ++ ".model_operation ORDER BY operation_id", &rows.writer);
+    try writeResultNamed("SELECT operation_id,tool_set_id FROM " ++ name ++ ".model_operation ORDER BY operation_id", &rows.writer);
     try std.testing.expectEqualStrings("\n 1:1 1:4\n 1:2 1:2\n 2:99 1:2", rows.written());
     rows.clearRetainingCapacity();
-    try writeResult("SELECT revision,tool_set_id,loaded_tool_set_id FROM " ++ name ++ ".session WHERE session_ref='d8mv7p'", &rows.writer);
+    try writeResultNamed("SELECT revision,tool_set_id,loaded_tool_set_id FROM " ++ name ++ ".session WHERE session_ref='d8mv7p'", &rows.writer);
     try std.testing.expectEqualStrings("\n 1:2 1:4 1:2", rows.written());
     done.migrations += 1;
     writeRecord();
@@ -923,11 +1053,11 @@ test "schema 66 MySQL migration freezes actual effort emission and prior admitte
     mutex.lockUncancelable(io);
     defer mutex.unlock(io);
     _ = connection() orelse return if (state == .absent) error.SkipZigTest else error.MysqlUnavailable;
-    defer restore("USE " ++ database);
+    defer restoreNamed("USE " ++ database_sql);
     inline for (std.enums.values(store_testing.EffortMigrationChoice)) |choice| inline for ([_]bool{ false, true }) |legacy_codec| {
-        const name = "rui_effort_migration";
-        try setup("DROP DATABASE IF EXISTS " ++ name ++ ";CREATE DATABASE " ++ name);
-        defer restore("DROP DATABASE IF EXISTS " ++ name);
+        const name = "{[effort]s}";
+        try setupNamed("DROP DATABASE IF EXISTS " ++ name ++ ";CREATE DATABASE " ++ name);
+        defer restoreNamed("DROP DATABASE IF EXISTS " ++ name);
         try load(name, store_testing.baseline_mysql_ddl, false);
         try load(name, store_testing.baseline_rows, true);
         inline for (schema.migrations) |step| {
@@ -941,7 +1071,7 @@ test "schema 66 MySQL migration freezes actual effort emission and prior admitte
         }
         var rows: std.Io.Writer.Allocating = .init(std.testing.allocator);
         defer rows.deinit();
-        try writeResult("SELECT operation_id,effort_source_revision,previous_reasoning_effort,effort_update FROM " ++ name ++ ".model_operation WHERE session_ref='d8mv7p' ORDER BY operation_id", &rows.writer);
+        try writeResultNamed("SELECT operation_id,effort_source_revision,previous_reasoning_effort,effort_update FROM " ++ name ++ ".model_operation WHERE session_ref='d8mv7p' ORDER BY operation_id", &rows.writer);
         const source: u64 = if (choice == .retained) 2 else 3;
         const emitted = !legacy_codec and choice != .back_to_top;
         const expected = std.fmt.comptimePrint("\n 1:1 1:1 null 1:0\n 2:99 1:2 3:low 1:{d}\n 3:100 1:2 4:high 1:0\n 3:101 1:{d} 4:high 1:{d}", .{ @intFromBool(!legacy_codec), source, @intFromBool(emitted) });
@@ -949,7 +1079,7 @@ test "schema 66 MySQL migration freezes actual effort emission and prior admitte
         if (choice == .legacy_new_choice) {
             try load(name, "INSERT INTO session_change(session_ref,position,ordinal,revision,field,changed_at,provider_text,refused_operation_id) VALUES('d8mv7p',30,0,2,'reasoning_effort_refused',1793781802,'refused',99)", false);
             rows.clearRetainingCapacity();
-            try writeResult(comptime "SELECT " ++ @import("domain/configuration.zig").reasoningEffortOverrideSql("s") ++ " FROM " ++ name ++ ".session s WHERE s.session_ref='d8mv7p'", &rows.writer);
+            try writeResultNamed(comptime "SELECT " ++ @import("domain/configuration.zig").reasoningEffortOverrideSql("s") ++ " FROM " ++ name ++ ".session s WHERE s.session_ref='d8mv7p'", &rows.writer);
             try std.testing.expectEqualStrings("\n 5:xhigh", rows.written());
         }
         done.migrations += 1;
@@ -962,32 +1092,32 @@ test "schema 75 MySQL pin migration handles fresh and historically upgraded kind
     mutex.lockUncancelable(io);
     defer mutex.unlock(io);
     _ = connection() orelse return if (state == .absent) error.SkipZigTest else error.MysqlUnavailable;
-    defer restore("USE " ++ database);
+    defer restoreNamed("USE " ++ database_sql);
     inline for (.{ false, true }) |historical| {
-        try setup("DROP DATABASE IF EXISTS " ++ migrated_database ++ ";CREATE DATABASE " ++ migrated_database);
-        try load(migrated_database, store_testing.baseline_mysql_ddl, false);
-        if (historical) try load(migrated_database, store_testing.baseline_rows, true);
+        try setupNamed("DROP DATABASE IF EXISTS " ++ migrated_database_sql ++ ";CREATE DATABASE " ++ migrated_database_sql);
+        try load(migrated_database_sql, store_testing.baseline_mysql_ddl, false);
+        if (historical) try load(migrated_database_sql, store_testing.baseline_rows, true);
         inline for (schema.migrations) |step| {
-            if (step.from < 74) try load(migrated_database, schema.mysqlMigration(step.from), false);
+            if (step.from < 74) try load(migrated_database_sql, schema.mysqlMigration(step.from), false);
         }
         if (!historical) {
-            try load(migrated_database, "DROP TABLE core_command", true);
+            try load(migrated_database_sql, "DROP TABLE core_command", true);
             for (comptime schema.objects(.mysql)) |object| {
                 if (!std.mem.eql(u8, object.name, "core_command") and !std.mem.eql(u8, object.name, "core_command_target_order")) continue;
                 const text = try std.mem.replaceOwned(u8, std.testing.allocator, object.sql, "kind BETWEEN 1 AND 8", "kind BETWEEN 1 AND 6");
                 defer std.testing.allocator.free(text);
-                try load(migrated_database, text, false);
+                try load(migrated_database_sql, text, false);
             }
-            try load(migrated_database, store_testing.expected_mysql_rows, true);
+            try load(migrated_database_sql, store_testing.expected_mysql_rows, true);
         }
-        try load(migrated_database, "CREATE TEMPORARY TABLE original_pin_commands AS SELECT * FROM core_command", false);
-        defer restore("DROP TEMPORARY TABLE " ++ migrated_database ++ ".original_pin_commands");
-        try load(migrated_database, "CREATE TEMPORARY TABLE original_pin_stops AS SELECT * FROM session_stop", false);
-        defer restore("DROP TEMPORARY TABLE " ++ migrated_database ++ ".original_pin_stops");
+        try load(migrated_database_sql, "CREATE TEMPORARY TABLE original_pin_commands AS SELECT * FROM core_command", false);
+        defer restoreNamed("DROP TEMPORARY TABLE " ++ migrated_database_sql ++ ".original_pin_commands");
+        try load(migrated_database_sql, "CREATE TEMPORARY TABLE original_pin_stops AS SELECT * FROM session_stop", false);
+        defer restoreNamed("DROP TEMPORARY TABLE " ++ migrated_database_sql ++ ".original_pin_stops");
         inline for (schema.migrations) |step| {
-            if (step.from >= 74) try load(migrated_database, schema.mysqlMigration(step.from), false);
+            if (step.from >= 74) try load(migrated_database_sql, schema.mysqlMigration(step.from), false);
         }
-        try expectCatalog(migrated_database);
+        try expectCatalog(migrated_database_sql);
         try expectSameResults(&.{
             "SELECT * FROM core_command ORDER BY command_seq",
             "SELECT command_key,session_ref,selected_turn_id,position,admission_cutoff,stopped_at,parent_caused FROM session_stop ORDER BY command_key",
@@ -1000,7 +1130,7 @@ test "schema 75 MySQL pin migration handles fresh and historically upgraded kind
             "SELECT 0",
         });
         try expectSameResults(&.{"SELECT count(*) FROM session_stop WHERE action_cutoff<>0"}, &.{"SELECT 0"});
-        try load(migrated_database, "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) VALUES('pin-upgrade',7,'d8mv7p',UNHEX(REPEAT('00',32)),1,'',0,0,100);INSERT INTO session_pin_command(command_key,pinned) VALUES('pin-upgrade',1);INSERT INTO session_pin(session_ref,command_key) VALUES('d8mv7p','pin-upgrade');UPDATE session_pin SET command_key=NULL WHERE session_ref='d8mv7p'", false);
+        try load(migrated_database_sql, "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) VALUES('pin-upgrade',7,'d8mv7p',UNHEX(REPEAT('00',32)),1,'',0,0,100);INSERT INTO session_pin_command(command_key,pinned) VALUES('pin-upgrade',1);INSERT INTO session_pin(session_ref,command_key) VALUES('d8mv7p','pin-upgrade');UPDATE session_pin SET command_key=NULL WHERE session_ref='d8mv7p'", false);
         try expectSameResults(&.{
             "SELECT count(*) FROM session_pin WHERE command_key IS NULL",
             "SELECT pinned FROM session_pin_command WHERE command_key='pin-upgrade'",
@@ -1015,9 +1145,9 @@ test "schema 75 MySQL pin migration refuses absent and ambiguous kind checks bef
     mutex.lockUncancelable(io);
     defer mutex.unlock(io);
     _ = connection() orelse return if (state == .absent) error.SkipZigTest else error.MysqlUnavailable;
-    defer restore("USE " ++ database);
+    defer restoreNamed("USE " ++ database_sql);
     inline for (.{ false, true }) |ambiguous| {
-        try setup("DROP DATABASE IF EXISTS " ++ migrated_database ++ ";CREATE DATABASE " ++ migrated_database ++ ";USE " ++ migrated_database);
+        try setupNamed("DROP DATABASE IF EXISTS " ++ migrated_database_sql ++ ";CREATE DATABASE " ++ migrated_database_sql ++ ";USE " ++ migrated_database_sql);
         try setup("CREATE TABLE core_command(kind BIGINT CHECK(kind BETWEEN 1 AND 7))");
         if (ambiguous) try setup("ALTER TABLE core_command ADD CHECK(kind BETWEEN 1 AND 6), ADD CHECK(kind BETWEEN 1 AND 6)");
         const step = schema.migrations[74 - schema.migration_baseline];
@@ -1031,8 +1161,8 @@ test "schema 75 MySQL pin migration refuses absent and ambiguous kind checks bef
         }
         try expectSameResults(&.{"SELECT @rui_pin_kind_ddl IS NULL"}, &.{"SELECT 1"});
         try expectSameResults(&.{
-            "SELECT count(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA='" ++ migrated_database ++ "' AND TABLE_NAME IN ('session_pin','session_pin_command')",
-            "SELECT count(*) FROM information_schema.TABLE_CONSTRAINTS WHERE TABLE_SCHEMA='" ++ migrated_database ++ "' AND TABLE_NAME='core_command' AND CONSTRAINT_TYPE='CHECK'",
+            "SELECT count(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA='" ++ migrated_database_sql ++ "' AND TABLE_NAME IN ('session_pin','session_pin_command')",
+            "SELECT count(*) FROM information_schema.TABLE_CONSTRAINTS WHERE TABLE_SCHEMA='" ++ migrated_database_sql ++ "' AND TABLE_NAME='core_command' AND CONSTRAINT_TYPE='CHECK'",
         }, &.{ "SELECT 0", if (ambiguous) "SELECT 3" else "SELECT 1" });
     }
 }
@@ -1047,10 +1177,10 @@ test "obligation projection MySQL row counts match SQLite for null changed uncha
     mutex.lockUncancelable(io);
     defer mutex.unlock(io);
     _ = connection() orelse return if (state == .absent) error.SkipZigTest else error.MysqlUnavailable;
-    const name = "rui_obligation_projection_parity";
-    try setup("DROP DATABASE IF EXISTS " ++ name ++ ";CREATE DATABASE " ++ name ++ ";USE " ++ name);
-    defer restore("DROP DATABASE IF EXISTS " ++ name);
-    defer restore("USE " ++ database);
+    const name = "{[projection]s}";
+    try setupNamed("DROP DATABASE IF EXISTS " ++ name ++ ";CREATE DATABASE " ++ name ++ ";USE " ++ name);
+    defer restoreNamed("DROP DATABASE IF EXISTS " ++ name);
+    defer restoreNamed("USE " ++ database_sql);
     const ddl_text = "CREATE TABLE session(session_ref VARCHAR(6) PRIMARY KEY,obligation_since BIGINT CHECK(obligation_since IS NULL OR obligation_since>0))";
     try setup(ddl_text);
     try setup("INSERT INTO session(session_ref,obligation_since) VALUES('aaaaaa',NULL),('bbbbbb',80)");

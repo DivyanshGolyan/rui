@@ -611,6 +611,20 @@ const NativeTurn = struct {
 
     pub fn advanceLiveBash(self: *NativeTurn) bool {
         const observed = std.Io.Clock.Timestamp.now(self.host.io, .awake);
+        const generation = self.host.store.commitGeneration();
+        var cursor: usize = 0;
+        while (self.host.custody.nextMessageWatch(&cursor, generation)) |watch| {
+            const interrupt = self.host.store.messageAfterActionLaunch(watch.binding, watch.cutoff) catch |err| {
+                fenceDispatch(self.host, "Message Action selection", err);
+                break;
+            };
+            if (!interrupt) continue;
+            const reply = self.host.store.backgroundAction(.{ .live_action = watch.binding.action_id }, self.host.hooks.storeFaults(.action_result));
+            if (reply == .infrastructure_failure or reply == .conflict) {
+                fenceDispatch(self.host, "Message Action promotion", error.ActionPromotionFailed);
+                break;
+            }
+        }
         while (self.host.custody.nextBackgroundDue(observed, self.host.background_after_ms)) |binding| {
             const reply = self.host.store.backgroundAction(.{ .live_action = binding.action_id }, self.host.hooks.storeFaults(.action_result));
             if (reply == .infrastructure_failure or reply == .conflict) {
@@ -1181,15 +1195,31 @@ noinline fn runNextCoreAction(host: *Host, mcp: *server_mcp.Calls) execution_tur
         .mcp => |call| mcp.admit(host, call),
         .ending => |*owed| runOwedEnding(host, owed),
         .forward => |id| runSessionForward(host, id),
+        .auto_deny => |decision| runMessageDecline(host, decision.action_id, decision.session.slice()),
         .action => |*input| switch (input.tool) {
             .find_tools => runFindTools(host, input),
             .message_agent => runMessageAgent(host, input),
             .read_action => runReadAction(host, input),
+            .stop_action => runStopAction(host, input),
             .read_transcript => runReadTranscript(host, input),
             .start_agent => runStartAgent(host, input),
             .skill => runSkill(host, input),
         },
     };
+}
+
+noinline fn runMessageDecline(host: *Host, action_id: u64, session: []const u8) execution_turn.Admission {
+    var command: protocol.PermissionDecisionCommand = .{ .action_id = action_id, .decision = .deny };
+    command.session.set(session) catch unreachable;
+    const key = std.fmt.bufPrint(&command.key.bytes, "rui.core/message-decline/{d}", .{action_id}) catch unreachable;
+    command.key.len = key.len;
+    switch (host.store.declineForMessage(&command, host.hooks.storeFaults(.action_result))) {
+        .accepted, .rejected, .conflict => return .admitted,
+        .infrastructure_failure => {
+            fenceDispatch(host, "Message approval decline", error.CanonicalStoreFailure);
+            return .retry_later;
+        },
+    }
 }
 
 noinline fn runOwedStop(host: *Host, owed: *const store_module.OwedStop) execution_turn.Admission {
@@ -1307,6 +1337,20 @@ noinline fn runReadTranscript(host: *Host, input: *const store_module.CoreAction
         error.StaleActionAttemptBinding => return .admitted,
         else => {
             fenceDispatch(host, "read_transcript core command", err);
+            return .retry_later;
+        },
+    };
+    return .admitted;
+}
+
+noinline fn runStopAction(host: *Host, input: *const store_module.CoreActionInput) execution_turn.Admission {
+    var arena: std.heap.ArenaAllocator = .init(host.allocator);
+    defer arena.deinit();
+    @import("stop_action_tool.zig").run(host.store, arena.allocator(), input, host.hooks.storeFaults(.action_result)) catch |err| switch (err) {
+        error.OutOfMemory => return .retry_later,
+        error.StaleActionAttemptBinding => return .admitted,
+        else => {
+            fenceDispatch(host, "stop_action core command", err);
             return .retry_later;
         },
     };
@@ -1443,7 +1487,7 @@ fn admitBashAttempt(
         host.allocator,
         arguments,
         input,
-        host.lease.paths.store.slice(),
+        host.lease.paths.selector(),
         host.bash_path,
         action_binding.action_id,
         host.hooks.bashFaults(),
@@ -1540,15 +1584,17 @@ fn launchPreparedBash(host: *Host, slot: *ExecutionSlot, prepared: *bash.Prepare
     };
     const work = &host.bash_work[token.index];
     var refused: bash.ArgumentSizes = .{};
-    host.store.withActionDispatchHandoff(action_binding, .{
+    host.store.withActionLaunchHandoff(action_binding, .{
         .host = host,
         .prepared = prepared,
         .base = base,
         .work = work,
         .refused = &refused,
+        .token = token,
     }, struct {
-        fn handoff(context: anytype) !void {
+        fn handoff(context: anytype, cutoff: u64) !void {
             try context.host.withEffectLaunch(context, launch);
+            try context.host.custody.watchMessages(context.token, cutoff);
         }
 
         fn launch(context: anytype) !void {

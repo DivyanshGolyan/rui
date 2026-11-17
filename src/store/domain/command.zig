@@ -1954,11 +1954,12 @@ pub const InterruptModel = struct {
 
 const decision_action = rsql.Read(.{
     .sql = "SELECT s.session_ref,s.workspace_key,s.next_position,a.authorized,a.background_position IS NOT NULL AS background," ++ action_domain.actionStoppedSql("a", "operation") ++ " AS stopped,a.resolution_code IS NULL AS unresolved,(t.outcome_code IS NULL OR a.background_position IS NOT NULL) AS turn_open,t.turn_id," ++
-        "EXISTS(SELECT 1 FROM session_forward f WHERE f.target_ref=?2 AND f.kind=1 AND f.source_id=a.action_id AND f.position IS NOT NULL) AS forwarded " ++
+        "EXISTS(SELECT 1 FROM session_forward f WHERE f.target_ref=?2 AND f.kind=1 AND f.source_id=a.action_id AND f.position IS NOT NULL) AS forwarded," ++
+        action_domain.messageDeclinesApprovalSql("a") ++ " AS message_decline " ++
         "FROM action_operation a JOIN session s ON s.session_ref=a.session_ref " ++
         "JOIN model_operation operation ON operation.operation_id=a.parent_operation_id JOIN turn t ON t.turn_id=operation.turn_id WHERE a.action_id=?1",
     .Args = struct { action_id: u64, target: []const u8 },
-    .Row = struct { session: rsql.SessionHead, authorized: bool, background: bool, stopped: bool, unresolved: bool, turn_open: bool, turn_id: rsql.Positive, forwarded: bool },
+    .Row = struct { session: rsql.SessionHead, authorized: bool, background: bool, stopped: bool, unresolved: bool, turn_open: bool, turn_id: rsql.Positive, forwarded: bool, message_decline: bool },
     .cardinality = .optional,
 });
 
@@ -1992,13 +1993,14 @@ fn decisionRejection(
     command: *const command_input.PermissionDecisionCommand,
     target: target_session.Result,
     action: decision_action.Result,
+    automatic: bool,
 ) ?mutation_answer.PermissionDecisionRejection {
     if (!session_id.valid(command.session.slice())) return .invalid_session_reference;
     if (!validId(command.action_id)) return .invalid_target;
     if (target == null) return .unknown_session;
     const found = action orelse return .unknown_action;
     if (!std.mem.eql(u8, &found.session.ref, command.session.slice()) and !found.forwarded) return .target_mismatch;
-    if (found.authorized or !found.unresolved or !found.turn_open) return .action_not_pending;
+    if (found.authorized or !found.unresolved or !found.turn_open or (found.message_decline and !automatic)) return .action_not_pending;
     return null;
 }
 
@@ -2007,7 +2009,7 @@ pub const DecidePermission = struct {
     pub const round_budget = 2;
     pub const commit: transition.Commit = .transaction;
     pub const begin: ?rounds.At = .facts;
-    pub const Input = struct { command: *const command_input.PermissionDecisionCommand };
+    pub const Input = struct { command: *const command_input.PermissionDecisionCommand, denial_reason: ?[]const u8 = null };
     pub const Result = PermissionDecisionReply;
     pub const Ordinary = store_core.Ordinary.none;
     pub const Guards = error{ActionSelectionChanged};
@@ -2035,7 +2037,10 @@ pub const DecidePermission = struct {
                 readTarget(r, session, &t.target);
                 if (session_id.valid(session)) r.read(decision_action, .{ .action_id = command.action_id, .target = session }, &t.action);
             }
-            if (command.decision == .deny) content_domain.lookup(r, &t.content);
+            if (command.decision == .deny) {
+                if (t.input.denial_reason) |reason| t.content = .ofBytes(reason, false);
+                content_domain.lookup(r, &t.content);
+            }
             return .{ .round = .facts };
         }
         switch (try classify(mutation_answer.PermissionDecisionRejection, &t.saved, .permission_decision, session, &t.digest)) {
@@ -2045,7 +2050,7 @@ pub const DecidePermission = struct {
             .rejected => |code| return .{ .done = .{ .rejected = .{ .replayed = true, .code = code } } },
         }
 
-        t.rejection = decisionRejection(command, t.target, t.action);
+        t.rejection = decisionRejection(command, t.target, t.action, t.input.denial_reason != null);
         t.answer = .{ .accepted = t.rejection == null };
         if (t.rejection) |code| try t.answer.code.set(@tagName(code));
         try queueCommand(r, command.key.slice(), .permission_decision, session, &t.digest, null, null, &t.answer);
@@ -2058,7 +2063,7 @@ pub const DecidePermission = struct {
                 .deny => {
                     if (r.faults().content_import) return error.InjectedContentImportFailure;
                     const positions = try r.positions(head);
-                    const content_id = try content_domain.importBytes(r, &t.content, denial_text);
+                    const content_id = try content_domain.importBytes(r, &t.content, t.input.denial_reason orelse denial_text);
                     r.write(deny_action, .{ .action_id = command.action_id, .content_id = content_id, .position = try positions.take(1), .session = head });
                     try t.final_input.admit(r, &found.session, command.action_id, content_id, .{ .background = found.background, .stopped = found.stopped });
                     turn_domain.queueContinuation(r, found.turn_id.get(), head);
