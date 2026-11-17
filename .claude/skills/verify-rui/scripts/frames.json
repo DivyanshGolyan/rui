@@ -287,19 +287,21 @@
       "open": "overview",
       "steps": [],
       "expect": [
-        "Settings",
-        "{upgrade_version}"
+        "Settings"
       ],
       "absent": [
         "Notifications",
-        "enter open"
+        "enter open",
+        "{upgrade_version}",
+        "Update failed:",
+        "Update to ",
+        "Updating…",
+        "Update failed"
       ],
-      "note": "Real release HTTP discovery and managed install; comparison uses native controls on each revision",
-      "expect_next": {
-        "Settings": "{upgrade_version}"
-      },
+      "note": "Real release HTTP discovery and managed install; divider above Settings with memory or an update, current version hidden",
+      "expect_next": {},
       "expect_regex": [
-        "^\\s*\\d+(?:\\.\\d+)? (?:MB|GB)\\s+{upgrade_version}\\s*(?:│.*)?$"
+        "^[─-]+(?:│[^\\n]*)?\\n *Settings +\\d+(?:\\.\\d+)? (?:MB|GB) *(?:│[^\\n]*)?$"
       ],
       "comparison": {
         "before": {
@@ -333,14 +335,14 @@
       ],
       "absent": [
         "Notifications",
-        "enter open"
+        "enter open",
+        "{upgrade_version}",
+        "Update failed:"
       ],
-      "note": "Real release HTTP discovery and managed install; comparison uses native controls on each revision",
-      "expect_next": {
-        "Settings": "Update to {available_version}"
-      },
+      "note": "Real release HTTP discovery and managed install; divider above Settings with memory or an update, current version hidden",
+      "expect_next": {},
       "expect_regex": [
-        "^\\s*\\d+(?:\\.\\d+)? (?:MB|GB)\\s+Update to {available_version}\\s*(?:│.*)?$"
+        "^[─-]+(?:│[^\\n]*)?\\n *Settings +Update to {available_version} *(?:│[^\\n]*)?$"
       ],
       "comparison": {
         "before": {
@@ -374,14 +376,14 @@
       ],
       "absent": [
         "Notifications",
-        "enter open"
+        "enter open",
+        "{upgrade_version}",
+        "Update failed:"
       ],
-      "note": "Real release HTTP discovery and managed install; comparison uses native controls on each revision",
-      "expect_next": {
-        "Settings": "Updating…"
-      },
+      "note": "Real release HTTP discovery and managed install; divider above Settings with memory or an update, current version hidden",
+      "expect_next": {},
       "expect_regex": [
-        "^\\s*\\d+(?:\\.\\d+)? (?:MB|GB)\\s+Updating…\\s*(?:│.*)?$"
+        "^[─-]+(?:│[^\\n]*)?\\n *Settings +Updating… *(?:│[^\\n]*)?$"
       ],
       "comparison": {
         "before": {
@@ -412,20 +414,20 @@
       "steps": [],
       "expect": [
         "Settings",
-        "Update failed: Couldn't reach GitHub"
+        "Update failed"
       ],
       "absent": [
         "Notifications",
         "Host paused",
         "enter open",
-        "Reading this Session"
+        "Reading this Session",
+        "{upgrade_version}",
+        "Update failed:"
       ],
-      "note": "Real release HTTP discovery and managed install; comparison uses native controls on each revision",
-      "expect_next": {
-        "Settings": "Update failed: Couldn't reach GitHub"
-      },
+      "note": "Real release HTTP discovery and managed install; divider above Settings with memory or an update, current version hidden",
+      "expect_next": {},
       "expect_regex": [
-        "^\\s*(?:\\d+(?:\\.\\d+)? (?:MB|GB)\\s+)?Update failed: Couldn't reach GitHub\\s*(?:│.*)?$"
+        "^[─-]+(?:│[^\\n]*)?\\n *Settings +Update failed *(?:│[^\\n]*)?$"
       ],
       "comparison": {
         "before": {
@@ -471,7 +473,8 @@
         "Updating…",
         "Publishing; cancelling no longer rolls back",
         "restart rui to continue",
-        "enter open"
+        "enter open",
+        "{upgrade_version}"
       ],
       "note": "Real release HTTP discovery and managed install; comparison uses native controls on each revision",
       "cast": [
@@ -518,19 +521,21 @@
       "open": "overview",
       "steps": [],
       "expect": [
-        "Settings",
-        "{upgrade_version}"
+        "Settings"
       ],
       "absent": [
         "Notifications",
-        "enter open"
+        "enter open",
+        "{upgrade_version}",
+        "Update failed:",
+        "Update to ",
+        "Updating…",
+        "Update failed"
       ],
-      "note": "Real release HTTP discovery and managed install; comparison uses native controls on each revision",
-      "expect_next": {
-        "Settings": "{upgrade_version}"
-      },
+      "note": "Real release HTTP discovery and managed install; divider above Settings with memory or an update, current version hidden",
+      "expect_next": {},
       "expect_regex": [
-        "^\\s*\\d+(?:\\.\\d+)? (?:MB|GB)\\s+{upgrade_version}\\s*(?:│.*)?$"
+        "^[─-]+(?:│[^\\n]*)?\\n *Settings +\\d+(?:\\.\\d+)? (?:MB|GB) *(?:│[^\\n]*)?$"
       ],
       "comparison": {
         "before": {
@@ -564,14 +569,14 @@
       ],
       "absent": [
         "Notifications",
-        "enter open"
+        "enter open",
+        "{upgrade_version}",
+        "Update failed:"
       ],
-      "note": "Real release HTTP discovery and managed install; comparison uses native controls on each revision",
-      "expect_next": {
-        "Settings": "Update to {available_version}"
-      },
+      "note": "Real release HTTP discovery and managed install; divider above Settings with memory or an update, current version hidden",
+      "expect_next": {},
       "expect_regex": [
-        "^\\s*\\d+(?:\\.\\d+)? (?:MB|GB)\\s+Update to {available_version}\\s*(?:│.*)?$"
+        "^[─-]+(?:│[^\\n]*)?\\n *Settings +Update to {available_version} *(?:│[^\\n]*)?$"
       ],
       "comparison": {
         "before": {
@@ -605,14 +610,14 @@
       ],
       "absent": [
         "Notifications",
-        "enter open"
+        "enter open",
+        "{upgrade_version}",
+        "Update failed:"
       ],
-      "note": "Real release HTTP discovery and managed install; comparison uses native controls on each revision",
-      "expect_next": {
-        "Settings": "Updating…"
-      },
+      "note": "Real release HTTP discovery and managed install; divider above Settings with memory or an update, current version hidden",
+      "expect_next": {},
       "expect_regex": [
-        "^\\s*\\d+(?:\\.\\d+)? (?:MB|GB)\\s+Updating…\\s*(?:│.*)?$"
+        "^[─-]+(?:│[^\\n]*)?\\n *Settings +Updating… *(?:│[^\\n]*)?$"
       ],
       "comparison": {
         "before": {
@@ -643,20 +648,20 @@
       "steps": [],
       "expect": [
         "Settings",
-        "Update failed: Couldn't reach GitHub"
+        "Update failed"
       ],
       "absent": [
         "Notifications",
         "Host paused",
         "enter open",
-        "Reading this Session"
+        "Reading this Session",
+        "{upgrade_version}",
+        "Update failed:"
       ],
-      "note": "Real release HTTP discovery and managed install; comparison uses native controls on each revision",
-      "expect_next": {
-        "Settings": "Update failed: Couldn't reach GitHub"
-      },
+      "note": "Real release HTTP discovery and managed install; divider above Settings with memory or an update, current version hidden",
+      "expect_next": {},
       "expect_regex": [
-        "^\\s*(?:\\d+(?:\\.\\d+)? (?:MB|GB)\\s+)?Update failed: Couldn't reach GitHub\\s*(?:│.*)?$"
+        "^[─-]+(?:│[^\\n]*)?\\n *Settings +Update failed *(?:│[^\\n]*)?$"
       ],
       "comparison": {
         "before": {
@@ -702,7 +707,8 @@
         "Updating…",
         "Publishing; cancelling no longer rolls back",
         "restart rui to continue",
-        "enter open"
+        "enter open",
+        "{upgrade_version}"
       ],
       "note": "Real release HTTP discovery and managed install; comparison uses native controls on each revision",
       "cast": [

@@ -21,7 +21,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const self: *Self = @ptrCast(@alignCast(raw));
     const size = ctx.max.size();
     if (size.width == 0 or size.height == 0) return vxfw.Surface.init(ctx.cell_arena, self.widget(), .{});
-    const facts_rows: u16 = @min(1, size.height - 1);
+    const facts_rows = @import("draft_layout.zig").fixedBottom(size.height).footer_rows;
     const status_room: u16 = @min(status_lines, size.height -| 1 -| facts_rows);
     const status = if (status_room == 0) null else if (self.status) |shown| status: {
         const drawn = try shown.draw(ctx.withConstraints(.{ .width = size.width }, .{ .width = size.width, .height = status_room }));

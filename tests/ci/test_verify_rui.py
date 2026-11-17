@@ -2751,7 +2751,7 @@ class UpgradeFramesTest(unittest.TestCase):
 
     def test_failure_frames_wait_for_public_chat_readiness_without_open_hints(self):
         settle = self.helper["frame_failure_settled"]
-        reason = "Update failed: Couldn't reach GitHub"
+        reason = "Update failed"
         for before in (False, True):
             marker = "! Couldn't reach GitHub; nothing changed" if before else reason
             screens = [marker + "\nReading this Session… alt+i info", marker + "\nHost paused alt+i info",
@@ -2774,10 +2774,11 @@ class UpgradeFramesTest(unittest.TestCase):
             self.assertIn("enter open", state["absent"])
             self.assertIn("enter open", state["comparison"]["before"]["absent"])
             self.assertIn(reason, state["expect"])
-            self.assertEqual(state["expect_next"], {"Settings": reason})
+            self.assertEqual(state["expect_next"], {})
+            self.assertIn("Update failed:", state["absent"])
             for size in state["sizes"]:
                 suffix = "│ actual chat" if size[0] == 140 else ""
-                rows = f"Settings{suffix}\n{reason}{suffix}\n"
+                rows = f"{'─' * size[0]}{suffix}\n     Settings  {reason}{suffix}\n"
                 screens = [rows + "Reading this Session…", rows + "Host paused", rows]
                 observed = []
                 def wait(predicate, _description, **_kwargs):
@@ -2791,7 +2792,10 @@ class UpgradeFramesTest(unittest.TestCase):
                     self.assertEqual(observed, [0, 1, 2])
                     self.assertIsNotNone(self.helper["frame_row_failure"](state, "Settings\nrui 7 MB " + reason))
                     self.assertIsNotNone(self.helper["frame_row_failure"](state, "Settings\nUpdate failed" + suffix))
-                    self.assertIsNone(self.helper["frame_row_failure"](state, f"Settings{suffix}\n7 MB {reason}{suffix}"))
+                    self.assertIsNone(self.helper["frame_row_failure"](state, rows))
+                    self.assertIsNotNone(self.helper["frame_row_failure"](state, rows.replace(reason, "7 MB  " + reason)))
+                    self.assertIsNotNone(self.helper["frame_row_failure"](state, rows.replace(reason, reason + ": Couldn't reach GitHub")))
+                    self.assertIsNotNone(self.helper["frame_row_failure"](state, rows.split("\n", 1)[1]))
 
     def test_narrow_upgrade_resize_reveals_the_list_without_closing_chat_specimens(self):
         reveal = self.helper["frame_upgrade_viewport"]
@@ -2833,19 +2837,34 @@ class UpgradeFramesTest(unittest.TestCase):
             reveal(None, terminal, {"upgrade": "chat"})
             self.assertEqual(events, [])
 
-    def test_split_sidebar_rows_bound_their_exact_version_before_chat_content(self):
+    def test_shared_sidebar_row_requires_divider_and_bounds_controls_before_chat_content(self):
         scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
-        current = next(state for state in scenario["states"] if state["name"] == "sidebar-current")
         row_failure = self.helper["frame_row_failure"]
-        after = {"expect_regex": [pattern.replace("{upgrade_version}", r"0\.78\.10000") for pattern in current["expect_regex"]]}
+        for state in (entry for entry in scenario["states"] if entry.get("upgrade") not in (None, "chat")):
+            patterns = [pattern.replace("{available_version}", r"0\.99\.99999") for pattern in state["expect_regex"]]
+            oracle = {"expect_regex": patterns}
+            label = {"current": "", "available": "Update to 0.99.99999", "updating": "Updating…", "failure": "Update failed"}[state["upgrade"]]
+            for width, _height in state["sizes"]:
+                ending = "│ Type a task" if width == 140 else ""
+                rule = "─" * min(width, 40) + ending + "\n"
+                row = "     Settings  " + (label if label else "7 MB") + " " + ending
+                with self.subTest(theme=state["theme"], kind=state["upgrade"], width=width):
+                    self.assertIn("{upgrade_version}", state["absent"])
+                    self.assertIsNone(row_failure(oracle, rule + row))
+                    if label:
+                        self.assertIsNotNone(row_failure(oracle, rule + row.replace(label, "7 MB  " + label)))
+                    for wrong in (row, rule + row.replace("Settings  ", "Settings\n"),
+                                  rule + row.replace("Settings  ", "Settings  rui "),
+                                  rule + row.replace("Settings  ", "Settings  tools 120 MB "),
+                                  rule + row.replace("Settings  ", "Settings  0.78.10000 ")):
+                        self.assertIsNotNone(row_failure(oracle, wrong))
+                    if label:
+                        self.assertIsNotNone(row_failure(oracle, rule + " Settings 7 MB │ " + label))
+                    if state["upgrade"] == "available":
+                        self.assertIsNotNone(row_failure(oracle, (rule + row).replace("0.99.99999", "0x99x99999")))
+        current = next(state for state in scenario["states"] if state["name"] == "sidebar-current")
         before = {"expect_regex": [pattern.replace("{upgrade_version}", r"0\.78\.10000") for pattern in current["comparison"]["before"]["expect_regex"]]}
-        for ending in ("", "│ Type a task 0.99.99999"):
-            self.assertIsNone(row_failure(after, " 7 MB     0.78.10000 " + ending))
-            self.assertIsNone(row_failure(before, " Settings rui 7 MB 0.78.10000 " + ending))
-            self.assertIsNotNone(row_failure(after, " rui 7 MB 0.78.10000 " + ending))
-            self.assertIsNotNone(row_failure(after, " 7 MB 0x78x10000 " + ending))
-            self.assertIsNotNone(row_failure(before, " Settings 0x78x10000 " + ending))
-        self.assertIsNotNone(row_failure(after, " 7 MB 0.77.10000 │ 0.78.10000"))
+        self.assertIsNone(row_failure(before, " Settings rui 7 MB 0.78.10000 │ Type a task"))
         self.assertIsNotNone(row_failure(before, " Settings 0.77.10000 │ 0.78.10000"))
 
     def test_held_upgrade_after_readiness_uses_publication_and_control_not_chat_status(self):
@@ -2856,18 +2875,25 @@ class UpgradeFramesTest(unittest.TestCase):
             events.append(description)
         terminal = types.SimpleNamespace(wait=wait, mouse=lambda event: events.append(event["at"]))
         with tempfile.TemporaryDirectory() as directory, patch.dict(drive.__globals__, {
-                "frame_wait": lambda _run, _terminal, marker, **_kwargs: events.append(marker)}):
+                "frame_wait": lambda _run, _terminal, marker, **_kwargs: events.append(marker),
+                "frame_steps": lambda _run, _terminal, steps: events.append(steps)}):
             run = types.SimpleNamespace(home=Path(directory))
             drive(run, terminal, {"upgrade": "updating", "comparison_side": "after"}, (None, object(), "0.78.10000"))
-        self.assertEqual(events, ["Type a task", "0.78.10000", "0.78.10000", "published release held before Host activation"])
+        self.assertEqual(events, ["Type a task",
+                                 [{"mouse": {"at": "Settings", "do": "click"}}, {"wait": "Notifications"},
+                                  {"keys": ["Down"] * 5 + ["Enter"]}],
+                                 " · publishing", [{"keys": ["Esc"]}, {"gone": "Notifications"}],
+                                 "published release held before Host activation"])
 
-    def test_compact_row_oracle_rejects_old_memory_labels_and_nonliteral_version(self):
+    def test_failure_row_oracle_rejects_expanded_reason_and_split_row(self):
+        state = next(state for state in self.helper["load_scenario"](SCRIPT.with_name("frames.json"))["states"]
+                     if state["name"] == "sidebar-failure")
         row_failure = self.helper["frame_row_failure"]
-        state = {"expect_regex": [r"^\s*\d+(?:\.\d+)? (?:MB|GB)\s+0\.70\.10000\s*$"]}
-        self.assertIsNone(row_failure(state, "  38 MB       0.70.10000 "))
-        for row in ("rui 38 MB       0.70.10000", "38 MB tools 120 MB 0.70.10000", "38 MB 0x70x10000"):
+        self.assertIsNone(row_failure(state, "─" * 40 + "\n     Settings   Update failed"))
+        for row in ("Settings\n38 MB Update failed", "Settings 38 MB Update failed", "Settings Update failed: Couldn't reach GitHub",
+                    "Settings 38 MB │ Update failed"):
             with self.subTest(row=row):
-                self.assertIsNotNone(row_failure(state, row))
+                self.assertIsNotNone(row_failure(state, "─" * 40 + "\n" + row))
 
     def test_native_retry_journey_waits_for_archive_gate_before_release_and_settings(self):
         journey = self.helper["frame_upgrade_journey"]
@@ -2886,6 +2912,11 @@ class UpgradeFramesTest(unittest.TestCase):
                                             wait=lambda _predicate, description, **_kwargs: events.append(description))
             def capture(_run, _terminal, _out, specimen, _size, _reason):
                 events.append(specimen["name"])
+                if specimen["name"] == "retry-completed":
+                    self.assertEqual(specimen["expect"], ["Settings"])
+                    self.assertIn("0.70.10000", specimen["absent"])
+                    self.assertIsNone(self.helper["frame_row_failure"](specimen, "─" * 46 + "\nSettings 7 MB"))
+                    self.assertIsNotNone(self.helper["frame_row_failure"](specimen, "Settings\n7 MB 0.70.10000"))
                 return {"ok": True}
             with patch.dict(journey.__globals__, {"frame_ready": lambda *_args: None, "frame_capture": capture,
                                                  "frame_steps": lambda *_args: events.append("Settings Version")}):

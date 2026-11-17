@@ -2,6 +2,20 @@ const std = @import("std");
 
 pub const max_rows = 10;
 
+pub const FixedBottom = struct {
+    footer_rows: u16,
+    rule: ?u16,
+
+    pub fn rows(self: FixedBottom) u16 {
+        return self.footer_rows + @intFromBool(self.rule != null);
+    }
+};
+
+pub fn fixedBottom(height: u16) FixedBottom {
+    const footer_rows = @min(1, height -| 1);
+    return .{ .footer_rows = footer_rows, .rule = if (height >= 2) height - footer_rows - 1 else null };
+}
+
 pub fn cap(height: u16) u16 {
     return @max(1, @min(max_rows, height / 3));
 }
@@ -42,4 +56,13 @@ test "the rule label names what the view hides and centres where it fits" {
 test "the cap is ten rows, a third of a short screen, and at least one" {
     const cases = [_][2]u16{ .{ 2, 1 }, .{ 3, 1 }, .{ 8, 2 }, .{ 24, 8 }, .{ 30, 10 }, .{ 60, 10 } };
     for (cases) |case| try std.testing.expectEqual(case[1], cap(case[0]));
+}
+
+test "fixed input bottom keeps one footer below its rule across every height" {
+    for (0..65536) |height| {
+        const bottom = fixedBottom(@intCast(height));
+        try std.testing.expectEqual(@as(u16, if (height >= 2) 1 else 0), bottom.footer_rows);
+        try std.testing.expectEqual(@as(?u16, if (height >= 2) @intCast(height - 2) else null), bottom.rule);
+        try std.testing.expectEqual(@as(u16, if (height >= 2) 2 else 0), bottom.rows());
+    }
 }

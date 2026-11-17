@@ -371,6 +371,10 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
             .narrow = .right,
             .divider = self.divider,
         };
+        split.divider.junction = if (@import("draft_layout.zig").fixedBottom(size.height).rule) |row|
+            .{ .row = row, .both = layout.pane == .session }
+        else
+            null;
         break :split try split.widget().draw(ctx);
     } else try pane.draw(ctx);
     children[0] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = child };

@@ -2261,13 +2261,12 @@ pub fn layout(state: *const State) Layout {
     const height = state.size.height;
     if (height == 0 or state.size.width == 0) return .{};
     const top: u16 = @intCast(@min(topRows(state), height));
-    const input = @max(top, height -| (statusRows(state) + 1));
+    const settings = @max(top, height -| @import("draft_layout.zig").fixedBottom(height).rows());
+    const footer_rows: u16 = @intFromBool(footerShown(state));
+    const input = @max(top, settings -| (statusRows(state) + footer_rows));
     const host = @max(top, input -| @intFromBool(state.host_line));
-    const settings = @max(top, host -| settings_rows);
-    return .{ .top = top, .list = .{ .start = top, .end = settings }, .settings = .{ .start = settings, .end = host }, .host = .{ .start = host, .end = input }, .input = input };
+    return .{ .top = top, .list = .{ .start = top, .end = host }, .settings = .{ .start = settings, .end = height }, .host = .{ .start = host, .end = input }, .input = input };
 }
-
-const settings_rows = 3;
 
 fn statusRows(state: *const State) u16 {
     var buffer: StatusBuffer = undefined;
@@ -2785,6 +2784,10 @@ pub fn newestEmpty(state: *const State) ?Reference {
             (row.created_at == newest.?.created_at and std.mem.order(u8, &row.reference, &newest.?.reference) == .gt)) newest = row;
     }
     return if (newest) |row| row.reference else null;
+}
+
+pub fn footerShown(state: *const State) bool {
+    return footerRight(state).len > 0 or footerNotice(state) != null;
 }
 
 pub fn footerRight(state: *const State) []const u8 {
@@ -5248,16 +5251,39 @@ test "list creation obeys Host holds and ledger capacity while Settings stays lo
     }
 }
 
-test "overview bottom layout reserves only status and one footer" {
+test "overview footer slot follows only visible notices and upgrade cancellation" {
+    var state = try opened(&.{});
+    defer state.deinit();
+    for ([_]bool{ false, true }) |notice| for ([_]bool{ false, true }) |upgrading| {
+        state.notice = null;
+        state.upgrade.run = if (upgrading) .checking else null;
+        if (notice) state.say(.normal, "Copied 3 lines", .{});
+        try std.testing.expectEqual(notice or upgrading, footerShown(&state));
+        for ([_]u16{ 0, 1, 2, 3, 4, 10, 30, 40 }) |height| {
+            state.size = .{ .width = 46, .height = height };
+            const rows = layout(&state);
+            try std.testing.expect(rows.list.end <= rows.settings.start);
+            try std.testing.expect(rows.host.end <= rows.settings.start);
+            try std.testing.expect(rows.host.end <= rows.input);
+            try std.testing.expect(rows.input <= height);
+        }
+    };
+}
+
+test "overview bottom layout reserves only visible status and footer rows" {
     var state = try opened(&.{});
     defer state.deinit();
     for ([_]u16{ 0, 1, 2, 10, 30, 40 }) |height| {
         state.size = .{ .width = 46, .height = height };
         const rows = layout(&state);
-        try std.testing.expectEqual(@max(rows.top, height -| 1), rows.input);
+        try std.testing.expectEqual(rows.settings.start, rows.input);
         try std.testing.expect(rows.list.end <= rows.settings.start);
-        try std.testing.expect(rows.settings.end <= rows.host.start);
+        try std.testing.expect(rows.host.end <= rows.settings.start);
         try std.testing.expect(rows.host.end <= rows.input);
+        if (height >= 4) {
+            try std.testing.expectEqual(@as(u16, height - 2), rows.settings.start);
+            try std.testing.expectEqual(height, rows.settings.end);
+        }
     }
 }
 

@@ -2970,21 +2970,12 @@ def frame_drive_upgrade(run, terminal, state, fixture):
             return
         terminal.wait(lambda _c: f"/releases/tag/v{releases.version}" in releases.requests, "release discovery HTTP response")
         return
-    if before:
-        frame_steps(run, terminal, [{"mouse": {"at": "Settings", "do": "click"}}, {"wait": "Notifications"},
-                                    {"keys": ["Down"] * 5 + ["Enter"]}])
-    else:
-        frame_wait(run, terminal, version)
-        terminal.mouse({"at": version, "do": "click"})
+    frame_steps(run, terminal, [{"mouse": {"at": "Settings", "do": "click"}}, {"wait": "Notifications"},
+                                {"keys": ["Down"] * 5 + ["Enter"]}])
     if gate is not None:
-        if before:
-            frame_wait(run, terminal, " · publishing", timeout=40)
-        else:
-            selected = run.home / ".local/bin/rui"
-            terminal.wait(lambda c: selected.resolve() != run.home / ".local/lib/rui/old/bin/rui"
-                          and "Updating…" in c.completed, "published release held before Host activation", timeout=40)
+        frame_wait(run, terminal, " · publishing", timeout=40)
     elif state["upgrade"] == "failure":
-        frame_wait(run, terminal, "couldn't reach GitHub" if before else "Update failed")
+        frame_wait(run, terminal, "couldn't reach GitHub")
     else:
         selected = run.home / ".local/bin/rui"
         import os_semantics
@@ -2996,8 +2987,11 @@ def frame_drive_upgrade(run, terminal, state, fixture):
         if status["instance"] == run.meta["upgrade_previous_instance"]:
             raise FrameFailure("Upgrade did not replace the original Host instance")
         return
-    if before:
-        frame_steps(run, terminal, [{"keys": ["Esc"]}, {"gone": "Notifications"}])
+    frame_steps(run, terminal, [{"keys": ["Esc"]}, {"gone": "Notifications"}])
+    if gate is not None and not before:
+        selected = run.home / ".local/bin/rui"
+        terminal.wait(lambda c: selected.resolve() != run.home / ".local/lib/rui/old/bin/rui"
+                      and "Updating…" in c.completed, "published release held before Host activation", timeout=40)
     if state["upgrade"] == "failure":
         frame_failure_settled(terminal, before)
 
@@ -3037,16 +3031,16 @@ def frame_upgrade_journey(run, terminal, state, fixture, out, size):
         shot("retry-updating", ["Updating…"], ["Update failed", "Notifications"])
         gate.release.set()
         selected = run.home / ".local/bin/rui"
-        quiet = {"expect_next": {"Settings": version},
-                 "expect_regex": [rf"^\s*\d+(?:\.\d+)? (?:MB|GB)\s+{re.escape(version)}\s*(?:│.*)?$"]}
+        quiet = {"expect_regex": [r"^[─-]+(?:│[^\n]*)?\n *Settings +\d+(?:\.\d+)? (?:MB|GB) *(?:│[^\n]*)?$"]}
         terminal.wait(lambda c: selected.resolve() != run.home / ".local/lib/rui/old/bin/rui"
                       and frame_row_failure(quiet, c.completed) is None
                       and "Updating…" not in c.completed and "Update failed" not in c.completed
+                      and version not in c.completed
                       and "Notifications" not in c.completed, "retry installed the selected release", timeout=40)
         status = json.loads(frame_command(run.rui_cmd("host", "status", "--store", run.store), "retry Host status").stdout)
         if status["status"] != "ready" or status["instance"] == run.meta["upgrade_previous_instance"]:
             raise FrameFailure("retry did not replace the original Host with a ready Host")
-        shot("retry-completed", [version, "Settings"], ["Updating…", "Update failed", "Notifications"], **quiet)
+        shot("retry-completed", ["Settings"], [version, "Update to ", "Updating…", "Update failed", "Notifications"], **quiet)
         frame_steps(run, terminal, [{"mouse": {"at": "Settings", "do": "click"}}, {"wait": "Notifications"},
                                     {"keys": ["Down"] * 5 + ["Enter"]}, {"wait": " · up to date"}])
         shot("settings-version-up-to-date", ["Version", " · up to date"], ["Update failed"])
