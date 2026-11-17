@@ -111,6 +111,7 @@ const cores = .{
     .{ "provider_route.zig", @import("provider_route.zig") },
     .{ "provider_selection.zig", @import("provider_selection.zig") },
     .{ "queued_line.zig", @import("queued_line.zig") },
+    .{ "read_image_arguments.zig", @import("read_image_arguments.zig") },
     .{ "replay_recipe.zig", @import("replay_recipe.zig") },
     .{ "request_wait.zig", @import("request_wait.zig") },
     .{ "retention_capacity.zig", @import("retention_capacity.zig") },

@@ -155,6 +155,7 @@ Stable handles from the product:
 
 Fixture policy, chosen by the latest user text:
 - `tool demonstration`: three Bash calls (`ls`, `exit 127`, stderr plus `exit 1`), then a summary.
+- `image consent check`: one built-in `read_image` call for `design/checkout.png`, which needs consent in ask mode; no file is read before approval.
 - `consent check`: one 32-line Bash command, which needs consent in `approve`.
 - `long bash`: one Bash command that sleeps 8 s, so a Session runs Bash long enough to stop.
 - `show environment`: one Bash call that prints `CLIENT_MARK`, `HOST_SECRET`, `command -v brew` and `PATH`, so a run can show which terminal's environment Bash got.

@@ -230,6 +230,19 @@ class PlatformBoundaryTest(unittest.TestCase):
         with os_semantics.simulate("darwin"), self.assertRaises(AssertionError):
             os_semantics.system_trust(Path("/ca.pem"))
 
+    def test_file_access_tracer_is_optional_on_linux_and_absent_on_darwin(self):
+        sys.path.insert(0, str(Path(__file__).parents[1] / "integration"))
+        import os_semantics
+        from unittest.mock import patch
+        for executable in ("/usr/bin/strace", None):
+            with self.subTest(executable=executable), os_semantics.simulate("linux"), \
+                    patch.object(os_semantics.shutil, "which", return_value=executable) as which:
+                self.assertEqual(os_semantics.file_access_tracer(), executable)
+                which.assert_called_once_with("strace")
+        with os_semantics.simulate("darwin"), patch.object(os_semantics.shutil, "which") as which:
+            self.assertIsNone(os_semantics.file_access_tracer())
+            which.assert_not_called()
+
     def test_a_bound_socket_that_never_listens_is_refused(self):
         unlistened = textwrap.dedent('''
             test "down" {

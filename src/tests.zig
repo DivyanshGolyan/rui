@@ -1,5 +1,8 @@
 test {
     _ = @import("InputCapture.zig");
+    _ = @import("read_image_arguments.zig");
+    _ = @import("os/read_image_file.zig");
+    _ = @import("server_read_image.zig");
     _ = @import("host_start.zig");
     _ = @import("host_launch_transfer.zig");
     _ = @import("server_mcp_settings.zig");
