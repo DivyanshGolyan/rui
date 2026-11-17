@@ -337,6 +337,11 @@ class ScreensWorkflowTest(unittest.TestCase):
                 subprocess.run(['bash', '-c', 'set -e\n' + cache_block], env=env, check=True)
                 self.assertEqual((root / 'published/main/base/shots.json').exists(), cacheable == 'true')
 
+    def test_automatic_runs_wait_for_the_repository_switch(self):
+        workflow = WORKFLOW.read_text()
+        select = workflow.split('  select:\n', 1)[1].split('    runs-on:', 1)[0]
+        self.assertIn("github.event_name == 'workflow_dispatch' || vars.RUI_SCREENS == 'on'", select)
+
     def test_baseline_runs_on_trusted_jobs_and_branch_errors_fail_closed(self):
         workflow = WORKFLOW.read_text()
         self.assertIn('  pull_request:', workflow)
