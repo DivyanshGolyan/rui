@@ -1185,6 +1185,7 @@ noinline fn runNextCoreAction(host: *Host, mcp: *server_mcp.Calls) execution_tur
             .find_tools => runFindTools(host, input),
             .message_agent => runMessageAgent(host, input),
             .read_action => runReadAction(host, input),
+            .stop_action => runStopAction(host, input),
             .read_transcript => runReadTranscript(host, input),
             .start_agent => runStartAgent(host, input),
             .skill => runSkill(host, input),
@@ -1307,6 +1308,20 @@ noinline fn runReadTranscript(host: *Host, input: *const store_module.CoreAction
         error.StaleActionAttemptBinding => return .admitted,
         else => {
             fenceDispatch(host, "read_transcript core command", err);
+            return .retry_later;
+        },
+    };
+    return .admitted;
+}
+
+noinline fn runStopAction(host: *Host, input: *const store_module.CoreActionInput) execution_turn.Admission {
+    var arena: std.heap.ArenaAllocator = .init(host.allocator);
+    defer arena.deinit();
+    @import("stop_action_tool.zig").run(host.store, arena.allocator(), input, host.hooks.storeFaults(.action_result)) catch |err| switch (err) {
+        error.OutOfMemory => return .retry_later,
+        error.StaleActionAttemptBinding => return .admitted,
+        else => {
+            fenceDispatch(host, "stop_action core command", err);
             return .retry_later;
         },
     };
