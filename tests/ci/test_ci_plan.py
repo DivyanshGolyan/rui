@@ -44,11 +44,20 @@ class PlanTest(unittest.TestCase):
                 plan(selection(), event_name='workflow_dispatch', draft=False, promotion=False,
                      change_kind=ChangeKind.NORMAL, native_targets=targets)
         for event, promotion, compile_only in (('pull_request', False, False),
-                                              ('workflow_dispatch', True, False),
-                                              ('workflow_dispatch', False, True)):
+                                              ('workflow_dispatch', True, False)):
             with self.subTest(event=event, promotion=promotion, compile_only=compile_only), self.assertRaises(ValueError):
                 plan(selection(), event_name=event, draft=False, promotion=promotion,
                      compile_only=compile_only, change_kind=ChangeKind.NORMAL, native_targets=['test'])
+
+    def test_manual_compile_only_can_build_explicit_native_targets(self):
+        targets = ['check-full', 'upgrade-integration']
+        result = plan(selection(), event_name='workflow_dispatch', draft=False, promotion=False,
+                      change_kind=ChangeKind.NORMAL, compile_only=True, native_targets=targets).outputs
+        self.assertEqual(result['native_targets'], targets)
+        self.assertTrue(result['native'])
+        self.assertTrue(result['compile_only'])
+        self.assertFalse(result['retry'])
+        self.assertEqual(result['quarantine'], 'off')
 
     def test_event_and_change_kind_domain(self):
         cases = (

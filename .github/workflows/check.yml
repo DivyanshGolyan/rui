@@ -155,10 +155,15 @@ jobs:
         continue-on-error: true
         env:
           INPUTS: ${{ toJSON(inputs) }}
+          DIAGNOSTIC_NATIVE: ${{ github.event_name == 'workflow_dispatch' && inputs.native_targets != '' }}
           RUI_MAC_RUNNER: ${{ vars.RUI_MAC_RUNNER }}
           RUNNERS_PATH: ${{ runner.temp }}/mac-runners.json
           QUEUE_PATH: ${{ runner.temp }}/mac-queue.json
-        run: python3 -B tests/ci/mac_runner.py
+        run: |
+          if [ "$DIAGNOSTIC_NATIVE" = true ]; then
+            export INPUTS='{"compile_only":true}'
+          fi
+          python3 -B tests/ci/mac_runner.py
       - name: Explain an unavailable routing decision
         if: ${{ always() && steps.decide.outcome != 'success' }}
         continue-on-error: true
@@ -203,7 +208,7 @@ jobs:
           DRAFT: ${{ github.event.pull_request.draft || false }}
           EVENT_NAME: ${{ github.event_name }}
           PROMOTION: ${{ inputs.promotion || false }}
-          COMPILE_ONLY: ${{ inputs.compile_only || false }}
+          COMPILE_ONLY: ${{ inputs.compile_only || (github.event_name == 'workflow_dispatch' && inputs.native_targets != '') || false }}
           NATIVE_TARGETS: ${{ inputs.native_targets || '' }}
         run: |
           set -euo pipefail
@@ -845,7 +850,7 @@ jobs:
     name: macos suites (${{ matrix.name }})
     needs: [plan, mac_runner, macos_build, macos_build_unit]
     # A skipped unit producer is expected only for an unsplit selection.
-    if: ${{ !cancelled() && needs.plan.outputs.native == 'true' && needs.macos_build.result == 'success' && needs.macos_build_unit.result == (needs.plan.outputs.macos_split == 'true' && 'success' || 'skipped') }}
+    if: ${{ !cancelled() && needs.plan.outputs.compile_only == 'false' && needs.plan.outputs.native == 'true' && needs.macos_build.result == 'success' && needs.macos_build_unit.result == (needs.plan.outputs.macos_split == 'true' && 'success' || 'skipped') }}
     runs-on: ${{ fromJSON(needs.mac_runner.outputs.runs_on || '"macos-15"') }}
     timeout-minutes: ${{ inputs.promotion && 300 || 35 }}
     strategy:
@@ -934,11 +939,12 @@ jobs:
           UNIT_RESULT: ${{ needs.macos_build_unit.result }}
           SPLIT: ${{ needs.plan.outputs.macos_split }}
           NATIVE_RESULT: ${{ needs.macos_suites.result }}
+          COMPILE_ONLY: ${{ needs.plan.outputs.compile_only }}
         run: |
           test "$PLAN_RESULT" = success
           if [ "$SPLIT" = true ]; then test "$UNIT_RESULT" = success; else test "$UNIT_RESULT" = skipped; fi
           test "$BUILD_RESULT" = success
-          test "$NATIVE_RESULT" = success
+          if [ "$COMPILE_ONLY" = true ]; then test "$NATIVE_RESULT" = skipped; else test "$NATIVE_RESULT" = success; fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: ${{ failure() }}
         with:

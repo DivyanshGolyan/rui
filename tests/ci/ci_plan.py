@@ -62,8 +62,8 @@ def plan(selection: dict, *, event_name: str, draft: bool, promotion: bool,
     else:
         p['native_targets'] = []
     if native_targets is not _UNSET:
-        if event_name != 'workflow_dispatch' or promotion or compile_only:
-            raise ValueError('Native diagnostic targets require a manual acceptance run')
+        if event_name != 'workflow_dispatch' or promotion:
+            raise ValueError('Native diagnostic targets require a manual run')
         if (not isinstance(native_targets, list) or not native_targets
                 or any(not isinstance(target, str) or not re.fullmatch(r'[a-z][a-z0-9-]*', target)
                        for target in native_targets)
