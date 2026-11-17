@@ -1566,10 +1566,11 @@ def exit_on_sigint(screen, process, description):
     process.send_signal(signal.SIGINT)
 
     def exited_and_drained():
-        return screen.read_output(), process.poll()
+        status = process.poll()
+        return status, screen.read_output()
 
     wait_for(exited_and_drained, description,
-             ready=lambda observation: observation[0] is False and observation[1] is not None)
+             ready=lambda observation: observation[0] is not None and observation[1] is not True)
     output = bytes(screen.tail)
     restored = output.rfind(b"\x1b[?1049l")
     assert restored >= 0, f"{description}: terminal not restored"

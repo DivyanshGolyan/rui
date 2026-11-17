@@ -1,6 +1,7 @@
 """Pure checks for Upgrade fixture ownership and readiness; no native fixture is launched."""
 import copy
 import importlib.util
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -59,14 +60,41 @@ class UpgradeEmptyChatTest(unittest.TestCase):
         screen.tail = bytearray()
         screen.transition_tail = b""
         screen.entries = screen.restorations = 0
-        process = SimpleNamespace(send_signal=Mock(), poll=Mock(return_value=0))
-        chunks = [BlockingIOError(), b"receipt \x1b[?104", b"9l\x1b[?25h done", b""]
+        status = [None]
+        process = SimpleNamespace(send_signal=Mock(), poll=Mock(side_effect=lambda: status[0]))
+        chunks = iter([BlockingIOError(), b"receipt \x1b[?104", b"9l\x1b[?25h done", b""])
+
+        def read_chunk(*args):
+            chunk = next(chunks)
+            if isinstance(chunk, BlockingIOError):
+                status[0] = 0
+                raise chunk
+            return chunk
+
         self.wait.stop()
-        with patch.object(self.fixture.os, "read", side_effect=chunks) as read:
+        with patch.object(self.fixture.os, "read", side_effect=read_chunk) as read:
             receipt = self.fixture.exit_on_sigint(screen, process, "exit")
         self.assertEqual(receipt, b"\x1b[?1049l\x1b[?25h done")
         self.assertEqual(screen.restorations, 1)
         self.assertEqual(read.call_count, 4)
+
+    def test_sigint_drains_with_slave_still_open(self):
+        master, slave = os.openpty()
+        self.addCleanup(os.close, master)
+        self.addCleanup(os.close, slave)
+        os.set_blocking(master, False)
+        screen = self.fixture.TerminalScreen.__new__(self.fixture.TerminalScreen)
+        screen.master = master
+        screen.capture = SimpleNamespace(feed=Mock())
+        screen.tail = bytearray()
+        screen.transition_tail = b""
+        screen.entries = screen.restorations = 0
+        process = SimpleNamespace(send_signal=Mock(), poll=Mock(return_value=0))
+        os.write(slave, b"receipt \x1b[?1049l\x1b[?25h done")
+        self.wait.stop()
+        receipt = self.fixture.exit_on_sigint(screen, process, "exit with open slave")
+        self.assertEqual(receipt, b"\x1b[?1049l\x1b[?25h done")
+        self.assertIsNone(screen.read_output())
 
     def test_case_disk_lifetime_follows_successful_process_retirement(self):
         for body_fails, cleanup_fails in ((False, False), (True, False), (False, True)):
