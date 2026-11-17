@@ -55,7 +55,7 @@ def plan(selection: dict, *, event_name: str, draft: bool, promotion: bool,
     elif ready_pr:
         p['native_targets'] = (p['native_targets'] or ['check']) if p['mac_required'] else []
         p['retry'] = False
-    else:
+    elif event_name != 'workflow_dispatch':
         p['native_targets'] = []
     p['linux_codegen'] = (event_name == 'pull_request'
                           and bool({'check', 'stack-frames'} & set(p['targets'])))
