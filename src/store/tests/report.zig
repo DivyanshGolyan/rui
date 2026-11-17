@@ -645,7 +645,7 @@ test "derived work facts are served across all work replies" {
 
 test "served work intents imply admission across permission and control states" {
     try store_testing.forEachEngine(struct {
-        const Scenario = enum { idle, queued, in_flight, retrying, finished, owed, stopped, stopping, stopping_queued, approval, message_decline, mixed };
+        const Scenario = enum { idle, queued, in_flight, retrying, finished, owed, stopped, stopping, stopping_queued, stopping_owed, approval, message_decline, mixed };
         const Intent = enum { stop, interrupt, decide };
 
         fn run(case: *store_testing.Case) !void {
@@ -677,7 +677,7 @@ test "served work intents imply admission across permission and control states" 
                         } else if (scenario != .in_flight) {
                             try settleTwoActionsForTesting(&storage, &tmp, model, "intent-calls");
                             old_action = try store_testing.queryU64(&storage, "SELECT min(action_id) FROM action_operation WHERE session_ref=?1", .{session.slice()});
-                            if (scenario == .stopping or scenario == .stopping_queued) {
+                            if (scenario == .stopping or scenario == .stopping_queued or scenario == .stopping_owed) {
                                 var allow: protocol.PermissionDecisionCommand = .{ .session = session, .action_id = old_action, .decision = .allow_once };
                                 try allow.key.set("intent-allow-running");
                                 try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
@@ -685,6 +685,12 @@ test "served work intents imply admission across permission and control states" 
                                 var stop = try completeSessionStop("intent-running-stop", session.slice());
                                 try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
                                 if (scenario == .stopping_queued) try submitTestMessage(&storage, &tmp, "intent-after-stop-file", "intent-after-stop", session.slice(), "new work");
+                                if (scenario == .stopping_owed) {
+                                    const child = try configureTestSession(&storage, "intent-stopping-child");
+                                    try store_testing.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ session.slice(), child.slice() });
+                                    try submitTestMessage(&storage, &tmp, "intent-stopping-child-file", "intent-stopping-child-message", child.slice(), "child work");
+                                    try shared_fixtures.refreshFrontiersForTesting(&storage, &.{ child.slice(), session.slice() });
+                                }
                             }
                             if (scenario == .mixed) {
                                 var promote: @import("../../command_input.zig").ActionBackgroundCommand = .{ .session = session, .action_id = old_action };
