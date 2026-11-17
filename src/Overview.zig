@@ -432,7 +432,8 @@ fn initScreen(self: *Self, screen: *SessionScreen) !void {
 
 fn initialListHeld(self: *Self, width: u16, now_ms: u64) bool {
     const deadline = self.initial_list_deadline orelse return false;
-    if (width < Root.split_at or self.state.listed_at_ms != null or self.state.list_stale or hostHeld(self) or now_ms >= deadline) {
+    if ((width < Root.split_at and self.root.session != null) or self.state.listed_at_ms != null or self.state.list_stale or hostHeld(self) or now_ms >= deadline) {
+        if (self.state.listed_at_ms == null and (self.state.launch == .sizing or self.state.launch == .waiting)) self.state.launch = .done;
         self.initial_list_deadline = null;
         return false;
     }
@@ -485,10 +486,8 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
             try app.vx.queryColor(app.tty.writer(), .bg);
             try self.paintCursor();
             try ctx.requestFocus(self.widget());
-            if (self.options.open) |reference| {
-                self.initial_list_deadline = self.animationMs() + 150;
-                try self.appNext(ctx, try self.event(.{ .open = reference }));
-            }
+            if (!self.signInIsFirstRun()) self.initial_list_deadline = self.animationMs() + 150;
+            if (self.options.open) |reference| try self.appNext(ctx, try self.event(.{ .open = reference }));
         },
         .focus_in => try ctx.requestFocus(self.widget()),
         .color_report => |report| if (report.kind == .bg) {
@@ -1087,6 +1086,7 @@ fn closeSignIn(raw: *anyopaque, ctx: *vxfw.EventContext) !void {
 
 fn signedIn(raw: *anyopaque, ctx: *vxfw.EventContext, activation: SignIn.Activation) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
+    const first_run = self.signInIsFirstRun();
     if (!std.mem.eql(u8, self.options.store, activation.store.slice())) {
         std.debug.assert(self.worker.thread == null);
         self.signed_in_store = activation.store;
@@ -1107,6 +1107,7 @@ fn signedIn(raw: *anyopaque, ctx: *vxfw.EventContext, activation: SignIn.Activat
         self.state.notice = notice;
     }
     try self.root.signedIn(ctx);
+    if (first_run) self.initial_list_deadline = self.animationMs() + 150;
     if (self.root.session == null) try ctx.requestFocus(self.widget());
 }
 
@@ -2170,7 +2171,7 @@ const Rig = struct {
     }
 };
 
-test "resumed wide presentation waits for the first live list with bounded fallback" {
+test "initial presentation waits for the first live list with bounded fallback" {
     const Scenario = enum { early, late, unavailable, empty };
     for ([_]Scenario{ .early, .late, .unavailable, .empty }) |scenario| {
         var cancellation: client.Cancellation = .{};
@@ -2213,6 +2214,40 @@ test "resumed wide presentation waits for the first live list with bounded fallb
         try std.testing.expect(std.mem.indexOf(u8, text, if (scenario == .empty) "No unarchived Sessions." else "k7m2qx") != null);
         try std.testing.expect(overview.initial_list_deadline == null);
     }
+}
+
+test "initial bare overview holds the list at narrow and wide widths" {
+    for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |late| {
+        var cancellation: client.Cancellation = .{};
+        const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
+        defer rig.close();
+        const overview = rig.overview;
+        _ = try view.step(&overview.state, .{ .launch_start = .{ .explicit_session = false, .restoring = false } });
+        overview.initial_list_deadline = overview.animationMs() + 60_000;
+        var held = try rig.shown(width, 30);
+        defer held.deinit();
+        try std.testing.expect(std.mem.indexOf(u8, try held.text(), "Loading") == null);
+        try std.testing.expect(std.mem.indexOf(u8, try held.text(), "+ New Session") == null);
+        _ = try overview.event(.{ .tick = test_now_s * 1000 });
+        try std.testing.expectEqual(Job.list, std.meta.activeTag(overview.jobs[0]));
+        try std.testing.expectEqual(Job.host, std.meta.activeTag(overview.jobs[1]));
+        if (late) {
+            overview.initial_list_deadline = overview.animationMs();
+            var fallback = try rig.shown(width, 30);
+            defer fallback.deinit();
+            try std.testing.expect(std.mem.indexOf(u8, try fallback.text(), "Loading") != null);
+            try std.testing.expect(std.mem.indexOf(u8, try fallback.text(), "+ New Session") != null);
+            try std.testing.expectEqual(.done, overview.state.launch);
+        }
+        try overview.dispatch(.all);
+        try rig.answered();
+        _ = try overview.complete();
+        var live = try rig.shown(width, 30);
+        defer live.deinit();
+        try std.testing.expect(std.mem.indexOf(u8, try live.text(), "Loading") == null);
+        if (width < Root.split_at or late) try std.testing.expect(std.mem.indexOf(u8, try live.text(), "k7m2qx") != null);
+        try std.testing.expect(overview.initial_list_deadline == null);
+    };
 }
 
 test "App overview paints its ground and plain footer" {
