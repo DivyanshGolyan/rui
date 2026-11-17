@@ -20,7 +20,9 @@ cache-mode: read
 
 jobs:
   select:
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    # Automatic runs are off unless repository variable RUI_SCREENS is 'on': each run holds
+    # up to ten runners for half an hour and starved Selected checks (17 Nov). Dispatch always runs.
+    if: ${{ (github.event_name == 'workflow_dispatch' || vars.RUI_SCREENS == 'on') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: ubuntu-24.04
     outputs:
       run: ${{ steps.select.outputs.run }}
