@@ -128,7 +128,8 @@ def preset_creation(binary, root, store_settings, env):
         restricted(base_report["session"])
         assert base_report["first_message"] is None and base_report["pending_messages"] == "0", base_report
         original_admission = admission(base, session)
-        result = invoke("request", "read-result", base, expect=3)
+        result = invoke("request", "read-result", base, expect=1)
+        assert result.stdout == "", result
         assert any(line.startswith("{") and json.loads(line).get("error", {}).get("code") == "result_not_found"
                    for line in result.stderr.splitlines()), result
 
