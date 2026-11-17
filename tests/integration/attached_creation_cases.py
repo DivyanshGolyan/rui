@@ -68,7 +68,8 @@ def attached_creation(binary, directory, root, env, *, scalar=None):
     """Run against a fresh Host directory, optionally configured for MySQL.
 
     scalar reads one integer from the same real database the Host owns. SQLite
-    uses a read-only connection; MySQL's caller supplies its existing SQL actor.
+    audits through a read-only connection only after each Host stops; MySQL's
+    caller supplies its existing SQL actor and also audits while the Host lives.
     """
     root, directory = pathlib.Path(root), pathlib.Path(directory)
     home, workspace, elsewhere = (root / name for name in ("attached-home", "attached-workspace", "attached-cwd"))
@@ -108,7 +109,24 @@ def attached_creation(binary, directory, root, env, *, scalar=None):
         with sqlite3.connect((directory / "rui.sqlite3").as_uri() + "?mode=ro", uri=True) as database:
             return database.execute(statement).fetchone()[0]
 
-    count = scalar or sqlite_scalar
+    sql_expectations = {}
+
+    def expect_count(statement, expected):
+        # SQLite owns an exclusive connection while its Host lives. Keep exact
+        # independent row expectations for each stopped-Host boundary instead
+        # of asking SQLite to violate that ownership for a fixture read.
+        sql_expectations[statement] = expected
+        if scalar is not None:
+            assert scalar(statement) == expected, (statement, expected)
+
+    def audit():
+        read = scalar or sqlite_scalar
+        for statement, expected in sql_expectations.items():
+            actual = read(statement)
+            assert actual == expected, (statement, expected, actual)
+
+    def session_refs():
+        return {row["reference"] for row in value("session", "list", "--store", directory, "--all")["sessions"]}
     spec = ["--model", "gpt-6-sol", "--tools", "bash", "--loaded-tools", "bash",
             "--permission-mode", "bypass", "--reasoning-effort", "low", "--compaction-trigger", "100000"]
     endpoint = AttachedModel()
@@ -163,10 +181,10 @@ def attached_creation(binary, directory, root, env, *, scalar=None):
             assert settings["parent"] == parent and settings["provider"] == "codex", settings
             assert settings["workspace"] == str(workspace) and settings["tools"] == ["bash"], settings
             assert settings["loaded_tools"] == ["bash"] and settings["permission_mode"] == "bypass", settings
-            assert count(f"SELECT count(*) FROM session WHERE session_ref='{child}' AND parent_ref='{parent}'") == 1
+            expect_count(f"SELECT count(*) FROM session WHERE session_ref='{child}' AND parent_ref='{parent}'", 1)
             expected_messages = int(door == "start")
-            assert count(f"SELECT count(*) FROM message_admission WHERE session_ref='{child}'") == expected_messages
-            assert count(f"SELECT count(*) FROM core_command WHERE target='{child}'") == 1, "creation must use one command"
+            expect_count(f"SELECT count(*) FROM message_admission WHERE session_ref='{child}'", expected_messages)
+            expect_count(f"SELECT count(*) FROM core_command WHERE target='{child}'", 1)
             if door == "configure":
                 assert current["first_message"] is None and current["pending_messages"] == "0", current
             else:
@@ -178,14 +196,16 @@ def attached_creation(binary, directory, root, env, *, scalar=None):
                 assert found and found.groups() == ("parent-original", str(workspace)), output
                 child_requests = [request for session, request in endpoint.requests if session == child]
                 assert len(child_requests) == 2, child_requests
-                assert "bash" in [tool.get("name") for tool in child_requests[0]["tools"]], child_requests[0]
-                assert count(f"SELECT count(*) FROM message_admission WHERE session_ref='{child}'") == 1
+                offered = {tool["name"] for item in child_requests[0]["input"]
+                           if item.get("type") == "additional_tools" for tool in item["tools"]}
+                assert offered == {"bash"}, child_requests[0]
+                expect_count(f"SELECT count(*) FROM message_admission WHERE session_ref='{child}'", 1)
             assert record.read_bytes() == original and routing.read_bytes() == route
             records.append((handle, child, original, route, record, routing, expected_messages))
 
         for handle, child, _original, _route, _record, _routing, messages in records:
             door = "start" if messages else "configure"
-            before = count("SELECT count(*) FROM session")
+            before = session_refs()
             changed = value("session", door, "--store", directory, "--parent", child, *spec,
                             "--record", home / (handle + "-changed-parent.json"), "--key", handle,
                             input=TASK if messages else None, expect=3)
@@ -195,8 +215,8 @@ def attached_creation(binary, directory, root, env, *, scalar=None):
                                 "--record", home / (handle + "-changed-task.json"), "--key", handle,
                                 input=TASK + "changed", expect=3)
                 assert changed["answer"]["status"] == "conflict", changed
-            assert count("SELECT count(*) FROM session") == before
-            assert count(f"SELECT count(*) FROM message_admission WHERE session_ref='{child}'") == messages
+            assert session_refs() == before
+            expect_count(f"SELECT count(*) FROM message_admission WHERE session_ref='{child}'", messages)
 
         # Narrowing permission and allowing a configured but unloaded parent tool
         # are separate facts. Neither may widen the parent's saved restrictions.
@@ -206,7 +226,7 @@ def attached_creation(binary, directory, root, env, *, scalar=None):
         direct_child = direct["context"]["session"]
         wait(direct["context"]["key"])
         assert configuration(direct_child)["parent"] == parent
-        assert count(f"SELECT count(*) FROM message_admission WHERE session_ref='{direct_child}'") == 1
+        expect_count(f"SELECT count(*) FROM message_admission WHERE session_ref='{direct_child}'", 1)
         asking_spec = list(spec)
         asking_spec[asking_spec.index("bypass")] = "ask"
         narrow = value("session", "configure", "--store", directory, "--parent", parent, *asking_spec)
@@ -216,7 +236,7 @@ def attached_creation(binary, directory, root, env, *, scalar=None):
         archived = value("session", "configure", "--store", directory, "--workspace", workspace,
                          "--provider", "codex", *spec)["context"]["session"]
         invoke("session", "archive", "--store", directory, "--session", archived)
-        known = {row["reference"] for row in value("session", "list", "--store", directory, "--all")["sessions"]}
+        known = session_refs()
         unknown = next(f"{number:06d}" for number in range(len(known) + 1) if f"{number:06d}" not in known)
         rejected_records = []
         cases = [
@@ -238,7 +258,7 @@ def attached_creation(binary, directory, root, env, *, scalar=None):
                         options[options.index(flag) + 1] = argument
                     else:
                         options.extend((flag, argument))
-                before = count("SELECT count(*) FROM session")
+                before = session_refs()
                 rejected = invoke("session", door, "--store", directory, "--parent", selected, *options,
                                   input=TASK if door == "start" else None, expect=3)
                 handle = announced(rejected)
@@ -246,8 +266,8 @@ def attached_creation(binary, directory, root, env, *, scalar=None):
                 assert answer["status"] == "rejected" and answer["code"] == code and not answer["replayed"], (name, rejected)
                 replay = value("request", "recover", handle, expect=3)["answer"]
                 assert replay["status"] == "rejected" and replay["code"] == code and replay["replayed"], replay
-                assert count("SELECT count(*) FROM session") == before
-                assert count(f"SELECT count(*) FROM message_admission WHERE command_key='{handle}'") == 0
+                assert session_refs() == before
+                expect_count(f"SELECT count(*) FROM message_admission WHERE command_key='{handle}'", 0)
                 rejected_records.append((handle, code))
         refused_update = invoke("session", "configure", "--store", directory, "--session", parent,
                                 "--parent", parent, "--permission-mode", "ask", expect=3)
@@ -271,7 +291,7 @@ def attached_creation(binary, directory, root, env, *, scalar=None):
                     for name, selected, extra, code in (cases[0], cases[1], cases[4], cases[5]):
                         key = f"attached-{mode}-{door}-{name}"
                         record = home / (key + ".json")
-                        before = count("SELECT count(*) FROM session")
+                        before = session_refs()
                         rejected = value("session", door, "--store", directory, "--parent", selected,
                                          *asking_spec, *extra, "--record", record, "--key", key,
                                          input=TASK if door == "start" else None,
@@ -285,8 +305,8 @@ def attached_creation(binary, directory, root, env, *, scalar=None):
                                        "--kind", "message" if door == "start" else "configure",
                                        without_home=mode == "no-home", expect=3)["answer"]
                         assert replay["code"] == code and replay["replayed"], replay
-                        assert count("SELECT count(*) FROM session") == before
-                        assert count(f"SELECT count(*) FROM message_admission WHERE command_key='{key}'") == 0
+                        assert session_refs() == before
+                        expect_count(f"SELECT count(*) FROM message_admission WHERE command_key='{key}'", 0)
         finally:
             preferences.write_bytes(saved_preferences)
 
@@ -294,18 +314,22 @@ def attached_creation(binary, directory, root, env, *, scalar=None):
         # Environment assertions above intentionally belong to the same Host.
         host_process.stop_process(host)
         host = None
+        audit()
         host, _ = host_process.start_ready_process(args, env=clean, required_fields={"execution": "enabled"})
         for handle, child, original, route, record, routing, messages in records:
             replay = value("request", "recover", handle)
             assert replay["context"]["session"] == child and replay["answer"]["replayed"], replay
             settings = inspect(child)["session"]
             assert settings["parent"] == parent and settings["tools"] == ["bash"], settings
-            assert count(f"SELECT count(*) FROM message_admission WHERE session_ref='{child}'") == messages
+            expect_count(f"SELECT count(*) FROM message_admission WHERE session_ref='{child}'", messages)
             assert record.read_bytes() == original and routing.read_bytes() == route
         for handle, code in rejected_records:
             replay = value("request", "recover", handle, expect=3)["answer"]
             assert replay["code"] == code and replay["replayed"], replay
         assert configuration(parent) == parent_after_refusals
+        host_process.stop_process(host)
+        host = None
+        audit()
         print("attached CLI: shared parent capture, atomic start, Bash environment, refusal and reopen replay passed", flush=True)
     finally:
         host_process.dispose_all(endpoint.release.set,
