@@ -27,9 +27,11 @@ Frame states: `focus-tab-list`, `focus-tab-settings`, `focus-tab-input`, `focus-
 
 ### Chatfeed appearance
 
-Frame states: `chatfeed-night-empty`, `chatfeed-night-draft`, `chatfeed-day-empty`, `chatfeed-day-draft`
+Frame states: `chatfeed-night-empty`, `chatfeed-night-draft`, `chatfeed-day-empty`, `chatfeed-day-draft`, `chatfeed-night-blank-line`, `chatfeed-day-blank-line`
 
 Run these states at 140x40 and 46x30. Their shared Session contains several real user Messages, a Bash tool demonstration and a recorded 61-second hold before the next Message. This crosses a minute boundary without modifying the transcript or clock. The first two Messages normally share a minute; the timestamp owner’s domain tests prove exact same-minute cases independently of wall-clock capture timing. Empty and retained-draft variants show the input anchor in both themes.
+
+The `chatfeed-night-blank-line` and `chatfeed-day-blank-line` states send one Message containing exactly `first line\n\nsecond line`. Capture both at 140x40 and 46x30; inspect that its timestamp appears on the first line and that the user tint covers all three rows, including the interior blank row, without a ground-colored break. Use an explicit shared scenario with `--before` to preserve comparable before/after captures and `pairs.json`.
 
 Inspect committed cells and PNG/HTML for faint user-message tint, upright text, quiet prompt marks, non-repeated adjacent minute stamps, and an untinted input. Compare input and surrounding divider row coordinates before and after at each width. PTY captures demonstrate layout and emitted cursor mode, not physical-terminal blinking.
 

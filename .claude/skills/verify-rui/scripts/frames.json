@@ -5,6 +5,62 @@
   ],
   "states": [
     {
+      "name": "chatfeed-night-blank-line",
+      "note": "One sent multiline Message retains its interior blank row inside an uninterrupted user tint band, with time on its first line",
+      "theme": "night",
+      "open": "Blank line witness",
+      "steps": [
+        {
+          "wait": "second line"
+        }
+      ],
+      "expect": [
+        "first line",
+        "second line",
+        "alt+i info"
+      ],
+      "absent": [
+        "Browsing · Esc returns",
+        "enter retry"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ],
+      "cast": [
+        {
+          "label": "Blank line witness",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "messages": [
+            "first line\n\nsecond line"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "chatfeed-day-blank-line",
+      "note": "One sent multiline Message retains its interior blank row inside an uninterrupted user tint band, with time on its first line",
+      "theme": "day",
+      "open": "Blank line witness",
+      "steps": [
+        {
+          "wait": "second line"
+        }
+      ],
+      "expect": [
+        "first line",
+        "second line",
+        "alt+i info"
+      ],
+      "absent": [
+        "Browsing · Esc returns",
+        "enter retry"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
+    },
+    {
       "name": "wide-launch",
       "note": "Bare launch opens an empty chat beside the list at wide widths",
       "open": "overview",

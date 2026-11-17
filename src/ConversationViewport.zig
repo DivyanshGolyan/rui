@@ -430,9 +430,13 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                 .heading => if (self.headingOpen(offset)) return .selected,
             };
             if (styled and offset < self.length and foregroundIndex(self.styles[offset]) == code_index) return .code;
-            if (styled) for (self.styles[offset..self.lineEnd(offset)]) |value| {
-                if (value & user_message_bit != 0) return .user_message;
-            };
+            if (styled) {
+                const end = self.lineEnd(offset);
+                const after = end + @intFromBool(end < self.length);
+                for (self.styles[offset..after]) |value| {
+                    if (value & user_message_bit != 0) return .user_message;
+                }
+            }
             return .plain;
         }
 
@@ -1791,4 +1795,45 @@ test "whole user message provenance tints empty bodies and rejects italics witho
         try std.testing.expectEqual(if (row < 2) colours.user_band else plain.bg, cell.style.bg);
         try std.testing.expect(!cell.style.italic);
     };
+}
+
+test "user band provenance includes blank and wrapped message lines only" {
+    const cases = [_]struct { body: []const u8, lines: usize, wraps: bool }{
+        .{ .body = "› \n", .lines = 1, .wraps = false },
+        .{ .body = "\n", .lines = 1, .wraps = false },
+        .{ .body = "› first\n\n  second\n", .lines = 3, .wraps = false },
+        .{ .body = "› first\n   \n  second\n", .lines = 3, .wraps = false },
+        .{ .body = "› a deliberately long message that wraps over several visual rows\n", .lines = 1, .wraps = true },
+    };
+    for (cases) |case| for ([_]u16{ 20, 46 }) |width| for ([_]bool{ false, true }) |colour| {
+        var document: Sized(512, true) = .{};
+        try document.append(TerminalText.user_message_on);
+        try document.append(case.body);
+        try document.append(TerminalText.user_message_off ++ "  Ran tool\n");
+        var screen: TestScreen = undefined;
+        const window = screen.window(width, 12);
+        const plain: vaxis.Style = .{ .bg = .{ .index = 1 } };
+        const colours: Colours = .{ .user_band = .{ .index = 2 } };
+        window.fill(.{ .style = plain });
+        var offset: usize = 0;
+        var row: u16 = 0;
+        var line: usize = 0;
+        while (offset < document.length) : (line += 1) {
+            const user = line < case.lines;
+            try std.testing.expectEqual(if (user) @as(@TypeOf(document.lineKind(0, null)), .user_message) else .plain, document.lineKind(offset, document.lineMarker(offset)));
+            const used = document.printLine(window, @intCast(row), offset, true, colour, plain, colours);
+            if (case.wraps and width == 20 and user) try std.testing.expect(used > 1);
+            for (row..row + used) |y| for (0..width) |x| {
+                try std.testing.expectEqual(if (colour and user) colours.user_band else plain.bg, screen.screen.readCell(@intCast(x), @intCast(y)).?.style.bg);
+            };
+            row += used;
+            offset = @min(document.lineEnd(offset) + 1, document.length);
+        }
+        try std.testing.expectEqual(case.lines + 1, line);
+    };
+    var unfinished: Sized(32, true) = .{};
+    try std.testing.expectEqual(@as(@TypeOf(unfinished.lineKind(0, null)), .plain), unfinished.lineKind(0, null));
+    try unfinished.append(TerminalText.user_message_on ++ "unfinished");
+    try std.testing.expectEqual(@as(@TypeOf(unfinished.lineKind(0, null)), .user_message), unfinished.lineKind(0, null));
+    try std.testing.expectEqual(@as(@TypeOf(unfinished.lineKind(0, null)), .plain), unfinished.lineKind(unfinished.length, null));
 }
