@@ -112,12 +112,13 @@ jobs:
                   with urllib.request.urlopen(request, timeout=10) as response:
                       data = json.load(response)
                   batch = data[key]
-                  if not isinstance(batch, list) or type(data['total_count']) is not int:
+                  if not isinstance(batch, list):
                       raise ValueError('Malformed Actions API response')
                   rows.extend(batch)
+                  # A short page ends the list. total_count is not used: for
+                  # status-filtered runs GitHub reports more than it returns
+                  # (run 44107206214), which made every snapshot unavailable.
                   if len(batch) < 100:
-                      if len(rows) < data['total_count']:
-                          raise ValueError('Incomplete Actions API response')
                       return rows
                   page += 1
 
@@ -168,6 +169,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
+      screens_required: ${{ steps.shape.outputs.screens_required }}
       change_kind: ${{ steps.select.outputs.change_kind }}
       draft_run: ${{ steps.select.outputs.draft_run }}
       candidate_ref: ${{ steps.select.outputs.candidate_ref }}
@@ -193,6 +195,7 @@ jobs:
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
+          filter: blob:none
       - name: Select existing targets
         id: select
         env:
@@ -231,6 +234,7 @@ jobs:
               print('Selection (not acceptance):\n```json\n' + json.dumps(result.selection, indent=2) + '\n```', file=f)
           PY
       - name: Require PR Shape
+        id: shape
         if: github.event_name == 'pull_request'
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
@@ -253,6 +257,7 @@ jobs:
           ref: ${{ github.sha }}
           # Import-cycle and caller-error allowances only shrink from trusted main history.
           fetch-depth: 0
+          filter: blob:none
       - name: Install the pinned packages tests/ci imports
         run: python3 -m pip install --disable-pip-version-check -r tests/integration/requirements.txt -r tests/ci/requirements.txt
       - name: Determine whether caller inventory needs its pinned-stdlib bootstrap
@@ -303,16 +308,21 @@ jobs:
           mkdir -p "$RUNNER_TEMP/actionlint"
           bash .github/scripts/install-actionlint.sh "$RUNNER_TEMP/actionlint"
           echo "$RUNNER_TEMP/actionlint" >> "$GITHUB_PATH"
-      - name: Validate workflows with one pinned-linter compatibility exception
+      - name: Validate workflows with pinned-linter compatibility exceptions
         run: |
           set -euo pipefail
           for workflow in .github/workflows/*.yml; do
-            if [ "$workflow" = .github/workflows/qualify-macos.yml ] || [ "$workflow" = .github/workflows/previous-release-upgrade.yml ] || [ "$workflow" = .github/workflows/release.yml ]; then
-              # 1.7.7 predates GitHub's server-enforced cache policy key.
-              actionlint -shellcheck= -ignore '^unexpected key "cache-mode" for "workflow" section\.' "$workflow"
-            else
-              actionlint -shellcheck= "$workflow"
+            ignores=()
+            # 1.7.7 predates GitHub's server-enforced cache policy key.
+            case "$workflow" in
+              .github/workflows/qualify-macos.yml|.github/workflows/previous-release-upgrade.yml|.github/workflows/release.yml|.github/workflows/screens.yml)
+                ignores+=(-ignore '^unexpected key "cache-mode" for "workflow" section\.') ;;
+            esac
+            # 1.7.7 predates GitHub's bounded concurrency queue option.
+            if [ "$workflow" = .github/workflows/screens.yml ]; then
+              ignores+=(-ignore '^unexpected key "queue" for "concurrency" section\.')
             fi
+            actionlint -shellcheck= "${ignores[@]}" "$workflow"
           done
   linux_build:
     needs: plan
@@ -969,6 +979,20 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: ${{ needs.plan.outputs.screens_required == 'true' }}
+        with:
+          ref: ${{ needs.plan.outputs.candidate_ref }}
+          sparse-checkout: tests/ci
+          persist-credentials: false
+      - name: Require screen evidence
+        if: ${{ needs.plan.outputs.screens_required == 'true' }}
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: python3 tests/ci/pr_shape.py --screens
       - name: Require candidate acceptance
         env:
           CHANGE_KIND: ${{ needs.plan.outputs.change_kind }}

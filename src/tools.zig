@@ -19,6 +19,7 @@ pub const max_host_tool_records = @import("tool_record.zig").max_host_tool_recor
 pub const bash_record = @import("tool_record.zig").bash_record;
 pub const find_tools_record = @import("tool_record.zig").find_tools_record;
 pub const message_agent_record = @import("tool_record.zig").message_agent_record;
+pub const read_image_record = @import("tool_record.zig").read_image_record;
 pub const read_action_record = @import("tool_record.zig").read_action_record;
 pub const read_transcript_record = @import("tool_record.zig").read_transcript_record;
 pub const skill_record = @import("tool_record.zig").skill_record;
@@ -463,5 +464,36 @@ test "read_action honors the offered core record and defers argument checks" {
         const excluded: Offered = .{ .names = "read_transcript" };
         const refused = try inspectCall(&name, "read_action".len, &arguments, &excluded);
         try std.testing.expectEqual(@as(?protocol.ProposalRejection, .unknown_tool), classifyCall(&refused));
+    }
+}
+
+test "read_image classification uses offered built-in records and typed path arguments" {
+    const Name = struct {
+        at: usize = 0,
+        pub fn next(self: *@This()) !?u8 {
+            const name = read_image_record.name;
+            if (self.at == name.len) return null;
+            defer self.at += 1;
+            return name[self.at];
+        }
+    };
+    const Case = struct { arguments: []const u8, offered: bool = true, rejection: ?protocol.ProposalRejection = null };
+    for ([_]Case{
+        .{ .arguments = "{\"path\":\"pixel.png\"}" },
+        .{ .arguments = "{\"path\":\"/tmp/pixel.jpg\"}" },
+        .{ .arguments = "{}", .rejection = .invalid_arguments },
+        .{ .arguments = "{\"path\":null}", .rejection = .invalid_arguments },
+        .{ .arguments = "{\"path\":\"https://example.com/image.png\"}", .rejection = .invalid_arguments },
+        .{ .arguments = "{\"path\":\"pixel.png\"}", .offered = false, .rejection = .unknown_tool },
+    }) |case| {
+        var name: Name = .{};
+        var arguments: TestSource = .{ .bytes = case.arguments };
+        const offered: Offered = .{ .names = if (case.offered) read_image_record.name else "" };
+        const facts = try inspectCall(&name, read_image_record.name.len, &arguments, &offered);
+        try std.testing.expectEqual(case.rejection, classifyCall(&facts));
+        if (case.rejection == null) {
+            try std.testing.expectEqual(Runner.read_image, facts.tool.?.runner());
+            try std.testing.expectEqualStrings("Read an image", facts.description().?.slice());
+        }
     }
 }

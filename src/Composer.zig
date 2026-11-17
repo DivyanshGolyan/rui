@@ -19,6 +19,8 @@ known_word: ?commands.Span = null,
 placeholder: []const u8 = "",
 ascii: bool = false,
 caret: bool = true,
+panel: ?vxfw.Widget = null,
+max_rows: u16 = std.math.maxInt(u16),
 
 pub fn setCaps(self: *Self, caps: view.Caps) void {
     self.style = widget_style.of(caps, .{});
@@ -40,15 +42,18 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const width = ctx.max.width.?;
     const height = ctx.max.height.?;
     if (width == 0 or height == 0) return vxfw.Surface.init(ctx.cell_arena, self.widget(), .{});
-    const rule: u16 = if (height >= 3) 1 else 0;
+    const rule: u16 = if (height >= layout.min_rule_height) 1 else 0;
     const prefix: u16 = if (width >= 4) 3 else 0;
     const area = &self.editor.area;
     area.style = self.style;
     area.show_cursor = true;
     area.width_method = self.method;
-    const text = try area.draw(ctx.withConstraints(.{}, .{ .width = width - prefix, .height = height - 2 * rule }));
+    const text = try area.draw(ctx.withConstraints(.{}, .{ .width = width - prefix, .height = @min(height - 2 * rule, self.max_rows) }));
+    const panel = if (self.panel) |child| try child.draw(ctx.withConstraints(.{}, .{ .width = width, .height = height - text.size.height - 2 * rule })) else null;
+    const panel_rows: u16 = if (panel) |drawn| drawn.size.height else 0;
+    const text_row = rule + panel_rows;
     const shown = area.viewport();
-    var surface = try vxfw.Surface.init(ctx.cell_arena, self.widget(), .{ .width = width, .height = text.size.height + 2 * rule });
+    var surface = try vxfw.Surface.init(ctx.cell_arena, self.widget(), .{ .width = width, .height = text.size.height + 2 * rule + panel_rows });
     @memset(surface.buffer, .{ .style = self.style });
     const command = if (self.known_word) |span| self.editor.text()[span.start..][0..span.len] else null;
     for (0..text.size.height) |row| for (0..text.size.width) |col| {
@@ -61,7 +66,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
             const at = @intFromPtr(glyph.ptr);
             if (glyph.len != 0 and at >= start and at - start < word.len and glyph.len <= word.len - (at - start)) cell.style = self.command_style;
         }
-        surface.writeCell(@intCast(col + prefix), @intCast(row + rule), cell);
+        surface.writeCell(@intCast(col + prefix), @intCast(row + text_row), cell);
     };
     var screen: vaxis.Screen = .{
         .width = surface.size.width,
@@ -89,14 +94,15 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         _ = window.child(.{ .x_off = @intCast(column), .height = 1 }).printSegment(.{ .text = label, .style = self.rule_style }, .{ .wrap = .none });
     };
     for (0..shown.visible) |index| {
-        const row: u16 = @intCast(index + rule);
+        const row: u16 = @intCast(index + text_row);
         if (prefix != 0) _ = window.child(.{ .y_off = row, .height = 1, .width = prefix }).printSegment(.{
             .text = if (shown.first + index != 0) "   " else if (self.ascii) " > " else " › ",
             .style = if (self.caret) self.style else self.quiet,
         }, .{ .wrap = .none });
     }
-    if (self.editor.text().len == 0) _ = window.child(.{ .x_off = prefix, .y_off = rule, .height = 1 }).printSegment(.{ .text = self.placeholder, .style = self.quiet }, .{ .wrap = .none });
-    if (self.caret) surface.cursor = .{ .row = text.cursor.?.row + rule, .col = text.cursor.?.col + prefix, .shape = .block_blink };
+    if (self.editor.text().len == 0) _ = window.child(.{ .x_off = prefix, .y_off = text_row, .height = 1 }).printSegment(.{ .text = self.placeholder, .style = self.quiet }, .{ .wrap = .none });
+    if (self.caret) surface.cursor = .{ .row = text.cursor.?.row + text_row, .col = text.cursor.?.col + prefix, .shape = .block_blink };
+    if (panel) |drawn| surface.children = try ctx.arena.dupe(vxfw.SubSurface, &.{.{ .origin = .{ .row = rule, .col = 0 }, .surface = drawn }});
     return surface;
 }
 
@@ -330,5 +336,49 @@ test "Composer colours the list owner's exact word without taking TextArea's lay
                 try std.testing.expectEqual(caret, editor.area.cursor);
             };
         }
+    };
+}
+
+test "Composer measures panels once between its rules without changing draft or caret" {
+    const Panel = struct {
+        rows: u16,
+        draws: usize = 0,
+        fn widget(self: *@This()) vxfw.Widget {
+            return .{ .userdata = self, .drawFn = drawPanel };
+        }
+        fn drawPanel(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.draws += 1;
+            return vxfw.Surface.init(ctx.cell_arena, self.widget(), .{ .width = ctx.max.width.?, .height = @min(self.rows, ctx.max.height.?) });
+        }
+    };
+    for ([_]u16{ 1, 2, 46, 140 }) |width| for ([_]u16{ 1, 2, 3, 7, 30, 40 }) |height| for ([_]u16{ 1, 4, 50 }) |rows| {
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var bytes = "kept\ndraft".*;
+        var editor: Editor = .initText(&bytes, &bytes, 4);
+        var panel: Panel = .{ .rows = rows };
+        var composer: Self = .{ .editor = &editor, .max_rows = 2 };
+        const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = height }, .cell_size = .{} };
+        const before = try composer.widget().draw(ctx);
+        composer.panel = panel.widget();
+        const after = try composer.widget().draw(ctx);
+        const child = after.children[0];
+        const rule: u16 = if (height >= 3) 1 else 0;
+        try std.testing.expectEqual(@as(usize, 1), panel.draws);
+        try std.testing.expectEqual(@as(i17, rule), child.origin.row);
+        try std.testing.expectEqual(@min(rows, height - before.size.height), child.surface.size.height);
+        try std.testing.expectEqual(before.size.height + child.surface.size.height, after.size.height);
+        try std.testing.expectEqual(before.cursor.?.row + child.surface.size.height, after.cursor.?.row);
+        try std.testing.expectEqual(before.cursor.?.col, after.cursor.?.col);
+        if (rule != 0) {
+            try std.testing.expectEqualStrings("─", after.readCell(0, 0).char.grapheme);
+            try std.testing.expectEqualStrings("─", after.readCell(0, after.size.height - 1).char.grapheme);
+        }
+        for (rule..before.size.height - rule) |row| for (0..width) |col| {
+            try std.testing.expectEqualDeep(before.readCell(col, row), after.readCell(col, row + child.surface.size.height));
+        };
+        try std.testing.expectEqualStrings("kept\ndraft", editor.text());
+        try std.testing.expectEqual(@as(usize, 4), editor.cursor());
     };
 }

@@ -94,32 +94,6 @@ pub const Queue = struct {
         try self.publish(&.{ pair.stdout, pair.stderr });
     }
 
-    pub noinline fn writeFile(self: *Queue, name: []const u8, length: u64, context: anytype, write: anytype) bool {
-        const tokens = (self.reserveEntries(1, .{name}, .{length}) catch return false) orelse return false;
-        const token = tokens[0];
-        defer self.releaseReservation(token);
-        const budget = self.sharedBudget();
-        if (!budget.allocate(length)) return false;
-        var created = false;
-        defer if (!created) budget.release(length);
-        var directory = std.Io.Dir.cwd().openDir(self.io, self.scratch_path, .{}) catch return false;
-        defer directory.close(self.io);
-        const file = directory.createFile(self.io, name, .{
-            .exclusive = true,
-            .permissions = .fromMode(0o600),
-        }) catch return false;
-        created = true;
-        defer {
-            file.close(self.io);
-            self.publish(&.{token}) catch unreachable;
-        }
-        var buffer: [4096]u8 = undefined;
-        var out = file.writer(self.io, &buffer);
-        write(&out.interface, context) catch return false;
-        out.interface.flush() catch return false;
-        return true;
-    }
-
     fn reserveEntries(self: *Queue, comptime count: usize, file_names: [count][]const u8, charges: [count]u64) !?[count]Token {
         var names: [count]protocol.Bounded(96) = @splat(.{});
         for (&names, file_names) |*name, value| try name.set(value);
@@ -261,6 +235,140 @@ pub const Queue = struct {
         defer self.mutex.unlock(self.io);
         const entry = &self.entries[index];
         if (entry.generation == generation and entry.state == .evicting) entry.state = .failed;
+    }
+};
+
+/// Optional full output. The caller opens this only once output must be retained.
+/// Until publication the reserved entry cannot be evicted, and this object owns
+/// the live charge. The caller must serialize operations on each Spill.
+pub const Spill = struct {
+    queue: *Queue,
+    token: Token,
+    file: ?std.Io.File,
+    charged: u64 = 0,
+    state: enum { writing, closed, yielded, published } = .writing,
+    kept: bool = false,
+
+    pub fn open(queue: *Queue, output_name: []const u8) ?Spill {
+        const tokens = (queue.reserveEntries(1, .{output_name}, .{0}) catch return null) orelse return null;
+        const token = tokens[0];
+        var directory = std.Io.Dir.cwd().openDir(queue.io, queue.scratch_path, .{}) catch {
+            queue.releaseReservation(token);
+            return null;
+        };
+        defer directory.close(queue.io);
+        const file = directory.createFile(queue.io, output_name, .{
+            .exclusive = true,
+            .permissions = .fromMode(0o600),
+        }) catch {
+            queue.releaseReservation(token);
+            return null;
+        };
+        return .{ .queue = queue, .token = token, .file = file };
+    }
+
+    pub fn write(self: *Spill, bytes: []const u8) void {
+        self.writeWith(bytes, struct {
+            fn writeSome(file: std.Io.File, io: std.Io, data: []const u8) !usize {
+                return file.writeStreaming(io, &.{}, &.{data}, 1);
+            }
+        }.writeSome);
+    }
+
+    fn writeWith(self: *Spill, bytes: []const u8, writeSome: anytype) void {
+        if (self.state != .writing or bytes.len == 0) return;
+        const amount: u64 = @intCast(bytes.len);
+        if (!self.queue.sharedBudget().allocate(amount)) {
+            _ = self.yield();
+            return;
+        }
+        // A failed write may have persisted an unknown portion of its input.
+        // Keep the entire submitted charge until removal is confirmed.
+        self.charged += amount;
+        var offset: usize = 0;
+        while (offset < bytes.len) {
+            const n = writeSome(self.file.?, self.queue.io, bytes[offset..]) catch {
+                _ = self.yield();
+                return;
+            };
+            if (n == 0) {
+                _ = self.yield();
+                return;
+            }
+            offset += n;
+        }
+    }
+
+    /// Remove optional output to give required capture first claim on its budget.
+    /// Failed removals transfer the charge to a retryable queue entry.
+    pub fn yield(self: *Spill) u64 {
+        if (self.state == .yielded or self.state == .published) return 0;
+        if (self.file) |file| file.close(self.queue.io);
+        self.file = null;
+        const queue = self.queue;
+        queue.mutex.lockUncancelable(queue.io);
+        const entry = queue.current(self.token) catch unreachable;
+        std.debug.assert(entry.state == .reserved);
+        const file_name = entry.name;
+        entry.charged = self.charged;
+        entry.state = .evicting;
+        queue.mutex.unlock(queue.io);
+        const removed = named_scratch.removeNameWith(queue.io, queue.scratch_path, file_name.slice(), queue.removal);
+        queue.mutex.lockUncancelable(queue.io);
+        const current = queue.current(self.token) catch unreachable;
+        std.debug.assert(current.state == .evicting);
+        const charged = self.charged;
+        if (removed) |_| {
+            current.* = .{ .generation = current.generation };
+            queue.budget.release(charged);
+        } else |_| {
+            current.state = .failed;
+        }
+        queue.mutex.unlock(queue.io);
+        self.charged = 0;
+        self.state = .yielded;
+        return if (removed) |_| charged else |_| 0;
+    }
+
+    pub fn close(self: *Spill) void {
+        if (self.state != .writing) return;
+        self.file.?.close(self.queue.io);
+        self.file = null;
+        self.state = .closed;
+        self.publishIfReady();
+    }
+
+    pub fn keep(self: *Spill) void {
+        if (self.state == .yielded or self.state == .published) return;
+        self.kept = true;
+        self.publishIfReady();
+    }
+
+    pub fn release(self: *Spill) void {
+        _ = self.yield();
+    }
+
+    pub fn alive(self: *const Spill) bool {
+        return self.state != .yielded;
+    }
+
+    /// Valid while the spill is alive and has not been published or released.
+    pub fn name(self: *const Spill) []const u8 {
+        std.debug.assert(self.state == .writing or self.state == .closed);
+        return self.queue.entries[self.token.index].name.slice();
+    }
+
+    fn publishIfReady(self: *Spill) void {
+        if (!self.kept or self.state != .closed) return;
+        const queue = self.queue;
+        queue.mutex.lockUncancelable(queue.io);
+        defer queue.mutex.unlock(queue.io);
+        const entry = queue.current(self.token) catch unreachable;
+        std.debug.assert(entry.state == .reserved);
+        entry.charged = self.charged;
+        entry.state = .retained;
+        self.charged = 0;
+        self.state = .published;
     }
 };
 
@@ -586,7 +694,7 @@ test "partial retained cleanup keeps only the exact residual owner and charge" {
     try std.testing.expectEqual(baseline, used.load(.acquire));
 }
 
-test "retention file write failure keeps partial bytes charged through removal retry" {
+test "spill unknown write failure retains submitted charge through removal retry" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
@@ -594,30 +702,29 @@ test "retention file write failure keeps partial bytes charged through removal r
     var used: std.atomic.Value(u64) = .init(41);
     var entries: [1]Entry = @splat(.{});
     var queue = Queue.initializeWithRemoval(std.testing.io, root, .{ .used = &used, .limit = 48 }, &entries, .injected_failure);
-    defer queue.cleanupAll();
     const Write = struct {
-        fn fail(out: *std.Io.Writer, _: void) !void {
-            try out.writeAll("partial");
-            try out.flush();
+        fn fail(file: std.Io.File, io: std.Io, bytes: []const u8) !usize {
+            try file.writeStreamingAll(io, bytes[0..3]);
             return error.InjectedOutputWriteFailure;
         }
     };
-    try std.testing.expect(!queue.writeFile("partial", 7, {}, Write.fail));
+    var spill = Spill.open(&queue, "partial") orelse return error.TestUnexpectedResult;
+    spill.writeWith("partial", Write.fail);
+    try std.testing.expect(!spill.alive());
     try std.testing.expectEqual(@as(u64, 48), used.load(.acquire));
-    try std.testing.expectEqual(@as(usize, 1), queue.occupied());
+    try std.testing.expectEqual(@as(u64, 7), entries[spill.token.index].charged);
     var bytes: [7]u8 = undefined;
-    try std.testing.expectEqualStrings("partial", try tmp.dir.readFile(std.testing.io, "partial", &bytes));
+    try std.testing.expectEqualStrings("par", try tmp.dir.readFile(std.testing.io, "partial", &bytes));
     queue.cleanupAll();
     try std.testing.expectEqual(@as(u64, 48), used.load(.acquire));
-    try std.testing.expectEqual(@as(usize, 1), queue.occupied());
     queue.removal = .native;
     queue.cleanupAll();
     try std.testing.expectEqual(@as(u64, 41), used.load(.acquire));
     try std.testing.expectEqual(@as(usize, 0), queue.occupied());
-    try std.testing.expectError(error.FileNotFound, tmp.dir.openFile(std.testing.io, "partial", .{}));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "partial", .{}));
 }
 
-test "retention file reservations protect writers and release failed creation charges" {
+test "spill reservation protects writers and failed creation preserves existing file" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
@@ -626,22 +733,132 @@ test "retention file reservations protect writers and release failed creation ch
     var entries: [1]Entry = @splat(.{});
     var queue = Queue.initialize(std.testing.io, root, .{ .used = &used, .limit = 48 }, &entries);
     defer queue.cleanupAll();
-    const Write = struct {
-        fn protected(out: *std.Io.Writer, owner: *Queue) !void {
-            try std.testing.expectEqual(@as(u64, 48), owner.budget.used.load(.acquire));
-            try std.testing.expect(!owner.sharedBudget().allocate(1));
-            try std.testing.expectEqual(@as(usize, 1), owner.occupied());
-            try out.writeAll("success");
-        }
-    };
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "collision", .data = "original" });
-    try std.testing.expect(!queue.writeFile("collision", 7, &queue, Write.protected));
+    try std.testing.expect(Spill.open(&queue, "collision") == null);
     try std.testing.expectEqual(@as(u64, 41), used.load(.acquire));
     try std.testing.expectEqual(@as(usize, 0), queue.occupied());
     var bytes: [8]u8 = undefined;
     try std.testing.expectEqualStrings("original", try tmp.dir.readFile(std.testing.io, "collision", &bytes));
-    try std.testing.expect(queue.writeFile("written", 7, &queue, Write.protected));
+    var spill = Spill.open(&queue, "written") orelse return error.TestUnexpectedResult;
+    spill.write("success");
+    try std.testing.expectEqual(@as(u64, 48), used.load(.acquire));
+    try std.testing.expect(!queue.sharedBudget().allocate(1));
+    try std.testing.expectEqual(@as(usize, 1), queue.occupied());
+    spill.close();
+    spill.keep();
     queue.cleanupAll();
     try std.testing.expectEqual(@as(u64, 41), used.load(.acquire));
     try std.testing.expectEqual(@as(usize, 0), queue.occupied());
+}
+
+test "spill handoff waits for close and keep in either order" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var used = std.atomic.Value(u64).init(0);
+    var entries: [2]Entry = @splat(.{});
+    var queue = Queue.initialize(std.testing.io, root, .{ .used = &used, .limit = 20 }, &entries);
+    defer queue.cleanupAll();
+
+    var first = Spill.open(&queue, "first") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("first", first.name());
+    first.write("abc");
+    try std.testing.expectEqual(@as(u64, 3), used.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 0), entries[first.token.index].charged);
+    first.keep();
+    try std.testing.expectEqual(State.reserved, entries[first.token.index].state);
+    first.close();
+    first.close();
+    first.keep();
+    first.release();
+    try std.testing.expectEqual(State.retained, entries[first.token.index].state);
+    try std.testing.expectEqual(@as(u64, 3), entries[first.token.index].charged);
+
+    var second = Spill.open(&queue, "second") orelse return error.TestUnexpectedResult;
+    second.write("de");
+    second.close();
+    try std.testing.expectEqual(State.reserved, entries[second.token.index].state);
+    second.keep();
+    try std.testing.expectEqual(State.retained, entries[second.token.index].state);
+    var data: [3]u8 = undefined;
+    try std.testing.expectEqualStrings("abc", try tmp.dir.readFile(std.testing.io, "first", &data));
+    queue.cleanupAll();
+    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+}
+
+test "spill yields its live charge for required capture" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var used = std.atomic.Value(u64).init(0);
+    var entries: [1]Entry = @splat(.{});
+    var queue = Queue.initialize(std.testing.io, root, .{ .used = &used, .limit = 4 }, &entries);
+    var spill = Spill.open(&queue, "output") orelse return error.TestUnexpectedResult;
+    spill.write("abcd");
+    try std.testing.expect(!queue.sharedBudget().allocate(4));
+    try std.testing.expectEqual(@as(u64, 4), spill.yield());
+    try std.testing.expect(!spill.alive());
+    try std.testing.expectEqual(@as(u64, 0), spill.yield());
+    try std.testing.expect(queue.sharedBudget().allocate(4));
+    queue.budget.release(4);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "output", .{}));
+    try std.testing.expectEqual(@as(usize, 0), queue.occupied());
+}
+
+test "spill failed removal preserves charge for retry and quota failure yields" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var used = std.atomic.Value(u64).init(0);
+    var entries: [1]Entry = @splat(.{});
+    var queue = Queue.initializeWithRemoval(std.testing.io, root, .{ .used = &used, .limit = 4 }, &entries, .injected_failure);
+    var spill = Spill.open(&queue, "output") orelse return error.TestUnexpectedResult;
+    spill.write("abc");
+    spill.write("de");
+    try std.testing.expect(!spill.alive());
+    try std.testing.expectEqual(@as(u64, 3), used.load(.acquire));
+    try std.testing.expectEqual(State.failed, entries[spill.token.index].state);
+    try std.testing.expectEqual(@as(u64, 3), entries[spill.token.index].charged);
+    queue.cleanupAll();
+    try std.testing.expectEqual(@as(u64, 3), used.load(.acquire));
+    queue.removal = .native;
+    queue.cleanupAll();
+    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), queue.occupied());
+}
+
+test "spill open and write refusals leave no unowned reservation" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var used = std.atomic.Value(u64).init(0);
+    var entries: [1]Entry = @splat(.{});
+    var queue = Queue.initialize(std.testing.io, root, .{ .used = &used, .limit = 0 }, &entries);
+    var spill = Spill.open(&queue, "zero-budget") orelse return error.TestUnexpectedResult;
+    spill.write("x");
+    try std.testing.expect(!spill.alive());
+    try std.testing.expectEqual(@as(usize, 0), queue.occupied());
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "zero-budget", .{}));
+
+    var empty: [0]Entry = .{};
+    var full = Queue.initialize(std.testing.io, root, .{ .used = &used, .limit = 0 }, &empty);
+    try std.testing.expect(Spill.open(&full, "no-entry") == null);
+    queue.next_sequence = std.math.maxInt(u64);
+    try std.testing.expect(Spill.open(&queue, "sequence") == null);
+    try std.testing.expectEqual(@as(usize, 0), queue.occupied());
+    queue.next_sequence = 1;
+
+    try tmp.dir.createDir(std.testing.io, "directory", .default_dir);
+    try std.testing.expect(Spill.open(&queue, "directory") == null);
+    try std.testing.expectEqual(@as(usize, 0), queue.occupied());
+    var missing_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const missing = try std.fmt.bufPrint(&missing_buffer, "{s}/absent", .{root});
+    var unavailable = Queue.initialize(std.testing.io, missing, .{ .used = &used, .limit = 0 }, &entries);
+    try std.testing.expect(Spill.open(&unavailable, "output") == null);
+    try std.testing.expectEqual(@as(usize, 0), unavailable.occupied());
+    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
 }

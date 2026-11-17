@@ -1,5 +1,6 @@
 const std = @import("std");
 const server_mcp = @import("server_mcp.zig");
+const server_read_image = @import("server_read_image.zig");
 const bash = @import("bash.zig");
 const codecs = @import("codecs.zig");
 const execution = @import("execution.zig");
@@ -390,17 +391,21 @@ const Workspace = struct {
     decode: output_decode.Decode,
     settlement: store_module.ValidatedOutput,
     listings: std.EnumArray(provider.ListingKind, ListingWork),
+    image_calls: server_read_image.Calls,
+    turn_state: execution_turn.State,
 };
 
-// Keep admission state within the existing mapped execution workspace pages.
-// Derive its previous shape rather than maintaining a second field inventory.
-const WorkspaceBeforeAdmission = blk: {
+// Keep admission and dispatch state within the original mapped workspace pages.
+// Exclude every added owner so its state cannot silently raise the baseline.
+const WorkspaceBeforeAdmissionAndDispatch = blk: {
     const fields = std.meta.fieldNames(Workspace);
-    var names: [fields.len - 1][:0]const u8 = undefined;
+    var names: [fields.len - 3][:0]const u8 = undefined;
     var types: [names.len]type = undefined;
     var next: usize = 0;
     for (fields) |name| {
-        if (std.mem.eql(u8, name, "model_admission")) continue;
+        if (std.mem.eql(u8, name, "model_admission") or
+            std.mem.eql(u8, name, "image_calls") or
+            std.mem.eql(u8, name, "turn_state")) continue;
         names[next] = name;
         types[next] = @FieldType(Workspace, name);
         next += 1;
@@ -410,9 +415,9 @@ const WorkspaceBeforeAdmission = blk: {
 
 comptime {
     const page = std.heap.page_size_min;
-    if (std.mem.alignForward(usize, @sizeOf(Workspace), page) > std.mem.alignForward(usize, @sizeOf(WorkspaceBeforeAdmission), page))
-        @compileError(std.fmt.comptimePrint("model admission preflight must fit existing workspace pages: {d} -> {d} bytes (state {d})", .{
-            @sizeOf(WorkspaceBeforeAdmission), @sizeOf(Workspace), @sizeOf(store_module.ModelAdmissionPreparation),
+    if (std.mem.alignForward(usize, @sizeOf(Workspace), page) > std.mem.alignForward(usize, @sizeOf(WorkspaceBeforeAdmissionAndDispatch), page))
+        @compileError(std.fmt.comptimePrint("admission and dispatch state must fit existing workspace pages: {d} -> {d} bytes", .{
+            @sizeOf(WorkspaceBeforeAdmissionAndDispatch), @sizeOf(Workspace),
         }));
 }
 
@@ -568,10 +573,12 @@ pub fn executionMain(host: *Host) void {
     if (reactor != null) host.scratch_budget = budget;
     defer host.scratch_budget = null;
     var mcp_calls: server_mcp.Calls = .{};
+    workspace.image_calls = .{};
+    defer workspace.image_calls.shutdown(host);
     defer shutdownExecution(host, slots, workspace);
     defer mcp_calls.shutdown(host);
 
-    var turn_state = execution_turn.State{ .capacity_was_full = slots.len == 0 };
+    workspace.turn_state = .{ .capacity_was_full = slots.len == 0 };
     var measurement: LifecycleMeasurement = .{};
     var heap_release: HeapRelease = .{};
     while (!host.executionEnding()) {
@@ -582,10 +589,11 @@ pub fn executionMain(host: *Host) void {
             .workspace = workspace,
             .measurement = &measurement,
             .mcp = &mcp_calls,
+            .images = &workspace.image_calls,
             .fenced = false,
         };
         host.dispatch_wake.reset();
-        switch (execution_turn.run(&turn_state, &native)) {
+        switch (execution_turn.run(&workspace.turn_state, &native)) {
             .continue_immediately => heap_release.worked = true,
             .wait => |kind| {
                 if (heap_release.due(slots, if (reactor) |active| active.listingPending() else false)) process.releaseFreeHeap();
@@ -625,6 +633,7 @@ const NativeTurn = struct {
     workspace: *Workspace,
     measurement: *LifecycleMeasurement,
     mcp: *server_mcp.Calls,
+    images: ?*server_read_image.Calls = null,
     fenced: bool,
     scheduled_retry: execution_turn.ScheduledRetry = .unknown,
 
@@ -715,7 +724,8 @@ const NativeTurn = struct {
             }
         }
         const mcp_progress = self.mcp.service(self.host);
-        return advanceBash(self.host, self.slots, self.workspace) or mcp_progress;
+        const image_progress = if (self.images) |images| images.service(self.host) else false;
+        return advanceBash(self.host, self.slots, self.workspace) or mcp_progress or image_progress;
     }
 
     pub fn advanceRetainedCleanup(self: *NativeTurn, observed: std.Io.Clock.Timestamp, retry_at: *std.Io.Clock.Timestamp) bool {
@@ -760,15 +770,15 @@ const NativeTurn = struct {
     }
 
     pub fn hasBash(self: *const NativeTurn) bool {
-        return slotsHaveBash(self.slots) or self.mcp.any();
+        return slotsHaveBash(self.slots) or self.mcp.any() or (if (self.images) |images| images.any() else false);
     }
 
     pub fn recoverUncertainAction(self: *NativeTurn) error{Fence}!bool {
-        const active_slots = ActiveSlots{ .slots = self.slots, .mcp = self.mcp };
+        const active_slots = ActiveSlots{ .slots = self.slots, .mcp = self.mcp, .images = self.images };
         const active_actions = store_module.ActiveOperationFilter{
             .context = &active_slots,
             .containsFn = activeActionContains,
-            .maximum_exclusions = self.slots.len + server_mcp.capacity,
+            .maximum_exclusions = self.host.custody.records.len,
         };
         return self.host.store.recoverOneUncertainAction(active_actions) catch |err| {
             fenceDispatch(self.host, "uncertain Action recovery", err);
@@ -802,7 +812,7 @@ const NativeTurn = struct {
     }
 
     pub fn runCoreAction(self: *NativeTurn) execution_turn.Admission {
-        return runNextCoreAction(self.host, self.mcp);
+        return runNextCoreAction(self.host, self.mcp, self.images);
     }
 
     pub noinline fn admitBash(self: *NativeTurn) execution_turn.Admission {
@@ -1259,6 +1269,7 @@ fn slotIsFree(slot: *const ExecutionSlot) bool {
 const ActiveSlots = struct {
     slots: []ExecutionSlot,
     mcp: ?*const server_mcp.Calls = null,
+    images: ?*const server_read_image.Calls = null,
 };
 
 fn activeOperationContains(context: *const anyopaque, operation_id: u64) bool {
@@ -1277,6 +1288,7 @@ fn activeOperationContains(context: *const anyopaque, operation_id: u64) bool {
 fn activeActionContains(context: *const anyopaque, action_id: u64) bool {
     const active: *const ActiveSlots = @ptrCast(@alignCast(context));
     if (active.mcp) |mcp| if (mcp.contains(action_id)) return true;
+    if (active.images) |images| if (images.contains(action_id)) return true;
     for (active.slots) |slot| switch (slot) {
         .bash_preparing => |value| if (value.binding.action_id == action_id) return true,
         .bash => |value| if (value.binding.action_id == action_id) return true,
@@ -1332,7 +1344,7 @@ fn advanceBash(host: *Host, slots: []ExecutionSlot, workspace: *Workspace) bool 
     return made_progress;
 }
 
-noinline fn runNextCoreAction(host: *Host, mcp: *server_mcp.Calls) execution_turn.Admission {
+noinline fn runNextCoreAction(host: *Host, mcp: *server_mcp.Calls, images: ?*server_read_image.Calls) execution_turn.Admission {
     const work = (host.store.nextCoreWork(host.custody.dispatchCapacity(!mcp.full())) catch |err| {
         fenceDispatch(host, "core tool selection", err);
         return .retry_later;
@@ -1340,6 +1352,7 @@ noinline fn runNextCoreAction(host: *Host, mcp: *server_mcp.Calls) execution_tur
     return switch (work) {
         .stop => |*owed| runOwedStop(host, owed),
         .mcp => |call| mcp.admit(host, call),
+        .read_image => |call| if (images) |calls| calls.admit(host, call) else .retry_later,
         .ending => |*owed| runOwedEnding(host, owed),
         .forward => |id| runSessionForward(host, id),
         .auto_deny => |decision| runMessageDecline(host, decision.action_id, decision.session.slice()),
