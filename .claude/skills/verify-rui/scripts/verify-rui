@@ -907,7 +907,7 @@ def cmd_new(args):
             "scratch": str(scratch), "home": str(scratch / "home"), "store": str(scratch / "store"),
             "project": str(scratch / "project"), "created": wall(), "label": args.label,
             "helper_sha256": sha256(HERE), "answers": getattr(args, "answers", "echo"),
-            "no_sessions": args.no_sessions}
+            "no_sessions": args.no_sessions, "frame_env": getattr(args, "frame_env", {})}
     (root / "run.json").write_text(json.dumps(meta, indent=1) + "\n")
     run = Run(root)
     (run.home / ".config/rui").mkdir(parents=True, mode=0o700)
@@ -2442,8 +2442,15 @@ def frame_request(run, result, settle="answered", sid=None):
     raise FrameFailure(f"request {key} did not settle ({settle})")
 
 
-def seed_cast(run, entries):
+def seed_cast(run, entries, *, ordered=False):
+    # The overview orders equal work states by whole-second settlement time,
+    # then by the Host-allocated Session ID. Start the next cast member in a
+    # later second so random IDs cannot change the order of settled rows.
     for entry in cast_entries(entries):
+        if ordered and (previous := getattr(run, "_cast_settled_at", None)) is not None:
+            delay = 1.01 - (time.monotonic() - previous)
+            if delay > 0:
+                time.sleep(delay)
         workspace = run.home / entry["workspace"]
         workspace.mkdir(parents=True, exist_ok=True)
         (workspace / "README.md").write_text("verify-rui project\n")
@@ -2491,6 +2498,8 @@ def seed_cast(run, entries):
                 wait_for(settled, f"peer {entry['label']} {settle}", timeout=40)
             else:
                 frame_request(run, result, settle, sid)
+        if ordered:
+            run._cast_settled_at = time.monotonic()
 
 
 class FrameTerminal:
@@ -2977,7 +2986,7 @@ def frame_upgrade_run(run, state, build):
         shutil.copy2(actor, isolated.rui)
         (host_build / "THIRD_PARTY_NOTICES.md").write_text("Synthetic release actor\n")
         isolated.meta.update(binary=str(isolated.rui), home=str(isolated.home), store=str(isolated.store), sessions={},
-                             frame_env={"RUI_TEST_UPGRADE_RELEASES_URL": releases.origin + "/releases",
+                             frame_env={**isolated.meta.get("frame_env", {}), "RUI_TEST_UPGRADE_RELEASES_URL": releases.origin + "/releases",
                                         "PATH": f"{isolated.home}/.local/bin:{isolated.rui.parent}:/usr/bin:/bin:/usr/sbin:/sbin"})
         gate = isolated.home.parent / "publication.gate" if mode == "updating" else None
         if gate is not None:
@@ -3201,6 +3210,24 @@ def require_upgrade_fixture_user():
         die("upgrade frames require a dedicated fixture account and VERIFY_RUI_UPGRADE_FIXTURE_USER matching its login; never use an account with unrelated Rui Hosts")
 
 
+def shots_fixture_env():
+    """Share one advancing wall-clock offset across the shot's processes."""
+    override = os.environ.get("VERIFY_RUI_FAKETIME_LIB")
+    if override:
+        candidates = [pathlib.Path(override).expanduser()]
+    else:
+        candidates = [pathlib.Path("/usr/local/lib/faketime/libfaketime.so.1"),
+                      pathlib.Path("/usr/lib/faketime/libfaketime.so.1")]
+        candidates += sorted(pathlib.Path("/usr/lib").glob("*/faketime/libfaketime.so.1"))
+    library = next((path.resolve() for path in candidates if path.is_file()), None)
+    if library is None:
+        raise ValueError("shots requires libfaketime; install it or set VERIFY_RUI_FAKETIME_LIB to libfaketime.so.1")
+    offset = 1767268800 - int(time.time())  # 2026-01-01 12:00 UTC
+    return {"LD_PRELOAD": str(library), "FAKETIME": f"{offset:+d}s",
+            "FAKETIME_DONT_FAKE_MONOTONIC": "1", "TZ": "UTC",
+            "RUI_TEST_MEMORY_BYTES": "33554432"}
+
+
 def run_frames(args):
     try:
         scenario = load_scenario(args.scenario or HERE.with_name("frames.json"), args.sizes)
@@ -3230,12 +3257,17 @@ def run_frames(args):
         probe = subprocess.run(["node", str(HERE.with_name("frames_png.js")), "--check"], capture_output=True, text=True)
         if probe.returncode:
             die("frames requires node and Playwright with Chromium; use --no-png")
+    try:
+        fixture_env = shots_fixture_env() if getattr(args, "shots_fixture", False) else {}
+    except ValueError as error:
+        die(str(error))
     # Keep the existing new command as the one run/fixture owner.
     output = io.StringIO()
     try:
         with contextlib.redirect_stdout(output):
             cmd_new(argparse.Namespace(sha=args.sha, seed=0, no_sessions=True, answers="realistic", label="frames",
-                                       active_capacity=2, host_setenv=[]))
+                                       active_capacity=2, host_setenv=[],
+                                       frame_env=fixture_env))
     except BaseException:
         # Even a partially initialized run must be torn down; cmd_new writes run.json first.
         candidates = sorted((CACHE / "runs").glob(f"*-{build_run_tag(args.sha)}-{os.getpid()}"))
@@ -3307,7 +3339,7 @@ def run_frames(args):
             is_selected = frame_capture_selected(state, selected)
             try:
                 run, state, upgrade_fixture = upgrade_scope.enter_context(frame_upgrade_run(run, state, build))
-                seed_cast(run, state.get("cast", []))
+                seed_cast(run, state.get("cast", []), ordered=getattr(args, "shots_fixture", False))
                 steps = state["steps"]
                 launch_size = state_sizes[0]
                 if state.get("upgrade") and launch_size[0] < 100:
@@ -3710,7 +3742,7 @@ def cmd_shots(args):
             if selected:
                 child = argparse.Namespace(sha=identifier, scenario=str(recipe), sizes=None,
                     only=",".join(s["name"] for s in states if s["name"] in selected),
-                    out=str(out), no_png=args.no_png, record=False, keep=False, timing=True)
+                    out=str(out), no_png=args.no_png, record=False, keep=False, timing=True, shots_fixture=True)
                 with contextlib.redirect_stdout(sys.stderr):
                     try:
                         run_frames(child)

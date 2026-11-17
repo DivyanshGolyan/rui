@@ -71,7 +71,7 @@ With no build identifier, `shots` builds the current checkout, including uncommi
 
 Open `index.html` to review changed and new screens and failures first. `diff.json` lists changed, new and removed entries, the same count and failures. Changes alone succeed; capture failures exit 1. `shots.json` retains each name, size, status, reason, fingerprint and files. The fingerprint covers committed cells, styles, dimensions and terminal colours, excluding cursor and timing.
 
-Full captures include upgrade states and require a dedicated non-root account with `VERIFY_RUI_UPGRADE_FIXTURE_USER` set to its login. Fixture clocks, Session ordering and live memory can vary between runs, so inspect reported differences before attributing them to a build.
+Full captures include upgrade states and require a dedicated non-root account with `VERIFY_RUI_UPGRADE_FIXTURE_USER` set to its login. Shots require Linux libfaketime; install it or set `VERIFY_RUI_FAKETIME_LIB` to its library path. Inspect reported differences and capture failures before attributing them to a build.
 
 For a large preview, use `--shard i/n` to partition states by index modulo n (i is 1-based), then combine the output directories:
 

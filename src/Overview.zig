@@ -363,6 +363,7 @@ interrupted: *client.Cancellation,
 worker: ClientTask = .{},
 upgrade_job: UpgradeJob = .{},
 host_process: ?struct { started_at: u64, pid: i32 } = null,
+memory_override: ?view.Memory,
 host_observation: HostObservation = .unread,
 host_launch: ?HostLaunch = null,
 restart_allowance: host_restart.Allowance = .unspent,
@@ -1012,6 +1013,7 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
     errdefer init.gpa.destroy(self);
     self.* = .{
         .init = init,
+        .memory_override = process_memory.testOverride(init.environ_map.get("RUI_TEST_MEMORY_BYTES")),
         .options = options,
         .hooks = hooks,
         .ops = ops,
@@ -1751,6 +1753,7 @@ fn hostFacts(self: *Self) HostRead {
 }
 
 fn liveMemory(self: *Self, host_started_at: ?u64) view.Memory {
+    if (self.memory_override) |memory| return memory;
     if (host_started_at) |started_at| {
         if (self.host_process == null or self.host_process.?.started_at != started_at) {
             self.host_process = if (client.observeHostProcess(self.init.io, self.options.store, null)) |process|
@@ -4365,6 +4368,20 @@ test "Esc while Upgrade waits for a held archive keeps the cancel: nothing check
     var cancellation_line: [upgrade_status.max_line_bytes]u8 = undefined;
     try std.testing.expectEqualStrings("Upgrade cancelled; nothing changed", upgrade_status.line(overview.state.upgrade.run.?, &cancellation_line, .unicode).text);
     try std.testing.expect(overview.upgrade_report == null);
+}
+
+test "displayed memory override is captured at Overview initialization" {
+    var cancellation: client.Cancellation = .{};
+    const options: Options = .{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" };
+    const rig = try Rig.open(options, fake_operations, &cancellation);
+    defer rig.close();
+    try rig.environ.put("RUI_TEST_MEMORY_BYTES", "12345");
+    const overview = try create(rig.init, options, undefined, fake_operations, &cancellation);
+    defer overview.destroy();
+    try rig.environ.put("RUI_TEST_MEMORY_BYTES", "67890");
+    try std.testing.expectEqual(view.Memory{ .rui = 12345, .tools = null }, overview.liveMemory(null));
+    try std.testing.expectEqual(view.Memory{ .rui = 12345, .tools = null }, overview.liveMemory(null));
+    try std.testing.expect(rig.overview.memory_override == null);
 }
 
 test "memory counts this TUI alone while no Host runs, at open and after a Host it sampled is gone" {
