@@ -547,7 +547,7 @@ fn firstApprovalSql(comptime session: []const u8) []const u8 {
         "JOIN model_operation source_operation ON source_operation.operation_id=approval.parent_operation_id " ++
         "JOIN turn source_turn ON source_turn.turn_id=source_operation.turn_id " ++
         "WHERE approval.session_ref=" ++ session ++ " AND " ++
-        action_domain.permissionDecisionEligibleSql("approval", "source_turn", false) ++ " AND " ++
+        action_domain.externalDecisionEligibleSql("approval", "source_turn") ++ " AND " ++
         "NOT " ++ action_domain.actionStoppedSql("approval", "source_operation") ++ " ORDER BY approval.action_id LIMIT 1";
 }
 

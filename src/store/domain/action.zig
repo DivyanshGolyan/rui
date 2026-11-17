@@ -150,16 +150,25 @@ pub fn stoppedSql(comptime session: []const u8, comptime selected: []const u8) [
         ") OR EXISTS(SELECT 1 FROM session_stop_owed owed WHERE owed.child_ref=" ++ session ++ " AND owed.settled=0))";
 }
 
-pub fn messageDeclinesApprovalSql(comptime action: []const u8) []const u8 {
-    // Seek from the approval position; an index on source_action_id scans all NULLs.
-    return "EXISTS(SELECT 1 FROM message_admission m @index(message_admission_position) WHERE m.session_ref=" ++ action ++ ".session_ref AND m.source_action_id IS NULL AND m.admission_position>" ++ action ++ ".approval_position)";
+fn messageDeclinesApprovalWithIndexSql(comptime action: []const u8, comptime index: []const u8) []const u8 {
+    return "EXISTS(SELECT 1 FROM message_admission m" ++ index ++ " WHERE m.session_ref=" ++ action ++ ".session_ref AND m.source_action_id IS NULL AND m.admission_position>" ++ action ++ ".approval_position)";
 }
 
-/// A permission decision can be admitted for this Action. Automatic denials
-/// also admit the Actions already superseded by a new Message.
-pub fn permissionDecisionEligibleSql(comptime action: []const u8, comptime turn: []const u8, comptime automatic: bool) []const u8 {
-    return action ++ ".authorized=0 AND " ++ action ++ ".resolution_code IS NULL AND (" ++ turn ++ ".outcome_code IS NULL OR " ++ action ++ ".background_position IS NOT NULL)" ++
-        (if (automatic) "" else " AND NOT " ++ messageDeclinesApprovalSql(action));
+pub fn messageDeclinesApprovalSql(comptime action: []const u8) []const u8 {
+    return messageDeclinesApprovalWithIndexSql(action, "");
+}
+
+test "automatic Message denial keeps its original selection predicate" {
+    try std.testing.expectEqualStrings(
+        "EXISTS(SELECT 1 FROM message_admission m WHERE m.session_ref=action.session_ref AND m.source_action_id IS NULL AND m.admission_position>action.approval_position)",
+        messageDeclinesApprovalSql("action"),
+    );
+}
+
+/// External decisions cannot be made after a Message has superseded the approval.
+pub fn externalDecisionEligibleSql(comptime action: []const u8, comptime turn: []const u8) []const u8 {
+    return action ++ ".authorized=0 AND " ++ action ++ ".resolution_code IS NULL AND (" ++ turn ++ ".outcome_code IS NULL OR " ++ action ++ ".background_position IS NOT NULL) AND NOT " ++
+        messageDeclinesApprovalWithIndexSql(action, " @index(message_admission_position)");
 }
 
 pub fn actionStoppedSql(comptime action: []const u8, comptime operation: []const u8) []const u8 {

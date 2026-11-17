@@ -299,7 +299,7 @@ One Host function derives the required Message `state` with this precedence; rea
 
 `queue` carries its admission ID and `admitted_at`, the admission's Host Unix second, as decimal strings; it has no status member.
 `binding` carries the bound Turn, its current Operation and Attempt, including after a terminal result; it replaces the former `processing` object and says nothing by itself about completion.
-Only nonterminal accepted Messages carry `work`, with the same Session `state` value as Current and list rows and nullable `first_action`, the earliest actionable Permission Request's Action ID.
+Only nonterminal accepted Messages carry `work`, with the same Session `state` value as Current and list rows and nullable `first_action`, the earliest actionable Permission Request's Action ID. During automatic denial after a new Message, the work state may still be `approval` while `first_action` is null; the Message state remains `waiting_for_permission` until that work advances.
 There is no separate coarse work status or duplicate Turn/Operation binding in `work`.
 CLI `request inspect` adds `as_of` beside `key`, its Unix seconds at render, so a caller can compare that decimal string with `work.state.since` without knowing the time.
 
