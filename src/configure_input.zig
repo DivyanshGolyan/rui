@@ -49,11 +49,11 @@ pub const ConfigureInput = struct {
         return .{ .binding = binding, .preferences = saved_effort or !self.permission_mode.present, .saved_effort = saved_effort };
     }
 
-    pub fn completeCreation(self: *ConfigureInput, provider: ?Provider, model: []const u8, saved_effort: ?ReasoningEffort, saved_permission: ?PermissionMode, compaction: *[20]u8) void {
+    pub fn completeCreation(self: *ConfigureInput, provider: ?Provider, model: []const u8, can_read_images: bool, saved_effort: ?ReasoningEffort, saved_permission: ?PermissionMode, compaction: *[20]u8) void {
         self.reasoning_effort = creationEffort(model, self.reasoning_effort, saved_effort);
         if (!self.compaction_trigger.present or self.compaction_trigger.value == null) self.compaction_trigger = .{ .present = true, .value = compactionTrigger(provider.?, model, compaction) };
         if (self.tools == null) {
-            const tool_defaults = product_defaults.creationTools(@import("model_catalog.zig").acceptsImages(model));
+            const tool_defaults = product_defaults.creationTools(@import("model_catalog.zig").acceptsImages(model), can_read_images);
             self.tools = tool_defaults.allowed;
             if (self.loaded_tools == null) self.loaded_tools = tool_defaults.loaded;
         }
@@ -100,7 +100,7 @@ test "a policy argument resets with default and keeps any other spelling" {
 test "a fresh Session sends concrete defaults where its caller named none" {
     var compaction: [20]u8 = undefined;
     var input: ConfigureInput = .{ .store = "", .session = .create };
-    input.completeCreation(.openai, "unlisted-model", null, null, &compaction);
+    input.completeCreation(.openai, "unlisted-model", true, null, null, &compaction);
     try std.testing.expectEqualStrings("115200", input.compaction_trigger.value.?);
     try std.testing.expectEqualStrings(product_defaults.reasoning_effort, input.reasoning_effort.value.?);
     try std.testing.expectEqualStrings(product_defaults.tools, input.tools.?);
@@ -109,13 +109,13 @@ test "a fresh Session sends concrete defaults where its caller named none" {
     try std.testing.expect(!input.workspace.present and !input.output_reservation.present and !input.label.present);
 
     input = .{ .store = "", .session = .create };
-    input.completeCreation(.openai, "gpt-6.1-sol", null, null, &compaction);
+    input.completeCreation(.openai, "gpt-6.1-sol", true, null, null, &compaction);
     try std.testing.expectEqualStrings("945000", input.compaction_trigger.value.?);
     input = .{ .store = "", .session = .create };
-    input.completeCreation(.codex, "gpt-6.1-sol", null, null, &compaction);
+    input.completeCreation(.codex, "gpt-6.1-sol", true, null, null, &compaction);
     try std.testing.expectEqualStrings("244800", input.compaction_trigger.value.?);
     input = .{ .store = "", .session = .create };
-    input.completeCreation(.openai, "openai/whisper-1", .high, null, &compaction);
+    input.completeCreation(.openai, "openai/whisper-1", true, .high, null, &compaction);
     try std.testing.expect(input.reasoning_effort.present and input.reasoning_effort.value == null);
 }
 
@@ -130,7 +130,7 @@ test "a fresh Session takes the saved effort only where its caller named none" {
     };
     for (cases) |case| {
         var input: ConfigureInput = .{ .store = "", .session = .create, .reasoning_effort = case.effort };
-        input.completeCreation(.openai, "gpt-6.1-sol", case.saved, null, &compaction);
+        input.completeCreation(.openai, "gpt-6.1-sol", true, case.saved, null, &compaction);
         try std.testing.expectEqualStrings(case.sent, input.reasoning_effort.value.?);
     }
 }
@@ -145,7 +145,7 @@ test "a fresh Session keeps every setting its caller named" {
         .compaction_trigger = policy("00042"),
         .reasoning_effort = policy("high"),
     };
-    input.completeCreation(.openai, "gpt-6.1-sol", .max, null, &compaction);
+    input.completeCreation(.openai, "gpt-6.1-sol", true, .max, null, &compaction);
     try std.testing.expectEqualStrings("", input.tools.?);
     try std.testing.expectEqualStrings("plan", input.permission_mode.value);
     try std.testing.expectEqualStrings("00042", input.compaction_trigger.value.?);
@@ -153,7 +153,7 @@ test "a fresh Session keeps every setting its caller named" {
 
     input.compaction_trigger = policy("default");
     try std.testing.expect(input.compaction_trigger.value == null);
-    input.completeCreation(.openai, "gpt-6.1-sol", .max, null, &compaction);
+    input.completeCreation(.openai, "gpt-6.1-sol", true, .max, null, &compaction);
     try std.testing.expectEqualStrings("945000", input.compaction_trigger.value.?);
 }
 
@@ -190,7 +190,7 @@ test "parent creation completes required defaults and preserves only explicit in
             .workspace = if (overrides) .{ .present = true, .value = "/parent" } else .{},
             .model = .{ .present = true, .value = "gpt-6.1-sol" },
         };
-        input.completeCreation(.openai, "gpt-6.1-sol", .high, .ask, &compaction);
+        input.completeCreation(.openai, "gpt-6.1-sol", true, .high, .ask, &compaction);
         try std.testing.expectEqualStrings("k7m2qx", input.parent.value);
         try std.testing.expectEqualStrings("gpt-6.1-sol", input.model.value);
         try std.testing.expectEqualStrings(product_defaults.tools, input.tools.?);
@@ -208,7 +208,7 @@ test "parent creation completes required defaults and preserves only explicit in
         input.loaded_tools = "";
         input.permission_mode = .{ .present = true, .value = "bypass" };
         input.compaction_trigger = policy("42");
-        input.completeCreation(.codex, "unlisted-model", null, .ask, &compaction);
+        input.completeCreation(.codex, "unlisted-model", true, null, .ask, &compaction);
         try std.testing.expectEqualStrings("", input.tools.?);
         try std.testing.expectEqualStrings("", input.loaded_tools.?);
         try std.testing.expectEqualStrings("bypass", input.permission_mode.value);
@@ -233,7 +233,7 @@ test "parent fully explicit creation needs neither binding nor preferences and p
         const reads = input.creationReads();
         try std.testing.expect(!reads.binding and !reads.preferences and !reads.saved_effort);
         var compaction: [20]u8 = undefined;
-        input.completeCreation(null, input.model.value, null, null, &compaction);
+        input.completeCreation(null, input.model.value, true, null, null, &compaction);
         try std.testing.expectEqualStrings("1000", input.compaction_trigger.value.?);
         try std.testing.expectEqualStrings("high", input.reasoning_effort.value.?);
         try std.testing.expectEqual(overrides, input.provider.present);
@@ -265,7 +265,7 @@ test "creation default completion preserves Overview omitted binding and require
             .model = if (bound) .{ .present = true, .value = "selected-model" } else .{},
         };
         var compaction: [20]u8 = undefined;
-        input.completeCreation(.openai, "unlisted-model", .high, .ask, &compaction);
+        input.completeCreation(.openai, "unlisted-model", true, .high, .ask, &compaction);
         try std.testing.expect(input.require_model);
         try std.testing.expectEqual(bound, input.provider.present);
         try std.testing.expectEqual(bound, input.model.present);
@@ -284,50 +284,60 @@ test "creation default completion preserves Overview omitted binding and require
     }
 }
 
-test "fresh creation preserves explicitly restricted tool selections" {
+test "fresh creation preserves explicitly restricted tool selections with or without an opener" {
     var compaction: [20]u8 = undefined;
-    for ([_][]const u8{ "gpt-6.1-sol", "unlisted-model", "gpt-3.5-turbo" }) |model| {
-        for ([_]struct { tools: []const u8, loaded: ?[]const u8 }{
-            .{ .tools = "bash", .loaded = null },
-            .{ .tools = "bash,find_tools", .loaded = "find_tools" },
-            .{ .tools = "read_image", .loaded = null },
-            .{ .tools = "none", .loaded = null },
-            .{ .tools = "none", .loaded = "none" },
-        }) |case| {
-            var input: ConfigureInput = .{ .store = "", .session = .create, .tools = case.tools, .loaded_tools = case.loaded };
-            input.completeCreation(.codex, model, null, null, &compaction);
-            try std.testing.expectEqualStrings(case.tools, input.tools.?);
-            if (case.loaded) |loaded| {
-                try std.testing.expectEqualStrings(loaded, input.loaded_tools.?);
-            } else try std.testing.expect(input.loaded_tools == null);
+    for ([_]bool{ false, true }) |can_read_images| {
+        for ([_][]const u8{ "gpt-6.1-sol", "unlisted-model", "gpt-3.5-turbo" }) |model| {
+            for ([_]struct { tools: []const u8, loaded: ?[]const u8 }{
+                .{ .tools = "bash", .loaded = null },
+                .{ .tools = "bash,find_tools", .loaded = "find_tools" },
+                .{ .tools = "read_image", .loaded = null },
+                .{ .tools = "read_image", .loaded = "read_image" },
+                .{ .tools = "none", .loaded = null },
+                .{ .tools = "none", .loaded = "none" },
+            }) |case| {
+                var input: ConfigureInput = .{ .store = "", .session = .create, .tools = case.tools, .loaded_tools = case.loaded };
+                input.completeCreation(.codex, model, can_read_images, null, null, &compaction);
+                try std.testing.expectEqualStrings(case.tools, input.tools.?);
+                if (case.loaded) |loaded| {
+                    try std.testing.expectEqualStrings(loaded, input.loaded_tools.?);
+                } else try std.testing.expect(input.loaded_tools == null);
+            }
         }
     }
 }
 
-test "fresh creation preserves explicitly loaded tools with default allowed tools" {
+test "fresh creation preserves explicitly loaded tools with default allowed tools and either opener capability" {
     var compaction: [20]u8 = undefined;
-    var input: ConfigureInput = .{ .store = "", .session = .create, .loaded_tools = "find_tools" };
-    input.completeCreation(.codex, "unlisted-model", null, null, &compaction);
-    try std.testing.expectEqualStrings(product_defaults.tools, input.tools.?);
-    try std.testing.expectEqualStrings("find_tools", input.loaded_tools.?);
+    for ([_]bool{ false, true }) |can_read_images| {
+        for ([_][]const u8{ "find_tools", "read_image", "none" }) |loaded| {
+            var input: ConfigureInput = .{ .store = "", .session = .create, .loaded_tools = loaded };
+            input.completeCreation(.codex, "unlisted-model", can_read_images, null, null, &compaction);
+            try std.testing.expectEqualStrings(product_defaults.creationTools(true, can_read_images).allowed, input.tools.?);
+            try std.testing.expectEqualStrings(loaded, input.loaded_tools.?);
+        }
+    }
 }
 
-test "fresh Session image tool defaults follow the chosen model with or without a parent" {
+test "fresh Session image tool defaults require model support and an opener with or without a parent" {
     for ([_]bool{ false, true }) |parent| {
-        for ([_]struct { model: []const u8, images: bool }{
-            .{ .model = "gpt-6.1-sol", .images = true },
-            .{ .model = "unlisted-model", .images = true },
-            .{ .model = "gpt-3.5-turbo", .images = false },
-        }) |case| {
-            var input: ConfigureInput = .{
-                .store = "",
-                .session = .create,
-                .parent = if (parent) .{ .present = true, .value = "k7m2qx" } else .{},
-            };
-            var compaction: [20]u8 = undefined;
-            input.completeCreation(.openai, case.model, null, null, &compaction);
-            try std.testing.expectEqual(case.images, std.mem.indexOf(u8, input.tools.?, "read_image") != null);
-            try std.testing.expectEqual(case.images, std.mem.indexOf(u8, input.loaded_tools.?, "read_image") != null);
+        for ([_]bool{ false, true }) |can_read_images| {
+            for ([_]struct { model: []const u8, images: bool }{
+                .{ .model = "gpt-6.1-sol", .images = true },
+                .{ .model = "unlisted-model", .images = true },
+                .{ .model = "gpt-3.5-turbo", .images = false },
+            }) |case| {
+                var input: ConfigureInput = .{
+                    .store = "",
+                    .session = .create,
+                    .parent = if (parent) .{ .present = true, .value = "k7m2qx" } else .{},
+                };
+                var compaction: [20]u8 = undefined;
+                input.completeCreation(.openai, case.model, can_read_images, null, null, &compaction);
+                const images = case.images and can_read_images;
+                try std.testing.expectEqual(images, std.mem.indexOf(u8, input.tools.?, "read_image") != null);
+                try std.testing.expectEqual(images, std.mem.indexOf(u8, input.loaded_tools.?, "read_image") != null);
+            }
         }
     }
 }

@@ -17,10 +17,11 @@ pub const tools = blk: {
 // Approved by the accepted #1469 design-review comment on 2026-11-16.
 pub const loaded_tools = "bash,find_tools,read_image,skill,web_search";
 
-pub fn creationTools(accepts_images: bool) struct { allowed: []const u8, loaded: []const u8 } {
+pub fn creationTools(accepts_images: bool, can_read_images: bool) struct { allowed: []const u8, loaded: []const u8 } {
+    const images = accepts_images and can_read_images;
     return .{
-        .allowed = if (accepts_images) tools else comptime withoutImages(tools),
-        .loaded = if (accepts_images) loaded_tools else comptime withoutImages(loaded_tools),
+        .allowed = if (images) tools else comptime withoutImages(tools),
+        .loaded = if (images) loaded_tools else comptime withoutImages(loaded_tools),
     };
 }
 
@@ -74,15 +75,18 @@ test "approved product defaults" {
     try std.testing.expectEqual(@as(u64, 0), output_reservation);
 }
 
-test "creation tool profiles omit only image reading for unsupported models" {
-    for ([_]bool{ false, true }) |images| {
-        const profile = creationTools(images);
-        var allowed = std.mem.splitScalar(u8, profile.allowed, ',');
-        for (std.meta.fieldNames(@import("built_in_tool.zig").BuiltInTool)) |name| {
-            if (!images and std.mem.eql(u8, name, "read_image")) continue;
-            try std.testing.expectEqualStrings(name, allowed.next().?);
+test "creation tool profiles require model image support and an available opener" {
+    for ([_]bool{ false, true }) |accepts_images| {
+        for ([_]bool{ false, true }) |can_read_images| {
+            const images = accepts_images and can_read_images;
+            const profile = creationTools(accepts_images, can_read_images);
+            var allowed = std.mem.splitScalar(u8, profile.allowed, ',');
+            for (std.meta.fieldNames(@import("built_in_tool.zig").BuiltInTool)) |name| {
+                if (!images and std.mem.eql(u8, name, "read_image")) continue;
+                try std.testing.expectEqualStrings(name, allowed.next().?);
+            }
+            try std.testing.expect(allowed.next() == null);
+            try std.testing.expectEqualStrings(if (images) "bash,find_tools,read_image,skill,web_search" else "bash,find_tools,skill,web_search", profile.loaded);
         }
-        try std.testing.expect(allowed.next() == null);
-        try std.testing.expectEqualStrings(if (images) "bash,find_tools,read_image,skill,web_search" else "bash,find_tools,skill,web_search", profile.loaded);
     }
 }

@@ -2266,6 +2266,7 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
         input.completeCreation(
             if (reads.binding) std.meta.stringToEnum(protocol.Provider, binding.provider.slice()).? else null,
             input.model.value,
+            @import("os/read_image_file.zig").available,
             saved_effort,
             snapshot.defaults.permission_mode,
             &compaction_buffer,
