@@ -173,34 +173,107 @@ def store_arg(run):
 
 
 def cmd_build(args):
-    jobs = os.environ.get("RUI_BUILD_JOBS", "2")
+    jobs = os.environ.get("RUI_BUILD_JOBS", str(os.cpu_count() or 1))
     if not re.fullmatch(r"[0-9]+", jobs) or int(jobs) < 1:
         die("RUI_BUILD_JOBS must be a positive integer")
-    sha = args.sha
-    if not re.fullmatch(r"[0-9a-f]{40}", sha):
-        die("build needs a full 40-hex commit SHA")
-    source = pathlib.Path(args.source).resolve() if args.source else CACHE / "src" / sha
-    build = CACHE / "builds" / sha
+    here = getattr(args, "here", False)
+    if here:
+        if args.sha or args.source:
+            die("--here cannot be combined with a SHA or --source")
+        origin = args.repo or os.getcwd()
+        source = pathlib.Path(subprocess.check_output(
+            ["git", "-C", origin, "rev-parse", "--show-toplevel"], text=True).strip()).resolve()
+        head = subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip()
+        head_tree = subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD^{tree}"], text=True).strip()
+        def source_tree():
+            with tempfile.TemporaryDirectory(prefix="verify-rui-index-") as tmp:
+                index_path = pathlib.Path(tmp) / "index"
+                index_env = dict(os.environ, GIT_INDEX_FILE=str(index_path))
+                actual_index = pathlib.Path(subprocess.check_output(
+                    ["git", "-C", str(source), "rev-parse", "--git-path", "index"], text=True).strip())
+                if not actual_index.is_absolute():
+                    actual_index = source / actual_index
+                if actual_index.exists():
+                    shutil.copyfile(actual_index, index_path)
+                else:
+                    subprocess.run(["git", "-C", str(source), "read-tree", "HEAD"], env=index_env, check=True)
+                subprocess.run(["git", "-C", str(source), "add", "-A", "--", "."], env=index_env, check=True)
+                return subprocess.check_output(["git", "-C", str(source), "write-tree"], env=index_env, text=True).strip()
+
+        def check_source():
+            current_head = subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip()
+            if current_head != head or source_tree() != tree:
+                die("build source changed since the build was identified")
+
+        tree = source_tree()
+        sha = "tree-" + tree
+        dirty = tree != head_tree
+    else:
+        sha = args.sha
+        if not sha or not re.fullmatch(r"[0-9a-f]{40}", sha):
+            die("build needs a full 40-hex commit SHA or --here")
+        source = pathlib.Path(args.source).resolve() if args.source else CACHE / "src" / sha
+    build = pathlib.Path(args.out).resolve() if getattr(args, "out", None) else CACHE / "builds" / sha
     manifest = build / "manifest.json"
+
+    def ensure_upgrade(record):
+        if not here and not getattr(args, "upgrade", False):
+            return
+        actor = build / "bin/rui-upgrade-release-fixture"
+        existing = record.get("upgrade_actor", {})
+        if (existing.get("sha") == sha and existing.get("tree") == tree
+                and actor.is_file() and sha256(actor) == existing.get("sha256")):
+            return
+        if not here:
+            actor_source = pathlib.Path(record["source"])
+            actor_head = subprocess.check_output(["git", "-C", str(actor_source), "rev-parse", "HEAD"], text=True).strip()
+            actor_dirty = subprocess.check_output(["git", "-C", str(actor_source), "status", "--porcelain", "--untracked-files=no"], text=True)
+            if actor_head != sha or actor_dirty:
+                die("upgrade actor requires the clean pinned source")
+        else:
+            actor_source = source
+            check_source()
+        env = dict(os.environ)
+        if args.pkg_dir:
+            env["ZIG_LOCAL_PKG_DIR"] = args.pkg_dir
+        with open(build / "upgrade-build.log", "w") as log:
+            result = subprocess.run(["zig", "build", "upgrade-fixture", f"-j{jobs}"],
+                                    cwd=actor_source, env=env, stdout=log, stderr=subprocess.STDOUT)
+        if result.returncode:
+            die(f"upgrade actor build failed; see {build / 'upgrade-build.log'}")
+        shutil.copy2(actor_source / "zig-out/bin/rui-upgrade-release-fixture", actor)
+        record["upgrade_actor"] = {"binary": str(actor), "sha256": sha256(actor), "sha": sha, "tree": tree}
     if manifest.exists() and not args.force:
         record = json.loads(manifest.read_text())
-        if getattr(args, "upgrade", False):
-            build_upgrade_actor(record, args, jobs)
-            manifest.write_text(json.dumps(record, indent=1) + "\n")
-        print(json.dumps(record, indent=1))
-        return
-    origin = args.repo or str(HERE.parents[4])
-    if not source.exists():
-        source.parent.mkdir(parents=True, exist_ok=True)
-        subprocess.run(["git", "-C", origin, "fetch", "--quiet", "origin", sha], check=False)
-        subprocess.run(["git", "-C", origin, "worktree", "add", "--detach", str(source), sha], check=True)
-    head = subprocess.run(["git", "-C", str(source), "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
-    dirty = subprocess.run(["git", "-C", str(source), "status", "--porcelain", "--untracked-files=no"],
-                           capture_output=True, text=True, check=True).stdout
-    if head != sha or dirty:
-        die(f"source {source} is not a clean checkout of {sha} (HEAD {head}, dirty={bool(dirty)})")
-    tree = subprocess.run(["git", "-C", str(source), "rev-parse", "HEAD^{tree}"], capture_output=True, text=True, check=True).stdout.strip()
+        if record.get("sha") != sha:
+            die(f"build directory {build} contains a different build; use --force")
+        screen = record.get("screen_library")
+        if args.no_screen or (screen and pathlib.Path(screen).is_file()):
+            if here:
+                record.update(head=head, dirty=dirty, source=str(source))
+            if here or getattr(args, "upgrade", False):
+                tree = record["tree"]
+                ensure_upgrade(record)
+                if here:
+                    check_source()
+                manifest.write_text(json.dumps(record, indent=1) + "\n")
+            print(json.dumps(record, indent=1))
+            return
+    if not here:
+        origin = args.repo or str(HERE.parents[4])
+        if not source.exists():
+            source.parent.mkdir(parents=True, exist_ok=True)
+            subprocess.run(["git", "-C", origin, "fetch", "--quiet", "origin", sha], check=False)
+            subprocess.run(["git", "-C", origin, "worktree", "add", "--detach", str(source), sha], check=True)
+        head = subprocess.run(["git", "-C", str(source), "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+        dirty = subprocess.run(["git", "-C", str(source), "status", "--porcelain", "--untracked-files=no"],
+                               capture_output=True, text=True, check=True).stdout
+        if head != sha or dirty:
+            die(f"source {source} is not a clean checkout of {sha} (HEAD {head}, dirty={bool(dirty)})")
+        tree = subprocess.run(["git", "-C", str(source), "rev-parse", "HEAD^{tree}"], capture_output=True, text=True, check=True).stdout.strip()
     build.mkdir(parents=True, exist_ok=True)
+    # A failed rebuild must not leave a manifest pointing at overwritten artifacts.
+    manifest.unlink(missing_ok=True)
     env = dict(os.environ)
     if args.pkg_dir:
         env["ZIG_LOCAL_PKG_DIR"] = args.pkg_dir
@@ -228,30 +301,13 @@ def cmd_build(args):
               "build_seconds": round(time.monotonic() - started, 1),
               "zig": subprocess.run(["zig", "version"], capture_output=True, text=True).stdout.strip(),
               "host": os.uname().nodename, "macos": macos_version()}
-    if getattr(args, "upgrade", False):
-        build_upgrade_actor(record, args, jobs)
+    if here:
+        record.update(head=head, dirty=dirty)
+    ensure_upgrade(record)
+    if here:
+        check_source()
     manifest.write_text(json.dumps(record, indent=1) + "\n")
     print(json.dumps(record, indent=1))
-
-
-def build_upgrade_actor(record, args, jobs):
-    source = pathlib.Path(record["source"])
-    head = subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip()
-    dirty = subprocess.check_output(["git", "-C", str(source), "status", "--porcelain", "--untracked-files=no"], text=True)
-    if head != record["sha"] or dirty:
-        die("upgrade actor requires the clean pinned source")
-    env = dict(os.environ)
-    if args.pkg_dir:
-        env["ZIG_LOCAL_PKG_DIR"] = args.pkg_dir
-    build = CACHE / "builds" / record["sha"]
-    with open(build / "upgrade-build.log", "w") as log:
-        result = subprocess.run(["zig", "build", "upgrade-fixture", f"-j{jobs}"], cwd=source,
-                                env=env, stdout=log, stderr=subprocess.STDOUT)
-    if result.returncode:
-        die(f"upgrade actor build failed; see {build / 'upgrade-build.log'}")
-    actor = build / "bin/rui-upgrade-release-fixture"
-    shutil.copy2(source / "zig-out/bin/rui-upgrade-release-fixture", actor)
-    record["upgrade_actor"] = {"binary": str(actor), "sha256": sha256(actor), "sha": record["sha"], "tree": record["tree"]}
 
 
 def upgrade_actor(build):
@@ -264,7 +320,8 @@ def upgrade_actor(build):
 
 
 def load_build(sha):
-    manifest = CACHE / "builds" / sha / "manifest.json"
+    candidate = pathlib.Path(sha)
+    manifest = (candidate if candidate.is_dir() else CACHE / "builds" / sha) / "manifest.json"
     if not manifest.exists():
         die(f"no build for {sha}; run: verify-rui build {sha}")
     return json.loads(manifest.read_text())
@@ -814,9 +871,14 @@ def cmd_restart_host(args):
     print(json.dumps({"stopped": [r["pid"] for r in old], "instance": json.loads(status.stdout).get("instance")}))
 
 
+def build_run_tag(identifier):
+    """Keep directory build identifiers out of generated run paths."""
+    return identifier[:7] if re.fullmatch(r"[0-9a-f]{40}", identifier) else hashlib.sha256(identifier.encode()).hexdigest()[:7]
+
+
 def cmd_new(args):
     build = load_build(args.sha)
-    run_id = time.strftime("%Y%m%dT%H%M%S") + f"-{args.sha[:7]}-{os.getpid()}"
+    run_id = time.strftime("%Y%m%dT%H%M%S") + f"-{build_run_tag(args.sha)}-{os.getpid()}"
     root = CACHE / "runs" / run_id
     scratch = SCRATCH_PARENT / f"vr.{os.getpid()}.{int(time.time()) % 100000}"
     for path in (root / "evidence", scratch / "home", scratch / "project", scratch / "tmp", scratch / "tmux"):
@@ -3163,7 +3225,7 @@ def run_frames(args):
                                        active_capacity=2, host_setenv=[]))
     except BaseException:
         # Even a partially initialized run must be torn down; cmd_new writes run.json first.
-        candidates = sorted((CACHE / "runs").glob(f"*-{args.sha[:7]}-{os.getpid()}"))
+        candidates = sorted((CACHE / "runs").glob(f"*-{build_run_tag(args.sha)}-{os.getpid()}"))
         if candidates and not args.keep:
             with contextlib.redirect_stdout(sys.stderr):
                 try:
@@ -3182,6 +3244,24 @@ def run_frames(args):
     out = pathlib.Path(args.out).resolve() if args.out else run.evidence / "frames"
     records = []
     failed = False
+
+    def capture_failure(target, state, size, reason):
+        # Freeze the last committed frame before rendering it. A resize can fail
+        # before or after the requested viewport has committed.
+        try:
+            frame = target.frame
+        except (Exception, SystemExit):
+            # A collector error may make the normal accessor refuse reads;
+            # retain the last frame the collector had already committed.
+            with target.condition:
+                frame = target.capture.frame
+        if frame is None:
+            raise FrameFailure("Rui produced no committed frame")
+        actual = (frame.columns, frame.lines)
+        if actual != size:
+            reason = f"{reason} (last committed frame is {size_name(actual)}; requested {size_name(size)})"
+        return frame_capture(run, argparse.Namespace(frame=frame), out, state, size, reason)
+
     try:
         out.mkdir(parents=True, exist_ok=True)
         (out / "scenario.json").write_text(json.dumps(scenario_snapshot(scenario), indent=2) + "\n")
@@ -3190,6 +3270,7 @@ def run_frames(args):
         for state in scenario["states"][:last + 1]:
             if state.get("upgrade") and state["name"] not in selected:
                 continue
+            state_started = time.monotonic_ns() if getattr(args, "timing", False) else None
             if state.get("upgrade") and not parent_paused:
                 frame_pause_owned_host(run)
                 parent_paused = True
@@ -3243,7 +3324,7 @@ def run_frames(args):
                           "(not selected; its failure does not fail this run)", file=sys.stderr)
                 if opened and is_selected:
                     try:
-                        failure_capture = frame_capture(run, target, out, state, state_sizes[0], reason)
+                        failure_capture = capture_failure(target, state, state_sizes[0], reason)
                     except (Exception, SystemExit):
                         pass  # The capture error below retains the primary state failure.
             try:
@@ -3265,8 +3346,14 @@ def run_frames(args):
                             record = frame_capture(run, target, out, state, size, reason)
                         except (Exception, SystemExit) as error:
                             failed = True
-                            record = {"name": state["name"], "size": size_name(size), "files": {}, "status": "failed", "ok": False,
-                                      "reason": reason or str(error), "sha": args.sha, "note": state.get("note", "")}
+                            failure_reason = reason or str(error)
+                            try:
+                                if target is None:
+                                    raise FrameFailure("terminal did not launch")
+                                record = capture_failure(target, state, size, failure_reason)
+                            except (Exception, SystemExit):
+                                record = {"name": state["name"], "size": size_name(size), "files": {}, "status": "failed", "ok": False,
+                                          "reason": failure_reason, "sha": args.sha, "note": state.get("note", "")}
                         failed = failed or not record["ok"]
                         if not record["ok"] and reason is None:
                             print(f"verify-rui: {state['name']}@{record['size']}: {record['reason']}", file=sys.stderr)
@@ -3315,6 +3402,9 @@ def run_frames(args):
                         raise SystemExit(1)
                     finally:
                         run = parent_run
+                        if state_started is not None and is_selected:
+                            append_jsonl(out / "state-timings.jsonl", {
+                                "name": state["name"], "elapsed_ns": time.monotonic_ns() - state_started})
                 if is_selected:
                     frames_index(out, records, False)
         if not args.no_png:
@@ -3391,28 +3481,35 @@ def paired_frames(out, head, base, new_states=()):
     pairs.sort(key=lambda pair: pair["same"])
     result = dict(head=head, base=base, pairs=pairs)
     (out / "pairs.json").write_text(json.dumps(result, indent=2) + "\n")
+    render_paired_frames(out, pairs)
+    return result
+
+
+def render_paired_frames(out, pairs):
+    """Render paired captures for both frame comparisons and shots diffs."""
     sections = []
     for pair in pairs:
         caption = html.escape(f"{pair['name']} · {pair['size']}")
         views = []
         for side in ("before", "after"):
-            if side == "before" and pair["new"]:
-                views.append("<td><p>New screen</p></td>")
+            record = pair.get(side)
+            if record is None:
+                message = "New screen" if side == "before" and (pair.get("new") or pair.get("label") == "new") else "No capture"
+                views.append(f"<td><p>{message}</p></td>")
                 continue
-            record = pair[side]
             files = record["files"]
             media = files.get("gif", files.get("png"))
             view = (f'<img src="{html.escape(media, quote=True)}" alt="{side} {caption}">' if media else
                     f'<iframe title="{side} {caption}" src="{html.escape(files["html"], quote=True)}"></iframe>'
                     if "html" in files else "No capture")
-            views.append(f'<td><p>{side}: {html.escape(record["reason"] or record["status"])}</p>{view}</td>')
-        status = "new" if pair["new"] else "same" if pair["same"] else "changed"
-        sections.append(f'<section><h2>{caption} — {status}</h2><table><tr>{"".join(views)}</tr></table></section>')
+            status = record.get("reason") or record.get("status", "ok" if record.get("ok") else "failed")
+            views.append(f'<td><p>{side}: {html.escape(status)}</p>{view}</td>')
+        status = pair.get("label") or ("new" if pair.get("new") else "same" if pair.get("same") else "changed")
+        sections.append(f'<section><h2>{caption} — {html.escape(status)}</h2><table><tr>{"".join(views)}</tr></table></section>')
     (out / "index.html").write_text('<!doctype html><meta charset="utf-8"><title>Rui before / after</title>'
         '<style>body{font:16px system-ui;background:#ddd;padding:20px}table{width:100%;table-layout:fixed}'
         'td{width:50%;vertical-align:top}img{max-width:100%}iframe{width:100%;height:900px;border:0}</style>'
         + "\n".join(sections))
-    return result
 
 
 def revision_scenario(sha, sizes):
@@ -3486,6 +3583,189 @@ def cmd_frames(args):
     print(out)
     if failed:
         raise SystemExit(1)
+
+
+def shot_records(path):
+    records = json.loads((path / "shots.json").read_text())
+    if not isinstance(records, list):
+        raise ValueError("shots.json must contain a list")
+    keys = set()
+    for record in records:
+        key = (record["name"], record["size"])
+        if key in keys:
+            raise ValueError(f"duplicate capture: {key[0]}@{key[1]}")
+        keys.add(key)
+        if not isinstance(record["files"], dict) or not isinstance(record["ok"], bool):
+            raise ValueError(f"invalid capture: {key[0]}@{key[1]}")
+    return records
+
+
+def copy_shot_files(records, source, target, prefix=""):
+    copied = []
+    for record in records:
+        files = {}
+        for ext, name in record["files"].items():
+            rel = pathlib.Path(name)
+            path = source / rel
+            if rel.is_absolute() or not path.resolve().is_relative_to(source.resolve()) or not path.is_file():
+                raise ValueError(f"invalid capture file: {name}")
+            dest = pathlib.Path(prefix) / rel
+            destination = target / dest
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if destination.exists():
+                raise ValueError(f"duplicate capture file: {dest}")
+            shutil.copy2(path, destination)
+            files[ext] = dest.as_posix()
+        copied.append({**record, "files": files})
+    return copied
+
+
+def shots_diff(out, records, baseline, selected=None):
+    previous = shot_records(baseline)
+    if selected is not None:
+        previous = [record for record in previous if record["name"] in selected]
+    previous = copy_shot_files(previous, baseline, out, "baseline")
+    old = {(r["name"], r["size"]): r for r in previous}
+    new = {(r["name"], r["size"]): r for r in records}
+    diff = {"changed": [], "new": [], "removed": [], "same_count": 0, "failed": []}
+    pairs = []
+    for key in sorted(old.keys() | new.keys()):
+        before, after = old.get(key), new.get(key)
+        pair = {"name": key[0], "size": key[1], "before": before, "after": after}
+        if (after and not after["ok"]) or (before and not before["ok"]):
+            diff["failed"].append(pair)
+            pairs.append({**pair, "label": "failed"})
+        elif before is None:
+            diff["new"].append(pair)
+            pairs.append({**pair, "label": "new"})
+        elif after is None:
+            diff["removed"].append(pair)
+        elif before.get("fingerprint") and before["fingerprint"] == after.get("fingerprint"):
+            diff["same_count"] += 1
+        else:
+            diff["changed"].append(pair)
+            pairs.append({**pair, "label": "changed"})
+    pairs.sort(key=lambda pair: (pair["label"] != "failed", pair["name"], pair["size"]))
+    (out / "diff.json").write_text(json.dumps(diff, indent=2) + "\n")
+    render_paired_frames(out, pairs)
+    return bool(diff["failed"])
+
+
+def shots_output(path):
+    out = pathlib.Path(path).resolve() if path else CACHE / "shots" / str(time.time_ns())
+    if out.exists() and (not out.is_dir() or any(out.iterdir())):
+        raise ValueError(f"shots output must be empty: {out}")
+    out.mkdir(parents=True, exist_ok=True)
+    return out
+
+
+def cmd_shots(args):
+    try:
+        identifier = args.build
+        if identifier is None:
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                cmd_build(argparse.Namespace(sha=None, here=True, out=None, repo=None, source=None,
+                                             pkg_dir=None, force=False, no_screen=False, upgrade=True))
+            identifier = json.loads(output.getvalue())["sha"]
+        build = load_build(identifier)
+        raw = subprocess.check_output(["git", "-C", build["source"], "show",
+                                       f"{build['tree']}:.claude/skills/verify-rui/scripts/frames.json"], text=True)
+        scenario = validate_scenario(json.loads(raw), None)
+        metadata = {"build": build.get("sha", identifier), "tree": build["tree"],
+                    "recipe_sha256": hashlib.sha256(raw.encode("utf-8")).hexdigest()}
+        states = scenario["states"]
+        selected = set(args.only.split(",")) if args.only else {s["name"] for s in states}
+        unknown = selected - {s["name"] for s in states}
+        if unknown:
+            raise ValueError("unknown states: " + ", ".join(sorted(unknown)))
+        if args.shard:
+            match = re.fullmatch(r"([0-9]+)/([0-9]+)", args.shard)
+            if not match or int(match[2]) < 1 or not 1 <= int(match[1]) <= int(match[2]):
+                raise ValueError("--shard must be i/n with 1 <= i <= n")
+            index, count = int(match[1]) - 1, int(match[2])
+            selected &= {s["name"] for i, s in enumerate(states) if i % count == index}
+        if args.no_png:
+            for state in states:
+                state["record"] = False
+        out = shots_output(args.out)
+        failed = False
+        with tempfile.TemporaryDirectory(prefix="verify-rui-shots-") as temporary:
+            recipe = pathlib.Path(temporary) / "frames.json"
+            recipe.write_text(json.dumps(scenario_snapshot(scenario)))
+            if selected:
+                child = argparse.Namespace(sha=identifier, scenario=str(recipe), sizes=None,
+                    only=",".join(s["name"] for s in states if s["name"] in selected),
+                    out=str(out), no_png=args.no_png, record=False, keep=False, timing=True)
+                with contextlib.redirect_stdout(sys.stderr):
+                    try:
+                        run_frames(child)
+                    except SystemExit as error:
+                        if error.code != 1:
+                            raise
+                        failed = True
+                frames = json.loads((out / "frames.json").read_text())
+            else:
+                frames = []
+                frames_index(out, [], False)
+        records = [{"name": r["name"], "size": r["size"], "ok": r["ok"],
+                    "reason": r["reason"], "fingerprint": r.get("cells_sha256"), "files": r["files"]}
+                   for r in frames]
+        (out / "shots.json").write_text(json.dumps(records, indent=2) + "\n")
+        (out / "shots-meta.json").write_text(json.dumps(metadata, indent=2) + "\n")
+        if args.baseline:
+            scope = selected if args.only or args.shard else None
+            failed = shots_diff(out, records, pathlib.Path(args.baseline).resolve(), scope) or failed
+        print(out)
+        if failed or any(not r["ok"] for r in records):
+            raise SystemExit(1)
+    except (OSError, ValueError, TypeError, KeyError, subprocess.CalledProcessError) as error:
+        die(f"cannot capture shots: {error}")
+
+
+def cmd_shots_merge(args):
+    try:
+        inputs = [(pathlib.Path(path).resolve(), None) for path in args.directories]
+        inputs = [(path, shot_records(path)) for path, _ in inputs]
+        metadata = []
+        for path, _ in inputs:
+            meta_path = path / "shots-meta.json"
+            if not meta_path.exists():
+                metadata.append(None)
+                continue
+            meta = json.loads(meta_path.read_text())
+            if (not isinstance(meta, dict) or set(meta) != {"build", "tree", "recipe_sha256"}
+                    or not all(isinstance(value, str) and value for value in meta.values())
+                    or not re.fullmatch(r"[0-9a-f]{64}", meta["recipe_sha256"])):
+                raise ValueError(f"invalid shots provenance: {meta_path}")
+            metadata.append(meta)
+        if any(meta != metadata[0] for meta in metadata[1:]):
+            raise ValueError("shots inputs have different or missing build provenance")
+        seen = set()
+        for _, records in inputs:
+            for record in records:
+                key = (record["name"], record["size"])
+                if key in seen:
+                    raise ValueError(f"duplicate capture: {key[0]}@{key[1]}")
+                seen.add(key)
+        out = shots_output(args.out)
+        records = []
+        for source, shard in inputs:
+            records.extend(copy_shot_files(shard, source, out))
+        records.sort(key=lambda r: (r["name"], r["size"]))
+        (out / "shots.json").write_text(json.dumps(records, indent=2) + "\n")
+        if metadata[0] is not None:
+            (out / "shots-meta.json").write_text(json.dumps(metadata[0], indent=2) + "\n")
+        failed = False
+        if args.baseline:
+            failed = shots_diff(out, records, pathlib.Path(args.baseline).resolve())
+        else:
+            frames_index(out, [{**r, "status": "ok" if r["ok"] else "failed", "note": ""} for r in records], True)
+        print(out)
+        if failed or any(not r["ok"] for r in records):
+            raise SystemExit(1)
+    except (OSError, ValueError, TypeError, KeyError) as error:
+        die(f"cannot merge shots: {error}")
 
 
 def publication_frames(out, states=None, include_same=False):
@@ -3705,7 +3985,8 @@ def main():
     parser = argparse.ArgumentParser(prog="verify-rui", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     p = sub.add_parser("build", help="build a pinned SHA once (ReleaseSafe) into the cache")
-    p.add_argument("sha"); p.add_argument("--repo"); p.add_argument("--pkg-dir"); p.add_argument("--force", action="store_true")
+    p.add_argument("sha", nargs="?"); p.add_argument("--here", action="store_true", help="build the current working tree in place")
+    p.add_argument("--repo"); p.add_argument("--pkg-dir"); p.add_argument("--out", help="build artifact directory"); p.add_argument("--force", action="store_true")
     p.add_argument("--source", help="existing clean detached worktree of SHA (default: cache worktree)")
     p.add_argument("--no-screen", action="store_true", help="skip the committed-screen observer library")
     p.add_argument("--upgrade", action="store_true", help="also pin the same-source synthetic release actor")
@@ -3730,6 +4011,19 @@ def main():
     p.add_argument("--record", action="store_true", help="record committed transitions at each state's first size as GIF")
     p.add_argument("--keep", action="store_true")
     p.set_defaults(func=cmd_frames)
+    p = sub.add_parser("shots", help="capture a build's own screen recipe")
+    p.add_argument("build", nargs="?", metavar="BUILD")
+    p.add_argument("--baseline", metavar="DIR")
+    p.add_argument("--only", metavar="NAME,...")
+    p.add_argument("--shard", metavar="I/N")
+    p.add_argument("--out")
+    p.add_argument("--no-png", action="store_true")
+    p.set_defaults(func=cmd_shots)
+    p = sub.add_parser("shots-merge", help="merge screenshot shards")
+    p.add_argument("directories", nargs="+", metavar="DIR")
+    p.add_argument("--out", required=True)
+    p.add_argument("--baseline", metavar="DIR")
+    p.set_defaults(func=cmd_shots_merge)
     p = sub.add_parser("publish", help="attach frames media to a PR Screens section (gh 2.104.0+)")
     p.add_argument("directory", metavar="DIR")
     p.add_argument("--pr", required=True, type=int, help="PR number to attach captures to")
