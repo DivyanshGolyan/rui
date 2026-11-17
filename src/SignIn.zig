@@ -1128,6 +1128,8 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         if (natural.size.height + 3 <= size.height) footer_surface = natural;
     }
     const footer_height = if (footer_surface) |surface| surface.size.height else @as(u16, 0);
+    var rule_caps = self.caps;
+    rule_caps.unicode = self.unicode;
     var panel: Panel = .{
         .title = title,
         .subtitle = if (self.state.page == .account) "Choose an account. Credentials stay out of conversations." else null,
@@ -1141,7 +1143,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         .ground = self.style,
         .selection = self.selection_style,
         .quiet = self.quiet,
-        .rule = @import("widget_style.zig").line(self.caps, .horizontal),
+        .rule = @import("widget_style.zig").line(rule_caps, .horizontal),
         .scroll = self.scroll,
     };
     const panel_surface = try panel.widget().draw(ctx.withConstraints(.{}, .{ .width = width, .height = size.height - footer_height }));
