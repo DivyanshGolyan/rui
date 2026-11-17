@@ -304,7 +304,7 @@ def main(network, ci):
     host = launch(frame(dict(good, presets={"review": preset})))
     wait_for_host(sock, store, host)
     create = {"version": WIRE, "kind": "configure", "store": str(store), "key": "preset:create",
-              "session": "", "preset": "review", "configuration": {"label": None}}
+              "session": "", "preset": "review", "configuration": {"label": None, "workspace": str(root)}}
     created = post(sock, "configure", create)
     assert created["answer"]["status"] == "accepted", created
     session = created["answer"]["session"]
@@ -312,6 +312,7 @@ def main(network, ci):
     assert replayed["answer"]["replayed"] is True and replayed["answer"]["session"] == session, replayed
     saved = post(sock, "inspect-session", {"version": WIRE, "kind": "inspect_session", "store": str(store), "session": session})["session"]
     assert saved["model"] == preset["model"] and saved["tools"] == [] and saved["label"] is None, saved
+    assert saved["workspace"] == str(root), saved
     assert saved["compaction_trigger_override"] == "100000", saved
     assert saved["reasoning_effort"] == "low" and saved["reasoning_effort_override"] == "low", saved
     unknown = post(sock, "configure", dict(create, key="preset:unknown", preset="missing"))
@@ -324,11 +325,17 @@ def main(network, ci):
     preset_creation(RUI, root / "cli-presets", good["store"], os.environ)
     empty_creation(RUI, root / "empty-creation", good["store"], os.environ)
 
+    for sparse in ({name: value for name, value in preset.items() if name != "effort"}, dict(preset, tools=["bash"])):
+        accepted = launch(frame(dict(good, presets={"review": sparse})))
+        wait_for_host(sock, store, accepted)
+        host_process.close_stdin(accepted)
+        assert accepted.wait(timeout=30) == 0, output(accepted)
+
     for presets in [
         {"Bad": preset},
         {"a" * 64: dict(preset, **{"\x01" * 64: None})},
-        {"review": {name: value for name, value in preset.items() if name != "effort"}},
-        {"review": dict(preset, tools=["bash"])},
+        {"review": dict(preset, effort=[])},
+        {"review": dict(preset, tools=[None])},
     ]:
         refused = refusal(launch(frame(dict(good, presets=presets))), expected_exit=2)
         assert refused["code"] == "settings_invalid", refused

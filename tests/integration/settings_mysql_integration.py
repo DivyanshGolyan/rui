@@ -159,7 +159,7 @@ def main():
         locked = launch(dict(good, interface=dict(good["interface"], dir=str(other))))
         assert frame_host.refusal(locked)["code"] == "store_locked"
         create = {"version": frame_host.WIRE, "kind": "configure", "store": store_id, "key": "mysql-launch-create",
-                  "session": "", "preset": "review", "configuration": {"label": None}}
+                  "session": "", "preset": "review", "configuration": {"label": None, "workspace": str(root)}}
         configured = frame_host.post(sock, "configure", create)
         assert configured["answer"]["status"] == "accepted", configured
         session = configured["answer"]["session"]
@@ -172,6 +172,7 @@ def main():
         assert observed["session"]["reference"] == session, observed
         saved = observed["session"]
         assert saved["model"] == preset["model"] and saved["tools"] == [] and saved["label"] is None, saved
+        assert saved["workspace"] == str(root), saved
         assert saved["compaction_trigger_override"] == "100000", saved
         assert saved["reasoning_effort"] == "low" and saved["reasoning_effort_override"] == "low", saved
         env = dict(os.environ, RUI_RUNTIME_DIR=str(runtime))
