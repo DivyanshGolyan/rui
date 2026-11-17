@@ -54,6 +54,7 @@ const cores = .{
     .{ "endpoint_value.zig", @import("endpoint_value.zig") },
     .{ "environment.zig", @import("environment.zig") },
     .{ "error_set.zig", @import("error_set.zig") },
+    .{ "excerpt.zig", @import("excerpt.zig") },
     .{ "failure_class.zig", @import("failure_class.zig") },
     .{ "feed_reads.zig", @import("feed_reads.zig") },
     .{ "find_tools_words.zig", @import("find_tools_words.zig") },
