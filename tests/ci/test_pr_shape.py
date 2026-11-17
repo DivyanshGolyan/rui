@@ -64,8 +64,7 @@ class VisibleTextTest(unittest.TestCase):
         )
         consumers = (
             (pr_shape.goal_present, "Goal: #12 Support the workstream goal"),
-            (pr_shape.screen_evidence, "No screen change: visible reason"),
-            (pr_shape.screen_evidence, "![screen](https://github.com/user-attachments/assets/123)"),
+            (pr_shape.screen_exemption, "No screen change: visible reason"),
         )
         for template, expected in cases:
             for consumer, evidence in consumers:
@@ -163,50 +162,75 @@ class ScreenEvidenceTest(unittest.TestCase):
         self.assertIsNone(refusal(["src/overview_view.zig"], "## Shape"))
 
 
-    def test_ui_media_forms_and_exemption(self):
-        for evidence in ("![Overview 140x40](https://github.com/user-attachments/assets/123)",
-                         '  <img src="https://github.com/user-attachments/assets/123" alt="Overview">',
-                         '<video src="https://github.com/user-attachments/assets/123"></video>',
-                         "  ![Overview 140x40](https://github.com/user-attachments/assets/123)",
-                         "No screen change: the refactor preserves all drawn cells.",
-                         "No screen change: reason\r\n"):
-            for path in ("src/overview_view.zig", "src/SessionScreen.zig",
-                         ".claude/skills/verify-rui/scripts/frames.json"):
-                with self.subTest(evidence=evidence, path=path):
-                    self.assertTrue(pr_shape.screens_required([path]))
-                    self.assertIsNone(pr_shape.screen_refusal(evidence))
+    def test_screen_decisions_for_head_and_exemption(self):
+        head = "a" * 40
+        def run(status, conclusion, *, sha=head, number=42, id=1):
+            return {"id": id, "event": "pull_request", "head_sha": sha, "status": status,
+                    "conclusion": conclusion, "pull_requests": [{"number": number, "head": {"sha": sha}}]}
+        cases = (
+            ([], "wait", "Timed out"),
+            ([run("queued", None)], "wait", "still running"),
+            ([run("in_progress", None)], "wait", "still running"),
+            ([run("completed", "success")], None, None),
+            ([run("completed", "failure")], "failure", "failure"),
+            ([run("completed", "cancelled")], "cancelled", "cancelled"),
+            ([run("completed", "success", sha="b" * 40)], "wait", "no matching"),
+            ([run("completed", "success", number=43)], "wait", "no matching"),
+            ([run("completed", "success"), run("in_progress", None, id=2)], "wait", "still running"),
+            ([run("completed", "failure"), run("completed", "success", id=2)], None, None),
+        )
+        for runs, immediate, timeout in cases:
+            with self.subTest(runs=runs):
+                result = pr_shape.screen_refusal("", runs, head, 42)
+                if immediate is None:
+                    self.assertIsNone(result)
+                else:
+                    self.assertIn(immediate, result)
+                result = pr_shape.screen_refusal("", runs, head, 42, timed_out=True)
+                if timeout is None:
+                    self.assertIsNone(result)
+                else:
+                    self.assertIn(timeout, result)
+                self.assertIsNone(pr_shape.screen_refusal("No screen change: unchanged", runs, head, 42, timed_out=True))
 
-    def test_ui_requires_visible_embed_or_nonempty_reason(self):
-        for evidence in ("", "No screen change:", "No screen change:   ", "No screen change:\n",
-                         "No screen change:\nthere is no reason on the line",
-                         "[Overview](https://example.test/a.png)", "https://example.test/a.png",
-                         "![Overview](https://example.test/a.png)",
-                         '<img src="https://example.test/a.png">', '<video src="https://example.test/a.mp4">',
-                         "https://github.com/user-attachments/assets/123",
-                         "`![Overview](https://github.com/user-attachments/assets/123)`",
-                         "Example: ![Overview](https://github.com/user-attachments/assets/123)",
-                         "![Overview][screen]\n\n[screen]: https://github.com/user-attachments/assets/123",
-                         "<!--\n![Overview](https://github.com/user-attachments/assets/123)\n-->",
-                         "```md\n![Overview](https://github.com/user-attachments/assets/123)\n```",
-                         "```\nNo screen change: hidden reason\n```",
-                         "<!--\nNo screen change: hidden reason"):
-            for path in ("src/overview_view.zig", ".claude/skills/verify-rui/scripts/frames.json"):
-                with self.subTest(evidence=evidence, path=path):
-                    self.assertTrue(pr_shape.screens_required([path]))
-                    reason = pr_shape.screen_refusal(evidence)
-                    self.assertIsInstance(reason, str)
-                    self.assertIn("verify-rui publish", reason)
+    def test_exemption_requires_visible_nonempty_reason(self):
+        for text in ("", "No screen change:", "No screen change:   ",
+                     "No screen change:\nreason", "```\nNo screen change: hidden\n```",
+                     "<!-- No screen change: hidden -->", "![screen](https://example.test/screen.png)"):
+            with self.subTest(text=text):
+                self.assertFalse(pr_shape.screen_exemption(text))
+        self.assertTrue(pr_shape.screen_exemption("No screen change: reason\r\n"))
 
-    def test_non_ui_does_not_need_media(self):
+    def test_non_ui_does_not_need_screens(self):
         for path in ("src/server.zig", "src/store/Store.zig", "src/cli.zig", "docs/agents/landing.md"):
             with self.subTest(path=path):
                 self.assertFalse(pr_shape.screens_required([path]))
 
-    def test_repository_page_links_do_not_replace_embedded_media(self):
-        for ref in ("a" * 40, "main", "pr-evidence"):
-            for view in ("tree", "blob"):
-                self.assertIsInstance(pr_shape.screen_refusal(
-                    f"[Screens](https://github.com/owner/repo/{view}/{ref}/capture)"), str)
+    def test_poll_reads_one_snapshot_per_attempt_and_stops_at_bound(self):
+        head = "a" * 40
+        running = {"id": 1, "event": "pull_request", "head_sha": head, "status": "in_progress",
+                   "conclusion": None, "pull_requests": [{"number": 42, "head": {"sha": head}}]}
+        success = {**running, "status": "completed", "conclusion": "success"}
+        now = [0]
+        def sleep(seconds):
+            now[0] += seconds
+        with patch.object(pr_shape, "github", side_effect=[{"workflow_runs": []}, {"workflow_runs": [running]},
+                                                           {"workflow_runs": [success]}]) as api:
+            self.assertIsNone(pr_shape.wait_for_screens("", "o/r", "42", head, timeout=20, interval=10,
+                                                      clock=lambda: now[0], sleep=sleep))
+            self.assertEqual(api.call_count, 3)
+            self.assertEqual(api.call_args.args, ("GET", f"repos/o/r/actions/workflows/screens.yml/runs?event=pull_request&head_sha={head}&per_page=100"))
+        now[0] = 0
+        with patch.object(pr_shape, "github", return_value={"workflow_runs": [running]}) as api:
+            reason = pr_shape.wait_for_screens("", "o/r", "42", head, timeout=20, interval=10,
+                                               clock=lambda: now[0], sleep=sleep)
+            self.assertIn("Timed out", reason)
+            self.assertEqual(api.call_count, 3)
+        with patch.object(pr_shape, "github", side_effect=OSError("offline")):
+            self.assertIn("Cannot read Screens", pr_shape.wait_for_screens("", "o/r", "42", head))
+        with patch.object(pr_shape, "github") as api:
+            self.assertIsNone(pr_shape.wait_for_screens("No screen change: reason", "o/r", "42", head))
+            api.assert_not_called()
 
     def test_graph_classifies_transitive_ui_but_excludes_host_and_test_imports(self):
         graph = select_tests.tree_graph()
@@ -296,15 +320,34 @@ class PrShapeMainTest(unittest.TestCase):
             changed.assert_called_once_with("environment-base", "HEAD")
             self.assertIn("Goal:", stderr.getvalue())
 
-    def test_screens_mode_reads_live_body_without_diff(self):
-        for body, expected in (("No screen change: unchanged", 0), ("", 1)):
-            with self.subTest(body=body), patch.dict(os.environ, {"PR_BODY": "stale", "PR_NUMBER": "42", "GITHUB_REPOSITORY": "o/r"}, clear=True), \
+    def test_screens_mode_reads_live_body_and_head_without_diff(self):
+        head = "a" * 40
+        for body, result, expected in (("No screen change: unchanged", None, 0), ("", "Screens failed", 1)):
+            with self.subTest(body=body), patch.dict(os.environ, {"PR_BODY": "stale", "PR_NUMBER": "42", "PR_HEAD_SHA": head, "GITHUB_REPOSITORY": "o/r"}, clear=True), \
                  patch.object(sys, "argv", ["pr_shape.py", "--screens"]), \
                  patch.object(pr_shape, "github", return_value={"body": body}), \
+                 patch.object(pr_shape, "wait_for_screens", return_value=result) as wait, \
                  patch.object(select_tests, "changed_paths") as changed, \
                  redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
                 self.assertEqual(pr_shape.main(), expected)
+                wait.assert_called_once_with(body, "o/r", "42", head)
                 changed.assert_not_called()
+
+    def test_screens_cli_uses_live_body_and_workflow_api(self):
+        head = "a" * 40
+        run = {"id": 10, "event": "pull_request", "head_sha": head, "status": "completed",
+               "conclusion": "success", "pull_requests": [{"number": 42, "head": {"sha": head}}]}
+        for conclusion, expected in (("success", 0), ("failure", 1), ("cancelled", 1)):
+            with self.subTest(conclusion=conclusion), \
+                 patch.dict(os.environ, {"PR_BODY": "stale", "PR_NUMBER": "42", "PR_HEAD_SHA": head,
+                                         "GITHUB_REPOSITORY": "o/r"}, clear=True), \
+                 patch.object(sys, "argv", ["pr_shape.py", "--screens"]), \
+                 patch.object(pr_shape, "github", side_effect=[{"body": ""}, {"workflow_runs": [{**run, "conclusion": conclusion}]}]) as api, \
+                 redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as stderr:
+                self.assertEqual(pr_shape.main(), expected)
+                self.assertEqual(api.call_count, 2)
+                if expected:
+                    self.assertIn(conclusion, stderr.getvalue())
 
     def test_screens_mode_runs_with_only_ci_directory(self):
         with tempfile.TemporaryDirectory() as directory:
