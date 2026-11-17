@@ -441,7 +441,8 @@ test "a compaction's floor weighs compound Action Resolutions as a whole Tool Re
             switch (entry.kind) {
                 .user => messages += 1,
                 .provider_output => outputs += 1,
-                else => return error.TestUnexpectedResult,
+                .instruction, .operation => {},
+                .tool_results, .skill => return error.TestUnexpectedResult,
             }
         }
         try std.testing.expectEqual(@as(usize, 2), messages);

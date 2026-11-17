@@ -120,6 +120,7 @@ test "Store entry points queue and fence only through canonical access" {
         @embedFile("access.zig"),
         @embedFile("access_rules.zig"),
         @embedFile("action.zig"),
+        @embedFile("action_parts.zig"),
         @embedFile("activity.zig"),
         @embedFile("agent.zig"),
         @embedFile("compaction.zig"),

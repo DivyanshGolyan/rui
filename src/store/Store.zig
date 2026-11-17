@@ -1283,9 +1283,14 @@ pub const Store = struct {
         parts: ?@import("../InputCapture.zig").Loan,
         faults: Faults,
     ) !ActionSettlement {
-        var saving = try content_parts.Saving.init(if (parts) |captured| .{ .captured = captured } else .{ .text = .{ .slice = result } });
+        // The serialized settlement lends the existing Store workspace to its
+        // compound publisher, including failures before the first Entry.
+        comptime std.debug.assert(@sizeOf(content_parts.Saving) <= scratch_bytes and @alignOf(content_parts.Saving) <= scratch_align);
+        const saving: *content_parts.Saving = @ptrCast(@alignCast(self.scratch(.action)));
+        defer self.scratch_use = .none;
+        saving.* = try .init(if (parts) |captured| .{ .captured = captured } else .{ .text = .{ .slice = result } });
         if (saving.reference == .bytes and saving.reference.bytes.length == 0) return error.InvalidActionResult;
-        return transition.apply(self, action_domain.SettleAttempt, .{ .binding = binding, .code = code, .result = result, .saving = &saving, .io = self.io }, faults);
+        return transition.apply(self, action_domain.SettleAttempt, .{ .binding = binding, .code = code, .result = result, .saving = saving, .io = self.io }, faults);
     }
 
     /// Publishes the ordered value at the Action's sole immutable Resolution.
@@ -1788,7 +1793,7 @@ const OutOfLine = struct {
     scratch: Scratch align(scratch_align),
 };
 
-const ScratchUse = enum(u8) { none, configuration, settlement, report };
+const ScratchUse = enum(u8) { none, configuration, settlement, action, report };
 
 const Scratch = [scratch_bytes]u8;
 const scratch_bytes = @max(@sizeOf(configuration_domain.ConfigurationReads), @sizeOf(model_settlement_domain.Batch));
