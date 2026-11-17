@@ -156,7 +156,8 @@ jobs:
         continue-on-error: true
         env:
           INPUTS: ${{ toJSON(inputs) }}
-          RUI_MAC_RUNNER: ${{ vars.RUI_MAC_RUNNER }}
+          # Held off until leftover processes from earlier Mac jobs are cleaned up (#1643).
+          RUI_MAC_RUNNER: 'off'
           RUNNERS_PATH: ${{ runner.temp }}/mac-runners.json
           QUEUE_PATH: ${{ runner.temp }}/mac-queue.json
         run: python3 -B tests/ci/mac_runner.py
