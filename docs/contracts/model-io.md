@@ -514,7 +514,7 @@ This runtime context does not modify saved Session instructions or append Conver
 Replay reads neither the Host's cwd nor the caller's current directory.
 Tool definitions own filesystem/cwd behavior and timeout selection; timeout results own the effective budget and recovery guidance.
 Static prompt text follows the running binary, not a copied per-Operation setting.
-The model catalog selects built-in guidance for the four exact, case-sensitive IDs `gpt-6-luna`, `gpt-6.1-terra`, `gpt-6.1-sol`, and `gpt-6-astra`, independently of provider.
+The model catalog selects built-in guidance for the six exact, case-sensitive IDs `gpt-6-luna`, `gpt-6.1-terra`, `gpt-6.1-sol`, `gpt-6-astra`, `gpt-6.2-sol` and `gpt-6.2-astra`, independently of provider; the two 6.2 IDs reuse the 6.1 Sol and Astra guidance until Codex publishes their own.
 Other IDs use the shared Rui frame and authored instructions without a specialized body; spelling similarity, namespaces and aliases do not borrow another model's guidance or change the requested ID.
 Each call composes from its Operation's frozen model and authored history.
 A deliberate binary upgrade may therefore change built-in wording on reconstruction or retry without changing saved instructions or Conversation.

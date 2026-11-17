@@ -1622,7 +1622,8 @@ fi
         self.assertTrue(all(row["targets"] == ["measure-model-output"] for row in rows))
 
     def test_requested_ref_cannot_publish_shared_caches(self):
-        for name in ('qualify-macos.yml', 'previous-release-upgrade.yml', 'release.yml'):
+        read_only = ('qualify-macos.yml', 'previous-release-upgrade.yml', 'release.yml', 'screens.yml')
+        for name in read_only:
             with self.subTest(workflow=name):
                 workflow = Path('.github/workflows', name).read_text()
                 self.assertRegex(workflow, r'(?m)^cache-mode: read$')
@@ -1649,7 +1650,7 @@ fi
                 self.assertEqual(workflow.count("publish-caches: 'false'"),
                                  workflow.count('uses: ./.github/actions/setup'))
         for path in Path('.github/workflows').glob('*.yml'):
-            if path.name not in ('qualify-macos.yml', 'previous-release-upgrade.yml', 'release.yml'):
+            if path.name not in read_only:
                 workflow = path.read_text()
                 if path.name == 'check.yml':
                     policy = re.search(r'(?ms)^  policy:\n(.*?)(?=^  [\w-]+:\n|\Z)', workflow).group(1)

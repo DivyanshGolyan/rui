@@ -743,9 +743,9 @@ test "store.mysql obligation reconciliation reads stay flat in completed Turn hi
             const seed = try std.fmt.bufPrint(&buffer, "INSERT INTO turn(turn_id,session_ref,first_admission_id,input_cutoff,operation_id,outcome_code,outcome_at,outcome_position,outcome_content_id) " ++
                 "WITH RECURSIVE sequence(value) AS (SELECT 1 UNION ALL SELECT value+1 FROM sequence WHERE value<{d}) " ++
                 "SELECT 100000+value,CASE WHEN value<={d} THEN '{s}' ELSE '{s}' END,100000+value,100000+value,1,'completed',1,1,1 FROM sequence;" ++
-                "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at) " ++
+                "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at,source_kind) " ++
                 "WITH RECURSIVE sequence(value) AS (SELECT 1 UNION ALL SELECT value+1 FROM sequence WHERE value<{d}) " ++
-                "SELECT 100000+value,CASE WHEN value<={d} THEN '{s}' ELSE '{s}' END,CONCAT('frontier-history-',value),1,100000+value,100000+value,1 FROM sequence", .{ 2 * history, history, child.slice(), parent.slice(), 2 * history, history, child.slice(), parent.slice() });
+                "SELECT 100000+value,CASE WHEN value<={d} THEN '{s}' ELSE '{s}' END,CONCAT('frontier-history-',value),1,100000+value,100000+value,1,1 FROM sequence", .{ 2 * history, history, child.slice(), parent.slice(), 2 * history, history, child.slice(), parent.slice() });
             try rawExec(&storage, "SET SESSION foreign_key_checks=0");
             {
                 defer rawExec(&storage, "SET SESSION foreign_key_checks=1") catch @panic("foreign keys stayed off");

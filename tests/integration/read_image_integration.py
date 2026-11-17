@@ -57,8 +57,10 @@ def prove_case(root, name):
         fixture.sse_tool_calls(name, [("read_image", call_id, arguments)]),
         fixture.sse_answer(name + "-answer", "reasoning", "message", "continued")[0],
     ]
+    delivery_release = threading.Event()
     if name == "background-pending":
-        responses.append(fixture.sse_answer("delivery-answer", "delivery-reasoning", "delivery-message", "delivered")[0])
+        delivery_response = fixture.sse_answer("delivery-answer", "delivery-reasoning", "delivery-message", "delivered")[0]
+        responses.append((delivery_response, delivery_release))
     endpoint = fixture.SuccessEndpoint(responses)
     thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
     endpoints = {endpoint: thread}
@@ -179,7 +181,14 @@ def prove_case(root, name):
                 wait(lambda: len(endpoint.requests) == 3, "final background delivery")
                 delivered = json.loads(endpoint.requests[2])
                 assert "data:image/png;base64," in json.dumps(delivered), delivered
-                wait(lambda: command("session", "inspect", "--store", store, "--session", session)["work"]["latest_outcome"]["code"] == "completed", "background delivery completion")
+                def delivery_completed():
+                    outcome = command("session", "inspect", "--store", store, "--session", session)["work"]["latest_outcome"]
+                    return (outcome or {}).get("code") == "completed"
+
+                assert command("session", "inspect", "--store", store, "--session", session)["work"]["latest_outcome"] is None
+                assert not delivery_completed()
+                delivery_release.set()
+                wait(delivery_completed, "background delivery completion")
             else:
                 assert isinstance(output, str) and output.strip(), outputs
                 assert "data:image/" not in output, outputs
@@ -194,7 +203,7 @@ def prove_case(root, name):
             assert len(saved) == 1 and saved[0][0] == expected and saved[0][1] > 0, saved
         print("read_image " + name + ": " + expected)
     finally:
-        fixture.dispose_dispatch(processes, endpoints, [])
+        fixture.dispose_dispatch(processes, endpoints, [delivery_release.set])
 
 
 def main():
