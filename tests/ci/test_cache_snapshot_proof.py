@@ -21,23 +21,24 @@ class Fixture:
             (root / "b").mkdir()
             (root / "b" / "builtin.zig").write_bytes(b"original builtin")
         self.candidate.mkdir()
-        (self.candidate / "rui-release-safe-check").write_bytes(b"eligible CLI bytes")
+        self.candidate_bytes = b"\x7fELF\x02\x01\x01" + b"\0" * 9 + b"\x02\0\x3e\0eligible CLI bytes"
+        (self.candidate / "rui-release-safe-check").write_bytes(self.candidate_bytes)
         self.mutable.mkdir()
         (self.mutable / "dependencies.zig").write_bytes(b"original generated input")
         self.source = base / "cli.zig"
         self.source.write_bytes(b"const x = 1;\n")
-        self.checkpoint = proof.Checkpoint([self.local, self.global_cache], base / "checkpoint")
+        self.checkpoint = proof.Checkpoint([self.local, self.global_cache], base / "checkpoint", reserve_bytes=0)
         self.report = {"removable": [{"path": str(self.candidate), "bytes": 18}]}
 
 
 class CheckpointTests(unittest.TestCase):
-    def test_only_non_o_and_known_generated_input_bytes_are_copied(self):
+    def test_non_executable_outputs_are_copied_without_copying_cli_bytes(self):
         with tempfile.TemporaryDirectory() as scratch:
             fixture = Fixture(Path(scratch))
             checkpoint = fixture.checkpoint
             copies = [p for p in checkpoint.destination.rglob("*") if p.is_file()]
             self.assertEqual(sorted(p.name for p in copies),
-                             ["builtin.zig", "builtin.zig", "dependencies.zig", "inventory.json", "manifest", "manifest"])
+                             ["builtin.zig", "builtin.zig", "dependencies.zig", "inventory.json", "manifest", "manifest", "object.o", "object.o"])
             checkpoint.validate()
 
     def test_quarantine_and_repeated_arms_restore_same_bytes_and_output_inodes(self):
@@ -66,7 +67,7 @@ class CheckpointTests(unittest.TestCase):
                 replacement.replace(generated)
                 checkpoint.validate()
                 checkpoint.restore()
-                self.assertEqual((fixture.candidate / "rui-release-safe-check").read_bytes(), b"eligible CLI bytes")
+                self.assertEqual((fixture.candidate / "rui-release-safe-check").read_bytes(), fixture.candidate_bytes)
                 self.assertEqual((fixture.candidate / "rui-release-safe-check").stat().st_ino, candidate_info.st_ino)
                 for root in checkpoint.roots:
                     self.assertEqual({p.name for p in (root / "o").iterdir()}, checkpoint.initial[checkpoint.roots.index(root)])
@@ -76,13 +77,13 @@ class CheckpointTests(unittest.TestCase):
                 self.assertEqual(generated.read_bytes(), b"original generated input")
                 after = proof.metadata(fixture.local / "o")
                 for name, info in before.items():
-                    if not name.startswith("d" * 32):
+                    if name.split("/")[0] not in checkpoint.mutable[0]:
                         self.assertEqual(after[name], info)
 
     def test_unknown_existing_output_write_fails_even_when_size_and_mtime_match(self):
         with tempfile.TemporaryDirectory() as scratch:
             fixture = Fixture(Path(scratch))
-            path = fixture.global_cache / "o" / ("b" * 32) / "object.o"
+            path = fixture.candidate / "rui-release-safe-check"
             original = path.stat()
             replacement = path.with_suffix(".tmp")
             replacement.write_bytes(path.read_bytes())
@@ -93,6 +94,32 @@ class CheckpointTests(unittest.TestCase):
             with self.assertRaisesRegex(proof.ProofError, "fairness unproved"):
                 fixture.checkpoint.restore()
             self.assertEqual((fixture.local / "h" / "manifest").read_bytes(), b"original manifest")
+
+    def test_generated_headers_and_global_outputs_restore_atomic_and_inplace_writes(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            fixture = Fixture(Path(scratch))
+            for root in (fixture.local, fixture.global_cache):
+                path = root / "o" / ("b" * 32) / "object.o"
+                path.write_bytes(b"in-place generated header write")
+                extra = path.parent / "new-header.h"
+                extra.write_bytes(b"atomic generated header")
+            fixture.checkpoint.validate()  # These classes are backed up, not immutable.
+            fixture.checkpoint.restore()
+            for root in (fixture.local, fixture.global_cache):
+                path = root / "o" / ("b" * 32) / "object.o"
+                self.assertEqual(path.read_bytes(), b"preserved large output")
+                self.assertFalse((path.parent / "new-header.h").exists())
+
+    def test_copy_budget_is_checked_before_any_cache_mutation(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            base = Path(scratch)
+            fixture = Fixture(base)
+            before = proof.metadata(fixture.local / "o")
+            with self.assertRaisesRegex(proof.ProofError, "copy budget exceeded"):
+                proof.Checkpoint([fixture.local, fixture.global_cache], base / "too-large",
+                                 budget_bytes=1, reserve_bytes=0)
+            self.assertEqual(proof.metadata(fixture.local / "o"), before)
+            self.assertFalse((base / "too-large").exists())
 
     def test_substituted_output_namespace_never_deletes_foreign_files(self):
         with tempfile.TemporaryDirectory() as scratch:

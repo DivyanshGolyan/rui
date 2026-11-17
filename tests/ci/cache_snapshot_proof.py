@@ -65,10 +65,40 @@ def metadata(directory):
     return found
 
 
-class Checkpoint:
-    """Copy non-o and tiny generated-input dirs, rename only audited CLI outputs."""
+def tree_bytes(path):
+    if path.is_symlink():
+        raise ProofError(f"symlink in checkpoint: {path}")
+    if path.is_file():
+        return path.stat().st_size
+    if not path.is_dir():
+        raise ProofError(f"special checkpoint entry: {path}")
+    return sum(tree_bytes(child) for child in path.iterdir())
 
-    def __init__(self, roots, destination):
+
+def contains_elf_output(directory, inventory):
+    """Conservatively retain ELF ET_EXEC/ET_DYN trees without copying their GBs."""
+    for relative, info in inventory.items():
+        if stat.S_ISREG(info[2]):
+            with (directory / relative).open("rb") as stream:
+                header = stream.read(20)
+            if header[:4] == b"\x7fELF" and len(header) == 20:
+                if header[5] not in (1, 2):
+                    raise ProofError(f"unknown ELF byte order: {directory / relative}")
+                order = "little" if header[5] == 1 else "big"
+                if int.from_bytes(header[16:18], order) in (2, 3):
+                    return True
+    return False
+
+
+class Checkpoint:
+    """Copy non-o, all global o and local o trees without ELF executables.
+
+    Generated ve.zig and hwy headers can mutate their old output directories.
+    Copying the non-executable trees covers these and newly generated options;
+    executable trees retain their original inodes and must stay unchanged.
+    """
+
+    def __init__(self, roots, destination, *, budget_bytes=4 * 1024**3, reserve_bytes=8 * 1024**3):
         self.roots = [Path(root).absolute() for root in roots]
         self.destination = Path(destination).absolute()
         if len(set(self.roots)) != len(self.roots):
@@ -80,40 +110,54 @@ class Checkpoint:
                 raise ProofError("checkpoint and caches must be disjoint")
         if any(a.is_relative_to(b) for a in self.roots for b in self.roots if a != b):
             raise ProofError("cache roots must be disjoint")
-        self.destination.mkdir(parents=True, exist_ok=False)
-        self.quarantine = self.destination / "quarantine"
-        self.quarantine.mkdir()
-        if self.quarantine.stat().st_dev != (self.roots[0] / "o").stat().st_dev:
+        if self.destination.exists():
+            raise ProofError(f"checkpoint already exists: {self.destination}")
+        self.destination.parent.mkdir(parents=True, exist_ok=True)
+        if self.destination.parent.stat().st_dev != (self.roots[0] / "o").stat().st_dev:
             raise ProofError("RUNNER_TEMP quarantine must be on the local cache filesystem")
+        self.quarantine = self.destination / "quarantine"
         self.initial = []
         self.mutable = []
         self.frozen = []
         self.moved = {}
+        planned = []
         for index, root in enumerate(self.roots):
             saved = self.destination / str(index)
-            (saved / "non-o").mkdir(parents=True)
-            (saved / "mutable").mkdir()
-            for path in root.iterdir():
-                if path.name != "o":
-                    copy(path, saved / "non-o" / path.name)
+            planned.extend((path, saved / "non-o" / path.name)
+                           for path in root.iterdir() if path.name != "o")
             names = {path.name for path in (root / "o").iterdir()}
-            mutable = set()
+            mutable, frozen = set(), {}
             for name in names:
                 directory = root / "o" / name
                 if not directory.is_dir() or directory.is_symlink():
                     raise ProofError(f"unexpected output namespace: {directory}")
-                if (directory / "dependencies.zig").is_file():
-                    # This is Zig's generated direct-hash dependency file, not a CLI output.
-                    if not re.fullmatch(r"[0-9a-f]{32}", name) or set(p.name for p in directory.iterdir()) != {"dependencies.zig"}:
-                        raise ProofError(f"unknown mutable output directory: {directory}")
-                    copy(directory, saved / "mutable" / name)
+                inventory = metadata(directory)
+                if index == 1 or not contains_elf_output(directory, inventory):
                     mutable.add(name)
+                    planned.append((directory, saved / "mutable" / name))
+                else:
+                    frozen[name] = inventory
             self.initial.append(names)
             self.mutable.append(mutable)
-            self.frozen.append({name: metadata(root / "o" / name) for name in names - mutable})
+            self.frozen.append(frozen)
+        self.copied_bytes = sum(tree_bytes(path) for path, _ in planned)
+        if self.copied_bytes > budget_bytes:
+            raise ProofError(f"checkpoint copy budget exceeded: {self.copied_bytes} > {budget_bytes}")
+        if shutil.disk_usage(self.destination.parent).free < self.copied_bytes + reserve_bytes:
+            raise ProofError("checkpoint would exhaust the configured disk reserve")
+        self.quarantine.mkdir(parents=True, exist_ok=False)
+        for index in range(len(self.roots)):
+            (self.destination / str(index) / "non-o").mkdir(parents=True)
+            (self.destination / str(index) / "mutable").mkdir()
+        for path, target in planned:
+            copy(path, target)
+        self.validate()
         (self.destination / "inventory.json").write_text(json.dumps({
             "roots": list(map(str, self.roots)), "initial_o": [sorted(n) for n in self.initial],
             "mutable_o": [sorted(n) for n in self.mutable], "metadata": self.frozen,
+            "copied_bytes": self.copied_bytes, "budget_bytes": budget_bytes,
+            "reserve_bytes": reserve_bytes,
+            "strategy": "all global o; local o without ELF ET_EXEC/ET_DYN; all non-o",
         }, sort_keys=True))
 
     def check_paths(self):
@@ -334,7 +378,9 @@ def run(args):
         with source.preserved():
             stage(command(args.targets, args.part, "pr", prefix, args.jobs),
                   output / "prime-pr", workspace=workspace, env=env)
-            checkpoint = Checkpoint([local, global_cache], output / "checkpoint")
+            checkpoint = Checkpoint([local, global_cache], output / "checkpoint",
+                                    budget_bytes=args.checkpoint_budget_gb * 1024**3,
+                                    reserve_bytes=args.disk_reserve_gb * 1024**3)
             audit = cache_snapshot.audit(local, global_cache, prefixes=[*args.protect_prefix, prefix / "bin"])
             (output / "audit.json").write_text(json.dumps(audit, indent=2))
             if not audit.get("removable") or audit.get("skipped"):
@@ -386,6 +432,8 @@ def main():
                         help="existing LLVM producer bin directory; repeat for other current outputs")
     parser.add_argument("--part", choices=("all", "unit", "rest"), default="rest")
     parser.add_argument("--profiles", nargs="+", choices=("llvm", "pr"), default=["llvm", "pr"])
+    parser.add_argument("--checkpoint-budget-gb", type=int, default=4)
+    parser.add_argument("--disk-reserve-gb", type=int, default=8)
     parser.add_argument("--jobs", type=int, help="use 1 locally; hosted Linux owner defaults to 8")
     parser.add_argument("--local", type=Path, default=Path(".zig-cache"))
     parser.add_argument("--global-cache", type=Path, default=Path(os.environ.get("ZIG_GLOBAL_CACHE_DIR", Path.home() / ".cache/zig")))
@@ -394,6 +442,8 @@ def main():
     if (not isinstance(args.targets, list) or not args.targets
             or any(not isinstance(target, str) or not target or target.startswith("-") for target in args.targets)):
         parser.error("--targets must be the nonempty producer JSON target list")
+    if args.checkpoint_budget_gb < 1 or args.disk_reserve_gb < 0:
+        parser.error("checkpoint budget must be positive and disk reserve nonnegative")
     if args.jobs is not None and args.jobs < 1:
         parser.error("--jobs must be positive")
     if len(set(args.profiles)) != len(args.profiles):
