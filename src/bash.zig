@@ -238,6 +238,22 @@ const OwnedFile = struct {
     }
 };
 
+const CaptureAdoption = struct {
+    capture: *OwnedFile,
+    scratch: Scratch,
+    queue: *output_retention.Queue,
+
+    fn adopt(context: *anyopaque) ?output_retention.Spill {
+        const self: *CaptureAdoption = @ptrCast(@alignCast(context));
+        if (self.capture.injectedCleanupFault(self.scratch)) return null;
+        self.capture.close(self.scratch.io);
+        const spill = output_retention.Spill.adopt(self.queue, self.capture.name.slice(), self.capture.charged) orelse return null;
+        self.capture.charged = 0;
+        self.capture.published = true;
+        return spill;
+    }
+};
+
 pub const Prepared = struct {
     scratch: Scratch,
     allocator: std.mem.Allocator,
@@ -383,7 +399,6 @@ pub const Execution = struct {
     faults: Faults,
     read_fault_used: bool = false,
     service_fault_used: bool = false,
-    output_reservation: ?output_retention.Pair = null,
     stdin_capture: ?OwnedFile = null,
 
     pub const TerminationAttempt = struct {
@@ -498,34 +513,32 @@ pub const Execution = struct {
         if (!self.retired()) return error.BashNotRetired;
     }
 
-    pub fn reserveOutput(self: *Execution, retention: *output_retention.Queue) !bool {
-        self.output_reservation = try retention.reservePair(
-            self.stdout_capture.name.slice(),
-            self.stdout_capture.charged,
-            self.stderr_capture.name.slice(),
-            self.stderr_capture.charged,
-        );
-        return self.output_reservation != null;
-    }
-
-    pub fn releaseOutputReservation(self: *Execution, retention: *output_retention.Queue) void {
-        const pair = self.output_reservation orelse return;
-        retention.releaseReservation(pair.stdout);
-        retention.releaseReservation(pair.stderr);
-        self.output_reservation = null;
-    }
-
-    pub fn outcome(self: *Execution, scratch: Scratch, include_paths: bool, out: *Outcome) !void {
+    pub fn resultCode(self: *Execution, scratch: Scratch) store.ActionResolutionCode {
         self.stdout_capture.file.?.sync(scratch.io) catch self.lifecycle.recordSealFailure();
         self.stderr_capture.file.?.sync(scratch.io) catch self.lifecycle.recordSealFailure();
         if (self.faults.seal) self.lifecycle.recordSealFailure();
-        const code: store.ActionResolutionCode = switch (self.lifecycle.resolution()) {
+        return switch (self.lifecycle.resolution()) {
             inline else => |resolution| @field(store.ActionResolutionCode, @tagName(resolution)),
         };
-        out.* = .{ .code = code };
-        var writer = std.Io.Writer.fixed(&out.content);
-        try self.formatResult(scratch, &writer, code, include_paths, &out.tail);
-        out.content_len = writer.buffered().len;
+    }
+
+    /// Build the shared result from the two finished capture files. Adoption
+    /// transfers an already charged file only after its excerpt was cut.
+    pub fn writeResult(self: *Execution, scratch: Scratch, queue: *output_retention.Queue, result: *@import("tool_result.zig").Result) !store.ActionResolutionCode {
+        const code = self.resultCode(scratch);
+        var header_buffer: [4096]u8 = undefined;
+        var header = std.Io.Writer.fixed(&header_buffer);
+        try self.writeHeader(&header, code);
+        try result.frame(header.buffered());
+        var captures = [_]CaptureAdoption{
+            .{ .capture = &self.stdout_capture, .scratch = scratch, .queue = queue },
+            .{ .capture = &self.stderr_capture, .scratch = scratch, .queue = queue },
+        };
+        try result.files(&.{
+            .{ .label = "stdout", .section = "stdout:\n", .file = self.stdout_capture.file.?, .length = try self.stdout_capture.file.?.length(scratch.io), .context = &captures[0], .adopt = CaptureAdoption.adopt },
+            .{ .label = "stderr", .section = "stderr:\n", .file = self.stderr_capture.file.?, .length = try self.stderr_capture.file.?.length(scratch.io), .context = &captures[1], .adopt = CaptureAdoption.adopt },
+        });
+        return code;
     }
 
     pub fn reclaim(self: *Execution, scratch: Scratch, retention: *output_retention.Queue) !void {
@@ -534,34 +547,14 @@ pub const Execution = struct {
         cleanupOwnedFiles(scratch, &.{&self.stdin_capture}) catch |err| {
             first_error = err;
         };
-        if (self.output_reservation != null) {
-            self.stdout_capture.close(scratch.io);
-            self.stderr_capture.close(scratch.io);
-            if (self.stdout_capture.injectedCleanupFault(scratch)) {
-                first_error = first_error orelse error.InjectedBashCleanupFailure;
-            } else self.publishReservedOutput(retention) catch |err| {
-                first_error = first_error orelse err;
-            };
-        } else {
-            self.stdout_capture.cleanup(scratch) catch |err| {
-                first_error = first_error orelse err;
-            };
-            self.stderr_capture.cleanup(scratch) catch |err| if (first_error == null) {
-                first_error = err;
-            };
-        }
+        _ = retention;
+        self.stdout_capture.cleanup(scratch) catch |err| {
+            first_error = first_error orelse err;
+        };
+        self.stderr_capture.cleanup(scratch) catch |err| if (first_error == null) {
+            first_error = err;
+        };
         if (first_error) |err| return err;
-    }
-
-    pub fn publishReservedOutput(self: *Execution, retention: *output_retention.Queue) !void {
-        const pair = self.output_reservation orelse return error.NoOutputReservation;
-        if (self.stdout_capture.file != null or self.stderr_capture.file != null) {
-            return error.ProducerAliasesOpen;
-        }
-        try retention.publishPair(pair);
-        self.output_reservation = null;
-        self.stdout_capture.published = true;
-        self.stderr_capture.published = true;
     }
 
     fn sendSignal(self: *Execution, signal: ?BashLifecycle.Signal) void {
@@ -742,14 +735,7 @@ pub const Execution = struct {
         self.lifecycle.beginTail(stream, if (observed) queued else null);
         self.releaseClosedDescriptor(io, stream);
     }
-    fn formatResult(
-        self: *Execution,
-        scratch: Scratch,
-        writer: *std.Io.Writer,
-        code: store.ActionResolutionCode,
-        include_paths: bool,
-        tail: *[excerpt_bytes + 14]u8,
-    ) !void {
+    pub fn writeHeader(self: *const Execution, writer: *std.Io.Writer, code: store.ActionResolutionCode) !void {
         try writer.print("Bash {s}. ", .{@tagName(code)});
         switch (self.lifecycle.process.gone) {
             .exited => |exit_code| try writer.print("Exit code: {d}.\n", .{exit_code}),
@@ -771,53 +757,34 @@ pub const Execution = struct {
             try writer.writeAll("Capture may be incomplete because writers outlived process-group termination.\n");
         }
         if (self.lifecycle.signal_failure) try writer.writeAll("Process-group signaling reported a failure.\n");
-        const stdout_length = try self.stdout_capture.file.?.length(scratch.io);
-        const stderr_length = try self.stderr_capture.file.?.length(scratch.io);
-        const stderr_base: usize = @intCast(@min(stderr_length, excerpt_bytes / 2));
-        const stdout_take: usize = @intCast(@min(stdout_length, excerpt_bytes - stderr_base));
-        const stderr_take = stderr_base + @as(usize, @intCast(@min(
-            stderr_length - stderr_base,
-            excerpt_bytes - stderr_base - stdout_take,
-        )));
-        const stdout_excerpt = try readExcerpt(self.stdout_capture.file.?, scratch.io, stdout_length, stdout_take, tail[0 .. stdout_take + 7]);
-        const stderr_excerpt = try readExcerpt(self.stderr_capture.file.?, scratch.io, stderr_length, stderr_take, tail[stdout_take + 7 ..][0 .. stderr_take + 7]);
-        const stderr_encoded_base = @min(stderr_excerpt.encodedLength(), excerpt_bytes / 2);
-        const stdout_allowance = @min(stdout_excerpt.encodedLength(), excerpt_bytes - stderr_encoded_base);
-        const stderr_allowance = stderr_encoded_base + @min(
-            stderr_excerpt.encodedLength() - stderr_encoded_base,
-            excerpt_bytes - stderr_encoded_base - stdout_allowance,
-        );
-        var stdout_omitted = false;
-        if (stdout_length != 0) {
-            try writer.writeAll("stdout:\n");
-            stdout_omitted = try stdout_excerpt.append(writer, stdout_allowance);
-        }
-        var stderr_omitted = false;
-        if (stderr_length != 0) {
-            try writer.writeAll(if (stdout_length != 0) "\nstderr:\n" else "stderr:\n");
-            stderr_omitted = try stderr_excerpt.append(writer, stderr_allowance);
-        }
-        if (!stdout_omitted and !stderr_omitted) return;
-        if (!include_paths) {
-            try writer.writeAll("\nFull output was not retained.\n");
-            return;
-        }
-        try writer.writeByte('\n');
-        if (stdout_omitted) try writer.print("Full stdout: {s}/{s}\n", .{ scratch.path, self.stdout_capture.name.slice() });
-        if (stderr_omitted) try writer.print("Full stderr: {s}/{s}\n", .{ scratch.path, self.stderr_capture.name.slice() });
     }
 };
 
-pub const Outcome = struct {
+const TestOutcome = struct {
     code: store.ActionResolutionCode,
     content: [excerpt_bytes + 4096]u8 = undefined,
     content_len: usize = 0,
-    tail: [excerpt_bytes + 14]u8 = undefined,
 
-    pub fn text(self: *const Outcome) []const u8 {
+    fn text(self: *const TestOutcome) []const u8 {
         return self.content[0..self.content_len];
     }
 };
+
+fn testOutcome(execution: *Execution, scratch: Scratch, queue: *output_retention.Queue, out: *TestOutcome) !void {
+    // Exercise the unavailable-retention path without transferring either
+    // capture; Bash's real profile always offers retention.
+    var no_entries: [0]output_retention.Entry = .{};
+    var unavailable = output_retention.Queue.initialize(scratch.io, scratch.path, queue.budget, &no_entries);
+    var host: @import("server_host.zig").Host = .{ .io = scratch.io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined, .retention = &unavailable };
+    const result = try @import("tool_result.zig").Result.create(&host, 1, .{ .excerpt_bytes = excerpt_bytes, .retain = true });
+    defer result.destroy();
+    out.code = try execution.writeResult(scratch, &unavailable, result);
+    const finished = result.finish();
+    if (finished != .value or finished.value != .text) return error.UnexpectedTestResult;
+    const text = finished.value.text;
+    @memcpy(out.content[0..text.len], text);
+    out.content_len = text.len;
+}
 
 pub const Preparation = struct {
     scratch: Scratch,
@@ -1215,12 +1182,18 @@ test "cleanup deadline cuts off unresolved pipe custody exactly once" {
     try std.testing.expect(gone_repeated.retired);
 
     gone.lifecycle.recordSignal(.group_permission_denied);
-    var quiet: Outcome = undefined;
-    try gone.outcome(scratch, false, &quiet);
+    var quiet: TestOutcome = undefined;
+    quiet.code = gone.resultCode(scratch);
+    var quiet_writer = std.Io.Writer.fixed(&quiet.content);
+    try gone.writeHeader(&quiet_writer, quiet.code);
+    quiet.content_len = quiet_writer.buffered().len;
     try std.testing.expectEqualStrings("Bash succeeded. Exit code: 0.\nCapture may be incomplete because writers outlived process-group termination.\n", quiet.text());
     gone.lifecycle.recordSignal(.failed);
-    var warned: Outcome = undefined;
-    try gone.outcome(scratch, false, &warned);
+    var warned: TestOutcome = undefined;
+    warned.code = gone.resultCode(scratch);
+    var warned_writer = std.Io.Writer.fixed(&warned.content);
+    try gone.writeHeader(&warned_writer, warned.code);
+    warned.content_len = warned_writer.buffered().len;
     try std.testing.expectEqualStrings("Bash succeeded. Exit code: 0.\nCapture may be incomplete because writers outlived process-group termination.\nProcess-group signaling reported a failure.\n", warned.text());
 }
 
@@ -1331,7 +1304,7 @@ test "prepared cleanup reclaims partially and retries through the same owner" {
     try std.testing.expectEqual(baseline, used.load(.acquire));
 }
 
-fn launchForTest(root: []const u8, budget: ScratchBudget, retention: *output_retention.Queue, ordinal: u64, command: []const u8, out: *Outcome) !void {
+fn launchForTest(root: []const u8, budget: ScratchBudget, retention: *output_retention.Queue, ordinal: u64, command: []const u8, out: *TestOutcome) !void {
     const scratch: Scratch = .{ .io = std.testing.io, .path = root, .budget = budget };
     var workspace: protocol.Bounded(protocol.max_workspace_bytes) = .{};
     try workspace.set(root);
@@ -1356,7 +1329,7 @@ fn launchForTest(root: []const u8, budget: ScratchBudget, retention: *output_ret
     var window: [copy_window_bytes]u8 = undefined;
     const service = .{ .execution = &execution, .scratch = scratch, .window = &window };
     try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(30)), service, bash_service.retired);
-    try execution.outcome(scratch, false, out);
+    try testOutcome(&execution, scratch, retention, out);
     try execution.reclaim(scratch, retention);
 }
 
@@ -1434,8 +1407,8 @@ test "MySQL Bash preserves a short runtime alias with an overlong canonical targ
         const service = .{ .execution = &execution, .scratch = scratch, .window = &window };
         try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(30)), service, bash_service.retired);
         defer execution.reclaim(scratch, &retention) catch @panic("Bash execution cleanup failed");
-        var output: Outcome = undefined;
-        try execution.outcome(scratch, false, &output);
+        var output: TestOutcome = undefined;
+        try testOutcome(&execution, scratch, &retention, &output);
         try std.testing.expectEqual(store.ActionResolutionCode.succeeded, output.code);
         var child_runtime_buffer: [protocol.max_store_bytes]u8 = undefined;
         const length = try execution.stdout_capture.file.?.readPositionalAll(io, &child_runtime_buffer, 0);
@@ -1478,7 +1451,7 @@ test "launched Bash starts with default signal actions, an empty mask and no /de
         .{ "kill -USR2 $$; echo survived", std.fmt.comptimePrint("Signal: {d}.", .{@backingInt(std.posix.SIG.USR2)}), "" },
         .{ "echo begin; for f in /dev/fd/*; do n=${f##*/}; [ \"$n\" -gt 2 ] && [ \"$f\" -ef /dev/null ] && echo leaked-$n; done | sort -t- -k2,2n; echo checked", succeeded, expected_descriptors },
     }, 1..) |case, ordinal| {
-        var result: Outcome = undefined;
+        var result: TestOutcome = undefined;
         try launchForTest(root, budget, &retention, ordinal, case[0], &result);
         const text = result.text();
         if (std.mem.indexOf(u8, text, case[1]) == null or std.mem.indexOf(u8, text, case[2]) == null) {
@@ -1499,7 +1472,7 @@ test "launched Bash leads its own session, so no terminal can reach its prompts"
     var entries: [8]output_retention.Entry = @splat(.{});
     var retention = output_retention.Queue.initialize(std.testing.io, root, budget, &entries);
     defer retention.cleanupAll();
-    var result: Outcome = undefined;
+    var result: TestOutcome = undefined;
     try launchForTest(root, budget, &retention, 1, "python3 -c 'import os; print(\"own-session\" if os.getsid(0) == os.getppid() else \"shared\")'; exec 3</dev/tty || echo no-terminal", &result);
     const text = result.text();
     if (std.mem.indexOf(u8, text, "own-session\nno-terminal\n") == null) {
@@ -1599,70 +1572,6 @@ test "retired execution is independent of outstanding capture reclamation" {
     try std.testing.expectError(error.BashNotRetired, execution.checkRetired());
 }
 
-test "output publication closes producer aliases before making output evictable" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
-    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
-    var used: std.atomic.Value(u64) = .init(0);
-    const budget = ScratchBudget{ .used = &used, .limit = 4 };
-    const scratch: Scratch = .{ .io = std.testing.io, .path = root, .budget = budget };
-    var entries: [2]output_retention.Entry = @splat(.{});
-    var retention = output_retention.Queue.initialize(std.testing.io, root, budget, &entries);
-    defer retention.cleanupAll();
-    try std.testing.expect(budget.charge(4));
-    const started = std.Io.Timestamp.fromNanoseconds(0).withClock(.awake);
-    var execution: Execution = undefined;
-    {
-        var stdout_capture = try createOwnedFile(scratch, .@"bash-stdout", 1, 1, .none);
-        errdefer stdout_capture.cleanup(scratch) catch {};
-        var stderr_capture = try createOwnedFile(scratch, .@"bash-stderr", 1, 1, .none);
-        errdefer stderr_capture.cleanup(scratch) catch {};
-        execution = .{
-            .lifecycle = .{
-                .process = .{ .gone = .{ .exited = 0 } },
-                .pipes = .initFill(.{ .closed = .eof }),
-            },
-            .leader = null,
-            .pgid = 1,
-            .pipes = .initFill(null),
-            .stdout_capture = stdout_capture,
-            .stderr_capture = stderr_capture,
-            .started = started,
-            .timeout_ms = 100,
-            .faults = .{},
-        };
-    }
-    execution.stdout_capture.charged = 2;
-    execution.stderr_capture.charged = 2;
-    var done = false;
-    errdefer if (!done) {
-        execution.releaseOutputReservation(&retention);
-        execution.stdout_capture.cleanup(scratch) catch {};
-        execution.stderr_capture.cleanup(scratch) catch {};
-    };
-    try execution.checkRetired();
-    try std.testing.expect(try execution.reserveOutput(&retention));
-    try std.testing.expect(execution.output_reservation != null);
-    try std.testing.expectEqual(@as(u64, 4), used.load(.acquire));
-    try std.testing.expectError(error.ProducerAliasesOpen, execution.publishReservedOutput(&retention));
-    try std.testing.expect(execution.output_reservation != null);
-    try std.testing.expect(!execution.stdout_capture.published);
-    try std.testing.expect(!execution.stderr_capture.published);
-    try std.testing.expectEqual(@as(usize, 2), retention.occupied());
-    try execution.reclaim(scratch, &retention);
-    done = true;
-    try std.testing.expect(execution.stdout_capture.file == null);
-    try std.testing.expect(execution.stderr_capture.file == null);
-    try std.testing.expect(execution.stdout_capture.published);
-    try std.testing.expect(execution.stderr_capture.published);
-    try std.testing.expectEqual(@as(u64, 4), used.load(.acquire));
-    try std.testing.expectEqual(@as(usize, 2), retention.occupied());
-    retention.cleanupAll();
-    try std.testing.expectEqual(@as(usize, 0), retention.occupied());
-    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
-}
-
 pub const ContentSource = struct {
     reader: store.ContentReader = undefined,
     length: u64,
@@ -1701,228 +1610,6 @@ pub const ContentSource = struct {
     }
 };
 
-const Utf8Unit = struct {
-    source_length: usize,
-    encoded_length: usize,
-    valid: bool,
-};
-
-fn utf8Unit(bytes: []const u8, index: usize) Utf8Unit {
-    const sequence_length = std.unicode.utf8ByteSequenceLength(bytes[index]) catch {
-        return .{ .source_length = 1, .encoded_length = "�".len, .valid = false };
-    };
-    if (index + sequence_length > bytes.len) {
-        return .{ .source_length = 1, .encoded_length = "�".len, .valid = false };
-    }
-    _ = std.unicode.utf8Decode(bytes[index .. index + sequence_length]) catch {
-        return .{ .source_length = 1, .encoded_length = "�".len, .valid = false };
-    };
-    return .{ .source_length = sequence_length, .encoded_length = sequence_length, .valid = true };
-}
-
-fn validUtf8Length(bytes: []const u8) usize {
-    var length: usize = 0;
-    var index: usize = 0;
-    while (index < bytes.len) {
-        const unit = utf8Unit(bytes, index);
-        length += unit.encoded_length;
-        index += unit.source_length;
-    }
-    return length;
-}
-
-const Excerpt = struct {
-    head: []const u8,
-    tail: []const u8,
-    tail_starts_line: bool,
-    source_length: u64,
-
-    fn encodedLength(self: Excerpt) usize {
-        return validUtf8Length(self.head) + validUtf8Length(self.tail);
-    }
-
-    fn append(self: Excerpt, writer: *std.Io.Writer, allowance: usize) !bool {
-        if (self.head.len == self.source_length and self.encodedLength() <= allowance) {
-            _ = try appendValidUtf8Tail(writer, self.head, allowance);
-            return false;
-        }
-        const head_allowance = allowance / 2;
-        var head_end = utf8HeadEnd(self.head, head_allowance);
-        const head_window = head_end -| 256;
-        if (std.mem.lastIndexOfScalar(u8, self.head[head_window..head_end], '\n')) |newline| {
-            head_end = head_window + newline + 1;
-        }
-        const tail = if (self.head.len == self.source_length) self.head else self.tail;
-        var tail_start = utf8TailStart(tail, allowance - head_allowance);
-        const tail_starts_line = if (tail_start == 0) self.tail_starts_line else tail[tail_start - 1] == '\n';
-        if (!tail_starts_line) if (std.mem.indexOfScalar(u8, tail[tail_start..][0..@min(256, tail.len - tail_start)], '\n')) |newline| {
-            tail_start += newline + 1;
-        };
-        _ = try appendValidUtf8Tail(writer, self.head[0..head_end], head_allowance);
-        if (head_end != 0 and self.head[head_end - 1] != '\n') try writer.writeByte('\n');
-        try writer.print("[{d} bytes left out]\n", .{self.source_length - head_end - (tail.len - tail_start)});
-        _ = try appendValidUtf8Tail(writer, tail[tail_start..], allowance - head_allowance);
-        return true;
-    }
-};
-
-fn readExcerpt(file: std.Io.File, io: std.Io, length: u64, take: usize, buffer: []u8) !Excerpt {
-    if (length <= take) {
-        if (try file.readPositionalAll(io, buffer[0..take], 0) != take) return error.ShortCaptureRead;
-        return .{ .head = buffer[0..take], .tail = "", .tail_starts_line = true, .source_length = length };
-    }
-    const head_take = take / 2;
-    const head_read: usize = @intCast(@min(length, head_take + 3));
-    if (try file.readPositionalAll(io, buffer[0..head_read], 0) != head_read) return error.ShortCaptureRead;
-    var head_end: usize = 0;
-    while (head_end < head_take) head_end += utf8Unit(buffer[0..head_read], head_end).source_length;
-    const tail_take = take - head_take;
-    const tail_offset = length - tail_take;
-    const context: usize = @intCast(@min(tail_offset, 4));
-    const tail_read = tail_take + context;
-    const tail = buffer[head_read..][0..tail_read];
-    if (try file.readPositionalAll(io, tail, tail_offset - context) != tail_read) return error.ShortCaptureRead;
-    var tail_start: usize = 0;
-    while (tail_start < context) {
-        const next = tail_start + utf8Unit(tail, tail_start).source_length;
-        if (next > context) break;
-        tail_start = next;
-    }
-    return .{
-        .head = buffer[0..head_end],
-        .tail = tail[tail_start..],
-        .tail_starts_line = if (tail_start == 0) tail_offset - context == 0 else tail[tail_start - 1] == '\n',
-        .source_length = length,
-    };
-}
-
-fn utf8HeadEnd(bytes: []const u8, allowance: usize) usize {
-    var encoded_length: usize = 0;
-    var end: usize = 0;
-    while (end < bytes.len) {
-        const unit = utf8Unit(bytes, end);
-        if (unit.encoded_length > allowance - encoded_length) break;
-        encoded_length += unit.encoded_length;
-        end += unit.source_length;
-    }
-    return end;
-}
-
-fn utf8TailStart(bytes: []const u8, allowance: usize) usize {
-    var encoded_length = validUtf8Length(bytes);
-    var start: usize = 0;
-    while (encoded_length > allowance) {
-        const unit = utf8Unit(bytes, start);
-        encoded_length -= unit.encoded_length;
-        start += unit.source_length;
-    }
-    return start;
-}
-
-fn appendValidUtf8Tail(writer: *std.Io.Writer, bytes: []const u8, allowance: usize) !bool {
-    const start = utf8TailStart(bytes, allowance);
-    var index = start;
-    while (index < bytes.len) {
-        const unit = utf8Unit(bytes, index);
-        if (unit.valid) {
-            try writer.writeAll(bytes[index .. index + unit.source_length]);
-        } else {
-            try writer.writeAll("�");
-        }
-        index += unit.source_length;
-    }
-    return start != 0;
-}
-
-test "UTF-8 excerpt keeps the newest source and reports replacement expansion" {
-    var source: [excerpt_bytes / 2]u8 = @splat(0xff);
-    source[source.len - 1] = '!';
-    var output: [excerpt_bytes]u8 = undefined;
-    var writer = std.Io.Writer.fixed(&output);
-    try std.testing.expect(try appendValidUtf8Tail(&writer, &source, excerpt_bytes));
-    const written = writer.buffered();
-    try std.testing.expect(written.len <= excerpt_bytes);
-    try std.testing.expect(std.unicode.utf8ValidateSlice(written));
-    try std.testing.expectEqual(@as(u8, '!'), written[written.len - 1]);
-}
-
-test "Bash excerpts align every multibyte cut and count source bytes" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const file = try tmp.dir.createFile(std.testing.io, "capture", .{ .read = true });
-    defer file.close(std.testing.io);
-    var source: [2048]u8 = undefined;
-    var sample: [1036]u8 = undefined;
-    var output: [1152]u8 = undefined;
-    var expected: [1152]u8 = undefined;
-    for ([_][]const u8{ "é", "€", "🙂" }) |character| {
-        for (1..character.len) |overlap| {
-            @memset(&source, 'a');
-            @memcpy(source[512 - overlap ..][0..character.len], character);
-            @memcpy(source[1536 - overlap ..][0..character.len], character);
-            try file.writePositionalAll(std.testing.io, &source, 0);
-            const excerpt = try readExcerpt(file, std.testing.io, source.len, 1024, &sample);
-            var writer = std.Io.Writer.fixed(&output);
-            try std.testing.expect(try excerpt.append(&writer, 1024));
-            var oracle = std.Io.Writer.fixed(&expected);
-            try oracle.writeAll(source[0 .. 512 - overlap]);
-            try oracle.print("\n[{d} bytes left out]\n", .{1024 + character.len});
-            try oracle.writeAll(source[1536 - overlap + character.len ..]);
-            try std.testing.expectEqualStrings(oracle.buffered(), writer.buffered());
-            try std.testing.expect(std.unicode.utf8ValidateSlice(writer.buffered()));
-        }
-    }
-}
-
-test "Bash excerpts snap only inside the 256-byte newline windows" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const file = try tmp.dir.createFile(std.testing.io, "capture", .{ .read = true });
-    defer file.close(std.testing.io);
-    var source: [2048]u8 = undefined;
-    var sample: [1036]u8 = undefined;
-    var output: [1152]u8 = undefined;
-    var expected: [1152]u8 = undefined;
-    for ([_]struct { newlines: []const usize, head_end: usize, tail_start: usize }{
-        .{ .newlines = &.{255}, .head_end = 512, .tail_start = 1536 },
-        .{ .newlines = &.{256}, .head_end = 257, .tail_start = 1536 },
-        .{ .newlines = &.{511}, .head_end = 512, .tail_start = 1536 },
-        .{ .newlines = &.{1536}, .head_end = 512, .tail_start = 1537 },
-        .{ .newlines = &.{1791}, .head_end = 512, .tail_start = 1792 },
-        .{ .newlines = &.{1792}, .head_end = 512, .tail_start = 1536 },
-        .{ .newlines = &.{ 1535, 1600 }, .head_end = 512, .tail_start = 1536 },
-        .{ .newlines = &.{ 300, 511 }, .head_end = 512, .tail_start = 1536 },
-        .{ .newlines = &.{ 300, 511, 1535, 1600 }, .head_end = 512, .tail_start = 1536 },
-    }) |case| {
-        @memset(&source, 'a');
-        for (case.newlines) |newline| source[newline] = '\n';
-        try file.writePositionalAll(std.testing.io, &source, 0);
-        for ([_]Excerpt{
-            .{ .head = &source, .tail = "", .tail_starts_line = true, .source_length = source.len },
-            try readExcerpt(file, std.testing.io, source.len, 1024, &sample),
-        }) |excerpt| {
-            var writer = std.Io.Writer.fixed(&output);
-            try std.testing.expect(try excerpt.append(&writer, 1024));
-            var oracle = std.Io.Writer.fixed(&expected);
-            try oracle.writeAll(source[0..case.head_end]);
-            if (source[case.head_end - 1] != '\n') try oracle.writeByte('\n');
-            try oracle.print("[{d} bytes left out]\n", .{case.tail_start - case.head_end});
-            try oracle.writeAll(source[case.tail_start..]);
-            try std.testing.expectEqualStrings(oracle.buffered(), writer.buffered());
-        }
-    }
-}
-
-test "Bash excerpts count omitted source bytes under replacement expansion" {
-    const source: [512]u8 = @splat(0xff);
-    const excerpt: Excerpt = .{ .head = &source, .tail = "", .tail_starts_line = true, .source_length = source.len };
-    var output: [1152]u8 = undefined;
-    var writer = std.Io.Writer.fixed(&output);
-    try std.testing.expect(try excerpt.append(&writer, 1024));
-    const replacements = @as([510]u8, @bitCast(@as([170][3]u8, @splat("�".*))));
-    try std.testing.expectEqualStrings(replacements ++ "\n[172 bytes left out]\n" ++ replacements, writer.buffered());
-}
-
 test "Bash excerpts preserve heads tails UTF-8 boundaries and newline cuts" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1950,7 +1637,7 @@ test "Bash excerpts preserve heads tails UTF-8 boundaries and newline cuts" {
         .{ "head -c 9900 /dev/zero | tr '\\0' a; printf '\\n'; head -c 30199 /dev/zero | tr '\\0' b; printf '\\n'; head -c 9899 /dev/zero | tr '\\0' c", "Bash succeeded. Exit code: 0.\nstdout:\n" ++ @as([9900]u8, @splat('a')) ++ "\n[30200 bytes left out]\n" ++ @as([9899]u8, @splat('c')) ++ "\nFull output was not retained.\n" },
         .{ "head -c 50000 /dev/zero | tr '\\0' a; head -c 4000 /dev/zero | tr '\\0' '\\377' >&2", "Bash succeeded. Exit code: 0.\nstdout:\n" ++ @as([5000]u8, @splat('a')) ++ "\n[40000 bytes left out]\n" ++ @as([5000]u8, @splat('a')) ++ "\nstderr:\n" ++ replacements ++ "\n[668 bytes left out]\n" ++ replacements ++ "\nFull output was not retained.\n" },
     }, 100..) |case, ordinal| {
-        var result: Outcome = undefined;
+        var result: TestOutcome = undefined;
         try launchForTest(root, budget, &retention, ordinal, case[0], &result);
         try std.testing.expectEqualStrings(case[1], result.text());
     }
@@ -2111,7 +1798,7 @@ test "Bash capture reclaims MCP output from the same scratch budget" {
     spill.keep();
     try std.testing.expectEqual(@as(u64, length), used.load(.acquire));
     try std.testing.expectEqual(@as(usize, 1), retention.occupied());
-    var result: Outcome = undefined;
+    var result: TestOutcome = undefined;
     try launchForTest(root, retention.sharedBudget(), &retention, 2, "printf bash", &result);
     try std.testing.expectEqual(store.ActionResolutionCode.succeeded, result.code);
     try std.testing.expectEqualStrings("Bash succeeded. Exit code: 0.\nstdout:\nbash", result.text());
@@ -2120,68 +1807,6 @@ test "Bash capture reclaims MCP output from the same scratch budget" {
     try std.testing.expectEqual(@as(usize, 0), retention.occupied());
 }
 
-test "seekable cutter matches Bash formatResult stream pairs" {
-    const core = @import("excerpt.zig");
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const file = try tmp.dir.createFile(std.testing.io, "capture", .{ .read = true });
-    defer file.close(std.testing.io);
-    const gpa = std.testing.allocator;
-    const source = try gpa.alloc(u8, 24000);
-    defer gpa.free(source);
-    const samples = try gpa.alloc(u8, 20014);
-    defer gpa.free(samples);
-    const expected = try gpa.alloc(u8, 21000);
-    defer gpa.free(expected);
-    const actual = try gpa.alloc(u8, 21000);
-    defer gpa.free(actual);
-    for ([_]usize{ 0, 1, 9999, 10000, 10001, 24000 }) |n1| {
-        for ([_]usize{ 0, 3, 9999, 10001, 24000 }) |n2| {
-            for (0..4) |pattern| {
-                const lengths = [_]u64{ n1, n2 };
-                var takes: [2]usize = undefined;
-                core.allot(&lengths, excerpt_bytes, &takes);
-                const stderr_base: usize = @intCast(@min(n2, excerpt_bytes / 2));
-                const old_first = @min(n1, excerpt_bytes - stderr_base);
-                const old_second = stderr_base + @min(n2 - stderr_base, excerpt_bytes - stderr_base - old_first);
-                try std.testing.expectEqualSlices(usize, &.{ old_first, old_second }, &takes);
-                var excerpts: [2]Excerpt = undefined;
-                var offset: usize = 0;
-                for (lengths, 0..) |length, i| {
-                    for (source, 0..) |*byte, j| byte.* = switch (pattern) {
-                        0 => 'x',
-                        1 => if (j % 113 == 0) '\n' else 'y',
-                        2 => if (j % 7 == 0) 0xff else if (j % 101 == 0) '\n' else 'z',
-                        else => ("é🙂\xff\nabc")[j % "é🙂\xff\nabc".len],
-                    };
-                    // Different data per stream is already stored in the samples.
-                    try file.writePositionalAll(std.testing.io, source[0..@intCast(length)], 0);
-                    excerpts[i] = try readExcerpt(file, std.testing.io, length, takes[i], samples[offset..][0 .. takes[i] + 7]);
-                    offset += takes[i] + 7;
-                }
-                const encoded = [_]u64{ excerpts[0].encodedLength(), excerpts[1].encodedLength() };
-                var allowances: [2]usize = undefined;
-                core.allot(&encoded, excerpt_bytes, &allowances);
-                const base = @min(excerpts[1].encodedLength(), excerpt_bytes / 2);
-                const first = @min(excerpts[0].encodedLength(), excerpt_bytes - base);
-                const second = base + @min(excerpts[1].encodedLength() - base, excerpt_bytes - base - first);
-                try std.testing.expectEqualSlices(usize, &.{ first, second }, &allowances);
-                for (excerpts, 0..) |old, i| {
-                    var oracle = std.Io.Writer.fixed(expected);
-                    const omitted = try old.append(&oracle, allowances[i]);
-                    const cut = core.cutSeekable(.{ .head = old.head, .tail = old.tail, .tail_starts_line = old.tail_starts_line, .source_length = old.source_length }, allowances[i]);
-                    var got = std.Io.Writer.fixed(actual);
-                    _ = try appendValidUtf8Tail(&got, old.head[0..cut.head_end], allowances[i]);
-                    if (cut.truncated) {
-                        if (cut.head_end != 0 and old.head[cut.head_end - 1] != '\n') try got.writeByte('\n');
-                        try got.print("[{d} bytes left out]\n", .{cut.left_out});
-                        const tail = if (old.head.len == old.source_length) old.head else old.tail;
-                        _ = try appendValidUtf8Tail(&got, tail[cut.tail_start..], allowances[i]);
-                    }
-                    try std.testing.expectEqual(omitted, cut.truncated);
-                    try std.testing.expectEqualStrings(oracle.buffered(), got.buffered());
-                }
-            }
-        }
-    }
+test {
+    _ = @import("bash_result_legacy_test.zig");
 }

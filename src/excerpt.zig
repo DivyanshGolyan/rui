@@ -8,7 +8,10 @@ pub const left_out_format = "\n[{d} bytes left out]\n";
 pub const head_note_max = std.fmt.count(head_note_format, .{std.math.maxInt(Count)});
 pub const left_out_max = std.fmt.count(left_out_format, .{std.math.maxInt(Count)});
 pub const not_retained = "\nFull output was not retained.\n";
-pub const footer_max = 1 + 2 * ("Full stderr: ".len + std.posix.PATH_MAX + 1);
+pub const max_retained = 2;
+pub const max_label_bytes = "stderr".len;
+pub const max_path_bytes = std.posix.PATH_MAX;
+pub const footer_max = 1 + max_retained * ("Full ".len + max_label_bytes + ": ".len + max_path_bytes + 1);
 
 /// A shared byte allowance. Bytes are preserved, including malformed UTF-8: MCP
 /// can render raw HTTP bodies and truncated response prefixes. When cutting,
@@ -149,17 +152,30 @@ pub fn allot(lengths: []const u64, total: usize, out: []usize) void {
 
 pub const Retained = struct { label: []const u8, path: ?[]const u8 };
 
-/// Caller supplies only truncated streams. A failed retention produces one
+/// Caller supplies only truncated streams. Bounds are checked even when
+/// retention is disabled or any path is absent. A missing path produces one
 /// shared refusal footer, matching the existing MCP and Bash renderers.
-pub fn footer(truncated: []const Retained, retain: bool, out: []u8) []const u8 {
+pub fn footer(truncated: []const Retained, retain: bool, out: []u8) error{ TooManyRetained, InvalidRetainedLabel, RetainedPathTooLong, FooterBufferTooSmall }![]const u8 {
+    if (truncated.len > max_retained) return error.TooManyRetained;
+    var missing = false;
+    var required: usize = 1;
+    for (truncated) |item| {
+        if (item.label.len > max_label_bytes) return error.InvalidRetainedLabel;
+        if (item.path) |path| {
+            if (path.len > max_path_bytes) return error.RetainedPathTooLong;
+            required += "Full ".len + item.label.len + ": ".len + path.len + 1;
+        } else missing = true;
+    }
     if (!retain or truncated.len == 0) return out[0..0];
-    for (truncated) |item| if (item.path == null) {
+    if (missing) {
+        if (out.len < not_retained.len) return error.FooterBufferTooSmall;
         @memcpy(out[0..not_retained.len], not_retained);
         return out[0..not_retained.len];
-    };
+    }
+    if (out.len < required) return error.FooterBufferTooSmall;
     var writer: std.Io.Writer = .fixed(out);
-    writer.writeByte('\n') catch unreachable;
-    for (truncated) |item| writer.print("Full {s}: {s}\n", .{ item.label, item.path.? }) catch unreachable;
+    writer.writeByte('\n') catch return error.FooterBufferTooSmall;
+    for (truncated) |item| writer.print("Full {s}: {s}\n", .{ item.label, item.path.? }) catch return error.FooterBufferTooSmall;
     return writer.buffered();
 }
 
@@ -233,9 +249,25 @@ test "window shares allowance across runs and footer describes retention" {
     try std.testing.expectEqual(@as(usize, 0), window.feed("z", &buffer).written);
     try std.testing.expectEqualStrings("\n[1 more bytes not shown]", window.closeRun(&buffer));
     try std.testing.expectEqualStrings("", window.closeRun(&buffer));
-    try std.testing.expectEqualStrings("", footer(&.{.{ .label = "output", .path = null }}, false, &buffer));
-    try std.testing.expectEqualStrings(not_retained, footer(&.{.{ .label = "output", .path = null }}, true, &buffer));
-    try std.testing.expectEqualStrings("\nFull output: /tmp/result\n", footer(&.{.{ .label = "output", .path = "/tmp/result" }}, true, &buffer));
+    try std.testing.expectEqualStrings("", try footer(&.{.{ .label = "output", .path = null }}, false, &buffer));
+    try std.testing.expectEqualStrings(not_retained, try footer(&.{.{ .label = "output", .path = null }}, true, &buffer));
+    try std.testing.expectEqualStrings("\nFull output: /tmp/result\n", try footer(&.{.{ .label = "output", .path = "/tmp/result" }}, true, &buffer));
+}
+
+test "footer enforces its capacity domain" {
+    const path: [max_path_bytes + 1]u8 = @splat('p');
+    var out: [footer_max]u8 = undefined;
+    const valid = Retained{ .label = "stderr", .path = path[0..max_path_bytes] };
+    const full = try footer(&.{ valid, valid }, true, &out);
+    try std.testing.expectEqual(footer_max, full.len);
+    try std.testing.expectError(error.TooManyRetained, footer(&.{ valid, valid, valid }, true, &out));
+    try std.testing.expectError(error.InvalidRetainedLabel, footer(&.{.{ .label = "toolong", .path = null }}, true, &out));
+    try std.testing.expectError(error.InvalidRetainedLabel, footer(&.{.{ .label = "toolong", .path = null }}, false, &out));
+    try std.testing.expectError(error.RetainedPathTooLong, footer(&.{.{ .label = "stdout", .path = &path }}, true, &out));
+    try std.testing.expectError(error.FooterBufferTooSmall, footer(&.{ valid, valid }, true, out[0 .. footer_max - 1]));
+    try std.testing.expectError(error.FooterBufferTooSmall, footer(&.{.{ .label = "stdout", .path = null }}, true, out[0 .. not_retained.len - 1]));
+    try std.testing.expectEqualStrings(not_retained, try footer(&.{.{ .label = "stdout", .path = null }}, true, &out));
+    try std.testing.expectEqualStrings("", try footer(&.{valid}, false, &out));
 }
 
 // This exercises the P1 text volume and ordering without asking the legacy

@@ -741,7 +741,14 @@ test "MCP Result reports retention refusal without changing success" {
         const scratch_root = if (reason == .missing) try std.fmt.bufPrint(&missing_buffer, "{s}/missing", .{root}) else root;
         var queue = adapter_test_retention.Queue.initialize(std.testing.io, scratch_root, .{ .used = &used, .limit = if (reason == .budget) 1 else Running.max_answer_bytes }, if (reason == .capacity) &.{} else &entries);
         defer queue.cleanupAll();
-        if (reason == .reserved) _ = try queue.reservePair("protected-out", 0, "protected-err", 0);
+        var protected_out: ?adapter_test_retention.Spill = null;
+        var protected_err: ?adapter_test_retention.Spill = null;
+        if (reason == .reserved) {
+            protected_out = adapter_test_retention.Spill.open(&queue, "protected-out") orelse return error.TestUnexpectedResult;
+            protected_err = adapter_test_retention.Spill.open(&queue, "protected-err") orelse return error.TestUnexpectedResult;
+        }
+        defer if (protected_out) |*spill| spill.release();
+        defer if (protected_err) |*spill| spill.release();
         if (reason == .sequence) queue.next_sequence = std.math.maxInt(u64);
         if (reason == .create) try tmp.dir.createDir(std.testing.io, "mcp-output-17-1.tmp", .default_dir);
         defer if (reason == .create) tmp.dir.deleteDir(std.testing.io, "mcp-output-17-1.tmp") catch {};
