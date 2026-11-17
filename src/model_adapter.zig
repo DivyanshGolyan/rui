@@ -5567,7 +5567,9 @@ test "a prepared request's bytes stay as pinned over pages, tool results and pag
                         11 => past_bound,
                         else => try std.fmt.bufPrint(&result_buffer, "result {d}", .{index}),
                     };
-                    _ = try storage.settleActionAttempt(action, .succeeded, result, .{});
+                    if (index == 3 or index == 11) {
+                        try testing.settleTestActionParts(&storage, &tmp, action, &.{.{ .bytes = result }});
+                    } else _ = try storage.settleActionAttempt(action, .succeeded, result, .{});
                 }
             },
             .bounds => {
@@ -6210,12 +6212,12 @@ test "canonical ordered Action Resolution counts images with Message parts at th
 
 test "canonical ordered Action Resolution cancellation releases readers and reopened corruption fences" {
     for ([_][]const u8{ image_test_png, @embedFile("testing/fixtures/input-baseline.jpg") }) |image| {
-        for ([_]u32{ 0, 1 }) |ordinal| {
+        inline for ([_]u32{ 0, 1 }) |ordinal| {
             var setup: PreparationTestSetup = undefined;
             try setup.init();
             defer setup.close();
-            const session = try setup.configure("ordered-action-corrupt");
-            try setup.submit("ordered-action-corrupt", "ordered-action-corrupt", session.slice(), "observe");
+            const session = try setup.configure("ordered-action-corrupt-config");
+            try setup.submit("ordered-action-corrupt", "ordered-action-corrupt-seed", session.slice(), "observe");
             const model = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
             try proposeOrderedActionsForTesting(&setup, model, &.{.{ .item_id = "corrupt-shot", .call_id = "corrupt-shot" }});
             const action = (try setup.storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
@@ -6245,9 +6247,8 @@ test "canonical ordered Action Resolution cancellation releases readers and reop
             const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{setup.root});
             try setup.storage.close();
             try setup.storage.open(std.testing.io, database, setup.root);
-            var query_buffer: [256]u8 = undefined;
-            const query = try std.fmt.bufPrint(&query_buffer, "SELECT part_content_id FROM content_part WHERE content_id=(SELECT resolution_content_id FROM action_operation WHERE parent_operation_id={d}) AND ordinal={d}", .{ model.operation_id, ordinal });
-            try store.testing.zeroContent(&setup.storage, query);
+            try store.testing.zeroContent(&setup.storage, "SELECT part_content_id FROM content_part WHERE content_id=" ++
+                "(SELECT resolution_content_id FROM action_operation) AND ordinal=" ++ std.fmt.comptimePrint("{d}", .{ordinal}));
             prep.page.open(binding);
             try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
             try std.testing.expectError(error.CorruptStore, drainLivePreparation(&prep, &setup.storage, 7, 3, 1 << 16));

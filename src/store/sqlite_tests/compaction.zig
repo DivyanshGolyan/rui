@@ -413,12 +413,15 @@ test "a compaction's floor weighs compound Action Resolutions as a whole Tool Re
             });
         }
         const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-        try tests.settleCallsForTesting(&storage, &tmp, continuation, "result-floor-done", &.{});
+        try settleItemsForTesting(&storage, &tmp, continuation, &.{
+            "{\"type\":\"message\",\"id\":\"floor-answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}",
+        }, "done");
         try submitTestMessage(&storage, &tmp, "result-floor-newest", "result-floor-newest", session.slice(), "newest");
         const newest = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
         try storage.settleModelAttemptFailure(newest, .{ .uncorrelated = "provider_context_overflow" }, .context_overflow, .{});
         const compaction = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
         const candidate = try TestingFloorWalk.deeper(&storage, compaction.operation_id);
+        if (candidate == null) std.debug.print("compound Action Resolution floor missing candidate at count {d}\n", .{count});
         try std.testing.expect(candidate != null);
         const room = candidate.?;
         try std.testing.expectEqual(@as(u8, 2), room.choice.level);
@@ -432,11 +435,16 @@ test "a compaction's floor weighs compound Action Resolutions as a whole Tool Re
         try std.testing.expectEqual(room.choice.floor, (try view.coverage()).floor.position);
         var after: u64 = 0;
         var messages: usize = 0;
+        var outputs: usize = 0;
         while (try view.nextEntry(after)) |entry| {
             after = entry.position;
-            try std.testing.expectEqual(historical_domain.HistoricalEntryKind.user, entry.kind);
-            messages += 1;
+            switch (entry.kind) {
+                .user => messages += 1,
+                .provider_output => outputs += 1,
+                else => return error.TestUnexpectedResult,
+            }
         }
         try std.testing.expectEqual(@as(usize, 2), messages);
+        try std.testing.expectEqual(@as(usize, 1), outputs);
     }
 }

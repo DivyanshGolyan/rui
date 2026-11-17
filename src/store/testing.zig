@@ -1235,7 +1235,15 @@ pub fn settleItemsForTesting(storage: *Store, tmp: *std.testing.TmpDir, binding:
     return settleSelectedItemsForTesting(storage, tmp, binding, items, null, answer);
 }
 
+pub fn settleItemsForTestingWithUsage(storage: *Store, tmp: *std.testing.TmpDir, binding: AttemptBinding, items: []const []const u8, answer: []const u8, usage: []const u8) !void {
+    return settleSelectedItemsAndUsageForTesting(storage, tmp, binding, items, null, answer, usage);
+}
+
 pub fn settleSelectedItemsForTesting(storage: *Store, tmp: *std.testing.TmpDir, binding: AttemptBinding, items: []const []const u8, selected: ?u64, answer: []const u8) !void {
+    return settleSelectedItemsAndUsageForTesting(storage, tmp, binding, items, selected, answer, null);
+}
+
+fn settleSelectedItemsAndUsageForTesting(storage: *Store, tmp: *std.testing.TmpDir, binding: AttemptBinding, items: []const []const u8, selected: ?u64, answer: []const u8, usage: ?[]const u8) !void {
     if (!@import("builtin").is_test) @compileError("test-only Store fixture");
     const source = try tmp.dir.createFile(std.testing.io, "items-output", .{ .read = true, .truncate = true });
     defer source.close(std.testing.io);
@@ -1254,6 +1262,18 @@ pub fn settleSelectedItemsForTesting(storage: *Store, tmp: *std.testing.TmpDir, 
         const record = try output_decode.recordItemForTesting(&metadata, source, offset, bytes.len, ordinal, .assistant_response);
         if (record.kind == .message) answer_item = ordinal;
         if (record.kind == .function_call) calls += 1;
+        offset += bytes.len;
+    }
+    if (usage) |bytes| {
+        try source.writeStreamingAll(std.testing.io, bytes);
+        try source.sync(std.testing.io);
+        try metadata.append(&.{
+            .tag = .usage,
+            .start = offset,
+            .length = bytes.len,
+            .content_digest = protocol.contentDigest(bytes),
+            .usage = try output_decode.readUsageForTesting(std.testing.io, source, offset, bytes.len),
+        });
         offset += bytes.len;
     }
     try metadata.sealForRead();

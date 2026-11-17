@@ -1734,6 +1734,7 @@ test "compound Action Resolution read verifies the whole value before declining 
         fn run(case: *store_testing.Case) !void {
             const Damage = enum { none, missing_last, extra_part, wrong_identity, nested_value, private_part, manifest_bytes };
             for (std.enums.values(Damage)) |damage| {
+                errdefer std.debug.print("compound Resolution damage {s} failed\n", .{@tagName(damage)});
                 var tmp = std.testing.tmpDir(.{});
                 defer tmp.cleanup();
                 var storage: Store = undefined;
@@ -1759,7 +1760,11 @@ test "compound Action Resolution read verifies the whole value before declining 
                         const first = try store_testing.queryU64(&storage, "SELECT part_content_id FROM content_part WHERE content_id=?1 AND ordinal=0", .{value});
                         try store_testing.exec(&storage, "UPDATE content_part SET part_content_id=?2 WHERE content_id=?1 AND ordinal=16", .{ value, first });
                     },
-                    .nested_value => try store_testing.exec(&storage, "UPDATE content_part SET part_content_id=?1 WHERE content_id=?1 AND ordinal=16", .{value}),
+                    .nested_value => {
+                        try store_testing.submitTestMessageParts(&storage, &tmp, "resolution-nested", session.slice(), &.{ .{ .bytes = "nested first" }, .{ .bytes = "nested last" } });
+                        const nested = try store_testing.queryU64(&storage, "SELECT primary_content_id FROM core_command WHERE command_key='resolution-nested'", .{});
+                        try store_testing.exec(&storage, "UPDATE content_part SET part_content_id=?2 WHERE content_id=?1 AND ordinal=16", .{ value, nested });
+                    },
                     .private_part => {
                         const last = try store_testing.queryU64(&storage, "SELECT part_content_id FROM content_part WHERE content_id=?1 AND ordinal=16", .{value});
                         try store_testing.exec(&storage, "UPDATE content SET private=1 WHERE content_id=?1", .{last});

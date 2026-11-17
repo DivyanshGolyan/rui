@@ -1365,14 +1365,19 @@ test "compound Action Resolution pressure counts Text bytes and images through u
                     .{ .bytes = png, .kind = .{ .image = .{} } },
                 });
                 const facts = try compoundPressureForTesting(&storage, session.slice());
-                try std.testing.expectEqual(@as(u64, length), facts.uncovered_bytes);
+                std.testing.expectEqual(@as(u64, length), facts.uncovered_bytes) catch |err| {
+                    std.debug.print("compound Action Resolution pressure uncovered Text bytes mismatch at length {d}\n", .{length});
+                    return err;
+                };
                 try std.testing.expectEqual(@as(u64, 1), facts.unknown_images);
                 try std.testing.expectEqual(@as(?u64, 990 + length / 4), policy.comparedPressure(facts));
                 const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
                 try std.testing.expectEqual(if (length >= 40) ModelOperationKind.compaction else ModelOperationKind.assistant_response, try storage.modelOperationKind(next));
                 if (length < 40) {
                     // A later provider usage report covers the complete value.
-                    try settleCallsForTestingWithFaults(&storage, &tmp, next, "result-pressure-covered", &.{}, .{}, "{\"input_tokens\":100,\"output_tokens\":0}");
+                    try store_testing.settleItemsForTestingWithUsage(&storage, &tmp, next, &.{
+                        "{\"type\":\"message\",\"id\":\"covered-answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}",
+                    }, "done", "{\"input_tokens\":100,\"output_tokens\":0}");
                     const covered = try compoundPressureForTesting(&storage, session.slice());
                     try std.testing.expectEqual(@as(u64, 0), covered.uncovered_bytes);
                     try std.testing.expectEqual(@as(u64, 0), covered.unknown_images);

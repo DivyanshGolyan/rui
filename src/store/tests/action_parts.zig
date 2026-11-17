@@ -19,6 +19,7 @@ const mixed = [_]testing.MessagePart{
 };
 const images = [_]testing.MessagePart{.{ .bytes = png, .kind = .{ .image = .{} } }};
 const text = [_]testing.MessagePart{.{ .bytes = "one Text remains bytes 雪" }};
+const json_text = [_]testing.MessagePart{.{ .bytes = "{\"text\":\"line\\nquote\\\"slash\\\\雪\",\"unicode\":\"\\u96ea\"}" }};
 const records = shared.testingHostToolRecords(&.{.{
     .name = "fetch_page",
     .owner = .mcp,
@@ -138,7 +139,7 @@ fn exercise(case: *testing.Case, background: bool) !void {
     var digests: [records.len][32]u8 = undefined;
     const tool_set = hostToolSet(&digests);
     inline for ([_]tools.Runner{ .bash, .mcp }) |runner| {
-        for ([_][]const testing.MessagePart{ &mixed, &images, &text }) |parts| {
+        for ([_][]const testing.MessagePart{ &mixed, &images, &text, &json_text }) |parts| {
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
             var storage: core.Store = undefined;

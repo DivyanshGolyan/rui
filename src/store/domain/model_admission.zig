@@ -327,7 +327,7 @@ fn uncoveredBytesUsingSql(comptime session: []const u8, comptime usage_position:
     const later = "max(" ++ usage_position ++ "," ++ frontier ++ ")";
     const terms = .{
         entries orelse historyBytesSql(session, usage_position, aggregate),
-        "(SELECT coalesce(sum(" ++ history_floor_domain.item_bytes_sql ++ "),0) FROM model_output_item i " ++
+        "(" ++ history_floor_domain.item_bytes_sql ++ " " ++
             "WHERE i.session_ref=" ++ session ++ " AND i.session_position>=max(" ++ usage_position ++ "+1,coalesce((SELECT max(anchor.session_position) " ++
             "FROM model_operation b @index(model_operation_compaction_bases) JOIN model_output_item anchor ON anchor.operation_id=b.operation_id AND anchor.session_ref=b.session_ref " ++
             "WHERE b.session_ref=" ++ session ++ " AND b.purpose=1 AND " ++ store_schema.resolutionIs("b.resolution_code", .compacted) ++ " AND b.admission_position=" ++ frontier ++ " AND anchor.item_kind=4),0)))",

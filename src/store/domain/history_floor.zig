@@ -105,14 +105,15 @@ pub fn firstMessageSkillSql(comptime e: []const u8, comptime first_message: []co
         ".source_skill_admission_id AND owner.session_position=" ++ first_message ++ "))";
 }
 
-pub const item_bytes_sql = "coalesce((SELECT bag.byte_length FROM content bag WHERE bag.content_id=i.extras_content_id),0) + " ++
+pub const item_bytes_sql = "SELECT coalesce(sum(coalesce(item_extras.byte_length,0) + " ++
     "(SELECT coalesce(sum(coalesce(p.text_length,text.byte_length,0)+coalesce(bag.byte_length,0)),0) FROM model_output_part p " ++
     "LEFT JOIN content text ON text.content_id=p.text_content_id LEFT JOIN content bag ON bag.content_id=p.extras_content_id " ++
     "WHERE p.operation_id=i.operation_id AND p.item_ordinal=i.item_ordinal) + " ++
     "coalesce((SELECT name.byte_length+call_id.byte_length+arguments.byte_length FROM model_tool_call tool_call " ++
     "JOIN content name ON name.content_id=tool_call.name_content_id JOIN content call_id ON call_id.content_id=tool_call.call_id_content_id " ++
     "JOIN content arguments ON arguments.content_id=tool_call.arguments_content_id " ++
-    "WHERE tool_call.operation_id=i.operation_id AND tool_call.item_ordinal=i.item_ordinal AND tool_call.session_ref=i.session_ref),0)";
+    "WHERE tool_call.operation_id=i.operation_id AND tool_call.item_ordinal=i.item_ordinal AND tool_call.session_ref=i.session_ref),0)),0) " ++
+    "FROM model_output_item i LEFT JOIN content item_extras ON item_extras.content_id=i.extras_content_id";
 
 const units = rsql.Read(.{
     .sql = "SELECT e.session_position AS start,content.content_id,content.form,content.digest,content.byte_length,content.byte_length+coalesce((SELECT sum(body.byte_length) FROM message_skill skill " ++
@@ -120,7 +121,7 @@ const units = rsql.Read(.{
         "JOIN conversation_entry e @index(conversation_entry_history) ON e.session_ref=current.session_ref " ++
         "JOIN content ON content.content_id=e.content_id " ++
         "WHERE current.operation_id=?1 AND e.session_position<?2 AND e.session_position>?3 AND e.entry_kind=1 AND e.session_position!=?4 UNION ALL " ++
-        "SELECT o.admission_position,NULL,(SELECT max(result.form) FROM action_operation a JOIN content result ON result.content_id=" ++ tool_fulfillment.actionContentSql("a") ++ " WHERE a.parent_operation_id=o.operation_id),NULL,NULL,(SELECT coalesce(sum(" ++ item_bytes_sql ++ "),0) FROM model_output_item i WHERE i.operation_id=o.operation_id)+" ++
+        "SELECT o.admission_position,NULL,(SELECT max(result.form) FROM action_operation a JOIN content result ON result.content_id=" ++ tool_fulfillment.actionContentSql("a") ++ " WHERE a.parent_operation_id=o.operation_id),NULL,NULL,(" ++ item_bytes_sql ++ " WHERE i.operation_id=o.operation_id)+" ++
         "coalesce((SELECT sum(result.byte_length) FROM action_operation a JOIN content result ON result.content_id=" ++ tool_fulfillment.actionContentSql("a") ++ " " ++
         "WHERE a.parent_operation_id=o.operation_id),0) FROM model_operation current " ++
         "JOIN model_operation o @index(model_operation_context_history) ON o.session_ref=current.session_ref " ++
