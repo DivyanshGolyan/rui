@@ -155,7 +155,7 @@ def preset_creation(binary, root, store_settings, env):
             assert observed == {"status": "rejected", "kind": "configure", "target": "", "code": code}, observed
             loaded_refusals.append((handle, code))
 
-        override, changed_capture = capture("--preset", "restricted", "--model", "override-model",
+        override, changed_capture = capture("--preset", "restricted", "--model", "gpt-6-luna",
             "--tools", "none", "--loaded-tools", "none", "--permission-mode", "bypass",
             "--reasoning-effort", "default", "--compaction-trigger", "2000", "--output-reservation", "default",
             "--instructions", "-", "--label", "", "--text-output", "--test-drop-reply", "after-commit", input="")
@@ -169,7 +169,7 @@ def preset_creation(binary, root, store_settings, env):
         changed_session = changed_reply["context"]["session"]
         changed = inspect(changed_session)["session"]
         assert changed["provider"] == "openai" and changed["workspace"] == str(workspace), changed
-        assert changed["model"] == "override-model" and changed["reasoning_effort_override"] is None, changed
+        assert changed["model"] == "gpt-6-luna" and changed["reasoning_effort_override"] is None, changed
         assert changed["tools"] == [] and changed["loaded_tools"] == [] and changed["permission_mode"] == "bypass", changed
         assert changed["compaction_trigger_override"] == "2000" and changed["output_reservation_override"] is None, changed
         assert changed["label"] is None and changed["output_schema"] is None and changed["instructions"]["bytes"] == "0", changed
