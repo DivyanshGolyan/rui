@@ -1,5 +1,7 @@
 const std = @import("std");
 const server_mcp = @import("server_mcp.zig");
+const tool_settle = @import("tool_settle.zig");
+const tool_record = @import("tool_record.zig");
 const server_read_image = @import("server_read_image.zig");
 const bash = @import("bash.zig");
 const codecs = @import("codecs.zig");
@@ -1847,20 +1849,20 @@ fn completeBash(host: *Host, slot: *ExecutionSlot, outcome: *bash.Outcome) void 
     };
     pause(host, .{ .action_result = binding });
     testTransition(host, .action_result_ready, binding);
-    if (host.custody.claimTerminalDelivery(token)) {
-        const settlement = host.store.settleActionAttempt(binding, outcome.code, outcome.text(), host.hooks.storeFaults(.action_result)) catch |err| {
+    const delivered = tool_settle.result(host, .{ .token = token, .binding = binding, .publication_phase = "Bash result settlement" }, tool_record.Runner.bash.resultProfile(true), outcome.code, .{ .text = outcome.text() });
+    switch (delivered) {
+        .delivered => testTransition(host, .action_result_committed, binding),
+        .session_stop => {
+            testTransition(host, .action_result_committed, binding);
             active.execution.releaseOutputReservation(host.retention);
-            _ = failBash(host, slot, "Bash result settlement", err);
-            return;
-        };
-        testTransition(host, .action_result_committed, binding);
-        if (settlement == .session_stop) active.execution.releaseOutputReservation(host.retention);
-    } else active.execution.releaseOutputReservation(host.retention);
+        },
+        .lost, .fenced => active.execution.releaseOutputReservation(host.retention),
+    }
     closeBashDelivery(host, slot);
 }
 
 fn failBash(host: *Host, slot: *ExecutionSlot, phase: []const u8, err: anyerror) bool {
-    fenceDispatch(host, phase, err);
+    _ = tool_settle.fence(host, phase, .{ .capture = err });
     if (slot.bash.delivery != .open) return false;
     slot.bash.execution.releaseOutputReservation(host.retention);
     closeBashDelivery(host, slot);
@@ -1924,11 +1926,7 @@ fn settleActionFailure(
     code: store_module.ActionResolutionCode,
     result: []const u8,
 ) void {
-    if (!host.custody.claimTerminalDelivery(token)) return;
-    _ = host.store.settleActionAttempt(binding, code, result, host.hooks.storeFaults(.action_result)) catch |err| {
-        fenceDispatch(host, "Bash failure settlement", err);
-        return;
-    };
+    _ = tool_settle.fixed(host, .{ .token = token, .binding = binding, .publication_phase = "Bash failure settlement" }, code, result);
 }
 
 fn admitNewAttempt(

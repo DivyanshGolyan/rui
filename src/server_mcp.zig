@@ -274,7 +274,10 @@ noinline fn complete(host: *Host, active: *Active, ended: @import("mcp/result_te
     const finished = result.finish();
     switch (finished) {
         .failed => |failed| settleFailure(host, active, failed.failure, failed.seal),
-        .value => |value| if (tool_settle.result(host, active.slot(), active.profile, resolution, value) == .delivered) result.keep(),
+        .value => |value| if (switch (tool_settle.result(host, active.slot(), active.profile, resolution, value)) {
+            .delivered, .session_stop => true,
+            else => false,
+        }) result.keep(),
     }
 }
 
