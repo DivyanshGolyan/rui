@@ -332,6 +332,33 @@ test "a peer sender is resolved from its Action handle and exact replays survive
                 const named = try store_core.activityPageForTesting(&storage, .{ .session = receiver });
                 try std.testing.expectEqualStrings("Lead", named.items[0].value.received.sender.?.label.slice());
             }
+            {
+                // Person and peer Messages enter the same queue. When a peer
+                // sends to itself, receiving precedes sending on that Session.
+                var person = try Send.make(tmp.dir, storage.storeId(), "person-to-sender", sender, null, "from a person");
+                defer person.removeTemporaryContent(std.testing.io) catch unreachable;
+                const person_reply = storage.submitMessageWithModel(&person, null, .{});
+                try std.testing.expect(person_reply == .accepted);
+
+                var self = try Send.make(tmp.dir, storage.storeId(), "peer-to-self", sender, sender, "from the same Session");
+                self.sender_handle = handle;
+                defer self.removeTemporaryContent(std.testing.io) catch unreachable;
+                const self_reply = storage.submitMessageWithModel(&self, null, .{});
+                try std.testing.expect(self_reply == .accepted);
+                try std.testing.expect(person_reply.accepted.admission_id < self_reply.accepted.admission_id);
+
+                const mixed = try store_core.activityPageForTesting(&storage, .{ .session = session, .position = own.end });
+                try std.testing.expectEqual(@as(usize, 3), mixed.count);
+                try std.testing.expectEqual(own.end + 1, mixed.items[0].position);
+                try std.testing.expectEqual(own.end + 2, mixed.items[1].position);
+                try std.testing.expectEqual(own.end + 3, mixed.items[2].position);
+                try std.testing.expect(mixed.items[0].value == .admission);
+                try std.testing.expect(mixed.items[1].value == .received);
+                try std.testing.expect(mixed.items[2].value == .sent);
+                try std.testing.expectEqual(person_reply.accepted.admission_id, mixed.items[0].value.admission.admission);
+                try std.testing.expectEqual(self_reply.accepted.admission_id, mixed.items[1].value.received.admission);
+                try std.testing.expectEqual(self_reply.accepted.admission_id, mixed.items[2].value.sent.admission);
+            }
             try storage.revokeActionSender(action);
             try std.testing.expect(storage.submitMessageWithModel(&sent, null, .{}).accepted.replayed);
             var stale = sent;

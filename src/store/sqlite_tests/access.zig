@@ -14,6 +14,7 @@ const action_domain = @import("../domain/action.zig");
 const command_domain = @import("../domain/command.zig");
 const configuration_domain = @import("../domain/configuration.zig");
 const reads_domain = @import("../domain/reads.zig");
+const sourced_input = @import("../domain/sourced_input.zig");
 const store_schema = @import("../schema.zig");
 const sqlite = @import("../sqlite.zig");
 const store_testing = @import("../testing.zig");
@@ -55,7 +56,7 @@ test "a statement that fails after an entry point touched its Session fails and 
         // anything, and a Message reads its Session's head there too.
         var fault: TestingStatementFault = .{ .sql = switch (route) {
             .configure => configuration_domain.update_session_sql,
-            .message => command_domain.admit_message_sql,
+            .message => sourced_input.admit_message_sql,
         } };
         switch (route) {
             .configure => {

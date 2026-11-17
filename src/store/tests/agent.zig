@@ -337,9 +337,13 @@ test "session message writer covers peer message_agent start_agent and ending wi
     // Ownership is part of this regression: correct rows alone did not catch
     // four private copies of this transition. Pair the structural invariant
     // with the durable behavior of every caller below.
-    const owner = @embedFile("../domain/command.zig");
-    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, owner, "a.write(admit_sent_message,"));
-    try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, owner, "try admitFromSession("));
+    const commands = @embedFile("../domain/command.zig");
+    const owner = @embedFile("../domain/sourced_input.zig");
+    const admission_insert = "INSERT INTO message_admission(";
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, commands, admission_insert));
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, owner, admission_insert));
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, commands, "sourced_input.admit("));
+    try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, commands, "try admitFromSession("));
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             const Source = enum { peer, message_agent, start_agent, ending };
