@@ -1392,7 +1392,7 @@ pub const SessionListPage = struct {
         fn decode(wire: anytype) !Row {
             if (!protocol.validSessionId(wire.reference.slice()) or wire.workspace.value.len == 0 or wire.model.value.len == 0) return error.InvalidCharacter;
             if (wire.parent) |parent| if (!protocol.validSessionId(parent.slice()) or parent.eql(wire.reference.slice())) return error.InvalidCharacter;
-            if (wire.creator) |creator| if (!protocol.validSessionId(creator.slice())) return error.InvalidCharacter;
+            if (wire.creator) |creator| if (!protocol.validSessionId(creator.slice()) or creator.eql(wire.reference.slice())) return error.InvalidCharacter;
             if (wire.label) |label| if (!protocol.validLabel(label.slice())) return error.InvalidCharacter;
             var row: Row = .{
                 .read_version = try protocol.SinceToken.parse(wire.read_version.slice()),
@@ -2890,6 +2890,7 @@ test "Session list facts reject malformed metadata and consequential ambiguity" 
         .{ "\"creator\":null", "\"creator\":{}" },
         .{ "\"creator\":null", "\"creator\":\"\"" },
         .{ "\"creator\":null", "\"creator\":\"k7m2qX\"" },
+        .{ "\"creator\":null", "\"creator\":\"k7m2qx\"" },
         .{ "\"creator\":null", "\"creator\":\"short\"" },
         .{ "\"creator\":null", "\"creator\":\"abcdefg\"" },
         .{ "\"creator\":null", "\"creator\":\"k7m2qi\"" },
