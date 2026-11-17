@@ -4511,11 +4511,11 @@ const LaunchFixture = struct {
                         1 => "rui: backing up and migrating [store_",
                         2 => "migrating]\n",
                         20 => migrated,
-                        else => return -1,
+                        else => return -@as(isize, @backingInt(std.posix.E.AGAIN)),
                     },
-                    .migration_both => if (self.reads == 1) migrating ++ migrated else return -1,
+                    .migration_both => if (self.reads == 1) migrating ++ migrated else return -@as(isize, @backingInt(std.posix.E.AGAIN)),
                     .migration_eof => if (self.reads == 1) migrating else return 0,
-                    .migration_final => if (self.reads == 2) migrating else return -1,
+                    .migration_final => if (self.reads == 2) migrating else return -@as(isize, @backingInt(std.posix.E.AGAIN)),
                     else => unreachable,
                 };
                 if (self.scenario != .migration_final) self.migration_announced = self.reads >= (if (self.scenario == .migration_success or self.scenario == .migration_timeout) @as(usize, 2) else 1);
