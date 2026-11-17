@@ -179,7 +179,7 @@ def prove_case(root, name):
                 wait(lambda: len(endpoint.requests) == 3, "final background delivery")
                 delivered = json.loads(endpoint.requests[2])
                 assert "data:image/png;base64," in json.dumps(delivered), delivered
-                wait(lambda: command("session", "inspect", "--store", store, "--session", session)["work"]["latest_outcome"]["code"] == "completed", "background delivery completion")
+                wait(lambda: (command("session", "inspect", "--store", store, "--session", session)["work"]["latest_outcome"] or {}).get("code") == "completed", "background delivery completion")
             else:
                 assert isinstance(output, str) and output.strip(), outputs
                 assert "data:image/" not in output, outputs
