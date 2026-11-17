@@ -52,6 +52,23 @@ class UpgradeEmptyChatTest(unittest.TestCase):
         self.screen.observe = lambda: frame
         return self.screen.empty_chat(self.case, self.session)
 
+    def test_sigint_drains_restoration_after_process_exit(self):
+        screen = self.fixture.TerminalScreen.__new__(self.fixture.TerminalScreen)
+        screen.master = 42
+        screen.capture = SimpleNamespace(feed=Mock())
+        screen.tail = bytearray()
+        screen.transition_tail = b""
+        screen.entries = screen.restorations = 0
+        process = SimpleNamespace(send_signal=Mock(), poll=Mock(return_value=0))
+        chunks = [BlockingIOError(), b"receipt \x1b[?104", b"9l\x1b[?25h done", b""]
+        with patch.object(self.fixture.os, "read", side_effect=chunks) as read, \
+                patch("select.select", return_value=([42], [], [])), \
+                patch.object(self.fixture, "wait_for", side_effect=lambda observe, description: observe()):
+            receipt = self.fixture.exit_on_sigint(screen, process, "exit")
+        self.assertEqual(receipt, b"\x1b[?1049l\x1b[?25h done")
+        self.assertEqual(screen.restorations, 1)
+        self.assertEqual(read.call_count, 4)
+
     def test_case_disk_lifetime_follows_successful_process_retirement(self):
         for body_fails, cleanup_fails in ((False, False), (True, False), (False, True)):
             with self.subTest(body_fails=body_fails, cleanup_fails=cleanup_fails), tempfile.TemporaryDirectory() as root:
