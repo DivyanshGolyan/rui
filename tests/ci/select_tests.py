@@ -351,6 +351,7 @@ CACHE_LINE = re.compile(r"zig[-_ ]?cache|\.cache/zig|cache[-_]dir|cache_root|has
                         r"|publish-caches|cache-execution", re.IGNORECASE)
 CACHE_POLICY = (".github/actions/setup/caches/save-keys.cjs", ".github/scripts/prune-caches.cjs", "tests/ci/cache_execution.py", "tests/ci/zig_cache_restat.c",
                 "tests/ci/run_selected.py", "tests/ci/cache_snapshot.py")
+ACCEPTANCE_INPUTS = ("build.zig", "build/ci.zig", "build/darwin.zig", "tests/ci/native_acceptance_test.py")
 
 
 def code_lines(source):
@@ -577,8 +578,6 @@ POLICY_SELF_CHECKS = (
     ("test_client_locality", CLIENT_LOCALITY_INPUTS),
     # TLC runs only when a model, its runner or its CI wrapper changes.
     ("test_formal_models", ("tests/formal/*", "tests/ci/test_formal_models.py")),
-    ("test_native_acceptance", ("build.zig", "build/*.zig", ".github/workflows/check.yml",
-                                "tests/ci/select_tests.py", "tests/ci/test_native_acceptance.py")),
 )
 
 
@@ -781,7 +780,7 @@ def select(paths, phase, available, graph=None, contents=None, fixture_literals=
     for reason, served_by in live_reasons:
         if not targets & served_by:
             raise ValueError(f"{reason!r} selected none of the targets that start its server: {sorted(served_by)}")
-    cache_execution_checks = phase == "review" and (any(path in CACHE_POLICY for path in paths)
+    cache_execution_checks = phase == "review" and (any(path in CACHE_POLICY or path in ACCEPTANCE_INPUTS for path in paths)
                                                     or "cache_policy" in content_changed)
     typecheck_macos = any(matches(path, TYPECHECK_INPUTS) or path in graph.compiled for path in paths)
     missing = (targets | native_targets) - available

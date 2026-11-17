@@ -881,6 +881,24 @@ class ReleaseFlowTest(unittest.TestCase):
         self.assertLess(body.index(restat), checks)
 
 
+    def test_compiler_backed_acceptance_proof_uses_existing_cache_execution_job(self):
+        workflow = CHECK.read_text()
+        cache = job(workflow, 'cache_execution')
+        proof = 'python3 -B -m unittest discover -s tests/ci -p native_acceptance_test.py -v'
+        self.assertIn(proof, cache)
+        self.assertLess(cache.index('uses: ./.github/actions/setup'), cache.index(proof))
+        self.assertNotIn('native_acceptance', job(workflow, 'policy'))
+        self.assertIn('timeout-minutes: 5', job(workflow, 'policy'))
+        self.assertIn('timeout-minutes: 20', cache)
+        discovered = unittest.defaultTestLoader.discover(str(ROOT / 'tests/ci'))
+        def ids(suite):
+            for test in suite:
+                if isinstance(test, unittest.TestSuite):
+                    yield from ids(test)
+                else:
+                    yield test.id()
+        self.assertFalse(any('native_acceptance' in name for name in ids(discovered)))
+
     def test_candidate_jobs_are_read_only_and_cache_proof_adds_macos_in_promotion(self):
         for path in (CHECK, UPGRADE):
             with self.subTest(workflow=path.name):

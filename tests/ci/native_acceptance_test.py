@@ -16,7 +16,7 @@ class NativeAcceptanceTest(unittest.TestCase):
             shutil.copytree(ROOT / "build", root / "build")
             (root / "build.zig").write_text('''
 const std = @import("std");
-const ci = @import("build/ci.zig");
+const darwin = @import("build/darwin.zig");
 pub fn build(b: *std.Build) void {
     const target = b.step("accept", "Exercise acceptance");
     const run = b.addSystemCommand(&.{"python3"});
@@ -38,7 +38,15 @@ pub fn build(b: *std.Build) void {
     const captured = b.addSystemCommand(&.{"true"});
     _ = captured.captureStdOut(.{});
     b.step("captured", "Generator capture").dependOn(&captured.step);
-    ci.concurrentAcceptance(b);
+    const host = b.graph.host.result.os.tag;
+    b.graph.host.result.os.tag = .linux;
+    darwin.configureAcceptance(b, "artifacts");
+    std.debug.assert(run.stdio == .infer_from_args);
+    b.graph.host.result.os.tag = .macos;
+    darwin.configureAcceptance(b, null);
+    std.debug.assert(run.stdio == .infer_from_args);
+    darwin.configureAcceptance(b, "artifacts");
+    b.graph.host.result.os.tag = host;
     std.debug.assert(run.stdio == .check and run.has_side_effects);
     std.debug.assert(run.argv.items.len == 8);
     std.debug.assert(generator.stdio == .infer_from_args and !generator.has_side_effects);

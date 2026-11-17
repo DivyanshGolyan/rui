@@ -153,11 +153,10 @@ jobs:
           needed=$(python3 -B tests/ci/caller_errors.py --bootstrap-needed)
           echo "needed=$needed" >> "$GITHUB_OUTPUT"
       - uses: ./.github/actions/setup
-        if: ${{ steps.caller-bootstrap.outputs.needed == 'true' || !contains(fromJSON(needs.plan.outputs.policy_skips), 'test_native_acceptance') }}
+        if: ${{ steps.caller-bootstrap.outputs.needed == 'true' }}
         with:
           # Install only the existing pinned compiler: no build/package caches,
           # selected fixture dependencies or product compilation in policy.
-          # The input-scoped native acceptance self-check uses a minimal Zig graph.
           targets: '[]'
           compiled: 'true'
           cold: 'true'
@@ -471,6 +470,8 @@ jobs:
         with:
           targets: '["test-logic"]'
           check-part: cache-execution
+      - name: Prove acceptance freshness, diagnostics and independent overlap
+        run: python3 -B -m unittest discover -s tests/ci -p native_acceptance_test.py -v
       - name: Prove warm compilation does not cache test acceptance
         id: compile
         # Cache timing: green 351 s, run 42755585733; minimum margin 120 s.

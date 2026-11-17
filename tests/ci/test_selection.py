@@ -16,7 +16,7 @@ from textwrap import dedent
 from unittest.mock import patch
 
 import build_files
-from select_tests import (BUILD_HUB, BUILD_MODULES, CACHE_POLICY, CHECK_COVERS, FIXTURES, LIVE_POSTGRES_TARGETS, LIVE_RULES,
+from select_tests import (ACCEPTANCE_INPUTS, BUILD_HUB, BUILD_MODULES, CACHE_POLICY, CHECK_COVERS, FIXTURES, LIVE_POSTGRES_TARGETS, LIVE_RULES,
                           POLICY_SELF_CHECKS, RENDERER_HARNESSES, RULES, SCREEN_TARGETS, SETUP_PARTS, TEST_CODE, UNIT_ROOTS, Graph, covers, execution_batches, matches, select,
                           setup_requirements, tree_graph, uses_live_mysql, live_mysql_suites, mysql_provisioning)
 from qualification import LONG_GATES, NATIVE, RESOURCES, SHARDS_BESIDE_LONG_GATE, qualification, shards
@@ -1248,18 +1248,15 @@ class SelectionTest(unittest.TestCase):
                 self.assertIn("current-facts-integration", combined[family])
 
     def test_policy_self_checks_run_only_when_their_inputs_change(self):
-        driver, admission, publication, artifact, locality, formal, native = (unit for unit, _ in POLICY_SELF_CHECKS)
+        driver, admission, publication, artifact, locality, formal = (unit for unit, _ in POLICY_SELF_CHECKS)
         for paths, run in (
                 (["src/cli.zig", "src/store/Store.zig", "tests/integration/human_cli_integration.py",
                   "README.md", "clients/ts/src/wire.ts"], {locality}),
-                (["tests/ci/select_tests.py"], {driver, admission, publication, artifact, locality, native}),
+                (["tests/ci/select_tests.py"], {driver, admission, publication, artifact, locality}),
                 (["tests/ci/requirements.txt"], {driver, admission, publication, artifact}),
                 (["tests/formal/mysql_ownership/MysqlOwnership.tla"], {formal}),
                 (["tests/ci/test_formal_models.py"], {driver, admission, publication, artifact, formal}),
-                (["build.zig"], {driver, admission, native}),
-                (["build/darwin.zig"], {native}),
-                ([".github/workflows/check.yml"], {admission, native}),
-                (["tests/ci/test_native_acceptance.py"], {driver, admission, publication, artifact, native}),
+                (["build.zig"], {driver, admission}),
                 ([".github/workflows/release.yml"], {admission}),
                 (["src/wire_version.zig"], {driver, locality}),
                 (["tests/integration/check.sh"], {driver}),
@@ -1274,7 +1271,7 @@ class SelectionTest(unittest.TestCase):
             for phase in ("development", "review"):
                 with self.subTest(paths=paths, phase=phase):
                     skips = select(paths, phase, AVAILABLE)["policy_skips"]
-                    self.assertEqual(set(skips), {driver, admission, publication, artifact, locality, formal, native} - run)
+                    self.assertEqual(set(skips), {driver, admission, publication, artifact, locality, formal} - run)
 
     def test_ci_policy_does_not_make_build_qualification_universal(self):
         for path in (".github/workflows/check.yml",
@@ -1663,7 +1660,7 @@ fi
                     self.assertEqual([line.strip() for line in bootstrap.splitlines()
                                       if line.strip() and not line.lstrip().startswith('#')], [
                         '- uses: ./.github/actions/setup',
-                        "if: ${{ steps.caller-bootstrap.outputs.needed == 'true' || !contains(fromJSON(needs.plan.outputs.policy_skips), 'test_native_acceptance') }}",
+                        "if: ${{ steps.caller-bootstrap.outputs.needed == 'true' }}",
                         'with:',
                         "targets: '[]'",
                         "compiled: 'true'",
@@ -1737,6 +1734,23 @@ fi
         self.assertTrue(select(["tests/ci/quarantine.json", "src/TerminalText.zig"], "development",
                                AVAILABLE)["typecheck_macos"])
 
+    def test_acceptance_owner_edits_always_select_compiler_backed_regression(self):
+        mutations = {
+            "build.zig": ('    darwin.configureAcceptance(b, ci.directory);\n', ''),
+            "build/darwin.zig": ('if (artifacts != null and b.graph.host.result.os.tag == .macos)',
+                                 'if (artifacts != null)'),
+            "build/ci.zig": ('run.expectExitCode(0);', 'run.expectExitCode(1);'),
+            "tests/ci/native_acceptance_test.py": ('self.assertTrue(observed)', 'self.assertFalse(observed)'),
+        }
+        self.assertEqual(set(mutations), set(ACCEPTANCE_INPUTS))
+        for path, (before, after) in mutations.items():
+            with self.subTest(path=path):
+                self.assertTrue(Path(path).is_file())
+                self.assertTrue(select([path], "review", AVAILABLE,
+                                       contents={path: (before, after)})["cache_execution_checks"])
+                self.assertFalse(select([path], "development", AVAILABLE,
+                                        contents={path: (before, after)})["cache_execution_checks"])
+
     def test_cache_proof_tracks_cache_policy_not_every_runtime_edit(self):
         def cache(path, before=None, after=None):
             contents = {} if after is None else {path: (before, after)}
@@ -1752,7 +1766,7 @@ fi
             self.assertFalse(cache(path), path)
 
         build = "    const run = b.addRunArtifact(tests);\n    run.has_side_effects = true;\n"
-        self.assertFalse(cache("build.zig", build, build + "    // A build comment.\n    const other = b.step(\"x\", \"y\");\n"))
+        self.assertTrue(cache("build.zig", build, build + "    // A build comment.\n    const other = b.step(\"x\", \"y\");\n"))
         self.assertTrue(cache("build.zig", build, build.replace("    run.has_side_effects = true;\n", "")))
         action = Path(".github/actions/setup/action.yml").read_text()
         fixtures = Path(".github/actions/setup/fixtures/action.yml").read_text()

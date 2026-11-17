@@ -82,6 +82,16 @@ class PrepushTest(unittest.TestCase):
         self.assertNotIn("tests/ci", commands)
         self.assertNotIn("development selection", commands)
 
+    def test_compiler_backed_acceptance_proof_remains_focused_local_feedback(self):
+        for path in select_tests.ACCEPTANCE_INPUTS:
+            for mode in ("default", "quick"):
+                with self.subTest(path=path, mode=mode):
+                    self.file("tests/ci/native_acceptance_test.py")
+                    self.commands([path])
+                    commands = dict(prepush.checks([path], AVAILABLE, "BASE", mode))
+                    self.assertIn("tests/ci: native_acceptance_test.py", commands)
+                    self.assertNotIn("tests/ci", commands)
+
     def test_verify_rui_map_inputs_select_the_map_test(self):
         for path in (".claude/skills/verify-rui/scripts/frames.json",
                      ".claude/skills/verify-rui/features/README.md",
