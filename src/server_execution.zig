@@ -391,17 +391,21 @@ const Workspace = struct {
     decode: output_decode.Decode,
     settlement: store_module.ValidatedOutput,
     listings: std.EnumArray(provider.ListingKind, ListingWork),
+    image_calls: server_read_image.Calls,
+    turn_state: execution_turn.State,
 };
 
-// Keep admission state within the existing mapped execution workspace pages.
-// Derive its previous shape rather than maintaining a second field inventory.
-const WorkspaceBeforeAdmission = blk: {
+// Keep admission and dispatch state within the original mapped workspace pages.
+// Exclude every added owner so its state cannot silently raise the baseline.
+const WorkspaceBeforeAdmissionAndDispatch = blk: {
     const fields = std.meta.fieldNames(Workspace);
-    var names: [fields.len - 1][:0]const u8 = undefined;
+    var names: [fields.len - 3][:0]const u8 = undefined;
     var types: [names.len]type = undefined;
     var next: usize = 0;
     for (fields) |name| {
-        if (std.mem.eql(u8, name, "model_admission")) continue;
+        if (std.mem.eql(u8, name, "model_admission") or
+            std.mem.eql(u8, name, "image_calls") or
+            std.mem.eql(u8, name, "turn_state")) continue;
         names[next] = name;
         types[next] = @FieldType(Workspace, name);
         next += 1;
@@ -411,9 +415,9 @@ const WorkspaceBeforeAdmission = blk: {
 
 comptime {
     const page = std.heap.page_size_min;
-    if (std.mem.alignForward(usize, @sizeOf(Workspace), page) > std.mem.alignForward(usize, @sizeOf(WorkspaceBeforeAdmission), page))
-        @compileError(std.fmt.comptimePrint("model admission preflight must fit existing workspace pages: {d} -> {d} bytes (state {d})", .{
-            @sizeOf(WorkspaceBeforeAdmission), @sizeOf(Workspace), @sizeOf(store_module.ModelAdmissionPreparation),
+    if (std.mem.alignForward(usize, @sizeOf(Workspace), page) > std.mem.alignForward(usize, @sizeOf(WorkspaceBeforeAdmissionAndDispatch), page))
+        @compileError(std.fmt.comptimePrint("admission and dispatch state must fit existing workspace pages: {d} -> {d} bytes", .{
+            @sizeOf(WorkspaceBeforeAdmissionAndDispatch), @sizeOf(Workspace),
         }));
 }
 
@@ -569,12 +573,12 @@ pub fn executionMain(host: *Host) void {
     if (reactor != null) host.scratch_budget = budget;
     defer host.scratch_budget = null;
     var mcp_calls: server_mcp.Calls = .{};
-    var image_calls: server_read_image.Calls = .{};
-    defer image_calls.shutdown(host);
+    workspace.image_calls = .{};
+    defer workspace.image_calls.shutdown(host);
     defer shutdownExecution(host, slots, workspace);
     defer mcp_calls.shutdown(host);
 
-    var turn_state = execution_turn.State{ .capacity_was_full = slots.len == 0 };
+    workspace.turn_state = .{ .capacity_was_full = slots.len == 0 };
     var measurement: LifecycleMeasurement = .{};
     var heap_release: HeapRelease = .{};
     while (!host.executionEnding()) {
@@ -585,11 +589,11 @@ pub fn executionMain(host: *Host) void {
             .workspace = workspace,
             .measurement = &measurement,
             .mcp = &mcp_calls,
-            .images = &image_calls,
+            .images = &workspace.image_calls,
             .fenced = false,
         };
         host.dispatch_wake.reset();
-        switch (execution_turn.run(&turn_state, &native)) {
+        switch (execution_turn.run(&workspace.turn_state, &native)) {
             .continue_immediately => heap_release.worked = true,
             .wait => |kind| {
                 if (heap_release.due(slots, if (reactor) |active| active.listingPending() else false)) process.releaseFreeHeap();
