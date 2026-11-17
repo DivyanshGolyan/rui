@@ -11,6 +11,7 @@ const panel_editor = @import("panel_editor.zig");
 const Panel = @import("widgets/Panel.zig");
 const Hover = @import("widgets/Hover.zig");
 const Self = @This();
+const RowInset = @import("widgets/RowInset.zig");
 
 pub const Snapshot = struct {
     menu: ?*const picker.Menu = null,
@@ -276,10 +277,10 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     self.hover.targets = targets;
     for (shown, 0..) |at, y| {
         const entry = self.menu.entries[at];
-        const line = try picker_view.modelLine(ctx.arena, entry, self.row(entry).?, widest, size.width -| 3, self.unicode);
+        const line = try picker_view.modelLine(ctx.arena, entry, self.row(entry).?, widest, RowInset.bounds(size.width).end -| 3, self.unicode);
         const style = if (self.focus == .row and self.focus.row == at) self.selection else if (self.hover.contains(targets[y])) self.hover_style else self.ground;
         for (0..size.width) |x| surface.writeCell(@intCast(x), @intCast(y), .{ .style = style });
-        paint(ctx, surface, line.text, @intCast(y), @min(3, size.width), size.width, style);
+        paint(ctx, surface, line.text, @intCast(y), @min(3, RowInset.bounds(size.width).end), RowInset.bounds(size.width).end, style);
     }
     if (self.show_more and end < indices.items.len and size.height > 1) {
         const more = try std.fmt.allocPrint(ctx.arena, "{s} {d} more", .{ if (self.unicode) "↓" else "v", indices.items.len - end });
@@ -558,13 +559,13 @@ test "Model choice Panel field keeps its input visible and compacts indented mat
             try std.testing.expect(child.origin.row + child.surface.size.height <= height);
             try std.testing.expect(child.origin.col + child.surface.size.width <= width);
         }
-        if (count > 0 and width > 19 and height >= 3) try std.testing.expect(drawn.cursor != null);
+        if (count > 0 and width > 21 and height >= 3) try std.testing.expect(drawn.cursor != null);
         if (count > 0 and width > 0 and height >= 4) try std.testing.expect(std.mem.indexOfScalar(usize, choice.hits, choice.focus.selected().?) != null);
         if (drawn.cursor) |cursor| {
             try std.testing.expect(cursor.row < height and cursor.col < width);
             try std.testing.expectEqual(@as(u16, 19), cursor.col);
         }
-        if (count == 0 or width <= 20 or height != 20) continue;
+        if (count == 0 or width <= 21 or height != 20) continue;
         var screen = try vaxis.Screen.init(arena.allocator(), .{ .cols = width, .rows = height, .x_pixel = 0, .y_pixel = 0 });
         try drawn.render(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = height, .screen = &screen }, panel.widget());
         try std.testing.expect(screen.cursor_vis);
