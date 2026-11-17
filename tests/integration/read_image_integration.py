@@ -108,7 +108,9 @@ def prove_case(root, name):
         action = None
         expected = "failed"
         if pending:
-            action = wait(lambda: action_for(store, session), "exact permission request")
+            proposal = wait(lambda: action_for(store, session), "exact permission request")
+            assert proposal["tool"] == "read_image" and proposal["authorization"] == "pending", proposal
+            action = proposal["action"]
             current = read(action)
             assert current["state"] == "waiting_approval" and current["final"] is None, current
             assert fixture.observe(store, "message", deadline=deadline)["state"] == "waiting_for_permission"
