@@ -176,6 +176,12 @@ def cmd_build(args):
     jobs = os.environ.get("RUI_BUILD_JOBS", str(os.cpu_count() or 1))
     if not re.fullmatch(r"[0-9]+", jobs) or int(jobs) < 1:
         die("RUI_BUILD_JOBS must be a positive integer")
+    def release_tag(source):
+        result = subprocess.run(["git", "-C", str(source), "describe", "--tags", "--exact-match",
+                                 "--match", "v[0-9]*.[0-9]*.[0-9]*", "HEAD"],
+                                capture_output=True, text=True)
+        return result.stdout.strip() if result.returncode == 0 else None
+
     here = getattr(args, "here", False)
     if here:
         if args.sha or args.source:
@@ -202,17 +208,32 @@ def cmd_build(args):
 
         def check_source():
             current_head = subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip()
-            if current_head != head or source_tree() != tree:
+            if current_head != head or source_tree() != tree or release_tag(source) != tag:
                 die("build source changed since the build was identified")
 
         tree = source_tree()
-        sha = "tree-" + tree
+        tag = release_tag(source)
+        identity = json.dumps([tree, head, tag], separators=(",", ":")).encode()
+        sha = "tree-" + hashlib.sha256(identity).hexdigest()
         dirty = tree != head_tree
     else:
         sha = args.sha
         if not sha or not re.fullmatch(r"[0-9a-f]{40}", sha):
             die("build needs a full 40-hex commit SHA or --here")
         source = pathlib.Path(args.source).resolve() if args.source else CACHE / "src" / sha
+    if not here:
+        origin = args.repo or str(HERE.parents[4])
+        if not source.exists():
+            source.parent.mkdir(parents=True, exist_ok=True)
+            subprocess.run(["git", "-C", origin, "fetch", "--quiet", "origin", sha], check=False)
+            subprocess.run(["git", "-C", origin, "worktree", "add", "--detach", str(source), sha], check=True)
+        head = subprocess.run(["git", "-C", str(source), "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+        dirty = subprocess.run(["git", "-C", str(source), "status", "--porcelain", "--untracked-files=no"],
+                               capture_output=True, text=True, check=True).stdout
+        if head != sha or dirty:
+            die(f"source {source} is not a clean checkout of {sha} (HEAD {head}, dirty={bool(dirty)})")
+        tree = subprocess.run(["git", "-C", str(source), "rev-parse", "HEAD^{tree}"], capture_output=True, text=True, check=True).stdout.strip()
+        tag = release_tag(source)
     build = pathlib.Path(args.out).resolve() if getattr(args, "out", None) else CACHE / "builds" / sha
     manifest = build / "manifest.json"
 
@@ -248,7 +269,7 @@ def cmd_build(args):
         if record.get("sha") != sha:
             die(f"build directory {build} contains a different build; use --force")
         screen = record.get("screen_library")
-        if args.no_screen or (screen and pathlib.Path(screen).is_file()):
+        if record.get("release_tag", object()) == tag and (args.no_screen or (screen and pathlib.Path(screen).is_file())):
             if here:
                 record.update(head=head, dirty=dirty, source=str(source))
             if here or getattr(args, "upgrade", False):
@@ -259,18 +280,6 @@ def cmd_build(args):
                 manifest.write_text(json.dumps(record, indent=1) + "\n")
             print(json.dumps(record, indent=1))
             return
-    if not here:
-        origin = args.repo or str(HERE.parents[4])
-        if not source.exists():
-            source.parent.mkdir(parents=True, exist_ok=True)
-            subprocess.run(["git", "-C", origin, "fetch", "--quiet", "origin", sha], check=False)
-            subprocess.run(["git", "-C", origin, "worktree", "add", "--detach", str(source), sha], check=True)
-        head = subprocess.run(["git", "-C", str(source), "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
-        dirty = subprocess.run(["git", "-C", str(source), "status", "--porcelain", "--untracked-files=no"],
-                               capture_output=True, text=True, check=True).stdout
-        if head != sha or dirty:
-            die(f"source {source} is not a clean checkout of {sha} (HEAD {head}, dirty={bool(dirty)})")
-        tree = subprocess.run(["git", "-C", str(source), "rev-parse", "HEAD^{tree}"], capture_output=True, text=True, check=True).stdout.strip()
     build.mkdir(parents=True, exist_ok=True)
     # A failed rebuild must not leave a manifest pointing at overwritten artifacts.
     manifest.unlink(missing_ok=True)
@@ -294,7 +303,7 @@ def cmd_build(args):
         shutil.rmtree(bin_dir)
     shutil.copytree(source / "zig-out/bin", bin_dir, symlinks=False)
     files = {p.name: sha256(p) for p in sorted(bin_dir.iterdir())}
-    record = {"sha": sha, "tree": tree, "source": str(source), "binary": str(bin_dir / "rui"),
+    record = {"sha": sha, "tree": tree, "release_tag": tag, "source": str(source), "binary": str(bin_dir / "rui"),
               "screen_library": str(screen_library) if screen_library else None,
               "screen_library_sha256": sha256(screen_library) if screen_library else None,
               "files_sha256": files, "optimize": "ReleaseSafe", "built_at": wall(),
@@ -306,6 +315,8 @@ def cmd_build(args):
     ensure_upgrade(record)
     if here:
         check_source()
+    elif release_tag(source) != tag:
+        die("build source changed since the build was identified")
     manifest.write_text(json.dumps(record, indent=1) + "\n")
     print(json.dumps(record, indent=1))
 
@@ -631,9 +642,9 @@ def tap_main(args):
     import struct
     import termios
     import tty
-    source = pathlib.Path(args.source)
-    head = subprocess.run(["git", "-C", str(source), "rev-parse", "HEAD"], capture_output=True, text=True, check=True)
-    build = load_build(head.stdout.strip())
+    run = Run(args.run)
+    source = pathlib.Path(run.meta["source"])
+    build = load_build(run.meta["sha"])
     require_screen(build)
     term = pathlib.Path(args.term_dir)
     term.mkdir(parents=True, exist_ok=True)
@@ -978,7 +989,7 @@ def cmd_doctor(args):
     check("binary matches pinned build", run.rui.exists() and sha256(run.rui) == build["files_sha256"]["rui"] == run.meta["binary_sha256"],
           f"{run.rui} sha256={sha256(run.rui) if run.rui.exists() else 'missing'}")
     head = subprocess.run(["git", "-C", run.meta["source"], "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
-    check("source is pinned SHA", head == run.meta["sha"], f"{run.meta['source']} HEAD={head}")
+    check("source is pinned SHA", head == build.get("head", build.get("sha", run.meta["sha"])), f"{run.meta['source']} HEAD={head}")
     if args.expect_sha:
         check("run SHA is the expected head", run.meta["sha"] == args.expect_sha, f"run={run.meta['sha']} expected={args.expect_sha}")
     default_store = pathlib.Path.home() / ".local/share/rui/store"
@@ -1084,7 +1095,7 @@ def cmd_term(args):
     for assignment in args.setenv:
         key, _, value = assignment.partition("=")
         child_env[key] = value.replace("{PATH}", child_env["PATH"]) if key == "PATH" else value
-    tap = [python, str(HERE), "_tap", str(term), "--source", run.meta["source"], "--cwd", str(run.project),
+    tap = [python, str(HERE), "_tap", str(term), "--run", str(run.root), "--cwd", str(run.project),
            "--env", json.dumps(child_env), "--size", args.size]
     record = {"name": name, "surface": args.surface, "session": args.session, "argv": argv, "size": args.size,
               "tapped": not args.no_tap, "setenv": args.setenv, "t_ns": now_ns(), "wall": wall()}
@@ -1143,7 +1154,7 @@ def attach_client(run, name, size):
     term.mkdir(parents=True)
     python = sys.executable
     argv = [shutil.which("tmux") or "/opt/homebrew/bin/tmux", "-S", str(run.sock), "attach-session", "-t", f"=verify-rui:={name}"]
-    process = subprocess.Popen([python, str(HERE), "_tap", str(term), "--source", run.meta["source"], "--cwd", str(run.project),
+    process = subprocess.Popen([python, str(HERE), "_tap", str(term), "--run", str(run.root), "--cwd", str(run.project),
                                 "--env", json.dumps(run.env()), "--size", size, "--mode", "fifo", "--", *argv],
                                stdin=subprocess.DEVNULL, stdout=open(term / "tap.log", "w"), stderr=subprocess.STDOUT,
                                start_new_session=True)
@@ -1781,8 +1792,8 @@ def cmd_physical(args):
         env_file = term / "env.json"
         env_file.write_text(json.dumps(run.env(COLORTERM="truecolor")))
         script = run.scratch / f"{name}.command"
-        script.write_text("#!/bin/sh\nprintf '\\033]0;verify-rui %s (owned test window)\\007'\nexec %s %s _tap %s --source %s --cwd %s --env @%s --mode terminal --hold -- %s\n" % (
-            name, shlex.quote(python), shlex.quote(str(HERE)), shlex.quote(str(term)), shlex.quote(run.meta["source"]),
+        script.write_text("#!/bin/sh\nprintf '\\033]0;verify-rui %s (owned test window)\\007'\nexec %s %s _tap %s --run %s --cwd %s --env @%s --mode terminal --hold -- %s\n" % (
+            name, shlex.quote(python), shlex.quote(str(HERE)), shlex.quote(str(term)), shlex.quote(str(run.root)),
             shlex.quote(str(run.project)), shlex.quote(str(env_file)), shlex.join(argv)))
         script.chmod(0o700)
         atomic_write(term / "term.json", json.dumps({"name": name, "surface": "gui", "app": args.app, "argv": argv, "script": str(script)}, indent=1))
@@ -3659,6 +3670,7 @@ def shots_output(path):
     return out
 
 
+
 def cmd_shots(args):
     try:
         identifier = args.build
@@ -3712,12 +3724,13 @@ def cmd_shots(args):
                     "reason": r["reason"], "fingerprint": r.get("cells_sha256"), "files": r["files"]}
                    for r in frames]
         (out / "shots.json").write_text(json.dumps(records, indent=2) + "\n")
-        (out / "shots-meta.json").write_text(json.dumps(metadata, indent=2) + "\n")
         if args.baseline:
             scope = selected if args.only or args.shard else None
             failed = shots_diff(out, records, pathlib.Path(args.baseline).resolve(), scope) or failed
+        failed = failed or any(not r["ok"] for r in records)
+        (out / "shots-meta.json").write_text(json.dumps({**metadata, "failed": failed}, indent=2) + "\n")
         print(out)
-        if failed or any(not r["ok"] for r in records):
+        if failed:
             raise SystemExit(1)
     except (OSError, ValueError, TypeError, KeyError, subprocess.CalledProcessError) as error:
         die(f"cannot capture shots: {error}")
@@ -3728,17 +3741,24 @@ def cmd_shots_merge(args):
         inputs = [(pathlib.Path(path).resolve(), None) for path in args.directories]
         inputs = [(path, shot_records(path)) for path, _ in inputs]
         metadata = []
+        failures = []
+        provenance_keys = {"build", "tree", "recipe_sha256"}
         for path, _ in inputs:
             meta_path = path / "shots-meta.json"
             if not meta_path.exists():
                 metadata.append(None)
+                failures.append(False)
                 continue
             meta = json.loads(meta_path.read_text())
-            if (not isinstance(meta, dict) or set(meta) != {"build", "tree", "recipe_sha256"}
-                    or not all(isinstance(value, str) and value for value in meta.values())
-                    or not re.fullmatch(r"[0-9a-f]{64}", meta["recipe_sha256"])):
+            if not isinstance(meta, dict) or not isinstance(meta.get("failed", False), bool):
+                raise ValueError(f"invalid shots metadata: {meta_path}")
+            provenance = {key: value for key, value in meta.items() if key != "failed"}
+            if ((not provenance and "failed" not in meta) or set(provenance) not in (set(), provenance_keys)
+                    or (provenance and (not all(isinstance(value, str) and value for value in provenance.values())
+                                        or not re.fullmatch(r"[0-9a-f]{64}", provenance["recipe_sha256"])) )):
                 raise ValueError(f"invalid shots provenance: {meta_path}")
-            metadata.append(meta)
+            metadata.append(provenance or None)
+            failures.append(meta.get("failed", False))
         if any(meta != metadata[0] for meta in metadata[1:]):
             raise ValueError("shots inputs have different or missing build provenance")
         seen = set()
@@ -3754,15 +3774,15 @@ def cmd_shots_merge(args):
             records.extend(copy_shot_files(shard, source, out))
         records.sort(key=lambda r: (r["name"], r["size"]))
         (out / "shots.json").write_text(json.dumps(records, indent=2) + "\n")
-        if metadata[0] is not None:
-            (out / "shots-meta.json").write_text(json.dumps(metadata[0], indent=2) + "\n")
-        failed = False
+        failed = any(failures)
         if args.baseline:
-            failed = shots_diff(out, records, pathlib.Path(args.baseline).resolve())
+            failed = shots_diff(out, records, pathlib.Path(args.baseline).resolve()) or failed
         else:
             frames_index(out, [{**r, "status": "ok" if r["ok"] else "failed", "note": ""} for r in records], True)
+        failed = failed or any(not r["ok"] for r in records)
+        (out / "shots-meta.json").write_text(json.dumps({**(metadata[0] or {}), "failed": failed}, indent=2) + "\n")
         print(out)
-        if failed or any(not r["ok"] for r in records):
+        if failed:
             raise SystemExit(1)
     except (OSError, ValueError, TypeError, KeyError) as error:
         die(f"cannot merge shots: {error}")
@@ -4104,7 +4124,7 @@ def main():
     p = sub.add_parser("list", help="list runs")
     p.set_defaults(func=cmd_list)
     p = sub.add_parser("_tap")
-    p.add_argument("term_dir"); p.add_argument("--source", required=True); p.add_argument("--cwd", required=True)
+    p.add_argument("term_dir"); p.add_argument("--run", required=True); p.add_argument("--cwd", required=True)
     p.add_argument("--env", required=True); p.add_argument("--size", default="80x24")
     p.add_argument("--mode", choices=["terminal", "fifo"], required=True); p.add_argument("--hold", action="store_true")
     p.add_argument("argv", nargs="+")
