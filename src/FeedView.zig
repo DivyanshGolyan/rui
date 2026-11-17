@@ -225,7 +225,7 @@ fn spotAt(self: *const Self, gpa: std.mem.Allocator, at: Cell) !?Spot {
     const cells = try gpa.alloc(vaxis.Cell, self.drawn.width);
     defer gpa.free(cells);
     self.paintRow(cells, line);
-    return self.keyed((Row{ .document = &self.window.document, .cells = cells, .line = line.offset }).spot(col));
+    return self.keyed((Row{ .document = &self.window.document, .cells = cells, .line = self.window.document.selectionLine(self.layout(), line) }).spot(col));
 }
 
 fn retryAt(self: *const Self, gpa: std.mem.Allocator, at: Cell) !?resident.RetryHit {
@@ -441,7 +441,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
             for (0..self.size.height) |row| {
                 const position = (rows.next() orelse break) orelse continue;
                 const cells = surface.buffer[row * self.size.width ..][0..self.size.width];
-                (Row{ .document = &self.window.document, .cells = cells, .line = position.offset }).covered(range, columns);
+                (Row{ .document = &self.window.document, .cells = cells, .line = self.window.document.selectionLine(self.layout(), position) }).covered(range, columns);
                 for (cells, columns) |*cell, selected| if (selected) {
                     cell.style.reverse = true;
                 };

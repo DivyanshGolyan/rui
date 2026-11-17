@@ -33,7 +33,7 @@ Run these states at 140x40 and 46x30. Their shared Session contains several real
 
 The `chatfeed-night-blank-line` and `chatfeed-day-blank-line` states send one Message containing exactly `first line\n\nsecond line`. Capture both at 140x40 and 46x30; inspect that its timestamp appears on the first line and that the user tint covers all three rows, including the interior blank row, without a ground-colored break. Use an explicit shared scenario with `--before` to preserve comparable before/after captures and `pairs.json`.
 
-Inspect committed cells and PNG/HTML for faint user-message tint, upright text, quiet prompt marks, non-repeated adjacent minute stamps, and an untinted input. Compare input and surrounding divider row coordinates before and after at each width. PTY captures demonstrate layout and emitted cursor mode, not physical-terminal blinking.
+Inspect committed cells and PNG/HTML for the two-column inset, the half-height tint above and below each User message, the ground gap between consecutive bands, upright text, quiet prompt marks, non-repeated adjacent minute stamps, and an untinted input. The no-color state uses full blank reverse-video padding rows; native tests also cover the no-Unicode fallback. Compare input and surrounding divider row coordinates before and after at each width. PTY captures demonstrate layout and emitted cursor mode, not physical-terminal blinking.
 
 ## Gotchas
 
