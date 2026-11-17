@@ -2206,7 +2206,7 @@ test "public Host starter preserves every typed refusal before and after waiting
         var expected: [start_report.max_line_bytes]u8 = undefined;
         try std.testing.expectEqualStrings(start_report.line(&result.outcome.failed.refusal.?, &expected), Probe.output[0..Probe.used]);
         try std.testing.expectEqual(if (waited) caller_exit.knownError(error.HostStartupFailed) else .invalid, exit_status);
-    }
+    };
 }
 
 noinline fn writeRefusal(io: std.Io, failure: *const start_report.Failure, status: caller_exit.Status) error{Reported} {
