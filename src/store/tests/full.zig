@@ -550,8 +550,8 @@ test "Full Message projection work does not multiply Messages by stops, in round
             const session = try configureTestSession(&storage, "full-scale-config");
             for (1..message_count + 1) |index| {
                 var key: [32]u8 = undefined;
-                try store_testing.withoutForeignKeys(&storage, "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id,admitted_at,admission_position) " ++
-                    "VALUES(?1,?2,?3,1,NULL,1,?4)", .{ index, session.slice(), try std.fmt.bufPrint(&key, "message-{d}", .{index}), 1000 + index });
+                try store_testing.withoutForeignKeys(&storage, "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id,admitted_at,admission_position,source_kind) " ++
+                    "VALUES(?1,?2,?3,1,NULL,1,?4,1)", .{ index, session.slice(), try std.fmt.bufPrint(&key, "message-{d}", .{index}), 1000 + index });
             }
             const last_command = try store_testing.queryU64(&storage, "SELECT coalesce(max(command_seq),0) FROM core_command", .{});
             for (1..stop_count + 1) |index| {

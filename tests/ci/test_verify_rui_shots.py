@@ -1,3 +1,4 @@
+import hashlib
 import argparse
 import contextlib
 import io
@@ -106,6 +107,22 @@ class ShotsTest(unittest.TestCase):
             self.assertIn('tree123:.claude/skills/verify-rui/scripts/frames.json', git.call_args.args[0])
             self.assertTrue(all(not s['record'] for s in captured['recipe']['states']))
             self.assertEqual(json.loads((out / 'shots.json').read_text())[0]['fingerprint'], 'abc')
+
+    def test_explicit_scenario_uses_tool_recipe_instead_of_build_source(self):
+        scenario = json.loads(SCRIPT.with_name('frames.json').read_text())
+        scenario['states'] = scenario['states'][:1]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            trusted_recipe = root / 'trusted.json'
+            trusted_recipe.write_text(json.dumps(scenario))
+            args = argparse.Namespace(build='tree-build', only=None, shard='2/2', out=str(root / 'out'),
+                                      no_png=True, baseline=None, scenario=str(trusted_recipe))
+            with patch.dict(self.globals, {'load_build': lambda _: {'source': '/untrusted', 'tree': 'tree123'}}), \
+                 patch('subprocess.check_output') as git, contextlib.redirect_stdout(io.StringIO()):
+                self.module['cmd_shots'](args)
+            git.assert_not_called()
+            metadata = json.loads((root / 'out/shots-meta.json').read_text())
+            self.assertEqual(metadata['recipe_sha256'], hashlib.sha256(trusted_recipe.read_bytes()).hexdigest())
 
     def test_default_build_is_requested_and_empty_shard_skips_runner(self):
         scenario = json.loads(SCRIPT.with_name('frames.json').read_text())

@@ -457,7 +457,7 @@ def fixture_main(args):
     """
     run = Run(args.run)
     sys.argv = [sys.argv[0], str(run.rui)]
-    sys.path.insert(0, str(pathlib.Path(run.meta["source"]) / "tests/integration"))
+    sys.path.insert(0, str(HERE.parents[4] / "tests/integration"))
     import http.server
     import model_fixture as fixture
     log = run.evidence / "provider.jsonl"
@@ -651,7 +651,7 @@ def tap_main(args):
     require_screen(build)
     term = pathlib.Path(args.term_dir)
     term.mkdir(parents=True, exist_ok=True)
-    sys.path.insert(0, str(source / "tests/integration"))
+    sys.path.insert(0, str(HERE.parents[4] / "tests/integration"))
     try:
         os.environ["RUI_TEST_GHOSTTY_VT"] = build["screen_library"]
         from terminal_screen import ScreenCapture
@@ -912,7 +912,7 @@ def cmd_new(args):
     run = Run(root)
     (run.home / ".config/rui").mkdir(parents=True, mode=0o700)
     sys.argv = [sys.argv[0], str(run.rui)]
-    sys.path.insert(0, str(pathlib.Path(run.meta["source"]) / "tests/integration"))
+    sys.path.insert(0, str(HERE.parents[4] / "tests/integration"))
     import codex_integration as codex_fixture
     codex_fixture.credentials(run.home / ".config/rui/codex.json")
     python = sys.executable
@@ -2262,7 +2262,7 @@ def validate_scenario(data, sizes=None):
         require(state.get("upgrade") in (None, "current", "available", "updating", "failure", "chat"), f"{name}: invalid upgrade scenario")
         sides = state.get("comparison", {})
         require(isinstance(sides, dict) and set(sides) <= {"before", "after"}
-                and all(isinstance(value, dict) and set(value) <= {"expect", "absent", "expect_next", "expect_last", "expect_dim", "absent_regex", "expect_regex"}
+                and all(isinstance(value, dict) and set(value) <= {"expect", "absent", "expect_next", "expect_last", "expect_dim", "absent_regex", "expect_regex", "absent_sidebar_regex", "expect_sidebar_regex", "expect_sidebar_rule"}
                         for value in sides.values()), f"{name}: invalid comparison oracle")
         env = state.get("env", {})
         require(isinstance(env, dict) and all(isinstance(k, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", k)
@@ -2374,6 +2374,13 @@ def validate_scenario(data, sizes=None):
         for pattern in regexes:
             re.compile(pattern)
         frame_absent_regex(state)
+        for key in ("expect_sidebar_regex", "absent_sidebar_regex"):
+            patterns = state.get(key, [])
+            require(isinstance(patterns, list) and all(isinstance(pattern, str) and pattern and "\0" not in pattern for pattern in patterns),
+                    f"{name}: {key} must be a list of nonempty regular expressions")
+            for pattern in patterns:
+                re.compile(pattern)
+        require(type(state.get("expect_sidebar_rule", False)) is bool, f"{name}: expect_sidebar_rule must be boolean")
         for text in frame_absences(state):
             match = re.fullmatch(r"\{session:(.+)\}", text)
             require(match is None or match.group(1) in labels,
@@ -2678,6 +2685,36 @@ class FrameTerminal:
         self.process.output.check()
 
 
+def frame_cell_width(text):
+    return sum(0 if unicodedata.combining(char) else
+               2 if unicodedata.east_asian_width(char) in ("W", "F") else 1 for char in text)
+
+
+def frame_split_row(line, column=None):
+    for index, char in enumerate(line):
+        if column is not None:
+            if frame_cell_width(line[:index]) == column and char in "│|┼┤+":
+                return line[:index], char, line[index + 1:]
+        elif char in "│|":
+            right = line[index + 1:].strip()
+            left = line[:index]
+            if (left and (set(left) <= {"─"} or set(left) <= {"-"})) or (right and (set(right) <= {"─"} or set(right) <= {"-"})):
+                return line[:index], char, line[index + 1:]
+        elif char in "┼┤+":
+            left, right = line[:index], line[index + 1:]
+            if left and (set(left) <= {"─"} or set(left) <= {"-"}):
+                return left, char, right
+    return "", "", line
+
+
+def frame_divider_column(lines):
+    for line in lines:
+        left, divider, _ = frame_split_row(line)
+        if divider:
+            return frame_cell_width(left)
+    return None
+
+
 def frame_wait(run, terminal, text, absent=False, timeout=20, allow_exit=False, empty_composer=False):
     def ready(capture):
         if (text in capture.completed) == absent:
@@ -2688,7 +2725,10 @@ def frame_wait(run, terminal, text, absent=False, timeout=20, allow_exit=False, 
         x, y = capture.frame.cursor
         if y >= len(lines):
             return False
-        line = lines[y].rsplit("│", 1)[-1].strip()
+        column = frame_divider_column(lines)
+        if column is None and x > 40:
+            column = 40
+        line = frame_split_row(lines[y], column)[2].strip()
         return capture.frame.visible and line == "›"
     terminal.wait(ready,
                   f"{'absence of ' if absent else ''}{text!r}", timeout, allow_exit)
@@ -2782,6 +2822,33 @@ def frame_initial_ready(terminal, first_wait=None, allow_exit=False):
 
 def frame_row_failure(state, plain):
     lines = plain.splitlines()
+    column = frame_divider_column(lines)
+    rows = [frame_split_row(line, column) for line in lines]
+    sidebar = [left if divider else pane for left, divider, pane in rows]
+    for pattern in state.get("expect_sidebar_regex", []):
+        matched = False
+        for index, text in enumerate(sidebar):
+            if not re.fullmatch(pattern, text):
+                continue
+            if state.get("expect_sidebar_rule", False):
+                if index == 0:
+                    continue
+                previous, separator, right = rows[index - 1]
+                rule = previous if separator else right
+                if not rule or not (set(rule) <= {"─"} or set(rule) <= {"-"}):
+                    continue
+                if rows[index][1] and (not separator or separator == rows[index][1]):
+                    continue
+                if separator and rows[index][1] == "":
+                    continue
+            matched = True
+            break
+        if not matched:
+            return f"missing sidebar row matching {pattern!r}"
+    for pattern in state.get("absent_sidebar_regex", []):
+        for text in sidebar:
+            if re.fullmatch(pattern, text):
+                return f"unexpected sidebar row matching {pattern!r}: {text!r}"
     if (last := state.get("expect_last")) and (not lines or last not in lines[-1]):
         return f"last physical row must contain {last!r}"
     for row, detail in state.get("expect_next", {}).items():
@@ -3015,7 +3082,7 @@ def frame_upgrade_run(run, state, build):
             if isinstance(value, list):
                 return [expand(item, regex) for item in value]
             if isinstance(value, dict):
-                return {expand(key): expand(item, key in ("expect_regex", "absent_regex")) for key, item in value.items()}
+                return {expand(key): expand(item, key in ("expect_regex", "absent_regex", "expect_sidebar_regex", "absent_sidebar_regex")) for key, item in value.items()}
             return value
         observed = {"actor": build["upgrade_actor"], "version": version, "candidate": candidate,
                     "selected": str(selected), "mode": mode}
@@ -3051,28 +3118,21 @@ def frame_chat_ready(plain, witness=None, empty=False):
         return bool(line) and (set(line) <= {"─"} or set(line) <= {"-"})
 
     for index in range(max(1, len(lines) - 6), len(lines) - 1):
-        def cell_width(text):
-            return sum(0 if unicodedata.combining(char) else
-                       2 if unicodedata.east_asian_width(char) in ("W", "F") else 1 for char in text)
-
-        divider = None
-        if not is_rule(lines[index]):
-            for separator in ("│", "|"):
-                left, found, right = lines[index].partition(separator)
-                if found and is_rule(right):
-                    divider = (cell_width(left), separator)
-                    break
-            if divider is None:
+        left, divider, right = frame_split_row(lines[index])
+        if divider:
+            if not is_rule(right):
                 continue
+            column = frame_cell_width(left)
+        elif is_rule(lines[index]):
+            column = None
+        else:
+            continue
 
         def pane(line):
-            if divider is None:
+            if column is None:
                 return line
-            column, separator = divider
-            for position, char in enumerate(line):
-                if char == separator and cell_width(line[:position]) == column:
-                    return line[position + 1:]
-            return ""
+            _, found, text = frame_split_row(line, column)
+            return text if found else ""
 
         top = next((i for i in range(index - 1, -1, -1) if is_rule(pane(lines[i]))), None)
         if top is None or top + 1 >= index:
@@ -3113,21 +3173,12 @@ def frame_drive_upgrade(run, terminal, state, fixture):
             return
         terminal.wait(lambda _c: f"/releases/tag/v{releases.version}" in releases.requests, "release discovery HTTP response")
         return
-    if before:
-        frame_steps(run, terminal, [{"mouse": {"at": "Settings", "do": "click"}}, {"wait": "Notifications"},
-                                    {"keys": ["Down"] * 5 + ["Enter"]}])
-    else:
-        frame_wait(run, terminal, version)
-        terminal.mouse({"at": version, "do": "click"})
+    frame_steps(run, terminal, [{"mouse": {"at": "Settings", "do": "click"}}, {"wait": "Notifications"},
+                                {"keys": ["Down"] * 5 + ["Enter"]}])
     if gate is not None:
-        if before:
-            frame_wait(run, terminal, " · publishing", timeout=40)
-        else:
-            selected = run.home / ".local/bin/rui"
-            terminal.wait(lambda c: selected.resolve() != run.home / ".local/lib/rui/old/bin/rui"
-                          and "Updating…" in c.completed, "published release held before Host activation", timeout=40)
+        frame_wait(run, terminal, " · publishing", timeout=40)
     elif state["upgrade"] == "failure":
-        frame_wait(run, terminal, "couldn't reach GitHub" if before else "Update failed")
+        frame_wait(run, terminal, "couldn't reach GitHub")
     else:
         selected = run.home / ".local/bin/rui"
         import os_semantics
@@ -3139,8 +3190,11 @@ def frame_drive_upgrade(run, terminal, state, fixture):
         if status["instance"] == run.meta["upgrade_previous_instance"]:
             raise FrameFailure("Upgrade did not replace the original Host instance")
         return
-    if before:
-        frame_steps(run, terminal, [{"keys": ["Esc"]}, {"gone": "Notifications"}])
+    frame_steps(run, terminal, [{"keys": ["Esc"]}, {"gone": "Notifications"}])
+    if gate is not None and not before:
+        selected = run.home / ".local/bin/rui"
+        terminal.wait(lambda c: selected.resolve() != run.home / ".local/lib/rui/old/bin/rui"
+                      and "Updating…" in c.completed, "published release held before Host activation", timeout=40)
     if state["upgrade"] == "failure":
         frame_failure_settled(terminal, before)
 
@@ -3180,16 +3234,16 @@ def frame_upgrade_journey(run, terminal, state, fixture, out, size):
         shot("retry-updating", ["Updating…"], ["Update failed", "Notifications"])
         gate.release.set()
         selected = run.home / ".local/bin/rui"
-        quiet = {"expect_next": {"Settings": version},
-                 "expect_regex": [rf"^\s*\d+(?:\.\d+)? (?:MB|GB)\s+{re.escape(version)}\s*(?:│.*)?$"]}
+        quiet = {"expect_sidebar_regex": [r" *Settings +\d+(?:\.\d+)? (?:MB|GB) *"], "expect_sidebar_rule": True}
         terminal.wait(lambda c: selected.resolve() != run.home / ".local/lib/rui/old/bin/rui"
                       and frame_row_failure(quiet, c.completed) is None
                       and "Updating…" not in c.completed and "Update failed" not in c.completed
+                      and version not in c.completed
                       and "Notifications" not in c.completed, "retry installed the selected release", timeout=40)
         status = json.loads(frame_command(run.rui_cmd("host", "status", "--store", run.store), "retry Host status").stdout)
         if status["status"] != "ready" or status["instance"] == run.meta["upgrade_previous_instance"]:
             raise FrameFailure("retry did not replace the original Host with a ready Host")
-        shot("retry-completed", [version, "Settings"], ["Updating…", "Update failed", "Notifications"], **quiet)
+        shot("retry-completed", ["Settings"], [version, "Update to ", "Updating…", "Update failed", "Notifications"], **quiet)
         frame_steps(run, terminal, [{"mouse": {"at": "Settings", "do": "click"}}, {"wait": "Notifications"},
                                     {"keys": ["Down"] * 5 + ["Enter"]}, {"wait": " · up to date"}])
         shot("settings-version-up-to-date", ["Version", " · up to date"], ["Update failed"])
@@ -3715,8 +3769,11 @@ def cmd_shots(args):
                                              pkg_dir=None, force=False, no_screen=False, upgrade=True))
             identifier = json.loads(output.getvalue())["sha"]
         build = load_build(identifier)
-        raw = subprocess.check_output(["git", "-C", build["source"], "show",
-                                       f"{build['tree']}:.claude/skills/verify-rui/scripts/frames.json"], text=True)
+        if getattr(args, "scenario", None):
+            raw = pathlib.Path(args.scenario).read_text()
+        else:
+            raw = subprocess.check_output(["git", "-C", build["source"], "show",
+                                           f"{build['tree']}:.claude/skills/verify-rui/scripts/frames.json"], text=True)
         scenario = validate_scenario(json.loads(raw), None)
         metadata = {"build": build.get("sha", identifier), "tree": build["tree"],
                     "recipe_sha256": hashlib.sha256(raw.encode("utf-8")).hexdigest()}
@@ -4070,6 +4127,7 @@ def main():
     p = sub.add_parser("shots", help="capture a build's own screen recipe")
     p.add_argument("build", nargs="?", metavar="BUILD")
     p.add_argument("--baseline", metavar="DIR")
+    p.add_argument("--scenario", metavar="FILE", help="use this trusted recipe instead of the build tree recipe")
     p.add_argument("--only", metavar="NAME,...")
     p.add_argument("--shard", metavar="I/N")
     p.add_argument("--out")

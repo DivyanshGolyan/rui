@@ -1,7 +1,9 @@
+import difflib
 import json
 import pathlib
 import re
 import shlex
+import threading
 
 import model_fixture as fixture
 from host_process import wait_for
@@ -249,12 +251,24 @@ def narrow_launch_resize():
     print("narrow launch: widening leaves the overview open", flush=True)
 
 
+def settled_inspection(w, session):
+    return wait_for(lambda: w.inspect(session), "finished Session and retired Host resources", timeout=60,
+                    ready=lambda report: finished(report) and report["execution"]["custody_occupied"] == "0"
+                    and report["execution"]["scratch_used_bytes"] == "0")
+
+
+def assert_inspection_unchanged(before, after):
+    assert after == before, "\n" + "".join(difflib.unified_diff(
+        json.dumps(before, indent=2, sort_keys=True).splitlines(keepends=True),
+        json.dumps(after, indent=2, sort_keys=True).splitlines(keepends=True),
+        fromfile="before", tofile="after"))
+
+
 def new_chat_aliases():
     with world("new-chat-aliases", {"old task": answer("old", "Old answer retained")}) as w:
         old = w.session("--label", "Old unchanged", "--reasoning-effort", "high")
         w.run("session", "send", "--store", w.store, "--to", old, input="old task")
-        wait_for_host(w, [old], finished, "the old chat has canonical history")
-        before = w.inspect(old)
+        before = settled_inspection(w, old)
         with w.overview(columns=WIDTH, rows=30) as screen:
             for alias in ("/new", "/clear"):
                 listed = screen.contains("Old unchanged")
@@ -262,11 +276,11 @@ def new_chat_aliases():
                 screen.wait(conversation_of("Old unchanged"), "open the old chat")
                 screen.keys(alias + " foo\r")
                 screen.contains("! Usage:")
-                assert w.inspect(old) == before
+                assert_inspection_unchanged(before, settled_inspection(w, old))
                 screen.keys(alias + "\r")
                 screen.wait(lambda frame: not is_overview(frame) and "Type a task" in frame
                             and "Old unchanged" not in frame, "alias opens a new empty chat")
-                assert w.inspect(old) == before
+                assert_inspection_unchanged(before, settled_inspection(w, old))
                 listed = back_to_overview(screen, "Old unchanged")
                 assert "Old unchanged" in listed
         rows = json.loads(w.run("session", "list", "--store", w.store))["sessions"]
@@ -278,10 +292,50 @@ def new_chat_aliases():
     print("overview aliases: no Message and old Current unchanged", flush=True)
 
 
+def inspection_waits_for_host_retirement():
+    release = threading.Event()
+    observed = threading.Event()
+    responses = {"old task": answer("old", "Old answer retained"),
+                 "held task": (answer("held", "Held answer"), release)}
+    with world("inspect-retirement", responses) as w:
+        try:
+            old = w.session("--label", "Old unchanged")
+            w.run("session", "send", "--store", w.store, "--to", old, input="old task")
+            before = settled_inspection(w, old)
+            held = w.session("--label", "Held work")
+            w.run("session", "send", "--store", w.store, "--to", held, input="held task")
+            busy = wait_for(lambda: w.inspect(old), "unrelated Host custody", timeout=60,
+                            ready=lambda report: report["execution"]["custody_occupied"] != "0")
+            assert busy != before
+            assert {**busy, "execution": before["execution"]} == before
+
+            class Observer:
+                def inspect(self, session):
+                    report = w.inspect(session)
+                    if report["execution"]["custody_occupied"] != "0":
+                        observed.set()
+                    return report
+
+            def release_after_observation():
+                if observed.wait(30):
+                    release.set()
+
+            thread = threading.Thread(target=release_after_observation, daemon=True)
+            thread.start()
+            after = settled_inspection(Observer(), old)
+            thread.join(timeout=30)
+            assert observed.is_set() and not thread.is_alive()
+            assert_inspection_unchanged(before, after)
+        finally:
+            release.set()
+    print("overview inspect: finished Session reports wait for unrelated Host custody to retire", flush=True)
+
+
 def cases():
     opening_and_views()
     flat_list()
     empty_list()
     wide_launch_reuses_empty()
     narrow_launch_resize()
+    inspection_waits_for_host_retirement()
     new_chat_aliases()
