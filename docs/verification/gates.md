@@ -146,6 +146,7 @@ Only non-promotion manually dispatched runs whose diff touches no strict path re
 Ready PRs, promotions and the documentation lane never rerun, except a batch that failed only on [listed flakes](#listed-flakes).
 Qualification keeps one job per target. macOS packs native work into at most three workers: execution plus portable logic, callers, and remaining native targets.
 Composed gates, long witnesses, launch, Debug admission, reply delivery and H2 stay isolated from other target batches.
+A Selected checks dispatch can supply a JSON `native_targets` array to reproduce an exact native selection through the same producer, matrix and acceptance owners; this diagnostic mode disables retries and quarantine.
 The `linux` and `macos` statuses fail if any selected job fails or is cancelled.
 A failing aggregate names each failed job of its run and whether infrastructure or a check failed it ([failure_cause.py](../../tests/ci/failure_cause.py)), so a red never reads only as an exit code.
 Use unsplit `zig build check-full` for single-machine isolated-latency or release evidence.
