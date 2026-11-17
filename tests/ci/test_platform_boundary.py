@@ -107,6 +107,72 @@ class PlatformBoundaryTest(unittest.TestCase):
                        'std.posix.kill(leader, .KILL) catch {};', '_ = c.kill(pid, c.SIGKILL);'):
             self.assertEqual(zig_sites(source), 0, source)
 
+    def test_process_observation_and_retirement_are_mac_sites(self):
+        for source in ('const ps = "/bin/ps";', '_ = std.posix.system.flock(fd, 0);',
+                       'platform.StoreLease.observe(io, store);',
+                       'client.upgradeGenerationRetired(a, b, c, d, e);',
+                       'const HostLifecycle = @import("HostLifecycle.zig"); HostLifecycle.activate(init);', 'rui_launch_detached_reported(a);',
+                       'rui_process_generation(pid, &started);'):
+            self.assertEqual(zig_sites(source), 1, source)
+        for source in ('// "/bin/ps"', 'const s = "flock";', 'lease.acquire(io);'):
+            self.assertEqual(zig_sites(source), 0, source)
+
+    def test_new_lifecycle_consumers_must_be_mac_paths(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            (root / "src").mkdir()
+            for module, methods in (
+                    ("HostLifecycle.zig", ("observe", "activate", "awaitRetirement")),
+                    ("host_coordinator.zig", ("restart", "restartAll", "run")),
+                    ("host_restart_all.zig", ("discover", "restart", "run")),
+                    ("host_identity.zig", ("generation", "peer", "snapshot")),
+                    ("host_start.zig", ("spawn",))):
+                for method in methods:
+                    for directory, prefix in (("src", ""), ("src/nested", "../")):
+                        (root / directory).mkdir(exist_ok=True)
+                        path = f"{directory}/new_consumer.zig"
+                        for expression in (f'const lifecycle = @import("{prefix}{module}");\nlifecycle.{method}(arg);\n',
+                                           f'@import("{prefix}{module}").{method}(arg);\n'):
+                            with self.subTest(module=module, method=method, expression=expression):
+                                (root / path).write_text(expression)
+                                self.assertEqual(sites(root), {path: 1})
+                                (root / path).unlink()
+
+    def test_process_observation_sites_in_new_files_require_mac_paths(self):
+        examples = (
+            ('src/new.zig', 'const path = "/proc/{d}/stat";'),
+            ('tests/integration/new.py', 'from pathlib import Path\nPath(f"/proc/{pid}/stat")\n'),
+            ('tests/integration/new.py', 'import subprocess as sp\nsp.check_output(["ps", "-p", str(pid)])\n'),
+            ('tests/integration/new.py', 'import fcntl as locks\nlocks.flock(fd, 1)\n'),
+            ('tests/integration/new.py', 'from fcntl import flock as lock\nlock(fd, 1)\n'),
+        )
+        for path, source in examples:
+            with self.subTest(source=source), tempfile.TemporaryDirectory() as scratch:
+                root = Path(scratch)
+                file = root / path
+                file.parent.mkdir(parents=True)
+                file.write_text(source)
+                self.assertEqual(sites(root), {path: 1})
+        self.assertEqual(python_sites('import subprocess\ntext = "ps"\n# /proc/123\n'), 0)
+        self.assertEqual(python_sites('import fcntl\nx.flock(fd, 1)\n'), 0)
+
+    def test_upgrade_lifecycle_paths_select_mac(self):
+        paths = ["build.zig", "docs/contracts/store.md", "docs/host.md",
+                 "src/HostLifecycle.zig", "src/cli.zig", "src/client.zig",
+                 "src/host_coordinator.zig", "src/host_restart_all.zig", "src/host_start.zig",
+                 "src/serve_grammar.zig", "src/upgrade.zig", "src/upgrade_process.zig",
+                 "tests/ci/host_settings_locality.py", "tests/ci/prepush.py",
+                 "tests/ci/test_host_settings_locality.py", "tests/ci/test_prepush.py",
+                 "tests/ci/test_previous_release_upgrade.py", "tests/ci/test_upgrade_fixture.py",
+                 "tests/integration/host_launch_integration.py",
+                 "tests/integration/previous_release_upgrade.py", "tests/integration/upgrade_integration.py"]
+        self.assertTrue(select(paths, "review", AVAILABLE)["mac_required"])
+        self.assertTrue(select(["src/cli.zig"], "review", AVAILABLE)["mac_required"])
+        for path in ("src/HostLifecycle.zig", "src/host_coordinator.zig",
+                     "src/host_restart_all.zig", "src/host_start.zig", "src/host_identity.zig", "src/upgrade.zig",
+                     "src/upgrade_process.zig", "tests/integration/upgrade_integration.py"):
+            self.assertTrue(select([path], "review", AVAILABLE)["mac_required"], path)
+
     def test_python_scan_ignores_comments_strings_and_attributes(self):
         self.assertEqual(python_sites('if sys.platform == "darwin":\n    pass\n'), 1)
         self.assertEqual(python_sites('name = platform.system()\nos.uname()\n'), 2)
@@ -183,7 +249,7 @@ class PlatformBoundaryTest(unittest.TestCase):
 
     def test_sites_outside_mac_paths_are_violations(self):
         self.assertEqual(violations({}), [])
-        self.assertIn("src/a.zig: 2 platform sites outside src/os/", violations({"src/a.zig": 2})[0])
+        self.assertIn("src/a.zig: 2 platform sites outside Mac paths", violations({"src/a.zig": 2})[0])
 
     def test_mac_specific_paths(self):
         for path in ("src/os/socket.zig", "tests/integration/os_semantics.py", "src/host_launch.c",
