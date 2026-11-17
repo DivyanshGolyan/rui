@@ -3,6 +3,37 @@ const vaxis = @import("vaxis");
 const view = @import("overview_view.zig");
 const theme = @import("theme.zig");
 
+pub const Line = enum { horizontal, vertical };
+
+/// The one cell every rule and divider draws: a running stitch in the thread colour.
+pub fn line(caps: view.Caps, which: Line) vaxis.Cell {
+    const glyph = switch (which) {
+        .horizontal => if (caps.unicode) "┄" else "-",
+        .vertical => if (caps.unicode) "┆" else "|",
+    };
+    return .{ .char = .{ .grapheme = glyph, .width = 1 }, .style = of(caps, .{ .colour = .rule }) };
+}
+
+test "line stitches use thread in every capability" {
+    for ([_]?view.Rgb{ null, .{ 255, 255, 255 } }) |background| {
+        for (std.enums.values(view.Caps.Depth)) |depth| for ([_]bool{ false, true }) |unicode| for (std.enums.values(Line)) |which| {
+            const caps: view.Caps = .{ .depth = depth, .unicode = unicode, .background = background };
+            const cell = line(caps, which);
+            const glyph = switch (which) {
+                .horizontal => if (unicode) "┄" else "-",
+                .vertical => if (unicode) "┆" else "|",
+            };
+            try std.testing.expectEqualStrings(glyph, cell.char.grapheme);
+            try std.testing.expectEqual(1, cell.char.width);
+            const expected: vaxis.Color = if (depth == .none) .default else switch (theme.thread(if (background == null) .dark else .light, if (depth == .direct) .direct else .indexed)) {
+                .direct => |rgb| .{ .rgb = rgb },
+                .indexed => |index| .{ .index = index },
+            };
+            try std.testing.expectEqual(expected, cell.style.fg);
+        };
+    }
+}
+
 // The returned segments and their text borrow the frame arena and the input, respectively.
 pub fn segments(arena: std.mem.Allocator, caps: view.Caps, input: []const view.Segment, background: ?view.Background) std.mem.Allocator.Error![]vaxis.Segment {
     const result = try arena.alloc(vaxis.Segment, input.len);
