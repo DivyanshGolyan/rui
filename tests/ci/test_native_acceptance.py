@@ -115,7 +115,9 @@ with socket.create_connection(("127.0.0.1", int(os.environ["OVERLAP_PORT"])), ti
                 with self.subTest(buffered=buffered), socket.socket() as server:
                     server.bind(("127.0.0.1", 0))
                     server.listen(2)
-                    server.settimeout(5)
+                    # Cold build-runner setup precedes the first peer. Only
+                    # the second peer's wait measures acceptance overlap.
+                    server.settimeout(120)
                     command = ["zig", "build", "overlap", "-j2", "--summary", "all",
                                "-Dbuffered=" + str(buffered).lower()]
                     peers = []
@@ -131,6 +133,7 @@ with socket.create_connection(("127.0.0.1", int(os.environ["OVERLAP_PORT"])), ti
                                     peers.append(peer)
                                     peer.settimeout(5)
                                     started.append(peer.recv(64).decode())
+                                    server.settimeout(5)
                             except TimeoutError:
                                 pass
                             observed = len(started) == 2
@@ -141,6 +144,10 @@ with socket.create_connection(("127.0.0.1", int(os.environ["OVERLAP_PORT"])), ti
                             self.assertEqual(observed, buffered, output)
                             self.assertEqual(process.returncode == 0, buffered, output)
                             self.assertIn("overlap observed=" + str(buffered), output)
+                            if buffered:
+                                self.assertEqual(set(started), {"first", "second"})
+                                for name in started:
+                                    self.assertIn(f"{name} overlap observed=True", output)
                         finally:
                             for peer in peers:
                                 peer.close()
