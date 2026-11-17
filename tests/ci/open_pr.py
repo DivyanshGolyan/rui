@@ -16,7 +16,7 @@ from urllib.parse import quote
 
 from conflict_alert import gh, github
 from pr_overlap import branch_changes, origin_repo, overlaps, report
-from pr_shape import refusal as shape_refusal
+from pr_shape import refusal as shape_refusal, screens_required
 
 
 def create_args(repo, title, body, base, branch, draft=False):
@@ -79,9 +79,12 @@ def main():
             if refusal := shape_refusal(paths, body):
                 print(refusal, file=sys.stderr)
                 return 1
+            needs_screens = screens_required(paths, base=f"origin/{args.base}")
             report(overlaps(github, repo, branch, paths, removed))
             pr = json.loads(gh(*create_args(repo, args.title, body, args.base, branch, draft=args.draft)))
             print(pr["html_url"])
+            if needs_screens:
+                print("UI PR: publish frames with verify-rui publish DIR --pr N; admission stays red until then.")
             github("POST", f"repos/{repo}/issues/{pr['number']}/comments", [("body", "@codex review")])
             if args.draft:
                 print("Opened draft and requested Codex review. "
