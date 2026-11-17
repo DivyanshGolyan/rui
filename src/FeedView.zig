@@ -420,7 +420,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const pending = if (self.pending != null) try self.pendingDocument(ctx) else null;
     const body_height: u16 = if (pending) |document| @intCast(document.measure(self.layout(), .{}, std.math.maxInt(u16)).rows) else 0;
     const pending_note = if (self.pending != null and self.pending.?.note != null) note: {
-        const document = try ctx.arena.create(viewport.Sized(256, true));
+        const document = try ctx.arena.create(viewport.Sized(resident.message_note_capacity, true));
         document.* = .{ .width_method = self.method };
         document.append("\x1b[90m  ") catch unreachable;
         document.append(self.pending.?.note.?) catch unreachable;
