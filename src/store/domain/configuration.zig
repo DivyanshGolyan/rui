@@ -3,6 +3,7 @@ const operation_effort = @import("operation_effort.zig");
 const session_settings = @import("../../session_settings.zig");
 const command_reply = @import("../../command_reply.zig");
 const command_input = @import("../../command_input.zig");
+const configuration_defaults = @import("../../configuration_defaults.zig");
 const configuration_admission = @import("../../configuration_admission.zig");
 const workspace_path = @import("../../workspace_path.zig");
 const provider_route = @import("../../provider_route.zig");
@@ -42,14 +43,8 @@ pub const PresetDecision = struct {
 
 pub const ConfigureReply = command_reply.ConfigureReply;
 
-fn requestedNames(requested: *const content_custody.Configuration) *const command_input.ToolsField {
-    return &requested.tools;
-}
-
-fn requestsBash(requested: *const content_custody.Configuration) bool {
-    var names = requested.tools.iterator();
-    while (names.next()) |name| if (std.mem.eql(u8, name, "bash")) return true;
-    return false;
+fn requestedNames(requested: anytype) *const command_input.ToolsField {
+    return if (@TypeOf(requested.tools) == *const command_input.ToolsField) requested.tools else &requested.tools;
 }
 
 fn defaultProvider(routes: provider_route.Routes) ?provider_name.Provider {
@@ -158,7 +153,7 @@ pub const ConfigurationUpdatePlan = union(enum) {
     },
 };
 
-fn configurationTokens(field: @TypeOf(@as(content_custody.Configuration, .{}).compaction_trigger), previous: ?u64, allow_zero: bool) !?u64 {
+fn configurationTokens(field: anytype, previous: ?u64, allow_zero: bool) !?u64 {
     if (field.state == .omitted) return previous;
     if (field.state == .explicit_null) return null;
     if (field.state != .value) return error.InvalidTokenHeuristic;
@@ -178,7 +173,7 @@ pub fn configurationBeforeWorkspace(
     selected_facts: []const model_catalog.Entry,
     host_tool_set: *const tool_defs.HostToolSet,
     current: ?*const CurrentConfiguration,
-    requested: *const content_custody.Configuration,
+    requested: anytype,
     default_provider: ?provider_name.Provider,
 ) ?configuration_admission.Rejection {
     if (requested.compaction_trigger.state == .explicit_null) return .invalid_compaction_trigger;
@@ -196,7 +191,7 @@ pub fn configurationBeforeWorkspace(
     if (current == null and
         (requested.model.state != .value or requested.reasoning_effort.state == .omitted or
             requested.compaction_trigger.state != .value or requested.tools.state != .value or
-            requested.permission_mode.state != .value or (requestsBash(requested) and requested.workspace.state != .value and requested.parent.state == .omitted) or
+            requested.permission_mode.state != .value or (requested.workspace.state != .value and requested.parent.state != .value) or
             (provider == null and default_provider == null)))
     {
         return .incomplete_initial_configuration;
@@ -207,7 +202,7 @@ pub fn configurationBeforeWorkspace(
         }
     }
     if (requested.label.state == .value and !tool_presentation.validLabel(requested.label.value.slice())) return .invalid_label;
-    if (requested.tools.state == .value) if (toolsRejection(host_tool_set, provider orelse (if (current) |existing| existing.provider else default_provider.?), &requested.tools)) |rejection| return rejection;
+    if (requested.tools.state == .value) if (toolsRejection(host_tool_set, provider orelse (if (current) |existing| existing.provider else default_provider.?), requestedNames(requested))) |rejection| return rejection;
     const model = if (requested.model.state == .value) requested.model.value.slice() else current.?.model.slice();
     if (compact_at) |tokens| if (model_catalog.find(selected_facts, model)) |known| {
         if (known.context_window) |window| if (tokens > window) return .compact_at_too_large;
@@ -247,7 +242,7 @@ pub fn previousReasoningEffortSql(comptime revision: []const u8) []const u8 {
 
 pub fn planConfigurationUpdate(
     current: ?*const CurrentConfiguration,
-    requested: *const content_custody.Configuration,
+    requested: anytype,
     workspace_matches: ?bool,
     next: *CurrentConfiguration,
 ) ConfigurationUpdatePlan {
@@ -401,6 +396,13 @@ pub const ParentFailure = struct {
     code: configuration_admission.Rejection,
     tool: ?[]const u8 = null,
 
+    fn from(failure: configuration_defaults.ParentRefusal) ParentFailure {
+        return switch (failure) {
+            .tools_not_in_parent => |name| .{ .code = .tools_not_in_parent, .tool = name },
+            .permission_mode_wider_than_parent => .{ .code = .permission_mode_wider_than_parent },
+        };
+    }
+
     pub fn text(failure: ParentFailure, buffer: []u8, comptime effect: []const u8) []const u8 {
         return switch (failure.code) {
             .tools_not_in_parent => std.fmt.bufPrint(buffer, "spec.tools: {s} is not one of your tools. Nothing was " ++ effect ++ ".", .{failure.tool.?}) catch unreachable,
@@ -425,17 +427,21 @@ pub fn inheritParent(host_tool_set: *const tool_defs.HostToolSet, configuration:
     const failure: ?ParentFailure = refusal: {
         if (configuration.workspace.state != .omitted) break :refusal .{ .code = .parent_workspace_forbidden };
         if (configuration.provider.state != .omitted) break :refusal .{ .code = .parent_provider_forbidden };
-        if (toolsRejection(host_tool_set, reads.inherited.provider, &configuration.tools)) |code| return code;
-        var requested = configuration.tools.iterator();
-        while (requested.next()) |name| {
-            var allowed = std.mem.splitScalar(u8, reads.inherited.tools.slice(), ',');
-            while (allowed.next()) |member| {
-                if (std.mem.eql(u8, name, member)) break;
-            } else break :refusal .{ .code = .tools_not_in_parent, .tool = name };
-        }
-        if (try permissionMode(reads.inherited.permission_mode) == .ask and
-            configuration.permission_mode.state == .value and !configuration.permission_mode.value.eql("ask"))
-            break :refusal .{ .code = .permission_mode_wider_than_parent };
+        // This early start_agent boundary needs only tool and permission
+        // authority. The selected catalog is read later for model defaults.
+        const resolved = configuration_defaults.resolve(&.{}, .{
+            .creating = true,
+            .parent = .{ .tools = reads.inherited.tools.slice(), .permission_mode = try permissionMode(reads.inherited.permission_mode) },
+            .provider = reads.inherited.provider,
+            .model = configuration.model.value.slice(),
+            .tools = &configuration.tools,
+            .loaded_tools = &configuration.loaded_tools,
+            .permission_mode = &configuration.permission_mode,
+            .reasoning_effort = &configuration.reasoning_effort,
+            .compaction_trigger = &configuration.compaction_trigger,
+        });
+        if (toolsRejection(host_tool_set, reads.inherited.provider, resolved.tools)) |code| return code;
+        if (resolved.parent_refusal) |failure| break :refusal ParentFailure.from(failure);
         break :refusal null;
     };
     reads.parent_checked = true;
@@ -447,7 +453,30 @@ pub fn inheritParent(host_tool_set: *const tool_defs.HostToolSet, configuration:
     return null;
 }
 
+/// A borrowed admission view keeps content custody and tool lists at their owners.
+const ConfigurationView = struct {
+    workspace: *const @FieldType(content_custody.Configuration, "workspace"),
+    provider: *const @FieldType(content_custody.Configuration, "provider"),
+    model: *const @FieldType(content_custody.Configuration, "model"),
+    instructions: *const @FieldType(content_custody.Configuration, "instructions"),
+    tools: *const @FieldType(content_custody.Configuration, "tools"),
+    loaded_tools: *const @FieldType(content_custody.Configuration, "loaded_tools"),
+    permission_mode: *const @FieldType(content_custody.Configuration, "permission_mode"),
+    output_schema: *const @FieldType(content_custody.Configuration, "output_schema"),
+    compaction_trigger: *const @FieldType(content_custody.Configuration, "compaction_trigger"),
+    output_reservation: *const @FieldType(content_custody.Configuration, "output_reservation"),
+    reasoning_effort: *const @FieldType(content_custody.Configuration, "reasoning_effort"),
+    label: *const @FieldType(content_custody.Configuration, "label"),
+    parent: *const @FieldType(content_custody.Configuration, "parent"),
+
+    fn init(self: *ConfigurationView, configuration: *const content_custody.Configuration) void {
+        inline for (@typeInfo(ConfigurationView).@"struct".field_names) |field| @field(self, field) = &@field(configuration, field);
+    }
+};
+
 pub const ConfigurationReads = struct {
+    configuration: ConfigurationView = undefined,
+    defaults: configuration_defaults.Resolved = undefined,
     saved_command: command_domain.saved_command.Result = undefined,
     command_digest: [32]u8 = undefined,
     command_answer: StoredAnswer = undefined,
@@ -606,10 +635,12 @@ fn newReference(io: std.Io, reference: *[session_id.bytes]u8) !void {
 
 pub noinline fn prepareConfiguration(a: anytype, host_tool_set: *const tool_defs.HostToolSet, session: []const u8, configuration: *const content_custody.Configuration, reads: *ConfigurationReads) void {
     const creating = session.len == 0;
+    reads.configuration.init(configuration);
+    if (creating) reads.configuration.model = configuration_defaults.creationModel(&configuration.model);
     if (!creating) readSaved(a, session, &reads.next, &reads.found);
     if (creating and configuration.parent.state == .value) prepareParent(a, configuration.parent.value.slice(), reads);
     if (creating or configuration.tools.state == .value) {
-        reads.tools = .of(host_tool_set, requestedNames(configuration));
+        reads.tools = .of(host_tool_set, if (creating) configuration_defaults.creationTools(&configuration.tools) else &configuration.tools);
         if (reads.tools) |*tools| tool_set.lookupSelection(a, tools);
     }
     const instructions: ?*content_domain.Import = if (configuration.instructions.state == .value) requested: {
@@ -663,7 +694,7 @@ fn loadedToolsRejection(tools: *const command_input.ToolsField, loaded: *const c
 }
 
 fn loadedTools(a: anytype, request: *const Request, reads: *ConfigurationReads) !Validation {
-    const requested = request.configuration;
+    const requested = &reads.configuration;
     const creating = request.session.len == 0;
     if (!creating and requested.tools.state != .value and requested.loaded_tools.state != .value) return finishValidation(request, reads);
     if (requested.loaded_tools.state != .value and (creating or reads.next.loaded_tool_set_id == null)) return finishValidation(request, reads);
@@ -682,8 +713,8 @@ fn loadedTools(a: anytype, request: *const Request, reads: *ConfigurationReads) 
 
 fn loadedNames(a: anytype, request: *const Request, reads: *ConfigurationReads) !Validation {
     const v = &reads.step.validating;
-    if (request.configuration.loaded_tools.state == .value) {
-        v.loaded = &request.configuration.loaded_tools;
+    if (reads.configuration.loaded_tools.state == .value) {
+        v.loaded = reads.configuration.loaded_tools;
         return selectLoaded(a, request, reads);
     }
     reads.saved_loaded.state = .value;
@@ -698,8 +729,8 @@ fn selectLoaded(a: anytype, request: *const Request, reads: *ConfigurationReads)
     const v = &reads.step.validating;
     if (loadedToolsRejection(v.tools, v.loaded)) |rejection| {
         if (rejection == .loaded_tools_unreachable and
-            request.configuration.tools.state == .value and
-            request.configuration.loaded_tools.state == .omitted)
+            reads.configuration.tools.state == .value and
+            reads.configuration.loaded_tools.state == .omitted)
         {
             // An unreachable implicit intersection falls back to all allowed tools.
             return finishValidation(request, reads);
@@ -707,7 +738,7 @@ fn selectLoaded(a: anytype, request: *const Request, reads: *ConfigurationReads)
         return .{ .rejected = rejection };
     }
     if (v.loaded.count == v.tools.count) return finishValidation(request, reads);
-    if (request.session.len == 0 or request.configuration.tools.state == .value) {
+    if (request.session.len == 0 or reads.configuration.tools.state == .value) {
         reads.loaded_tools = tool_set.Selection.of(request.tools.host_tool_set, v.loaded) orelse return error.CorruptStore;
         tool_set.lookupSelection(a, &reads.loaded_tools.?);
         return .{ .round = .loaded };
@@ -723,12 +754,6 @@ fn savedNames(reads: *const ConfigurationReads) error{CorruptStore}!void {
 
 fn readCreation(a: anytype, reads: *ConfigurationReads) void {
     a.read(creation_facts, .{ .digest = reads.workspace_digest, .workspace = reads.next.workspace.slice(), .session = &reads.reference }, &reads.creation);
-}
-
-noinline fn saveUnusedWorkspace(configuration: *const content_custody.Configuration, next: *CurrentConfiguration, reads: *ConfigurationReads) void {
-    std.debug.assert(!requestsBash(configuration));
-    next.workspace.set("/") catch unreachable;
-    reads.workspace_digest = store_core.workspaceDigest(next.workspace.slice());
 }
 
 pub fn targetRejection(session: []const u8) ?configuration_admission.Rejection {
@@ -792,7 +817,7 @@ pub fn validateStep(a: anytype, request: *const Request, reads: *ConfigurationRe
 
 fn validateRequest(a: anytype, request: *const Request, reads: *ConfigurationReads) !Validation {
     const session = request.session;
-    const configuration = request.configuration;
+    const configuration = &reads.configuration;
     const creating = session.len == 0;
     if (targetRejection(session)) |code| return .{ .rejected = code };
     if (configuration.permission_mode.state == .value and
@@ -800,7 +825,7 @@ fn validateRequest(a: anytype, request: *const Request, reads: *ConfigurationRea
     {
         return .{ .rejected = .unsupported_permission_mode };
     }
-    if (configuration.model.state == .value and configuration.model.value.len == 0) {
+    if (configuration.model.state == .explicit_null or (configuration.model.state == .value and configuration.model.value.len == 0)) {
         return .{ .rejected = .invalid_model };
     }
     if (configuration.output_schema.state == .value) {
@@ -811,14 +836,14 @@ fn validateRequest(a: anytype, request: *const Request, reads: *ConfigurationRea
         if (!valid) return .{ .rejected = .invalid_output_schema };
     }
 
-    if (reads.pair) |*rows| content_domain.foundPair(rows, reads.instructionsValue(configuration), &reads.output_schema);
+    if (reads.pair) |*rows| content_domain.foundPair(rows, reads.instructionsValue(request.configuration), &reads.output_schema);
     const next = &reads.next;
     if (!creating and !reads.found.get()) {
         return .{ .rejected = .unknown_session };
     }
     if (reads.found.get()) try checkSaved(next);
     if (!creating and configuration.parent.state != .omitted) return .{ .rejected = .parent_on_update };
-    if (creating) if (try inheritParent(request.tools.host_tool_set, configuration, reads)) |code| return .{ .rejected = code };
+    if (creating) if (try inheritParent(request.tools.host_tool_set, request.configuration, reads)) |code| return .{ .rejected = code };
     reads.step = .{ .validating = undefined };
     const v = &reads.step.validating;
     v.default_provider = if (reads.inherits_parent) reads.next.provider else defaultProvider(request.served);
@@ -829,25 +854,48 @@ fn validateRequest(a: anytype, request: *const Request, reads: *ConfigurationRea
 
 fn validateModel(a: anytype, request: *const Request, reads: *ConfigurationReads) !Validation {
     const io = request.io;
-    const configuration = request.configuration;
+    const configuration = &reads.configuration;
     const creating = request.session.len == 0;
     const v = &reads.step.validating;
     const next = &reads.next;
     const current_configuration: ?*const CurrentConfiguration = if (reads.found.get()) next else null;
+    if (configuration.compaction_trigger.state == .value) _ = tokenCount(configuration.compaction_trigger.value.slice(), false) catch return .{ .rejected = .invalid_compaction_trigger };
+    _ = configurationTokens(configuration.output_reservation, null, true) catch return .{ .rejected = .invalid_output_reservation };
+    const provider = if (configuration.provider.state == .value)
+        std.meta.stringToEnum(provider_name.Provider, configuration.provider.value.slice()) orelse return .{ .rejected = .unsupported_provider }
+    else if (current_configuration) |existing| existing.provider else v.default_provider orelse return .{ .rejected = .incomplete_initial_configuration };
+    const model = if (configuration.model.state == .value) configuration.model.value.slice() else next.model.slice();
+    reads.defaults = configuration_defaults.resolve(v.model.facts(), .{
+        .creating = creating,
+        .parent = if (reads.inherits_parent) .{ .tools = reads.inherited.tools.slice(), .permission_mode = try permissionMode(reads.inherited.permission_mode) } else null,
+        .provider = provider,
+        .model = model,
+        .tools = configuration.tools,
+        .loaded_tools = configuration.loaded_tools,
+        .permission_mode = configuration.permission_mode,
+        .reasoning_effort = configuration.reasoning_effort,
+        .compaction_trigger = configuration.compaction_trigger,
+    });
+    if (reads.defaults.parent_refusal) |failure| {
+        reads.parent_failure = ParentFailure.from(failure);
+        return .{ .rejected = reads.parent_failure.?.code };
+    }
+    reads.configuration.tools = reads.defaults.tools;
+    reads.configuration.loaded_tools = reads.defaults.loaded_tools;
+    reads.configuration.permission_mode = &reads.defaults.permission_mode;
+    reads.configuration.reasoning_effort = &reads.defaults.reasoning_effort;
+    reads.configuration.compaction_trigger = &reads.defaults.compaction_trigger;
     if (configurationBeforeWorkspace(v.model.facts(), request.tools.host_tool_set, current_configuration, configuration, v.default_provider)) |rejection| {
         return .{ .rejected = rejection };
     }
 
-    if (creating) if (v.default_provider) |provider| {
-        next.provider = provider;
+    if (creating) if (v.default_provider) |default_value| {
+        next.provider = default_value;
     };
     v.workspace_matches = if (creating and reads.inherits_parent) inherited: {
         validateWorkspace(io, next.workspace.slice(), &next.workspace) catch return .{ .rejected = .invalid_workspace };
         reads.workspace_digest = store_core.workspaceDigest(next.workspace.slice());
         break :inherited null;
-    } else if (creating and configuration.workspace.state != .value) unused: {
-        saveUnusedWorkspace(configuration, next, reads);
-        break :unused null;
     } else if (configuration.workspace.state == .value) matches: {
         if (reads.found.get()) {
             break :matches sameWorkspace(io, configuration.workspace.value.slice(), next.workspace.slice()) catch {
@@ -863,7 +911,7 @@ fn validateModel(a: anytype, request: *const Request, reads: *ConfigurationReads
 }
 
 fn finishValidation(request: *const Request, reads: *ConfigurationReads) Validation {
-    const configuration = request.configuration;
+    const configuration = &reads.configuration;
     const next = &reads.next;
     const created = !reads.found.get();
     const current_configuration: ?*const CurrentConfiguration = if (reads.found.get()) next else null;
@@ -913,7 +961,7 @@ pub fn applyStep(a: anytype, request: *const Request, faults: Faults, reads: *Co
 fn applyContent(a: anytype, request: *const Request, faults: Faults, reads: *ConfigurationReads) !Applying {
     const io = request.io;
     const session = request.session;
-    const configuration = request.configuration;
+    const configuration = &reads.configuration;
     const creating = session.len == 0;
     const created = !reads.found.get();
     const next = &reads.next;
@@ -924,7 +972,7 @@ fn applyContent(a: anytype, request: *const Request, faults: Faults, reads: *Con
     switch (content_actions.instructions) {
         .preserve => {},
         .import_requested => {
-            applied.instructions_id = try content_domain.importSealed(a, io, &configuration.instructions, &reads.instructions, faults);
+            applied.instructions_id = try content_domain.importSealed(a, io, configuration.instructions, &reads.instructions, faults);
             next.instructions_id = @intCast(applied.instructions_id.?);
         },
         .default_empty => next.instructions_id = @intCast(try content_domain.importBytes(a, &reads.empty, "")),
@@ -934,7 +982,7 @@ fn applyContent(a: anytype, request: *const Request, faults: Faults, reads: *Con
     switch (content_actions.output_schema) {
         .preserve => {},
         .import_requested => {
-            applied.output_schema_id = try content_domain.importSealed(a, io, &configuration.output_schema, &reads.output_schema, faults);
+            applied.output_schema_id = try content_domain.importSealed(a, io, configuration.output_schema, &reads.output_schema, faults);
             next.output_schema_id = @intCast(applied.output_schema_id.?);
         },
         .clear => next.output_schema_id = null,
@@ -969,7 +1017,7 @@ fn applyContent(a: anytype, request: *const Request, faults: Faults, reads: *Con
         .reasoning_effort = next.reasoning_effort,
         .label = if (next.label) |*label| label.slice() else null,
     });
-    try accept(request, reads, head, session);
+    try accept(reads, head, session);
     return .{ .accepted = applied };
 }
 
@@ -988,7 +1036,7 @@ fn insertCreated(a: anytype, request: *const Request, reads: *ConfigurationReads
     };
     const creator = if (reads.creator) |*reference| reference else null;
     insertSession(a, head, &reads.next, &reads.workspace_digest, created_seq, if (reads.attach_parent) creator else null, creator);
-    try accept(request, reads, head, &reads.reference);
+    try accept(reads, head, &reads.reference);
     if (try skills_domain.Appending.initial(head, request.initial_skills)) |appending| {
         reads.step.applying.catalog = appending;
         reads.step.applying.catalog.queue(a);
@@ -997,14 +1045,14 @@ fn insertCreated(a: anytype, request: *const Request, reads: *ConfigurationReads
     return .{ .accepted = &reads.applied };
 }
 
-fn accept(request: *const Request, reads: *ConfigurationReads, head: rsql.SessionHead, target: []const u8) !void {
+fn accept(reads: *ConfigurationReads, head: rsql.SessionHead, target: []const u8) !void {
     const applied = &reads.applied;
     const created = !reads.found.get();
     applied.session = .{};
     try applied.session.set(target);
     applied.head = head;
     applied.revision = reads.next.revision;
-    applied.instructions_updated = created or request.configuration.instructions.state == .value;
+    applied.instructions_updated = created or reads.configuration.instructions.state == .value;
     applied.changes = if (reads.validated.before) |*saved| saved.changed(&reads.next) else .empty;
 }
 

@@ -43,6 +43,7 @@ const cores = .{
     .{ "command_spec.zig", @import("command_spec.zig") },
     .{ "command_value.zig", @import("command_value.zig") },
     .{ "configuration_admission.zig", @import("configuration_admission.zig") },
+    .{ "configuration_defaults.zig", @import("configuration_defaults.zig") },
     .{ "configure_input.zig", @import("configure_input.zig") },
     .{ "content_string.zig", @import("content_string.zig") },
     .{ "conversation_read.zig", @import("conversation_read.zig") },

@@ -258,18 +258,18 @@ fn parseAgentSpecFor(arena: std.mem.Allocator, spec: std.json.ObjectMap, configu
     }
     if (try protocol.parseAgentSpec(wire_request.Custody, arena, spec, configuration)) |reason|
         return .{ .rejected = reason };
-    if (protocol.missingCreatingSetting(configuration, inherits_parent)) |name|
-        return .{ .rejected = try std.fmt.allocPrint(arena, "spec.{s} is required", .{name}) };
     if (configuration.provider.state == .value and std.meta.stringToEnum(protocol.Provider, configuration.provider.value.slice()) == null)
         return refused("spec.provider must be a provider name");
     if (configuration.workspace.state == .value and configuration.workspace.value.len == 0)
         return refused("spec.workspace must be a Workspace path");
-    if (configuration.model.value.len == 0) return refused("spec.model must be a model name");
+    if (configuration.model.state == .value and configuration.model.value.len == 0) return refused("spec.model must be a model name");
     if (configuration.reasoning_effort.state == .value and std.meta.stringToEnum(protocol.ReasoningEffort, configuration.reasoning_effort.value.slice()) == null)
         return refused("spec.effort must be null, none, low, medium, high, xhigh or max");
-    const tokens = std.fmt.parseInt(u64, configuration.compaction_trigger.value.slice(), 10) catch return refused("spec.compactAt must be a positive number of tokens");
-    if (tokens == 0) return refused("spec.compactAt must be a positive number of tokens");
-    if (!configuration.permission_mode.value.eql("ask") and !configuration.permission_mode.value.eql("bypass"))
+    if (configuration.compaction_trigger.state == .value) {
+        const tokens = std.fmt.parseInt(u64, configuration.compaction_trigger.value.slice(), 10) catch return refused("spec.compactAt must be a positive number of tokens");
+        if (tokens == 0) return refused("spec.compactAt must be a positive number of tokens");
+    }
+    if (configuration.permission_mode.state == .value and !configuration.permission_mode.value.eql("ask") and !configuration.permission_mode.value.eql("bypass"))
         return refused("spec.permissionMode must be ask or bypass");
     if (configuration.label.state == .value and !protocol.validLabel(configuration.label.value.slice()))
         return refused("spec.label must be one nonblank line of UTF-8");
@@ -444,31 +444,111 @@ test "a start_agent task at its bound is accepted however it is escaped, and one
     }
 }
 
-test "core_tools start_agent requires every required spec field and accepts null effort" {
-    const fields = [_][]const u8{ "model", "effort", "compactAt", "tools", "permissionMode" };
-    const values = [_][]const u8{ "\"custom\"", "null", "18446744073709551615", "[]", "\"ask\"" };
-    for (0..fields.len + 1) |omitted| {
-        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-        defer arena.deinit();
-        const allocator = arena.allocator();
-        var json: std.Io.Writer.Allocating = .init(allocator);
-        try json.writer.writeAll("{\"task\":\"read\",\"attached\":true,\"spec\":{");
-        var separator: []const u8 = "";
-        for (fields, values, 0..) |field, value, index| {
-            if (index == omitted) continue;
-            try json.writer.print("{s}\"{s}\":{s}", .{ separator, field, value });
-            separator = ",";
+test "core_tools sparse specs preserve every omitted explicit and defaulted Host setting" {
+    const fields = .{
+        .{ "effort", "reasoning_effort", "\"low\"", 3 },
+        .{ "compactAt", "compaction_trigger", "18446744073709551615", 3 },
+        .{ "tools", "tools", "[]", 2 },
+        .{ "loadedTools", "loaded_tools", "[]", 2 },
+        .{ "permissionMode", "permission_mode", "\"ask\"", 2 },
+    };
+    for (0..144) |combination| {
+        var memory: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer memory.deinit();
+        const arena = memory.allocator();
+        var json: std.Io.Writer.Allocating = .init(arena);
+        try json.writer.writeByte('{');
+        const model_present = combination & 1 != 0;
+        if (model_present) try json.writer.writeAll("\"model\":\"custom\"");
+        var separator: []const u8 = if (model_present) "," else "";
+        var selector = combination / 2;
+        inline for (fields) |field| {
+            const state = selector % field[3];
+            selector /= field[3];
+            if (state != 0) {
+                try json.writer.print("{s}\"{s}\":{s}", .{ separator, field[0], if (state == 2) "null" else field[2] });
+                separator = ",";
+            }
         }
-        try json.writer.writeAll("}}");
-        const start = try allocator.create(StartAgent);
-        const result = try checkStartAgent(allocator, json.written(), start);
-        if (omitted < fields.len) {
-            try std.testing.expect(result == .rejected);
-            try std.testing.expect(std.mem.indexOf(u8, result.rejected, fields[omitted]) != null);
-        } else {
+        try json.writer.writeByte('}');
+        const spec = (try std.json.parseFromSliceLeaky(std.json.Value, arena, json.written(), .{})).object;
+        const configuration = try arena.create(wire_request.Configuration);
+        try std.testing.expect(try parseAgentSpec(arena, spec, configuration) == .accepted);
+        const start = try arena.create(StartAgent);
+        const arguments = try std.fmt.allocPrint(arena, "{{\"task\":\"read\",\"attached\":true,\"spec\":{s}}}", .{json.written()});
+        const presets = [_]Preset{.{ .name = "review", .spec = spec }};
+        for ([_]bool{ false, true }) |preset| {
+            const result = if (preset)
+                try checkStartAgentWithPresets(arena, "{\"task\":\"read\",\"attached\":true,\"preset\":\"review\"}", &presets, start)
+            else
+                try checkStartAgent(arena, arguments, start);
             try std.testing.expect(result == .accepted);
-            try std.testing.expectEqual(.explicit_null, start.configuration.reasoning_effort.state);
-            try std.testing.expectEqualStrings("18446744073709551615", start.configuration.compaction_trigger.value.slice());
+            selector = combination / 2;
+            const model_state: protocol.FieldState = if (model_present) .value else .omitted;
+            try std.testing.expectEqual(model_state, configuration.model.state);
+            try std.testing.expectEqual(model_state, start.configuration.model.state);
+            inline for (fields) |field| {
+                const state = selector % field[3];
+                selector /= field[3];
+                const expected: protocol.FieldState = switch (state) {
+                    0 => .omitted,
+                    1 => .value,
+                    2 => .explicit_null,
+                    else => unreachable,
+                };
+                const direct = &@field(configuration, field[1]);
+                const agent = &@field(start.configuration, field[1]);
+                try std.testing.expectEqual(expected, direct.state);
+                try std.testing.expectEqual(expected, agent.state);
+                if (expected == .value) {
+                    if (comptime std.mem.eql(u8, field[1], "tools") or std.mem.eql(u8, field[1], "loaded_tools")) {
+                        try std.testing.expectEqual(@as(u8, 0), direct.count);
+                        try std.testing.expectEqual(@as(u8, 0), agent.count);
+                    } else {
+                        const value = if (comptime std.mem.eql(u8, field[1], "reasoning_effort")) "low" else if (comptime std.mem.eql(u8, field[1], "permission_mode")) "ask" else field[2];
+                        try std.testing.expectEqualStrings(value, direct.value.slice());
+                        try std.testing.expectEqualStrings(value, agent.value.slice());
+                    }
+                }
+            }
+        }
+    }
+}
+
+test "core_tools sparse specs leave Workspace completeness to Host and preserve inherited bindings" {
+    var memory: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer memory.deinit();
+    const arena = memory.allocator();
+    const configuration = try arena.create(wire_request.Configuration);
+    const start = try arena.create(StartAgent);
+    const cases = [_]struct { spec: []const u8, direct: ?[]const u8 = null, agent: ?[]const u8 = null }{
+        .{ .spec = "{}" },
+        .{ .spec = "{\"model\":null}", .direct = "spec.model", .agent = "spec.model" },
+        .{ .spec = "{\"model\":\"\"}", .direct = "spec.model", .agent = "spec.model" },
+        .{ .spec = "{\"model\":\"custom\"}" },
+        .{ .spec = "{\"model\":\"custom\",\"tools\":[\"bash\"]}" },
+        .{ .spec = "{\"tools\":[\"bash\"]}" },
+        .{ .spec = "{\"model\":\"custom\",\"tools\":[\"bash\"],\"workspace\":\"/\"}", .agent = "spec.workspace" },
+        .{ .spec = "{\"model\":\"custom\",\"workspace\":\"\"}", .direct = "spec.workspace", .agent = "spec.workspace" },
+        .{ .spec = "{\"model\":\"custom\",\"provider\":\"openai\"}", .agent = "spec.provider" },
+        .{ .spec = "{\"model\":\"custom\",\"parent\":\"k7m2qx\"}", .direct = "spec.parent", .agent = "spec.parent" },
+        .{ .spec = "{\"model\":\"custom\",\"tools\":null}", .direct = "spec.tools", .agent = "spec.tools" },
+        .{ .spec = "{\"model\":\"custom\",\"loadedTools\":null}", .direct = "spec.loadedTools", .agent = "spec.loadedTools" },
+        .{ .spec = "{\"model\":\"custom\",\"permissionMode\":null}", .direct = "spec.permissionMode", .agent = "spec.permissionMode" },
+        .{ .spec = "{\"model\":\"custom\",\"compactAt\":0}", .direct = "spec.compactAt", .agent = "spec.compactAt" },
+        .{ .spec = "{\"model\":\"custom\",\"permissionMode\":\"never\"}", .direct = "spec.permissionMode", .agent = "spec.permissionMode" },
+        .{ .spec = "{\"model\":\"custom\",\"effort\":\"ultra\"}", .direct = "spec.effort", .agent = "spec.effort" },
+    };
+    for (cases) |case| {
+        const spec = (try std.json.parseFromSliceLeaky(std.json.Value, arena, case.spec, .{})).object;
+        const direct = try parseAgentSpec(arena, spec, configuration);
+        const arguments = try std.fmt.allocPrint(arena, "{{\"task\":\"read\",\"attached\":true,\"spec\":{s}}}", .{case.spec});
+        const agent = try checkStartAgent(arena, arguments, start);
+        for ([_]StartAgentCheck{ direct, agent }, [_]?[]const u8{ case.direct, case.agent }) |result, field| {
+            if (field) |name| {
+                try std.testing.expect(result == .rejected);
+                try std.testing.expect(std.mem.startsWith(u8, result.rejected, name));
+            } else try std.testing.expect(result == .accepted);
         }
     }
 }

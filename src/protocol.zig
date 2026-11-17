@@ -1039,7 +1039,6 @@ fn ParserOf(comptime Custody: type) type {
                 .reload_skills => out.reload_skills = try self.readBoolean(),
             };
             try require(Field, seen, &.{ .key, .session, .configuration });
-            if (out.session.len == 0 and out.preset == null) try validateCreatingConfiguration(&out.configuration);
         }
 
         fn specField(key: *const Bounded(32), seen: *std.enums.EnumSet(std.meta.FieldEnum(Configuration))) !std.meta.FieldEnum(Configuration) {
@@ -1111,10 +1110,6 @@ fn ParserOf(comptime Custody: type) type {
             };
         }
 
-        fn validateCreatingConfiguration(configuration: *const Configuration) !void {
-            if (missingCreatingSetting(configuration, configuration.parent.state == .value) != null) return error.MissingField;
-        }
-
         fn parseMessage(self: *Parser, out: *MessageCommand, members: *Members) !void {
             const Field = enum { key, session, sender, sender_handle, configuration, text, require_model };
             var seen: std.enums.EnumSet(Field) = .empty;
@@ -1139,7 +1134,6 @@ fn ParserOf(comptime Custody: type) type {
             };
             try require(Field, seen, &.{ .key, .session, .sender, .sender_handle, .text });
             if (out.session.len == 0 and out.configuration == null) return error.MissingField;
-            if (out.session.len == 0) try validateCreatingConfiguration(&out.configuration.?);
             if (out.session.len != 0 and out.configuration != null) return error.UnexpectedField;
             if (out.text.state != .value) return error.InvalidMessage;
             if (seen.contains(.require_model) and out.configuration == null) return error.InvalidMessage;
@@ -1647,25 +1641,6 @@ fn ParserOf(comptime Custody: type) type {
             }
         }
     };
-}
-
-pub fn missingCreatingSetting(configuration: anytype, inherits_parent: bool) ?[]const u8 {
-    inline for (session_settings.entries) |entry| {
-        const name = entry.field;
-        const state = @field(configuration, name).state;
-        switch (entry.create) {
-            .optional => {},
-            .must_value => if (state != .value) return entry.spec,
-            .must_state => if (state == .omitted) return entry.spec,
-        }
-    }
-    if (!inherits_parent) {
-        var tools = configuration.tools.iterator();
-        while (tools.next()) |tool| {
-            if (std.mem.eql(u8, tool, "bash") and configuration.workspace.state != .value) return "workspace";
-        }
-    }
-    return null;
 }
 
 pub fn parseAgentSpec(comptime Custody: type, arena: std.mem.Allocator, spec: std.json.ObjectMap, configuration: *Requests(Custody).Configuration) error{OutOfMemory}!?[]const u8 {
@@ -2848,39 +2823,43 @@ test "SessionRow borrowed fields preserve offered tool names" {
     try std.testing.expect(out.written().len <= SessionRow.max_json_bytes);
 }
 
-test "protocol creation requires five explicit settings independent of field order" {
-    const fields = [_][]const u8{
-        "\"model\":\"model\"",
-        "\"compactAt\":1000",
-        "\"tools\":[]",
-        "\"permissionMode\":\"default\"",
-        "\"effort\":null",
+test "protocol sparse creation preserves all omitted settings independent of field order" {
+    const fields = .{
+        .{ "\"model\":\"model\"", "model" },
+        .{ "\"compactAt\":null", "compaction_trigger" },
+        .{ "\"tools\":[]", "tools" },
+        .{ "\"loadedTools\":[]", "loaded_tools" },
+        .{ "\"permissionMode\":\"ask\"", "permission_mode" },
+        .{ "\"effort\":null", "reasoning_effort" },
     };
+    const members = [_][]const u8{ fields[0][0], fields[1][0], fields[2][0], fields[3][0], fields[4][0], fields[5][0] };
     inline for (.{ "configure", "message" }) |kind| {
-        for (0..fields.len + 1) |skip| {
-            var buffer: [2048]u8 = undefined;
-            var writer: std.Io.Writer = .fixed(&buffer);
-            try writer.writeAll("{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"" ++ kind ++ "\",\"store\":\"s\",\"key\":\"k\",\"configuration\":{");
-            var comma = false;
-            for (fields, 0..) |field, index| {
-                if (index == skip) continue;
-                if (comma) try writer.writeByte(',');
-                try writer.writeAll(field);
-                comma = true;
-            }
-            try writer.writeAll("},\"session\":\"\"");
-            if (comptime std.mem.eql(u8, kind, "message"))
-                try writer.writeAll(",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"omitted\"}");
-            try writer.writeByte('}');
-            const json = writer.buffered();
-            var source: MetadataSource = .{ .input = json };
-            var parser = Tested.Parser{ .source = &source };
-            if (skip < fields.len) {
-                try std.testing.expectError(error.MissingField, parseForTest(&parser));
-            } else if (comptime std.mem.eql(u8, kind, "message")) {
-                try std.testing.expectError(error.InvalidMessage, parseForTest(&parser));
-            } else {
-                _ = try parseForTest(&parser);
+        for (0..64) |present| {
+            for ([_]bool{ false, true }) |reverse| {
+                var buffer: [2048]u8 = undefined;
+                var writer: std.Io.Writer = .fixed(&buffer);
+                try writer.writeAll("{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"" ++ kind ++ "\",\"store\":\"s\",\"key\":\"k\",\"configuration\":{");
+                var comma = false;
+                for (0..members.len) |index| {
+                    const field = if (reverse) members.len - index - 1 else index;
+                    if (present & (@as(usize, 1) << @intCast(field)) == 0) continue;
+                    if (comma) try writer.writeByte(',');
+                    try writer.writeAll(members[field]);
+                    comma = true;
+                }
+                try writer.writeAll("},\"session\":\"\"");
+                if (comptime std.mem.eql(u8, kind, "message"))
+                    try writer.writeAll(",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"\"}");
+                try writer.writeByte('}');
+                var source: MetadataSource = .{ .input = writer.buffered() };
+                const captured: Tested.ContentField = .{ .state = .value, .length = 3, .digest = contentDigest("abc") };
+                var parser: Tested.Parser = .{ .source = &source, .captured = &.{captured} };
+                const request = try parseForTest(&parser);
+                const configuration = if (comptime std.mem.eql(u8, kind, "message")) &request.message.configuration.? else &request.configure.configuration;
+                inline for (fields, 0..) |field, index| {
+                    const expected: FieldState = if (present & (@as(usize, 1) << index) == 0) .omitted else if (index == 1 or index == 5) .explicit_null else .value;
+                    try std.testing.expectEqual(expected, @field(configuration, field[1]).state);
+                }
             }
         }
     }
@@ -3178,6 +3157,29 @@ test "Session settings preserve omitted and nullable wire states for every field
     }
 }
 
+test "creation parsers leave Workspace completeness to Host admission" {
+    inline for (.{
+        .{ "configure", "" },
+        .{ "configure", ",\"preset\":\"review\"" },
+        .{ "message", ",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"\"}" },
+    }) |surface| {
+        inline for (.{ "", "\"tools\":[]", "\"tools\":[\"bash\"]" }) |members| {
+            const json = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"" ++ surface[0] ++ "\",\"store\":\"s\",\"key\":\"k\",\"session\":\"\",\"require_model\":true,\"configuration\":{" ++ members ++ "}" ++ surface[1] ++ "}";
+            var source: MetadataSource = .{ .input = json };
+            const captured: Tested.ContentField = .{ .state = .value, .length = 3, .digest = contentDigest("abc") };
+            var parser: Tested.Parser = .{ .source = &source, .captured = &.{captured} };
+            const request = try parseForTest(&parser);
+            const configuration = if (comptime std.mem.eql(u8, surface[0], "message")) &request.message.configuration.? else &request.configure.configuration;
+            try std.testing.expectEqual(FieldState.omitted, configuration.workspace.state);
+            try std.testing.expectEqual(FieldState.omitted, configuration.model.state);
+            if (comptime std.mem.eql(u8, surface[0], "message")) {
+                try std.testing.expect(request.message.require_model);
+            } else try std.testing.expect(request.configure.require_model);
+            try std.testing.expectEqual(if (members.len == 0) FieldState.omitted else FieldState.value, configuration.tools.state);
+        }
+    }
+}
+
 test "parent spec relation parses creation without a workspace and rejects null or duplicate fields" {
     const head = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"configure\",\"store\":\"s\",\"key\":\"k\",\"session\":\"\",\"configuration\":{";
     const required = "\"model\":\"model-a\",\"effort\":null,\"compactAt\":1000,\"tools\":[\"bash\"],\"permissionMode\":\"ask\"";
@@ -3190,7 +3192,6 @@ test "parent spec relation parses creation without a workspace and rejects null 
         try std.testing.expectEqual(FieldState.omitted, request.configure.configuration.provider.state);
     }
     inline for (.{
-        .{ required, error.MissingField },
         .{ required ++ ",\"parent\":null", error.InvalidFieldState },
         .{ required ++ ",\"parent\":\"k7m2qx\",\"parent\":\"k7m2qx\"", error.UnexpectedField },
     }) |case| {
