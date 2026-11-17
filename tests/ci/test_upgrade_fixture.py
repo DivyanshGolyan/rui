@@ -45,12 +45,12 @@ class UpgradeEmptyChatTest(unittest.TestCase):
         self.wait.start()
         self.addCleanup(self.wait.stop)
 
-    def observe(self, footer, *, notice=None, report=None, listing=None, model="gpt-6-luna"):
+    def observe(self, footer, *, report=None, listing=None, model="gpt-6-luna"):
         self.case.json.side_effect = [copy.deepcopy(self.report if report is None else report),
                                       copy.deepcopy(self.listing if listing is None else listing)]
         frame = f"│ › conversation β draft\n│ {model} · low    {footer}"
         self.screen.observe = lambda: frame
-        return self.screen.empty_chat(self.case, self.session, expected_notice=notice)
+        return self.screen.empty_chat(self.case, self.session)
 
     def test_case_disk_lifetime_follows_successful_process_retirement(self):
         for body_fails, cleanup_fails in ((False, False), (True, False), (False, True)):
@@ -140,35 +140,48 @@ class UpgradeEmptyChatTest(unittest.TestCase):
                     else:
                         self.assertEqual(build, owner.root / "retained")
 
-    def test_initial_info_action_and_explicit_relaunch_notice(self):
+    def test_chat_footer_rejects_upgrade_notices_before_and_after_relaunch(self):
         self.assertIn("alt+i info", self.observe("alt+i info"))
-        with self.assertRaises(NotReady):
-            self.observe(self.notice)
-        self.assertIn(self.notice, self.observe(self.notice, notice=self.notice))
-        for footer in ("alt+i info", "Upgraded to another version · Host restarted", ""):
+        for footer in (self.notice, "Upgraded to another version · Host restarted", "",
+                       "alt+i info · upgraded to 0.76.0", "alt+i info  Upgraded to 0.76.0"):
             with self.subTest(footer=footer), self.assertRaises(NotReady):
-                self.observe(footer, notice=self.notice)
-        for notice in (None, self.notice):
-            with self.subTest(notice=notice), self.assertRaises(NotReady):
-                self.observe(notice or "alt+i info", notice=notice, model="wrong-model")
+                self.observe(footer)
+        with self.assertRaises(NotReady):
+            self.observe("alt+i info", model="wrong-model")
 
-    def test_public_identity_and_zero_messages_remain_required_in_both_paths(self):
-        for notice in (None, self.notice):
-            footer = notice or "alt+i info"
-            self.case.json.reset_mock()
-            self.observe(footer, notice=notice)
-            self.assertEqual(self.case.json.call_args_list, [
-                call("session", "inspect", "--store", self.case.store, "--session", self.session),
-                call("session", "list", "--store", self.case.store, "--all")])
-            for field, value in (("session", {"reference": "wrong1", "model": "gpt-6-luna"}),
-                                 ("selected_message", "message1"), ("recent_messages", [{"message": "message1"}])):
-                report = {**self.report, field: value}
-                with self.subTest(notice=notice, field=field), self.assertRaises(AssertionError):
-                    self.observe(footer, notice=notice, report=report)
-            for sessions in ([], [{"reference": "wrong1"}],
-                             [{"reference": self.session}, {"reference": "wrong1"}]):
-                with self.subTest(notice=notice, sessions=sessions), self.assertRaises(AssertionError):
-                    self.observe(footer, notice=notice, listing={"sessions": sessions})
+    def test_quiet_version_is_below_settings_not_a_version_elsewhere(self):
+        version = "0.76.0"
+        valid = [f"Settings\n  38 MB    {version} ", f"Settings │ chat\n {version} │ model"]
+        invalid = [f"Settings {version}\n footer", f"Settings\nUpdate to {version}",
+                   f"Settings\nrui 38 MB {version}", f"Settings\n38 MB tools 12 MB {version}",
+                   f"Settings\n{version}\nUpgraded to {version}",
+                   f"Settings\n{version}\n · upgraded to {version}",
+                   f"Settings\n0.76.1\n{version}", f"Settings\n38 MB\n{version}"]
+        for frame in valid:
+            self.screen.observe = lambda: frame
+            with self.subTest(frame=frame):
+                self.assertEqual(frame, self.screen.quiet_version(version))
+        for frame in invalid:
+            self.screen.observe = lambda: frame
+            with self.subTest(frame=frame), self.assertRaises(NotReady):
+                self.screen.quiet_version(version)
+
+    def test_public_identity_and_zero_messages_remain_required(self):
+        footer = "alt+i info"
+        self.case.json.reset_mock()
+        self.observe(footer)
+        self.assertEqual(self.case.json.call_args_list, [
+            call("session", "inspect", "--store", self.case.store, "--session", self.session),
+            call("session", "list", "--store", self.case.store, "--all")])
+        for field, value in (("session", {"reference": "wrong1", "model": "gpt-6-luna"}),
+                             ("selected_message", "message1"), ("recent_messages", [{"message": "message1"}])):
+            report = {**self.report, field: value}
+            with self.subTest(field=field), self.assertRaises(AssertionError):
+                self.observe(footer, report=report)
+        for sessions in ([], [{"reference": "wrong1"}],
+                         [{"reference": self.session}, {"reference": "wrong1"}]):
+            with self.subTest(sessions=sessions), self.assertRaises(AssertionError):
+                self.observe(footer, listing={"sessions": sessions})
 
 
     def hidden(self, frame, *, report=None, listing=None):
@@ -191,7 +204,7 @@ class UpgradeEmptyChatTest(unittest.TestCase):
                 self.hidden(wrong)
 
     def test_overview_waits_past_sidebar_controls_for_the_full_list(self):
-        sidebar = "  + New Session                Archived │\n  Settings │ gpt-6-luna · low\n"
+        sidebar = " + New Session                Archived │\n   Settings │ gpt-6-luna · low\n"
         frames = [sidebar + "│ › Type a task", sidebar + "│ › unsent draft",
                   "+ New Session                Archived\nSettings"]
         self.screen.observe = Mock(side_effect=frames)

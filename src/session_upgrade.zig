@@ -13,7 +13,7 @@ pub const Phase = enum {
 };
 
 pub const recovery = "! Host requests paused after Upgrade; draft and original retained. Select Version in app settings or use the selected Rui in a new terminal.";
-pub const rereading = "Reading this Session again after the Upgrade…";
+pub const rereading = "Reading this Session…";
 
 pub fn refusal(phase: Phase) []const u8 {
     return switch (phase) {
@@ -29,6 +29,7 @@ pub fn relaunch(outcome: Outcome, has_guidance: bool) bool {
 }
 
 pub const Upgrade = struct {
+    available: ?upgrade_status.Version = null,
     run: ?upgrade_status.Run = null,
     after: After = .open,
 

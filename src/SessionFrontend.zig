@@ -4713,7 +4713,8 @@ test "app settings starts the overview's run and keeps the original submission; 
         try std.testing.expectEqualStrings("", self.input.composition().bytes);
         try std.testing.expect(self.input.queuedCommand() == null);
         try std.testing.expectEqual(session_upgrade.Phase.quiescing, self.upgradePhase());
-        try std.testing.expectEqualStrings("Checking for updates…", self.lender.line(self.lender.context, .idle).text.?);
+        const said = self.lender.line(self.lender.context, .idle);
+        try std.testing.expect(said.text == null and said.notice == null);
         _ = try overview_view.step(&overview.state, .start_upgrade);
         try std.testing.expect(overview.state.upgrade.run.? == .checking);
         try sendKeys(self, "keep\x1b");
@@ -4866,7 +4867,6 @@ const ArchiveOverview = struct {
     stops: usize = 0,
     host_inputs: usize = 0,
     cancels: usize = 0,
-    said: [256]u8 = undefined,
     archived: ?overview_view.Reference = null,
     requested: bool = true,
 
@@ -4905,7 +4905,7 @@ const ArchiveOverview = struct {
 
     fn line(raw: *anyopaque, work: protocol.session_work.Kind) Lender.Said {
         const self: *ArchiveOverview = @ptrCast(@alignCast(raw));
-        const said = overview_view.conversation(&self.state, "k7m2qx".*, work, .{}, self.said[0..160]);
+        const said = overview_view.conversation(&self.state, "k7m2qx".*, work);
         return .{ .text = said.text, .notice = said.notice, .stoppable = said.stoppable };
     }
 

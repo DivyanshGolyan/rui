@@ -35,7 +35,7 @@ def rows_by_mark():
     with world("drawing-marks", responses, active_capacity=2) as w, released(*holds.values()):
         with w.overview(columns=99, rows=30) as screen:
             frame = screen.contains("+ New Session")
-            assert frame.split("\n")[0] == "  + New Session", frame
+            assert frame.split("\n")[0] == " + New Session", frame
             asking = w.session("--label", "Asking", "--tools", "bash", "--permission-mode", "ask")
             failing = w.session("--label", "Failing")
             send(w, asking, "ask")
@@ -48,18 +48,18 @@ def rows_by_mark():
             frame = screen.contains("◌ q1")
             lines = frame.split("\n")
             queued = next(i for i, line in enumerate(lines) if "◌ q1" in line)
-            assert re.fullmatch(r"◌ q1 +\d+s", lines[queued].strip()), frame
+            assert re.fullmatch(r"◌ q1 +now", lines[queued].strip()), frame
             assert "Queued" not in frame and "workspace" not in frame, frame
             assert "slots " not in frame, frame
             for line in lines:
-                if not line.startswith("  Settings"):
+                if not line.startswith("   Settings"):
                     assert not re.search(r"(?:rui|tools) \d+(?:\.\d+)? (?:MB|GB)\b", line), frame
             assert screen.style("? Asking").fg != screen.style("× Failing").fg, frame
             holds["w1"].set()
-            screen.wait(lambda f: "✓ w1" in f and "◌ q1" not in f, "queue admission")
+            screen.wait(lambda f: "   w1" in f and "◌ q1" not in f, "queue admission")
             for held in holds.values():
                 held.set()
-            screen.contains("✓ q1")
+            screen.contains("   q1")
     print("overview drawing: one-line state rows replace counts and slots", flush=True)
 
 
@@ -68,8 +68,10 @@ def pinned_settings():
         frame = screen.contains("Settings")
         rows = frame.split("\n")
         settings = next(i for i, line in enumerate(rows) if "Settings" in line)
-        assert settings == len(rows) - 2, frame
-        assert re.fullmatch(r"─+", rows[settings - 1]), frame
+        assert settings == len(rows) - 3, frame
+        assert set(rows[settings - 1].strip()) <= {"─", "-"} and rows[settings - 1].strip(), frame
+        assert re.search(r"0\.\d+\.\d+|unreleased", rows[settings + 1]), frame
+        assert "rui " not in rows[settings + 1] and "tools " not in rows[settings + 1], frame
         assert "enter open" not in frame, frame
         assert "Type a task" not in frame and "gpt-6-luna" not in frame, frame
         before = requests(w)
@@ -81,7 +83,7 @@ def pinned_settings():
         assert "Type a task" not in frame and "/nope" not in frame and "pasted task" not in frame, frame
         assert "Unknown command" not in frame and requests(w) == before, frame
         assert json.loads(w.run("session", "list", "--store", w.store, "--all"))["sessions"] == [], frame
-    print("overview drawing: Settings ends the list above one Footer; text and paste create no draft or request", flush=True)
+    print("overview drawing: Settings sits above memory/version and one Footer; text and paste create no draft or request", flush=True)
 
 
 def requests(w):
@@ -93,7 +95,7 @@ def unconfirmed_status():
         session = w.session("--label", "Talk")
         send(w, session, "first")
         with w.overview() as screen:
-            frame = screen.contains("✓ Talk")
+            frame = screen.contains("   Talk")
             assert "Not confirmed" not in frame, frame
             screen.keys(b"\r")
             screen.wait(lambda f: "first done" in f and "Talk ·" in f, "the conversation")
