@@ -144,7 +144,8 @@ pub fn stoppedSql(comptime session: []const u8, comptime selected: []const u8) [
 }
 
 pub fn messageDeclinesApprovalSql(comptime action: []const u8) []const u8 {
-    return "EXISTS(SELECT 1 FROM message_admission m WHERE m.session_ref=" ++ action ++ ".session_ref AND m.source_action_id IS NULL AND m.admission_position>" ++ action ++ ".approval_position)";
+    // Seek from the approval position; an index on source_action_id scans all NULLs.
+    return "EXISTS(SELECT 1 FROM message_admission m @index(message_admission_position) WHERE m.session_ref=" ++ action ++ ".session_ref AND m.source_action_id IS NULL AND m.admission_position>" ++ action ++ ".approval_position)";
 }
 
 /// A permission decision can be admitted for this Action. Automatic denials
