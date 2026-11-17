@@ -98,22 +98,23 @@ test "session group names and identities validate their boundaries" {
 test "session group action construction owns every action and field-presence combination" {
     const name = try Name.from("Work");
     const Case = struct { fields: u3, action: Action };
-    const expected: std.EnumArray(std.meta.Tag(Action), Case) = .init(.{
-        .assign = .{ .fields = 1, .action = .{ .assign = name } },
-        .rename_current = .{ .fields = 1, .action = .{ .rename_current = name } },
-        .leave = .{ .fields = 0, .action = .leave },
-        .automatic = .{ .fields = 0, .action = .automatic },
-        .rename = .{ .fields = 3, .action = .{ .rename = .{ .group = 7, .name = name } } },
-        .collapse = .{ .fields = 6, .action = .{ .collapse = .{ .group = 7, .collapsed = false } } },
-    });
-    for (std.enums.values(std.meta.Tag(Action))) |kind| {
+    const expected = .{
+        .assign = Case{ .fields = 1, .action = .{ .assign = name } },
+        .rename_current = Case{ .fields = 1, .action = .{ .rename_current = name } },
+        .leave = Case{ .fields = 0, .action = .leave },
+        .automatic = Case{ .fields = 0, .action = .automatic },
+        .rename = Case{ .fields = 3, .action = .{ .rename = .{ .group = 7, .name = name } } },
+        .collapse = Case{ .fields = 6, .action = .{ .collapse = .{ .group = 7, .collapsed = false } } },
+    };
+    inline for (comptime std.enums.values(std.meta.Tag(Action))) |kind| {
         for (0..8) |mask| for ([_]bool{ false, true }) |collapsed| {
             const fields: Action.Fields = .{
                 .name = if (mask & 1 != 0) name else null,
                 .group = if (mask & 2 != 0) 7 else null,
                 .collapsed = if (mask & 4 != 0) collapsed else null,
             };
-            const case = expected.get(kind);
+            const field_name = @tagName(kind);
+            const case = @field(expected, field_name);
             if (mask != case.fields) {
                 try std.testing.expectError(error.InvalidGroupOptions, Action.fromFields(kind, fields));
             } else {
