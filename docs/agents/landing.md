@@ -11,13 +11,14 @@ The description lists every behavior change in the diff, small ones included, so
 PRs changing `src/` follow [Shape before code](../../CODING_STANDARDS.md#shape-before-code); the plan checks the description, and review checks the shape.
 Every PR commit states its actual test commands and results.
 Open every PR with `python3 tests/ci/open_pr.py open --title TITLE --body-file FILE`, which reports overlapping work and opens it ready for review.
-Selected CI and the opener's `@codex review` request start together on the published candidate.
+Selected CI and automatic Codex review start together on a ready candidate.
+The opener requests `@codex review` only for drafts; Codex also reviews automatically when a draft is marked ready and on each push to a ready PR.
 Use `python3 tests/ci/open_pr.py ready` for an older draft once its published head matches the clean committed checkout.
 New PRs need no draft conversion, so the same unchanged candidate does not run heavy checks twice merely to become ready.
 Codex is clean when its latest `codex-review-state:v1` summary names the reviewed head and reports no unresolved findings.
 A "no major issues" receipt alone is not clean, and an earlier review thread stays open until its author resolves it.
 After a fix push, resolve each earlier thread that the fix answered.
-Keep clean Codex evidence through unchanged semantics as permitted below; request `@codex review` when a production or operational change invalidates it.
+Keep clean Codex evidence through unchanged semantics as permitted below; a production or operational change invalidates it and receives an automatic review on push to a ready PR.
 A fix whose diff since Codex's clean review changes only test files or blocks (`tests/**/test_*.py`, integration fixtures and their data, `*_test.zig`/test-only Zig roots, or `test "..."` blocks in source) merges once `admission` is green, without another Codex review.
 Documentation-only edits that preserve the reviewed contract also reuse the clean review, with the semantic comparison recorded in the PR.
 Two more changes merge on green `admission` without another Codex review: a commit that only applies the Store format renumber `tests/ci/schema_number.py` computes, and a pure revert of the one merged PR that broke `main`.
