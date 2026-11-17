@@ -8,6 +8,8 @@ labelled issue but changes only CI tooling gets CI. The labeler only adds labels
 import argparse
 import os
 import re
+import subprocess
+import sys
 
 from conflict_alert import github, pages
 from pr_shape import visible_lines
@@ -15,6 +17,11 @@ from pr_shape import visible_lines
 WORKSTREAMS = ("TUI", "Host parity", "background tasks", "images", "Host consolidation", "Store", "CI", "drift")
 CI_TOOLING = (".github/", "tests/ci/")
 MAX_DEPTH = 10
+
+
+def unavailable(error):
+    """A missing, deleted or transferred issue; Goal validation checks only the text."""
+    return isinstance(error, subprocess.CalledProcessError) and re.search(r"HTTP (404|410)\b", error.stderr or "")
 
 
 def goal_issues(body, repo):
@@ -32,7 +39,12 @@ def workstream(api, repo, number):
     parent = re.compile(r"/repos/" + re.escape(repo) + r"/issues/([0-9]+)$")
     wanted = {name.casefold(): name for name in WORKSTREAMS}
     for _ in range(MAX_DEPTH):
-        issue = api("GET", f"repos/{repo}/issues/{number}")
+        try:
+            issue = api("GET", f"repos/{repo}/issues/{number}")
+        except subprocess.CalledProcessError as error:
+            if unavailable(error):
+                return set()
+            raise
         found = {wanted[label["name"].casefold()] for label in issue["labels"] if label["name"].casefold() in wanted}
         if found:
             return found
@@ -74,9 +86,17 @@ def main():
         parser.error("provide --repo or GITHUB_REPOSITORY")
     prs = (pages(github, f"repos/{args.repo}/pulls?state=open") if args.all_open
            else [github("GET", f"repos/{args.repo}/pulls/{args.pr}")])
+    failed = []
     for pr in prs:
-        added = label(github, args.repo, pr)
+        try:
+            added = label(github, args.repo, pr)
+        except subprocess.CalledProcessError as error:
+            failed.append(pr["number"])
+            print(f"#{pr['number']}: failed: {(error.stderr or '').strip()}", file=sys.stderr)
+            continue
         print(f"#{pr['number']}: {', '.join(added) if added else 'no change'}")
+    if failed:
+        sys.exit(f"labelling failed for {', '.join(f'#{number}' for number in failed)}")
 
 
 if __name__ == "__main__":

@@ -1,4 +1,8 @@
+import subprocess
 import unittest
+from unittest.mock import patch
+
+import pr_labels
 
 from pr_labels import goal_issues, label
 
@@ -18,6 +22,10 @@ class FakeGitHub:
         if route.endswith("/files"):
             return [{"filename": name} for name in self.files]
         number = int(route.rsplit("/", 1)[1])
+        if number not in self.issues:
+            raise subprocess.CalledProcessError(1, ["gh"], stderr="gh: Not Found (HTTP 404)")
+        if self.issues[number] is None:
+            raise subprocess.CalledProcessError(1, ["gh"], stderr="gh: Server Error (HTTP 502)")
         labels, parent = self.issues[number]
         return {"labels": [{"name": name} for name in labels],
                 "parent_issue_url": parent and f"https://api.github.com/repos/{REPO}/issues/{parent}"}
@@ -56,6 +64,24 @@ class PrLabelsTest(unittest.TestCase):
     def test_parent_cycle_stops(self):
         api = FakeGitHub({10: ([], 11), 11: ([], 10)})
         self.assertEqual(label(api, REPO, pr("Goal: #10 x")), [])
+
+    def test_missing_goal_issue_falls_back_to_paths(self):
+        api = FakeGitHub({}, ["tests/ci/b.py"])
+        self.assertEqual(label(api, REPO, pr("Goal: #404 speed up CI")), ["CI"])
+
+    def test_other_api_errors_still_fail(self):
+        with self.assertRaises(subprocess.CalledProcessError):
+            label(FakeGitHub({10: None}), REPO, pr("Goal: #10 x"))
+
+    def test_all_open_continues_after_a_failed_pr(self):
+        api = FakeGitHub({10: None, 11: (["TUI"], None)})
+        prs = [dict(pr("Goal: #10 x"), number=1), dict(pr("Goal: #11 x"), number=2)]
+        with patch.object(pr_labels, "github", api), patch.object(pr_labels, "pages", return_value=iter(prs)), \
+                patch("sys.argv", ["pr_labels.py", "--repo", REPO, "--all-open"]), \
+                self.assertRaises(SystemExit) as exit:
+            pr_labels.main()
+        self.assertIn("#1", str(exit.exception.code))
+        self.assertEqual(api.posted, [(f"repos/{REPO}/issues/2/labels", ["TUI"])])
 
 
 if __name__ == "__main__":
