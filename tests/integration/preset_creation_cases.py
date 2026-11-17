@@ -107,6 +107,8 @@ def preset_creation(binary, root, store_settings, env):
         assert json.loads(revision["output_schema"]["text"]) == preset["outputSchema"], revision
 
     try:
+        if "sqlite" in store_settings:
+            invoke("host", "set", "--store", store_settings["sqlite"]["dir"], "interface.dir", runtime)
         launch({"restricted": preset})
         # Poison ordinary fresh preferences and cwd: none may replace the preset seed.
         invoke("defaults", "configure", "--provider", "codex", "--model", "gpt-6-sol",
