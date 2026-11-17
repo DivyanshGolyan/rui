@@ -584,7 +584,7 @@ It takes only its natural content height, leaving the latest feed rows visible a
 Opening Model adds only the match and overflow rows it needs; filtering gives their space back to the feed.
 If space runs short, the panel takes feed space, not the retained input or its bottom footer.
 Its title is the chat's label, with Effort, Permissions, Allowed tools, Folder and Model below, and Context only while Current supplies a non-null estimate.
-A missing estimate omits the Context row: neither `unknown` nor an invented zero is a context measurement; an actual zero estimate is shown as zero. When Current reports an estimate without a compaction trigger, the row shows the count alone.
+A missing estimate omits the Context row: neither `unknown` nor an invented zero is a context measurement; an actual zero estimate is shown as zero.
 Folder and Context are read-only; Folder shortens HOME to `~` and fits long paths from the left, preserving the true right edge.
 It first keeps a suffix of whole path components with a leading ellipsis; when the basename itself is too wide, it keeps the longest grapheme-aligned basename suffix that fits after that ellipsis.
 It never arbitrarily cuts the right edge or shows an ellipsis alone instead of all the name.
