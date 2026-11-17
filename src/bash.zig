@@ -2093,20 +2093,22 @@ test "yielded Bash preparation leaves checkpoints free while retaining its descr
 }
 
 test "Bash capture reclaims MCP output from the same scratch budget" {
-    const result_text = @import("mcp/result_text.zig");
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
     const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
     var used: std.atomic.Value(u64) = .init(0);
-    const length = result_text.excerpt_bytes + 1;
+    const length = comptime @import("tool_record.zig").Runner.mcp.resultProfile(true).excerpt_bytes + 1;
     const budget: ScratchBudget = .{ .used = &used, .limit = length };
     var entries: [4]output_retention.Entry = @splat(.{});
     var retention = output_retention.Queue.initialize(std.testing.io, root, budget, &entries);
     defer retention.cleanupAll();
     const text: [length]u8 = @splat('x');
-    const ended: result_text.Ended = .{ .server_name = "test", .ended = .{ .outcome = .{ .result = .{ .content = "[]", .structured = &text, .is_error = false } } } };
-    try std.testing.expect(retention.writeFile("mcp-output-1-1.tmp", length, ended, result_text.writeFull));
+    var spill = output_retention.Spill.open(&retention, "mcp-output-1-1.tmp") orelse return error.TestUnexpectedResult;
+    spill.write(&text);
+    try std.testing.expect(spill.alive());
+    spill.close();
+    spill.keep();
     try std.testing.expectEqual(@as(u64, length), used.load(.acquire));
     try std.testing.expectEqual(@as(usize, 1), retention.occupied());
     var result: Outcome = undefined;
