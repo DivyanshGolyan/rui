@@ -103,7 +103,6 @@ Changes under `.claude/skills/verify-rui/features/` use the normal policy lane s
 The compiler and dependency setup action is bootstrap, not CI policy.
 An unavailable selection base is an error.
 PR selection uses its recorded base and immutable merge candidate.
-A Selected checks diagnostic dispatch retains the selector's native targets against its supplied base, independently of the PR-only Mac-path requirement.
 Ready normal changes retain policy and the Linux aggregate even for a narrow diff.
 Only an explicit documentation classification or draft plan can omit policy; an empty target list alone cannot.
 The Linux aggregate always checks the plan's selected parts or exact skips.

@@ -24,19 +24,6 @@ def selection(documentation=False):
 
 
 class PlanTest(unittest.TestCase):
-    def test_dispatch_preserves_selected_native_targets_without_pr_mac_path(self):
-        for targets, required in (([], False), (['transport-h2-integration'], False),
-                                  (['transport-h2-integration'], True)):
-            with self.subTest(targets=targets, mac_required=required):
-                selected = selection()
-                selected.update(native_targets=targets, mac_required=required)
-                result = plan(selected, event_name='workflow_dispatch', draft=False,
-                              promotion=False, change_kind=ChangeKind.NORMAL)
-                self.assertEqual(result.outputs['native_targets'], targets)
-                self.assertEqual(result.outputs['native'], bool(targets))
-                self.assertTrue(result.outputs['retry'])
-                self.assertFalse(result.outputs['upgrade'])
-
     def test_event_and_change_kind_domain(self):
         cases = (
             ('draft', 'pull_request', True, False),
@@ -52,8 +39,7 @@ class PlanTest(unittest.TestCase):
             ('draft', False): ([], []), ('draft', True): ([], []),
             ('ready', False): (normal_linux, ['test-native', 'transport-h2-integration']),
             ('ready', True): ([], []),
-            ('manual', False): (selection()['targets'], ['test-native', 'transport-h2-integration']),
-            ('manual', True): ([], []),
+            ('manual', False): (selection()['targets'], []), ('manual', True): ([], []),
             ('promotion', False): (promoted_linux, promoted_mac),
             ('promotion', True): (promoted_linux[:-1], promoted_mac[:-1]),
         }
