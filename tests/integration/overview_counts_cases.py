@@ -36,7 +36,7 @@ def rows_by_mark():
     with world("drawing-marks", responses, active_capacity=2) as w, released(*holds.values()):
         with w.overview(columns=99, rows=30) as screen:
             frame = screen.contains("+ New Session")
-            assert frame.split("\n")[0] == " + New Session", frame
+            assert frame.split("\n")[0] == "   + New Session", frame
             asking = w.session("--label", "Asking", "--tools", "bash", "--permission-mode", "ask")
             failing = w.session("--label", "Failing")
             send(w, asking, "ask")
@@ -53,7 +53,7 @@ def rows_by_mark():
             assert "Queued" not in frame and "workspace" not in frame, frame
             assert "slots " not in frame, frame
             for line in lines:
-                if not line.startswith("   Settings"):
+                if not line.startswith("     Settings"):
                     assert not re.search(r"(?:rui|tools) \d+(?:\.\d+)? (?:MB|GB)\b", line), frame
             assert screen.style("? Asking").fg != screen.style("× Failing").fg, frame
             holds["w1"].set()

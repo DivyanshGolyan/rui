@@ -9,32 +9,33 @@ module.exports = async function pruneCaches({github, context, core}) {
     if (!cache.key.startsWith('rui-') || (!pull && cache.ref !== 'refs/heads/main')) continue;
     const created = Date.parse(cache.created_at);
     if (!Number.isFinite(created)) throw new Error('Invalid cache creation time');
-    candidates.push({cache, pull, created, group: pull ? null : mainGroup(cache.key)});
+    const group = pull ? null : mainGroup(cache.key);
+    const compiledVersion = group === 'build/Linux-X64/compiled' || group === 'partial/build/Linux-X64/compiled'
+      ? /^rui-build-v([234])-/.exec(cache.key)[1] : null;
+    candidates.push({cache, pull, created, group, compiledVersion});
   }
 
   // A completed migration supersedes every legacy snapshot, even when an
-  // older in-flight v2 producer finishes after v3. Partial v3 work cannot
-  // establish this transition; complete and partial v3 retain independently.
-  const migrated = candidates.some(({cache, group}) =>
-    group === 'build/Linux-X64/compiled' && cache.key.startsWith('rui-build-v3-'));
+  // older in-flight v2/v3 producer finishes after v4. Partial v4 work cannot
+  // establish this transition; each generation retains complete and partial
+  // snapshots independently until a complete v4 supersedes the legacy formats.
+  const migrated = candidates.some(({compiledVersion, group}) =>
+    group === 'build/Linux-X64/compiled' && compiledVersion === '4');
   candidates.sort((a, b) => b.created - a.created || b.cache.id - a.cache.id);
   const retained = new Set();
   const obsolete = [];
-  for (const {cache, pull, group} of candidates) {
+  for (const {cache, pull, group, compiledVersion} of candidates) {
     if (pull) {
       obsolete.push(cache);
       continue;
     }
     if (group === null) continue;
-    if (migrated && cache.key.startsWith('rui-build-v2-') &&
-        (group === 'build/Linux-X64/compiled' || group === 'partial/build/Linux-X64/compiled')) {
+    if (migrated && compiledVersion !== null && compiledVersion !== '4') {
       obsolete.push(cache);
       continue;
     }
-    // Until completion establishes migration, keep the legacy partial as
-    // well as the v3 partial so unfinished work cannot retire the fallback.
-    const retentionGroup = group === 'partial/build/Linux-X64/compiled' && cache.key.startsWith('rui-build-v3-')
-      ? `v3/${group}` : group;
+    // Unfinished v4 cannot evict any generation's usable fallback.
+    const retentionGroup = compiledVersion === null ? group : `v${compiledVersion}/${group}`;
     if (retained.has(retentionGroup)) obsolete.push(cache);
     retained.add(retentionGroup);
   }
@@ -62,7 +63,7 @@ function mainGroup(key) {
     const complete = mainGroup(partial[1]);
     return complete !== null && /^(build|runner)\//.test(complete) ? `partial/${complete}` : null;
   }
-  if (/^rui-build-v3-Linux-X64-0\.17\.[0-9]+-[a-f0-9]{64}-compiled\.[a-f0-9]{64}-[a-f0-9]{64}$/.test(key)) {
+  if (/^rui-build-v[34]-Linux-X64-0\.17\.[0-9]+-[a-f0-9]{64}-compiled\.[a-f0-9]{64}-[a-f0-9]{64}$/.test(key)) {
     return 'build/Linux-X64/compiled';
   }
   const reordered = /^rui-build-v2-(Linux-X64|macOS-ARM64)-0\.17\.[0-9]+-[a-f0-9]{64}-([a-z][a-z0-9-]*)\.[a-f0-9]{64}-[a-f0-9]{64}$/.exec(key);

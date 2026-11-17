@@ -180,7 +180,9 @@ static int observe_generation(int pid, int directory, unsigned long long *starte
     (void)directory;
     struct proc_bsdinfo info;
     errno = 0;
-    int count = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, sizeof(info));
+    /* XNU only searches its zombie list for this flavor when arg is nonzero.
+     * An unreaped exit still has the exact start time needed for retirement. */
+    int count = proc_pidinfo(pid, PROC_PIDTBSDINFO, 1, &info, sizeof(info));
     if (count != sizeof(info)) return errno ? errno : ESRCH;
     if (info.pbi_pid != (uint32_t)pid || info.pbi_uid != geteuid()) return EPERM;
     if (info.pbi_start_tvsec > ULLONG_MAX / 1000000 || info.pbi_start_tvusec >= 1000000 ||

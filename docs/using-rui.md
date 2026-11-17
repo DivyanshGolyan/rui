@@ -61,7 +61,10 @@ The panel has its own ground and never becomes part of the feed; your draft stay
 It uses only the height it needs, leaving recent messages visible above it.
 Opening Model grows the panel into that feed space, and filtering gives space back; the input and bottom footer stay in place.
 Its one footer replaces the usual chat footer below the input’s lower divider, on the physical last row; there is no second footer inside the panel or blank notice row below it.
-Up and Down select Effort, Permissions, Tools or Model, and Enter opens the field's choices.
+Up and Down select Effort, Permissions, Allowed tools or Model, and Enter opens the field's choices.
+Allowed tools shows the configured allowed set; its built-in choices preserve configured MCP tools and valid loaded intent.
+Loaded tools records the configured loaded intent, while each model operation keeps the effective offer frozen when it was admitted; editing the allowed set does not rewrite that offer.
+Use `rui session inspect` or TypeScript Session status to read allowed and loaded names; `rui session inspect --profile full` also reports each model operation’s frozen `offered_tools`.
 Folder is read-only: HOME is shown as `~`, and a long path keeps its right edge with a leading ellipsis.
 It prefers whole trailing directory components; if the basename itself is too wide, it shows the longest grapheme-aligned basename suffix that fits, never an arbitrary right-side cut or an ellipsis hiding the whole name.
 Context is read-only and appears only when a context estimate is available; a missing estimate is not shown as unknown or zero, while a known zero is shown as zero.

@@ -18,6 +18,15 @@ pub const max_outcome_bytes = 96;
 pub const max_recent = 10;
 
 pub const Session = struct {
+    pub fn builtInTools(self: *const Session) built_in_tool.Selection {
+        var selected: built_in_tool.Selection = .empty;
+        var names = self.tools.iterator();
+        while (names.next()) |name| {
+            if (std.meta.stringToEnum(built_in_tool.BuiltInTool, name)) |builtin| selected.insert(builtin);
+        }
+        return selected;
+    }
+
     session: Bounded(max_session_bytes),
     label: Bounded(max_label_bytes),
     workspace: Bounded(max_path_bytes),
@@ -26,7 +35,8 @@ pub const Session = struct {
     effort: ?ReasoningEffort,
     effort_override: bool,
     permission: enum { ask, bypass },
-    tools: built_in_tool.Selection,
+    tools: @import("command_input.zig").ToolsField,
+    loaded_tools: @import("command_input.zig").ToolsField = .{ .state = .value },
     instructions: bool,
     compaction_trigger: ?u64,
     compaction_override: bool,
@@ -41,7 +51,7 @@ pub const Session = struct {
             const a = &@field(self, name);
             const b = &@field(other, name);
             const Field = @TypeOf(a.*);
-            const same = if (Field == Work) a.eql(b) else if (comptime @typeInfo(Field) == .@"struct" and @hasDecl(Field, "slice")) b.eql(a.slice()) else std.meta.eql(a.*, b.*);
+            const same = if (Field == Work or Field == @import("command_input.zig").ToolsField) a.eql(b) else if (comptime @typeInfo(Field) == .@"struct" and @hasDecl(Field, "slice")) b.eql(a.slice()) else std.meta.eql(a.*, b.*);
             if (!same) return false;
         }
         return true;
@@ -103,7 +113,7 @@ pub fn sample(session: *Session) void {
         .effort = .high,
         .effort_override = false,
         .permission = .bypass,
-        .tools = .initMany(&.{ .bash, .web_search }),
+        .tools = @import("command_input.zig").ToolsField.of(&.{ "bash", "web_search" }) catch unreachable,
         .instructions = true,
         .compaction_trigger = 245_000,
         .compaction_override = false,
@@ -144,4 +154,17 @@ test "Session inspection equality ignores unused storage and includes work chang
     other = session;
     other.work.current_message = .{ .len = 0 };
     try std.testing.expect(!session.eql(&other));
+}
+
+test "status compares tool intent without unused capacity and detects loaded-only changes" {
+    var first: Session = undefined;
+    sample(&first);
+    var second = first;
+    @memset(first.tools.names.bytes[first.tools.names.len..], 'a');
+    @memset(second.tools.names.bytes[second.tools.names.len..], 'b');
+    @memset(first.loaded_tools.names.bytes[first.loaded_tools.names.len..], 'c');
+    @memset(second.loaded_tools.names.bytes[second.loaded_tools.names.len..], 'd');
+    try std.testing.expect(first.eql(&second));
+    try second.loaded_tools.append("bash");
+    try std.testing.expect(!first.eql(&second));
 }

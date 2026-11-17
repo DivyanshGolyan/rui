@@ -77,7 +77,7 @@ def prove_effect_without_result_becomes_indeterminate(state):
         ) as (entered, master):
             human.read_terminal(master, "› ")
             info = human.chat_info_frame(master)
-            assert "Model" in info and "Tools" in info, info
+            assert "Model" in info and "Allowed tools" in info, info
             report = json.loads(human.run(home, "session", "inspect", "--store", store,
                                          "--session", session, "--profile", "full"))
             action, = report["full"]["actions"]

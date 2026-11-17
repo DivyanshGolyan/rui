@@ -944,7 +944,7 @@ fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: AppScreen.Overview.Part) s
     const awake_ms = self.animationMs();
     const frame = awake_ms / view.spin_interval_ms;
     const rows = try ctx.arena.create(SessionRows);
-    rows.* = .{ .state = &self.state, .width = size.width, .caps = self.caps, .frame = frame };
+    rows.* = .{ .state = &self.state, .width = @import("widgets/RowInset.zig").contentWidth(size.width), .caps = self.caps, .frame = frame };
     self.app_sessions.selected = if (view.focusedLine(&self.state, self.root.input.listFocused() or self.root.session == null)) |line| @intCast(line) else null;
     self.app_sessions.selection_background = if (self.root.session != null and !self.root.input.listFocused()) .bar else .selection;
     self.app_sessions.rows = .{ .userdata = rows, .count = @intCast(view.listLength(&self.state)), .rowFn = SessionRows.row, .countFromFn = SessionRows.count };
@@ -1928,8 +1928,8 @@ const fake_operations: Operations = .{
                 .provider = if (settings.provider.present) Seen.bounded(settings.provider.value) else null,
                 .model = if (settings.model.present) Seen.bounded(settings.model.value) else null,
                 .permission_mode = Seen.bounded(settings.permission_mode.value),
-                .tools = if (settings.tools) |tools| protocol.Bounded(protocol.max_tool_names_bytes).from(tools) catch unreachable else null,
-                .loaded_tools = if (settings.loaded_tools) |loaded| protocol.Bounded(protocol.max_tool_names_bytes).from(loaded) catch unreachable else null,
+                .tools = if (settings.tools) |tools| protocol.Bounded(protocol.max_tool_names_bytes).from(tools.cli) catch unreachable else null,
+                .loaded_tools = if (settings.loaded_tools) |loaded| protocol.Bounded(protocol.max_tool_names_bytes).from(loaded.cli) catch unreachable else null,
                 .label = if (settings.label.value) |label| Seen.bounded(label) else null,
                 .reasoning_effort = if (settings.reasoning_effort.present) Seen.bounded(settings.reasoning_effort.value orelse "") else null,
             };
@@ -2188,7 +2188,7 @@ test "pin separator is ground and inert beside selected controls or Sessions at 
         overview.state.selected = selection;
         var shown = try rig.shown(width, 30);
         defer shown.deinit();
-        try std.testing.expect(std.mem.startsWith(u8, try shown.line(0), " + New Session"));
+        try std.testing.expect(std.mem.startsWith(u8, try shown.line(0), "   + New Session"));
         try std.testing.expect(std.mem.indexOf(u8, try shown.line(1), "Archived") != null);
         try std.testing.expectEqual(selection == .new_session, std.meta.eql(highlight, shown.screen.readCell(1, 0).?.style.bg));
         for (0..30) |col| {
@@ -3302,14 +3302,14 @@ test "Host line and Settings tail show together without overlap at wide and narr
         const at = view.layout(&overview.state);
         const text = try shown.text();
         try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, "Host stopped ·"));
-        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, "   Settings"));
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, "     Settings"));
         try std.testing.expectEqual(at.list.end, at.settings.start);
         try std.testing.expectEqual(@as(u16, 3), at.settings.len());
         try std.testing.expectEqual(at.settings.end, at.host.start);
         try std.testing.expectEqual(@as(u16, 1), at.host.len());
         try std.testing.expectEqual(at.host.end, at.input);
         try std.testing.expect(std.mem.startsWith(u8, try shown.line(at.settings.start), "─"));
-        try std.testing.expect(std.mem.startsWith(u8, try shown.line(at.settings.start + 1), "   Settings"));
+        try std.testing.expect(std.mem.startsWith(u8, try shown.line(at.settings.start + 1), "     Settings"));
         try std.testing.expectEqualStrings(@import("transport_options").version, std.mem.trim(u8, try shown.line(at.settings.start + 2), " "));
         try std.testing.expect(std.mem.startsWith(u8, try shown.line(at.host.start), "■ Host stopped ·"));
         try std.testing.expect(std.mem.indexOf(u8, try shown.line(at.input), "enter open") == null);
@@ -5370,7 +5370,7 @@ test "pinned New Session remains above the end marker and responds to clicks and
         for (0..2) |_| {
             var shown = try rig.shown(width, 9);
             defer shown.deinit();
-            try std.testing.expect(std.mem.startsWith(u8, try shown.line(0), " + New Session"));
+            try std.testing.expect(std.mem.startsWith(u8, try shown.line(0), "   + New Session"));
             try std.testing.expect(std.mem.indexOf(u8, try shown.line(1), "Archived") != null);
             try std.testing.expect(std.mem.indexOf(u8, try shown.line(2), "↑") != null);
             const span = for (rig.overview.app_sessions.shown_at) |span| {
@@ -5429,7 +5429,7 @@ test "chat sidebar and overview share pinned New Session and Archived controls" 
     for ([_]u16{ 46, 140 }) |width| {
         var shown = try rig.shown(width, 20);
         defer shown.deinit();
-        try std.testing.expect(std.mem.startsWith(u8, try shown.line(0), " + New Session"));
+        try std.testing.expect(std.mem.startsWith(u8, try shown.line(0), "   + New Session"));
         try std.testing.expect(std.mem.indexOf(u8, try shown.line(1), "Archived") != null);
     }
 }
@@ -5492,7 +5492,7 @@ test "chat pinned controls preserve late-listed Sessions and the physical last-r
     for ([_]u16{ 140, 46 }) |width| {
         var shown = try rig.shown(width, 30);
         defer shown.deinit();
-        try std.testing.expect(std.mem.startsWith(u8, try shown.line(0), " + New Session"));
+        try std.testing.expect(std.mem.startsWith(u8, try shown.line(0), "   + New Session"));
         try std.testing.expect(std.mem.indexOf(u8, try shown.line(1), "Archived") != null);
         try std.testing.expect(std.mem.indexOf(u8, try shown.line(2), "Fix the flaky test") != null);
     }
@@ -5509,7 +5509,7 @@ test "pinned New Session wins the last header row over a provider band" {
         try std.testing.expect(view.band(state) != null);
         var shown = try rig.shown(width, 2);
         defer shown.deinit();
-        try std.testing.expect(std.mem.startsWith(u8, try shown.line(0), " + New Session"));
+        try std.testing.expect(std.mem.startsWith(u8, try shown.line(0), "   + New Session"));
         try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "Archived") == null);
     }
 }
@@ -5945,7 +5945,7 @@ test "Overview mouse Settings hover persists across frames and never changes sel
     var plain = try rig.shown(80, 24);
     defer plain.deinit();
     const row: u16 = for (0..24) |y| {
-        if (std.mem.startsWith(u8, try plain.line(@intCast(y)), "   Settings")) break @intCast(y);
+        if (std.mem.startsWith(u8, try plain.line(@intCast(y)), "     Settings")) break @intCast(y);
     } else return error.TestExpectedSettingsRow;
     const selection = rig.overview.state.selected;
     var ctx = rig.context();
@@ -7544,7 +7544,7 @@ test "Overview Settings live memory frame uses quiet role in day and night" {
         var shown = try rig.shown(80, 24);
         defer shown.deinit();
         const row: u16 = for (0..24) |y| {
-            if (std.mem.startsWith(u8, try shown.line(@intCast(y)), "   Settings")) break @intCast(y);
+            if (std.mem.startsWith(u8, try shown.line(@intCast(y)), "     Settings")) break @intCast(y);
         } else return error.TestExpectedSettingsRow;
         const text = try shown.line(row + 1);
         const memory = std.mem.indexOf(u8, text, "38 MB") orelse return error.TestExpectedMemory;
@@ -7876,7 +7876,7 @@ test "background discovery reaches the production version widget without request
         defer shown.deinit();
         try std.testing.expectEqualDeep(overview.state.upgrade.available, overview.app_settings_line.available);
         const settings_row: u16 = for (0..24) |row| {
-            if (std.mem.startsWith(u8, try shown.line(@intCast(row)), "   Settings")) break @intCast(row);
+            if (std.mem.startsWith(u8, try shown.line(@intCast(row)), "     Settings")) break @intCast(row);
         } else return error.TestExpectedSettingsRow;
         const bottom = try shown.line(settings_row + 1);
         try std.testing.expectEqual(offers_update, std.mem.indexOf(u8, bottom, "Update to 0.999.2") != null);
@@ -8264,7 +8264,7 @@ test "narrow empty chat exit retains every list row through spinner repaints and
             try std.testing.expect(ctx.redraw);
             stage = "spinner paint";
             try Frames.paint(rig, &vx, &output.writer, size);
-            const glyph = vx.screen_last.readCell(1, 3).?.char.grapheme;
+            const glyph = vx.screen_last.readCell(3, 3).?.char.grapheme;
             if (previous.len != 0 and !std.mem.eql(u8, previous.slice(), glyph)) changed = true;
             try previous.set(glyph);
         }

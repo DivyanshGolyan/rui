@@ -864,5 +864,51 @@ print('import-safe')
                 self.assertEqual(list(Path(directory).iterdir()), [])
 
 
+class ToolIntentDisposalTest(unittest.TestCase):
+    def test_mysql_tool_store_preserves_body_failure_and_reports_drop_failure(self):
+        source = """
+import os, pathlib, subprocess, sys, tempfile
+from unittest.mock import patch
+sys.path.insert(0, sys.argv[1])
+sys.argv = ['tool-intent-unit', '/never-launched-rui']
+import tool_intent_cases as tools
+for body_failed in (False, True):
+    for cleanup_failed in (False, True):
+        primary = AssertionError('tool intent body failed')
+        cleanup = OSError('database drop failed')
+        statements = []
+        def run(command, **arguments):
+            if command[0] == 'fixture-admin':
+                statement = arguments['input']
+                statements.append(statement)
+                if statement.startswith('DROP DATABASE') and cleanup_failed:
+                    raise cleanup
+                return subprocess.CompletedProcess(command, 0, stdout='', stderr='')
+            assert command[1:] == ['store', 'schema', '--engine', 'mysql'], command
+            return subprocess.CompletedProcess(command, 0, stdout='emitted schema', stderr='')
+        caught = None
+        with tempfile.TemporaryDirectory() as temporary, patch.dict(os.environ, {
+            'RUI_TEST_MYSQL_SOCKET': '/fixture.sock', 'RUI_TEST_MYSQL_ROOT_PASSWORD': 'fixture-password',
+            'RUI_TEST_MYSQL_ADMIN': 'fixture-admin',
+        }), patch.object(tools.subprocess, 'run', side_effect=run):
+            try:
+                with tools.tool_store('mysql', temporary):
+                    if body_failed:
+                        raise primary
+            except BaseException as error:
+                caught = error
+        expected = primary if body_failed else cleanup if cleanup_failed else None
+        assert caught is expected, (body_failed, cleanup_failed, caught, expected)
+        assert sum(statement.startswith('DROP DATABASE') for statement in statements) == 1, statements
+        if body_failed and cleanup_failed:
+            assert any('database drop failed' in note for note in primary.__notes__), primary.__notes__
+print('body/drop failure matrix passed')
+"""
+        result = subprocess.run([sys.executable, "-B", "-c", source, str(ROOT / "tests/integration")],
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout, "body/drop failure matrix passed\n")
+
+
 if __name__ == "__main__":
     unittest.main()
