@@ -694,7 +694,16 @@ fn loadedNames(a: anytype, request: *const Request, reads: *ConfigurationReads) 
 
 fn selectLoaded(a: anytype, request: *const Request, reads: *ConfigurationReads) !Validation {
     const v = &reads.step.validating;
-    if (loadedToolsRejection(v.tools, v.loaded)) |rejection| return .{ .rejected = rejection };
+    if (loadedToolsRejection(v.tools, v.loaded)) |rejection| {
+        if (rejection == .loaded_tools_unreachable and
+            request.configuration.tools.state == .value and
+            request.configuration.loaded_tools.state == .omitted)
+        {
+            // An unreachable implicit intersection falls back to all allowed tools.
+            return finishValidation(request, reads);
+        }
+        return .{ .rejected = rejection };
+    }
     if (v.loaded.count == v.tools.count) return finishValidation(request, reads);
     if (request.session.len == 0 or request.configuration.tools.state == .value) {
         reads.loaded_tools = tool_set.Selection.of(request.tools.host_tool_set, v.loaded) orelse return error.CorruptStore;
