@@ -10,6 +10,7 @@ const cores = .{
     .{ "action_read.zig", @import("action_read.zig") },
     .{ "action_receipt.zig", @import("action_receipt.zig") },
     .{ "action_text.zig", @import("action_text.zig") },
+    .{ "action_value_limits.zig", @import("action_value_limits.zig") },
     .{ "ActionConsent.zig", @import("ActionConsent.zig") },
     .{ "activity_facts.zig", @import("activity_facts.zig") },
     .{ "activity_read.zig", @import("activity_read.zig") },

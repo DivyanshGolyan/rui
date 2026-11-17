@@ -69,6 +69,7 @@ test "every function that enters the Store has a round budget" {
         @embedFile("../domain/action_control.zig"),
         @embedFile("../domain/action_stop.zig"),
         @embedFile("../domain/action_read.zig"),
+        @embedFile("../domain/action_value.zig"),
         @embedFile("../domain/forward.zig"),
         @embedFile("../domain/command.zig"),
         @embedFile("../domain/configuration.zig"),
