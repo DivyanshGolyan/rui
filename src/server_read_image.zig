@@ -156,7 +156,8 @@ fn fail(host: *Host, active: *Active, err: anyerror) void {
         settleText(host, active, .cancelled, "Stopped before this image read completed.");
     } else {
         var buffer: [192]u8 = undefined;
-        settleText(host, active, .failed, std.fmt.bufPrint(&buffer, "Image read failed: {s}.", .{@errorName(err)}) catch unreachable);
+        const code: store.ActionResolutionCode = if (err == error.ScratchCapacityExceeded) .storage_failed else .failed;
+        settleText(host, active, code, std.fmt.bufPrint(&buffer, "Image read failed: {s}.", .{@errorName(err)}) catch unreachable);
     }
 }
 
@@ -394,12 +395,13 @@ fn testReadImage(cases: []const TestCase) !void {
             try std.testing.expect(host.launchAllowed());
             try std.testing.expect(!storage.isFenced());
             const text = "Image read failed: ScratchCapacityExceeded.";
-            try std.testing.expectEqual(@as(u64, 1), try testing.queryU64(&storage, "SELECT count(*) FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id WHERE a.action_id=?1 AND a.resolution_code='failed' AND c.form=0 AND c.byte_length=?2 AND c.digest=?3", .{ selected.action_id, text.len, testing.Blob{ .bytes = &protocol.contentDigest(text) } }));
+            try std.testing.expectEqual(@as(u64, 1), try testing.queryU64(&storage, "SELECT count(*) FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id WHERE a.action_id=?1 AND a.resolution_code='storage_failed' AND c.form=0 AND c.byte_length=?2 AND c.digest=?3", .{ selected.action_id, text.len, testing.Blob{ .bytes = &protocol.contentDigest(text) } }));
             try std.testing.expect(!(try storage.recoverOneUncertainAction(.empty())));
         }
         const code = switch (case) {
             .snapshot, .background => "succeeded",
             .stop => "cancelled",
+            .payload_capacity, .index_capacity => "storage_failed",
             .capture, .seal, .publication, .shutdown => "indeterminate",
             else => "failed",
         };
