@@ -1944,21 +1944,20 @@ fn arrange(state: *State) error{OutOfMemory}!void {
         row.born_held = false;
     };
     state.summary.counts = counts(state);
-    var hash = std.hash.Wyhash.init(0);
-    hash.update(std.mem.asBytes(&state.pin_end));
+    var hash = std.hash.Wyhash.hash(0, std.mem.asBytes(&state.pin_end));
     for (state.order.items) |index| {
         const node = nodes[index];
-        hash.update(&rows[index].reference);
-        hash.update(std.mem.asBytes(&node.depth));
-        hash.update(std.mem.asBytes(&node.last_sibling));
+        hash = std.hash.Wyhash.hash(hash, &rows[index].reference);
+        hash = std.hash.Wyhash.hash(hash, std.mem.asBytes(&node.depth));
+        hash = std.hash.Wyhash.hash(hash, std.mem.asBytes(&node.last_sibling));
         const folded = isFolded(state, rows[index].reference) and node.descendants != 0;
-        hash.update(std.mem.asBytes(&folded));
+        hash = std.hash.Wyhash.hash(hash, std.mem.asBytes(&folded));
         if (folded) {
-            hash.update(std.mem.asBytes(&node.descendants));
-            hash.update(std.mem.asBytes(&node.attention));
+            hash = std.hash.Wyhash.hash(hash, std.mem.asBytes(&node.descendants));
+            hash = std.hash.Wyhash.hash(hash, std.mem.asBytes(&node.attention));
         }
     }
-    const tree = hash.final();
+    const tree = hash;
     if (state.tree_presentation == null or state.tree_presentation.? != tree) state.presentation_revision +%= 1;
     state.tree_presentation = tree;
 }
