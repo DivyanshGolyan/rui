@@ -465,3 +465,83 @@ test "native Activity round trips selected and Action-only stops before and afte
         }
     }
 }
+
+test "derived work facts are served across all work replies" {
+    try store.testing.forEachEngine(struct {
+        fn checkField(expected: std.json.Value, actual: std.json.Value, name: []const u8) !void {
+            var a: [1024]u8 = undefined;
+            var b: [1024]u8 = undefined;
+            var aw = std.Io.Writer.fixed(&a);
+            var bw = std.Io.Writer.fixed(&b);
+            try std.json.Stringify.value(expected.object.get(name).?, .{}, &aw);
+            try std.json.Stringify.value(actual.object.get(name).?, .{}, &bw);
+            try std.testing.expectEqualStrings(aw.buffered(), bw.buffered());
+        }
+        fn run(case: *store.testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: store.Store = undefined;
+            try store.testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try store.testing.configureTestSession(&storage, "facts-config");
+            try store.testingSubmitMessage(&storage, &tmp, "facts-file", "facts-message", session.slice(), "input");
+            const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            const report = try store.testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, .current);
+            defer std.testing.allocator.free(report);
+            const current = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, report, .{});
+            defer current.deinit();
+            const expected = current.value.object.get("work").?;
+            try std.testing.expect(expected.object.get("actions").?.object.get("stop").?.bool);
+            try std.testing.expectEqual(binding.turn_id, try std.fmt.parseInt(u64, expected.object.get("actions").?.object.get("interrupt").?.object.get("turn").?.string, 10));
+            var used = std.atomic.Value(u64).init(0);
+            const listing = try store.testingSessionList(&storage, &tmp, .{}, &used, 914);
+            defer std.testing.allocator.free(listing);
+            const list = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, listing, .{});
+            defer list.deinit();
+            const list_work = list.value.object.get("sessions").?.array.items[0].object.get("work").?;
+            var request: protocol.ActivityPage = .{};
+            try request.session.set(session.slice());
+            const page = try storage.activityPageForTesting(request);
+            var activity_buffer: [@import("activity_reply.zig").max_page_bytes]u8 = undefined;
+            var activity_writer = std.Io.Writer.fixed(&activity_buffer);
+            try @import("activity_reply.zig").writePage(&activity_writer, &page);
+            const activity = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, activity_writer.buffered(), .{});
+            defer activity.deinit();
+            const observed = try store.testing.observeCommandForTesting(&storage, "facts-message");
+            var observation_buffer: protocol.CommandObservationBuffer = .{};
+            try observation_buffer.render(@import("host_reply.zig").renderFullCommandObservation, .{ "facts-message", &observed, @as(?[]const u8, null) });
+            const observation = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, observation_buffer.bytes[0..observation_buffer.len], .{});
+            defer observation.deinit();
+            inline for (.{ "attention", "group", "actions" }) |field| {
+                try checkField(expected, list_work, field);
+                try checkField(expected, activity.value.object.get("work").?, field);
+                try checkField(expected, observation.value.object.get("observation").?.object.get("work").?, field);
+            }
+        }
+    }.run);
+}
+
+test "client decodes approval observation while automatic denial is pending" {
+    try store.testing.forEachEngine(struct {
+        fn run(case: *store.testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: store.Store = undefined;
+            try store.testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const fixtures = @import("store/tests.zig");
+            const session = try fixtures.configureTestSessionAsk(&storage, "decode-denial-config");
+            try store.testingSubmitMessage(&storage, &tmp, "decode-denial-file", "decode-denial-first", session.slice(), "run");
+            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try fixtures.settleTwoActionsForTesting(&storage, &tmp, model, "decode-denial-calls");
+            try store.testingSubmitMessage(&storage, &tmp, "decode-denial-next-file", "decode-denial-next", session.slice(), "new instructions");
+            const observed = try store.testing.observeCommandForTesting(&storage, "decode-denial-first");
+            try std.testing.expectEqual(protocol.MessageRequestState.waiting_for_permission, observed.requestState().?);
+            var response: protocol.CommandObservationBuffer = .{};
+            try response.render(@import("host_reply.zig").renderFullCommandObservation, .{ "decode-denial-first", &observed, @as(?[]const u8, null) });
+            const decoded = try protocol_reply.CommandObservation.parse(.{ .status = 200, .body = response.bytes[0..response.len] }, "decode-denial-first");
+            try std.testing.expectEqual(protocol.MessageRequestState.waiting_for_permission, decoded.state.?);
+            try std.testing.expectEqual(@as(?u64, null), decoded.work.?.first_action);
+        }
+    }.run);
+}
