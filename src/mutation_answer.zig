@@ -197,7 +197,8 @@ fn bind(comptime kind: CommandKind, comptime accepted: bool, partial: anytype, s
         if (try decimalId(answer.action, true) != target.permission_decision.action or !answer.decision.eql(@tagName(target.permission_decision.decision))) return error.RequestBindingMismatch;
     } else if (comptime kind == .action_background or kind == .action_stop) {
         if (!partial.has(".answer.action")) return error.InvalidResponse;
-        if (try decimalId(answer.action, true) != @field(target, @tagName(kind))) return error.RequestBindingMismatch;
+        const expected_action = if (comptime kind == .action_background) target.action_background else target.action_stop;
+        if (try decimalId(answer.action, true) != expected_action) return error.RequestBindingMismatch;
     }
     if (answer.status.eql("accepted") and !session_id.valid(resolved_session.slice())) return error.InvalidResponse;
 }
