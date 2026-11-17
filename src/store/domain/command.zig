@@ -2246,14 +2246,20 @@ pub const InterruptModel = struct {
 };
 
 const decision_action = rsql.Read(.{
-    .sql = "SELECT s.session_ref,s.workspace_key,s.next_position,a.background_position IS NOT NULL AS background," ++ action_domain.actionStoppedSql("a", "operation") ++ " AS stopped,t.turn_id," ++
-        "EXISTS(SELECT 1 FROM session_forward f WHERE f.target_ref=?2 AND f.kind=1 AND f.source_id=a.action_id AND f.position IS NOT NULL) AS forwarded," ++
-        action_domain.permissionDecisionEligibleSql("a", "t", false) ++ " AS external_eligible," ++
-        action_domain.permissionDecisionEligibleSql("a", "t", true) ++ " AS automatic_eligible " ++
+    .sql = "SELECT s.session_ref,s.workspace_key,s.next_position,a.authorized,a.background_position IS NOT NULL AS background," ++ action_domain.actionStoppedSql("a", "operation") ++ " AS stopped,a.resolution_code IS NULL AS unresolved,(t.outcome_code IS NULL OR a.background_position IS NOT NULL) AS turn_open,t.turn_id," ++
+        "EXISTS(SELECT 1 FROM session_forward f WHERE f.target_ref=?2 AND f.kind=1 AND f.source_id=a.action_id AND f.position IS NOT NULL) AS forwarded " ++
         "FROM action_operation a JOIN session s ON s.session_ref=a.session_ref " ++
         "JOIN model_operation operation ON operation.operation_id=a.parent_operation_id JOIN turn t ON t.turn_id=operation.turn_id WHERE a.action_id=?1",
     .Args = struct { action_id: u64, target: []const u8 },
-    .Row = struct { session: rsql.SessionHead, background: bool, stopped: bool, turn_id: rsql.Positive, forwarded: bool, external_eligible: bool, automatic_eligible: bool },
+    .Row = struct { session: rsql.SessionHead, authorized: bool, background: bool, stopped: bool, unresolved: bool, turn_open: bool, turn_id: rsql.Positive, forwarded: bool },
+    .cardinality = .optional,
+});
+
+const external_decision_eligible = rsql.Read(.{
+    .sql = "SELECT " ++ action_domain.externalDecisionEligibleSql("a", "t") ++ " AS eligible FROM action_operation a " ++
+        "JOIN model_operation operation ON operation.operation_id=a.parent_operation_id JOIN turn t ON t.turn_id=operation.turn_id WHERE a.action_id=?1",
+    .Args = struct { action_id: u64 },
+    .Row = struct { eligible: bool },
     .cardinality = .optional,
 });
 
@@ -2288,13 +2294,16 @@ fn decisionRejection(
     target: target_session.Result,
     action: decision_action.Result,
     automatic: bool,
+    external_eligible: external_decision_eligible.Result,
 ) ?mutation_answer.PermissionDecisionRejection {
     if (!session_id.valid(command.session.slice())) return .invalid_session_reference;
     if (!validId(command.action_id)) return .invalid_target;
     if (target == null) return .unknown_session;
     const found = action orelse return .unknown_action;
     if (!std.mem.eql(u8, &found.session.ref, command.session.slice()) and !found.forwarded) return .target_mismatch;
-    if (!(if (automatic) found.automatic_eligible else found.external_eligible)) return .action_not_pending;
+    if (automatic) {
+        if (found.authorized or !found.unresolved or !found.turn_open) return .action_not_pending;
+    } else if (!(external_eligible orelse return .action_not_pending).eligible) return .action_not_pending;
     return null;
 }
 
@@ -2315,6 +2324,7 @@ pub const DecidePermission = struct {
     saved: saved_command.Result = undefined,
     target: target_session.Result = null,
     action: decision_action.Result = null,
+    external_eligible: external_decision_eligible.Result = null,
     content: content_domain.Import = denial,
     answer: StoredAnswer = undefined,
     action_text: [20]u8 = undefined,
@@ -2329,7 +2339,10 @@ pub const DecidePermission = struct {
             lookupCommand(r, command.key.slice(), &t.saved);
             if (validId(command.action_id)) {
                 readTarget(r, session, &t.target);
-                if (session_id.valid(session)) r.read(decision_action, .{ .action_id = command.action_id, .target = session }, &t.action);
+                if (session_id.valid(session)) {
+                    r.read(decision_action, .{ .action_id = command.action_id, .target = session }, &t.action);
+                    if (t.input.denial_reason == null) r.read(external_decision_eligible, .{ .action_id = command.action_id }, &t.external_eligible);
+                }
             }
             if (command.decision == .deny) {
                 if (t.input.denial_reason) |reason| t.content = .ofBytes(reason, false);
@@ -2344,7 +2357,8 @@ pub const DecidePermission = struct {
             .rejected => |code| return .{ .done = .{ .rejected = .{ .replayed = true, .code = code } } },
         }
 
-        t.rejection = decisionRejection(command, t.target, t.action, t.input.denial_reason != null);
+        if (t.input.denial_reason == null and t.action != null and t.external_eligible == null) return error.CorruptStore;
+        t.rejection = decisionRejection(command, t.target, t.action, t.input.denial_reason != null, t.external_eligible);
         t.answer = .{ .accepted = t.rejection == null };
         if (t.rejection) |code| try t.answer.code.set(@tagName(code));
         try queueCommand(r, command.key.slice(), .permission_decision, session, &t.digest, null, null, &t.answer);

@@ -470,7 +470,8 @@ def info_natural_height_case():
                 assert composer_line(choice, draft_row) == composer_line(live, draft_row), (live, choice)
                 live = chrome.frame(master, b"\x1b", lambda screen:
                                     "✓" not in conversation_text(screen) and "FEED-24" in screen and "kept draft" in screen)
-            columns = [rows(live)[chat_footer_row(live)].index("alt+i")]
+            assert "alt+i info" not in live, live
+            columns = [width - 1]
             opened = None
             for column in columns:
                 opened = chrome.frame(master, footer_click(live, column=column),
@@ -512,7 +513,7 @@ def info_natural_height_case():
                          "Copy last answer" not in screen and "FEED-24" in screen and "kept draft" in screen)
             chrome.leave(master, caller)
         assert len(chrome.endpoint.requests) == 1, chrome.endpoint.requests
-    print("session chrome: natural-height info leaves saved feed above; Model grows/shrinks by its rows; model/effort clicks keep feed and draft; the info hint and Alt-I share one transition", flush=True)
+    print("session chrome: natural-height info leaves saved feed above; Model grows/shrinks by its rows; model/effort clicks keep feed and draft; the footer and Alt-I share one transition", flush=True)
 
 
 def approval_overflow_case():

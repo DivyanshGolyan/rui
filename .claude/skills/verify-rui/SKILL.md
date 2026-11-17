@@ -20,7 +20,7 @@ The helper is `scripts/verify-rui`. Set `V=.claude/skills/verify-rui/scripts/ver
 
    If packages are missing, run `src/fetch_dependencies.sh` for the shared package directory and run each pinned worktree’s `src/fetch_screen_dependencies.sh` before building it. Keep its `screen-emulator/zig-pkg` local to that worktree: symlinking it elsewhere breaks relative generator paths in Zig.
 
-   The build refuses a dirty or mismatched checkout. Set `RUI_BUILD_JOBS` to a positive integer to control parallelism for both builds (default `2`; use `1` on constrained containers). It runs `zig build -Doptimize=ReleaseSafe` and copies `zig-out/bin` to `~/.cache/verify-rui/builds/SHA/bin`. It then runs `zig build screen-emulator`, which installs the libghostty-vt that decodes committed frames into `~/.cache/verify-rui/builds/SHA/screen`. It also writes `manifest.json` with the SHA, tree and binary and library sha256 values. A cold build takes about 5 minutes on an M-series Mac, plus about 5 for libghostty-vt. A line saying `failed command: sh ./src/build_transport.sh` in the log is normal when rc=0. Use `build FULLSHA --no-screen` to skip libghostty-vt: the manifest records `screen_library: null`. The tap, tapped `term`, `wait` and `frames` refuse such builds with one line; direct untapped tmux terminals still work. A build made before the library existed has none; rebuild it with `--force` to add it.
+   The build refuses a dirty or mismatched checkout. Set `RUI_BUILD_JOBS` to a positive integer to control parallelism for both builds (default: available CPUs; use `1` on constrained containers). It runs `zig build -Doptimize=ReleaseSafe` and copies `zig-out/bin` to `~/.cache/verify-rui/builds/SHA/bin`. It then runs `zig build screen-emulator`, which installs the libghostty-vt that decodes committed frames into `~/.cache/verify-rui/builds/SHA/screen`. It also writes `manifest.json` with the SHA, tree and binary and library sha256 values. A cold build takes about 5 minutes on an M-series Mac, plus about 5 for libghostty-vt. A line saying `failed command: sh ./src/build_transport.sh` in the log is normal when rc=0. Use `build FULLSHA --no-screen` to skip libghostty-vt: the manifest records `screen_library: null`. The tap, tapped `term`, `wait` and `frames` refuse such builds with one line; direct untapped tmux terminals still work. A cached build without the library is rebuilt when a screen-enabled build is requested.
 
 2. **New run, one per experiment.**
 
@@ -59,6 +59,28 @@ The helper is `scripts/verify-rui`. Set `V=.claude/skills/verify-rui/scripts/ver
 
    Each Rui runs under the tap: an inner PTY proxy that records every byte Rui receives and emits.
 
+## Preview all screens
+
+Use `shots` to preview every state in a build's recipe at its own sizes and compare it with a baseline:
+
+```sh
+$V shots --out CANDIDATE --baseline BASELINE
+```
+
+With no build identifier, `shots` builds the current checkout, including uncommitted changes, in ReleaseSafe and keys it by its content tree, HEAD and release tag (`tree-...`). It defaults to available CPU parallelism; `RUI_BUILD_JOBS` overrides that. Pass a build identifier to `shots` to use an existing build: a full 40-hex commit SHA or a `tree-...` content ID. Set `VERIFY_RUI_CACHE` to an absolute path to override the default `~/.cache/verify-rui`; the build cache must be outside the checkout for current-checkout builds. Make a baseline with `shots` first, and pass its output directory as `--baseline`. Use `--only a,b` to select states or `--no-png` to omit PNGs.
+
+Open `index.html` to review changed and new screens and failures first. `diff.json` lists changed, new and removed entries, the same count and failures. Changes alone succeed; capture failures exit 1. `shots.json` retains each name, size, status, reason, fingerprint and files. The fingerprint covers committed cells, styles, dimensions and terminal colours, excluding cursor and timing.
+
+Full captures include upgrade states and require a dedicated non-root account with `VERIFY_RUI_UPGRADE_FIXTURE_USER` set to its login. Fixture clocks, Session ordering and live memory can vary between runs, so inspect reported differences before attributing them to a build.
+
+For a large preview, use `--shard i/n` to partition states by index modulo n (i is 1-based), then combine the output directories:
+
+```sh
+$V shots-merge OUT1 OUT2 ... --out MERGED --baseline BASELINE
+```
+
+Review failures and fingerprint comparisons in the merged output. See [frames and previews](features/frames.md) for targeted captures and publication.
+
 ## Frames
 
 ```sh
@@ -94,9 +116,9 @@ The publisher selects changed/new pairs by default (`--all` includes same pairs 
 The upload machine needs gh **2.104.0+** with `--attach`, a classic PAT or gh OAuth token, and repository push access. Without `--ssh` the same worker runs locally, for example on Divyansh's box.
 Cloud threads use `--ssh rui-box`: set up the alias with `bash /mnt/project-files/rui-dev/rui-box-up.sh THREAD-NAME` if needed. The publisher copies only selected media and its worker to a fresh remote directory, uploads and verifies there, and removes that directory. Credentials stay on the box.
 Cloud GitHub writes filter image embeds, and their proxy blocks the CLI's GraphQL lookup. Once images are present, **every later PR body edit must also run on the box**: copy the body file there, then use `ssh rui-box 'gh pr edit N -R OWNER/REPO --body-file /path/on/box/body.md'`. Container REST, open_pr.py and MCP body writes would break the screenshots again.
-Open the PR to obtain `N`, then publish before its next push so the synchronize check sees the images. PR Shape runs on opened/synchronize/reopened/ready_for_review, not body edits; if the opening run already failed, publish and manually rerun the failed jobs. The check reads the current body from GitHub.
+Open the PR to obtain `N`, then publish the frames. Screens are required by `admission` for merge; the build and tests run without them. After publishing, rerun only the failed `admission` job; it reads the current body from GitHub, falling back to the event payload if that read fails. Body edits do not trigger a run.
 Show the before/after PNGs to the person who requested the work in your own conversation when possible.
-PR Shape accepts a media line only when, after leading whitespace, it starts with `![`, `<img` or `<video` and contains a `https://github.com/user-attachments/` URL outside fenced code and HTML comments. Inline-code examples, reference images, other image hosts, bare URLs and repository page links do not pass.
+Admission accepts a media line only when, after leading whitespace, it starts with `![`, `<img` or `<video` and contains a `https://github.com/user-attachments/` URL outside fenced code and HTML comments. Inline-code examples, reference images, other image hosts, bare URLs and repository page links do not pass.
 A UI-path change that provably draws nothing different may instead carry a line `No screen change: <nonempty reason>`.
 Humans with browsers may also upload `github.com/user-attachments` images or videos.
 
@@ -155,6 +177,7 @@ Stable handles from the product:
 
 Fixture policy, chosen by the latest user text:
 - `tool demonstration`: three Bash calls (`ls`, `exit 127`, stderr plus `exit 1`), then a summary.
+- `image consent check`: one built-in `read_image` call for `design/checkout.png`, which needs consent in ask mode; no file is read before approval.
 - `consent check`: one 32-line Bash command, which needs consent in `approve`.
 - `long bash`: one Bash command that sleeps 8 s, so a Session runs Bash long enough to stop.
 - `show environment`: one Bash call that prints `CLIENT_MARK`, `HOST_SECRET`, `command -v brew` and `PATH`, so a run can show which terminal's environment Bash got.

@@ -1030,3 +1030,43 @@ test "parent authority refuses omitted defaults across Configure Message and sta
         }
     }.run);
 }
+
+test "start_agent validates its model before parent tool authority" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            var parent_spec = try completeConfiguration("agent-model-order-parent", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
+            parent_spec.configuration.tools = try .of(&.{"start_agent"});
+            const parent = (try storage.configure(&parent_spec, .{})).accepted.session;
+            try submitTestMessage(&storage, &tmp, "agent-model-order-message", "agent-model-order-message", parent.slice(), "start children");
+            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try settleCallsForTesting(&storage, &tmp, model, "agent-model-order-calls", &.{
+                .{ .item_id = "missing", .name = "start_agent", .encoded_call_id = "missing", .decoded_call_id = "missing", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+                .{ .item_id = "null", .name = "start_agent", .encoded_call_id = "null", .decoded_call_id = "null", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+                .{ .item_id = "empty", .name = "start_agent", .encoded_call_id = "empty", .decoded_call_id = "empty", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+            });
+            for (0..3) |index| {
+                const action = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
+                var child: wire_request.ConfigureCommand = .{};
+                child.configuration.model.state = switch (index) {
+                    0 => .omitted,
+                    1 => .explicit_null,
+                    else => .value,
+                };
+                const reason = if (index == 0)
+                    "Rui could not start the agent (incomplete_initial_configuration). Nothing was started."
+                else
+                    "Rui could not start the agent (invalid_model). Nothing was started.";
+                try std.testing.expect(try storage.startAgent(action.binding, parent.slice(), "read", true, &child.configuration, null, .{}) == .failed);
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id WHERE a.action_id=?1 AND a.resolution_code='failed' AND c.digest=?2", .{ action.binding.action_id, store_testing.Blob{ .bytes = &protocol.contentDigest(reason) } }));
+            }
+            try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE parent_ref=?1", .{parent.slice()}));
+            try std.testing.expect(!storage.isFenced());
+        }
+    }.run);
+}

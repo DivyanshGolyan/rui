@@ -16,7 +16,7 @@ from textwrap import dedent
 from unittest.mock import patch
 
 import build_files
-from select_tests import (BUILD_HUB, BUILD_MODULES, CACHE_POLICY, CHECK_COVERS, FIXTURES, LIVE_POSTGRES_TARGETS, LIVE_RULES,
+from select_tests import (ACCEPTANCE_INPUTS, BUILD_HUB, BUILD_MODULES, CACHE_POLICY, CHECK_COVERS, FIXTURES, LIVE_POSTGRES_TARGETS, LIVE_RULES,
                           POLICY_SELF_CHECKS, RENDERER_HARNESSES, RULES, SCREEN_TARGETS, SETUP_PARTS, TEST_CODE, UNIT_ROOTS, Graph, covers, execution_batches, matches, select,
                           setup_requirements, tree_graph, uses_live_mysql, live_mysql_suites, mysql_provisioning)
 from qualification import LONG_GATES, NATIVE, RESOURCES, SHARDS_BESIDE_LONG_GATE, qualification, shards
@@ -1216,6 +1216,7 @@ class SelectionTest(unittest.TestCase):
         self.assertNotIn("check", select(["tests/integration/control_fixture.py"], "review", AVAILABLE)["targets"])
         for path, target in (("control_integration.py", "control-integration"),
                              ("dispatch_integration.py", "dispatch-integration"),
+                             ("read_image_integration.py", "read-image-integration"),
                              ("canonical_failure_integration.py", "canonical-failure-integration")):
             with self.subTest(path=path):
                 result = select([f"tests/integration/{path}"], "review", AVAILABLE)
@@ -1642,7 +1643,8 @@ fi
         self.assertTrue(all(row["targets"] == ["measure-model-output"] for row in rows))
 
     def test_requested_ref_cannot_publish_shared_caches(self):
-        for name in ('qualify-macos.yml', 'previous-release-upgrade.yml', 'release.yml'):
+        read_only = ('qualify-macos.yml', 'previous-release-upgrade.yml', 'release.yml', 'screens.yml')
+        for name in read_only:
             with self.subTest(workflow=name):
                 workflow = Path('.github/workflows', name).read_text()
                 self.assertRegex(workflow, r'(?m)^cache-mode: read$')
@@ -1669,7 +1671,7 @@ fi
                 self.assertEqual(workflow.count("publish-caches: 'false'"),
                                  workflow.count('uses: ./.github/actions/setup'))
         for path in Path('.github/workflows').glob('*.yml'):
-            if path.name not in ('qualify-macos.yml', 'previous-release-upgrade.yml', 'release.yml'):
+            if path.name not in read_only:
                 workflow = path.read_text()
                 if path.name == 'check.yml':
                     policy = re.search(r'(?ms)^  policy:\n(.*?)(?=^  [\w-]+:\n|\Z)', workflow).group(1)
@@ -1739,12 +1741,12 @@ fi
     def test_batches_share_builds_but_isolate_timing_witnesses(self):
         targets = ["test", "dispatch-integration", "transport-h2-integration",
                    "test-full", "admission-debug-integration",
-                   "host-launch-integration", "check-full"]
+                   "host-launch-integration", "check-full", "upgrade-integration"]
         self.assertEqual(execution_batches(targets), [
             ["test", "dispatch-integration"],
             ["transport-h2-integration"],
             ["test-full"], ["admission-debug-integration"],
-            ["host-launch-integration"], ["check-full"],
+            ["host-launch-integration"], ["check-full"], ["upgrade-integration"],
         ])
         self.assertEqual(execution_batches([]), [])
 
@@ -1758,6 +1760,23 @@ fi
             self.assertFalse(select([path], "review", AVAILABLE)["typecheck_macos"], path)
         self.assertTrue(select(["tests/ci/quarantine.json", "src/TerminalText.zig"], "development",
                                AVAILABLE)["typecheck_macos"])
+
+    def test_acceptance_owner_edits_always_select_compiler_backed_regression(self):
+        mutations = {
+            "build.zig": ('    darwin.configureAcceptance(b, ci.directory);\n', ''),
+            "build/darwin.zig": ('if (artifacts != null and b.graph.host.result.os.tag == .macos)',
+                                 'if (artifacts != null)'),
+            "build/ci.zig": ('run.expectExitCode(0);', 'run.expectExitCode(1);'),
+            "tests/ci/native_acceptance_test.py": ('self.assertTrue(observed)', 'self.assertFalse(observed)'),
+        }
+        self.assertEqual(set(mutations), set(ACCEPTANCE_INPUTS))
+        for path, (before, after) in mutations.items():
+            with self.subTest(path=path):
+                self.assertTrue(Path(path).is_file())
+                self.assertTrue(select([path], "review", AVAILABLE,
+                                       contents={path: (before, after)})["cache_execution_checks"])
+                self.assertFalse(select([path], "development", AVAILABLE,
+                                        contents={path: (before, after)})["cache_execution_checks"])
 
     def test_cache_proof_tracks_cache_policy_not_every_runtime_edit(self):
         def cache(path, before=None, after=None):
@@ -1774,7 +1793,7 @@ fi
             self.assertFalse(cache(path), path)
 
         build = "    const run = b.addRunArtifact(tests);\n    run.has_side_effects = true;\n"
-        self.assertFalse(cache("build.zig", build, build + "    // A build comment.\n    const other = b.step(\"x\", \"y\");\n"))
+        self.assertTrue(cache("build.zig", build, build + "    // A build comment.\n    const other = b.step(\"x\", \"y\");\n"))
         self.assertTrue(cache("build.zig", build, build.replace("    run.has_side_effects = true;\n", "")))
         action = Path(".github/actions/setup/action.yml").read_text()
         fixtures = Path(".github/actions/setup/fixtures/action.yml").read_text()
@@ -2265,6 +2284,7 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
     def test_parts_are_disjoint_and_cover_the_unchanged_full_gate(self):
         expected = {
             "admission_integration.sh release", "dispatch_integration.py release",
+            "read_image_integration.py release",
             "bash_owner_integration.py release", "bash_integration.py release",
             "peer_integration.py release", "bash_environment_integration.py release",
             "sender_identity_integration.py release",

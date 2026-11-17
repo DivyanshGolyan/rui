@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import base64
 import hashlib
 import json
 import os
@@ -1182,6 +1183,91 @@ def held_message_denial_cases(state, processes, endpoints):
     print("Held Message: all pending approvals decline before the reason reaches the continuation")
 
 
+def read_image_cases(state, processes, endpoints):
+    fixtures = ROOT / "src"
+    for label, source, mime in (
+        ("png", fixtures / "codecs/fixtures/image-input/pixel.png", "image/png"),
+        ("baseline-jpeg", fixtures / "testing/fixtures/input-baseline.jpg", "image/jpeg"),
+        ("progressive-jpeg", fixtures / "testing/fixtures/input-progressive.jpg", "image/jpeg"),
+    ):
+        workspace = state / ("read-image-" + label)
+        workspace.mkdir()
+        image = workspace / 'image "quoted" 雪.bin'
+        original = source.read_bytes()
+        image.write_bytes(original)
+        call_id = 'read-image-"' + label
+        endpoint = SuccessEndpoint([
+            sse_tool_calls("read-image-" + label, [
+                ("read_image", call_id, json.dumps({"path": image.name}, ensure_ascii=False)),
+            ]),
+            sse_answer("image-answer", "image-reasoning", "image-message", "Image received")[0],
+            sse_answer("replay-answer", "replay-reasoning", "replay-message", "Image replayed")[0],
+        ])
+        thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+        endpoints[endpoint] = thread
+        thread.start()
+        store = workspace / "store"
+        url = f"http://127.0.0.1:{endpoint.server_port}/responses"
+        host = start_host(store, url)
+        processes.append(host)
+        configured = command(
+            "session", "configure", "--store", store, "--workspace", workspace,
+            "--record", state / f"image-{label}-config.json", "--key", f"image-{label}-config",
+            "--provider", "codex", "--model", "gpt-6-sol", "--tools", "read_image",
+            "--permission-mode", "bypass",
+        )
+        assert configured["answer"]["status"] == "accepted", configured
+        session = configured["context"]["session"]
+        key = "image-" + label
+        message(state, store, key, session, "Read the image in this workspace")
+        result, _, _ = wait_for_result_release(store, key, session, time.monotonic() + 15)
+        assert result["result"]["status"] == "completed", result
+        assert read_result(store, key) == b"Image received"
+        assert len(endpoint.requests) == 2, endpoint.requests
+        first, continuation = map(json.loads, endpoint.requests)
+        tools = first.get("tools", []) + [tool for item in first["input"]
+                if item.get("type") == "additional_tools" for tool in item["tools"]]
+        assert any(tool.get("name") == "read_image" for tool in tools), tools
+        outputs = [item for item in continuation["input"] if item.get("type") == "function_call_output"]
+        assert len(outputs) == 1 and outputs[0]["call_id"] == call_id, outputs
+        output = outputs[0]
+        assert isinstance(output["output"], list), output
+        images = [part for part in output["output"] if part.get("type") == "input_image"]
+        assert len(images) == 1, output
+        part = images[0]
+        assert part["detail"] == "auto", part
+        prefix = f"data:{mime};base64,"
+        assert part["image_url"].startswith(prefix), part
+        assert base64.b64decode(part["image_url"][len(prefix):], validate=True) == original, label
+        assert [item for item in continuation["input"] if item.get("role") == "user"] == [
+            {"role": "user", "content": [{"type": "input_text", "text": "Read the image in this workspace"}]},
+        ], continuation
+
+        # A later request must use the saved observation, even without its source file.
+        image.unlink()
+        crash_host(host, state, "image-" + label)
+        processes.remove(host)
+        host = start_host(store, url)
+        processes.append(host)
+        assert read_result(store, key) == b"Image received"
+        replay_key = key + "-replay"
+        message(state, store, replay_key, session, "Recall the image")
+        replay_result, _, _ = wait_for_result_release(store, replay_key, session, time.monotonic() + 15)
+        assert replay_result["result"]["status"] == "completed", replay_result
+        assert read_result(store, replay_key) == b"Image replayed"
+        assert len(endpoint.requests) == 3, endpoint.requests
+        replay = json.loads(endpoint.requests[2])
+        assert [item for item in replay["input"] if item.get("type") == "function_call_output"] == [output], replay
+        assert [item for item in replay["input"] if item.get("type") == "function_call"] == [
+            item for item in continuation["input"] if item.get("type") == "function_call"
+        ], replay
+        assert not image.exists(), "historical replay recreated the source image"
+        stop_host(host)
+        processes.remove(host)
+        stop_endpoint(endpoint, endpoints)
+    print("read_image: PNG and baseline/progressive JPEG exact bytes in tool output; saved replay after source removal and Host restart")
+
+
 def builtin_instruction_cases(state, processes, endpoints, releases):
     workspace = state / 'workspace{} "quoted"\\雪\nSession instructions:'
     workspace.mkdir()
@@ -1335,6 +1421,11 @@ def main(mode="all", correlation_case="all"):
     continuation_diagnostics = None
     completed = False
     try:
+        if mode in ("all", "read-image"):
+            read_image_cases(state, processes, endpoints)
+            if mode == "read-image":
+                completed = True
+                return
         if mode in ("all", "builtin-instructions"):
             builtin_instruction_cases(state, processes, endpoints, releases)
             if mode == "builtin-instructions":
@@ -5551,8 +5642,8 @@ if __name__ == "__main__":
     host_process.enter()
     mode = sys.argv[2] if len(sys.argv) >= 3 else "all"
     correlation_case = sys.argv[3] if len(sys.argv) == 4 else "all"
-    if (len(sys.argv) not in (2, 3, 4) or mode not in ("all", "builtin-instructions", "http-quota", "failure-correlation", "phased-messages", "held-message-denial", "failed-response-export", "empty-answers", "stream-failures", "refusals", "sse-framing")
+    if (len(sys.argv) not in (2, 3, 4) or mode not in ("all", "read-image", "builtin-instructions", "http-quota", "failure-correlation", "phased-messages", "held-message-denial", "failed-response-export", "empty-answers", "stream-failures", "refusals", "sse-framing")
             or correlation_case not in ("all", "rejected", "correlated", "exhausted")
             or (len(sys.argv) == 4 and mode != "failure-correlation")):
-        raise SystemExit("usage: dispatch_integration.py RUI [all|builtin-instructions|sse-framing|http-quota|stream-failures|empty-answers|refusals|failed-response-export|held-message-denial|phased-messages|failure-correlation [all|rejected|correlated|exhausted]]")
+        raise SystemExit("usage: dispatch_integration.py RUI [all|read-image|builtin-instructions|sse-framing|http-quota|stream-failures|empty-answers|refusals|failed-response-export|held-message-denial|phased-messages|failure-correlation [all|rejected|correlated|exhausted]]")
     main(mode, correlation_case)

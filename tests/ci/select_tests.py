@@ -64,6 +64,8 @@ FIXTURES = {
     "admission-debug-integration": ((I + "admission_integration.sh",), (), ()),
     "dispatch-integration": ((I + "dispatch_integration.py",), (), ("src/model_adapter.zig", *MODEL)),
     "dispatch-debug-integration": ((I + "dispatch_integration.py",), (), ()),
+    "read-image-integration": ((I + "read_image_integration.py",), (),
+                               ("src/server_read_image.zig", "src/os/read_image_file.zig", "src/input_media.zig")),
     "bash-integration": ((I + "bash_integration.py",), (), BASH),
     "bash-owner-integration": ((I + "bash_owner_integration.py",), (), BASH),
     "bash-lifecycle-integration": ((I + "bash_lifecycle_integration.py",), (), BASH),
@@ -351,6 +353,7 @@ CACHE_LINE = re.compile(r"zig[-_ ]?cache|\.cache/zig|cache[-_]dir|cache_root|has
                         r"|publish-caches|cache-execution", re.IGNORECASE)
 CACHE_POLICY = (".github/actions/setup/caches/save-keys.cjs", ".github/scripts/prune-caches.cjs", "tests/ci/cache_execution.py", "tests/ci/zig_cache_restat.c",
                 "tests/ci/run_selected.py", "tests/ci/cache_snapshot.py")
+ACCEPTANCE_INPUTS = ("build.zig", "build/ci.zig", "build/darwin.zig", "tests/ci/native_acceptance_test.py")
 
 
 def code_lines(source):
@@ -549,7 +552,7 @@ STACK_FRAMES = ("src/*", "build.zig", "build.zig.zon", "tests/ci/stack_frames.py
 
 CHECK_COVERS = {
     "test", "test-native", "test-store", "test-h2", "test-pg", "admission-integration", "dispatch-integration",
-    "bash-owner-integration", "bash-lifecycle-integration", "bash-recovery-integration",
+    "read-image-integration", "bash-owner-integration", "bash-lifecycle-integration", "bash-recovery-integration",
     "bash-integration", "bash-environment-integration", "codex-integration", "control-integration",
     "host-status-integration", "host-launch-integration", "host-stop-integration",
     "descriptor-capacity-integration", "request-wait-integration",
@@ -605,7 +608,7 @@ def execution_batches(targets, check_part="all"):
         raise ValueError(f"Unknown full-check part: {check_part}")
     isolated = {"check", "check-full", "admission-debug-integration", "test-full",
                 "host-launch-integration", "server-delivery-integration",
-                "transport-h2-integration", "codex-h2-integration"}
+                "transport-h2-integration", "codex-h2-integration", "upgrade-integration"}
     shared = [target for target in targets if target not in isolated]
     return (([shared] if shared else [])
             + [[target, "-Dcheck-part=callers"] if target == "check-full" and check_part == "callers"
@@ -782,7 +785,7 @@ def select(paths, phase, available, graph=None, contents=None, fixture_literals=
     for reason, served_by in live_reasons:
         if not targets & served_by:
             raise ValueError(f"{reason!r} selected none of the targets that start its server: {sorted(served_by)}")
-    cache_execution_checks = phase == "review" and (any(path in CACHE_POLICY for path in paths)
+    cache_execution_checks = phase == "review" and (any(path in CACHE_POLICY or path in ACCEPTANCE_INPUTS for path in paths)
                                                     or "cache_policy" in content_changed)
     typecheck_macos = any(matches(path, TYPECHECK_INPUTS) or path in graph.compiled for path in paths)
     missing = (targets | native_targets) - available

@@ -26,6 +26,7 @@ const rsql = @import("../rsql.zig");
 const store_access = @import("../access.zig");
 const Store = store_core.Store;
 const action_domain = @import("action.zig");
+const sourced_input = @import("sourced_input.zig");
 const command_domain = @import("command.zig");
 const configuration_domain = @import("configuration.zig");
 const content_domain = @import("content.zig");
@@ -240,7 +241,7 @@ pub const FirstCandidates = struct {
 };
 
 pub const person_message_sql = "SELECT admitted_at FROM message_admission @index(message_admission_person) " ++
-    "WHERE session_ref=?1 AND sender_session_ref IS NULL AND source_action_id IS NULL ORDER BY admission_position DESC LIMIT 1";
+    "WHERE session_ref=?1 AND " ++ sourced_input.personSql("message_admission") ++ " ORDER BY admission_position DESC LIMIT 1";
 
 pub const person_message = rsql.Read(.{
     .sql = person_message_sql,
@@ -547,7 +548,7 @@ fn firstApprovalSql(comptime session: []const u8) []const u8 {
         "JOIN model_operation source_operation ON source_operation.operation_id=approval.parent_operation_id " ++
         "JOIN turn source_turn ON source_turn.turn_id=source_operation.turn_id " ++
         "WHERE approval.session_ref=" ++ session ++ " AND " ++
-        action_domain.permissionDecisionEligibleSql("approval", "source_turn", false) ++ " AND " ++
+        action_domain.externalDecisionEligibleSql("approval", "source_turn") ++ " AND " ++
         "NOT " ++ action_domain.actionStoppedSql("approval", "source_operation") ++ " ORDER BY approval.action_id LIMIT 1";
 }
 

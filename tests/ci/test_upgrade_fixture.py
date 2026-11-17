@@ -141,33 +141,72 @@ class UpgradeEmptyChatTest(unittest.TestCase):
                         self.assertEqual(build, owner.root / "retained")
 
     def test_chat_footer_rejects_upgrade_notices_before_and_after_relaunch(self):
-        self.assertIn("alt+i info", self.observe("alt+i info"))
-        for footer in (self.notice, "Upgraded to another version · Host restarted", "",
+        self.assertIn("gpt-6-luna", self.observe(""))
+        for footer in (self.notice, "Upgraded to another version · Host restarted", "alt+i info",
                        "alt+i info · upgraded to 0.76.0", "alt+i info  Upgraded to 0.76.0"):
             with self.subTest(footer=footer), self.assertRaises(NotReady):
                 self.observe(footer)
         with self.assertRaises(NotReady):
-            self.observe("alt+i info", model="wrong-model")
+            self.observe("", model="wrong-model")
 
-    def test_quiet_version_is_below_settings_not_a_version_elsewhere(self):
-        version = "0.76.0"
-        valid = [f"Settings\n  38 MB    {version} ", f"Settings │ chat\n {version} │ model"]
-        invalid = [f"Settings {version}\n footer", f"Settings\nUpdate to {version}",
-                   f"Settings\nrui 38 MB {version}", f"Settings\n38 MB tools 12 MB {version}",
-                   f"Settings\n{version}\nUpgraded to {version}",
-                   f"Settings\n{version}\n · upgraded to {version}",
-                   f"Settings\n0.76.1\n{version}", f"Settings\n38 MB\n{version}"]
+    def test_sidebar_keeps_memory_with_settings_and_hides_current_version(self):
+        valid = ["Settings    38 MB", "  Settings    1.5 GB │ chat\n footer │ model"]
+        invalid = ["Settings\n  38 MB", "Settings 0.76.0\n footer",
+                   "Settings\n38 MB 0.76.0", "Settings    38 MB 0.76.0",
+                   "Settings    38 MB\n0.76.1", "Settings    38 MB\nunreleased",
+                   "Settings    rui 38 MB", "Settings    38 MB · tools 12 MB",
+                   "Settings    38 MB    Update to 0.76.0", "Settings    38 MB    Updating…",
+                   "Settings    38 MB    Update failed", "Settings │ 38 MB",
+                   "Settings    38 MB\nUpgraded to 0.76.0",
+                   "Settings    38 MB\n · upgraded to 0.76.0"]
         for frame in valid:
             self.screen.observe = lambda: frame
             with self.subTest(frame=frame):
-                self.assertEqual(frame, self.screen.quiet_version(version))
+                self.assertEqual(frame, self.screen.sidebar())
         for frame in invalid:
             self.screen.observe = lambda: frame
             with self.subTest(frame=frame), self.assertRaises(NotReady):
-                self.screen.quiet_version(version)
+                self.screen.sidebar()
+
+    def test_sidebar_readiness_uses_real_junctions_and_ignores_chat_versions(self):
+        for horizontal, vertical, crossing, ending in (("─", "│", "┼", "┤"), ("-", "|", "+", "+")):
+            for junction, pane in ((crossing, horizontal * 30), (ending, " " * 30)):
+                frame = "\n".join((horizontal * 40 + junction + pane,
+                                   "  Settings    38 MB".ljust(40) + vertical + " gpt-6-luna 0.76.0"))
+                self.screen.observe = lambda: frame
+                with self.subTest(junction=junction, horizontal=horizontal):
+                    self.assertEqual(frame, self.screen.sidebar())
+            self.screen.observe = lambda: horizontal * 46 + "\n  Settings    38 MB"
+            self.assertEqual(self.screen.observe(), self.screen.sidebar())
+
+    def test_empty_chat_accepts_ascii_and_unsplit_footer_rows(self):
+        for prefix in ("", " " * 40 + "|", " " * 40 + "│"):
+            self.case.json.reset_mock()
+            self.case.json.side_effect = [copy.deepcopy(self.report), copy.deepcopy(self.listing)]
+            frame = prefix + " gpt-6-luna · low"
+            self.screen.observe = lambda: frame
+            with self.subTest(prefix=prefix):
+                self.assertEqual(frame, self.screen.empty_chat(self.case, self.session))
+
+    def test_sidebar_update_failure_replaces_memory_with_a_short_label(self):
+        for frame in ("Settings    Update failed",
+                      "  Settings    Update failed │ chat"):
+            self.screen.observe = lambda: frame
+            with self.subTest(frame=frame):
+                self.assertEqual(frame, self.screen.sidebar(failed=True))
+        for frame in ("Settings\nUpdate failed", "Settings    38 MB\nUpdate failed",
+                      "Settings    38 MB    Update failed", "Settings    1.5 GB    Update failed │ chat",
+                      "Settings    Update failed: Couldn't reach GitHub",
+                      "Settings    Update failed: Upgrade failed",
+                      "Settings    Update failed 0.76.0",
+                      "Settings    Update failed\n0.76.0",
+                      "Settings    Update failed │ chat\n · upgraded to 0.76.0"):
+            self.screen.observe = lambda: frame
+            with self.subTest(frame=frame), self.assertRaises(NotReady):
+                self.screen.sidebar(failed=True)
 
     def test_public_identity_and_zero_messages_remain_required(self):
-        footer = "alt+i info"
+        footer = ""
         self.case.json.reset_mock()
         self.observe(footer)
         self.assertEqual(self.case.json.call_args_list, [

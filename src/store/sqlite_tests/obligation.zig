@@ -33,8 +33,8 @@ fn expectDescendantHistoryCost(kind: DescendantHistory) !void {
         try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=OFF");
         const seed = try std.testing.allocator.printSentinel(
             "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
-                "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at) " ++
-                "SELECT value,'{1s}',printf('excluded-%d',value),1,value+1,1 FROM sequence; " ++
+                "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at,source_kind) " ++
+                "SELECT value,'{1s}',printf('excluded-%d',value),1,value+1,1,1 FROM sequence; " ++
                 "INSERT INTO session_stop(command_key,session_ref,admission_cutoff,position,stopped_at) VALUES('history-stop','{1s}',{0},{0}+2,1); " ++
                 "UPDATE session SET next_position={0}+3 WHERE session_ref='{1s}'",
             .{ history, child.slice() },

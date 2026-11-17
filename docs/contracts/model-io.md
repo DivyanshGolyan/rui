@@ -172,8 +172,8 @@ Triggers are positive token counts; output reservation is nonnegative extra heur
 Current inspection shows effective values and whether each value is a Session override.
 Current inspection also reports `context_estimate`: the estimated tokens the next model call starts from (eligible accepted usage, estimated bytes / 4 and output reservation), read by the same facts purpose selection reads, when that selection would compare it with the trigger.
 It is null without a trigger and when the next call's purpose does not depend on it: a Session's first call, the call after a compaction, a recovery compaction and context unchanged since the last compaction.
-So whenever it is shown, it reaches the trigger exactly when a model call admitted at that moment compacts, and the Session line's `0% left` means that.
-When non-null, chat info’s Context field shows it beside the trigger, and the conversation’s Session line shows the share of the trigger it leaves.
+So whenever it is shown, it reaches the trigger exactly when a model call admitted at that moment compacts, and the chat footer's `0% context left` means that.
+When non-null, chat info’s Context field shows it beside the trigger; once at least half is used, the chat footer shows the share of the trigger it leaves.
 Resolve policy once before purpose selection and freeze the effective values on the admitted Operation.
 The Operation INSERT also freezes its model's effective context window from the selected saved-or-shipped catalog, in the same statement and Store hold, with no additional Store round.
 Only absence of a catalog source selects shipped facts; an authoritative saved generation with a missing model or null window uses the 128,000-token unlisted estimate, and a non-null window, including zero, is preserved.

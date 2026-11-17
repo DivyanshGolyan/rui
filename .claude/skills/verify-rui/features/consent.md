@@ -16,9 +16,11 @@ In Session `approve`, or after choosing **ask first** in Chat info's **Permissio
 
 ## Driving it with verify-rui
 
-Frame states: `approval`, `approval-hover`, `approval-typing`, `approval-after-esc`
+Frame states: `approval`, `approval-hover`, `approval-typing`, `approval-after-esc`, `read-image-approval`
 
 Run `$V frames FULLSHA --only approval,approval-hover,approval-typing,approval-after-esc` for the request, Deny hover, retained draft and return to the selector.
+
+The `read-image-approval` state proposes the built-in `read_image` tool in ask mode, showing its exact path arguments and **Allow once**/**Deny** without an MCP Server label. The source file need not exist while approval is pending. This is a new state on revisions that offer `read_image`; it cannot run on an earlier revision without that tool.
 
 Use a fresh terminal on `--session approve` with `doctor` PASS for side effects:
 

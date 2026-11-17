@@ -83,6 +83,16 @@ class PrepushTest(unittest.TestCase):
         self.assertNotIn("tests/ci", commands)
         self.assertNotIn("development selection", commands)
 
+    def test_compiler_backed_acceptance_proof_remains_focused_local_feedback(self):
+        for path in select_tests.ACCEPTANCE_INPUTS:
+            for mode in ("default", "quick"):
+                with self.subTest(path=path, mode=mode):
+                    self.file("tests/ci/native_acceptance_test.py")
+                    self.commands([path])
+                    commands = dict(prepush.checks([path], AVAILABLE, "BASE", mode))
+                    self.assertIn("tests/ci: native_acceptance_test.py", commands)
+                    self.assertNotIn("tests/ci", commands)
+
     def test_verify_rui_map_inputs_select_the_map_test(self):
         for path in (".claude/skills/verify-rui/scripts/frames.json",
                      ".claude/skills/verify-rui/features/README.md",
@@ -214,8 +224,11 @@ class PrepushTest(unittest.TestCase):
         without = dict(prepush.checks(paths, AVAILABLE, "BASE", "full"))
         with_server = dict(prepush.checks(paths, AVAILABLE, "BASE", "full", mysql=True))
         for full in (without, with_server):
-            self.assertEqual(set(full) - set(default), {"development selection", "macOS type check", "unfiltered unit compile", "stack frames", "live MySQL"})
-            self.assertEqual({name: full[name] for name in default}, default)
+            focused = {name for name in default if name.startswith("tests/ci:")}
+            self.assertEqual(set(full) - set(default), {"tests/ci (CI policy suite)", "development selection", "macOS type check", "unfiltered unit compile", "stack frames", "live MySQL"})
+            self.assertEqual(set(default) - set(full), focused)
+            self.assertEqual({name: full[name] for name in default if name not in focused},
+                             {name: command for name, command in default.items() if name not in focused})
             self.assertEqual(full["unfiltered unit compile"], prepush.unit_compile())
             self.assertEqual(full["stack frames"], ["zig", "build", "-j1", "stack-frames", "-Dcpu=baseline", "--summary", "line"])
         self.assertEqual(with_server["live MySQL"], ["env", "RUI_TEST_REQUIRE_ENGINES=mysql", "zig", "build", "test-store", "--summary", "line"])

@@ -301,7 +301,7 @@ One Host function derives the required Message `state` with this precedence; rea
 `binding` carries the bound Turn, its current Operation and Attempt, including after a terminal result; it replaces the former `processing` object and says nothing by itself about completion.
 Only nonterminal accepted Messages carry `work`, with the same Session `state` value as Current and list rows and nullable `first_action`, the earliest actionable Permission Request's Action ID.
 The required `attention` (nullable), `group` and `actions` members carry the Host's derived values; `actions` requires `stop`, nullable `interrupt` and nullable `decide`.
-After a newer Message supersedes an approval, `first_action` and `actions.decide` are null even while the work remains `approval` and the Message remains `waiting_for_permission` until automatic denial is recorded.
+After a newer Message supersedes an approval, `first_action` and `actions.decide` are null even while the work remains `approval` and the Message remains `waiting_for_permission` until automatic denial is recorded and the work advances.
 A promoted background Action can remain actionable after its original Turn ends when no later Message or stop supersedes it.
 There is no separate coarse work status or duplicate Turn/Operation binding in `work`.
 CLI `request inspect` adds `as_of` beside `key`, its Unix seconds at render, so a caller can compare that decimal string with `work.state.since` without knowing the time.

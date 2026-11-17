@@ -9,6 +9,8 @@ from pathlib import Path
 ALLOWLIST = ("DivyanshGolyan",)
 HOSTED = "macos-15"
 SELF_HOSTED = ["self-hosted", "macOS", "ARM64", "rui-mac"]
+# The dedicated macOS account the runner service uses (tests/ci/mac-runner/install.sh).
+RUNNER_USER = "ruici"
 
 
 def _object(value):
@@ -35,7 +37,7 @@ def admission(event_name, event, actor, triggering_actor, repository, allowlist=
     return True, "The run satisfies the trusted Mac admission policy."
 
 
-def decide(event_name, event, actor, triggering_actor, repository, inputs, switch, runners):
+def decide(event_name, event, actor, triggering_actor, repository, inputs, switch, runners, queue=None):
     """Return a runs-on value and one sentence explaining the scheduling snapshot."""
     if switch == "off":
         return HOSTED, "Hosted macOS is selected because RUI_MAC_RUNNER is off."
@@ -47,15 +49,23 @@ def decide(event_name, event, actor, triggering_actor, repository, inputs, switc
         return HOSTED, reason
     if runners is None:
         return HOSTED, "Hosted macOS is selected because runner status is unavailable."
+    keys = ("mac_queued", "hosted_queued", "hosted_running")
+    valid_queue = isinstance(queue, dict) and all(type(queue.get(key)) is int and queue[key] >= 0 for key in keys)
+    counts = (f" Mac queued: {queue['mac_queued']}, hosted queued: {queue['hosted_queued']},"
+              f" hosted running: {queue['hosted_running']}." if valid_queue else " Queue data is unavailable.")
     if isinstance(runners, list):
         for runner in runners:
             runner = _object(runner)
             labels = runner.get("labels")
-            if (runner.get("status") == "online" and runner.get("busy") is False
-                    and isinstance(labels, list)
+            if (runner.get("status") == "online" and isinstance(labels, list)
                     and any(_object(label).get("name") == "rui-mac" for label in labels)):
-                return SELF_HOSTED.copy(), "The allowlisted run will use the online, idle rui-mac runner."
-    return HOSTED, "Hosted macOS is selected because no rui-mac runner is online and idle."
+                if runner.get("busy") is False:
+                    return SELF_HOSTED.copy(), "The allowlisted run will use the online, idle rui-mac runner." + counts
+                if (runner.get("busy") is True and valid_queue
+                        and queue["mac_queued"] < queue["hosted_queued"] + (queue["hosted_running"] >= 5)):
+                    return SELF_HOSTED.copy(), "The online rui-mac queue is shorter than the hosted backlog." + counts
+    return HOSTED, "Hosted macOS is selected because no eligible rui-mac runner has a shorter queue or is idle." + counts
+
 
 
 def registration_record(name, runner_id=None):
@@ -131,12 +141,17 @@ def main():
             payload = json.loads(status.read_text())
             if isinstance(payload, dict) and isinstance(payload.get("runners"), list):
                 runners = payload["runners"]
+        queue = None
+        try:
+            queue = json.loads(Path(os.environ.get("QUEUE_PATH", "queue.json")).read_text())
+        except (OSError, ValueError):
+            pass
         runs_on, reason = decide(
             os.environ.get("GITHUB_EVENT_NAME"),
             json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text()),
             os.environ.get("GITHUB_ACTOR"), os.environ.get("GITHUB_TRIGGERING_ACTOR"),
             os.environ.get("GITHUB_REPOSITORY"), json.loads(os.environ.get("INPUTS", "{}")),
-            os.environ.get("RUI_MAC_RUNNER"), runners,
+            os.environ.get("RUI_MAC_RUNNER"), runners, queue,
         )
     except (OSError, ValueError, KeyError, TypeError):
         # Status fetch/JSON failures and malformed events must never block CI.

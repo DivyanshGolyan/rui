@@ -725,6 +725,16 @@ test "served work intents imply admission across permission and control states" 
                 try std.testing.expectEqual(scenario == .approval or scenario == .mixed, work.actions.decide != null);
                 try std.testing.expectEqual(work.actions.decide, work.first_action);
                 if (scenario == .mixed) try std.testing.expect(work.actions.decide.? > old_action);
+                if (scenario == .message_decline) {
+                    // The approval is still settling, but no external decision is actionable.
+                    const observed = try store_testing.observeCommandForTesting(&storage, "intent-first");
+                    try std.testing.expectEqual(protocol.MessageRequestState.waiting_for_permission, observed.requestState().?);
+                    var response: protocol.CommandObservationBuffer = .{};
+                    try response.render(@import("../../host_reply.zig").renderFullCommandObservation, .{ "intent-first", &observed, @as(?[]const u8, null) });
+                    const decoded = try @import("../../protocol_reply.zig").CommandObservation.parse(.{ .status = 200, .body = response.bytes[0..response.len] }, "intent-first");
+                    try std.testing.expectEqual(protocol.MessageRequestState.waiting_for_permission, decoded.state.?);
+                    try std.testing.expectEqual(@as(?u64, null), decoded.work.?.first_action);
+                }
                 if (scenario == .message_decline or scenario == .mixed) {
                     const bytes = try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, .current);
                     defer std.testing.allocator.free(bytes);

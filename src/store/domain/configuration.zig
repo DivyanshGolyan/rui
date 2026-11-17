@@ -432,6 +432,9 @@ pub fn inheritParent(host_tool_set: *const tool_defs.HostToolSet, configuration:
     if (!reads.inherits_parent) return null;
     if (!reads.parent_found.get()) return .unknown_session;
     if (reads.parent_checked) return if (reads.parent_failure) |failure| failure.code else null;
+    // start_agent checks parent authority before the ordinary validation round.
+    // Do not cache authority against an image profile for an absent or invalid model.
+    if (modelRejection(true, &configuration.model)) |code| return code;
     const failure: ?ParentFailure = refusal: {
         if (configuration.workspace.state != .omitted) break :refusal .{ .code = .parent_workspace_forbidden };
         if (configuration.provider.state != .omitted) break :refusal .{ .code = .parent_provider_forbidden };
@@ -442,6 +445,7 @@ pub fn inheritParent(host_tool_set: *const tool_defs.HostToolSet, configuration:
             .parent = .{ .tools = reads.inherited.tools.slice(), .permission_mode = try permissionMode(reads.inherited.permission_mode) },
             .provider = reads.inherited.provider,
             .model = configuration.model.value.slice(),
+            .can_read_images = @import("../../os/read_image_file.zig").available,
             .tools = &configuration.tools,
             .loaded_tools = &configuration.loaded_tools,
             .permission_mode = &configuration.permission_mode,
@@ -648,7 +652,7 @@ pub noinline fn prepareConfiguration(a: anytype, host_tool_set: *const tool_defs
     if (!creating) readSaved(a, session, &reads.next, &reads.found);
     if (creating and configuration.parent.state == .value) prepareParent(a, configuration.parent.value.slice(), reads);
     if (creating or configuration.tools.state == .value) {
-        reads.tools = .of(host_tool_set, if (creating) configuration_defaults.creationTools(&configuration.tools) else &configuration.tools);
+        reads.tools = .of(host_tool_set, if (creating) configuration_defaults.creationTools(&configuration.tools, configuration.model.value.slice(), @import("../../os/read_image_file.zig").available) else &configuration.tools);
         if (reads.tools) |*tools| tool_set.lookupSelection(a, tools);
     }
     const instructions: ?*content_domain.Import = if (configuration.instructions.state == .value) requested: {
@@ -898,6 +902,7 @@ fn validateModel(a: anytype, request: *const Request, reads: *ConfigurationReads
         .parent = if (reads.inherits_parent) .{ .tools = reads.inherited.tools.slice(), .permission_mode = try permissionMode(reads.inherited.permission_mode) } else null,
         .provider = provider,
         .model = model,
+        .can_read_images = @import("../../os/read_image_file.zig").available,
         .tools = configuration.tools,
         .loaded_tools = configuration.loaded_tools,
         .permission_mode = configuration.permission_mode,

@@ -332,8 +332,16 @@ pub const start_agent_record: Record = .{
 
 pub const web_search_record: Record = .{ .name = "web_search", .owner = .provider };
 
+pub const read_image_record: Record = .{
+    .name = "read_image",
+    .owner = .rui,
+    .description = "Read a PNG or JPEG image from a regular file on the Host. Relative paths resolve in the Session Workspace; absolute paths may name other Host-local files. Returns a saved image observation. URLs and special files are not supported.",
+    .input_schema = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":4096}},\"required\":[\"path\"],\"additionalProperties\":false}",
+};
+
 pub const Runner = enum {
     bash,
+    read_image,
     core,
     mcp,
     provider,
@@ -341,6 +349,7 @@ pub const Runner = enum {
     pub fn beforeAdmissionStopText(self: Runner) []const u8 {
         return switch (self) {
             .bash => @import("bash_action_text.zig").stopped_before_admission,
+            .read_image => @import("action_text.zig").stopped_before_admission,
             .mcp => @import("mcp/action_text.zig").stopped_before_admission,
             .core => @import("action_text.zig").stopped_before_admission,
             .provider => unreachable,
@@ -350,6 +359,7 @@ pub const Runner = enum {
     pub fn stoppedText(self: Runner, _: anytype, result: []const u8) []const u8 {
         return switch (self) {
             .bash => @import("bash_action_text.zig").stopped_before_admission,
+            .read_image => "Stopped before this image read completed.",
             .mcp => result,
             .core, .provider => unreachable,
         };
@@ -358,6 +368,7 @@ pub const Runner = enum {
     pub fn indeterminateText(self: Runner) []const u8 {
         return switch (self) {
             .bash => @import("bash_action_text.zig").indeterminate,
+            .read_image => "The Host stopped before saving this image read result. The read may have completed; it was not automatically repeated.",
             .mcp => @import("mcp/action_text.zig").indeterminate,
             .core, .provider => unreachable,
         };
@@ -379,6 +390,7 @@ pub const built_in_rows = std.enums.EnumArray(Tool, BuiltInRow).init(.{
     .find_tools = .{ .record = &find_tools_record, .runner = .core },
     .message_agent = .{ .record = &message_agent_record, .runner = .core },
     .read_action = .{ .record = &read_action_record, .runner = .core },
+    .read_image = .{ .record = &read_image_record, .runner = .read_image },
     .read_transcript = .{ .record = &read_transcript_record, .runner = .core },
     .skill = .{ .record = &skill_record, .runner = .core },
     .start_agent = .{ .record = &start_agent_record, .runner = .core },

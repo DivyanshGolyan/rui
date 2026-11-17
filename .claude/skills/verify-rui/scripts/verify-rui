@@ -29,6 +29,7 @@ import tarfile
 import threading
 import time
 import tempfile
+import unicodedata
 from urllib.parse import quote
 
 CACHE = pathlib.Path(os.environ.get("VERIFY_RUI_CACHE", pathlib.Path.home() / ".cache/verify-rui"))
@@ -172,34 +173,118 @@ def store_arg(run):
 
 
 def cmd_build(args):
-    jobs = os.environ.get("RUI_BUILD_JOBS", "2")
+    jobs = os.environ.get("RUI_BUILD_JOBS", str(os.cpu_count() or 1))
     if not re.fullmatch(r"[0-9]+", jobs) or int(jobs) < 1:
         die("RUI_BUILD_JOBS must be a positive integer")
-    sha = args.sha
-    if not re.fullmatch(r"[0-9a-f]{40}", sha):
-        die("build needs a full 40-hex commit SHA")
-    source = pathlib.Path(args.source).resolve() if args.source else CACHE / "src" / sha
+    def release_tag(source):
+        result = subprocess.run(["git", "-C", str(source), "describe", "--tags", "--exact-match",
+                                 "--match", "v[0-9]*.[0-9]*.[0-9]*", "HEAD"],
+                                capture_output=True, text=True)
+        return result.stdout.strip() if result.returncode == 0 else None
+
+    here = getattr(args, "here", False)
+    if here:
+        if args.sha or args.source:
+            die("--here cannot be combined with a SHA or --source")
+        origin = args.repo or os.getcwd()
+        source = pathlib.Path(subprocess.check_output(
+            ["git", "-C", origin, "rev-parse", "--show-toplevel"], text=True).strip()).resolve()
+        head = subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip()
+        head_tree = subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD^{tree}"], text=True).strip()
+        def source_tree():
+            with tempfile.TemporaryDirectory(prefix="verify-rui-index-") as tmp:
+                index_path = pathlib.Path(tmp) / "index"
+                index_env = dict(os.environ, GIT_INDEX_FILE=str(index_path))
+                actual_index = pathlib.Path(subprocess.check_output(
+                    ["git", "-C", str(source), "rev-parse", "--git-path", "index"], text=True).strip())
+                if not actual_index.is_absolute():
+                    actual_index = source / actual_index
+                if actual_index.exists():
+                    shutil.copyfile(actual_index, index_path)
+                else:
+                    subprocess.run(["git", "-C", str(source), "read-tree", "HEAD"], env=index_env, check=True)
+                subprocess.run(["git", "-C", str(source), "add", "-A", "--", "."], env=index_env, check=True)
+                return subprocess.check_output(["git", "-C", str(source), "write-tree"], env=index_env, text=True).strip()
+
+        def check_source():
+            current_head = subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip()
+            if current_head != head or source_tree() != tree or release_tag(source) != tag:
+                die("build source changed since the build was identified")
+
+        tree = source_tree()
+        tag = release_tag(source)
+        identity = json.dumps([tree, head, tag], separators=(",", ":")).encode()
+        sha = "tree-" + hashlib.sha256(identity).hexdigest()
+        dirty = tree != head_tree
+    else:
+        sha = args.sha
+        if not sha or not re.fullmatch(r"[0-9a-f]{40}", sha):
+            die("build needs a full 40-hex commit SHA or --here")
+        source = pathlib.Path(args.source).resolve() if args.source else CACHE / "src" / sha
+    if (CACHE / "builds").resolve().is_relative_to(source.resolve()):
+        die("build cache must be outside the checkout")
+    if not here:
+        origin = args.repo or str(HERE.parents[4])
+        if not source.exists():
+            source.parent.mkdir(parents=True, exist_ok=True)
+            subprocess.run(["git", "-C", origin, "fetch", "--quiet", "origin", sha], check=False)
+            subprocess.run(["git", "-C", origin, "worktree", "add", "--detach", str(source), sha], check=True)
+        head = subprocess.run(["git", "-C", str(source), "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+        dirty = subprocess.run(["git", "-C", str(source), "status", "--porcelain", "--untracked-files=no"],
+                               capture_output=True, text=True, check=True).stdout
+        if head != sha or dirty:
+            die(f"source {source} is not a clean checkout of {sha} (HEAD {head}, dirty={bool(dirty)})")
+        tree = subprocess.run(["git", "-C", str(source), "rev-parse", "HEAD^{tree}"], capture_output=True, text=True, check=True).stdout.strip()
+        tag = release_tag(source)
     build = CACHE / "builds" / sha
     manifest = build / "manifest.json"
+
+    def ensure_upgrade(record):
+        if not here and not getattr(args, "upgrade", False):
+            return
+        actor = build / "bin/rui-upgrade-release-fixture"
+        existing = record.get("upgrade_actor", {})
+        if (existing.get("sha") == sha and existing.get("tree") == tree
+                and actor.is_file() and sha256(actor) == existing.get("sha256")):
+            return
+        if not here:
+            actor_source = pathlib.Path(record["source"])
+            actor_head = subprocess.check_output(["git", "-C", str(actor_source), "rev-parse", "HEAD"], text=True).strip()
+            actor_dirty = subprocess.check_output(["git", "-C", str(actor_source), "status", "--porcelain", "--untracked-files=no"], text=True)
+            if actor_head != sha or actor_dirty:
+                die("upgrade actor requires the clean pinned source")
+        else:
+            actor_source = source
+            check_source()
+        env = dict(os.environ)
+        if args.pkg_dir:
+            env["ZIG_LOCAL_PKG_DIR"] = args.pkg_dir
+        with open(build / "upgrade-build.log", "w") as log:
+            result = subprocess.run(["zig", "build", "upgrade-fixture", f"-j{jobs}"],
+                                    cwd=actor_source, env=env, stdout=log, stderr=subprocess.STDOUT)
+        if result.returncode:
+            die(f"upgrade actor build failed; see {build / 'upgrade-build.log'}")
+        shutil.copy2(actor_source / "zig-out/bin/rui-upgrade-release-fixture", actor)
+        record["upgrade_actor"] = {"binary": str(actor), "sha256": sha256(actor), "sha": sha, "tree": tree}
     if manifest.exists() and not args.force:
         record = json.loads(manifest.read_text())
-        if getattr(args, "upgrade", False):
-            build_upgrade_actor(record, args, jobs)
-            manifest.write_text(json.dumps(record, indent=1) + "\n")
-        print(json.dumps(record, indent=1))
-        return
-    origin = args.repo or str(HERE.parents[4])
-    if not source.exists():
-        source.parent.mkdir(parents=True, exist_ok=True)
-        subprocess.run(["git", "-C", origin, "fetch", "--quiet", "origin", sha], check=False)
-        subprocess.run(["git", "-C", origin, "worktree", "add", "--detach", str(source), sha], check=True)
-    head = subprocess.run(["git", "-C", str(source), "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
-    dirty = subprocess.run(["git", "-C", str(source), "status", "--porcelain", "--untracked-files=no"],
-                           capture_output=True, text=True, check=True).stdout
-    if head != sha or dirty:
-        die(f"source {source} is not a clean checkout of {sha} (HEAD {head}, dirty={bool(dirty)})")
-    tree = subprocess.run(["git", "-C", str(source), "rev-parse", "HEAD^{tree}"], capture_output=True, text=True, check=True).stdout.strip()
+        if record.get("sha") != sha:
+            die(f"build directory {build} contains a different build; use --force")
+        screen = record.get("screen_library")
+        if record.get("release_tag", object()) == tag and (args.no_screen or (screen and pathlib.Path(screen).is_file())):
+            if here:
+                record.update(head=head, dirty=dirty, source=str(source))
+            if here or getattr(args, "upgrade", False):
+                tree = record["tree"]
+                ensure_upgrade(record)
+                if here:
+                    check_source()
+                manifest.write_text(json.dumps(record, indent=1) + "\n")
+            print(json.dumps(record, indent=1))
+            return
     build.mkdir(parents=True, exist_ok=True)
+    # A failed rebuild must not leave a manifest pointing at overwritten artifacts.
+    manifest.unlink(missing_ok=True)
     env = dict(os.environ)
     if args.pkg_dir:
         env["ZIG_LOCAL_PKG_DIR"] = args.pkg_dir
@@ -220,37 +305,22 @@ def cmd_build(args):
         shutil.rmtree(bin_dir)
     shutil.copytree(source / "zig-out/bin", bin_dir, symlinks=False)
     files = {p.name: sha256(p) for p in sorted(bin_dir.iterdir())}
-    record = {"sha": sha, "tree": tree, "source": str(source), "binary": str(bin_dir / "rui"),
+    record = {"sha": sha, "tree": tree, "release_tag": tag, "source": str(source), "binary": str(bin_dir / "rui"),
               "screen_library": str(screen_library) if screen_library else None,
               "screen_library_sha256": sha256(screen_library) if screen_library else None,
               "files_sha256": files, "optimize": "ReleaseSafe", "built_at": wall(),
               "build_seconds": round(time.monotonic() - started, 1),
               "zig": subprocess.run(["zig", "version"], capture_output=True, text=True).stdout.strip(),
               "host": os.uname().nodename, "macos": macos_version()}
-    if getattr(args, "upgrade", False):
-        build_upgrade_actor(record, args, jobs)
+    if here:
+        record.update(head=head, dirty=dirty)
+    ensure_upgrade(record)
+    if here:
+        check_source()
+    elif release_tag(source) != tag:
+        die("build source changed since the build was identified")
     manifest.write_text(json.dumps(record, indent=1) + "\n")
     print(json.dumps(record, indent=1))
-
-
-def build_upgrade_actor(record, args, jobs):
-    source = pathlib.Path(record["source"])
-    head = subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip()
-    dirty = subprocess.check_output(["git", "-C", str(source), "status", "--porcelain", "--untracked-files=no"], text=True)
-    if head != record["sha"] or dirty:
-        die("upgrade actor requires the clean pinned source")
-    env = dict(os.environ)
-    if args.pkg_dir:
-        env["ZIG_LOCAL_PKG_DIR"] = args.pkg_dir
-    build = CACHE / "builds" / record["sha"]
-    with open(build / "upgrade-build.log", "w") as log:
-        result = subprocess.run(["zig", "build", "upgrade-fixture", f"-j{jobs}"], cwd=source,
-                                env=env, stdout=log, stderr=subprocess.STDOUT)
-    if result.returncode:
-        die(f"upgrade actor build failed; see {build / 'upgrade-build.log'}")
-    actor = build / "bin/rui-upgrade-release-fixture"
-    shutil.copy2(source / "zig-out/bin/rui-upgrade-release-fixture", actor)
-    record["upgrade_actor"] = {"binary": str(actor), "sha256": sha256(actor), "sha": record["sha"], "tree": record["tree"]}
 
 
 def upgrade_actor(build):
@@ -262,8 +332,10 @@ def upgrade_actor(build):
     return path
 
 
-def load_build(sha):
-    manifest = CACHE / "builds" / sha / "manifest.json"
+def load_build(sha, cache=None):
+    if not re.fullmatch(r"(?:[0-9a-f]{40}|tree-[0-9a-f]{64})", sha):
+        die("build identifier must be a full 40-hex commit SHA or tree- content id")
+    manifest = (CACHE if cache is None else cache) / "builds" / sha / "manifest.json"
     if not manifest.exists():
         die(f"no build for {sha}; run: verify-rui build {sha}")
     return json.loads(manifest.read_text())
@@ -365,6 +437,7 @@ def fixture_main(args):
     Policy (by the latest user text, or by a pending tool result):
       * after a function_call_output: echo tool summary, or believable prose in realistic mode
       * text containing "tool demonstration": three Bash calls (ls, exit 127, stderr+exit 1)
+      * text containing "image consent check": one read_image call for design/checkout.png (needs approval in ask mode)
       * text containing "consent check": one 32-line Bash command (needs approval in ask mode)
       * text containing "long tool output": one Bash call that prints 32 numbered lines
       * text containing "long bash": one Bash command that sleeps 8 s
@@ -491,6 +564,10 @@ def fixture_main(args):
                 # A stream the provider adapter cannot read: the Turn fails.
                 kind = "invalid-output"
                 payload = b"data: {not json\n\n"
+            elif user_text and "image consent check" in user_text:
+                kind = "image-consent-call"
+                payload = fixture.sse_tool_calls(f"r{n}", [
+                    ("read_image", f"c{n}", json.dumps({"path": "design/checkout.png"}))])
             elif user_text and "consent check" in user_text:
                 kind = "consent-call"
                 command = "set -eu\n" + "\n".join(f"printf 'step {k:02d}\\n' >> progress.log" for k in range(1, 31)) + "\nwc -l progress.log"
@@ -568,9 +645,9 @@ def tap_main(args):
     import struct
     import termios
     import tty
-    source = pathlib.Path(args.source)
-    head = subprocess.run(["git", "-C", str(source), "rev-parse", "HEAD"], capture_output=True, text=True, check=True)
-    build = load_build(head.stdout.strip())
+    run = Run(args.run)
+    source = pathlib.Path(run.meta["source"])
+    build = load_build(run.meta["sha"], cache=run.root.parent.parent)
     require_screen(build)
     term = pathlib.Path(args.term_dir)
     term.mkdir(parents=True, exist_ok=True)
@@ -808,9 +885,13 @@ def cmd_restart_host(args):
     print(json.dumps({"stopped": [r["pid"] for r in old], "instance": json.loads(status.stdout).get("instance")}))
 
 
+def build_run_tag(identifier):
+    return identifier.removeprefix("tree-")[:7]
+
+
 def cmd_new(args):
     build = load_build(args.sha)
-    run_id = time.strftime("%Y%m%dT%H%M%S") + f"-{args.sha[:7]}-{os.getpid()}"
+    run_id = time.strftime("%Y%m%dT%H%M%S") + f"-{build_run_tag(args.sha)}-{os.getpid()}"
     root = CACHE / "runs" / run_id
     scratch = SCRATCH_PARENT / f"vr.{os.getpid()}.{int(time.time()) % 100000}"
     for path in (root / "evidence", scratch / "home", scratch / "project", scratch / "tmp", scratch / "tmux"):
@@ -910,7 +991,7 @@ def cmd_doctor(args):
     check("binary matches pinned build", run.rui.exists() and sha256(run.rui) == build["files_sha256"]["rui"] == run.meta["binary_sha256"],
           f"{run.rui} sha256={sha256(run.rui) if run.rui.exists() else 'missing'}")
     head = subprocess.run(["git", "-C", run.meta["source"], "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
-    check("source is pinned SHA", head == run.meta["sha"], f"{run.meta['source']} HEAD={head}")
+    check("source is pinned SHA", head == build.get("head", build.get("sha", run.meta["sha"])), f"{run.meta['source']} HEAD={head}")
     if args.expect_sha:
         check("run SHA is the expected head", run.meta["sha"] == args.expect_sha, f"run={run.meta['sha']} expected={args.expect_sha}")
     default_store = pathlib.Path.home() / ".local/share/rui/store"
@@ -1016,7 +1097,7 @@ def cmd_term(args):
     for assignment in args.setenv:
         key, _, value = assignment.partition("=")
         child_env[key] = value.replace("{PATH}", child_env["PATH"]) if key == "PATH" else value
-    tap = [python, str(HERE), "_tap", str(term), "--source", run.meta["source"], "--cwd", str(run.project),
+    tap = [python, str(HERE), "_tap", str(term), "--run", str(run.root), "--cwd", str(run.project),
            "--env", json.dumps(child_env), "--size", args.size]
     record = {"name": name, "surface": args.surface, "session": args.session, "argv": argv, "size": args.size,
               "tapped": not args.no_tap, "setenv": args.setenv, "t_ns": now_ns(), "wall": wall()}
@@ -1075,7 +1156,7 @@ def attach_client(run, name, size):
     term.mkdir(parents=True)
     python = sys.executable
     argv = [shutil.which("tmux") or "/opt/homebrew/bin/tmux", "-S", str(run.sock), "attach-session", "-t", f"=verify-rui:={name}"]
-    process = subprocess.Popen([python, str(HERE), "_tap", str(term), "--source", run.meta["source"], "--cwd", str(run.project),
+    process = subprocess.Popen([python, str(HERE), "_tap", str(term), "--run", str(run.root), "--cwd", str(run.project),
                                 "--env", json.dumps(run.env()), "--size", size, "--mode", "fifo", "--", *argv],
                                stdin=subprocess.DEVNULL, stdout=open(term / "tap.log", "w"), stderr=subprocess.STDOUT,
                                start_new_session=True)
@@ -1713,8 +1794,8 @@ def cmd_physical(args):
         env_file = term / "env.json"
         env_file.write_text(json.dumps(run.env(COLORTERM="truecolor")))
         script = run.scratch / f"{name}.command"
-        script.write_text("#!/bin/sh\nprintf '\\033]0;verify-rui %s (owned test window)\\007'\nexec %s %s _tap %s --source %s --cwd %s --env @%s --mode terminal --hold -- %s\n" % (
-            name, shlex.quote(python), shlex.quote(str(HERE)), shlex.quote(str(term)), shlex.quote(run.meta["source"]),
+        script.write_text("#!/bin/sh\nprintf '\\033]0;verify-rui %s (owned test window)\\007'\nexec %s %s _tap %s --run %s --cwd %s --env @%s --mode terminal --hold -- %s\n" % (
+            name, shlex.quote(python), shlex.quote(str(HERE)), shlex.quote(str(term)), shlex.quote(str(run.root)),
             shlex.quote(str(run.project)), shlex.quote(str(env_file)), shlex.join(argv)))
         script.chmod(0o700)
         atomic_write(term / "term.json", json.dumps({"name": name, "surface": "gui", "app": args.app, "argv": argv, "script": str(script)}, indent=1))
@@ -2181,7 +2262,7 @@ def validate_scenario(data, sizes=None):
         require(state.get("upgrade") in (None, "current", "available", "updating", "failure", "chat"), f"{name}: invalid upgrade scenario")
         sides = state.get("comparison", {})
         require(isinstance(sides, dict) and set(sides) <= {"before", "after"}
-                and all(isinstance(value, dict) and set(value) <= {"expect", "absent", "expect_next", "expect_last", "expect_dim", "absent_regex", "expect_regex"}
+                and all(isinstance(value, dict) and set(value) <= {"expect", "absent", "expect_next", "expect_last", "expect_dim", "absent_regex", "expect_regex", "absent_sidebar_regex", "expect_sidebar_regex", "expect_sidebar_rule"}
                         for value in sides.values()), f"{name}: invalid comparison oracle")
         env = state.get("env", {})
         require(isinstance(env, dict) and all(isinstance(k, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", k)
@@ -2293,6 +2374,13 @@ def validate_scenario(data, sizes=None):
         for pattern in regexes:
             re.compile(pattern)
         frame_absent_regex(state)
+        for key in ("expect_sidebar_regex", "absent_sidebar_regex"):
+            patterns = state.get(key, [])
+            require(isinstance(patterns, list) and all(isinstance(pattern, str) and pattern and "\0" not in pattern for pattern in patterns),
+                    f"{name}: {key} must be a list of nonempty regular expressions")
+            for pattern in patterns:
+                re.compile(pattern)
+        require(type(state.get("expect_sidebar_rule", False)) is bool, f"{name}: expect_sidebar_rule must be boolean")
         for text in frame_absences(state):
             match = re.fullmatch(r"\{session:(.+)\}", text)
             require(match is None or match.group(1) in labels,
@@ -2588,6 +2676,36 @@ class FrameTerminal:
         self.process.output.check()
 
 
+def frame_cell_width(text):
+    return sum(0 if unicodedata.combining(char) else
+               2 if unicodedata.east_asian_width(char) in ("W", "F") else 1 for char in text)
+
+
+def frame_split_row(line, column=None):
+    for index, char in enumerate(line):
+        if column is not None:
+            if frame_cell_width(line[:index]) == column and char in "│|┼┤+":
+                return line[:index], char, line[index + 1:]
+        elif char in "│|":
+            right = line[index + 1:].strip()
+            left = line[:index]
+            if (left and (set(left) <= {"─"} or set(left) <= {"-"})) or (right and (set(right) <= {"─"} or set(right) <= {"-"})):
+                return line[:index], char, line[index + 1:]
+        elif char in "┼┤+":
+            left, right = line[:index], line[index + 1:]
+            if left and (set(left) <= {"─"} or set(left) <= {"-"}):
+                return left, char, right
+    return "", "", line
+
+
+def frame_divider_column(lines):
+    for line in lines:
+        left, divider, _ = frame_split_row(line)
+        if divider:
+            return frame_cell_width(left)
+    return None
+
+
 def frame_wait(run, terminal, text, absent=False, timeout=20, allow_exit=False, empty_composer=False):
     def ready(capture):
         if (text in capture.completed) == absent:
@@ -2598,7 +2716,10 @@ def frame_wait(run, terminal, text, absent=False, timeout=20, allow_exit=False, 
         x, y = capture.frame.cursor
         if y >= len(lines):
             return False
-        line = lines[y].rsplit("│", 1)[-1].strip()
+        column = frame_divider_column(lines)
+        if column is None and x > 40:
+            column = 40
+        line = frame_split_row(lines[y], column)[2].strip()
         return capture.frame.visible and line == "›"
     terminal.wait(ready,
                   f"{'absence of ' if absent else ''}{text!r}", timeout, allow_exit)
@@ -2692,6 +2813,33 @@ def frame_initial_ready(terminal, first_wait=None, allow_exit=False):
 
 def frame_row_failure(state, plain):
     lines = plain.splitlines()
+    column = frame_divider_column(lines)
+    rows = [frame_split_row(line, column) for line in lines]
+    sidebar = [left if divider else pane for left, divider, pane in rows]
+    for pattern in state.get("expect_sidebar_regex", []):
+        matched = False
+        for index, text in enumerate(sidebar):
+            if not re.fullmatch(pattern, text):
+                continue
+            if state.get("expect_sidebar_rule", False):
+                if index == 0:
+                    continue
+                previous, separator, right = rows[index - 1]
+                rule = previous if separator else right
+                if not rule or not (set(rule) <= {"─"} or set(rule) <= {"-"}):
+                    continue
+                if rows[index][1] and (not separator or separator == rows[index][1]):
+                    continue
+                if separator and rows[index][1] == "":
+                    continue
+            matched = True
+            break
+        if not matched:
+            return f"missing sidebar row matching {pattern!r}"
+    for pattern in state.get("absent_sidebar_regex", []):
+        for text in sidebar:
+            if re.fullmatch(pattern, text):
+                return f"unexpected sidebar row matching {pattern!r}: {text!r}"
     if (last := state.get("expect_last")) and (not lines or last not in lines[-1]):
         return f"last physical row must contain {last!r}"
     for row, detail in state.get("expect_next", {}).items():
@@ -2925,7 +3073,7 @@ def frame_upgrade_run(run, state, build):
             if isinstance(value, list):
                 return [expand(item, regex) for item in value]
             if isinstance(value, dict):
-                return {expand(key): expand(item, key in ("expect_regex", "absent_regex")) for key, item in value.items()}
+                return {expand(key): expand(item, key in ("expect_regex", "absent_regex", "expect_sidebar_regex", "absent_sidebar_regex")) for key, item in value.items()}
             return value
         observed = {"actor": build["upgrade_actor"], "version": version, "candidate": candidate,
                     "selected": str(selected), "mode": mode}
@@ -2951,11 +3099,57 @@ def frame_upgrade_viewport(run, terminal, state):
         frame_steps(run, terminal, [{"keys": ["Esc"]}, {"wait": "Settings"}])
 
 
+def frame_chat_ready(plain, witness=None, empty=False):
+    if any(marker in plain for marker in ("Opening…", "Reading this Session", "Host paused", "Notifications")):
+        return False
+    lines = plain.splitlines()
+
+    def is_rule(line):
+        line = line.strip()
+        return bool(line) and (set(line) <= {"─"} or set(line) <= {"-"})
+
+    for index in range(max(1, len(lines) - 6), len(lines) - 1):
+        left, divider, right = frame_split_row(lines[index])
+        if divider:
+            if not is_rule(right):
+                continue
+            column = frame_cell_width(left)
+        elif is_rule(lines[index]):
+            column = None
+        else:
+            continue
+
+        def pane(line):
+            if column is None:
+                return line
+            _, found, text = frame_split_row(line, column)
+            return text if found else ""
+
+        top = next((i for i in range(index - 1, -1, -1) if is_rule(pane(lines[i]))), None)
+        if top is None or top + 1 >= index:
+            continue
+        prompt = pane(lines[top + 1])
+        if re.match(r"^\s*[›>](?:\s|$)", prompt) is None:
+            continue
+        if empty and (top + 2 != index or re.fullmatch(r"\s*[›>]\s+Type a task\s*", prompt) is None):
+            continue
+        footer = []
+        for line in lines[index + 1:index + 4]:
+            text = pane(line)
+            if is_rule(text):
+                break
+            footer.append(text)
+        if not any(line.strip() for line in footer):
+            continue
+        if witness is None or any(witness in pane(line) for line in lines[:top]):
+            return True
+    return False
+
+
 def frame_failure_settled(terminal, before):
     marker = "! Couldn't reach GitHub; nothing changed" if before else "Update failed"
-    terminal.wait(lambda c: marker in c.completed and "Host paused" not in c.completed
-                  and "Reading this Session" not in c.completed
-                  and (before or "alt+i info" in c.completed), "failed Upgrade reread the open conversation")
+    terminal.wait(lambda c: marker in c.completed and frame_chat_ready(c.completed, empty=True),
+                  "failed Upgrade reread the open conversation")
 
 
 def frame_drive_upgrade(run, terminal, state, fixture):
@@ -2970,34 +3164,28 @@ def frame_drive_upgrade(run, terminal, state, fixture):
             return
         terminal.wait(lambda _c: f"/releases/tag/v{releases.version}" in releases.requests, "release discovery HTTP response")
         return
-    if before:
-        frame_steps(run, terminal, [{"mouse": {"at": "Settings", "do": "click"}}, {"wait": "Notifications"},
-                                    {"keys": ["Down"] * 5 + ["Enter"]}])
-    else:
-        frame_wait(run, terminal, version)
-        terminal.mouse({"at": version, "do": "click"})
+    frame_steps(run, terminal, [{"mouse": {"at": "Settings", "do": "click"}}, {"wait": "Notifications"},
+                                {"keys": ["Down"] * 5 + ["Enter"]}])
     if gate is not None:
-        if before:
-            frame_wait(run, terminal, " · publishing", timeout=40)
-        else:
-            selected = run.home / ".local/bin/rui"
-            terminal.wait(lambda c: selected.resolve() != run.home / ".local/lib/rui/old/bin/rui"
-                          and "Updating…" in c.completed, "published release held before Host activation", timeout=40)
+        frame_wait(run, terminal, " · publishing", timeout=40)
     elif state["upgrade"] == "failure":
-        frame_wait(run, terminal, "couldn't reach GitHub" if before else "Update failed")
+        frame_wait(run, terminal, "couldn't reach GitHub")
     else:
         selected = run.home / ".local/bin/rui"
         import os_semantics
         terminal.wait(lambda c: os_semantics.process_executable(terminal.process.pid) == selected.resolve()
-                      and (f"Upgraded to {version}" if before else "alt+i info") in c.completed
-                      and "Notifications" not in c.completed,
+                      and frame_chat_ready(c.completed, state["open"])
+                      and (not before or f"Upgraded to {version}" in c.completed),
                       "installed release relaunched the same conversation", timeout=40)
         status = json.loads(frame_command(run.rui_cmd("host", "status", "--store", run.store), "upgraded Host status").stdout)
         if status["instance"] == run.meta["upgrade_previous_instance"]:
             raise FrameFailure("Upgrade did not replace the original Host instance")
         return
-    if before:
-        frame_steps(run, terminal, [{"keys": ["Esc"]}, {"gone": "Notifications"}])
+    frame_steps(run, terminal, [{"keys": ["Esc"]}, {"gone": "Notifications"}])
+    if gate is not None and not before:
+        selected = run.home / ".local/bin/rui"
+        terminal.wait(lambda c: selected.resolve() != run.home / ".local/lib/rui/old/bin/rui"
+                      and "Updating…" in c.completed, "published release held before Host activation", timeout=40)
     if state["upgrade"] == "failure":
         frame_failure_settled(terminal, before)
 
@@ -3037,16 +3225,16 @@ def frame_upgrade_journey(run, terminal, state, fixture, out, size):
         shot("retry-updating", ["Updating…"], ["Update failed", "Notifications"])
         gate.release.set()
         selected = run.home / ".local/bin/rui"
-        quiet = {"expect_next": {"Settings": version},
-                 "expect_regex": [rf"^\s*\d+(?:\.\d+)? (?:MB|GB)\s+{re.escape(version)}\s*(?:│.*)?$"]}
+        quiet = {"expect_sidebar_regex": [r" *Settings +\d+(?:\.\d+)? (?:MB|GB) *"], "expect_sidebar_rule": True}
         terminal.wait(lambda c: selected.resolve() != run.home / ".local/lib/rui/old/bin/rui"
                       and frame_row_failure(quiet, c.completed) is None
                       and "Updating…" not in c.completed and "Update failed" not in c.completed
+                      and version not in c.completed
                       and "Notifications" not in c.completed, "retry installed the selected release", timeout=40)
         status = json.loads(frame_command(run.rui_cmd("host", "status", "--store", run.store), "retry Host status").stdout)
         if status["status"] != "ready" or status["instance"] == run.meta["upgrade_previous_instance"]:
             raise FrameFailure("retry did not replace the original Host with a ready Host")
-        shot("retry-completed", [version, "Settings"], ["Updating…", "Update failed", "Notifications"], **quiet)
+        shot("retry-completed", ["Settings"], [version, "Update to ", "Updating…", "Update failed", "Notifications"], **quiet)
         frame_steps(run, terminal, [{"mouse": {"at": "Settings", "do": "click"}}, {"wait": "Notifications"},
                                     {"keys": ["Down"] * 5 + ["Enter"]}, {"wait": " · up to date"}])
         shot("settings-version-up-to-date", ["Version", " · up to date"], ["Update failed"])
@@ -3104,7 +3292,7 @@ def run_frames(args):
                                        active_capacity=2, host_setenv=[]))
     except BaseException:
         # Even a partially initialized run must be torn down; cmd_new writes run.json first.
-        candidates = sorted((CACHE / "runs").glob(f"*-{args.sha[:7]}-{os.getpid()}"))
+        candidates = sorted((CACHE / "runs").glob(f"*-{build_run_tag(args.sha)}-{os.getpid()}"))
         if candidates and not args.keep:
             with contextlib.redirect_stdout(sys.stderr):
                 try:
@@ -3123,6 +3311,24 @@ def run_frames(args):
     out = pathlib.Path(args.out).resolve() if args.out else run.evidence / "frames"
     records = []
     failed = False
+
+    def capture_failure(target, state, size, reason):
+        # Freeze the last committed frame before rendering it. A resize can fail
+        # before or after the requested viewport has committed.
+        try:
+            frame = target.frame
+        except (Exception, SystemExit):
+            # A collector error may make the normal accessor refuse reads;
+            # retain the last frame the collector had already committed.
+            with target.condition:
+                frame = target.capture.frame
+        if frame is None:
+            raise FrameFailure("Rui produced no committed frame")
+        actual = (frame.columns, frame.lines)
+        if actual != size:
+            reason = f"{reason} (last committed frame is {size_name(actual)}; requested {size_name(size)})"
+        return frame_capture(run, argparse.Namespace(frame=frame), out, state, size, reason)
+
     try:
         out.mkdir(parents=True, exist_ok=True)
         (out / "scenario.json").write_text(json.dumps(scenario_snapshot(scenario), indent=2) + "\n")
@@ -3131,6 +3337,7 @@ def run_frames(args):
         for state in scenario["states"][:last + 1]:
             if state.get("upgrade") and state["name"] not in selected:
                 continue
+            state_started = time.monotonic_ns() if getattr(args, "timing", False) else None
             if state.get("upgrade") and not parent_paused:
                 frame_pause_owned_host(run)
                 parent_paused = True
@@ -3184,7 +3391,7 @@ def run_frames(args):
                           "(not selected; its failure does not fail this run)", file=sys.stderr)
                 if opened and is_selected:
                     try:
-                        failure_capture = frame_capture(run, target, out, state, state_sizes[0], reason)
+                        failure_capture = capture_failure(target, state, state_sizes[0], reason)
                     except (Exception, SystemExit):
                         pass  # The capture error below retains the primary state failure.
             try:
@@ -3206,8 +3413,14 @@ def run_frames(args):
                             record = frame_capture(run, target, out, state, size, reason)
                         except (Exception, SystemExit) as error:
                             failed = True
-                            record = {"name": state["name"], "size": size_name(size), "files": {}, "status": "failed", "ok": False,
-                                      "reason": reason or str(error), "sha": args.sha, "note": state.get("note", "")}
+                            failure_reason = reason or str(error)
+                            try:
+                                if target is None:
+                                    raise FrameFailure("terminal did not launch")
+                                record = capture_failure(target, state, size, failure_reason)
+                            except (Exception, SystemExit):
+                                record = {"name": state["name"], "size": size_name(size), "files": {}, "status": "failed", "ok": False,
+                                          "reason": failure_reason, "sha": args.sha, "note": state.get("note", "")}
                         failed = failed or not record["ok"]
                         if not record["ok"] and reason is None:
                             print(f"verify-rui: {state['name']}@{record['size']}: {record['reason']}", file=sys.stderr)
@@ -3256,6 +3469,9 @@ def run_frames(args):
                         raise SystemExit(1)
                     finally:
                         run = parent_run
+                        if state_started is not None and is_selected:
+                            append_jsonl(out / "state-timings.jsonl", {
+                                "name": state["name"], "elapsed_ns": time.monotonic_ns() - state_started})
                 if is_selected:
                     frames_index(out, records, False)
         if not args.no_png:
@@ -3332,28 +3548,35 @@ def paired_frames(out, head, base, new_states=()):
     pairs.sort(key=lambda pair: pair["same"])
     result = dict(head=head, base=base, pairs=pairs)
     (out / "pairs.json").write_text(json.dumps(result, indent=2) + "\n")
+    render_paired_frames(out, pairs)
+    return result
+
+
+def render_paired_frames(out, pairs):
+    """Render paired captures for both frame comparisons and shots diffs."""
     sections = []
     for pair in pairs:
         caption = html.escape(f"{pair['name']} · {pair['size']}")
         views = []
         for side in ("before", "after"):
-            if side == "before" and pair["new"]:
-                views.append("<td><p>New screen</p></td>")
+            record = pair.get(side)
+            if record is None:
+                message = "New screen" if side == "before" and (pair.get("new") or pair.get("label") == "new") else "No capture"
+                views.append(f"<td><p>{message}</p></td>")
                 continue
-            record = pair[side]
             files = record["files"]
             media = files.get("gif", files.get("png"))
             view = (f'<img src="{html.escape(media, quote=True)}" alt="{side} {caption}">' if media else
                     f'<iframe title="{side} {caption}" src="{html.escape(files["html"], quote=True)}"></iframe>'
                     if "html" in files else "No capture")
-            views.append(f'<td><p>{side}: {html.escape(record["reason"] or record["status"])}</p>{view}</td>')
-        status = "new" if pair["new"] else "same" if pair["same"] else "changed"
-        sections.append(f'<section><h2>{caption} — {status}</h2><table><tr>{"".join(views)}</tr></table></section>')
+            status = record.get("reason") or record.get("status", "ok" if record.get("ok") else "failed")
+            views.append(f'<td><p>{side}: {html.escape(status)}</p>{view}</td>')
+        status = pair.get("label") or ("new" if pair.get("new") else "same" if pair.get("same") else "changed")
+        sections.append(f'<section><h2>{caption} — {html.escape(status)}</h2><table><tr>{"".join(views)}</tr></table></section>')
     (out / "index.html").write_text('<!doctype html><meta charset="utf-8"><title>Rui before / after</title>'
         '<style>body{font:16px system-ui;background:#ddd;padding:20px}table{width:100%;table-layout:fixed}'
         'td{width:50%;vertical-align:top}img{max-width:100%}iframe{width:100%;height:900px;border:0}</style>'
         + "\n".join(sections))
-    return result
 
 
 def revision_scenario(sha, sizes):
@@ -3427,6 +3650,198 @@ def cmd_frames(args):
     print(out)
     if failed:
         raise SystemExit(1)
+
+
+def shot_records(path):
+    records = json.loads((path / "shots.json").read_text())
+    if not isinstance(records, list):
+        raise ValueError("shots.json must contain a list")
+    keys = set()
+    for record in records:
+        key = (record["name"], record["size"])
+        if key in keys:
+            raise ValueError(f"duplicate capture: {key[0]}@{key[1]}")
+        keys.add(key)
+        if not isinstance(record["files"], dict) or not isinstance(record["ok"], bool):
+            raise ValueError(f"invalid capture: {key[0]}@{key[1]}")
+    return records
+
+
+def copy_shot_files(records, source, target, prefix=""):
+    copied = []
+    for record in records:
+        files = {}
+        for ext, name in record["files"].items():
+            rel = pathlib.Path(name)
+            path = source / rel
+            if rel.is_absolute() or not path.resolve().is_relative_to(source.resolve()) or not path.is_file():
+                raise ValueError(f"invalid capture file: {name}")
+            dest = pathlib.Path(prefix) / rel
+            destination = target / dest
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if destination.exists():
+                raise ValueError(f"duplicate capture file: {dest}")
+            shutil.copy2(path, destination)
+            files[ext] = dest.as_posix()
+        copied.append({**record, "files": files})
+    return copied
+
+
+def shots_diff(out, records, baseline, selected=None):
+    previous = shot_records(baseline)
+    if selected is not None:
+        previous = [record for record in previous if record["name"] in selected]
+    previous = copy_shot_files(previous, baseline, out, "baseline")
+    old = {(r["name"], r["size"]): r for r in previous}
+    new = {(r["name"], r["size"]): r for r in records}
+    diff = {"changed": [], "new": [], "removed": [], "same_count": 0, "failed": []}
+    pairs = []
+    for key in sorted(old.keys() | new.keys()):
+        before, after = old.get(key), new.get(key)
+        pair = {"name": key[0], "size": key[1], "before": before, "after": after}
+        if (after and not after["ok"]) or (before and not before["ok"]):
+            diff["failed"].append(pair)
+            pairs.append({**pair, "label": "failed"})
+        elif before is None:
+            diff["new"].append(pair)
+            pairs.append({**pair, "label": "new"})
+        elif after is None:
+            diff["removed"].append(pair)
+        elif before.get("fingerprint") and before["fingerprint"] == after.get("fingerprint"):
+            diff["same_count"] += 1
+        else:
+            diff["changed"].append(pair)
+            pairs.append({**pair, "label": "changed"})
+    pairs.sort(key=lambda pair: (pair["label"] != "failed", pair["name"], pair["size"]))
+    (out / "diff.json").write_text(json.dumps(diff, indent=2) + "\n")
+    render_paired_frames(out, pairs)
+    return bool(diff["failed"])
+
+
+def shots_output(path):
+    out = pathlib.Path(path).resolve() if path else CACHE / "shots" / str(time.time_ns())
+    if out.exists() and (not out.is_dir() or any(out.iterdir())):
+        raise ValueError(f"shots output must be empty: {out}")
+    out.mkdir(parents=True, exist_ok=True)
+    return out
+
+
+
+def cmd_shots(args):
+    try:
+        identifier = args.build
+        if identifier is None:
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                cmd_build(argparse.Namespace(sha=None, here=True, repo=None, source=None,
+                                             pkg_dir=None, force=False, no_screen=False, upgrade=True))
+            identifier = json.loads(output.getvalue())["sha"]
+        build = load_build(identifier)
+        raw = subprocess.check_output(["git", "-C", build["source"], "show",
+                                       f"{build['tree']}:.claude/skills/verify-rui/scripts/frames.json"], text=True)
+        scenario = validate_scenario(json.loads(raw), None)
+        metadata = {"build": build.get("sha", identifier), "tree": build["tree"],
+                    "recipe_sha256": hashlib.sha256(raw.encode("utf-8")).hexdigest()}
+        states = scenario["states"]
+        selected = set(args.only.split(",")) if args.only else {s["name"] for s in states}
+        unknown = selected - {s["name"] for s in states}
+        if unknown:
+            raise ValueError("unknown states: " + ", ".join(sorted(unknown)))
+        if args.shard:
+            match = re.fullmatch(r"([0-9]+)/([0-9]+)", args.shard)
+            if not match or int(match[2]) < 1 or not 1 <= int(match[1]) <= int(match[2]):
+                raise ValueError("--shard must be i/n with 1 <= i <= n")
+            index, count = int(match[1]) - 1, int(match[2])
+            selected &= {s["name"] for i, s in enumerate(states) if i % count == index}
+        if args.no_png:
+            for state in states:
+                state["record"] = False
+        out = shots_output(args.out)
+        failed = False
+        with tempfile.TemporaryDirectory(prefix="verify-rui-shots-") as temporary:
+            recipe = pathlib.Path(temporary) / "frames.json"
+            recipe.write_text(json.dumps(scenario_snapshot(scenario)))
+            if selected:
+                child = argparse.Namespace(sha=identifier, scenario=str(recipe), sizes=None,
+                    only=",".join(s["name"] for s in states if s["name"] in selected),
+                    out=str(out), no_png=args.no_png, record=False, keep=False, timing=True)
+                with contextlib.redirect_stdout(sys.stderr):
+                    try:
+                        run_frames(child)
+                    except SystemExit as error:
+                        if error.code != 1:
+                            raise
+                        failed = True
+                frames = json.loads((out / "frames.json").read_text())
+            else:
+                frames = []
+                frames_index(out, [], False)
+        records = [{"name": r["name"], "size": r["size"], "ok": r["ok"],
+                    "reason": r["reason"], "fingerprint": r.get("cells_sha256"), "files": r["files"]}
+                   for r in frames]
+        (out / "shots.json").write_text(json.dumps(records, indent=2) + "\n")
+        if args.baseline:
+            scope = selected if args.only or args.shard else None
+            failed = shots_diff(out, records, pathlib.Path(args.baseline).resolve(), scope) or failed
+        failed = failed or any(not r["ok"] for r in records)
+        (out / "shots-meta.json").write_text(json.dumps({**metadata, "failed": failed}, indent=2) + "\n")
+        print(out)
+        if failed:
+            raise SystemExit(1)
+    except (OSError, ValueError, TypeError, KeyError, subprocess.CalledProcessError) as error:
+        die(f"cannot capture shots: {error}")
+
+
+def cmd_shots_merge(args):
+    try:
+        inputs = [(pathlib.Path(path).resolve(), None) for path in args.directories]
+        inputs = [(path, shot_records(path)) for path, _ in inputs]
+        metadata = []
+        failures = []
+        provenance_keys = {"build", "tree", "recipe_sha256"}
+        for path, _ in inputs:
+            meta_path = path / "shots-meta.json"
+            if not meta_path.exists():
+                metadata.append(None)
+                failures.append(False)
+                continue
+            meta = json.loads(meta_path.read_text())
+            if not isinstance(meta, dict) or not isinstance(meta.get("failed", False), bool):
+                raise ValueError(f"invalid shots metadata: {meta_path}")
+            provenance = {key: value for key, value in meta.items() if key != "failed"}
+            if ((not provenance and "failed" not in meta) or set(provenance) not in (set(), provenance_keys)
+                    or (provenance and (not all(isinstance(value, str) and value for value in provenance.values())
+                                        or not re.fullmatch(r"[0-9a-f]{64}", provenance["recipe_sha256"])) )):
+                raise ValueError(f"invalid shots provenance: {meta_path}")
+            metadata.append(provenance or None)
+            failures.append(meta.get("failed", False))
+        if any(meta != metadata[0] for meta in metadata[1:]):
+            raise ValueError("shots inputs have different or missing build provenance")
+        seen = set()
+        for _, records in inputs:
+            for record in records:
+                key = (record["name"], record["size"])
+                if key in seen:
+                    raise ValueError(f"duplicate capture: {key[0]}@{key[1]}")
+                seen.add(key)
+        out = shots_output(args.out)
+        records = []
+        for source, shard in inputs:
+            records.extend(copy_shot_files(shard, source, out))
+        records.sort(key=lambda r: (r["name"], r["size"]))
+        (out / "shots.json").write_text(json.dumps(records, indent=2) + "\n")
+        failed = any(failures)
+        if args.baseline:
+            failed = shots_diff(out, records, pathlib.Path(args.baseline).resolve()) or failed
+        else:
+            frames_index(out, [{**r, "status": "ok" if r["ok"] else "failed", "note": ""} for r in records], True)
+        failed = failed or any(not r["ok"] for r in records)
+        (out / "shots-meta.json").write_text(json.dumps({**(metadata[0] or {}), "failed": failed}, indent=2) + "\n")
+        print(out)
+        if failed:
+            raise SystemExit(1)
+    except (OSError, ValueError, TypeError, KeyError) as error:
+        die(f"cannot merge shots: {error}")
 
 
 def publication_frames(out, states=None, include_same=False):
@@ -3643,10 +4058,13 @@ def cmd_publish(args):
 
 
 def main():
+    if not CACHE.is_absolute():
+        die("VERIFY_RUI_CACHE must be an absolute path")
     parser = argparse.ArgumentParser(prog="verify-rui", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     p = sub.add_parser("build", help="build a pinned SHA once (ReleaseSafe) into the cache")
-    p.add_argument("sha"); p.add_argument("--repo"); p.add_argument("--pkg-dir"); p.add_argument("--force", action="store_true")
+    p.add_argument("sha", nargs="?"); p.add_argument("--here", action="store_true", help="build the current working tree in place")
+    p.add_argument("--repo"); p.add_argument("--pkg-dir"); p.add_argument("--force", action="store_true")
     p.add_argument("--source", help="existing clean detached worktree of SHA (default: cache worktree)")
     p.add_argument("--no-screen", action="store_true", help="skip the committed-screen observer library")
     p.add_argument("--upgrade", action="store_true", help="also pin the same-source synthetic release actor")
@@ -3671,6 +4089,19 @@ def main():
     p.add_argument("--record", action="store_true", help="record committed transitions at each state's first size as GIF")
     p.add_argument("--keep", action="store_true")
     p.set_defaults(func=cmd_frames)
+    p = sub.add_parser("shots", help="capture a build's own screen recipe")
+    p.add_argument("build", nargs="?", metavar="BUILD")
+    p.add_argument("--baseline", metavar="DIR")
+    p.add_argument("--only", metavar="NAME,...")
+    p.add_argument("--shard", metavar="I/N")
+    p.add_argument("--out")
+    p.add_argument("--no-png", action="store_true")
+    p.set_defaults(func=cmd_shots)
+    p = sub.add_parser("shots-merge", help="merge screenshot shards")
+    p.add_argument("directories", nargs="+", metavar="DIR")
+    p.add_argument("--out", required=True)
+    p.add_argument("--baseline", metavar="DIR")
+    p.set_defaults(func=cmd_shots_merge)
     p = sub.add_parser("publish", help="attach frames media to a PR Screens section (gh 2.104.0+)")
     p.add_argument("directory", metavar="DIR")
     p.add_argument("--pr", required=True, type=int, help="PR number to attach captures to")
@@ -3751,7 +4182,7 @@ def main():
     p = sub.add_parser("list", help="list runs")
     p.set_defaults(func=cmd_list)
     p = sub.add_parser("_tap")
-    p.add_argument("term_dir"); p.add_argument("--source", required=True); p.add_argument("--cwd", required=True)
+    p.add_argument("term_dir"); p.add_argument("--run", required=True); p.add_argument("--cwd", required=True)
     p.add_argument("--env", required=True); p.add_argument("--size", default="80x24")
     p.add_argument("--mode", choices=["terminal", "fifo"], required=True); p.add_argument("--hold", action="store_true")
     p.add_argument("argv", nargs="+")

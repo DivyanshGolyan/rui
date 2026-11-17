@@ -7,8 +7,9 @@ const Provider = @import("provider_name.zig").Provider;
 
 const Choice = input.OptionalBounded(16);
 const Tokens = input.OptionalBounded(20);
-const product_tools = names(product.tools);
-const product_loaded = names(product.loaded_tools);
+const ToolProfile = struct { allowed: input.ToolsField, loaded: input.ToolsField };
+const image_profile: ToolProfile = .{ .allowed = names(product.creationTools(true, true).allowed), .loaded = names(product.creationTools(true, true).loaded) };
+const text_profile: ToolProfile = .{ .allowed = names(product.creationTools(false, false).allowed), .loaded = names(product.creationTools(false, false).loaded) };
 const product_permission = choice(.value, product.permission_mode);
 
 fn names(comptime text: []const u8) input.ToolsField {
@@ -20,8 +21,12 @@ fn names(comptime text: []const u8) input.ToolsField {
 }
 
 /// These lists borrow the request or immutable product defaults.
-pub fn creationTools(requested: *const input.ToolsField) *const input.ToolsField {
-    return if (requested.state == .omitted) &product_tools else requested;
+fn creationProfile(model: []const u8, can_read_images: bool) *const ToolProfile {
+    return if (catalog.acceptsImages(model) and can_read_images) &image_profile else &text_profile;
+}
+
+pub fn creationTools(requested: *const input.ToolsField, model: []const u8, can_read_images: bool) *const input.ToolsField {
+    return if (requested.state == .omitted) &creationProfile(model, can_read_images).allowed else requested;
 }
 
 fn creationPermission(requested: *const Choice) *const Choice {
@@ -50,6 +55,7 @@ pub const Request = struct {
     parent: ?Parent = null,
     provider: Provider,
     model: []const u8,
+    can_read_images: bool,
     tools: *const input.ToolsField,
     loaded_tools: *const input.ToolsField,
     permission_mode: *const Choice,
@@ -84,8 +90,10 @@ pub fn resolve(facts: []const catalog.Entry, request: Request) Resolved {
         .compaction_trigger = request.compaction_trigger.*,
     };
     if (request.creating) {
-        out.tools = creationTools(request.tools);
-        if (request.tools.state == .omitted and request.loaded_tools.state == .omitted) out.loaded_tools = &product_loaded;
+        out.tools = creationTools(request.tools, request.model, request.can_read_images);
+        if (request.tools.state == .omitted and request.loaded_tools.state == .omitted) {
+            out.loaded_tools = &creationProfile(request.model, request.can_read_images).loaded;
+        }
         out.permission_mode = creationPermission(request.permission_mode).*;
         if (request.permission_mode.state == .omitted) if (request.preferences.permission_mode) |saved| {
             if (std.meta.stringToEnum(@import("cli_value.zig").PermissionMode, saved)) |mode| {
@@ -94,7 +102,7 @@ pub fn resolve(facts: []const catalog.Entry, request: Request) Resolved {
                 }
             }
         };
-        if (request.parent) |parent| out.parent_refusal = checkParent(parent, request.tools, &out.permission_mode);
+        if (request.parent) |parent| out.parent_refusal = checkParent(parent, out.tools, &out.permission_mode);
     }
     if (request.reasoning_effort.state == .explicit_null or (request.creating and request.reasoning_effort.state == .omitted)) {
         const saved_effort = if (request.creating and request.reasoning_effort.state == .omitted)
@@ -131,7 +139,7 @@ pub const ParentRefusal = union(enum) {
 /// Parent authority is checked against the completed creation intent, including
 /// the early start_agent check, before its result can be cached.
 fn checkParent(parent: Parent, tools: *const input.ToolsField, permission: *const Choice) ?ParentRefusal {
-    var requested = creationTools(tools).iterator();
+    var requested = tools.iterator();
     while (requested.next()) |name| {
         var allowed = std.mem.splitScalar(u8, parent.tools, ',');
         while (allowed.next()) |member| {
@@ -183,6 +191,7 @@ test "configuration defaults enumerate every omitted explicit and null combinati
                 .parent = if (has_parent) .{ .tools = "bash,find_tools,lookup,message_agent,read_action,read_transcript,skill,start_agent,stop_action,web_search", .permission_mode = .ask } else null,
                 .provider = provider,
                 .model = model.id,
+                .can_read_images = false,
                 .tools = &tools,
                 .loaded_tools = &loaded,
                 .permission_mode = &permission,
@@ -237,6 +246,7 @@ test "configuration defaults preserve update omissions and explicit values while
             .creating = false,
             .provider = .codex,
             .model = "gpt-6.1-sol",
+            .can_read_images = false,
             .tools = &tools,
             .loaded_tools = &loaded,
             .permission_mode = &permission,
@@ -284,6 +294,7 @@ test "configuration defaults use only selected Host model facts and preserve eve
                 .creating = true,
                 .provider = .openai,
                 .model = row.id,
+                .can_read_images = false,
                 .tools = &tools,
                 .loaded_tools = &tools,
                 .permission_mode = &permission,
@@ -302,7 +313,7 @@ test "configuration defaults parent checks reject default widening and preserve 
     const bash = try input.ToolsField.of(&.{"bash"});
     const ask = choice(.value, "ask");
     const inherited = choice(.omitted, "");
-    try std.testing.expectEqualStrings("find_tools", checkParent(parent, &omitted, &ask).?.tools_not_in_parent);
+    try std.testing.expectEqualStrings("find_tools", checkParent(parent, creationTools(&omitted, "model-a", false), &ask).?.tools_not_in_parent);
     try std.testing.expect(checkParent(parent, &empty, &ask) == null);
     try std.testing.expect(checkParent(parent, &bash, &ask) == null);
     try std.testing.expect(checkParent(parent, &bash, &inherited).? == .permission_mode_wider_than_parent);
@@ -373,6 +384,7 @@ test "parent creation uses inherited provider for omitted compaction regardless 
             .parent = .{ .tools = "bash,find_tools,message_agent,read_action,read_transcript,skill,start_agent,stop_action,web_search", .permission_mode = .bypass },
             .provider = .codex,
             .model = "gpt-6.1-sol",
+            .can_read_images = false,
             .tools = &omitted_tools,
             .loaded_tools = &omitted_tools,
             .permission_mode = &omitted_choice,
@@ -399,7 +411,7 @@ test "creation preferences obey explicit intent and admission over the model and
         for (std.enums.values(Provider)) |provider| for (parents) |parent| for (states) |mode_state| for (states) |effort_state| {
             const mode = choice(mode_state, "ask");
             const effort = choice(effort_state, "high");
-            const base: Request = .{ .creating = true, .parent = parent, .provider = provider, .model = model, .tools = &tools, .loaded_tools = &tools, .permission_mode = &mode, .reasoning_effort = &effort, .compaction_trigger = &compact };
+            const base: Request = .{ .creating = true, .parent = parent, .provider = provider, .model = model, .can_read_images = false, .tools = &tools, .loaded_tools = &tools, .permission_mode = &mode, .reasoning_effort = &effort, .compaction_trigger = &compact };
             const fallback = resolve(catalog.shipped, base);
             for (saved_modes) |saved_mode| for (saved_efforts) |saved_effort| {
                 var request = base;
@@ -440,7 +452,7 @@ test "creation preferences use the selected Host catalog rather than shipped fac
     const compact = tokenField(.omitted, "");
     var selected = catalog.shipped[0];
     selected.id = "custom-model";
-    const request: Request = .{ .creating = true, .provider = .openai, .model = "custom-model", .tools = &tools, .loaded_tools = &tools, .permission_mode = &omitted, .reasoning_effort = &omitted, .compaction_trigger = &compact, .preferences = .{ .reasoning_effort = "max" } };
+    const request: Request = .{ .creating = true, .provider = .openai, .model = "custom-model", .can_read_images = false, .tools = &tools, .loaded_tools = &tools, .permission_mode = &omitted, .reasoning_effort = &omitted, .compaction_trigger = &compact, .preferences = .{ .reasoning_effort = "max" } };
     selected.efforts = .initMany(&.{ .low, .max });
     const accepted = resolve(&.{selected}, request);
     try std.testing.expectEqualStrings("max", accepted.reasoning_effort.value.slice());
@@ -450,4 +462,63 @@ test "creation preferences use the selected Host catalog rather than shipped fac
     selected.efforts = .empty;
     const no_effort = resolve(&.{selected}, request);
     try std.testing.expectEqual(input.FieldState.explicit_null, no_effort.reasoning_effort.state);
+}
+
+test "creation tool profiles cover model image support Host capability explicit intent and parent authority" {
+    const cases = [_]struct { model: []const u8, accepts_images: bool }{
+        .{ .model = "gpt-3.5-turbo", .accepts_images = false },
+        .{ .model = "gpt-3.5-turbo-0125", .accepts_images = false },
+        .{ .model = "gpt-3.5-turbo-1106", .accepts_images = false },
+        .{ .model = "gpt-3.5-turbo-instruct", .accepts_images = false },
+        .{ .model = "gpt-6.1-sol", .accepts_images = true },
+        .{ .model = "unlisted-model", .accepts_images = true },
+        .{ .model = "gpt-3.5-turbo-next", .accepts_images = true },
+    };
+    const text_allowed = "bash find_tools message_agent read_action read_transcript skill start_agent stop_action web_search";
+    const image_allowed = "bash find_tools message_agent read_action read_image read_transcript skill start_agent stop_action web_search";
+    const text_loaded = "bash find_tools skill web_search";
+    const image_loaded = "bash find_tools read_image skill web_search";
+    const parent_text = "bash,find_tools,message_agent,read_action,read_transcript,skill,start_agent,stop_action,web_search";
+    const parent_image = "bash,find_tools,message_agent,read_action,read_image,read_transcript,skill,start_agent,stop_action,web_search";
+    const mode = choice(.value, "ask");
+    const effort = choice(.omitted, "");
+    const compact = tokenField(.omitted, "");
+    for (cases) |case| for ([_]bool{ false, true }) |can_read| for ([_]bool{ false, true }) |parent_has_image| {
+        for ([_]input.FieldState{ .omitted, .value, .explicit_null }) |tools_state| for ([_]input.FieldState{ .omitted, .value, .explicit_null }) |loaded_state| {
+            var tools = try input.ToolsField.of(&.{"bash"});
+            var loaded = try input.ToolsField.of(&.{"bash"});
+            tools.state = tools_state;
+            loaded.state = loaded_state;
+            const image = case.accepts_images and can_read;
+            var request: Request = .{
+                .creating = true,
+                .parent = .{ .tools = if (parent_has_image) parent_image else parent_text, .permission_mode = .ask },
+                .provider = .codex,
+                .model = case.model,
+                .can_read_images = can_read,
+                .tools = &tools,
+                .loaded_tools = &loaded,
+                .permission_mode = &mode,
+                .reasoning_effort = &effort,
+                .compaction_trigger = &compact,
+            };
+            const selected = creationTools(&tools, case.model, can_read);
+            const result = resolve(catalog.shipped, request);
+            try std.testing.expect(selected == result.tools);
+            if (tools_state == .omitted) {
+                try std.testing.expectEqualStrings(if (image) image_allowed else text_allowed, result.tools.names.slice());
+            } else try std.testing.expect(result.tools == &tools);
+            if (tools_state == .omitted and loaded_state == .omitted) {
+                try std.testing.expectEqual(input.FieldState.value, result.loaded_tools.state);
+                try std.testing.expectEqualStrings(if (image) image_loaded else text_loaded, result.loaded_tools.names.slice());
+            } else try std.testing.expect(result.loaded_tools == &loaded);
+            if (tools_state == .omitted and image and !parent_has_image) {
+                try std.testing.expectEqualStrings("read_image", result.parent_refusal.?.tools_not_in_parent);
+            } else try std.testing.expect(result.parent_refusal == null);
+            request.creating = false;
+            const update = resolve(catalog.shipped, request);
+            try std.testing.expect(update.tools == &tools and update.loaded_tools == &loaded);
+            try std.testing.expect(update.parent_refusal == null);
+        };
+    };
 }

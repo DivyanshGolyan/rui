@@ -171,3 +171,21 @@ test "saved creation preserves every CLI and semantic tool intent" {
     try std.testing.expect(loaded_only.tools == null);
     try std.testing.expectEqualStrings("find_tools", loaded_only.loaded_tools.?.cli);
 }
+
+test "saved preferences preserve explicit image tool selections" {
+    for ([_][]const []const u8{ &.{}, &.{"read_image"}, &.{ "bash", "read_image" } }) |allowed| {
+        for ([_]?[]const []const u8{ null, &.{}, &.{"read_image"} }) |loaded| {
+            var input: ConfigureInput = .{
+                .store = "",
+                .session = .create,
+                .tools = .{ .names = allowed },
+                .loaded_tools = if (loaded) |names| .{ .names = names } else null,
+            };
+            input.applySavedCreation(.max, .ask);
+            try std.testing.expectEqualDeep(allowed, input.tools.?.names);
+            if (loaded) |names| try std.testing.expectEqualDeep(names, input.loaded_tools.?.names) else try std.testing.expect(input.loaded_tools == null);
+            try std.testing.expectEqual(@as(?ReasoningEffort, .max), input.preferences.reasoning_effort);
+            try std.testing.expectEqual(@as(?PermissionMode, .ask), input.preferences.permission_mode);
+        }
+    }
+}

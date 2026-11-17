@@ -1,4 +1,5 @@
 const std = @import("std");
+const launch_transfer = @import("host_launch_transfer.zig");
 const client = @import("client.zig");
 const policy = @import("download_policy.zig");
 
@@ -41,6 +42,8 @@ pub const Result = std.process.RunResult;
 pub const Context = struct {
     environ_map: ?*const std.process.Environ.Map = null,
     cwd: std.process.Child.Cwd = .inherit,
+    /// Opaque checked settings handoff, transported only through private stdin.
+    input: ?[]const u8 = null,
 };
 
 pub fn dispose(allocator: std.mem.Allocator, result: Result) void {
@@ -50,6 +53,7 @@ pub fn dispose(allocator: std.mem.Allocator, result: Result) void {
 
 fn capture(allocator: std.mem.Allocator, io: std.Io, argv: []const []const u8, limit: usize, deadline: std.Io.Clock.Timestamp, context: Context, done: *std.atomic.Value(bool)) std.process.RunError!Result {
     defer done.store(true, .release);
+    if (context.input) |bytes| return captureInput(allocator, io, argv, limit, deadline, context, bytes);
     return std.process.run(allocator, io, .{
         .argv = argv,
         .environ_map = context.environ_map,
@@ -58,6 +62,41 @@ fn capture(allocator: std.mem.Allocator, io: std.Io, argv: []const []const u8, l
         .stderr_limit = .limited(4096),
         .timeout = .{ .deadline = deadline },
     });
+}
+
+fn captureInput(allocator: std.mem.Allocator, io: std.Io, argv: []const []const u8, limit: usize, deadline: std.Io.Clock.Timestamp, context: Context, bytes: []const u8) std.process.RunError!Result {
+    var child = try std.process.spawn(io, .{ .argv = argv, .environ_map = context.environ_map, .cwd = context.cwd, .stdin = .pipe, .stdout = .pipe, .stderr = .pipe });
+    defer child.kill(io);
+    const input = child.stdin.?.handle;
+    launch_transfer.nonblocking(input) catch return error.Unexpected;
+    launch_transfer.nonblocking(child.stdout.?.handle) catch return error.Unexpected;
+    launch_transfer.nonblocking(child.stderr.?.handle) catch return error.Unexpected;
+    var delivery: launch_transfer.Transfer = .{ .input = input, .bytes = bytes };
+    child.stdin = null;
+    defer delivery.deinit();
+    var stdout: std.ArrayList(u8) = .empty;
+    defer stdout.deinit(allocator);
+    var stderr_bytes: std.ArrayList(u8) = .empty;
+    defer stderr_bytes.deinit(allocator);
+    var closed = [2]bool{ false, false };
+    var buffers: [2][8192]u8 = undefined;
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&buffers));
+    while (delivery.input >= 0 or !closed[0] or !closed[1]) {
+        if (deadline.durationFromNow(io).raw.nanoseconds <= 0) return error.Timeout;
+        const moved = delivery.step(.{}, .{
+            .{ .fd = if (closed[0]) -1 else child.stdout.?.handle, .buffer = &buffers[0] },
+            .{ .fd = if (closed[1]) -1 else child.stderr.?.handle, .buffer = &buffers[1] },
+        }) catch return error.Unexpected;
+        if (stdout.items.len + moved.counts[0] > limit or stderr_bytes.items.len + moved.counts[1] > 4096) return error.StreamTooLong;
+        try stdout.appendSlice(allocator, buffers[0][0..moved.counts[0]]);
+        try stderr_bytes.appendSlice(allocator, buffers[1][0..moved.counts[1]]);
+        for (0..2) |i| closed[i] = closed[i] or moved.closed[i];
+        if (!moved.progressed and (delivery.input >= 0 or !closed[0] or !closed[1])) try std.Io.sleep(io, .fromMilliseconds(1), .awake);
+    }
+    const term = try child.wait(io);
+    const captured_stdout = try stdout.toOwnedSlice(allocator);
+    errdefer allocator.free(captured_stdout);
+    return .{ .term = term, .stdout = captured_stdout, .stderr = try stderr_bytes.toOwnedSlice(allocator) };
 }
 
 pub fn run(allocator: std.mem.Allocator, io: std.Io, argv: []const []const u8, cancellation: ?*const client.Cancellation, limit: usize) !Result {
@@ -267,15 +306,15 @@ test "upgrade process cancellation kills a child after it records readiness" {
     defer allocator.free(directory);
     const marker = try std.fmt.allocPrint(allocator, "{s}/ready", .{directory});
     defer allocator.free(marker);
-    var token: client.Cancellation = .{};
     const Worker = struct {
         allocator: std.mem.Allocator,
         io: std.Io,
         marker: []const u8,
         token: *const client.Cancellation,
+        input: ?[]const u8,
         failure: ?anyerror = null,
         fn execute(self: *@This()) void {
-            const result = run(self.allocator, self.io, &.{ "sh", "-c", ": > \"$1\"; exec sleep 300", "upgrade-child", self.marker }, self.token, 1024) catch |err| {
+            const result = runIn(self.allocator, self.io, &.{ "sh", "-c", ": > \"$1\"; exec sleep 300", "upgrade-child", self.marker }, self.token, 1024, .fromSeconds(300), .{ .input = self.input }) catch |err| {
                 self.failure = err;
                 return;
             };
@@ -289,16 +328,23 @@ test "upgrade process cancellation kills a child after it records readiness" {
             return true;
         }
     };
-    var worker: Worker = .{ .allocator = allocator, .io = io, .marker = marker, .token = &token };
-    {
-        const thread = try std.Thread.spawn(.{}, Worker.execute, .{&worker});
-        defer thread.join();
-        defer token.requestStop();
-        const poll = @import("test_poll");
-        try poll.waitUntil(io, poll.after(io, .fromSeconds(5)), &worker, Worker.ready);
-        token.requestStop();
+    const input = try allocator.alloc(u8, 256 * 1024);
+    defer allocator.free(input);
+    @memset(input, 'i');
+    for ([_]?[]const u8{ null, input }) |pending| {
+        var token: client.Cancellation = .{};
+        var worker: Worker = .{ .allocator = allocator, .io = io, .marker = marker, .token = &token, .input = pending };
+        {
+            const thread = try std.Thread.spawn(.{}, Worker.execute, .{&worker});
+            defer thread.join();
+            defer token.requestStop();
+            const poll = @import("test_poll");
+            try poll.waitUntil(io, poll.after(io, .fromSeconds(5)), &worker, Worker.ready);
+            token.requestStop();
+        }
+        try std.testing.expectEqual(error.Cancelled, worker.failure.?);
+        try std.Io.Dir.cwd().deleteFile(io, marker);
     }
-    try std.testing.expectEqual(error.Cancelled, worker.failure.?);
 }
 
 test "upgrade process deadline covers wait after child closes its output pipes" {
@@ -431,4 +477,37 @@ test "upgrade test gate is opt-in, acknowledges only held gates and bounds cance
     _ = try std.Io.Dir.cwd().statFile(io, entered, .{});
     // The held input still belongs to the fixture, including on timeout.
     _ = try std.Io.Dir.cwd().statFile(io, gate, .{});
+}
+
+test "frozen launch forwarding drains both diagnostics before oversized-pipe input and reaps early refusal" {
+    const gpa = std.testing.allocator;
+    const input = try gpa.alloc(u8, 256 * 1024);
+    defer gpa.free(input);
+    @memset(input, 'i');
+    const result = try runIn(gpa, std.testing.io, &.{ "/bin/sh", "-c", "printf 'out:'; printf 'err:' >&2; cat" }, null, input.len + 4, .fromSeconds(10), .{ .input = input });
+    defer dispose(gpa, result);
+    try std.testing.expect(result.term.success());
+    try std.testing.expectEqualStrings("err:", result.stderr);
+    try std.testing.expectEqualStrings("out:", result.stdout[0..4]);
+    try std.testing.expectEqualSlices(u8, input, result.stdout[4..]);
+    const quiet = try runIn(gpa, std.testing.io, &.{ "/bin/sh", "-c", "exec 1>&- 2>&-; cat >/dev/null" }, null, 1024, .fromSeconds(5), .{ .input = input });
+    defer dispose(gpa, quiet);
+    try std.testing.expect(quiet.term.success());
+    try std.testing.expectEqual(@as(usize, 0), quiet.stdout.len);
+    try std.testing.expectEqual(@as(usize, 0), quiet.stderr.len);
+    const refused = try runIn(gpa, std.testing.io, &.{ "/bin/sh", "-c", "exec 0<&-; printf 'refused'; printf 'reason' >&2; exit 2" }, null, 1024, .fromSeconds(5), .{ .input = input });
+    defer dispose(gpa, refused);
+    try std.testing.expect(!refused.term.success());
+    try std.testing.expectEqualStrings("refused", refused.stdout);
+    try std.testing.expectEqualStrings("reason", refused.stderr);
+}
+
+test "frozen launch forwarding deadline covers an unread pipe and a child with closed diagnostics" {
+    const gpa = std.testing.allocator;
+    const input = try gpa.alloc(u8, 256 * 1024);
+    defer gpa.free(input);
+    @memset(input, 'i');
+    for ([_][]const u8{ "exec sleep 300", "exec 1>&- 2>&-; exec sleep 300" }) |script| {
+        try std.testing.expectError(error.Timeout, runIn(gpa, std.testing.io, &.{ "/bin/sh", "-c", script }, null, 1024, .fromMilliseconds(100), .{ .input = input }));
+    }
 }

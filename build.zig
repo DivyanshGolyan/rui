@@ -1,6 +1,7 @@
 const std = @import("std");
 const product = @import("build/product.zig");
 const ci_module = @import("build/ci.zig");
+const darwin = @import("build/darwin.zig");
 const screen_module = @import("build/screen.zig");
 const unit_module = @import("build/unit.zig");
 const measurement_module = @import("build/measurement.zig");
@@ -481,6 +482,8 @@ pub fn build(b: *std.Build) void {
     const sqlite_shell = measurement_module.addCheck(b, ci, target, release_safe);
     cross_module.add(b, target, pinned_transport);
     measurement_module.add(b, ci, release_safe, sqlite_shell, model_queue_output);
+
+    darwin.configureAcceptance(b, ci.directory);
 
     const ci_build = b.step("ci-build", "Compile selected CI gates without running tests");
     if (ci_targets) |selected| {
