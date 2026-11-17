@@ -451,6 +451,11 @@ class PublicationTest(unittest.TestCase):
                 self.write()
                 with self.assertRaises(snapshot.SnapshotError):
                     snapshot.publication_prefix(self.env)
+        for malformed in (None, [], "scalar", 42, False):
+            with self.subTest(receipt=malformed):
+                self.path.write_text(json.dumps(malformed))
+                with self.assertRaises(snapshot.SnapshotError):
+                    snapshot.publication_prefix(self.env)
         self.path.write_text("not JSON")
         with self.assertRaises(json.JSONDecodeError):
             snapshot.publication_prefix(self.env)

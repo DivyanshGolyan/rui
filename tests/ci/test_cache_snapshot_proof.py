@@ -464,7 +464,7 @@ class RunOwnerTests(unittest.TestCase):
             roots = [base / name for name in (".zig-cache", "global", "zig-pkg", "screen/zig-pkg")]
             listing = base / "files.txt"
             self.assertEqual(proof.archive_command(roots, listing),
-                             ["tar", "--posix", "-c", "-f", "-", "-P", "--use-compress-program", "zstdmt", "--files-from", str(listing)])
+                             ["tar", "--posix", "-c", "-f", "-", "--exclude", "cache.tzst", "-P", "--use-compress-program", "zstdmt", "--files-from", str(listing)])
             self.assertEqual(listing.read_text().splitlines(), list(map(str, roots)))
 
 

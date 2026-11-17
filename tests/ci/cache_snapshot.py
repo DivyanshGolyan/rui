@@ -289,6 +289,8 @@ def publication_prefix(env):
     import build_artifact
     temporary = Path(env["RUNNER_TEMP"])
     receipt = json.loads((temporary / "rui-compiled" / "compiled.json").read_text())
+    if not isinstance(receipt, dict):
+        raise SnapshotError("producer receipt must be an object")
     inputs = receipt.get("inputs")
     if (not isinstance(inputs, dict) or inputs.get("format") != 5 or inputs.get("pr_ci") is not False
             or inputs.get("part") not in ("all", "rest")):

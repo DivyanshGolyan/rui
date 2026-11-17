@@ -385,7 +385,7 @@ def archive_command(roots, listing):
     if any("\n" in str(path) or "\r" in str(path) for path in paths):
         raise ProofError("archive paths cannot contain newlines")
     listing.write_text("".join(str(path) + "\n" for path in paths))
-    return ["tar", "--posix", "-c", "-f", "-", "-P", "--use-compress-program", "zstdmt",
+    return ["tar", "--posix", "-c", "-f", "-", "--exclude", "cache.tzst", "-P", "--use-compress-program", "zstdmt",
             "--files-from", str(listing)]
 
 
@@ -455,7 +455,7 @@ def run(args):
             if not audit.get("removable") or audit.get("skipped"):
                 raise ProofError("audit found no eligible outputs; candidate experiment unavailable")
             if args.measure_archives:
-                roots = [local, global_cache, workspace / "zig-pkg", workspace / "screen-emulator" / "zig-pkg"]
+                roots = [global_cache, local, workspace / "zig-pkg", workspace / "screen-emulator" / "zig-pkg"]
                 result["archives"] = {}
                 try:
                     checkpoint.restore()
