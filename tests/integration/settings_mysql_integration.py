@@ -19,6 +19,7 @@ import store_rounds_cases
 from request_routing_cases import capture_routing
 from attached_creation_cases import attached_creation
 from preset_creation_cases import preset_creation
+from empty_creation_cases import empty_creation
 
 
 def main():
@@ -232,6 +233,8 @@ def main():
                     released()
 
         preset_creation(rui, root / "cli-presets", good["store"], os.environ)
+        released()
+        empty_creation(rui, root / "empty-creation", good["store"], os.environ)
         released()
 
         attached_directory = root / "attached-host"

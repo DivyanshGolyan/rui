@@ -1222,6 +1222,20 @@ class SelectionTest(unittest.TestCase):
                 self.assertIn(target, result["targets"])
                 self.assertNotIn("human-cli-integration", result["targets"])
 
+    def test_start_receipt_helper_selects_its_public_human_cli_fixture(self):
+        helper = "tests/integration/start_receipt_cases.py"
+        # Include the added source before its first commit, then let the normal
+        # import reader discover the edge from the actual entry point.
+        names = subprocess.check_output(["git", "ls-files", "-z"]).decode().split("\0")
+        root = Path(__file__).resolve().parents[2]
+        graph = Graph({name for name in (*names, helper) if name and (root / name).is_file()},
+                      lambda name: (root / name).read_text())
+        self.assertIn(helper, graph.scripts(FIXTURES["human-cli-integration"][0]))
+        result = select([helper], "review", AVAILABLE, graph)
+        for family in ("targets", "native_targets"):
+            self.assertIn("human-cli-integration", result[family])
+        self.assertTrue(setup_requirements(result["targets"])["python"])
+
     def test_shared_fixture_helpers_keep_composed_and_separate_consumers(self):
         for name in ("host_process.py",):
             path = f"tests/integration/{name}"
@@ -1412,6 +1426,12 @@ class SelectionTest(unittest.TestCase):
         for target in ("settings-integration", "check", "check-full"):
             self.assertTrue(setup_requirements([target])["node"], target)
 
+    def test_creation_parity_helper_selects_both_engine_fixtures_and_screen(self):
+        targets = select(["clients/ts/test/fixtures/empty-creation.ts"], "review", AVAILABLE)["targets"]
+        self.assertTrue(covers("settings-integration", targets), targets)
+        self.assertTrue(setup_requirements(targets)["screen"])
+        self.assertTrue(setup_requirements(targets)["node"])
+
     def test_setup_installs_fixture_packages_for_any_target(self):
         self.assertEqual(setup_requirements([]), {"go": False, "node": False, "python": False, "screen": False, "tmux": False})
         self.assertEqual(setup_requirements(["test-logic"]), {"go": False, "node": False, "python": True, "screen": False, "tmux": False})
@@ -1427,7 +1447,7 @@ class SelectionTest(unittest.TestCase):
         for targets in ([], ["test-logic"], ["installer-integration"], ["ts-client"]):
             with self.subTest(targets=targets):
                 self.assertFalse(setup_requirements(targets)["screen"])
-        for targets in (["check"], ["check-full"], ["terminal-restoration-integration"], ["test-logic", "direct-pty"]):
+        for targets in (["check"], ["check-full"], ["settings-integration"], ["terminal-restoration-integration"], ["test-logic", "direct-pty"]):
             with self.subTest(targets=targets):
                 self.assertTrue(setup_requirements(targets)["screen"])
         build = build_files.source()

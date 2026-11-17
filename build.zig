@@ -335,11 +335,11 @@ pub fn build(b: *std.Build) void {
     const upgrade_step = b.step("upgrade-integration", "Run isolated release publication and exact Host upgrade lifecycle cases");
     upgrade_step.dependOn(&upgrade_integration.step);
 
-    const settings_integration = b.addSystemCommand(&.{"python3"});
+    const settings_integration = screen_module.screenCommand(b, screen, &.{"python3"});
     settings_integration.addFileArg(b.path("tests/integration/settings_integration.py"));
     settings_integration.addFileArg(ci.path(release_safe));
     settings_integration.addArg("--require-mcp-sdk");
-    const mysql_settings_integration = b.addSystemCommand(&.{"python3"});
+    const mysql_settings_integration = screen_module.screenCommand(b, screen, &.{"python3"});
     mysql_settings_integration.addFileArg(b.path("tests/integration/settings_mysql_integration.py"));
     mysql_settings_integration.addFileArg(ci.path(release_safe));
     mysql_settings_integration.addFileArg(ci.path(mysql_launch_admin));

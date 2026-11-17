@@ -58,6 +58,7 @@ class PrepushTest(unittest.TestCase):
                    subprocess.CompletedProcess([], 0, stdout=artifact + "\n")]
         with patch.object(prepush.subprocess, "run", side_effect=results) as run, redirect_stdout(io.StringIO()) as out:
             self.assertEqual(1, prepush.regenerate())
+        self.assertEqual(["zig", "build", "-j1", "openapi", "--summary", "none"], run.call_args_list[0].args[0])
         diff = run.call_args_list[-1].args[0]
         self.assertEqual(["git", "diff", "--name-only", "HEAD", "--", *prepush.GENERATED], diff)
         self.assertIn(artifact, diff)

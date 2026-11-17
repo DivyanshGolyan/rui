@@ -10,6 +10,7 @@ import threading
 from canonical_fixture import announced
 import host_process
 import model_fixture
+from product_defaults import compaction_trigger
 
 
 TASK = "attached CLI environment\n雪\n"
@@ -152,6 +153,39 @@ def attached_creation(binary, directory, root, env, *, scalar=None):
         saved_parent = configuration(parent)
         assert saved_parent["tools"] == ["bash", "find_tools"], saved_parent
         assert saved_parent["loaded_tools"] == ["find_tools"], saved_parent
+        # Saved client bindings must not choose an attached child's compaction
+        # policy. Both creating routes resolve against the inherited provider.
+        for saved_provider in ("openai", "codex"):
+            invoke("defaults", "configure", "--provider", saved_provider, "--model", "gpt-6.1-sol")
+            for door in ("configure", "start"):
+                for explicit in (False, True):
+                    record = root / f"parent-compaction-{saved_provider}-{door}-{explicit}.json"
+                    options = ["--compaction-trigger", "2000"] if explicit else []
+                    created = value("session", door, "--store", directory, "--parent", parent,
+                                    "--model", "gpt-6.1-sol", "--tools", "bash", "--loaded-tools", "bash",
+                                    "--permission-mode", "bypass", "--record", record, *options,
+                                    input="attached compaction evidence" if door == "start" else None)
+                    captured = json.loads(record.read_bytes())["configuration"]
+                    assert "provider" not in captured and "workspace" not in captured, captured
+                    if explicit:
+                        assert captured["compactAt"] == 2000, captured
+                    else:
+                        assert "compactAt" not in captured, captured
+                    child = created["context"]["session"]
+                    saved = inspect(child)["session"]
+                    assert saved["parent"] == parent and saved["provider"] == "codex", saved
+                    assert saved["workspace"] == str(workspace) and saved["model"] == "gpt-6.1-sol", saved
+                    expected = "2000" if explicit else str(compaction_trigger("codex", "gpt-6.1-sol"))
+                    assert saved["compaction_trigger"] == expected, saved
+                    assert saved["compaction_trigger_override"] == expected, saved
+                    if door == "start":
+                        wait(created["context"]["key"])
+                    replay = value("request", "recover", "--store", directory, "--record", record,
+                                   "--kind", "message" if door == "start" else "configure")
+                    assert replay["answer"]["replayed"] is True and replay["context"]["session"] == child, replay
+        invoke("defaults", "configure", "--provider", "openai", "--model", "gpt-6.1-sol")
+        assert configuration(parent) == saved_parent
+        print("attached CLI: OpenAI/Codex saved bindings preserve inherited compaction and explicit overrides", flush=True)
         records = []
         for door in ("configure", "start"):
             dropped = invoke("session", door, "--store", directory, "--parent", parent, *spec,
