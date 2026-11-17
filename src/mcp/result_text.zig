@@ -2,6 +2,7 @@ const std = @import("std");
 const utf8_validation = @import("../utf8_validation.zig");
 const reply = @import("reply.zig");
 const document = @import("document.zig");
+const result_parts = @import("result_parts.zig");
 
 pub const excerpt_bytes = 10_000;
 pub const max_answer_bytes = 4 * 1024 * 1024;
@@ -99,7 +100,31 @@ const Prefix = struct {
     }
 };
 
+const TextSink = struct {
+    out: *std.Io.Writer,
+
+    fn image(self: *TextSink, _: anytype, raw: []const u8) !void {
+        try self.out.writeAll(raw);
+    }
+
+    fn badImage(self: *TextSink, _: anytype, raw: []const u8) !void {
+        try self.out.writeAll(raw);
+    }
+};
+
 fn render(out: *std.Io.Writer, ended: Ended) !Code {
+    var sink: TextSink = .{ .out = out };
+    return renderSink(&sink, ended, true);
+}
+
+/// Render text to sink.out and deliver image blocks to sink.image/badImage.
+/// Callbacks receive the parsed block and its original JSON, borrowed from ended.
+pub fn renderParts(sink: anytype, ended: Ended) !Code {
+    return renderSink(sink, ended, false);
+}
+
+fn renderSink(sink: anytype, ended: Ended, comptime legacy: bool) !Code {
+    const out = sink.out;
     const name = ended.server_name;
     const code = classify(ended.ended);
     switch (ended.ended) {
@@ -109,10 +134,25 @@ fn render(out: *std.Io.Writer, ended: Ended) !Code {
                 if (result.is_error) try out.writeAll("The tool reported an error:\n");
                 var items = document.Items.init(result.content);
                 var any = false;
+                var previous_image = false;
                 while (items.next()) |block| {
-                    if (any) try out.writeByte('\n');
+                    const part = result_parts.classify(block);
+                    const is_image = part == .image;
+                    if (any and (legacy or (!previous_image and !is_image))) try out.writeByte('\n');
                     any = true;
-                    try writeBlock(out, block);
+                    previous_image = is_image;
+                    switch (part) {
+                        .text => |text| try document.writeDecoded(out, text),
+                        .other => |raw| try out.writeAll(raw),
+                        .image => |image| {
+                            try out.flush();
+                            try sink.image(image, block);
+                        },
+                        .bad_image => |reason| {
+                            try out.flush();
+                            try sink.badImage(reason, block);
+                        },
+                    }
                 }
                 if (!any) try out.writeAll(result.structured orelse "(no output)");
                 return code;
@@ -162,22 +202,6 @@ fn render(out: *std.Io.Writer, ended: Ended) !Code {
             return code;
         },
     }
-}
-
-fn writeBlock(out: *std.Io.Writer, block: []const u8) !void {
-    if (document.kind(block) == .object) {
-        if (document.member(block, "type")) |kind| {
-            if (document.kind(kind) == .string and document.keyIs(document.contents(kind), "text")) {
-                if (document.member(block, "text")) |text| {
-                    if (document.kind(text) == .string) {
-                        try document.writeDecoded(out, document.contents(text));
-                        return;
-                    }
-                }
-            }
-        }
-    }
-    try out.writeAll(block);
 }
 
 test "result_text renders blocks and structured content with resolution codes" {
@@ -367,5 +391,91 @@ test "result_text truncates at every UTF-8 offset and preserves exact-fit output
         var out: std.Io.Writer = .fixed(buffer);
         _ = try write(&out, .{ .server_name = "test", .ended = .{ .outcome = .{ .refused = .{ .status = 403, .body = content[0 .. length - "The MCP server answered HTTP 403: ".len] } } } });
         try std.testing.expectEqual(length, out.buffered().len);
+    }
+}
+
+test "result_text sink preserves block order and routes malformed images" {
+    const TestSink = struct {
+        out: *std.Io.Writer,
+        pub fn image(self: *@This(), value: result_parts.Image, _: []const u8) !void {
+            try self.out.print("<image:{s}:{s}>", .{ value.mime, value.data });
+        }
+        pub fn badImage(self: *@This(), reason: []const u8, _: []const u8) !void {
+            try self.out.print("<bad:{s}>", .{reason});
+        }
+    };
+    const ended: Ended = .{ .server_name = "test", .ended = .{ .outcome = .{ .result = .{
+        .content = "[{\"type\":\"text\",\"text\":\"a\\nb\"},{\"type\":\"image\",\"data\":\"YQ==\",\"mimeType\":\"image/png\"},{\"type\":\"image\",\"data\":\"Yg==\",\"mimeType\":\"image/jpeg\"},{\"type\":\"image\",\"data\":\"secret\"},{\"type\":\"text\",\"text\":\"end\"},{\"type\":\"audio\"}]",
+        .is_error = true,
+        .structured = null,
+    } } } };
+    var buffer: [1024]u8 = undefined;
+    var out: std.Io.Writer = .fixed(&buffer);
+    var sink: TestSink = .{ .out = &out };
+    try std.testing.expectEqual(Code.failed, try renderParts(&sink, ended));
+    try std.testing.expectEqualStrings("The tool reported an error:\na\nb<image:image/png:YQ==><image:image/jpeg:Yg==><bad:missing image MIME type>\nend\n{\"type\":\"audio\"}", out.buffered());
+    out = .fixed(&buffer);
+    try std.testing.expectEqual(Code.failed, try write(&out, ended));
+    try std.testing.expectEqualStrings("The tool reported an error:\na\nb\n{\"type\":\"image\",\"data\":\"YQ==\",\"mimeType\":\"image/png\"}\n{\"type\":\"image\",\"data\":\"Yg==\",\"mimeType\":\"image/jpeg\"}\n{\"type\":\"image\",\"data\":\"secret\"}\nend\n{\"type\":\"audio\"}", out.buffered());
+}
+
+test "result_text sink propagates image callback errors" {
+    const TestSink = struct {
+        out: *std.Io.Writer,
+        pub fn image(_: *@This(), _: result_parts.Image, _: []const u8) !void {
+            return error.ImageRejected;
+        }
+        pub fn badImage(_: *@This(), _: []const u8, _: []const u8) !void {
+            return error.BadImageRejected;
+        }
+    };
+    var buffer: [256]u8 = undefined;
+    var out: std.Io.Writer = .fixed(&buffer);
+    var sink: TestSink = .{ .out = &out };
+    for ([_]struct { content: []const u8, err: anyerror }{
+        .{ .content = "[{\"type\":\"image\",\"data\":\"YQ==\",\"mimeType\":\"image/png\"}]", .err = error.ImageRejected },
+        .{ .content = "[{\"type\":\"image\"}]", .err = error.BadImageRejected },
+    }) |case| {
+        try std.testing.expectError(case.err, renderParts(&sink, .{ .server_name = "test", .ended = .{ .outcome = .{ .result = .{ .content = case.content, .is_error = false, .structured = null } } } }));
+    }
+}
+
+test "result_text golden text and non-result endings" {
+    const TestSink = struct {
+        out: *std.Io.Writer,
+        pub fn image(_: *@This(), _: result_parts.Image, _: []const u8) !void {
+            return error.UnexpectedImage;
+        }
+        pub fn badImage(_: *@This(), _: []const u8, _: []const u8) !void {
+            return error.UnexpectedImage;
+        }
+    };
+    const cases = [_]struct { ending: Ending, code: Code, expected: []const u8 }{
+        .{ .ending = .{ .outcome = .{ .result = .{ .content = "[{\"type\":\"text\",\"text\":\"hello\\nworld\"},{\"type\":\"text\",\"text\":\"again\"},{\"type\":\"audio\"}]", .structured = null, .is_error = false } } }, .code = .succeeded, .expected = "hello\nworld\nagain\n{\"type\":\"audio\"}" },
+        .{ .ending = .{ .outcome = .{ .result = .{ .content = "[]", .structured = "{\"a\":1}", .is_error = true } } }, .code = .failed, .expected = "The tool reported an error:\n{\"a\":1}" },
+        .{ .ending = .{ .outcome = .{ .result = .{ .content = "[]", .structured = null, .is_error = false } } }, .code = .succeeded, .expected = "(no output)" },
+        .{ .ending = .{ .outcome = .{ .server_error = .{ .code = -32602, .message = "bad\\nargument", .data = "{\"field\":1}" } } }, .code = .failed, .expected = "The MCP server returned error -32602: bad\nargument\n{\"field\":1}" },
+        .{ .ending = .{ .outcome = .{ .server_error = .{ .code = 1, .message = "bad", .data = null } } }, .code = .failed, .expected = "The MCP server returned error 1: bad" },
+        .{ .ending = .{ .outcome = .{ .refused = .{ .status = 403, .body = "denied" } } }, .code = .failed, .expected = "The MCP server answered HTTP 403: denied" },
+        .{ .ending = .{ .outcome = .{ .refused = .{ .status = 500, .body = "failure" } } }, .code = .indeterminate, .expected = "Outcome unknown: The MCP server answered HTTP 500. The call may or may not have run; it was not retried.\nfailure" },
+        .{ .ending = .{ .not_sent = error.ConnectFailed }, .code = .spawn_failed, .expected = "Failed, not run: Rui could not reach MCP server example (ConnectFailed)." },
+        .{ .ending = .{ .lost = error.NoAnswer }, .code = .indeterminate, .expected = "Outcome unknown: the connection to MCP server example failed after the call was sent (NoAnswer). The call may or may not have run; it was not retried." },
+        .{ .ending = .{ .timed_out = .{ .after_ms = 1500, .sent = false } }, .code = .spawn_failed, .expected = "Failed, not run: MCP server example did not accept the call within 1.5 s." },
+        .{ .ending = .{ .timed_out = .{ .after_ms = 1500, .sent = true } }, .code = .indeterminate, .expected = "Outcome unknown: no reply from MCP server example within 1.5 s. The call may or may not have run; it was not retried." },
+        .{ .ending = .{ .stopped = false }, .code = .cancelled, .expected = "Cancelled by Session stop. Failed, not run: the MCP request was not sent." },
+        .{ .ending = .{ .stopped = true }, .code = .indeterminate, .expected = "Outcome unknown: Session stop closed the connection after the MCP request was sent. The call may or may not have run; it was not retried." },
+        .{ .ending = .{ .oversized = .{ .bytes = "prefix", .id = 7, .status = 500, .extent = .cut } }, .code = .indeterminate, .expected = "Outcome unknown: The MCP server's answer was larger than the 4194304-byte limit; the retained prefix follows. The call may or may not have run; it was not retried.\nprefix" },
+        .{ .ending = .{ .oversized = .{ .bytes = "prefix", .id = 7, .status = 403, .extent = .cut } }, .code = .failed, .expected = "The MCP server's answer was larger than the 4194304-byte limit; the retained prefix follows.\nprefix" },
+    };
+    for (cases) |case| {
+        const ended: Ended = .{ .server_name = "example", .ended = case.ending };
+        var buffer: [1024]u8 = undefined;
+        var out: std.Io.Writer = .fixed(&buffer);
+        var sink: TestSink = .{ .out = &out };
+        try std.testing.expectEqual(case.code, try renderParts(&sink, ended));
+        try std.testing.expectEqualStrings(case.expected, out.buffered());
+        out = .fixed(&buffer);
+        try std.testing.expectEqual(case.code, try write(&out, ended));
+        try std.testing.expectEqualStrings(case.expected, out.buffered());
     }
 }
