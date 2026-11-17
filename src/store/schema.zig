@@ -2796,7 +2796,12 @@ test "schema 76 migration creates canonical promotion objects on SQLite and MySQ
         for (statements) |statement| {
             if (!std.mem.startsWith(u8, statement, "CREATE ")) continue;
             for (expected) |object| {
-                if (std.mem.eql(u8, object.sql, statement)) {
+                const historical = if (dialect == .sqlite and std.mem.eql(u8, object.name, "core_command"))
+                    try std.mem.replaceOwned(u8, std.testing.allocator, object.sql, "kind BETWEEN 1 AND 9", "kind BETWEEN 1 AND 8")
+                else
+                    null;
+                defer if (historical) |text| std.testing.allocator.free(text);
+                if (std.mem.eql(u8, historical orelse object.sql, statement)) {
                     matched += 1;
                     break;
                 }

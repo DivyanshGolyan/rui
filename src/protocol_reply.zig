@@ -3202,6 +3202,8 @@ fn observationFieldSample() !CommandObservation {
     sample.permission_target = .{ .action = 29, .decision = .allow_once };
     sample.action_target = 29;
     sample.action_selection = .{ .kind = .background, .position = 31 };
+    sample.kind = .action_stop;
+    sample.resolution_position = 31;
     return sample;
 }
 
@@ -3258,6 +3260,8 @@ test "keyed observation validates every operation shape and binding" {
         .{ "model_interruption", ",\"interruption_target\":{\"session\":\"k7m2qx\",\"turn\":\"3\",\"operation\":\"7\"}", ",\"interruption_target\":{\"session\":\"k7m2qx\",\"turn\":\"0\",\"operation\":\"0\"}" },
         .{ "permission_decision", ",\"permission_target\":{\"action\":\"29\",\"decision\":\"allow_once\"}", ",\"permission_target\":{\"action\":\"0\",\"decision\":\"deny\"}" },
         .{ "action_background", ",\"action_target\":{\"action\":\"29\"},\"action_selection\":{\"kind\":\"background\",\"position\":\"31\"}", ",\"action_target\":{\"action\":\"29\"}" },
+        .{ "action_stop", ",\"action_target\":{\"action\":\"29\"},\"resolution_position\":null", ",\"action_target\":{\"action\":\"29\"}" },
+        .{ "action_stop", ",\"action_target\":{\"action\":\"29\"},\"resolution_position\":\"31\"", ",\"action_target\":{\"action\":\"29\"}" },
     }) |case| {
         const accepted = prefix ++ "\"kind\":\"" ++ case[0] ++ "\",\"status\":\"accepted\"" ++ case[1] ++ "}}";
         const observed = try CommandObservation.parse(.{ .status = 200, .body = accepted }, "k");
