@@ -645,7 +645,6 @@ fn newReference(io: std.Io, reference: *[session_id.bytes]u8) !void {
 pub noinline fn prepareConfiguration(a: anytype, host_tool_set: *const tool_defs.HostToolSet, session: []const u8, configuration: *const content_custody.Configuration, reads: *ConfigurationReads) void {
     const creating = session.len == 0;
     reads.configuration.init(configuration);
-    if (creating) reads.configuration.model = configuration_defaults.creationModel(&configuration.model);
     if (!creating) readSaved(a, session, &reads.next, &reads.found);
     if (creating and configuration.parent.state == .value) prepareParent(a, configuration.parent.value.slice(), reads);
     if (creating or configuration.tools.state == .value) {
@@ -824,6 +823,27 @@ pub fn validateStep(a: anytype, request: *const Request, reads: *ConfigurationRe
     }
 }
 
+fn modelRejection(creating: bool, model: *const command_input.OptionalBounded(model_capability.max_model_bytes)) ?configuration_admission.Rejection {
+    return switch (model.state) {
+        .omitted => if (creating) .incomplete_initial_configuration else null,
+        .explicit_null => .invalid_model,
+        .value => if (model.value.len == 0) .invalid_model else null,
+    };
+}
+
+test "configuration creation requires a model and updates preserve omitted model" {
+    const Model = command_input.OptionalBounded(model_capability.max_model_bytes);
+    var model: Model = .{};
+    try std.testing.expectEqual(configuration_admission.Rejection.incomplete_initial_configuration, modelRejection(true, &model).?);
+    try std.testing.expectEqual(@as(?configuration_admission.Rejection, null), modelRejection(false, &model));
+    model.state = .explicit_null;
+    for ([_]bool{ false, true }) |creating| try std.testing.expectEqual(configuration_admission.Rejection.invalid_model, modelRejection(creating, &model).?);
+    model.state = .value;
+    for ([_]bool{ false, true }) |creating| try std.testing.expectEqual(configuration_admission.Rejection.invalid_model, modelRejection(creating, &model).?);
+    try model.value.set("model-a");
+    for ([_]bool{ false, true }) |creating| try std.testing.expectEqual(@as(?configuration_admission.Rejection, null), modelRejection(creating, &model));
+}
+
 fn validateRequest(a: anytype, request: *const Request, reads: *ConfigurationReads) !Validation {
     const session = request.session;
     const configuration = &reads.configuration;
@@ -835,9 +855,7 @@ fn validateRequest(a: anytype, request: *const Request, reads: *ConfigurationRea
     {
         return .{ .rejected = .unsupported_permission_mode };
     }
-    if (configuration.model.state == .explicit_null or (configuration.model.state == .value and configuration.model.value.len == 0)) {
-        return .{ .rejected = .invalid_model };
-    }
+    if (modelRejection(creating, configuration.model)) |rejection| return .{ .rejected = rejection };
     if (configuration.output_schema.state == .value) {
         const valid = if (configuration.output_schema.borrowedBytes()) |bytes|
             try model_settlement_domain.validateJsonBytes(bytes)

@@ -1906,7 +1906,6 @@ const OverviewEntry = struct {
     workspace_len: usize,
     home: []const u8,
     binding: ?new_session_selection.Binding,
-    model_pinned: bool = false,
     launch: ?HostLaunchResult = null,
     login_at: ?u64,
 };
@@ -1928,23 +1927,21 @@ fn prepareOverviewUsing(init: std.process.Init, options: NewSessionOptions, entr
     const destination = try snapshot.destination(home, &fallback);
     try preflightNewSession(init.io, destination.path, destination.saved);
     const usable: provider_selection.Readinesses = .initFill(.configured);
-    const selected = try snapshot.resolveDisplay(&usable);
+    const selected = try snapshot.resolve(&usable);
     var readiness = localReadiness(init);
-    entry.binding = try snapshot.resolveDisplay(&readiness);
+    entry.binding = try snapshot.resolve(&readiness);
     if (selected != null and entry.binding != null) {
-        if (connection == null and intent.model == null and std.mem.eql(u8, entry.binding.?.provider.slice(), "openai")) entry.binding = null;
+        if (intent.model == null and std.mem.eql(u8, entry.binding.?.provider.slice(), "openai")) entry.binding = null;
     } else {
         const connection_info = try host_start.inspectConnection(init, destination.path);
         readiness.set(.openai, connection_info.readiness);
-        entry.binding = try snapshot.resolveDisplay(&readiness);
-        if (connection == null and connection_info.custom() and intent.model == null) {
+        entry.binding = try snapshot.resolve(&readiness);
+        if (connection_info.custom() and intent.model == null) {
             if (entry.binding) |*binding| if (std.mem.eql(u8, binding.provider.slice(), "openai")) {
                 entry.binding = null;
             };
         }
     }
-    const pin = try snapshot.resolve(&readiness);
-    entry.model_pinned = if (pin) |value| value.model.len != 0 else false;
     entry.login_at = null;
     try entry.store.set(destination.path);
     entry.launch = null;
@@ -1976,7 +1973,7 @@ fn activateOverviewConnectionUsing(init: std.process.Init, intent: new_session_s
     const entry = try init.gpa.create(OverviewEntry);
     defer init.gpa.destroy(entry);
     try prepareOverviewUsing(init, .{ .store = intent.store, .provider = intent.provider, .model = intent.model }, entry, ops, connection);
-    return .{ .pending = connection != null and entry.launch != null and entry.launch.?.outcome == .ready and entry.launch.?.outcome.ready.adopted, .binding = entry.binding orelse return error.HostModelUnavailable, .model_pinned = entry.model_pinned, .store = entry.store, .launch = entry.launch };
+    return .{ .pending = connection != null and entry.launch != null and entry.launch.?.outcome == .ready and entry.launch.?.outcome.ready.adopted, .binding = entry.binding orelse return error.HostModelUnavailable, .store = entry.store, .launch = entry.launch };
 }
 
 fn overviewProviderReady(init: std.process.Init, store: []const u8) provider_selection.Readinesses {
@@ -2310,11 +2307,9 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
         } else .{} };
         saved_effort = if (reads.saved_effort) snapshot.defaults.reasoning_effort else null;
         if (reads.binding) {
-            if (try snapshot.resolveCreation()) |chosen| {
-                binding = chosen;
-                if (binding.model.len != 0) input.model = .{ .present = true, .value = binding.model.slice() };
-                if (!input.parent.present) input.provider = .{ .present = true, .value = binding.provider.slice() };
-            }
+            binding = try snapshot.resolveUnprompted();
+            input.model = .{ .present = true, .value = binding.model.slice() };
+            if (!input.parent.present) input.provider = .{ .present = true, .value = binding.provider.slice() };
         }
         input.applySavedCreation(saved_effort, snapshot.defaults.permission_mode);
         if (!input.parent.present and !input.workspace.present) {
@@ -2672,7 +2667,7 @@ fn openExistingOverview(init: std.process.Init, destination: []const u8, open: ?
     const home = init.environ_map.get("HOME");
     const binding: ?new_session_selection.Binding = blk: {
         const snapshot: new_session_selection.Snapshot = .{ .intent = selectors, .defaults = if (selectors.needsPreferences()) preferences.load(home orelse break :blk null) catch break :blk null else .{} };
-        break :blk snapshot.resolveUnpromptedDisplay() catch null;
+        break :blk snapshot.resolveUnprompted() catch null;
     };
     return openOverview(init, .{
         .store = destination,
@@ -3722,9 +3717,9 @@ fn writeCreationConfiguration(writer: *std.Io.Writer, config: @import("creation_
     try writer.writeAll(",\"workspace\":");
     try std.json.Stringify.value(config.workspace.slice(), .{}, writer);
     try writer.writeAll(",\"tools\":");
-    try (@import("creation_receipt_wire.zig").Names{ .value = config.tools }).writeJson(writer);
+    try (@import("creation_receipt_wire.zig").NamesJson{ .value = config.tools.slice() }).writeJson(writer);
     try writer.writeAll(",\"loaded_tools\":");
-    try (@import("creation_receipt_wire.zig").Names{ .value = config.loaded_tools }).writeJson(writer);
+    try (@import("creation_receipt_wire.zig").NamesJson{ .value = config.loaded_tools.slice() }).writeJson(writer);
     try writer.print(",\"permission_mode\":\"{s}\",\"compaction_trigger\":", .{@tagName(config.permission_mode)});
     if (config.compaction_trigger) |trigger| try writer.print("\"{d}\"", .{trigger}) else try writer.writeAll("null");
     try writer.writeByte('}');
@@ -4779,7 +4774,7 @@ test "native promotion saved refusals keep their catalog code and refused exit" 
 test "saved CLI rejection goldens preserve JSON and explain permission and incomplete configuration" {
     const cases = [_]struct { code: []const u8, session: []const u8, line: []const u8 }{
         .{ .code = "unsupported_permission_mode", .session = "k7m2qx", .line = "rui session configure: --permission-mode: Rui has no such permission mode. Accepted: ask, bypass. Next: Use one of the accepted values. This rejection was saved and replays as saved; a resend needs a new key. [unsupported_permission_mode]\n" },
-        .{ .code = "incomplete_initial_configuration", .session = "", .line = "rui session configure: --workspace, --provider: A new Session's spec is missing a required setting. Accepted: a Workspace for standalone creation and a provider when the Host serves several. Next: Supply the missing Workspace or provider; Workspace may come from a preset or parent. This rejection was saved and replays as saved; a resend needs a new key. [incomplete_initial_configuration]\n" },
+        .{ .code = "incomplete_initial_configuration", .session = "", .line = "rui session configure: --model, --workspace, --provider: A new Session's spec is missing a required setting. Accepted: a model, a Workspace for standalone creation and a provider when the Host serves several. Next: Supply the missing model, Workspace or provider; Workspace may come from a preset or parent. This rejection was saved and replays as saved; a resend needs a new key. [incomplete_initial_configuration]\n" },
     };
     for (cases) |case| {
         var wire: [1024]u8 = undefined;

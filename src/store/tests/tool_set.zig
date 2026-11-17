@@ -1009,8 +1009,10 @@ test "creation receipts retain maximum configured and loaded tools" {
                 var storage: Store = undefined;
                 try store_testing.testingStoreWith(case, &storage, &tmp, std.testing.io, .{ .host_tool_set = &host_tools });
                 defer storage.close() catch unreachable;
-                const configured = try storage.configure(&create, .{});
-                const submitted = storage.submitMessageWithModel(&message, null, .{});
+                var configured_receipt: @import("../../creation_receipt.zig").Configuration = undefined;
+                const configured = try storage.configureInto(&create, &configured_receipt, .{});
+                var submitted_receipt: @import("../../creation_receipt.zig").Configuration = undefined;
+                const submitted = storage.submitMessageWithModelInto(&message, null, &submitted_receipt, .{});
                 try std.testing.expect(configured == .accepted and submitted == .accepted);
                 config_session = configured.accepted.session;
                 message_session = submitted.accepted.session;
@@ -1021,8 +1023,10 @@ test "creation receipts retain maximum configured and loaded tools" {
                 var storage: Store = undefined;
                 try store_testing.testingStoreWith(case, &storage, &tmp, std.testing.io, .{ .host_tool_set = &host_tools });
                 defer storage.close() catch unreachable;
-                const configured = try storage.configure(&create, .{});
-                const submitted = storage.submitMessageWithModel(&message, null, .{});
+                var configured_receipt: @import("../../creation_receipt.zig").Configuration = undefined;
+                const configured = try storage.configureInto(&create, &configured_receipt, .{});
+                var submitted_receipt: @import("../../creation_receipt.zig").Configuration = undefined;
+                const submitted = storage.submitMessageWithModelInto(&message, null, &submitted_receipt, .{});
                 try std.testing.expect(configured == .accepted and configured.accepted.replayed);
                 try std.testing.expect(submitted == .accepted and submitted.accepted.replayed);
                 try std.testing.expectEqualStrings(config_session.slice(), configured.accepted.session.slice());
@@ -1032,7 +1036,7 @@ test "creation receipts retain maximum configured and loaded tools" {
             }
         }
 
-        fn check(receipt: ?@import("../../creation_receipt.zig").Configuration, expected: []const u8) !void {
+        fn check(receipt: ?*const @import("../../creation_receipt.zig").Configuration, expected: []const u8) !void {
             try std.testing.expect(receipt != null);
             try std.testing.expectEqualStrings(expected, receipt.?.tools.slice());
             try std.testing.expectEqualStrings(expected, receipt.?.loaded_tools.slice());

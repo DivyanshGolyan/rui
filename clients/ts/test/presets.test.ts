@@ -80,19 +80,22 @@ test("connect presets seed creation, overrides win and edited presets replay by 
 	}
 });
 
-test("a connect preset refuses an explicit null model", { skip }, async () => {
-	const root = realpathSync(mkdtempSync(join(tmpdir(), "rui-ts-")));
-	await assert.rejects(Rui.connect({
-		store: { sqlite: { dir: join(root, "store") } },
-		providers: { openai: { endpoint: "https://api.openai.com/v1/responses", key: "sk-ts-presets" } },
-		// @ts-expect-error Deliberately pass a null model to exercise Host refusal.
-		presets: { review: { model: null, tools: [] } },
-	}, { binary: binary ?? "rui" }), (error: unknown) => error instanceof RuiStartError && error.code === "settings_invalid" && /review.*model/.test(error.message));
-});
+for (const model of [undefined, null, ""] as const) {
+	test(`a connect preset refuses ${model === undefined ? "an omitted" : model === null ? "a null" : "an empty"} model`, { skip }, async () => {
+		const root = realpathSync(mkdtempSync(join(tmpdir(), "rui-ts-")));
+		const spec = model === undefined ? { tools: [] } : { model, tools: [] };
+		await assert.rejects(Rui.connect({
+			store: { sqlite: { dir: join(root, "store") } },
+			providers: { openai: { endpoint: "https://api.openai.com/v1/responses", key: "sk-ts-presets" } },
+			// @ts-expect-error Deliberately pass malformed model choices to exercise Host refusal.
+			presets: { review: spec },
+		}, { binary: binary ?? "rui" }), (error: unknown) => error instanceof RuiStartError && error.code === "settings_invalid" && /review.*model/.test(error.message));
+	});
+}
 
 test("the Host resolves omitted preset settings at creation and preserves explicit choices", { skip }, async () => {
 	const root = realpathSync(mkdtempSync(join(tmpdir(), "rui-ts-")));
-	const minimal = { workspace: root } satisfies AgentSpec;
+	const minimal = { workspace: root, model: "gpt-6.1-sol" } satisfies AgentSpec;
 	const rui = await Rui.connect({
 		store: { sqlite: { dir: join(root, "store") } },
 		providers: { openai: { endpoint: "https://api.openai.com/v1/responses", key: "sk-ts-presets" } },

@@ -84,7 +84,7 @@ The Host resolves omitted creation settings; an explicit default request for eff
 
 | Field | Initially omitted | Explicit value | Later omitted |
 | --- | --- | --- | --- |
-| Model | Host recommended model | Exact nonempty model ID | Preserve existing value |
+| Model | Required; omission rejects creation | Exact nonempty model ID | Preserve existing value |
 | Instructions | Empty text | `instructions: ""` selects empty text | Preserve existing value |
 | Tools | Product default tool catalog | `tools: []` offers no tools | Preserve existing value |
 | Permission Mode | `bypass` | `ask` or `bypass` | Preserve existing value |

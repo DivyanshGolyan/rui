@@ -363,7 +363,7 @@ pub const Input = enum {
             .session => "--session / --to",
             .sender_handle => "RUI_SENDER_HANDLE",
             .preset => "preset",
-            .initial_configuration => "--workspace, --provider",
+            .initial_configuration => "--model, --workspace, --provider",
             .target => "--turn / --operation / --action",
             .operation => "--operation",
             .action => "--action",
@@ -469,7 +469,7 @@ pub fn facts(code: Code) Facts {
         .loaded_tools_not_in_tools => .{ .act = .fix, .input = .loaded_tools, .accepted = .{ .grammar = "a subset of the Session's --tools, or none" }, .says = "A loaded tool is not one of the Session's tools.", .next = "Remove it from --loaded-tools, or add it to --tools first." },
         .loaded_tools_unreachable => .{ .act = .fix, .input = .loaded_tools, .accepted = .{ .grammar = "every tool in --tools, or a subset when find_tools is loaded" }, .says = "Some tools would never be reachable: --loaded-tools leaves tools out without loading find_tools.", .next = "Add find_tools to --loaded-tools, or load every tool in --tools." },
         .invalid_label => .{ .act = .fix, .input = .label, .accepted = .{ .grammar = "one line of at most 100 UTF-8 bytes, or an empty string to clear it" }, .says = "The Label is too long or contains a line break or control character.", .next = "Shorten --label and remove line breaks and control characters." },
-        .incomplete_initial_configuration => .{ .act = .fix, .input = .initial_configuration, .accepted = .{ .grammar = "a Workspace for standalone creation and a provider when the Host serves several" }, .says = "A new Session's spec is missing a required setting.", .next = "Supply the missing Workspace or provider; Workspace may come from a preset or parent." },
+        .incomplete_initial_configuration => .{ .act = .fix, .input = .initial_configuration, .accepted = .{ .grammar = "a model, a Workspace for standalone creation and a provider when the Host serves several" }, .says = "A new Session's spec is missing a required setting.", .next = "Supply the missing model, Workspace or provider; Workspace may come from a preset or parent." },
         .unknown_preset => .{ .act = .fix, .input = .preset, .accepted = .{ .grammar = "a preset name supplied when this Host was launched" }, .says = "The Host does not have that preset.", .next = "Use a preset supplied at connect, or supply a complete creation spec." },
         .preset_on_update => .{ .act = .fix, .input = .preset, .accepted = .{ .grammar = "a preset only when creating a Session" }, .says = "An existing Session cannot apply a preset.", .next = "Omit preset from the update, or create a new Session with it." },
         .preferences_on_update => .{ .act = .fix, .input = .session, .accepted = .{ .grammar = "preferences only on creation" }, .says = "An existing Session cannot apply creation preferences.", .next = "Omit preferences from the update." },
@@ -746,9 +746,9 @@ test "historical model immutability rejection explains its saved policy" {
 
 test "saved ambiguous causes do not invent missing flags or model restrictions" {
     const initial = facts(.incomplete_initial_configuration);
-    try std.testing.expectEqualStrings("a Workspace for standalone creation and a provider when the Host serves several", initial.accepted.grammar);
+    try std.testing.expectEqualStrings("a model, a Workspace for standalone creation and a provider when the Host serves several", initial.accepted.grammar);
     try std.testing.expectEqualStrings("A new Session's spec is missing a required setting.", initial.says);
-    try std.testing.expectEqualStrings("Supply the missing Workspace or provider; Workspace may come from a preset or parent.", initial.next);
+    try std.testing.expectEqualStrings("Supply the missing model, Workspace or provider; Workspace may come from a preset or parent.", initial.next);
     try std.testing.expectEqualStrings("The model ID is empty.", facts(.invalid_model).says);
     try std.testing.expectEqual(Input.provider, facts(.model_capability_unavailable).input.?);
     try std.testing.expectEqualStrings("default or a decimal from 1 to 9223372036854775807", facts(.invalid_compaction_trigger).accepted.grammar);

@@ -5,6 +5,7 @@ import { Session, Sessions, type SessionSpec, type SessionUpdate, type Link } fr
 import type { components } from "../src/wire.ts";
 import { WIRE_VERSION } from "../src/transport.ts";
 import { RuiRequestError } from "../src/errors.ts";
+import type { HostSettings } from "../src/settings.ts";
 
 test("configuration preserves omitted, null and value states and normalizes tools", async () => {
 	const requests: components["schemas"]["ConfigureRequest"][] = [];
@@ -212,12 +213,15 @@ function sessionTypeContract(spec: SessionSpec): void {
 	const { effort: _effort, ...withoutEffort } = spec;
 	const missingEffort: SessionSpec = withoutEffort;
 	const minimal: SessionSpec = { model: "gpt-6.1-sol" };
+	// @ts-expect-error creation needs an explicit model
 	const missingModel: SessionSpec = {};
+	// @ts-expect-error presets must supply their model
+	const missingPresetModel: HostSettings = { presets: { review: {} } };
 	// @ts-expect-error an explicit null model cannot request the Host default
 	const nullModel: SessionSpec = { model: null };
 	const nullCompaction: SessionUpdate = { compactAt: null };
 	const sparse: SessionUpdate = {};
-	void [missingEffort, minimal, missingModel, nullModel, nullCompaction, sparse];
+	void [missingEffort, minimal, missingModel, missingPresetModel, nullModel, nullCompaction, sparse];
 }
 void sessionTypeContract;
 
@@ -239,18 +243,22 @@ test("creation can name a preset without inventing missing fields", async () => 
 function presetTypeContract(sessions: Sessions): void {
 	void sessions.create({ preset: "review" }, { idempotencyKey: "preset" });
 	void sessions.create({ preset: "review", workspace: "/caller" }, { idempotencyKey: "preset-workspace" });
-	void sessions.create({ workspace: "/caller" }, { idempotencyKey: "empty-settings" });
-	void sessions.create({ workspace: "/caller", instructions: "Do this" }, { idempotencyKey: "partial" });
-	void sessions.create({ parent: "p4rent" }, { idempotencyKey: "child" });
+	void sessions.create({ workspace: "/caller", model: "gpt-6.1-sol" }, { idempotencyKey: "empty-settings" });
+	void sessions.create({ workspace: "/caller", model: "gpt-6.1-sol", instructions: "Do this" }, { idempotencyKey: "partial" });
+	void sessions.create({ parent: "p4rent", model: "gpt-6.1-sol" }, { idempotencyKey: "child" });
 	void sessions.create({ parent: "p4rent", preset: "review" }, { idempotencyKey: "child-preset" });
+	// @ts-expect-error a root needs a model unless a preset supplies it
+	void sessions.create({ workspace: "/caller" }, { idempotencyKey: "missing-root-model" });
+	// @ts-expect-error a child needs a model unless a preset supplies it
+	void sessions.create({ parent: "p4rent" }, { idempotencyKey: "missing-child-model" });
 	// @ts-expect-error root creation always carries the caller's Workspace
 	void sessions.create({}, { idempotencyKey: "empty" });
 	// @ts-expect-error disabling Bash does not make the root Workspace optional
-	void sessions.create({ tools: [] }, { idempotencyKey: "no-tools" });
+	void sessions.create({ model: "gpt-6.1-sol", tools: [] }, { idempotencyKey: "no-tools" });
 	// @ts-expect-error a child inherits its Workspace
-	void sessions.create({ parent: "p4rent", workspace: "/caller" }, { idempotencyKey: "child-workspace" });
+	void sessions.create({ parent: "p4rent", model: "gpt-6.1-sol", workspace: "/caller" }, { idempotencyKey: "child-workspace" });
 	// @ts-expect-error a child inherits its provider
-	void sessions.create({ parent: "p4rent", provider: "openai" }, { idempotencyKey: "child-provider" });
+	void sessions.create({ parent: "p4rent", model: "gpt-6.1-sol", provider: "openai" }, { idempotencyKey: "child-provider" });
 	// @ts-expect-error an explicit null model is never valid
 	void sessions.create({ workspace: "/caller", model: null }, { idempotencyKey: "null-model" });
 	// @ts-expect-error a preset name is never null

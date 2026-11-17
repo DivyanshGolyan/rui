@@ -7,13 +7,6 @@ const Provider = @import("provider_name.zig").Provider;
 
 const Choice = input.OptionalBounded(16);
 const Tokens = input.OptionalBounded(20);
-const Model = input.OptionalBounded(capability.max_model_bytes);
-const product_model: Model = blk: {
-    var field: Model = .{ .state = .value };
-    field.value.set(product.recommended_model) catch unreachable;
-    break :blk field;
-};
-
 const product_tools = names(product.tools);
 const product_loaded = names(product.loaded_tools);
 const product_permission = choice(.value, product.permission_mode);
@@ -24,12 +17,6 @@ fn names(comptime text: []const u8) input.ToolsField {
     var each = std.mem.splitScalar(u8, text, ',');
     while (each.next()) |name| out.insert(name) catch unreachable;
     return out;
-}
-
-/// Model selection precedes the Host catalog read; all returned fields borrow
-/// the request or immutable product defaults.
-pub fn creationModel(requested: *const Model) *const Model {
-    return if (requested.state == .omitted) &product_model else requested;
 }
 
 /// These lists borrow the request or immutable product defaults.
@@ -369,18 +356,6 @@ test "configuration defaults enumerate wire refusal for every null list and perm
     };
     try std.testing.expectEqual(@as(usize, 1458), total);
     try std.testing.expectEqual(@as(usize, 1026), invalid);
-}
-
-test "configuration defaults select the recommended model only for creation omissions" {
-    var model: Model = .{};
-    try std.testing.expectEqual(input.FieldState.value, creationModel(&model).state);
-    try std.testing.expectEqualStrings("gpt-6.1-sol", creationModel(&model).value.slice());
-    for ([_]input.FieldState{ .value, .explicit_null }) |state| {
-        model.state = state;
-        try model.value.set("custom-model");
-        try std.testing.expect(creationModel(&model) == &model);
-        try std.testing.expectEqual(state, model.state);
-    }
 }
 
 test "parent creation uses inherited provider for omitted compaction regardless of saved provider binding" {

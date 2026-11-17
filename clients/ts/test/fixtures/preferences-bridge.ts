@@ -56,19 +56,19 @@ try {
 		}
 	}
 	// Child authority is checked after Host defaults and preferences are resolved.
-	// The parent has the Host-supported max model; an omitted child model uses
-	// the recommended low-only model while its provider and Workspace inherit.
+	// The parent has the Host-supported max model; each child supplies a model
+	// while its provider and Workspace inherit from the parent.
 	const parent = await rui.sessions.create({ workspace, provider: "openai", model: "gpt-5.5", permissionMode: "ask" },
 		{ idempotencyKey: "preferences:parent" });
 	for (const [suffix, childPreferences] of [["omitted", undefined], ["bypass", preferences]] as const) {
 		await assert.rejects(
-			rui.sessions.create({ parent: parent.id, ...(childPreferences === undefined ? {} : { preferences: childPreferences }) },
+			rui.sessions.create({ parent: parent.id, model: "gpt-6.1-sol", ...(childPreferences === undefined ? {} : { preferences: childPreferences }) },
 				{ idempotencyKey: `preferences:child:${suffix}` }),
 			(error: unknown) => error instanceof RuiRequestError && error.code === "permission_mode_wider_than_parent",
 		);
 	}
 	for (const [suffix, childSpec, model, effort] of [
-		["saved-ask", { parent: parent.id, preferences: { reasoningEffort: "max", permissionMode: "ask" } }, "gpt-6.1-sol", "low"],
+		["saved-ask", { parent: parent.id, model: "gpt-6.1-sol", preferences: { reasoningEffort: "max", permissionMode: "ask" } }, "gpt-6.1-sol", "low"],
 		["explicit-ask", { parent: parent.id, model: "gpt-5.5", preferences, permissionMode: "ask" }, "gpt-5.5", "max"],
 	] as const) {
 		const child = await rui.sessions.create(childSpec, { idempotencyKey: `preferences:child:${suffix}` });

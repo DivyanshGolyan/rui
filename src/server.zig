@@ -1337,7 +1337,7 @@ noinline fn writeReadiness(
     retention_capacity: usize,
     provider_enabled: bool,
 ) !void {
-    var ready: protocol.ResponseBuffer = .{};
+    var ready: protocol.DiagnosticBuffer = .{};
     const instance_hex = std.fmt.bytesToHex(instance, .lower);
     try ready.appendFmt("ready instance={s} store={s} socket={s} active_capacity={d} intake_capacity={d} descriptor_requirement={d} descriptor_limit={s} custody_record_bytes={d} execution_slot_bytes={d} model_preparation_bytes={d} scratch_limit_bytes={d} retention_entry_bytes={d} retention_capacity={d} bash_execution=enabled execution={s}", .{
         &instance_hex,
@@ -1442,7 +1442,7 @@ const ControlTiming = struct {
         if (self.store_queued_ns == 0 or self.lock_acquired_ns == 0 or self.store_complete_ns == 0) return;
         var publication = beginTestObservation(self.host, "control_timing", null);
         defer if (publication) |*value| value.finish();
-        var trace: protocol.ResponseBuffer = .{};
+        var trace: protocol.DiagnosticBuffer = .{};
         trace.append("{\"rui_test_phase\":\"control_timing\",\"command_key\":") catch return;
         trace.appendJsonString(self.command_key.slice()) catch return;
         trace.append(",\"kind\":") catch return;
@@ -1554,7 +1554,7 @@ const Header = struct {
     instance: ?protocol.InstanceId = null,
 };
 
-noinline fn submitMessage(host: *Host, command: *const wire_request.MessageCommand, offer: *SessionEnvironments.Offer) error{OutOfMemory}!store_module.MessageReply {
+noinline fn submitMessage(host: *Host, command: *const wire_request.MessageCommand, offer: *SessionEnvironments.Offer, receipt: ?*@import("creation_receipt.zig").Configuration) error{OutOfMemory}!store_module.MessageReply {
     std.debug.assert(offer.value() != null);
     defer offer.deinit(host.allocator);
     var memory: std.heap.ArenaAllocator = .init(host.allocator);
@@ -1572,9 +1572,9 @@ noinline fn submitMessage(host: *Host, command: *const wire_request.MessageComma
             return if (err == error.OutOfMemory) error.OutOfMemory else .infrastructure_failure;
         };
         defer inheritance.deinit(host.allocator);
-        return host.store.submitMessageCapturedSkills(command, inheritance.messageCallback(), initial_skills, if (captured_skill) |*value| value else null, faults);
+        return host.store.submitMessageCapturedSkillsInto(command, inheritance.messageCallback(), initial_skills, if (captured_skill) |*value| value else null, receipt, faults);
     };
-    const environments = host.environments orelse return host.store.submitMessageCapturedSkills(command, null, initial_skills, if (captured_skill) |*value| value else null, faults);
+    const environments = host.environments orelse return host.store.submitMessageCapturedSkillsInto(command, null, initial_skills, if (captured_skill) |*value| value else null, receipt, faults);
     const Install = struct {
         environments: *SessionEnvironments,
         offer: *SessionEnvironments.Offer,
@@ -1588,21 +1588,21 @@ noinline fn submitMessage(host: *Host, command: *const wire_request.MessageComma
         }
     };
     var install: Install = .{ .environments = environments, .offer = offer };
-    return host.store.submitMessageCapturedSkills(command, .{ .context = &install, .call = Install.call }, initial_skills, if (captured_skill) |*value| value else null, faults);
+    return host.store.submitMessageCapturedSkillsInto(command, .{ .context = &install, .call = Install.call }, initial_skills, if (captured_skill) |*value| value else null, receipt, faults);
 }
 
-noinline fn submitConfigure(host: *Host, command: *const wire_request.ConfigureCommand) error{OutOfMemory}!store_module.ConfigureReply {
-    const name = command.preset orelse return configureCapturedSkills(host, command, null);
+noinline fn submitConfigure(host: *Host, command: *const wire_request.ConfigureCommand, receipt: ?*@import("creation_receipt.zig").Configuration) error{OutOfMemory}!store_module.ConfigureReply {
+    const name = command.preset orelse return configureCapturedSkills(host, command, null, receipt);
     var decision: store_module.PresetDecision = .{ .request_digest = command.presetRequestDigest() };
     if (command.session.len != 0) {
         decision.rejection = .preset_on_update;
-        return try host.store.configureWithPreset(command, &decision, host.hooks.storeFaults(.command));
+        return try host.store.configureWithCreationCommittedInto(command, &decision, null, null, host.allocator, null, receipt, host.hooks.storeFaults(.command));
     }
     const preset = for (host.presets) |*entry| {
         if (std.mem.eql(u8, entry.name, name.slice())) break entry;
     } else {
         decision.rejection = .unknown_preset;
-        return try host.store.configureWithPreset(command, &decision, host.hooks.storeFaults(.command));
+        return try host.store.configureWithCreationCommittedInto(command, &decision, null, null, host.allocator, null, receipt, host.hooks.storeFaults(.command));
     };
     var memory: std.heap.ArenaAllocator = .init(host.allocator);
     defer memory.deinit();
@@ -1618,7 +1618,7 @@ noinline fn submitConfigure(host: *Host, command: *const wire_request.ConfigureC
     const checked = core_tools.parseAgentSpec(arena, preset.spec, &resolved.configuration) catch |err| return configureFailure(host, err);
     std.debug.assert(checked == .accepted);
     overlayConfiguration(&resolved.configuration, &command.configuration);
-    return configureCapturedSkills(host, resolved, &decision);
+    return configureCapturedSkills(host, resolved, &decision, receipt);
 }
 
 fn overlayConfiguration(base: *wire_request.Configuration, override: *const wire_request.Configuration) void {
@@ -1644,7 +1644,7 @@ fn configureFailure(host: *Host, err: anyerror) error{OutOfMemory}!store_module.
     return if (err == error.OutOfMemory) error.OutOfMemory else .infrastructure_failure;
 }
 
-noinline fn configureCapturedSkills(host: *Host, command: *const wire_request.ConfigureCommand, preset: ?*const store_module.PresetDecision) error{OutOfMemory}!store_module.ConfigureReply {
+noinline fn configureCapturedSkills(host: *Host, command: *const wire_request.ConfigureCommand, preset: ?*const store_module.PresetDecision, receipt: ?*@import("creation_receipt.zig").Configuration) error{OutOfMemory}!store_module.ConfigureReply {
     var memory: std.heap.ArenaAllocator = .init(host.allocator);
     defer memory.deinit();
     const reload_capture: ?store_module.CapturedSkill = if (command.reload_skills and !(host.store.commandExists(command.key.slice()) catch return .infrastructure_failure))
@@ -1660,7 +1660,7 @@ noinline fn configureCapturedSkills(host: *Host, command: *const wire_request.Co
     else
         @import("child_environment.zig").Inheritance{ .environments = null };
     defer inheritance.deinit(host.allocator);
-    return host.store.configureWithCreationCommitted(command, preset, initial_skills, if (reload_capture) |*value| value else null, host.allocator, inheritance.creationCallback(), host.hooks.storeFaults(.command));
+    return host.store.configureWithCreationCommittedInto(command, preset, initial_skills, if (reload_capture) |*value| value else null, host.allocator, inheritance.creationCallback(), receipt, host.hooks.storeFaults(.command));
 }
 
 fn submitControl(host: *Host, comptime kind: command_spec.CommandKind, command: *const @FieldType(wire_request.Request, @tagName(kind)), faults: store_module.Faults) host_reply.MutationResult(kind) {
@@ -1691,7 +1691,7 @@ fn controlSubject(comptime kind: command_spec.CommandKind, command: *const @Fiel
 fn answerMutation(host: *Host, fd: *Reply, header: Header, comptime kind: command_spec.CommandKind, subject: host_reply.MutationSubject(kind), result: host_reply.MutationResult(kind)) !bool {
     if (result == .infrastructure_failure) fenceDispatch(host, command_spec.spec(kind).fence_message, error.CanonicalStoreFailure);
     if (header.drop == .after_commit and result != .infrastructure_failure) return false;
-    try fd.json(host_reply.httpStatus(result), protocol.max_response_bytes, host_reply.renderMutationReply(kind), .{ subject, result });
+    try fd.json(host_reply.httpStatus(result), @max(command_spec.spec(kind).Reply(protocol).max_bytes, protocol.max_control_error_response_bytes), host_reply.renderMutationReply(kind), .{ subject, result });
     return true;
 }
 
@@ -1760,10 +1760,16 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             if (header.drop != .after_commit) try fd.json(200, protocol.host_stop_ack.len, protocol.JsonOut.append, .{protocol.host_stop_ack});
         },
         .configure => |*command| {
-            _ = try answerMutation(host, fd, header, .configure, command.session.slice(), try submitConfigure(host, command));
+            // One bounded receipt per active creating exchange; ordinary exchanges
+            // are limited by Host intake capacity. It lives only through encoding.
+            const receipt = if (command.session.len == 0) try createUnfilled(host.allocator, @import("creation_receipt.zig").Configuration) else null;
+            defer if (receipt) |value| host.allocator.destroy(value);
+            _ = try answerMutation(host, fd, header, .configure, command.session.slice(), try submitConfigure(host, command, receipt));
         },
         .message => |*command| {
-            _ = try answerMutation(host, fd, header, .message, command.session.slice(), try submitMessage(host, command, client_environment.?));
+            const receipt = if (command.configuration != null) try createUnfilled(host.allocator, @import("creation_receipt.zig").Configuration) else null;
+            defer if (receipt) |value| host.allocator.destroy(value);
+            _ = try answerMutation(host, fd, header, .message, command.session.slice(), try submitMessage(host, command, client_environment.?, receipt));
         },
         inline .session_stop, .session_archive, .session_pin, .model_interruption, .permission_decision, .action_background, .action_stop => |*command, tag| {
             const kind = comptime @field(command_spec.CommandKind, @tagName(tag));
@@ -2223,12 +2229,23 @@ test "canonical failure classifier accepts every production mutation failure env
 test "initial Message reply binds its allocated Session and original input before exposing acceptance" {
     const protocol_reply = @import("protocol_reply.zig");
     const content: store_module.ContentReference = .{ .length = 9, .digest = protocol.contentDigest("seven\nµ!") };
+    const configuration: @import("creation_receipt.zig").Configuration = .{
+        .provider = .codex,
+        .model = try .from("model-a"),
+        .reasoning_effort = null,
+        .workspace = try .from("/workspace"),
+        .tools = .{},
+        .loaded_tools = .{},
+        .permission_mode = .ask,
+        .compaction_trigger = null,
+    };
     var allocated: protocol.Bounded(protocol.max_session_bytes) = .{};
     try allocated.set("k7m2qx");
     var response: protocol.ResponseBuffer = .{};
     try response.render(host_reply.renderMessageReply, .{ "", store_module.MessageReply{ .accepted = .{
         .replayed = true,
         .admission_id = 17,
+        .configuration = &configuration,
         .content = content,
         .session = allocated,
     } } });
@@ -2245,6 +2262,7 @@ test "initial Message reply binds its allocated Session and original input befor
     try response.render(host_reply.renderMessageReply, .{ "", store_module.MessageReply{ .accepted = .{
         .replayed = true,
         .admission_id = 17,
+        .configuration = &configuration,
         .content = content,
         .session = allocated,
     } } });
@@ -4293,6 +4311,80 @@ test "MCP socket capacity is reserved beside model and Bash descriptors" {
     try std.testing.expectEqual(before.inherited, requirement.inherited);
 }
 
+test "creation receipt survives dropped and failed reply allocation" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var path_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/store.sqlite", .{root});
+    var storage: store_module.Store = undefined;
+    try storage.open(std.testing.io, path, root);
+    defer storage.close() catch unreachable;
+    var lease: platform.StoreLease = undefined;
+    lease.paths = .{};
+    try lease.paths.store_identity.set(root);
+    try lease.paths.scratch.set(root);
+    var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = &lease, .store = &storage };
+    const request = try std.testing.allocator.create(wire_request.Request);
+    defer std.testing.allocator.destroy(request);
+    request.* = .{ .configure = try store_module.testingCompleteConfiguration("receipt-allocation", "", root, "model-a") };
+    try request.configure.store.set(root);
+    var header = Header{ .route = .configure, .content_length = 0 };
+    var receipt_failure = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    host.allocator = receipt_failure.allocator();
+    var reply = Reply{ .io = std.testing.io, .allocator = std.testing.allocator };
+    try std.testing.expectError(error.OutOfMemory, prepareReply(&host, &reply, -1, header, 0, 0, request, null));
+    try std.testing.expect(!try storage.commandExists(request.configure.key.slice()));
+    try std.testing.expectEqual(receipt_failure.allocated_bytes, receipt_failure.freed_bytes);
+    var accounting = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    host.allocator = accounting.allocator();
+    var output_failure = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    reply.allocator = output_failure.allocator();
+    try prepareReply(&host, &reply, -1, header, 0, 0, request, null);
+    try std.testing.expect(reply.body == .none);
+    try std.testing.expect(try storage.commandExists(request.configure.key.slice()));
+    try std.testing.expect(accounting.allocations > 0);
+    try std.testing.expectEqual(accounting.allocated_bytes, accounting.freed_bytes);
+    reply.allocator = std.testing.allocator;
+    try prepareReply(&host, &reply, -1, header, 0, 0, request, null);
+    try std.testing.expect(reply.body == .json);
+    try std.testing.expect(std.mem.indexOf(u8, reply.body.json, "\"configuration\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, reply.body.json, "\"replayed\":true") != null);
+    const Session = protocol.Bounded(protocol.max_session_bytes);
+    const readSession = struct {
+        fn call(body: []const u8) !Session {
+            const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
+            defer parsed.deinit();
+            return Session.from(parsed.value.object.get("answer").?.object.get("session").?.string);
+        }
+    }.call;
+    const first_session = try readSession(reply.body.json);
+    try std.testing.expectEqual(accounting.allocated_bytes, accounting.freed_bytes);
+    reply.deinit();
+    try prepareReply(&host, &reply, -1, header, 0, 0, request, null);
+    try std.testing.expectEqualStrings(first_session.slice(), (try readSession(reply.body.json)).slice());
+    try std.testing.expectEqual(accounting.allocated_bytes, accounting.freed_bytes);
+    reply.deinit();
+    try request.configure.key.set("receipt-drop");
+    header.drop = .after_commit;
+    try prepareReply(&host, &reply, -1, header, 0, 0, request, null);
+    try std.testing.expect(reply.body == .none);
+    try std.testing.expectEqual(accounting.allocated_bytes, accounting.freed_bytes);
+    header.drop = .none;
+    try prepareReply(&host, &reply, -1, header, 0, 0, request, null);
+    try std.testing.expect(reply.body == .json);
+    try std.testing.expect(std.mem.indexOf(u8, reply.body.json, "\"configuration\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, reply.body.json, "\"replayed\":true") != null);
+    const dropped_session = try readSession(reply.body.json);
+    try std.testing.expectEqual(accounting.allocated_bytes, accounting.freed_bytes);
+    reply.deinit();
+    try prepareReply(&host, &reply, -1, header, 0, 0, request, null);
+    defer reply.deinit();
+    try std.testing.expectEqualStrings(dropped_session.slice(), (try readSession(reply.body.json)).slice());
+    try std.testing.expectEqual(accounting.allocated_bytes, accounting.freed_bytes);
+}
+
 test "presets seed configure before Store validation and idempotency" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -4320,13 +4412,13 @@ test "presets seed configure before Store validation and idempotency" {
     const reload = try arena.create(wire_request.ConfigureCommand);
     reload.* = .{ .preset = create.preset, .reload_skills = true };
     try reload.key.set("skills-reload-preset-empty");
-    const reload_refused = try submitConfigure(&host, reload);
+    const reload_refused = try submitConfigure(&host, reload, null);
     try std.testing.expect(reload_refused == .rejected);
     try std.testing.expectEqual(protocol.ConfigurationRejection.unknown_session, reload_refused.rejected.code);
-    try std.testing.expect((try submitConfigure(&host, reload)).rejected.replayed);
+    try std.testing.expect((try submitConfigure(&host, reload, null)).rejected.replayed);
     reload.reload_skills = false;
-    try std.testing.expect(try submitConfigure(&host, reload) == .conflict);
-    const first = try submitConfigure(&host, create);
+    try std.testing.expect(try submitConfigure(&host, reload, null) == .conflict);
+    const first = try submitConfigure(&host, create, null);
     try std.testing.expect(first == .accepted);
     try std.testing.expect(!first.accepted.replayed);
     const session = first.accepted.session;
@@ -4337,7 +4429,7 @@ test "presets seed configure before Store validation and idempotency" {
     try std.testing.expectEqualStrings("ask", observed.permission_mode.slice());
     try std.testing.expectEqualSlices(u8, &protocol.contentDigest("Preset instructions"), &observed.instructions.digest);
     try std.testing.expect(observed.output_schema != null);
-    const replay = try submitConfigure(&host, create);
+    const replay = try submitConfigure(&host, create, null);
     try std.testing.expect(replay == .accepted and replay.accepted.replayed);
     try std.testing.expectEqualStrings(session.slice(), replay.accepted.session.slice());
     try std.testing.expectEqual(first.accepted.revision, replay.accepted.revision);
@@ -4365,7 +4457,7 @@ test "presets seed configure before Store validation and idempotency" {
         .length = "Overridden instructions".len,
         .digest = protocol.contentDigest("Overridden instructions"),
     };
-    const overridden = try submitConfigure(&host, override);
+    const overridden = try submitConfigure(&host, override, null);
     try std.testing.expect(overridden == .accepted);
     try storage.inspectSession(overridden.accepted.session.slice(), &observed);
     try std.testing.expectEqualStrings("preset-override-model", observed.model.slice());
@@ -4384,10 +4476,10 @@ test "presets seed configure before Store validation and idempotency" {
     , .{})).object;
     const edited_presets = [_]core_tools.Preset{.{ .name = "review", .spec = edited_spec }};
     host.presets = &edited_presets;
-    const same = try submitConfigure(&host, override);
+    const same = try submitConfigure(&host, override, null);
     try std.testing.expect(same == .accepted and same.accepted.replayed);
     try std.testing.expectEqualStrings(overridden.accepted.session.slice(), same.accepted.session.slice());
-    try std.testing.expect(try submitConfigure(&host, create) == .conflict);
+    try std.testing.expect(try submitConfigure(&host, create, null) == .conflict);
     try storage.inspectSession(session.slice(), &observed);
     try std.testing.expectEqualStrings("gpt-6.1-sol", observed.model.slice());
 
@@ -4398,27 +4490,27 @@ test "presets seed configure before Store validation and idempotency" {
     try invalid.configuration.workspace.value.set(root);
     invalid.configuration.compaction_trigger.state = .value;
     try invalid.configuration.compaction_trigger.value.set("0");
-    const refused = try submitConfigure(&host, invalid);
+    const refused = try submitConfigure(&host, invalid, null);
     try std.testing.expect(refused == .rejected);
     try std.testing.expectEqual(protocol.ConfigurationRejection.invalid_compaction_trigger, refused.rejected.code);
     host.presets = &.{};
-    try std.testing.expect(try submitConfigure(&host, create) == .conflict);
+    try std.testing.expect(try submitConfigure(&host, create, null) == .conflict);
     const missing = try arena.create(wire_request.ConfigureCommand);
     missing.* = .{ .preset = create.preset };
     try missing.key.set("preset-missing");
-    const unknown = try submitConfigure(&host, missing);
+    const unknown = try submitConfigure(&host, missing, null);
     try std.testing.expect(unknown == .rejected);
     try std.testing.expectEqual(protocol.ConfigurationRejection.unknown_preset, unknown.rejected.code);
     host.presets = &presets;
-    const refused_again = try submitConfigure(&host, missing);
+    const refused_again = try submitConfigure(&host, missing, null);
     try std.testing.expect(refused_again == .rejected and refused_again.rejected.replayed);
     try std.testing.expectEqual(protocol.ConfigurationRejection.unknown_preset, refused_again.rejected.code);
     invalid.session = session;
     try invalid.key.set("preset-on-update");
-    const update = try submitConfigure(&host, invalid);
+    const update = try submitConfigure(&host, invalid, null);
     try std.testing.expect(update == .rejected);
     try std.testing.expectEqual(protocol.ConfigurationRejection.preset_on_update, update.rejected.code);
-    const update_replay = try submitConfigure(&host, invalid);
+    const update_replay = try submitConfigure(&host, invalid, null);
     try std.testing.expect(update_replay == .rejected and update_replay.rejected.replayed);
     try std.testing.expectEqual(protocol.ConfigurationRejection.preset_on_update, update_replay.rejected.code);
 }
@@ -4495,7 +4587,7 @@ test "inline skills binding under heap exhaustion answers 503 without key admiss
         var oom_offer = try SessionEnvironments.Offer.init(std.testing.allocator, 0);
         failing = .init(std.testing.allocator, .{ .fail_index = fail_index });
         host.allocator = failing.allocator();
-        const result = submitMessage(&host, &command, &oom_offer);
+        const result = submitMessage(&host, &command, &oom_offer, null);
         host.allocator = std.testing.allocator;
         try std.testing.expect(!storage.isFenced() and host.launchAllowed());
         if (!failing.has_induced_failure) break;
@@ -4523,7 +4615,7 @@ test "inline skills binding under heap exhaustion answers 503 without key admiss
     try std.testing.expectEqual(@import("skill_suggestions.zig").capacity, preview.entries.len);
     try std.testing.expectEqual(entries.len, preview.total);
     var retry_offer = try SessionEnvironments.Offer.init(std.testing.allocator, 0);
-    const accepted = try submitMessage(&host, &command, &retry_offer);
+    const accepted = try submitMessage(&host, &command, &retry_offer, null);
     try std.testing.expect(accepted == .accepted and accepted.accepted.replayed);
     try std.testing.expectEqual(@as(u64, text.len), accepted.accepted.content.length);
     try std.testing.expect(host.launchAllowed() and !storage.isFenced());
@@ -4533,7 +4625,7 @@ test "inline skills binding under heap exhaustion answers 503 without key admiss
     while (true) : (fail_index += 1) {
         failing = .init(std.testing.allocator, .{ .fail_index = fail_index });
         host.allocator = failing.allocator();
-        const result = submitConfigure(&host, &reload);
+        const result = submitConfigure(&host, &reload, null);
         host.allocator = std.testing.allocator;
         try std.testing.expect(!storage.isFenced() and host.launchAllowed());
         if (!failing.has_induced_failure) {
@@ -4708,7 +4800,8 @@ test "configure parent inherits the Host environment only after a fresh creation
     var host: Host = .{ .io = io, .allocator = allocator, .lease = &lease, .store = &storage, .environments = &environments };
     var create = try store_module.testing.completeConfiguration("env-parent", "", root, "model-a");
     create.configuration.tools = try .of(&.{"bash"});
-    const parent = (try storage.configure(&create, .{})).accepted.session;
+    const parent_reply = try storage.configure(&create, .{});
+    const parent = parent_reply.accepted.session;
     var offer = try SessionEnvironments.Offer.init(allocator, 4);
     defer offer.deinit(allocator);
     @memcpy(offer.room(), "A=1\x00");
@@ -4722,7 +4815,7 @@ test "configure parent inherits the Host environment only after a fresh creation
     try child.configuration.permission_mode.value.set("ask");
     child.configuration.parent.state = .value;
     try child.configuration.parent.value.set(parent.slice());
-    const result = try submitConfigure(&host, &child);
+    const result = try submitConfigure(&host, &child, null);
     try std.testing.expect(result == .accepted);
     const session = result.accepted.session;
     const copied = (try environments.copy(session.slice(), allocator)).?;
@@ -4733,7 +4826,7 @@ test "configure parent inherits the Host environment only after a fresh creation
     defer newer.deinit(allocator);
     @memcpy(newer.room(), "B=2\x00");
     environments.offer(parent.slice(), .{ .origin = .person, .admission = 2 }, &newer);
-    const replay = try submitConfigure(&host, &child);
+    const replay = try submitConfigure(&host, &child, null);
     try std.testing.expect(replay == .accepted and replay.accepted.replayed);
     const retained = (try environments.copy(session.slice(), allocator)).?;
     defer allocator.free(retained);
@@ -4741,7 +4834,7 @@ test "configure parent inherits the Host environment only after a fresh creation
     try child.key.set("env-child-refused");
     child.configuration.provider.state = .value;
     try child.configuration.provider.value.set("codex");
-    const refusal = try submitConfigure(&host, &child);
+    const refusal = try submitConfigure(&host, &child, null);
     try std.testing.expect(refusal == .rejected);
     try std.testing.expectEqual(protocol.ConfigurationRejection.parent_provider_forbidden, refusal.rejected.code);
     try std.testing.expectEqual(count, environments.len);

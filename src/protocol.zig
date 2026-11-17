@@ -1046,6 +1046,11 @@ fn ParserOf(comptime Custody: type) type {
                 .reload_skills => out.reload_skills = try self.readBoolean(),
             };
             try require(Field, seen, &.{ .key, .session, .configuration });
+            if (out.session.len == 0 and out.preset == null) try validateCreatingConfiguration(&out.configuration);
+        }
+
+        fn validateCreatingConfiguration(configuration: *const Configuration) !void {
+            if (missingCreatingSetting(configuration) != null) return error.MissingField;
         }
 
         fn specField(key: *const Bounded(32), seen: *std.enums.EnumSet(std.meta.FieldEnum(Configuration))) !std.meta.FieldEnum(Configuration) {
@@ -1168,6 +1173,7 @@ fn ParserOf(comptime Custody: type) type {
             if (out.session.len != 0 and out.configuration != null) return error.UnexpectedField;
             if (out.text.state != .value) return error.InvalidMessage;
             if (seen.contains(.require_model) and out.configuration == null) return error.InvalidMessage;
+            if (out.session.len == 0) try validateCreatingConfiguration(&out.configuration.?);
         }
 
         fn parseAddress(self: *Parser, out: *Address) !void {
@@ -1685,6 +1691,17 @@ fn ParserOf(comptime Custody: type) type {
     };
 }
 
+pub fn missingCreatingSetting(configuration: anytype) ?[]const u8 {
+    inline for (session_settings.entries) |entry| {
+        const name = entry.field;
+        switch (entry.create) {
+            .optional => {},
+            .must_value => if (@field(configuration, name).state != .value) return entry.spec,
+        }
+    }
+    return null;
+}
+
 pub fn parseAgentSpec(comptime Custody: type, arena: std.mem.Allocator, spec: std.json.ObjectMap, configuration: *Requests(Custody).Configuration) error{OutOfMemory}!?[]const u8 {
     const ContentField = Requests(Custody).ContentField;
     var captured: [spec_content_count]ContentField = @splat(.{});
@@ -2087,7 +2104,7 @@ pub fn jsonListBytes(comptime count: usize, comptime item_bytes: usize) usize {
 
 pub const content_reference_shape = .{ "{\"type\":\"text\",\"bytes\":\"", Hole.decimal, "\",\"sha256\":\"", Hole{ .hex = 32 }, "\"}" };
 
-pub const creation_configuration_shape = .{ ",\"configuration\":{\"provider\":\"", Hole{ .tag = Provider }, "\",\"model\":", Hole{ .string = max_model_bytes }, ",\"reasoning_effort\":", Hole{ .optional_tag = ReasoningEffort }, ",\"workspace\":", Hole{ .string = max_workspace_bytes }, ",\"tools\":", Hole{ .json = @import("creation_receipt_wire.zig").Names }, ",\"loaded_tools\":", Hole{ .json = @import("creation_receipt_wire.zig").Names }, ",\"permission_mode\":\"", Hole{ .tag = cli_value.PermissionMode }, "\",\"compaction_trigger\":", Hole.optional_id, "}" };
+pub const creation_configuration_shape = .{ ",\"configuration\":{\"provider\":\"", Hole{ .tag = Provider }, "\",\"model\":", Hole{ .string = max_model_bytes }, ",\"reasoning_effort\":", Hole{ .optional_tag = ReasoningEffort }, ",\"workspace\":", Hole{ .string = max_workspace_bytes }, ",\"tools\":", Hole{ .json = @import("creation_receipt_wire.zig").NamesJson }, ",\"loaded_tools\":", Hole{ .json = @import("creation_receipt_wire.zig").NamesJson }, ",\"permission_mode\":\"", Hole{ .tag = cli_value.PermissionMode }, "\",\"compaction_trigger\":", Hole.optional_id, "}" };
 
 pub const configuration_reply = struct {
     const head = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"" ++ command_spec.spec(.configure).reply_type ++ "\",\"answer\":{\"status\":";
@@ -2310,6 +2327,18 @@ pub const host_stop_ack = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"ho
 pub const host_pause_reply = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"host_pause_reply\",\"paused\":", Hole.boolean, "}" };
 pub const max_response_bytes = @max(@max(max_mutation_response_bytes, max_host_info_response_bytes), @max(host_stop_ack.len, shapeBytes(host_pause_reply)));
 
+// Trace and readiness paths used the pre-creation-receipt response bound.
+// Keep that independent of the larger, caller-owned mutation reply buffer.
+pub const max_diagnostic_buffer_bytes = blk: {
+    var bytes: usize = max_control_error_response_bytes;
+    for (std.meta.tags(CommandKind)) |kind| {
+        const reply = command_spec.spec(kind).Reply(Protocol);
+        bytes = @max(bytes, maxShapeBytes(.{ reply.accepted, reply.rejected, reply.conflict }));
+        if (@hasDecl(reply, "accepted_skills")) bytes = @max(bytes, shapeBytes(reply.accepted_skills));
+    }
+    break :blk @max(@max(bytes, max_host_info_response_bytes), @max(host_stop_ack.len, shapeBytes(host_pause_reply)));
+};
+
 pub const conversation_page_reply = struct {
     pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"conversation_page\",\"direction\":\"newest_first\",\"end\":\"", Hole.decimal, "\",\"items\":[" };
     pub fn item(comptime kind: ConversationItemKind) struct { []const u8, Hole, []const u8, Hole, []const u8, Hole, []const u8, Hole, []const u8 } {
@@ -2396,6 +2425,7 @@ pub fn FixedJsonBuffer(comptime capacity: usize) type {
 
 pub const RequestBuffer = FixedJsonBuffer(max_client_request_bytes);
 pub const ResponseBuffer = FixedJsonBuffer(max_response_bytes);
+pub const DiagnosticBuffer = FixedJsonBuffer(max_diagnostic_buffer_bytes);
 pub const CommandObservationBuffer = FixedJsonBuffer(command_observation_reply.max_bytes);
 
 const TestCustody = struct {
@@ -2916,6 +2946,10 @@ test "protocol sparse creation preserves all omitted settings independent of fie
                 var source: MetadataSource = .{ .input = writer.buffered() };
                 const captured: Tested.ContentField = .{ .state = .value, .length = 3, .digest = contentDigest("abc") };
                 var parser: Tested.Parser = .{ .source = &source, .captured = &.{captured} };
+                if (present & 1 == 0) {
+                    try std.testing.expectError(error.MissingField, parseForTest(&parser));
+                    continue;
+                }
                 const request = try parseForTest(&parser);
                 const configuration = if (comptime std.mem.eql(u8, kind, "message")) &request.message.configuration.? else &request.configure.configuration;
                 inline for (fields, 0..) |field, index| {
@@ -3004,6 +3038,34 @@ test "the request parser refuses what each command's grammar forbids" {
         var parser: Tested.Parser = .{ .source = &source, .expected_kind = case.route, .captured = &.{ .{}, .{}, .{} } };
         if (case.failure) |failure| try std.testing.expectError(failure, parseForTest(&parser)) else _ = try parseForTest(&parser);
     }
+}
+
+test "creation requires an explicit model while require_model and sparse updates retain their rules" {
+    inline for (.{ "configure", "message" }) |kind| {
+        inline for (.{ false, true }) |require_model| {
+            inline for (.{ "", "\"model\":null", "\"model\":\"\"", "\"model\":\"custom\"" }, 0..) |member, model| {
+                const json = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"" ++ kind ++ "\",\"store\":\"s\",\"key\":\"k\",\"session\":\"\",\"require_model\":" ++
+                    (if (require_model) "true" else "false") ++ ",\"configuration\":{" ++ member ++ "}" ++
+                    (if (comptime std.mem.eql(u8, kind, "message")) ",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"\"}" else "") ++ "}";
+                var source: MetadataSource = .{ .input = json };
+                const captured: Tested.ContentField = .{ .state = .value, .length = 3, .digest = contentDigest("abc") };
+                var parser: Tested.Parser = .{ .source = &source, .captured = &.{captured} };
+                if (model < 2) {
+                    try std.testing.expectError(if (model == 0) error.MissingField else error.InvalidFieldState, parseForTest(&parser));
+                } else {
+                    const request = try parseForTest(&parser);
+                    const configuration = if (comptime std.mem.eql(u8, kind, "message")) &request.message.configuration.? else &request.configure.configuration;
+                    try std.testing.expectEqual(FieldState.value, configuration.model.state);
+                    try std.testing.expectEqualStrings(if (model == 2) "" else "custom", configuration.model.value.slice());
+                    try std.testing.expectEqual(require_model, if (comptime std.mem.eql(u8, kind, "message")) request.message.require_model else request.configure.require_model);
+                }
+            }
+        }
+    }
+    var source: MetadataSource = .{ .input = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"configure\",\"store\":\"s\",\"key\":\"k\",\"session\":\"k7m2qx\",\"configuration\":{}}" };
+    var parser: Tested.Parser = .{ .source = &source };
+    const update = try parseForTest(&parser);
+    try std.testing.expectEqual(FieldState.omitted, update.configure.configuration.model.state);
 }
 
 test "presets allow partial creating configure in either field order" {
@@ -3227,14 +3289,14 @@ test "creation parsers leave Workspace completeness to Host admission" {
         .{ "message", ",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"\"}" },
     }) |surface| {
         inline for (.{ "", "\"tools\":[]", "\"tools\":[\"bash\"]" }) |members| {
-            const json = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"" ++ surface[0] ++ "\",\"store\":\"s\",\"key\":\"k\",\"session\":\"\",\"require_model\":true,\"configuration\":{" ++ members ++ "}" ++ surface[1] ++ "}";
+            const json = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"" ++ surface[0] ++ "\",\"store\":\"s\",\"key\":\"k\",\"session\":\"\",\"require_model\":true,\"configuration\":{\"model\":\"model\"" ++ (if (members.len == 0) "" else ",") ++ members ++ "}" ++ surface[1] ++ "}";
             var source: MetadataSource = .{ .input = json };
             const captured: Tested.ContentField = .{ .state = .value, .length = 3, .digest = contentDigest("abc") };
             var parser: Tested.Parser = .{ .source = &source, .captured = &.{captured} };
             const request = try parseForTest(&parser);
             const configuration = if (comptime std.mem.eql(u8, surface[0], "message")) &request.message.configuration.? else &request.configure.configuration;
             try std.testing.expectEqual(FieldState.omitted, configuration.workspace.state);
-            try std.testing.expectEqual(FieldState.omitted, configuration.model.state);
+            try std.testing.expectEqual(FieldState.value, configuration.model.state);
             if (comptime std.mem.eql(u8, surface[0], "message")) {
                 try std.testing.expect(request.message.require_model);
             } else try std.testing.expect(request.configure.require_model);
@@ -3364,5 +3426,18 @@ test "configuration preferences parse sparsely and bind idempotency" {
             try std.testing.expectEqual(if (index >= 2) FieldState.value else FieldState.omitted, preferences.reasoning_effort.state);
             try std.testing.expectEqual(if (index == 3) FieldState.value else FieldState.omitted, preferences.permission_mode.state);
         }
+    }
+}
+
+test "diagnostic buffer retains the noncreation response bound" {
+    try std.testing.expect(max_diagnostic_buffer_bytes < max_response_bytes);
+    try std.testing.expect(max_diagnostic_buffer_bytes >= max_host_info_response_bytes);
+    try std.testing.expect(max_diagnostic_buffer_bytes >= max_control_error_response_bytes);
+    inline for (comptime std.meta.tags(CommandKind)) |kind| {
+        const reply = comptime command_spec.spec(kind).Reply(Protocol);
+        try std.testing.expect(max_diagnostic_buffer_bytes >= shapeBytes(reply.accepted));
+        try std.testing.expect(max_diagnostic_buffer_bytes >= shapeBytes(reply.rejected));
+        try std.testing.expect(max_diagnostic_buffer_bytes >= shapeBytes(reply.conflict));
+        if (@hasDecl(reply, "accepted_skills")) try std.testing.expect(max_diagnostic_buffer_bytes >= shapeBytes(reply.accepted_skills));
     }
 }

@@ -258,6 +258,8 @@ fn parseAgentSpecFor(arena: std.mem.Allocator, spec: std.json.ObjectMap, configu
     }
     if (try protocol.parseAgentSpec(wire_request.Custody, arena, spec, configuration)) |reason|
         return .{ .rejected = reason };
+    if (protocol.missingCreatingSetting(configuration)) |name|
+        return .{ .rejected = try std.fmt.allocPrint(arena, "spec.{s} is required", .{name}) };
     if (configuration.provider.state == .value and std.meta.stringToEnum(protocol.Provider, configuration.provider.value.slice()) == null)
         return refused("spec.provider must be a provider name");
     if (configuration.workspace.state == .value and configuration.workspace.value.len == 0)
@@ -473,7 +475,10 @@ test "core_tools sparse specs preserve every omitted explicit and defaulted Host
         try json.writer.writeByte('}');
         const spec = (try std.json.parseFromSliceLeaky(std.json.Value, arena, json.written(), .{})).object;
         const configuration = try arena.create(wire_request.Configuration);
-        try std.testing.expect(try parseAgentSpec(arena, spec, configuration) == .accepted);
+        const direct_check = try parseAgentSpec(arena, spec, configuration);
+        if (model_present) {
+            try std.testing.expect(direct_check == .accepted);
+        } else try std.testing.expectEqualStrings("spec.model is required", direct_check.rejected);
         const start = try arena.create(StartAgent);
         const arguments = try std.fmt.allocPrint(arena, "{{\"task\":\"read\",\"attached\":true,\"spec\":{s}}}", .{json.written()});
         const presets = [_]Preset{.{ .name = "review", .spec = spec }};
@@ -482,6 +487,10 @@ test "core_tools sparse specs preserve every omitted explicit and defaulted Host
                 try checkStartAgentWithPresets(arena, "{\"task\":\"read\",\"attached\":true,\"preset\":\"review\"}", &presets, start)
             else
                 try checkStartAgent(arena, arguments, start);
+            if (!model_present) {
+                try std.testing.expectEqualStrings("spec.model is required", result.rejected);
+                continue;
+            }
             try std.testing.expect(result == .accepted);
             selector = combination / 2;
             const model_state: protocol.FieldState = if (model_present) .value else .omitted;
@@ -522,12 +531,12 @@ test "core_tools sparse specs leave Workspace completeness to Host and preserve 
     const configuration = try arena.create(wire_request.Configuration);
     const start = try arena.create(StartAgent);
     const cases = [_]struct { spec: []const u8, direct: ?[]const u8 = null, agent: ?[]const u8 = null }{
-        .{ .spec = "{}" },
+        .{ .spec = "{}", .direct = "spec.model", .agent = "spec.model" },
         .{ .spec = "{\"model\":null}", .direct = "spec.model", .agent = "spec.model" },
         .{ .spec = "{\"model\":\"\"}", .direct = "spec.model", .agent = "spec.model" },
         .{ .spec = "{\"model\":\"custom\"}" },
         .{ .spec = "{\"model\":\"custom\",\"tools\":[\"bash\"]}" },
-        .{ .spec = "{\"tools\":[\"bash\"]}" },
+        .{ .spec = "{\"tools\":[\"bash\"]}", .direct = "spec.model", .agent = "spec.model" },
         .{ .spec = "{\"model\":\"custom\",\"tools\":[\"bash\"],\"workspace\":\"/\"}", .agent = "spec.workspace" },
         .{ .spec = "{\"model\":\"custom\",\"workspace\":\"\"}", .direct = "spec.workspace", .agent = "spec.workspace" },
         .{ .spec = "{\"model\":\"custom\",\"provider\":\"openai\"}", .agent = "spec.provider" },

@@ -6,7 +6,6 @@ import { Sessions, type AgentSpec, type Link, type SessionCreate } from "../src/
 import { WIRE_VERSION } from "../src/transport.ts";
 
 const fields = [
-	["model", "gpt-6.1-sol", "gpt-6.1-sol"],
 	["tools", ["web_search", "bash", "bash"], ["bash", "web_search"]],
 	["loadedTools", ["web_search", "bash", "web_search"], ["bash", "web_search"]],
 	["permissionMode", "ask", "ask"],
@@ -18,8 +17,8 @@ const fields = [
 test("creation sends only chosen settings for every omitted and explicit field combination", async () => {
 	for (let mask = 0; mask < 1 << fields.length; mask++) {
 		const chosen = fields.filter((_, index) => (mask & (1 << index)) !== 0);
-		const spec: AgentSpec & { workspace: string } = { workspace: "/caller", ...Object.fromEntries(chosen.map(([name, value]) => [name, value])) };
-		const expected = { workspace: "/caller", ...Object.fromEntries(chosen.map(([name, , value]) => [name, value])) };
+		const spec: AgentSpec & { workspace: string } = { workspace: "/caller", model: "gpt-6.1-sol", ...Object.fromEntries(chosen.map(([name, value]) => [name, value])) };
+		const expected = { workspace: "/caller", model: "gpt-6.1-sol", ...Object.fromEntries(chosen.map(([name, , value]) => [name, value])) };
 		const before = structuredClone(spec);
 		const idempotencyKey = `chosen:${mask}`;
 		const link: Link = {
@@ -72,22 +71,22 @@ test("a named preset forwards only the chosen overrides", async () => {
 
 
 test("presets keep sparse settings until creation resolves a Workspace", () => {
-	const spec: AgentSpec = {};
+	const spec: AgentSpec = { model: "gpt-6.1-sol" };
 	const launch = launchFor({ presets: { review: spec } }, "/runtime");
 	try {
-		assert.deepEqual(JSON.parse(launch.document.subarray(4).toString("utf8")).presets.review, {});
+		assert.deepEqual(JSON.parse(launch.document.subarray(4).toString("utf8")).presets.review, { model: "gpt-6.1-sol" });
 	} finally {
 		launch.document.fill(0);
 	}
 });
 
 test("child creation forwards the parent without inventing a Workspace or provider", async () => {
-	for (const spec of [{ parent: "p4rent" }, { parent: "p4rent", preset: "review" }] as const) {
+	for (const spec of [{ parent: "p4rent", model: "gpt-6.1-sol" }, { parent: "p4rent", preset: "review" }] as const) {
 		const sessions = new Sessions({
 			async exchange(path, build) {
 				assert.equal(path, "/v1/configure");
 				const request = JSON.parse(build("/store"));
-				assert.deepEqual(request.configuration, { parent: "p4rent" });
+				assert.deepEqual(request.configuration, { parent: "p4rent", ...("model" in spec ? { model: spec.model } : {}) });
 				assert.equal(request.preset, "preset" in spec ? spec.preset : undefined);
 				return Buffer.from(JSON.stringify({ answer: { status: "accepted", session: "abc123" } }));
 			},
@@ -100,9 +99,9 @@ test("child creation forwards the parent without inventing a Workspace or provid
 test("creation preserves an empty preferences object", async () => {
 	const sessions = new Sessions({
 		async exchange(_path, build) {
-			assert.deepEqual(JSON.parse(build("/store")).configuration, { workspace: "/caller", preferences: {} });
+			assert.deepEqual(JSON.parse(build("/store")).configuration, { workspace: "/caller", model: "gpt-6.1-sol", preferences: {} });
 			return Buffer.from(JSON.stringify({ answer: { status: "accepted", session: "abc123" } }));
 		},
 	});
-	await sessions.create({ workspace: "/caller", preferences: {} }, { idempotencyKey: "chosen:preferences" });
+	await sessions.create({ workspace: "/caller", model: "gpt-6.1-sol", preferences: {} }, { idempotencyKey: "chosen:preferences" });
 });

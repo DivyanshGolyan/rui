@@ -22,7 +22,8 @@ pub const AcceptedConfiguration = struct {
     replayed: bool,
     revision: u64 = 0,
     created: bool = false,
-    configuration: ?CreationConfiguration = null,
+    /// Borrowed from caller-supplied receipt storage; valid for its lifetime.
+    configuration: ?*const CreationConfiguration = null,
     skills: ?mutation_answer.SkillsReloadStatus = null,
     session: Bounded(session_id.max_reference_bytes) = .{},
 };
@@ -43,7 +44,8 @@ pub const ConfigureReply = union(enum) {
 pub const AcceptedMessage = struct {
     replayed: bool,
     admission_id: u64,
-    configuration: ?CreationConfiguration = null,
+    /// Borrowed from caller-supplied receipt storage; valid for its lifetime.
+    configuration: ?*const CreationConfiguration = null,
     content: ContentReference,
     session: Bounded(session_id.max_reference_bytes),
 };

@@ -607,7 +607,7 @@ pub fn beginTestObservation(host: *Host, phase: []const u8, subject: ?[]const u8
     return writer.begin(phase, subject);
 }
 
-pub fn writeTestTrace(host: *Host, trace: *protocol.ResponseBuffer, publication: *?TestObservation.Publication) void {
+pub fn writeTestTrace(host: *Host, trace: *protocol.DiagnosticBuffer, publication: *?TestObservation.Publication) void {
     if (!host.hooks.phase_trace) return;
     if (publication.*) |*value| value.record(trace.slice());
     if (!stderr.tryAcquire()) {
@@ -639,7 +639,7 @@ pub inline fn traceSubject(host: *Host, phase: []const u8, subject_kind: []const
 noinline fn writeSubjectTrace(host: *Host, phase: []const u8, subject_kind: []const u8, subject: []const u8) void {
     var publication = beginTestObservation(host, phase, subject);
     defer if (publication) |*value| value.finish();
-    var trace: protocol.ResponseBuffer = .{};
+    var trace: protocol.DiagnosticBuffer = .{};
     trace.append("{\"rui_test_phase\":") catch return;
     trace.appendJsonString(phase) catch return;
     trace.appendFmt(",\"at_ns\":\"{d}\",\"subject_kind\":", .{nowNs(host)}) catch return;
@@ -657,7 +657,7 @@ pub inline fn traceCommandObservation(host: *Host, key: []const u8, phase: []con
 noinline fn writeCommandObservationTrace(host: *Host, key: []const u8, phase: []const u8) void {
     var publication = beginTestObservation(host, phase, null);
     defer if (publication) |*value| value.finish();
-    var trace: protocol.ResponseBuffer = .{};
+    var trace: protocol.DiagnosticBuffer = .{};
     trace.append("{\"rui_test_phase\":") catch return;
     trace.appendJsonString(phase) catch return;
     trace.append(",\"command_key\":") catch return;
@@ -673,7 +673,7 @@ pub inline fn traceRequest(host: *Host, phase: []const u8, request_number: u64, 
 noinline fn writeRequestTrace(host: *Host, phase: []const u8, request_number: u64, scratch_used_bytes: ?u64) void {
     var publication = beginTestObservation(host, phase, null);
     defer if (publication) |*value| value.finish();
-    var trace: protocol.ResponseBuffer = .{};
+    var trace: protocol.DiagnosticBuffer = .{};
     trace.append("{\"rui_test_phase\":") catch return;
     trace.appendJsonString(phase) catch return;
     trace.appendFmt(
@@ -701,7 +701,7 @@ pub inline fn traceServiceBoundary(host: *Host, start_ns: u64, end_ns: u64, wait
 noinline fn writeServiceBoundaryTrace(host: *Host, start_ns: u64, end_ns: u64, wait_ns: u64) void {
     var publication = beginTestObservation(host, "lifecycle_boundary", null);
     defer if (publication) |*value| value.finish();
-    var trace: protocol.ResponseBuffer = .{};
+    var trace: protocol.DiagnosticBuffer = .{};
     trace.appendFmt(
         "{{\"rui_test_phase\":\"lifecycle_boundary\",\"at_ns\":\"{d}\",\"start_ns\":\"{d}\",\"wait_ns\":\"{d}\"}}",
         .{ end_ns, start_ns, wait_ns },
@@ -716,7 +716,7 @@ pub inline fn traceLifecycleService(host: *Host, maximum_gap_ns: u64) void {
 noinline fn writeLifecycleServiceTrace(host: *Host, maximum_gap_ns: u64) void {
     var publication = beginTestObservation(host, "lifecycle_service_observation", null);
     defer if (publication) |*value| value.finish();
-    var trace: protocol.ResponseBuffer = .{};
+    var trace: protocol.DiagnosticBuffer = .{};
     trace.appendFmt(
         "{{\"rui_test_phase\":\"lifecycle_service_observation\",\"at_ns\":\"{d}\",\"maximum_gap_ns\":\"{d}\",\"owner\":\"execution\"}}",
         .{ nowNs(host), maximum_gap_ns },
@@ -731,7 +731,7 @@ pub inline fn traceOperation(host: *Host, phase: []const u8, binding: store_modu
 noinline fn writeOperationTrace(host: *Host, phase: []const u8, binding: store_module.AttemptBinding) void {
     var publication = beginTestObservation(host, phase, null);
     defer if (publication) |*value| value.finish();
-    var trace: protocol.ResponseBuffer = .{};
+    var trace: protocol.DiagnosticBuffer = .{};
     trace.append("{\"rui_test_phase\":") catch return;
     trace.appendJsonString(phase) catch return;
     trace.appendFmt(",\"at_ns\":\"{d}\",\"turn\":\"{d}\",\"operation\":\"{d}\",\"attempt\":\"{d}\"}}", .{
@@ -760,7 +760,7 @@ noinline fn writePreparationAdvanceTrace(
 ) void {
     var publication = beginTestObservation(host, phase, null);
     defer if (publication) |*value| value.finish();
-    var trace: protocol.ResponseBuffer = .{};
+    var trace: protocol.DiagnosticBuffer = .{};
     trace.append("{\"rui_test_phase\":") catch return;
     trace.appendJsonString(phase) catch return;
     trace.appendFmt(
@@ -789,7 +789,7 @@ noinline fn writePreparationAdvanceErrorTrace(
 ) void {
     var publication = beginTestObservation(host, phase, null);
     defer if (publication) |*value| value.finish();
-    var trace: protocol.ResponseBuffer = .{};
+    var trace: protocol.DiagnosticBuffer = .{};
     trace.append("{\"rui_test_phase\":") catch return;
     trace.appendJsonString(phase) catch return;
     trace.appendFmt(",\"at_ns\":\"{d}\",\"error\":", .{nowNs(host)}) catch return;
@@ -808,7 +808,7 @@ pub inline fn traceCompletionQueue(host: *Host, queued_after: usize, binding: st
 noinline fn writeCompletionQueueTrace(host: *Host, queued_after: usize, binding: store_module.AttemptBinding) void {
     var publication = beginTestObservation(host, "provider_completion_removed", null);
     defer if (publication) |*value| value.finish();
-    var trace: protocol.ResponseBuffer = .{};
+    var trace: protocol.DiagnosticBuffer = .{};
     trace.appendFmt(
         "{{\"rui_test_phase\":\"provider_completion_removed\",\"at_ns\":\"{d}\",\"queued_after\":\"{d}\",\"turn\":\"{d}\",\"operation\":\"{d}\",\"attempt\":\"{d}\"}}",
         .{ nowNs(host), queued_after, binding.turn_id, binding.operation_id, binding.attempt_ordinal },
@@ -823,7 +823,7 @@ pub inline fn traceAction(host: *Host, phase: []const u8, binding: store_module.
 noinline fn writeActionTrace(host: *Host, phase: []const u8, binding: store_module.ActionAttemptBinding) void {
     var publication = beginTestObservation(host, phase, null);
     defer if (publication) |*value| value.finish();
-    var trace: protocol.ResponseBuffer = .{};
+    var trace: protocol.DiagnosticBuffer = .{};
     trace.append("{\"rui_test_phase\":") catch return;
     trace.appendJsonString(phase) catch return;
     trace.appendFmt(",\"at_ns\":\"{d}\",\"turn\":\"{d}\",\"operation\":\"{d}\",\"action\":\"{d}\"}}", .{
@@ -852,7 +852,7 @@ noinline fn writeOperationControlTrace(
 ) void {
     var publication = beginTestObservation(host, phase, null);
     defer if (publication) |*value| value.finish();
-    var trace: protocol.ResponseBuffer = .{};
+    var trace: protocol.DiagnosticBuffer = .{};
     trace.append("{\"rui_test_phase\":") catch return;
     trace.appendJsonString(phase) catch return;
     trace.appendFmt(",\"at_ns\":\"{d}\",\"control_key\":", .{nowNs(host)}) catch return;
@@ -882,7 +882,7 @@ noinline fn writeActionControlTrace(
 ) void {
     var publication = beginTestObservation(host, phase, null);
     defer if (publication) |*value| value.finish();
-    var trace: protocol.ResponseBuffer = .{};
+    var trace: protocol.DiagnosticBuffer = .{};
     trace.append("{\"rui_test_phase\":") catch return;
     trace.appendJsonString(phase) catch return;
     trace.appendFmt(",\"at_ns\":\"{d}\",\"control_key\":", .{nowNs(host)}) catch return;
@@ -916,7 +916,7 @@ noinline fn writeActionControlOutcomeTrace(
 ) void {
     var publication = beginTestObservation(host, phase, null);
     defer if (publication) |*value| value.finish();
-    var trace: protocol.ResponseBuffer = .{};
+    var trace: protocol.DiagnosticBuffer = .{};
     trace.append("{\"rui_test_phase\":") catch return;
     trace.appendJsonString(phase) catch return;
     trace.appendFmt(",\"at_ns\":\"{d}\",\"control_key\":", .{nowNs(host)}) catch return;
@@ -950,7 +950,7 @@ noinline fn writeActionDeadlineTrace(
 ) void {
     var publication = beginTestObservation(host, phase, null);
     defer if (publication) |*value| value.finish();
-    var trace: protocol.ResponseBuffer = .{};
+    var trace: protocol.DiagnosticBuffer = .{};
     trace.append("{\"rui_test_phase\":") catch return;
     trace.appendJsonString(phase) catch return;
     trace.appendFmt(",\"at_ns\":\"{d}\",\"deadline_ns\":\"{d}\",\"failed\":{s},\"turn\":\"{d}\",\"operation\":\"{d}\",\"action\":\"{d}\"}}", .{
@@ -1054,7 +1054,7 @@ pub inline fn observeUnprocessedCompletions(host: *Host, reactor: *provider.Reac
 noinline fn writeUnprocessedCompletionsTrace(host: *Host, count: u64) void {
     var publication = beginTestObservation(host, "native_completions_unprocessed", null);
     defer if (publication) |*value| value.finish();
-    var trace: protocol.ResponseBuffer = .{};
+    var trace: protocol.DiagnosticBuffer = .{};
     trace.appendFmt(
         "{{\"rui_test_phase\":\"native_completions_unprocessed\",\"at_ns\":\"{d}\",\"queued_after\":\"{d}\"}}",
         .{ nowNs(host), count },
@@ -1063,7 +1063,7 @@ noinline fn writeUnprocessedCompletionsTrace(host: *Host, count: u64) void {
 }
 
 fn appendOptionalUnsigned(
-    trace: *protocol.ResponseBuffer,
+    trace: *protocol.DiagnosticBuffer,
     name: []const u8,
     value: ?u64,
 ) !void {
@@ -1075,7 +1075,7 @@ fn appendOptionalUnsigned(
 }
 
 fn appendOptionalSigned(
-    trace: *protocol.ResponseBuffer,
+    trace: *protocol.DiagnosticBuffer,
     name: []const u8,
     value: ?i64,
 ) !void {
@@ -1097,7 +1097,7 @@ noinline fn writeTransferTrace(host: *Host, transfer: *provider.Transfer, bindin
     const correlation = transfer.requestId();
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(correlation, &digest, .{});
-    var trace: protocol.ResponseBuffer = .{};
+    var trace: protocol.DiagnosticBuffer = .{};
     trace.appendFmt("{{\"rui_test_phase\":\"codex_transfer\",\"operation\":\"{d}\",\"new_connections\":{d},\"replays\":{d},\"correlation_present\":{s},\"correlation_sha256\":\"{x}\"}}", .{
         binding.operation_id,
         observation.new_connections,
@@ -1119,7 +1119,7 @@ noinline fn writeSqliteDiagnosticTrace(host: *Host, subject: []const u8) void {
         .sqlite => |value| value,
         .mysql => return,
     };
-    var trace: protocol.ResponseBuffer = .{};
+    var trace: protocol.DiagnosticBuffer = .{};
     trace.append("{\"rui_test_phase\":\"sqlite_diagnostic\",\"at_ns\":\"") catch return;
     trace.appendFmt("{d}", .{nowNs(host)}) catch return;
     trace.append("\",\"subject\":") catch return;

@@ -7,7 +7,7 @@ import { WIRE_VERSION } from "../../src/transport.ts";
 let input = "";
 for await (const chunk of process.stdin) input += chunk.toString();
 const { binary, settings, binding } = JSON.parse(input) as {
-	binary: string; settings: HostSettings; binding: AgentSpec & { workspace: string };
+	binary: string; settings: HostSettings; binding: AgentSpec & { workspace: string; model: string };
 };
 const rui = await Rui.connect(settings, { binary });
 try {
@@ -17,9 +17,8 @@ try {
 		if (path === "/v1/configure") requests.push(JSON.parse(body));
 		return call(path, body, ...rest);
 	};
-	const { model: _model, ...omittedModel } = binding;
 	const results: { request: unknown; report: unknown }[] = [];
-	for (const [index, spec] of [binding, omittedModel, { workspace: binding.workspace }].entries()) {
+	for (const [index, spec] of [binding].entries()) {
 		const session = await rui.sessions.create(spec, { idempotencyKey: `empty-creation:typescript:${index}` });
 		assert.equal(requests.length, index + 1);
 		const request = requests[index];

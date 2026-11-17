@@ -102,7 +102,8 @@ pub fn decode(comptime protocol: type, comptime command_reply: type, allocator: 
                     if ((status == 409) != conflict) break :candidate;
                     const Parser = command_reply.DecoderWithPolicy(@field(Reply, name), universe, struct {
                         pub fn Type(comptime T: type) type {
-                            return T;
+                            const receipt = @import("creation_receipt_wire.zig");
+                            return if (T == receipt.NamesJson) receipt.Names else T;
                         }
                     }, DecodePolicy(kind));
                     const partial = Parser.parsePartial(allocator, body) catch |err| {
@@ -113,8 +114,10 @@ pub fn decode(comptime protocol: type, comptime command_reply: type, allocator: 
                         const wants_creation = if (comptime kind == .configure) session.len == 0 else target.message.creates_session;
                         if (@hasField(@TypeOf(partial.value.answer), "configuration") != wants_creation) break :candidate;
                     }
+                    // A shape for another outcome must not claim the request
+                    // binding; only its own status can authorize that check.
+                    if (partial.has(".answer.status") and !partial.value.answer.status.eql(if (accepted) "accepted" else if (conflict) "conflict" else "rejected")) break :candidate;
                     try bind(kind, accepted, partial, session, target, resolved_session);
-                    if (!partial.value.answer.status.eql(if (accepted) "accepted" else if (conflict) "conflict" else "rejected")) break :candidate;
                     if (partial.deferred_error) |err| {
                         if (err == error.RequestBindingMismatch) return error.RequestBindingMismatch;
                         break :candidate;

@@ -35,7 +35,7 @@ pub fn renderConfigureReply(
 ) !void {
     const shapes = protocol.configuration_reply;
     try switch (result) {
-        .accepted => |value| if (value.configuration) |config| response.appendShape(shapes.accepted_create, .{ value.replayed, value.session.slice(), value.revision, value.created, config.provider, config.model.slice(), config.reasoning_effort, config.workspace.slice(), @import("creation_receipt_wire.zig").Names{ .value = config.tools }, @import("creation_receipt_wire.zig").Names{ .value = config.loaded_tools }, config.permission_mode, config.compaction_trigger }) else if (value.skills) |status| response.appendShape(shapes.accepted_skills, .{ value.replayed, value.session.slice(), value.revision, status }) else response.appendShape(shapes.accepted, .{ value.replayed, value.session.slice(), value.revision, value.created }),
+        .accepted => |value| if (value.configuration) |config| response.appendShape(shapes.accepted_create, .{ value.replayed, value.session.slice(), value.revision, value.created, config.provider, config.model.slice(), config.reasoning_effort, config.workspace.slice(), @import("creation_receipt_wire.zig").NamesJson{ .value = config.tools.slice() }, @import("creation_receipt_wire.zig").NamesJson{ .value = config.loaded_tools.slice() }, config.permission_mode, config.compaction_trigger }) else if (value.skills) |status| response.appendShape(shapes.accepted_skills, .{ value.replayed, value.session.slice(), value.revision, status }) else response.appendShape(shapes.accepted, .{ value.replayed, value.session.slice(), value.revision, value.created }),
         .rejected => |value| renderToolRejection(response, session, value, shapes.rejected),
         .conflict => response.appendShape(shapes.conflict, .{session}),
         .infrastructure_failure => renderStatic(response, .invocation_error, "canonical_store_failure"),
@@ -49,7 +49,7 @@ pub fn renderMessageReply(
 ) !void {
     const shapes = protocol.message_reply;
     try switch (result) {
-        .accepted => |value| if (value.configuration) |config| response.appendShape(shapes.accepted_create, .{ value.replayed, value.session.slice(), value.admission_id, config.provider, config.model.slice(), config.reasoning_effort, config.workspace.slice(), @import("creation_receipt_wire.zig").Names{ .value = config.tools }, @import("creation_receipt_wire.zig").Names{ .value = config.loaded_tools }, config.permission_mode, config.compaction_trigger, value.content.length, value.content.digest, value.admission_id }) else response.appendShape(shapes.accepted, .{ value.replayed, value.session.slice(), value.admission_id, value.content.length, value.content.digest, value.admission_id }),
+        .accepted => |value| if (value.configuration) |config| response.appendShape(shapes.accepted_create, .{ value.replayed, value.session.slice(), value.admission_id, config.provider, config.model.slice(), config.reasoning_effort, config.workspace.slice(), @import("creation_receipt_wire.zig").NamesJson{ .value = config.tools.slice() }, @import("creation_receipt_wire.zig").NamesJson{ .value = config.loaded_tools.slice() }, config.permission_mode, config.compaction_trigger, value.content.length, value.content.digest, value.admission_id }) else response.appendShape(shapes.accepted, .{ value.replayed, value.session.slice(), value.admission_id, value.content.length, value.content.digest, value.admission_id }),
         .rejected => |value| renderToolRejection(response, session, value, shapes.rejected),
         .conflict => response.appendShape(shapes.conflict, .{session}),
         .infrastructure_failure => renderStatic(response, .invocation_error, "canonical_store_failure"),
@@ -364,7 +364,7 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     try std.testing.expectEqual(protocol.configuration_reply.max_bytes, @max(
         try Worst.reply(renderMutationReply(.configure), @as([]const u8, &escaped_session), .{
             command_reply.ConfigureReply{ .accepted = .{ .replayed = false, .revision = max, .created = false, .session = session, .skills = .unchanged } },
-            command_reply.ConfigureReply{ .accepted = .{ .replayed = false, .revision = max, .created = false, .session = session, .configuration = config } },
+            command_reply.ConfigureReply{ .accepted = .{ .replayed = false, .revision = max, .created = false, .session = session, .configuration = &config } },
             command_reply.ConfigureReply.conflict,
         }),
         try Worst.reply(renderMutationReply(.configure), @as([]const u8, &escaped_session), .{
@@ -374,7 +374,7 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
 
     try std.testing.expectEqual(protocol.message_reply.max_bytes, @max(
         try Worst.reply(renderMutationReply(.message), @as([]const u8, &escaped_session), .{
-            command_reply.MessageReply{ .accepted = .{ .replayed = false, .admission_id = max, .content = content, .session = session, .configuration = config } },
+            command_reply.MessageReply{ .accepted = .{ .replayed = false, .admission_id = max, .content = content, .session = session, .configuration = &config } },
             command_reply.MessageReply.conflict,
         }),
         try Worst.reply(renderMutationReply(.message), @as([]const u8, &escaped_session), .{

@@ -181,8 +181,9 @@ The settings process test also runs on MySQL when `RUI_TEST_MYSQL_SOCKET`, `RUI_
 
 ## Session settings
 
-Root creation carries the caller's `workspace`, supplied directly or by a named preset.
-Within that Workspace, the Host fills omitted `model`, `effort`, `compactAt`, `tools`, `loadedTools` and `permissionMode` settings.
+Creation requires a `model`, supplied directly or by a named preset.
+Root creation also carries the caller's `workspace`, supplied directly or by the preset.
+Within that Workspace, the Host fills omitted `effort`, `compactAt`, `tools`, `loadedTools` and `permissionMode` settings.
 An explicit `tools: []` allows no tools.
 `provider` may be left out when the Host serves one provider.
 A creation naming `parent` inherits that Session's Workspace and provider and cannot supply either field.
@@ -207,7 +208,7 @@ Counts, times and Turn/Operation IDs stay decimal strings; absent targets, paren
 A separate ending is not in the report, so status does not invent one.
 `interrupt()` uses this status snapshot to select its exact model target.
 
-Presets are sparse agent specs passed at connect and kept only in Host memory.
+Presets supply a model and may omit the other agent settings; they are passed at connect and kept only in Host memory.
 Creation copies the preset, with every supplied field (including `null`) overriding it, then the Host resolves omitted settings.
 A root creation must resolve a Workspace from the preset or its overrides.
 
@@ -216,7 +217,7 @@ const rui = await Rui.connect({
 	store: { sqlite: { dir: "/var/lib/myapp/rui-store" } },
 	providers: { openai: { endpoint: "https://api.openai.com/v1/responses", key: process.env.OPENAI_API_KEY! } },
 	presets: {
-		review: { workspace: "/work/project", instructions: "Review patches", tools: [], permissionMode: "ask" },
+		review: { workspace: "/work/project", model: "gpt-6.1-sol", instructions: "Review patches", tools: [], permissionMode: "ask" },
 	},
 });
 const review = await rui.sessions.create({ preset: "review", instructions: "Review this patch" }, { idempotencyKey: "review:1" });

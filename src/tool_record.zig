@@ -52,7 +52,15 @@ pub const start_agent_schema = "{\"type\":\"object\",\"properties\":{" ++
     "\"preset\":{\"type\":\"string\",\"description\":\"A connect-time preset; spec fields override it.\"}," ++
     "\"spec\":{\"type\":\"object\",\"properties\":{" ++ agent_spec_properties ++
     "},\"additionalProperties\":false}" ++
-    "},\"required\":[\"task\",\"attached\"],\"anyOf\":[{\"required\":[\"spec\"]},{\"required\":[\"preset\"]}],\"additionalProperties\":false}";
+    "},\"required\":[\"task\",\"attached\"],\"anyOf\":[{\"required\":[\"spec\"],\"properties\":{\"spec\":{\"required\":[" ++ agent_required_properties ++ "]}}},{\"required\":[\"preset\"]}],\"additionalProperties\":false}";
+
+const agent_required_properties = blk: {
+    var required: []const u8 = "";
+    for (@import("session_settings.zig").entries) |entry| {
+        if (entry.create == .must_value) required = required ++ (if (required.len == 0) "" else ",") ++ "\"" ++ entry.spec ++ "\"";
+    }
+    break :blk required;
+};
 
 const agent_spec_properties = blk: {
     var properties: []const u8 = "";
@@ -503,4 +511,17 @@ test "MCP missing tools tool set resolution covers every empty-server combinatio
         }
         try std.testing.expectEqual(@as(?[]const u8, null), empty.next());
     }
+}
+
+test "start_agent schema requires a model unless a preset supplies one" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const schema = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), start_agent_schema, .{});
+    const alternatives = schema.object.get("anyOf").?.array.items;
+    const direct = alternatives[0].object;
+    const required = direct.get("properties").?.object.get("spec").?.object.get("required").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), required.len);
+    try std.testing.expectEqualStrings("model", required[0].string);
+    const preset = alternatives[1].object.get("required").?.array.items;
+    try std.testing.expectEqualStrings("preset", preset[0].string);
 }

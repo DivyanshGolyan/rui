@@ -21,6 +21,13 @@ DEFAULT_IMPORT = "imports product_defaults.zig"
 CLASSIFIER = "classifies Session work"
 TS_DEFAULT = "hard-codes a Session default"
 ISSUES = {DEFAULT_IMPORT: "#1621", CLASSIFIER: "#1622", TS_DEFAULT: "#1621"}
+# These existing imports only select a provider or model, deferred to #1697.
+# Other imports still cover Session defaults or Host lifecycle constants.
+SELECTION_ISSUES = {
+    ("src/SignIn.zig", DEFAULT_IMPORT): "#1697",
+    ("src/new_session_selection.zig", DEFAULT_IMPORT): "#1697",
+    ("src/status_page.zig", DEFAULT_IMPORT): "#1697",
+}
 # Shared dependencies can be in graph.host even though these client entry points
 # themselves must remain covered. Keep the requested minimum inventory together.
 REQUIRED_SOURCES = (
@@ -36,12 +43,12 @@ REQUIRED_SOURCES = (
 # New pairs are forbidden once this file exists at the trusted review base.
 ALLOWED = {
     ("src/HostLifecycle.zig", "imports product_defaults.zig"): "#1621",
-    ("src/SignIn.zig", "imports product_defaults.zig"): "#1621",
+    ("src/SignIn.zig", "imports product_defaults.zig"): "#1697",
     ("src/app_settings.zig", "imports product_defaults.zig"): "#1621",
     ("src/cli.zig", "imports product_defaults.zig"): "#1621",
     ("src/cli_args.zig", "imports product_defaults.zig"): "#1621",
-    ("src/new_session_selection.zig", "imports product_defaults.zig"): "#1621",
-    ("src/status_page.zig", "imports product_defaults.zig"): "#1621",
+    ("src/new_session_selection.zig", "imports product_defaults.zig"): "#1697",
+    ("src/status_page.zig", "imports product_defaults.zig"): "#1697",
     ("src/attention.zig", "classifies Session work"): "#1622",
     ("src/overview_view.zig", "classifies Session work"): "#1622",
     ("clients/ts/src/sessions.ts", "classifies Session work"): "#1622",
@@ -217,7 +224,9 @@ def allowed_entries(source, *, trusted=False):
         if (not isinstance(pair, tuple) or len(pair) != 2 or not all(isinstance(part, str) for part in pair)
                 or pair[1] not in ISSUES):
             raise ValueError(f"client_locality.py allowance needs its removal issue: {pair!r}")
-        if issue != ISSUES[pair[1]]:
+        expected = SELECTION_ISSUES.get(pair, ISSUES[pair[1]])
+        historical = trusted and pair in SELECTION_ISSUES and issue == ISSUES[pair[1]]
+        if issue != expected and not historical:
             raise ValueError(f"client_locality.py allowance needs its removal issue: {pair!r}")
     return entries
 

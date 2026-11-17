@@ -968,6 +968,8 @@ test "parent authority refuses omitted defaults across Configure Message and sta
                 const expected: protocol.ConfigurationRejection = if (permission_only) .permission_mode_wider_than_parent else .tools_not_in_parent;
                 var child: wire_request.ConfigureCommand = .{};
                 try child.key.set("default-child");
+                child.configuration.model.state = .value;
+                try child.configuration.model.value.set("model-a");
                 if (permission_only) child.configuration.tools = try .of(&.{});
                 if (surface == .start_agent) {
                     try submitTestMessage(&storage, &tmp, "default-parent-message", "default-parent-message", parent.slice(), "start agents");
@@ -1023,7 +1025,7 @@ test "parent authority refuses omitted defaults across Configure Message and sta
                     }
                 }
                 try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE parent_ref=?1", .{parent.slice()}));
-                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE parent_ref=?1 AND model=?2", .{ parent.slice(), @import("../../product_defaults.zig").recommended_model }));
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE parent_ref=?1 AND model=?2", .{ parent.slice(), "model-a" }));
             };
         }
     }.run);

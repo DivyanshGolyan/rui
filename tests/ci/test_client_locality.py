@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from client_locality import (
     ALLOWED, CLASSIFIER, DEFAULT_IMPORT, GATE, ISSUES, MESSAGE, REQUIRED_SOURCES,
-    ROOT, TS_DEFAULT, allowance_growth, allowed_entries, findings, scan,
+    ROOT, SELECTION_ISSUES, TS_DEFAULT, allowance_growth, allowed_entries, findings, scan,
     stale_allowances, surfaces, violations,
 )
 
@@ -25,7 +25,7 @@ class ClientLocalityTest(unittest.TestCase):
         self.assertEqual(stale_allowances(), [])
         self.assertEqual(allowed_entries((ROOT / GATE).read_text()), ALLOWED)
         for pair, issue in ALLOWED.items():
-            self.assertEqual(issue, ISSUES[pair[1]])
+            self.assertEqual(issue, SELECTION_ISSUES.get(pair, ISSUES[pair[1]]))
         self.assertNotIn(("src/client_defaults.zig", DEFAULT_IMPORT), ALLOWED)
 
     def test_allowances_do_not_grow_from_trusted_base(self):
@@ -204,6 +204,18 @@ class ClientSourceInventoryTest(unittest.TestCase):
         names = {path.relative_to(self.root).as_posix() for path in surfaces(self.root)}
         self.assertTrue(set(REQUIRED_SOURCES) <= names)
 
+    def test_retagged_selection_allowance_still_requires_its_import(self):
+        for pair, issue in SELECTION_ISSUES.items():
+            with self.subTest(pair=pair):
+                self.write("src/Overview.zig", f'const selection = @import("{Path(pair[0]).name}");')
+                self.write(pair[0], 'const defaults = @import("product_defaults.zig");')
+                allowed = {pair: issue}
+                self.assertEqual(stale_allowances(self.root, allowed), [])
+                self.write(pair[0], "// The Host supplies provider and model now.\n")
+                self.assertEqual(stale_allowances(self.root, allowed), [
+                    f"{pair[0]}: remove stale allowance for {pair[1]} (#1697)"
+                ])
+
     def test_removing_local_policy_requires_removing_its_allowance(self):
         allowed = {("src/cli_args.zig", DEFAULT_IMPORT): "#1621"}
         self.assertEqual(stale_allowances(self.root, allowed), [])
@@ -257,6 +269,44 @@ class ClientAllowanceRatchetTest(unittest.TestCase):
         found = allowance_growth(self.root)
         self.assertEqual(found, [f"{file}: {rule}: allowance exceeds the trusted review base: {MESSAGE}"
                                  for file, rule in sorted((removed, new))])
+
+    def test_selection_retag_preserves_the_existing_pair_ratchet(self):
+        old = {pair: "#1621" for pair in SELECTION_ISSUES}
+        self.write_allowances(old)
+        self.commit(trusted=True)
+        self.write_allowances(SELECTION_ISSUES)
+        self.assertEqual(allowance_growth(self.root), [])
+        self.commit(trusted=True)
+        self.write_allowances({})
+        self.commit(trusted=True)
+        self.write_allowances(SELECTION_ISSUES)
+        self.assertEqual(allowance_growth(self.root), [
+            f"{file}: {rule}: allowance exceeds the trusted review base: {MESSAGE}"
+            for file, rule in sorted(SELECTION_ISSUES)
+        ])
+
+    def test_selection_issue_is_specific_to_existing_pairs_and_trusted_history(self):
+        for pair, issue in SELECTION_ISSUES.items():
+            with self.subTest(pair=pair):
+                current = "ALLOWED = " + repr({pair: issue})
+                historical = "ALLOWED = " + repr({pair: "#1621"})
+                self.assertEqual(allowed_entries(current), {pair: issue})
+                self.assertEqual(allowed_entries(current, trusted=True), {pair: issue})
+                self.assertEqual(allowed_entries(historical, trusted=True), {pair: "#1621"})
+                with self.assertRaises(ValueError):
+                    allowed_entries(historical)
+                with self.assertRaises(ValueError):
+                    allowed_entries("ALLOWED = " + repr({pair: "#1629"}), trusted=True)
+        for pair in (("src/client_defaults.zig", DEFAULT_IMPORT),
+                     ("src/new_selection.zig", DEFAULT_IMPORT),
+                     ("src/app_settings.zig", DEFAULT_IMPORT),
+                     ("src/SignIn.zig", CLASSIFIER)):
+            with self.subTest(pair=pair):
+                source = "ALLOWED = " + repr({pair: "#1697"})
+                with self.assertRaises(ValueError):
+                    allowed_entries(source)
+                with self.assertRaises(ValueError):
+                    allowed_entries(source, trusted=True)
 
     def test_removed_allowance_cannot_be_reintroduced(self):
         pair = ("src/client_defaults.zig", DEFAULT_IMPORT)

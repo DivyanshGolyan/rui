@@ -383,14 +383,16 @@ test "creating Message replay reads independently of Session history in SQLite s
     try message.key.set("receipt-steps");
     message.text = try tests.testingBytesContent(&tmp, "receipt-steps-input", "initial");
     defer message.removeTemporaryContent(std.testing.io) catch unreachable;
-    const created = storage.submitMessageWithModel(&message, null, .{});
+    var created_receipt: @import("../../creation_receipt.zig").Configuration = undefined;
+    const created = storage.submitMessageWithModelInto(&message, null, &created_receipt, .{});
     try std.testing.expect(created == .accepted);
     const session = created.accepted.session;
     const Counter = struct {
         fn steps(store: *Store, command: *const wire_request.MessageCommand) !u64 {
             var counter: TestingSteps = .{};
             counter.begin(store.sqliteDatabase());
-            const replay = store.submitMessageWithModel(command, null, .{});
+            var replay_receipt: @import("../../creation_receipt.zig").Configuration = undefined;
+            const replay = store.submitMessageWithModelInto(command, null, &replay_receipt, .{});
             counter.end(store.sqliteDatabase());
             try std.testing.expect(replay == .accepted and replay.accepted.replayed);
             return counter.steps;
@@ -416,14 +418,16 @@ test "creating configuration receipt replay reads independently of Session histo
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
     const workspace = try store_testing.canonicalCwd(std.testing.io, &workspace_buffer);
     var create = try completeConfiguration("configure-receipt-steps", "", workspace, "model-a");
-    const created = try storage.configure(&create, .{});
+    var created_receipt: @import("../../creation_receipt.zig").Configuration = undefined;
+    const created = try storage.configureInto(&create, &created_receipt, .{});
     try std.testing.expect(created == .accepted and created.accepted.configuration != null);
     const session = created.accepted.session;
     const Counter = struct {
         fn steps(store: *Store, command: *const @import("../../wire_request.zig").ConfigureCommand) !u64 {
             var counter: TestingSteps = .{};
             counter.begin(store.sqliteDatabase());
-            const result = store.configure(command, .{});
+            var result_receipt: @import("../../creation_receipt.zig").Configuration = undefined;
+            const result = store.configureInto(command, &result_receipt, .{});
             counter.end(store.sqliteDatabase());
             const replay = try result;
             try std.testing.expect(replay == .accepted and replay.accepted.replayed and replay.accepted.configuration != null);

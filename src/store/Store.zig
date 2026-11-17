@@ -562,8 +562,17 @@ pub const Store = struct {
         call: *const fn (context: *anyopaque, session: []const u8) void,
     };
 
+    /// The optional receipt is owned by the caller and must outlive the reply.
+    pub fn configureWithCreationCommittedInto(self: *Store, command: *const content_custody.ConfigureCommand, preset: ?*const configuration_domain.PresetDecision, initial_skills: ?*const skills_domain.Initial, reload_capture: ?*const skills_domain.Capture, allocator: std.mem.Allocator, committed: ?CreationCommitted, receipt: ?*command_reply.CreationConfiguration, faults: Faults) error{OutOfMemory}!ConfigureReply {
+        return self.queue().write(configureHeld, .{ self, command, preset, initial_skills, reload_capture, allocator, committed, receipt, faults });
+    }
+
     pub fn configureWithCreationCommitted(self: *Store, command: *const content_custody.ConfigureCommand, preset: ?*const configuration_domain.PresetDecision, initial_skills: ?*const skills_domain.Initial, reload_capture: ?*const skills_domain.Capture, allocator: std.mem.Allocator, committed: ?CreationCommitted, faults: Faults) error{OutOfMemory}!ConfigureReply {
-        return self.queue().write(configureHeld, .{ self, command, preset, initial_skills, reload_capture, allocator, committed, faults });
+        return self.configureWithCreationCommittedInto(command, preset, initial_skills, reload_capture, allocator, committed, null, faults);
+    }
+
+    pub fn configureInto(self: *Store, command: *const content_custody.ConfigureCommand, receipt: *command_reply.CreationConfiguration, faults: Faults) error{OutOfMemory}!ConfigureReply {
+        return self.configureWithCreationCommittedInto(command, null, null, null, std.heap.c_allocator, null, receipt, faults);
     }
 
     fn configureHeld(
@@ -574,6 +583,7 @@ pub const Store = struct {
         reload_capture: ?*const skills_domain.Capture,
         allocator: std.mem.Allocator,
         committed: ?CreationCommitted,
+        receipt: ?*command_reply.CreationConfiguration,
         faults: Faults,
     ) error{OutOfMemory}!ConfigureReply {
         var reply: ConfigureReply = undefined;
@@ -588,6 +598,7 @@ pub const Store = struct {
             .allocator = allocator,
             .committed = committed,
             .reply = &reply,
+            .receipt = receipt,
         }, faults) catch |err| {
             stderr.print("rui: Store configure transition failed: {s}\n", .{@errorName(err)});
             switch (err) {
@@ -625,12 +636,21 @@ pub const Store = struct {
     }
 
     pub fn submitMessageCapturedSkills(self: *Store, command: *const content_custody.MessageCommand, committed: ?MessageCommitted, initial_skills: ?*const skills_domain.Initial, captured_skill: ?*const skills_domain.MessageCapture, faults: Faults) MessageReply {
-        return self.queue().write(submitMessageWithModelHeld, .{ self, command, committed, initial_skills, captured_skill, @as(?*content_parts.Saving, null), faults });
+        return self.submitMessageCapturedSkillsInto(command, committed, initial_skills, captured_skill, null, faults);
+    }
+
+    /// The optional receipt is owned by the caller and must outlive the reply.
+    pub fn submitMessageCapturedSkillsInto(self: *Store, command: *const content_custody.MessageCommand, committed: ?MessageCommitted, initial_skills: ?*const skills_domain.Initial, captured_skill: ?*const skills_domain.MessageCapture, receipt: ?*command_reply.CreationConfiguration, faults: Faults) MessageReply {
+        return self.submitMessageQueued(command, committed, initial_skills, captured_skill, null, receipt, faults);
+    }
+
+    pub fn submitMessageWithModelInto(self: *Store, command: *const content_custody.MessageCommand, committed: ?MessageCommitted, receipt: *command_reply.CreationConfiguration, faults: Faults) MessageReply {
+        return self.submitMessageCapturedSkillsInto(command, committed, null, null, receipt, faults);
     }
 
     pub fn submitMessageParts(self: *Store, command: *const content_custody.MessageCommand, loan: @import("../InputCapture.zig").Loan, committed: ?MessageCommitted, faults: Faults) !MessageReply {
         var saving = try content_parts.Saving.init(.{ .captured = loan });
-        return self.queue().write(submitMessageWithModelHeld, .{ self, command, committed, @as(?*const skills_domain.Initial, null), @as(?*const skills_domain.MessageCapture, null), @as(?*content_parts.Saving, &saving), faults });
+        return self.submitMessageQueued(command, committed, null, null, &saving, null, faults);
     }
 
     /// Fixture adapter for a compound Message and its captured skills. Both
@@ -644,7 +664,11 @@ pub const Store = struct {
     ) !MessageReply {
         if (!@import("builtin").is_test) @compileError("test-only compound Message fixture");
         var saving = try content_parts.Saving.init(.{ .captured = loan });
-        return self.queue().write(submitMessageWithModelHeld, .{ self, command, @as(?MessageCommitted, null), initial_skills, captured_skill, @as(?*content_parts.Saving, &saving), Faults{} });
+        return self.submitMessageQueued(command, null, initial_skills, captured_skill, &saving, null, .{});
+    }
+
+    fn submitMessageQueued(self: *Store, command: *const content_custody.MessageCommand, committed: ?MessageCommitted, initial_skills: ?*const skills_domain.Initial, captured_skill: ?*const skills_domain.MessageCapture, saving: ?*content_parts.Saving, receipt: ?*command_reply.CreationConfiguration, faults: Faults) MessageReply {
+        return self.queue().write(submitMessageWithModelHeld, .{ self, command, committed, initial_skills, captured_skill, saving, receipt, faults });
     }
 
     fn submitMessageWithModelHeld(
@@ -654,6 +678,7 @@ pub const Store = struct {
         initial_skills: ?*const skills_domain.Initial,
         captured_skill: ?*const skills_domain.MessageCapture,
         saving: ?*content_parts.Saving,
+        receipt: ?*command_reply.CreationConfiguration,
         faults: Faults,
     ) MessageReply {
         var reply: MessageReply = undefined;
@@ -668,6 +693,7 @@ pub const Store = struct {
             .captured = captured_skill,
             .parts_saving = saving,
             .reply = &reply,
+            .receipt = receipt,
         }, faults) catch {
             reply = .infrastructure_failure;
         };

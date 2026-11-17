@@ -21,8 +21,8 @@ export interface AgentSpec {
 	workspace?: string;
 	/** `openai` or `codex`. Fixed for the Session's life. */
 	provider?: NonNullable<Schemas["AgentSpec"]["provider"]>;
-	/** The Host chooses the model when omitted at creation. May change within the fixed provider. */
-	model?: string;
+	/** Creation requires a model, supplied directly or by a preset. May change within the fixed provider. */
+	model: string;
 	instructions?: string;
 	/** JSON output schema object; `null` clears it. */
 	outputSchema?: Record<string, unknown> | null;
@@ -46,17 +46,19 @@ export interface AgentSpec {
 /** The same agent spec accepted by creation and connect-time presets. */
 export type SessionSpec = AgentSpec;
 
-/** Root creation carries a Workspace, supplied directly or by a preset. Children inherit it. */
-export type SessionCreate =
-	| (AgentSpec & { workspace: string; parent?: never; preset?: never })
-	| (AgentSpec & { preset: string; parent?: never })
-	| (Omit<AgentSpec, "workspace" | "provider"> & {
+type CreationSettings = (AgentSpec & { preset?: never }) | (Partial<AgentSpec> & { preset: string });
+
+/** Creation needs a model, directly or from a preset. Roots carry a Workspace; children inherit it. */
+export type SessionCreate = CreationSettings & (
+	| { workspace: string; parent?: never }
+	| { preset: string; parent?: never }
+	| {
 		/** Create an attached child, inheriting provider, Workspace and Bash environment. */
 		parent: string;
 		workspace?: never;
 		provider?: never;
-		preset?: string;
-	});
+	}
+);
 
 /** The settings `update` may change: everything but the ones fixed at creation. */
 export type SessionUpdate = Partial<Pick<SessionSpec, "model" | "instructions" | "outputSchema" | "tools" | "permissionMode" | "effort" | "compactAt" | "label" | "loadedTools" | "outputReservation">>;

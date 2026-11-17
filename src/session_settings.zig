@@ -1,6 +1,7 @@
 const std = @import("std");
 
 pub const Kind = union(enum) { text: usize, choice: usize, content, tools, decimal_policy };
+pub const Create = enum { optional, must_value };
 pub const Cli = struct {
     name: []const u8,
     group: enum { binding, settings } = .settings,
@@ -12,6 +13,7 @@ pub const Entry = struct {
     kind: Kind,
     nullable: bool = false,
     json_object: bool = false,
+    create: Create = .optional,
     changeable: bool = true,
     cli: ?Cli,
     digest: enum { always, unless_omitted } = .always,
@@ -21,7 +23,7 @@ pub const Entry = struct {
 pub const entries = [_]Entry{
     .{ .field = "workspace", .spec = "workspace", .kind = .{ .text = 4096 }, .changeable = false, .cli = .{ .name = "workspace" }, .column = "workspace" },
     .{ .field = "provider", .spec = "provider", .kind = .{ .choice = 16 }, .changeable = false, .cli = .{ .name = "provider", .group = .binding }, .column = "provider" },
-    .{ .field = "model", .spec = "model", .kind = .{ .text = 256 }, .changeable = true, .cli = .{ .name = "model", .group = .binding }, .column = "model" },
+    .{ .field = "model", .spec = "model", .kind = .{ .text = 256 }, .create = .must_value, .changeable = true, .cli = .{ .name = "model", .group = .binding }, .column = "model" },
     .{ .field = "instructions", .spec = "instructions", .kind = .content, .cli = .{ .name = "instructions", .on_start = false }, .column = "instructions_content_id" },
     .{ .field = "tools", .spec = "tools", .kind = .tools, .cli = .{ .name = "tools" }, .column = "tool_set_id" },
     .{ .field = "loaded_tools", .spec = "loadedTools", .kind = .tools, .cli = .{ .name = "loaded-tools" }, .digest = .unless_omitted, .column = "loaded_tool_set_id" },
@@ -66,4 +68,10 @@ test "Session settings revision tags retain persisted names ordinals and backing
     try std.testing.expectEqualStrings("reasoning_effort_refused", actual.field_names[expected.field_names.len]);
     try std.testing.expectEqual(expected.field_names.len, @backingInt(SessionField.reasoning_effort_refused));
     inline for (entries) |entry| try std.testing.expect(!std.mem.eql(u8, entry.field, "reasoning_effort_refused"));
+}
+
+test "creation metadata requires only model and keeps Host defaults optional" {
+    inline for (entries) |entry| {
+        try std.testing.expectEqual(if (std.mem.eql(u8, entry.field, "model")) Create.must_value else Create.optional, entry.create);
+    }
 }

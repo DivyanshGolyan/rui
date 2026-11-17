@@ -21,7 +21,6 @@ const host_launch = @import("host_launch.zig");
 
 pub const Activation = struct {
     binding: selection.Binding,
-    model_pinned: bool = false,
     store: protocol.Bounded(protocol.max_store_bytes),
     default_failed: bool = false,
     launch: ?host_launch.Result = null,
@@ -166,7 +165,7 @@ const Form = struct {
             .{ .base = self.base.text() };
     }
 };
-const Frozen = struct { intent: selection.Intent, provider: core.Provider, model: []const u8, key: host_start.ConnectionKey, endpoint: host_start.EndpointEdit, model_pinned: ?bool = null };
+const Frozen = struct { intent: selection.Intent, provider: core.Provider, model: []const u8, key: host_start.ConnectionKey, endpoint: host_start.EndpointEdit };
 const Paste = union(enum) { none, ignore, field: core.Field, callback };
 const Hit = struct { row: u16, start: u16, end: u16, action: core.Action };
 const Drawn = struct {
@@ -480,12 +479,7 @@ fn activatePublished(self: *Self, connection: ?host_start.ConnectionSave) Publis
     };
     const defaults: anyerror!void = if (frozen.provider == .openai) {} else preferences.saveProviderAfterLogin(init_.environ_map.get("HOME") orelse "", frozen.provider);
     const intended = if (connection) |*value| &value.saved else if (frozen.provider == .openai) self.savedConnection() else null;
-    const activation: anyerror!Activation = if (self.activate.?(init_, frozen.intent, intended)) |value| blk: {
-        var selected = value;
-        if (frozen.model_pinned) |pinned| selected.model_pinned = pinned;
-        break :blk selected;
-    } else |err| err;
-    return .{ .defaults = defaults, .activation = activation, .connection = connection };
+    return .{ .defaults = defaults, .activation = self.activate.?(init_, frozen.intent, intended), .connection = connection };
 }
 fn closeBrowser(self: *Self) ?core.Failure {
     std.debug.assert(self.task.thread == null);
@@ -745,8 +739,8 @@ fn freeze(self: *Self, attempt: core.Attempt, action: core.Action) !bool {
         }
         if (self.target.len != 0) intent.store = self.target.slice();
         intent.provider = "openai";
-        intent.model = if (form.model.text().len != 0) form.model.text() else self.selectors.model;
-        self.frozen = .{ .intent = intent, .provider = .openai, .model = model, .model_pinned = if (intent.model != null) true else null, .key = if (using_saved) .{ .existing = &form.original } else .{ .provided = form.key.text() }, .endpoint = endpoint_edit };
+        intent.model = model;
+        self.frozen = .{ .intent = intent, .provider = .openai, .model = model, .key = if (using_saved) .{ .existing = &form.original } else .{ .provided = form.key.text() }, .endpoint = endpoint_edit };
     } else {
         intent.provider = intent.provider orelse @tagName(provider);
         self.frozen = .{ .intent = intent, .provider = provider, .model = intent.model orelse @import("product_defaults.zig").recommended_model, .key = .{ .provided = "" }, .endpoint = .{ .unchanged = host_start.openai_endpoint } };
@@ -2679,29 +2673,4 @@ test "Sign-in unknown API settings reach typed form failure instead of a guessed
     var report: std.Io.Writer.Allocating = .init(rig.arena.allocator());
     try std.testing.expectError(error.SettingsInvalid, page.stopTo(&report.writer));
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, report.written(), "SettingsInvalid"));
-}
-
-test "API sign-in keeps an empty model unchosen and retains a typed model" {
-    var page: Self = .{};
-    defer page.closeForm();
-    const form = try page.ensureForm();
-    _ = form.key.set("sk-test", "sk-test".len);
-    try std.testing.expect(try page.freeze(.key, .connect));
-    try std.testing.expect(page.frozen.?.intent.model == null);
-    try std.testing.expect(page.frozen.?.model_pinned == null);
-    try std.testing.expectEqualStrings(@import("product_defaults.zig").recommended_model, page.frozen.?.model);
-    var snapshot: selection.Snapshot = .{ .intent = page.frozen.?.intent, .defaults = .{} };
-    const readiness: @import("provider_selection.zig").Readinesses = .initFill(.configured);
-    try std.testing.expectEqualStrings("", (try snapshot.resolve(&readiness)).?.model.slice());
-    try snapshot.defaults.provider.set("openai");
-    try snapshot.defaults.model.set("saved-model");
-    try std.testing.expectEqualStrings("saved-model", (try snapshot.resolve(&readiness)).?.model.slice());
-    try snapshot.defaults.provider.set("codex");
-    try std.testing.expectEqualStrings("", (try snapshot.resolve(&readiness)).?.model.slice());
-    _ = form.model.set("chosen-model", "chosen-model".len);
-    try std.testing.expect(try page.freeze(.key, .connect));
-    try std.testing.expectEqualStrings("chosen-model", page.frozen.?.intent.model.?);
-    try std.testing.expectEqual(@as(?bool, true), page.frozen.?.model_pinned);
-    snapshot.intent = page.frozen.?.intent;
-    try std.testing.expectEqualStrings("chosen-model", (try snapshot.resolve(&readiness)).?.model.slice());
 }

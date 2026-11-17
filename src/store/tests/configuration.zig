@@ -202,7 +202,7 @@ test "configure refuses a tool name the tool set lacks and a provider tool its p
     }
 }
 
-test "Store configuration requires Workspace and, on a Host serving several, a provider" {
+test "Store configuration requires Workspace and model and, on a Host serving several, a provider" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
@@ -225,7 +225,7 @@ test "Store configuration requires Workspace and, on a Host serving several, a p
                 if (mask & 2 == 0) command.configuration.provider.state = .omitted;
                 if (mask & 4 == 0) command.configuration.model.state = .omitted;
                 const reply = try storage.configure(&command, .{});
-                if (mask & 3 == 3) {
+                if (mask == 7) {
                     try std.testing.expect(reply == .accepted);
                 } else {
                     try std.testing.expect(reply == .rejected);
@@ -335,14 +335,19 @@ test "creation accepts omitted Host settings and preserves its supplied Workspac
             defer storage.close() catch unreachable;
             var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
             const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
-            inline for (.{ "model", "reasoning_effort", "compaction_trigger", "tools", "permission_mode" }) |field| {
+            var missing_model = try completeConfiguration("missing-model", "", workspace, "model-a");
+            missing_model.configuration.model.state = .omitted;
+            const missing_model_reply = try storage.configure(&missing_model, .{});
+            try std.testing.expect(missing_model_reply == .rejected);
+            try std.testing.expectEqual(protocol.ConfigurationRejection.incomplete_initial_configuration, missing_model_reply.rejected.code);
+            inline for (.{ "reasoning_effort", "compaction_trigger", "tools", "permission_mode" }) |field| {
                 var command = try completeConfiguration("missing-" ++ field, "", workspace, "model-a");
                 @field(command.configuration, field).state = .omitted;
                 const reply = try storage.configure(&command, .{});
                 try std.testing.expect(reply == .accepted);
                 const observed = try storage.inspectSessionForTesting(reply.accepted.session.slice());
                 try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .low), observed.reasoning_effort);
-                try std.testing.expectEqualStrings(if (comptime std.mem.eql(u8, field, "model")) @import("../../product_defaults.zig").recommended_model else "model-a", observed.model.slice());
+                try std.testing.expectEqualStrings("model-a", observed.model.slice());
             }
             var missing = try completeConfiguration("unused-missing", "", "/does-not-exist/rui-unused-workspace", "model-a");
             missing.configuration.tools = try .of(&.{});
@@ -1277,7 +1282,6 @@ test "standalone creation always requires Workspace and replays saved refusal ac
                     var message: wire_request.MessageCommand = .{};
                     try message.key.set("missing-workspace");
                     message.configuration = configure.configuration;
-                    message.configuration.?.model.state = .omitted;
                     message.text = try testingBytesContent(&tmp, "missing-workspace-message", "create in my Workspace");
                     defer message.removeTemporaryContent(std.testing.io) catch unreachable;
                     const refused = storage.submitMessageWithModel(&message, null, .{});
@@ -1294,7 +1298,7 @@ test "standalone creation always requires Workspace and replays saved refusal ac
                     try std.testing.expect(accepted == .accepted);
                     const observed = try storage.inspectSessionForTesting(accepted.accepted.session.slice());
                     try std.testing.expectEqualStrings(workspace, observed.workspace.slice());
-                    try std.testing.expectEqualStrings(@import("../../product_defaults.zig").recommended_model, observed.model.slice());
+                    try std.testing.expectEqualStrings("model-a", observed.model.slice());
                 } else {
                     const refused = try storage.configure(&configure, .{});
                     try std.testing.expect(refused == .rejected);
