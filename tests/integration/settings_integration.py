@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 
 import json
+import itertools
+
+import codex_fixture
 import pathlib
 import os
 import selectors
@@ -224,6 +227,76 @@ def flag_start_failures(root):
         assert json.loads(done.stdout) == {"rui_start_error": {"code": "settings_invalid", "message": message}}, (flags, done)
 
 
+def credential_location_matrix():
+    # Sign-in admission records the path but deliberately reads it at dispatch,
+    # whereas OpenAI reads its key during admission. Status is client-only.
+    with tempfile.TemporaryDirectory(prefix="rui-credential-matrix-") as temporary:
+        root = pathlib.Path(temporary).resolve()
+        for kind, leaf, variable, present in itertools.product(("openai", "codex"), (False, True), (False, True), (False, True)):
+            case = root / f"{kind}-{int(leaf)}{int(variable)}{int(present)}"
+            case.mkdir(mode=0o700)
+            home = case / "home"
+            config = home / ".config" / "rui"
+            config.mkdir(mode=0o700, parents=True)
+            default = config / ("openai.key" if kind == "openai" else "codex.json")
+            named = case / "named"
+            explicit = case / "explicit"
+            chosen = explicit if leaf else named if variable else default
+            client = named if variable else default
+            if present:
+                if kind == "openai":
+                    chosen.write_text("sk-credential-matrix\n")
+                    chosen.chmod(0o600)
+                else:
+                    codex_fixture.credentials(chosen)
+            env = {**os.environ, "HOME": str(home)}
+            for name in ("RUI_OPENAI_KEY_FILE", "RUI_CODEX_CREDENTIAL_FILE", "RUI_CHATGPT_CREDENTIAL_FILE"):
+                env.pop(name, None)
+            if variable:
+                env["RUI_OPENAI_KEY_FILE" if kind == "openai" else "RUI_CODEX_CREDENTIAL_FILE"] = str(named)
+            status = subprocess.run([RUI, "auth", "status"], env=env, capture_output=True, text=True, timeout=30)
+            assert status.returncode == 0, (case, status)
+            expected_client = present and client == chosen
+            if kind == "openai":
+                line = "OpenAI API key: saved locally (remote acceptance not checked)." if expected_client else "OpenAI API key: missing."
+            else:
+                line = "ChatGPT (device code): signed in (remote acceptance not checked)." if expected_client else "ChatGPT: not signed in;"
+            assert line in status.stdout, (case, line, status.stdout, status.stderr)
+            store, runtime = case / "store", case / "runtime"
+            runtime.mkdir(mode=0o700)
+            placement = subprocess.run([RUI, "host", "set", "--store", str(store), "interface.dir", str(runtime)], env=env, capture_output=True, text=True, timeout=30)
+            assert placement.returncode == 0, (case, placement)
+            flags = ["--store", str(store), "--set", f'providers={{"{kind}":{{}}}}']
+            if leaf:
+                setting = "providers.openai.key=file:" if kind == "openai" else "providers.codex.credentialFile="
+                flags += ["--set", setting + str(explicit)]
+            check = subprocess.run([RUI, "host", "settings", "--check", *flags], env=env, capture_output=True, text=True, timeout=30)
+            should_start = kind == "codex" or present
+            if should_start:
+                assert check.returncode == 0, (case, check)
+            else:
+                assert check.returncode != 0, (case, check)
+                if leaf:
+                    assert "providers.openai.key" in check.stdout + check.stderr, (case, check)
+                else:
+                    assert "sign_in_required" in check.stdout + check.stderr, (case, check)
+            started = subprocess.run([RUI, "host", "start", *flags], env=env, capture_output=True, text=True, timeout=30)
+            try:
+                if should_start:
+                    assert started.returncode == 0, (case, started)
+                    info = host_info(runtime / "rui.sock", str(store))
+                    assert kind in info["capabilities"]["providers"], (case, info)
+                    host_stop(runtime / "rui.sock", str(store), info["instance"])
+                else:
+                    assert started.returncode != 0, (case, started)
+                    assert ("providers.openai.key" if leaf else "sign_in_required") in started.stdout + started.stderr, (case, started)
+            finally:
+                if (runtime / "rui.sock").exists():
+                    from host_launch_fixture import forced_crash_cleanup
+                    forced_crash_cleanup(store)
+        print("credential location process matrix: client status, settings check and Host start")
+
+
 def token_endpoint_refusals(root):
     """All Host admission doors name a forbidden token target before serving."""
     for door in ("serve", "start", "check"):
@@ -261,6 +334,7 @@ def main(network, ci):
     source_modes(root, good)
     flag_start_failures(root)
     token_endpoint_refusals(root)
+    credential_location_matrix()
 
     other = root / "other"
     other.mkdir(mode=0o700)

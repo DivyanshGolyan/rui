@@ -704,6 +704,33 @@ fn initForTest(arena: *std.heap.ArenaAllocator, env: *std.process.Environ.Map) s
     return .{ .minimal = .{ .args = .{ .vector = &.{} }, .environ = .empty }, .arena = arena, .gpa = std.testing.allocator, .io = std.testing.io, .environ_map = env, .preopens = .empty };
 }
 
+test "sign-in leaf overrides environment location before dispatch" {
+    inline for (.{ .codex, .chatgpt }) |provider| {
+        for ([_]bool{ false, true }) |leaf| {
+            for ([_]bool{ false, true }) |named| {
+                var environment: std.process.Environ.Map = .init(std.testing.allocator);
+                defer environment.deinit();
+                try environment.put("HOME", "/home/fixture");
+                if (named) try environment.put(credential_location.variable(provider), "/named/credential");
+                var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+                defer arena.deinit();
+                const init = initForTest(&arena, &environment);
+                const settings = try std.testing.allocator.create(hs.Settings);
+                defer std.testing.allocator.destroy(settings);
+                settings.* = .{};
+                defer settings.deinit();
+                var failure: start_report.Failure = undefined;
+                try hs.apply(settings, arena.allocator(), "{\"providers\":{}}", .file, checkPreset, &failure);
+                try assign(settings, arena.allocator(), "providers." ++ @tagName(provider), "{}", &failure);
+                if (leaf) try assign(settings, arena.allocator(), "providers." ++ @tagName(provider) ++ ".credentialFile", "/explicit/credential", &failure);
+                try resolveProviders(init, settings, &failure);
+                const expected = if (leaf) "/explicit/credential" else if (named) "/named/credential" else "/home/fixture/.config/rui/" ++ @tagName(provider) ++ ".json";
+                try std.testing.expectEqualStrings(expected, @field(settings.providers.entries, @tagName(provider)).?.credential_file.?.slice());
+            }
+        }
+    }
+}
+
 test "Host start resolves environment private file and saved credential sources" {
     const gpa = std.testing.allocator;
     var environment: std.process.Environ.Map = .init(gpa);
