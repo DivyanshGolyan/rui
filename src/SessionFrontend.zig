@@ -2460,15 +2460,27 @@ fn perform(self: *Self, action: ConversationAction) !void {
                 self.dirty = true;
                 return;
             }
-            if (action == .close) if (self.menu.current(self.menuSource())) |shown| {
-                shown.close();
-                switch (slash_commands.draftOf(self.input.composition().bytes)) {
-                    .word, .command => self.input.clear(),
-                    .message => {},
+            if (action == .close) {
+                const draft = slash_commands.draftOf(self.input.composition().bytes);
+                const drawn_command = switch (draft) {
+                    .word, .command => if (self.menu.drawn_pick) |pick|
+                        pick.revision == self.input.revision and self.menu.shown != null and self.menu.shown.?.seen == .drawn
+                    else
+                        false,
+                    .message => false,
+                };
+                const current = self.menu.current(self.menuSource());
+                const shown = current orelse if (drawn_command) (if (self.menu.shown) |*list| list else null) else null;
+                if (shown) |list| {
+                    list.close();
+                    switch (draft) {
+                        .word, .command => self.input.clear(),
+                        .message => {},
+                    }
+                    self.dirty = true;
+                    return;
                 }
-                self.dirty = true;
-                return;
-            };
+            }
             self.dropMessageRequest();
             screen.moveRow(.selector);
             if (action == .close and self.settledView()) {
@@ -9328,6 +9340,35 @@ test "chat info supplies the one bottom footer after the input and both dividers
         try std.testing.expect((try rowWith(held, "alt+i info")) != null);
         try std.testing.expectEqualStrings("kept draft", held.self.input.composition().bytes);
     };
+}
+
+test "App Session Escape closes drawn command list before leaving chat" {
+    for ([_]struct { width: u16, height: u16 }{ .{ .width = 140, .height = 40 }, .{ .width = 46, .height = 30 } }) |size| {
+        for ([_][]const u8{ "/", "/ne" }) |draft| for ([_]bool{ false, true }) |new_skills| {
+            const held = try HeldFrontend.create();
+            defer held.destroy();
+            held.size = .{ .width = size.width, .height = size.height };
+            held.root.size = .{ .width = size.width, .height = size.height };
+            try held.frame();
+            try held.keys(draft);
+            try held.frame();
+            try std.testing.expectEqual(.drawn, held.self.menu.shown.?.seen);
+            if (new_skills) {
+                _ = held.self.dropSkills();
+                const ask = held.self.skills.ask(draft[1..]).?;
+                try std.testing.expect(held.self.skills.answer(ask.read, .{}, draft[1..]) == null);
+            }
+            try held.keys("\x1b");
+            try std.testing.expectEqual(@as(?Outcome, null), held.left);
+            try std.testing.expect(held.root.session != null);
+            try std.testing.expect(held.root.input.mainFocused());
+            try std.testing.expectEqualStrings("", held.self.input.composition().bytes);
+            try held.frame();
+            try std.testing.expect(held.self.menu.current(held.self.menuSource()) == null);
+            try held.keys("\x1b");
+            try std.testing.expectEqual(@as(?Outcome, .returned), held.left);
+        };
+    }
 }
 
 test "App Session palette total budget stays between input rules and reserves feed rows" {
