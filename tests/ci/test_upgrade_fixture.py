@@ -48,7 +48,7 @@ class UpgradeEmptyChatTest(unittest.TestCase):
     def observe(self, footer, *, report=None, listing=None, model="gpt-6-luna"):
         self.case.json.side_effect = [copy.deepcopy(self.report if report is None else report),
                                       copy.deepcopy(self.listing if listing is None else listing)]
-        frame = f"│ › conversation β draft\n│ {model} · low    {footer}"
+        frame = f"{self.fixture.VERTICAL_DIVIDER} › conversation β draft\n{self.fixture.VERTICAL_DIVIDER} {model} · low    {footer}"
         self.screen.observe = lambda: frame
         return self.screen.empty_chat(self.case, self.session)
 
@@ -151,7 +151,7 @@ class UpgradeEmptyChatTest(unittest.TestCase):
 
     def test_quiet_version_is_below_settings_not_a_version_elsewhere(self):
         version = "0.76.0"
-        valid = [f"Settings\n  38 MB    {version} ", f"Settings │ chat\n {version} │ model"]
+        valid = [f"Settings\n  38 MB    {version} ", f"Settings {self.fixture.VERTICAL_DIVIDER} chat\n {version} {self.fixture.VERTICAL_DIVIDER} model"]
         invalid = [f"Settings {version}\n footer", f"Settings\nUpdate to {version}",
                    f"Settings\nrui 38 MB {version}", f"Settings\n38 MB tools 12 MB {version}",
                    f"Settings\n{version}\nUpgraded to {version}",
@@ -204,8 +204,8 @@ class UpgradeEmptyChatTest(unittest.TestCase):
                 self.hidden(wrong)
 
     def test_overview_waits_past_sidebar_controls_for_the_full_list(self):
-        sidebar = " + New Session                Archived │\n   Settings │ gpt-6-luna · low\n"
-        frames = [sidebar + "│ › Type a task", sidebar + "│ › unsent draft",
+        sidebar = f" + New Session                Archived {self.fixture.VERTICAL_DIVIDER}\n   Settings {self.fixture.VERTICAL_DIVIDER} gpt-6-luna · low\n"
+        frames = [sidebar + f"{self.fixture.VERTICAL_DIVIDER} › Type a task", sidebar + f"{self.fixture.VERTICAL_DIVIDER} › unsent draft",
                   "+ New Session                Archived\nSettings"]
         self.screen.observe = Mock(side_effect=frames)
         self.case.json.side_effect = [copy.deepcopy(self.report), copy.deepcopy(self.listing)]
