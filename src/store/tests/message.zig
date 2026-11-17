@@ -93,7 +93,8 @@ test "initial Message atomically allocates its Session and replays its original 
                 const receipt = first.configuration.?;
                 try std.testing.expectEqual(.codex, receipt.provider);
                 try std.testing.expectEqualStrings("model-a", receipt.model.slice());
-                try std.testing.expectEqual(@as(?@import("../../model_capability.zig").ReasoningEffort, null), receipt.reasoning_effort);
+                const initial_session = try storage.inspectSessionForTesting(first.session.slice());
+                try std.testing.expectEqual(initial_session.reasoning_effort, receipt.reasoning_effort);
                 try std.testing.expectEqual(.bypass, receipt.permission_mode);
                 try std.testing.expectEqualStrings(workspace, receipt.workspace.slice());
                 try std.testing.expectEqual(@as(?u64, 115200), receipt.compaction_trigger);
