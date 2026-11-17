@@ -258,3 +258,30 @@ test("Action promotion reports capacity refusal and changed-key conflicts", asyn
 			error instanceof RuiRequestError && error.type === status && error.code === code);
 	}
 });
+
+test("stop Action sends the selected Session, Action and recoverable request key", async () => {
+	const link: Link = {
+		async exchange(path, build) {
+			assert.equal(path, "/v1/control/action-stop");
+			assert.deepEqual(JSON.parse(build("store")), {
+				version: WIRE_VERSION, kind: "action_stop", store: "store",
+				key: "stop-request", session: "session", action: "42",
+			});
+			return Buffer.from(JSON.stringify({ answer: { status: "accepted", action: "42", resolution_position: null } }));
+		},
+	};
+	assert.equal(await new Session(link, "session").stopAction("42", { idempotencyKey: "stop-request" }), null);
+});
+
+test("stop Action reports refusal and request key conflicts", async () => {
+	for (const [status, code] of [["rejected", "unknown_action"], ["rejected", "target_mismatch"], ["conflict", "idempotency_key_conflict"]]) {
+		const link: Link = { exchange: async () => Buffer.from(JSON.stringify({ answer: { status, code } })) };
+		await assert.rejects(new Session(link, "session").stopAction("1", { idempotencyKey: "stop-request" }), (error: unknown) =>
+			error instanceof RuiRequestError && error.type === status && error.code === code);
+	}
+});
+
+test("stop Action preserves the existing Resolution position", async () => {
+    const link: Link = { exchange: async () => Buffer.from(JSON.stringify({ answer: { status: "accepted", action: "42", resolution_position: "9007199254740993" } })) };
+    assert.equal(await new Session(link, "session").stopAction("42"), "9007199254740993");
+});

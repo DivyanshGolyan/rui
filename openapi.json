@@ -651,6 +651,69 @@
         }
       }
     },
+    "/v1/control/action-stop": {
+      "post": {
+        "operationId": "actionStop",
+        "summary": "Selects one owned Action for stop, preserving an existing Resolution. Read completion with read-action. Retried by its key.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/WireVersion"
+          },
+          {
+            "$ref": "#/components/parameters/HostInstance"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ActionStopRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The reply.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActionStopReply"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The key was used before with different input (the conflict reply), or the request names another Store or Host instance (a refusal).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ActionStopConflictReply"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ErrorReply"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "A refusal or failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorReply"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/read-action": {
       "post": {
         "operationId": "readAction",
@@ -1486,6 +1549,206 @@
           },
           "kind": {
             "const": "action_background"
+          },
+          "store": {
+            "type": "string",
+            "maxLength": 492,
+            "x-rui-max-bytes": 492
+          },
+          "key": {
+            "type": "string",
+            "maxLength": 128,
+            "x-rui-max-bytes": 128
+          },
+          "session": {
+            "type": "string",
+            "maxLength": 128,
+            "x-rui-max-bytes": 128
+          },
+          "action": {
+            "$ref": "#/components/schemas/Decimal"
+          }
+        },
+        "required": [
+          "version",
+          "kind",
+          "store",
+          "key",
+          "session",
+          "action"
+        ],
+        "additionalProperties": false
+      },
+      "ActionStopConflictReply": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "const": "20"
+          },
+          "type": {
+            "const": "action_stop_reply"
+          },
+          "answer": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "const": "conflict"
+              },
+              "replayed": {
+                "const": false
+              },
+              "session": {
+                "type": "string",
+                "maxLength": 128,
+                "x-rui-max-bytes": 128
+              },
+              "action": {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              "code": {
+                "const": "idempotency_key_conflict"
+              }
+            },
+            "required": [
+              "status",
+              "replayed",
+              "session",
+              "action",
+              "code"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "version",
+          "type",
+          "answer"
+        ],
+        "additionalProperties": false
+      },
+      "ActionStopReply": {
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "version": {
+                "const": "20"
+              },
+              "type": {
+                "const": "action_stop_reply"
+              },
+              "answer": {
+                "type": "object",
+                "properties": {
+                  "status": {
+                    "const": "accepted"
+                  },
+                  "replayed": {
+                    "type": "boolean"
+                  },
+                  "session": {
+                    "type": "string",
+                    "maxLength": 128,
+                    "x-rui-max-bytes": 128
+                  },
+                  "action": {
+                    "$ref": "#/components/schemas/Decimal"
+                  },
+                  "resolution_position": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/components/schemas/Decimal"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "status",
+                  "replayed",
+                  "session",
+                  "action",
+                  "resolution_position"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "version",
+              "type",
+              "answer"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "version": {
+                "const": "20"
+              },
+              "type": {
+                "const": "action_stop_reply"
+              },
+              "answer": {
+                "type": "object",
+                "properties": {
+                  "status": {
+                    "const": "rejected"
+                  },
+                  "replayed": {
+                    "type": "boolean"
+                  },
+                  "session": {
+                    "type": "string",
+                    "maxLength": 128,
+                    "x-rui-max-bytes": 128
+                  },
+                  "action": {
+                    "$ref": "#/components/schemas/Decimal"
+                  },
+                  "code": {
+                    "type": "string",
+                    "enum": [
+                      "invalid_session_reference",
+                      "invalid_target",
+                      "unknown_session",
+                      "unknown_action",
+                      "target_mismatch",
+                      "source_stopped",
+                      "action_not_backgroundable",
+                      "background_unavailable"
+                    ]
+                  }
+                },
+                "required": [
+                  "status",
+                  "replayed",
+                  "session",
+                  "action",
+                  "code"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "version",
+              "type",
+              "answer"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      },
+      "ActionStopRequest": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "const": "20"
+          },
+          "kind": {
+            "const": "action_stop"
           },
           "store": {
             "type": "string",
@@ -11784,6 +12047,244 @@
                       "code",
                       "action_target",
                       "action_selection"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              }
+            },
+            "required": [
+              "version",
+              "type",
+              "key",
+              "delta",
+              "since",
+              "observation"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "version": {
+                "const": "20"
+              },
+              "type": {
+                "const": "command_observation"
+              },
+              "key": {
+                "type": "string",
+                "maxLength": 128,
+                "x-rui-max-bytes": 128
+              },
+              "delta": {
+                "const": "full"
+              },
+              "since": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "maxLength": 60,
+                    "x-rui-max-bytes": 60
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "observation": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "status": {
+                        "type": "string",
+                        "enum": [
+                          "absent",
+                          "accepted",
+                          "rejected"
+                        ]
+                      },
+                      "kind": {
+                        "const": "action_stop"
+                      },
+                      "target": {
+                        "type": "string",
+                        "maxLength": 128,
+                        "x-rui-max-bytes": 128
+                      },
+                      "action_target": {
+                        "type": "object",
+                        "properties": {
+                          "action": {
+                            "$ref": "#/components/schemas/Decimal"
+                          }
+                        },
+                        "required": [
+                          "action"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "required": [
+                      "status",
+                      "kind",
+                      "target",
+                      "action_target"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "status": {
+                        "type": "string",
+                        "enum": [
+                          "absent",
+                          "accepted",
+                          "rejected"
+                        ]
+                      },
+                      "kind": {
+                        "const": "action_stop"
+                      },
+                      "target": {
+                        "type": "string",
+                        "maxLength": 128,
+                        "x-rui-max-bytes": 128
+                      },
+                      "code": {
+                        "type": "string",
+                        "maxLength": 96,
+                        "x-rui-max-bytes": 96
+                      },
+                      "action_target": {
+                        "type": "object",
+                        "properties": {
+                          "action": {
+                            "$ref": "#/components/schemas/Decimal"
+                          }
+                        },
+                        "required": [
+                          "action"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "required": [
+                      "status",
+                      "kind",
+                      "target",
+                      "code",
+                      "action_target"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "status": {
+                        "type": "string",
+                        "enum": [
+                          "absent",
+                          "accepted",
+                          "rejected"
+                        ]
+                      },
+                      "kind": {
+                        "const": "action_stop"
+                      },
+                      "target": {
+                        "type": "string",
+                        "maxLength": 128,
+                        "x-rui-max-bytes": 128
+                      },
+                      "action_target": {
+                        "type": "object",
+                        "properties": {
+                          "action": {
+                            "$ref": "#/components/schemas/Decimal"
+                          }
+                        },
+                        "required": [
+                          "action"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "resolution_position": {
+                        "anyOf": [
+                          {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      }
+                    },
+                    "required": [
+                      "status",
+                      "kind",
+                      "target",
+                      "action_target",
+                      "resolution_position"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "status": {
+                        "type": "string",
+                        "enum": [
+                          "absent",
+                          "accepted",
+                          "rejected"
+                        ]
+                      },
+                      "kind": {
+                        "const": "action_stop"
+                      },
+                      "target": {
+                        "type": "string",
+                        "maxLength": 128,
+                        "x-rui-max-bytes": 128
+                      },
+                      "code": {
+                        "type": "string",
+                        "maxLength": 96,
+                        "x-rui-max-bytes": 96
+                      },
+                      "action_target": {
+                        "type": "object",
+                        "properties": {
+                          "action": {
+                            "$ref": "#/components/schemas/Decimal"
+                          }
+                        },
+                        "required": [
+                          "action"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "resolution_position": {
+                        "anyOf": [
+                          {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      }
+                    },
+                    "required": [
+                      "status",
+                      "kind",
+                      "target",
+                      "code",
+                      "action_target",
+                      "resolution_position"
                     ],
                     "additionalProperties": false
                   }

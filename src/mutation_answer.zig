@@ -44,6 +44,7 @@ pub const Target = union(CommandKind) {
     permission_decision: struct { action: u64, decision: PermissionDecision },
     session_pin: struct { pinned: bool },
     action_background: u64,
+    action_stop: u64,
 };
 
 pub const Answer = struct {
@@ -58,6 +59,7 @@ pub const Answer = struct {
             model_interruption,
             permission_decision,
             action_background: @import("action_control.zig").Selection,
+            action_stop: ?u64,
         },
         rejected: Bounded(max_code_bytes),
         conflict,
@@ -193,9 +195,9 @@ fn bind(comptime kind: CommandKind, comptime accepted: bool, partial: anytype, s
     if (comptime kind == .permission_decision) {
         if (!partial.has(".answer.action") or !partial.has(".answer.decision")) return error.InvalidResponse;
         if (try decimalId(answer.action, true) != target.permission_decision.action or !answer.decision.eql(@tagName(target.permission_decision.decision))) return error.RequestBindingMismatch;
-    } else if (comptime kind == .action_background) {
+    } else if (comptime kind == .action_background or kind == .action_stop) {
         if (!partial.has(".answer.action")) return error.InvalidResponse;
-        if (try decimalId(answer.action, true) != target.action_background) return error.RequestBindingMismatch;
+        if (try decimalId(answer.action, true) != @field(target, @tagName(kind))) return error.RequestBindingMismatch;
     }
     if (answer.status.eql("accepted") and !session_id.valid(resolved_session.slice())) return error.InvalidResponse;
 }
@@ -272,6 +274,10 @@ fn decide(comptime kind: CommandKind, comptime accepted: bool, comptime conflict
         },
         .model_interruption => .model_interruption,
         .permission_decision => .permission_decision,
+        .action_stop => blk: {
+            try require(partial, ".answer.resolution_position");
+            break :blk .{ .action_stop = if (answer.resolution_position) |p| try decimalId(p, false) else null };
+        },
         .action_background => blk: {
             try require(partial, ".answer.action_selection");
             break :blk .{ .action_background = .{ .kind = answer.action_selection.kind.value, .position = try decimalId(answer.action_selection.position, false) } };

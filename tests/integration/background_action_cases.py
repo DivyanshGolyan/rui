@@ -2,6 +2,7 @@
 import hashlib
 import json
 import shlex
+import subprocess
 import sys
 import threading
 import time
@@ -463,3 +464,84 @@ def prove_message_background_and_stop(state, *, deadline=None):
             lambda: retain_failure_state("message background and stop failure state", case) if failed else None,
         )
     return evidence
+
+def prove_client_action_stop(state, *, deadline=None):
+    """Stop through capture and native ingress, including lost-output recovery."""
+    from bash_fixture import dispose_owner_case
+    from canonical_fixture import announced
+
+    deadline = time.monotonic() + 120 if deadline is None else deadline
+
+    def command(*args, **options):
+        return fixture.command(*args, timeout=min(15, max(1, deadline - time.monotonic())), **options)
+
+    def wait_for(observe, description):
+        return fixture.wait_for(observe, description, deadline=deadline)
+
+    outcomes = []
+    for mode in ("waiting", "running"):
+        case = state / f"client-stop-{mode}"
+        case.mkdir(mode=0o700)
+        workspace = case / "workspace"
+        workspace.mkdir()
+        gate = ReleaseGate(workspace / "gate")
+        producer = "import pathlib; pathlib.Path('ready').write_text('ready'); open('gate','rb').read(); print('late result')"
+        arguments = json.dumps({"cmd": "exec " + shlex.join([sys.executable, "-c", producer]), "description": "Held Action", "timeout_ms": 30000})
+        endpoint = fixture.SuccessEndpoint([
+            fixture.sse_tool_calls("stop-calls", [("bash", "held", arguments)]),
+            fixture.sse_answer("stop-answer", "stop-reason", "stop-message", "original answer")[0],
+        ])
+        thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+        host = session = None
+        try:
+            thread.start()
+            store = case / "store"
+            host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses", active_capacity=2)
+            session = configure(case, store, "configure", workspace=workspace)
+            fixture.message(case, store, "message", session, "run")
+            action = wait_for(lambda: action_for(store, session), "Action awaiting permission")["action"]
+            if mode == "running":
+                allow(case, store, "allow", session, action)
+                wait_for(lambda: (workspace / "ready").exists(), "running Action before stop")
+            command("action", "background", "--store", store, "--session", session, "--action", action,
+                    "--key", "background", "--record", case / "background.json")
+            wait_for(lambda: fixture.completed_observation(store, "message"), "original receipt continuation")
+            # A generated handle is delivered before the deliberately lost reply.
+            pending = subprocess.run([str(fixture.RUI), "action", "stop", "--store", str(store), "--session", session, "--action", action,
+                                      "--test-drop-reply", "after-commit"], text=True, capture_output=True, timeout=15)
+            assert pending.returncode == 4 and pending.stdout == "" and "[reply_unconfirmed]" in pending.stderr, pending
+            handle = announced(pending)
+            recovered = command("request", "recover", handle)
+            assert recovered["answer"]["status"] == "accepted" and recovered["answer"]["replayed"], recovered
+            assert recovered["answer"]["resolution_position"] is None, recovered
+            final = wait_for(lambda: (value if (value := command("action", "read", "--store", store, "--session", session, "--action", action))["state"] == "resolved" else None), "stopped Resolution")
+            assert final["final"]["code"] == "cancelled", final
+            after = command("action", "stop", "--store", store, "--session", session, "--action", action,
+                            "--key", "after", "--record", case / "after.json")
+            assert after["answer"]["resolution_position"] == final["final"]["position"], after
+            assert command("request", "recover", handle)["answer"] == recovered["answer"]
+            observed = command("request", "inspect", handle)
+            assert observed["observation"]["kind"] == "action_stop", observed
+            assert observed["observation"]["resolution_position"] is None, observed
+            foreign = configure(case, store, "foreign", workspace=workspace)
+            refused = command("action", "stop", "--store", store, "--session", foreign, "--action", action,
+                              "--key", "foreign-stop", "--record", case / "foreign-stop.json", expect=3)
+            assert refused["answer"]["code"] == "target_mismatch", refused
+            unknown = command("action", "stop", "--store", store, "--session", session, "--action", "9223372036854775807",
+                              "--key", "unknown", "--record", case / "unknown.json", expect=3)
+            assert unknown["answer"]["code"] == "unknown_action", unknown
+            wait_for(lambda: execution_custody_idle(store, session), "stop cleanup")
+            assert command("request", "inspect", "--store", store, "--key", f"rui.core/action-final/{action}")["observation"]["status"] == "absent"
+            assert len(endpoint.requests) == 2 and fixture.read_result(store, "message") == b"original answer"
+            if mode == "waiting":
+                assert not (workspace / "ready").exists()
+            outcomes.append({"mode": mode, "action": action, "handle": handle, "final": final["final"]["position"]})
+        finally:
+            failed = sys.exception() is not None
+            dispose_all(
+                gate.release,
+                lambda: fixture.command("session", "stop", "--store", case / "store", "--session", session, "--key", "dispose", "--record", case / "dispose.json") if failed and session is not None and host.poll() is None else None,
+                lambda: dispose_owner_case(host, endpoint, thread),
+                lambda: retain_failure_state("client Action stop failure state", case) if failed else None,
+            )
+    return outcomes
