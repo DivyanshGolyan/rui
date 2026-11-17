@@ -1,0 +1,520 @@
+name: Screens
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, closed]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Same-repository pull request number to preview
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  select:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-24.04
+    outputs:
+      run: ${{ steps.select.outputs.run }}
+      pr: ${{ steps.select.outputs.pr }}
+      head: ${{ steps.select.outputs.head }}
+      base: ${{ steps.select.outputs.base }}
+      close: ${{ steps.select.outputs.close }}
+      started: ${{ steps.select.outputs.started }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          persist-credentials: false
+      - id: select
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          ACTION: ${{ github.event.action }}
+          INPUT_PR: ${{ inputs.pr }}
+          EVENT_PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          echo "started=$(date +%s)" >> "$GITHUB_OUTPUT"
+          if [ "$EVENT" = push ]; then
+            echo 'run=true' >> "$GITHUB_OUTPUT"
+            echo "head=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+            exit
+          fi
+          pr=${INPUT_PR:-$EVENT_PR}
+          [[ "$pr" =~ ^[1-9][0-9]*$ ]]
+          echo "pr=$pr" >> "$GITHUB_OUTPUT"
+          if [ "$ACTION" = closed ]; then
+            echo 'close=true' >> "$GITHUB_OUTPUT"
+            exit
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/pulls/$pr" > "$RUNNER_TEMP/pr.json"
+          jq -e --arg repo "$GITHUB_REPOSITORY" '.state == "open" and .head.repo.full_name == $repo' "$RUNNER_TEMP/pr.json" > /dev/null
+          head=$(jq -r .head.sha "$RUNNER_TEMP/pr.json")
+          base=$(jq -r .base.sha "$RUNNER_TEMP/pr.json")
+          git fetch --no-tags origin "$head" "$base"
+          git worktree add --detach "$RUNNER_TEMP/selector-head" "$head"
+          base=$(git merge-base "$base" "$head")
+          echo "head=$head" >> "$GITHUB_OUTPUT"
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          BASE="$base" python3 - <<'PY'
+          import os, pathlib, sys
+          sys.path.insert(0, str(pathlib.Path.cwd() / 'tests/ci'))
+          import select_tests
+          from pr_shape import screens_required
+          candidate = pathlib.Path(os.environ['RUNNER_TEMP']) / 'selector-head'
+          select_tests.ROOT = candidate
+          os.chdir(candidate)
+          paths, base = select_tests.changed_paths(os.environ['BASE'], 'HEAD')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              print('run=' + str(screens_required(paths, base=base)).lower(), file=output)
+          PY
+  build:
+    needs: select
+    if: ${{ needs.select.outputs.run == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.select.outputs.head }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          targets: '["terminal-restoration-integration"]'
+          check-part: screens
+          publish-caches: 'false'
+      - name: Build candidate
+        run: |
+          set -euo pipefail
+          V="$PWD/.claude/skills/verify-rui/scripts/verify-rui"
+          mkdir -p "$RUNNER_TEMP/screens-build"
+          bash src/fetch_screen_dependencies.sh
+          "$V" build --here --out "$RUNNER_TEMP/screens-build/head"
+          tar -cf "$RUNNER_TEMP/screens-build.tar" -C "$RUNNER_TEMP" screens-build
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: screens-build-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/screens-build.tar
+          retention-days: 1
+          if-no-files-found: error
+  baseline_probe:
+    needs: select
+    if: ${{ needs.select.outputs.run == 'true' && needs.select.outputs.base != '' }}
+    runs-on: ubuntu-24.04
+    outputs:
+      missing: ${{ steps.probe.outputs.missing }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Locate baseline on trusted main history
+        id: probe
+        env:
+          BASE: ${{ needs.select.outputs.base }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          git merge-base --is-ancestor "$BASE" "origin/$DEFAULT_BRANCH"
+          remote=$(git ls-remote --refs origin refs/heads/pr-screens)
+          if [ -n "$remote" ]; then
+            git fetch --no-tags origin refs/heads/pr-screens:refs/remotes/origin/pr-screens
+          fi
+          if [ -n "$remote" ] && git cat-file -e "origin/pr-screens:main/$BASE/shots.json" 2>/dev/null; then
+            git archive origin/pr-screens "main/$BASE" > "$RUNNER_TEMP/cached-baseline.tar"
+            echo 'missing=false' >> "$GITHUB_OUTPUT"
+          else
+            echo 'Baseline missing; building and capturing it for reuse.'
+            echo 'missing=true' >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ steps.probe.outputs.missing == 'false' }}
+        with:
+          name: screens-baseline-cached-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cached-baseline.tar
+          retention-days: 1
+          if-no-files-found: error
+  baseline_build:
+    needs: [select, baseline_probe]
+    if: ${{ needs.baseline_probe.outputs.missing == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          targets: '["terminal-restoration-integration"]'
+          check-part: screens-baseline
+          publish-caches: 'false'
+      - name: Build the exact base with trusted tooling
+        env:
+          BASE: ${{ needs.select.outputs.base }}
+        run: |
+          set -euo pipefail
+          V="$PWD/.claude/skills/verify-rui/scripts/verify-rui"
+          git worktree add --detach "$RUNNER_TEMP/base-source" "$BASE"
+          mkdir -p "$RUNNER_TEMP/screens-baseline-build"
+          (cd "$RUNNER_TEMP/base-source"; bash src/fetch_dependencies.sh; bash src/fetch_screen_dependencies.sh; "$V" build --here --out "$RUNNER_TEMP/screens-baseline-build/base")
+          tar -cf "$RUNNER_TEMP/screens-baseline-build.tar" -C "$RUNNER_TEMP" screens-baseline-build
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: screens-baseline-build-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/screens-baseline-build.tar
+          retention-days: 1
+          if-no-files-found: error
+  baseline_capture:
+    needs: [select, baseline_build]
+    if: ${{ needs.baseline_build.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: screens-baseline-build-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}
+      - name: Restore base build and source
+        env:
+          BASE: ${{ needs.select.outputs.base }}
+        run: |
+          set -euo pipefail
+          git worktree add --detach "$RUNNER_TEMP/base-source" "$BASE"
+          tar -xf "$RUNNER_TEMP/screens-baseline-build.tar" -C "$RUNNER_TEMP"
+          python3 - "$RUNNER_TEMP/screens-baseline-build/base/manifest.json" "$RUNNER_TEMP/base-source" <<'PY_MANIFEST'
+          import json, pathlib, subprocess, sys
+          manifest, source = map(pathlib.Path, sys.argv[1:])
+          record = json.loads(manifest.read_text())
+          if pathlib.Path(record['source']) != source:
+              raise SystemExit('restored baseline source path differs')
+          tree = subprocess.check_output(['git', '-C', str(source), 'rev-parse', 'HEAD^{tree}'], text=True).strip()
+          if record['tree'] != tree:
+              raise SystemExit('restored baseline tree differs')
+          for key in ('binary', 'screen_library'):
+              path = pathlib.Path(record[key])
+              if not path.is_file() or not path.is_relative_to(manifest.parent):
+                  raise SystemExit(f'invalid restored {key}: {path}')
+          PY_MANIFEST
+      - name: Install screenshot renderer
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y tmux ffmpeg
+          npm install --prefix "$RUNNER_TEMP/screens-node" playwright@1.55.1
+          echo "NODE_PATH=$RUNNER_TEMP/screens-node/node_modules" >> "$GITHUB_ENV"
+          echo "VERIFY_RUI_UPGRADE_FIXTURE_USER=$(id -un)" >> "$GITHUB_ENV"
+          "$RUNNER_TEMP/screens-node/node_modules/.bin/playwright" install --with-deps chromium
+      - name: Capture baseline shard with trusted tooling
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          set -euo pipefail
+          V="$PWD/.claude/skills/verify-rui/scripts/verify-rui"
+          "$V" shots "$RUNNER_TEMP/screens-baseline-build/base" --shard "$SHARD/4" --out "$RUNNER_TEMP/baseline-shard" || test -f "$RUNNER_TEMP/baseline-shard/shots.json"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ always() }}
+        with:
+          name: screens-baseline-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/baseline-shard
+          retention-days: 3
+          if-no-files-found: error
+  capture:
+    needs: [select, build]
+    if: ${{ needs.select.outputs.run == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.select.outputs.head }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: screens-build-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}
+      - name: Restore candidate build
+        run: |
+          set -euo pipefail
+          tar -xf "$RUNNER_TEMP/screens-build.tar" -C "$RUNNER_TEMP"
+          python3 - "$RUNNER_TEMP/screens-build" <<'PY_MANIFEST'
+          import json, pathlib, subprocess, sys
+          root = pathlib.Path(sys.argv[1])
+          for manifest in root.glob('*/manifest.json'):
+              record = json.loads(manifest.read_text())
+              source = pathlib.Path(record['source'])
+              for key in ('binary', 'screen_library'):
+                  path = pathlib.Path(record[key])
+                  if not path.is_file() or not path.is_relative_to(manifest.parent):
+                      raise SystemExit(f'invalid restored {key}: {path}')
+              subprocess.run(['git', '-C', str(source), 'cat-file', '-e', record['tree'] + '^{tree}'], check=True)
+          PY_MANIFEST
+      - name: Install screenshot renderer
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y tmux ffmpeg
+          npm install --prefix "$RUNNER_TEMP/screens-node" playwright@1.55.1
+          echo "NODE_PATH=$RUNNER_TEMP/screens-node/node_modules" >> "$GITHUB_ENV"
+          echo "VERIFY_RUI_UPGRADE_FIXTURE_USER=$(id -un)" >> "$GITHUB_ENV"
+          "$RUNNER_TEMP/screens-node/node_modules/.bin/playwright" install --with-deps chromium
+      - name: Capture candidate shard
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          set -euo pipefail
+          V="$PWD/.claude/skills/verify-rui/scripts/verify-rui"
+          mkdir -p "$RUNNER_TEMP/results"
+          "$V" shots "$RUNNER_TEMP/screens-build/head" --shard "$SHARD/4" --out "$RUNNER_TEMP/results/head" || test -f "$RUNNER_TEMP/results/head/shots.json"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ always() }}
+        with:
+          name: screens-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/results
+          retention-days: 3
+          if-no-files-found: error
+  screens:
+    needs: [select, capture, baseline_probe, baseline_build, baseline_capture]
+    if: ${{ always() && needs.select.outputs.run == 'true' && needs.capture.result == 'success' && (needs.select.outputs.base == '' || (needs.baseline_probe.result == 'success' && (needs.baseline_probe.outputs.missing == 'false' || needs.baseline_capture.result == 'success'))) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    concurrency:
+      group: pr-screens-writer
+      queue: max
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: screens-[1-4]-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/shards
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: ${{ needs.baseline_probe.outputs.missing == 'true' }}
+        with:
+          pattern: screens-baseline-[1-4]-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/baseline-shards
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: ${{ needs.baseline_probe.outputs.missing == 'false' }}
+        with:
+          name: screens-baseline-cached-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}
+      - name: Merge captures
+        id: merge
+        env:
+          BASE: ${{ needs.select.outputs.base }}
+          BASELINE_MISSING: ${{ needs.baseline_probe.outputs.missing }}
+        run: |
+          set -euo pipefail
+          V="$PWD/.claude/skills/verify-rui/scripts/verify-rui"
+          shards=()
+          for number in 1 2 3 4; do
+            shard="$RUNNER_TEMP/shards/screens-$number-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+            test -f "$shard/head/shots.json"
+            shards+=("$shard")
+          done
+          if [ -n "$BASE" ]; then
+            if [ "$BASELINE_MISSING" = false ]; then
+              mkdir -p "$RUNNER_TEMP/baseline"
+              tar -xf "$RUNNER_TEMP/cached-baseline.tar" -C "$RUNNER_TEMP/baseline" --strip-components=2
+            else
+              base_shards=()
+              for number in 1 2 3 4; do
+                shard="$RUNNER_TEMP/baseline-shards/screens-baseline-$number-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+                test -f "$shard/shots.json"
+                base_shards+=("$shard")
+              done
+              "$V" shots-merge "${base_shards[@]}" --out "$RUNNER_TEMP/baseline" || test -f "$RUNNER_TEMP/baseline/shots.json"
+            fi
+            "$V" shots-merge "${shards[0]}/head" "${shards[1]}/head" "${shards[2]}/head" "${shards[3]}/head" --out "$RUNNER_TEMP/merged" --baseline "$RUNNER_TEMP/baseline" || test -f "$RUNNER_TEMP/merged/diff.json"
+          else
+            "$V" shots-merge "${shards[0]}/head" "${shards[1]}/head" "${shards[2]}/head" "${shards[3]}/head" --out "$RUNNER_TEMP/merged" || test -f "$RUNNER_TEMP/merged/shots.json"
+          fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ always() }}
+        with:
+          name: screens-merged-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/merged
+          retention-days: 3
+          if-no-files-found: ignore
+      - name: Publish screenshots and update comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ needs.select.outputs.head }}
+          BASE: ${{ needs.select.outputs.base }}
+          PR: ${{ needs.select.outputs.pr }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          STARTED: ${{ needs.select.outputs.started }}
+          BASELINE_MISSING: ${{ needs.baseline_probe.outputs.missing }}
+        run: |
+          set -euo pipefail
+          if [ -n "$PR" ]; then
+            gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" > "$RUNNER_TEMP/current-pr.json"
+            current_base=$(jq -r .base.sha "$RUNNER_TEMP/current-pr.json")
+            git fetch --no-tags origin "$HEAD_SHA" "$current_base"
+            if [ "$(git merge-base "$HEAD_SHA" "$current_base")" != "$BASE" ] || ! jq -e --arg head "$HEAD_SHA" '.state == "open" and .head.sha == $head' "$RUNNER_TEMP/current-pr.json" > /dev/null; then
+              echo 'A newer PR state superseded this run.'
+              exit 0
+            fi
+          fi
+          mkdir -p "$RUNNER_TEMP/published"
+          remote=$(git ls-remote --refs origin refs/heads/pr-screens)
+          remote_sha=${remote%%$'\t'*}
+          if [ -n "$remote" ]; then
+            git fetch --no-tags origin "$remote_sha"
+            git archive "$remote_sha" | tar -x -C "$RUNNER_TEMP/published"
+          fi
+          if [ -n "$PR" ]; then
+            mkdir -p "$RUNNER_TEMP/published/pr-$PR/$HEAD_SHA"
+            python3 - "$RUNNER_TEMP/merged" "$RUNNER_TEMP/published/pr-$PR/$HEAD_SHA" "$RUNNER_TEMP/baseline/shots.json" <<'PY_MEDIA'
+          import json, pathlib, shutil, sys
+          source, dest, baseline_manifest = map(pathlib.Path, sys.argv[1:])
+          diff = json.loads((source / 'diff.json').read_text())
+          records = [record for pair in sum((diff[key] for key in ('failed', 'changed', 'new')), [])
+                     for record in (pair.get('before'), pair.get('after')) if record]
+          states = {pair['name'] for key in ('changed', 'new') for pair in diff[key]}
+          for manifest, prefix in ((source / 'shots.json', ''), (baseline_manifest, 'baseline')):
+              for record in json.loads(manifest.read_text()):
+                  if record['name'] in states:
+                      files = {}
+                      for kind, name in record.get('files', {}).items():
+                          path = pathlib.PurePosixPath(name)
+                          if path.is_absolute() or '..' in path.parts:
+                              raise ValueError(f'invalid image path: {name}')
+                          files[kind] = str(pathlib.PurePosixPath(prefix) / path)
+                      records.append({**record, 'files': files})
+          for record in records:
+              for name in record.get('files', {}).values():
+                  path = pathlib.Path(name)
+                  if path.suffix.lower() != '.png':
+                      continue
+                  src = (source / path).resolve()
+                  if path.is_absolute() or not src.is_relative_to(source.resolve()) or not src.is_file():
+                      raise ValueError(f'invalid image path: {name}')
+                  target = dest / path
+                  target.parent.mkdir(parents=True, exist_ok=True)
+                  shutil.copy2(src, target)
+          PY_MEDIA
+            if python3 - "$RUNNER_TEMP/baseline/shots.json" <<'PY_BASE'
+          import json, sys
+          sys.exit(any(not item['ok'] for item in json.load(open(sys.argv[1]))))
+          PY_BASE
+            then
+              mkdir -p "$RUNNER_TEMP/published/main/$BASE"
+              cp -a "$RUNNER_TEMP/baseline/." "$RUNNER_TEMP/published/main/$BASE/"
+            fi
+          else
+            if python3 - "$RUNNER_TEMP/merged/shots.json" <<'PY_HEAD'
+          import json, sys
+          sys.exit(any(not item['ok'] for item in json.load(open(sys.argv[1]))))
+          PY_HEAD
+            then
+              mkdir -p "$RUNNER_TEMP/published/main/$HEAD_SHA"
+              cp -a "$RUNNER_TEMP/merged/." "$RUNNER_TEMP/published/main/$HEAD_SHA/"
+            fi
+          fi
+          mkdir -p "$RUNNER_TEMP/published/main"
+          git rev-list "origin/$DEFAULT_BRANCH" > "$RUNNER_TEMP/main-history"
+          pin=""
+          if [ "$BASELINE_MISSING" = true ]; then pin="$BASE"; fi
+          python3 - "$RUNNER_TEMP/published/main" "$RUNNER_TEMP/main-history" "$pin" <<'PY'
+          import pathlib, shutil, sys
+          root = pathlib.Path(sys.argv[1])
+          history = pathlib.Path(sys.argv[2]).read_text().splitlines()
+          available = {p.name: p for p in root.iterdir() if p.is_dir()}
+          pin = sys.argv[3]
+          ordered = ([pin] if pin in available else []) + [name for name in history if name in available and name != pin]
+          keep = set(ordered[:20])
+          for name, path in available.items():
+              if name not in keep:
+                  shutil.rmtree(path)
+          (root / '.order').unlink(missing_ok=True)
+          PY
+          cd "$RUNNER_TEMP/published"
+          git init -q
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .
+          git commit -qm 'Publish screen captures'
+          git -c "http.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)" push --force-with-lease="refs/heads/pr-screens:$remote_sha" "https://github.com/$GITHUB_REPOSITORY.git" HEAD:refs/heads/pr-screens
+          echo "Screen preview wall time: $(( $(date +%s) - STARTED )) seconds" >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$PR" ]; then
+            cd "$GITHUB_WORKSPACE"
+            python3 tests/ci/screens_comment.py --diff "$RUNNER_TEMP/merged/diff.json" --repo "$GITHUB_REPOSITORY" --pr "$PR" --head "$HEAD_SHA" --base "$BASE" --shots "$RUNNER_TEMP/merged/shots.json" --baseline-shots "$RUNNER_TEMP/baseline/shots.json"
+            python3 - "$RUNNER_TEMP/merged/diff.json" <<'PY'
+          import json, sys
+          sys.exit(bool(json.load(open(sys.argv[1]))['failed']))
+          PY
+          else
+            python3 - "$RUNNER_TEMP/merged/shots.json" <<'PY'
+          import json, sys
+          sys.exit(any(not item['ok'] for item in json.load(open(sys.argv[1]))))
+          PY
+          fi
+  cleanup:
+    needs: select
+    if: ${{ needs.select.outputs.close == 'true' }}
+    runs-on: ubuntu-24.04
+    concurrency:
+      group: pr-screens-writer
+      queue: max
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Remove closed PR captures
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ needs.select.outputs.pr }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" > "$RUNNER_TEMP/current-pr.json"
+          if ! jq -e '.state == "closed"' "$RUNNER_TEMP/current-pr.json" > /dev/null; then exit 0; fi
+          remote=$(git ls-remote --refs origin refs/heads/pr-screens)
+          [ -n "$remote" ] || exit 0
+          remote_sha=${remote%%$'\t'*}
+          git fetch --no-tags origin "$remote_sha"
+          mkdir -p "$RUNNER_TEMP/published"
+          git archive "$remote_sha" | tar -x -C "$RUNNER_TEMP/published"
+          rm -rf "$RUNNER_TEMP/published/pr-$PR"
+          cd "$RUNNER_TEMP/published"
+          git init -q
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .
+          git commit -qm 'Remove closed PR screen captures' --allow-empty
+          git -c "http.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)" push --force-with-lease="refs/heads/pr-screens:$remote_sha" "https://github.com/$GITHUB_REPOSITORY.git" HEAD:refs/heads/pr-screens
