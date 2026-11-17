@@ -559,13 +559,15 @@ test "historical context selection work excludes nonmatching Operation populatio
 }
 
 test "a failed context read answers its reader's name and fences" {
-    for ([_]struct { report: bool, read: enum { context, bytes, compound_bytes }, compound: bool = false }{
+    const Read = enum { context, bytes, compound_bytes };
+    for ([_]struct { report: bool, read: Read, compound: enum { none, text, image } = .none }{
         .{ .report = false, .read = .context },
         .{ .report = true, .read = .context },
         .{ .report = false, .read = .bytes },
         .{ .report = true, .read = .bytes },
-        .{ .report = true, .read = .bytes, .compound = true },
-        .{ .report = true, .read = .compound_bytes, .compound = true },
+        .{ .report = true, .read = .compound_bytes, .compound = .text },
+        .{ .report = true, .read = .bytes, .compound = .image },
+        .{ .report = true, .read = .compound_bytes, .compound = .image },
     }) |case| {
         const report = case.report;
         var tmp = std.testing.tmpDir(.{});
@@ -582,13 +584,14 @@ test "a failed context read answers its reader's name and fences" {
         try std.testing.expect(try storage.configure(&patch, .{}) == .accepted);
         try submitTestMessage(&storage, &tmp, "context-fold-one", "context-fold-one", session.slice(), "one");
         const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-        if (case.compound)
-            try store_testing.submitTestMessageParts(&storage, &tmp, "context-fold-two", session.slice(), &.{
+        switch (case.compound) {
+            .none => try submitTestMessage(&storage, &tmp, "context-fold-two", "context-fold-two", session.slice(), "two"),
+            .text => try store_testing.submitTestMessageParts(&storage, &tmp, "context-fold-two", session.slice(), &.{ .{ .bytes = "two" }, .{ .bytes = "parts" } }),
+            .image => try store_testing.submitTestMessageParts(&storage, &tmp, "context-fold-two", session.slice(), &.{
                 .{ .bytes = "two" },
                 .{ .bytes = @embedFile("../../codecs/fixtures/image-input/pixel.png"), .kind = .{ .image = .{} } },
-            })
-        else
-            try submitTestMessage(&storage, &tmp, "context-fold-two", "context-fold-two", session.slice(), "two");
+            }),
+        }
         try settleCallsForTestingWithFaults(&storage, &tmp, first, "context-fold-output", &.{}, .{}, "{\"input_tokens\":10,\"output_tokens\":0}");
         var fault: TestingStatementFault = .{ .sql = if (report) switch (case.read) {
             .context => namedStatementForTesting(model_admission_domain.compaction_failures, null, "since AS (SELECT"),

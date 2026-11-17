@@ -1,5 +1,7 @@
 const std = @import("std");
 const hs = @import("host_settings.zig");
+const settings_handoff = @import("host_settings_handoff.zig");
+const transfer = @import("host_launch_transfer.zig");
 const cli_args = @import("cli_args.zig");
 const providers = @import("providers.zig");
 const protocol = @import("protocol.zig");
@@ -1340,9 +1342,9 @@ test "Host start unset retains exact provider sets and selected Store arms" {
 }
 
 const HostLaunchResult = @import("host_launch.zig").Result;
-extern "c" fn rui_launch_detached_reported(executable: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, argc: usize, startup_read: *c_int, report_read: *c_int, launched_pid: *c_int, launched_started: *c_ulonglong) c_int;
+extern "c" fn rui_launch_detached_reported(executable: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, argc: usize, settings_read: c_int, startup_read: *c_int, report_read: *c_int, launched_pid: *c_int, launched_started: *c_ulonglong) c_int;
 pub const Progress = struct { context: *anyopaque, report: *const fn (*anyopaque, []const u8) void };
-pub const Spawn = struct { dir: []const u8, settings_file: ?[]const u8 = null, assignments: []const []const u8 = &.{} };
+pub const Spawn = struct { dir: []const u8, settings_file: ?[]const u8 = null, assignments: []const []const u8 = &.{}, frozen: ?[]const u8 = null };
 
 /// Finish a running Host's semantic sources, not a child launch plan. Older
 /// releases had flag-fill provider policy; prefix that baseline BEFORE explicit
@@ -1373,7 +1375,7 @@ pub fn restartSources(init: std.process.Init, allocator: std.mem.Allocator, sour
 pub const Ops = struct {
     context: ?*anyopaque = null,
     observe: *const fn (?*anyopaque, std.Io, *const platform.Paths, ?i128) @import("protocol_reply.zig").HostStatus = nativeObserve,
-    launch: *const fn (?*anyopaque, [*:0]const u8, [*:null]const ?[*:0]const u8, usize, *c_int, *c_int, *c_int, *c_ulonglong) c_int = nativeLaunch,
+    launch: *const fn (?*anyopaque, [*:0]const u8, [*:null]const ?[*:0]const u8, usize, c_int, *c_int, *c_int, *c_int, *c_ulonglong) c_int = nativeLaunch,
     verify: *const fn (?*anyopaque, std.Io, *const platform.Paths, c_int, u64, []const u8, ?i128, *@import("protocol_reply.zig").HostInfoFacts) bool = nativeVerify,
     read: *const fn (?*anyopaque, c_int, []u8) isize = nativeRead,
     now: *const fn (?*anyopaque, std.Io) i96 = nativeNow,
@@ -1382,8 +1384,8 @@ pub const Ops = struct {
     fn nativeObserve(_: ?*anyopaque, io: std.Io, paths: *const platform.Paths, until: ?i128) @import("protocol_reply.zig").HostStatus {
         return @import("client.zig").hostStatusAt(io, paths, until);
     }
-    fn nativeLaunch(_: ?*anyopaque, executable: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, argc: usize, startup_read: *c_int, report_read: *c_int, pid: *c_int, started: *c_ulonglong) c_int {
-        return rui_launch_detached_reported(executable, argv, argc, startup_read, report_read, pid, started);
+    fn nativeLaunch(_: ?*anyopaque, executable: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, argc: usize, settings_read: c_int, startup_read: *c_int, report_read: *c_int, pid: *c_int, started: *c_ulonglong) c_int {
+        return rui_launch_detached_reported(executable, argv, argc, settings_read, startup_read, report_read, pid, started);
     }
     fn nativeVerify(_: ?*anyopaque, io: std.Io, paths: *const platform.Paths, pid: c_int, started: u64, executable: []const u8, until: ?i128, facts: *@import("protocol_reply.zig").HostInfoFacts) bool {
         if (pid <= 0 or started == 0) return false;
@@ -1397,7 +1399,7 @@ pub const Ops = struct {
         return true;
     }
     fn nativeRead(_: ?*anyopaque, fd: c_int, bytes: []u8) isize {
-        return std.c.read(fd, bytes.ptr, bytes.len);
+        return transfer.Ops.nativeRead(null, fd, bytes);
     }
     fn nativeNow(_: ?*anyopaque, io: std.Io) i96 {
         return std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
@@ -1424,7 +1426,7 @@ pub fn launchReady(result: *HostLaunchResult, ready: @import("protocol_reply.zig
     result.outcome.ready.diagnostics_directory.set(paths.diagnosticsDirectory()) catch unreachable;
 }
 
-pub const ProviderIntent = enum { automatic, explicit };
+pub const ProviderIntent = settings_handoff.ProviderIntent;
 
 pub fn readSources(init: std.process.Init, request: Spawn, settings: *hs.Settings, failure: *start_report.Failure) !ProviderIntent {
     var wiping: secret_value.WipingAllocator = .{ .backing = init.gpa };
@@ -1516,6 +1518,11 @@ fn readDetached(init: std.process.Init, request: Spawn, settings: *hs.Settings, 
         if (std.mem.startsWith(u8, value, "@") and !std.fs.path.isAbsolute(value[1..])) return invalid(failure, "settings", "@FILE " ++ relative);
     }
     const intent = try readSources(init, request, settings, failure);
+    try detachedValue(settings, failure);
+    return intent;
+}
+
+fn detachedValue(settings: *const hs.Settings, failure: *start_report.Failure) !void {
     if (settings.interface.lifetime.value == .stdin) return invalid(failure, "interface.lifetime", "a Host started by bare rui or rui host start has no stdin; use detached, or run rui host serve");
     var name: LeafName = .{};
     if (relativeLeaf(hs.Settings, settings, &name)) {
@@ -1524,7 +1531,7 @@ fn readDetached(init: std.process.Init, request: Spawn, settings: *hs.Settings, 
         failure.* = .init(.settings_invalid, message);
         return error.SettingsInvalid;
     }
-    return intent;
+    return;
 }
 
 const relative = "a Host started in / has no base for a relative path; give an absolute path";
@@ -1600,6 +1607,34 @@ pub fn checkStart(init: std.process.Init, request: Spawn, failure: *start_report
     _ = try readStart(init, request, settings, failure);
 }
 
+/// Retain this caller-owned unresolved allocation through route selection and
+/// freezing. Full --check may resolve it only AFTER the source-only frame exists.
+pub fn freezeStart(init: std.process.Init, request: Spawn, settings: *hs.Settings, failure: *start_report.Failure) !settings_handoff.Owned {
+    const intent = try readStart(init, request, settings, failure);
+    var canonical: [protocol.max_store_bytes]u8 = undefined;
+    const directory = try platform.canonicalStoreDestination(init.io, request.dir, &canonical);
+    return settings_handoff.freeze(init.gpa, directory, settings, intent, failure);
+}
+
+pub fn decodeStart(init: std.process.Init, bytes: []const u8, selected: []const u8, settings: *hs.Settings, failure: *start_report.Failure) !ProviderIntent {
+    var canonical: [protocol.max_store_bytes]u8 = undefined;
+    const directory = try platform.canonicalStoreDestination(init.io, selected, &canonical);
+    const intent = try settings_handoff.decode(bytes, directory, settings, init.gpa, checkPreset, failure);
+    try detachedValue(settings, failure);
+    try anchorPlacement(init, settings, directory, failure);
+    return intent;
+}
+
+pub fn intakeFrozen(init: std.process.Init, bytes: []const u8, selected: []const u8, settings: *hs.Settings, fixtures: providers.Fixtures, failure: *start_report.Failure) !void {
+    const intent = try decodeStart(init, bytes, selected, settings, failure);
+    try finishDetached(init, settings, intent, fixtures, failure);
+}
+
+pub fn finishDetached(init: std.process.Init, settings: *hs.Settings, intent: ProviderIntent, fixtures: providers.Fixtures, failure: *start_report.Failure) !void {
+    try finishSources(init, settings, intent, failure);
+    try resolveProviders(init, settings, fixtures, failure);
+}
+
 /// One detached source/placement owner for spawn and settings --check. Keep
 /// provider finishing/resolution out of this read-only phase: attachment and
 /// saved connection editing do not eagerly need another provider's login.
@@ -1634,11 +1669,25 @@ fn readStart(init: std.process.Init, request: Spawn, settings: *hs.Settings, fai
 pub noinline fn spawn(init: std.process.Init, typed: Spawn, ops: Ops, progress: ?Progress, result: *HostLaunchResult) void {
     const selected = typed.dir;
     const io = init.io;
+    const settings = init.gpa.create(hs.Settings) catch |err| return launchFailure(result, .setup, err, null);
+    defer init.gpa.destroy(settings);
+    settings.* = .{};
+    defer settings.deinit();
+    var reach_failure: start_report.Failure = .init(.settings_invalid, "settings: could not be read");
+    if (typed.frozen) |bytes| {
+        _ = decodeStart(init, bytes, selected, settings, &reach_failure) catch |err| {
+            launchFailure(result, .child_refused, err, null);
+            result.outcome.failed.refusal = reach_failure;
+            result.outcome.failed.cause.refusal_code = reach_failure.code;
+            return;
+        };
+    }
     const selection = platform.resolveClientSelection(selected);
-    const resolved: ?platform.Paths = (if (selection == .mysql) selection.paths(io) else existingPlacement(io, selected)) catch |err| switch (err) {
+    var resolved: ?platform.Paths = (if (typed.frozen != null) platform.placementPaths(io, settings) else if (selection == .mysql) selection.paths(io) else existingPlacement(io, selected)) catch |err| switch (err) {
         error.FileNotFound, error.SettingsInvalid => null,
         else => return launchFailure(result, .store_access, error.StoreAccessFailed, null),
     };
+    if (typed.frozen) |bytes| if (resolved) |*paths| paths.host_directory.set((settings_handoff.inspect(bytes) catch unreachable).directory) catch unreachable;
     switch (if (resolved) |*paths| ops.observe(ops.context, io, paths, null) else @as(@import("protocol_reply.zig").HostStatus, .unavailable)) {
         .ready => |ready| return launchReady(result, ready, &resolved.?, true),
         .incompatible => return launchFailure(result, .incompatible, error.IncompatibleHost, null),
@@ -1650,10 +1699,11 @@ pub noinline fn spawn(init: std.process.Init, typed: Spawn, ops: Ops, progress: 
     var anchoring: std.heap.ArenaAllocator = .init(wiping.allocator());
     defer anchoring.deinit();
     var cwd: Cwd = .{ .io = io };
-    var reach_failure: start_report.Failure = .init(.settings_invalid, "settings: could not be read");
+    var frozen: ?settings_handoff.Owned = null;
+    defer if (frozen) |*owned_frame| owned_frame.deinit(init.gpa);
     const admitted: anyerror!Spawn = admit: {
         const anchored = anchorTyped(anchoring.allocator(), &cwd, typed, &reach_failure) catch |err| break :admit err;
-        checkStart(init, anchored, &reach_failure) catch |err| break :admit err;
+        if (typed.frozen == null) frozen = freezeStart(init, anchored, settings, &reach_failure) catch |err| break :admit err;
         break :admit anchored;
     };
     const request = admitted catch |err| {
@@ -1663,25 +1713,31 @@ pub noinline fn spawn(init: std.process.Init, typed: Spawn, ops: Ops, progress: 
         result.outcome.failed.cause.refusal_code = reach_failure.code;
         return;
     };
-    var dir = std.Io.Dir.cwd().createDirPathOpen(io, selected, .{ .permissions = .fromMode(0o700) }) catch |err| return launchFailure(result, .setup, err, null);
+    const frame_bytes = typed.frozen orelse frozen.?.bytes;
+    const admitted_directory = (settings_handoff.inspect(frame_bytes) catch unreachable).directory;
+    // Placement and the selected directory come from the same retained intake,
+    // before creating a directory or publishing a child. Never select again
+    // from saved sources (or the original directory alias) after freezing.
+    var paths = platform.placementPaths(io, settings) catch |err| return launchFailure(result, .store_access, err, null);
+    paths.host_directory.set(admitted_directory) catch unreachable;
+    @import("upgrade_process.zig").waitForTestGate(init.gpa, io, init.environ_map.get("RUI_TEST_HOST_AFTER_FREEZE_GATE"), null, .fromSeconds(300)) catch |err| return launchFailure(result, .interrupted, err, null);
+    var dir = std.Io.Dir.cwd().createDirPathOpen(io, admitted_directory, .{ .permissions = .fromMode(0o700) }) catch |err| return launchFailure(result, .setup, err, null);
     dir.close(io);
-    const paths = resolved orelse (savedPlacement(io, selected) catch |err| return launchFailure(result, .store_access, err, null));
     var executable_buffer: [std.Io.Dir.max_path_bytes + 1]u8 = undefined;
     const length = std.process.executablePath(io, &executable_buffer) catch |err| return launchFailure(result, .setup, err, paths.selector());
     if (length == executable_buffer.len) return launchFailure(result, .setup, error.ExecutablePathTooLong, paths.selector());
     executable_buffer[length] = 0;
     const gpa = std.heap.c_allocator;
     const first: usize = if (request.settings_file == null) 5 else 7;
-    const argc = first + 2 * request.assignments.len;
+    const provenance_argc = first + 2 * request.assignments.len;
+    const argc = provenance_argc + 2;
     const argv = gpa.allocSentinel(?[*:0]const u8, argc, null) catch |err| return launchFailure(result, .setup, err, paths.selector());
     defer gpa.free(argv);
     argv[0] = @ptrCast(&executable_buffer);
     argv[1] = "host";
     argv[2] = "serve";
     argv[3] = "--store";
-    var host_buffer: [protocol.max_store_bytes]u8 = undefined;
-    const host_dir = platform.canonicalStoreDestination(io, selected, &host_buffer) catch |err| return launchFailure(result, .setup, err, null);
-    const directory = gpa.dupeSentinel(u8, host_dir, 0) catch |err| return launchFailure(result, .setup, err, paths.selector());
+    const directory = gpa.dupeSentinel(u8, admitted_directory, 0) catch |err| return launchFailure(result, .setup, err, paths.selector());
     defer gpa.free(directory);
     argv[4] = directory.ptr;
     const settings_file = if (request.settings_file) |file| gpa.dupeSentinel(u8, file, 0) catch |err| return launchFailure(result, .setup, err, paths.selector()) else null;
@@ -1702,11 +1758,18 @@ pub noinline fn spawn(init: std.process.Init, typed: Spawn, ops: Ops, progress: 
         argv[first + 1 + index * 2] = value.ptr;
         owned += 1;
     }
+    argv[provenance_argc] = "--" ++ settings_handoff.input_option;
+    argv[provenance_argc + 1] = "5";
+    var input_pipe = transfer.Pipe.init() catch |err| return launchFailure(result, .setup, err, paths.selector());
+    defer input_pipe.close();
+    var delivery: transfer.Transfer = .{ .input = input_pipe.writer, .bytes = frame_bytes };
+    input_pipe.writer = -1;
+    defer delivery.deinit();
     var startup_read: c_int = -1;
     var report_read: c_int = -1;
     var launched_pid: c_int = 0;
     var launched_started: c_ulonglong = 0;
-    const launched = ops.launch(ops.context, argv[0].?, argv.ptr, argc, &startup_read, &report_read, &launched_pid, &launched_started);
+    const launched = ops.launch(ops.context, argv[0].?, argv.ptr, argc, input_pipe.reader, &startup_read, &report_read, &launched_pid, &launched_started);
     defer if (report_read >= 0) {
         _ = std.c.close(report_read);
     };
@@ -1721,11 +1784,17 @@ pub noinline fn spawn(init: std.process.Init, typed: Spawn, ops: Ops, progress: 
         result.outcome.failed.os_error = launched;
         return;
     }
+    _ = std.c.close(input_pipe.reader);
+    input_pipe.reader = -1;
     result.wait = .init(ops.now(ops.context, io));
     while (!result.wait.?.expired(ops.now(ops.context, io))) {
-        if (refusal == null and report_len < report_bytes.len) {
-            const read = ops.read(ops.context, report_read, report_bytes[report_len..]);
-            if (read > 0) report_len += @intCast(read);
+        const moved = delivery.step(.{ .context = ops.context, .read = ops.read }, .{
+            .{ .fd = startup_read, .buffer = result.startup_bytes[result.startup_len..] },
+            .{ .fd = report_read, .buffer = if (refusal == null) report_bytes[report_len..] else &.{} },
+        }) catch |err| return launchFailure(result, .interrupted, err, paths.selector());
+        result.startup_len += moved.counts[0];
+        report_len += moved.counts[1];
+        if (refusal == null and report_len <= report_bytes.len) {
             var lines = std.mem.splitScalar(u8, report_bytes[0..report_len], '\n');
             var offset: usize = 0;
             while (lines.next()) |line_bytes| {
@@ -1738,8 +1807,7 @@ pub noinline fn spawn(init: std.process.Init, typed: Spawn, ops: Ops, progress: 
                 offset = end;
             }
         }
-        const count = ops.read(ops.context, startup_read, result.startup_bytes[result.startup_len..]);
-        if (count > 0) result.startup_len += @intCast(count);
+        const startup_closed = moved.closed[0];
         const now = ops.now(ops.context, io);
         result.wait.?.observe(result.startup(), now);
         const until: i128 = result.wait.?.until(now);
@@ -1749,7 +1817,7 @@ pub noinline fn spawn(init: std.process.Init, typed: Spawn, ops: Ops, progress: 
         const full = result.startup_len == HostLaunchResult.max_startup_bytes or report_len == report_bytes.len;
         // A losing child can exit before the winner is ready. EOF ends that
         // child, not the caller's existing opportunity to adopt a ready owner.
-        if ((!contended and (refusal != null or count == 0)) or full) {
+        if ((!contended and (refusal != null or startup_closed)) or full) {
             if (observed != .ready) {
                 if (refusal) |failure| return launchRefusal(result, failure, paths.selector());
                 if (result.startup_len == HostLaunchResult.max_startup_bytes or report_len == report_bytes.len) return launchFailure(result, .startup_full, error.HostReadinessUnconfirmed, paths.selector());
@@ -1773,7 +1841,7 @@ pub noinline fn spawn(init: std.process.Init, typed: Spawn, ops: Ops, progress: 
             .incompatible => return launchFailure(result, .incompatible, error.IncompatibleHost, paths.selector()),
             .access_failure => return launchFailure(result, .store_access, error.StoreAccessFailed, paths.selector()),
             .unavailable, .owned_unavailable => {
-                if (contended and count == 0) {
+                if (contended and startup_closed) {
                     // Reuse the acknowledged interposition owner: a fixture
                     // can hold the former premature-refusal transition.
                     const remaining = @max(0, until - ops.now(ops.context, io));
@@ -1782,7 +1850,8 @@ pub noinline fn spawn(init: std.process.Init, typed: Spawn, ops: Ops, progress: 
             },
         }
         const remaining = until - ops.now(ops.context, io);
-        if (remaining > 0) ops.pause(ops.context, io, @intCast(@min(remaining, 100 * std.time.ns_per_ms))) catch |err| return launchFailure(result, .interrupted, err, paths.selector());
+        if (delivery.input >= 0 and moved.progressed) continue;
+        if (remaining > 0) ops.pause(ops.context, io, @intCast(@min(remaining, (if (delivery.input >= 0) @as(i128, 1) else 100) * std.time.ns_per_ms))) catch |err| return launchFailure(result, .interrupted, err, paths.selector());
     }
     if (refusal) |failure| return launchRefusal(result, failure, paths.selector());
     return launchFailure(result, .readiness_timeout, error.HostReadinessUnconfirmed, paths.selector());

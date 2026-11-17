@@ -41,7 +41,7 @@ import build_files
 from caller_errors import inventory_path
 import fixture_user
 from platform_boundary import SCANNED as PLATFORM_SCANNED
-from select_tests import CLIENT_LOCALITY_INPUTS, LIVE_MYSQL_DIALECT_TARGETS, changed_paths, matches, select, tree_graph
+from select_tests import ACCEPTANCE_INPUTS, CLIENT_LOCALITY_INPUTS, LIVE_MYSQL_DIALECT_TARGETS, changed_paths, matches, select, tree_graph
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "integration"))
 import live_engines
@@ -50,6 +50,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 SOURCE_POLICY = (
+    (ACCEPTANCE_INPUTS, (("native_acceptance_test.py", "*"),)),
     (CLIENT_LOCALITY_INPUTS, (("test_client_locality.py", "*"),)),
     ((".claude/skills/verify-rui/scripts/frames.json", ".claude/skills/verify-rui/features/*.md"),
      (("test_verify_rui_map.py", "*"),)),

@@ -47,7 +47,7 @@ static void fail_child(int report, int code) {
 
 struct launch_receipt { int kind; int value; };
 enum { receipt_pid = 1, receipt_error = 2, receipt_confirm = 3 };
-enum { launch_report_fd = 3, launch_ack_fd = 4, launch_first_unreserved_fd = 5 };
+enum { launch_report_fd = 3, launch_ack_fd = 4, launch_settings_fd = 5, launch_first_unreserved_fd = 6 };
 
 static void write_receipt(int report, int kind, int value) {
     struct launch_receipt receipt = { kind, value };
@@ -78,6 +78,8 @@ static void fail_launch(int report, int code, int exact) {
 
 #if defined(__APPLE__)
 static int launch_helper(char *const *argv, int exact) {
+    // Only the spawn action can admit settings on fd 5. Unlike report/ack,
+    // leave it open across the final exec; the consuming child closes it.
     if (fcntl(launch_report_fd, F_SETFD, FD_CLOEXEC) < 0) fail_launch(launch_report_fd, errno, exact);
     if (exact && fcntl(launch_ack_fd, F_SETFD, FD_CLOEXEC) < 0) fail_launch(launch_report_fd, errno, exact);
     if (setsid() < 0) fail_launch(launch_report_fd, errno, exact);
@@ -133,9 +135,61 @@ int rui_write_readiness(int fd, const unsigned char *data, size_t length) {
     return failure != 0 ? failure : result;
 }
 
+/* Private launch input is never a public stdin policy. The transfer owner
+ * polls the nonblocking writer alongside both startup diagnostic readers. */
+int rui_launch_input_pipe(int *reader, int *writer) {
+    if (!reader || !writer || reader == writer) return EINVAL;
+    *reader = -1;
+    *writer = -1;
+    int channel[2];
+    if (pipe(channel) != 0) return errno;
+    int result = 0;
+    if (fcntl(channel[0], F_SETFD, FD_CLOEXEC) < 0 ||
+        fcntl(channel[1], F_SETFD, FD_CLOEXEC) < 0) result = errno;
+    if (!result) {
+        int flags = fcntl(channel[1], F_GETFL);
+        if (flags < 0 || fcntl(channel[1], F_SETFL, flags | O_NONBLOCK) < 0) result = errno;
+    }
+    if (result) {
+        close(channel[0]);
+        close(channel[1]);
+        return result;
+    }
+    *reader = channel[0];
+    *writer = channel[1];
+    return 0;
+}
+
+/* One write only: partial progress, EAGAIN and EINTR belong to the Zig pump.
+ * Suppress only this thread's newly generated SIGPIPE, not an earlier signal. */
+long rui_write_launch_input(int fd, const unsigned char *data, size_t length) {
+    sigset_t blocked, previous, pending;
+    sigemptyset(&blocked);
+    sigaddset(&blocked, SIGPIPE);
+    int result = pthread_sigmask(SIG_BLOCK, &blocked, &previous);
+    if (result != 0) return -(long)result;
+    if (sigpending(&pending) != 0) {
+        int failure = errno;
+        (void)pthread_sigmask(SIG_SETMASK, &previous, NULL);
+        return -(long)failure;
+    }
+    int was_pending = sigismember(&pending, SIGPIPE);
+    ssize_t count = write(fd, data, length);
+    int failure = count < 0 ? errno : 0;
+    if (failure == EPIPE && !was_pending && !sigismember(&previous, SIGPIPE)) {
+        if (sigpending(&pending) == 0 && sigismember(&pending, SIGPIPE)) {
+            int signal_number;
+            (void)sigwait(&blocked, &signal_number);
+        }
+    }
+    result = pthread_sigmask(SIG_SETMASK, &previous, NULL);
+    if (failure) return -(long)failure;
+    return result != 0 ? -(long)result : (long)count;
+}
+
 static int launch_detached(const char *helper_executable, const char *executable,
                            const char *const *argv, size_t argc,
-                           const char *const *envp, int startup_write, int output_write, int *launched_pid,
+                           const char *const *envp, int startup_write, int output_write, int settings_read, int *launched_pid,
                            unsigned long long *launched_started) {
     int exact = launched_pid != NULL;
 #if defined(__APPLE__)
@@ -203,6 +257,10 @@ static int launch_detached(const char *helper_executable, const char *executable
         err = posix_spawn_file_actions_adddup2(&actions, gate, launch_ack_fd);
         if (err != 0) goto attributes_done;
     }
+    if (settings_read >= 0) {
+        err = posix_spawn_file_actions_adddup2(&actions, settings_read, launch_settings_fd);
+        if (err != 0) goto attributes_done;
+    }
     pid_t child = -1;
     err = posix_spawn(&child, helper_executable, &actions, &attributes, (char *const *)helper, (char *const *)envp);
 attributes_done:
@@ -248,7 +306,10 @@ spawn_done:
         }
         if (fcntl(report, F_SETFD, FD_CLOEXEC) < 0) fail_launch(report, errno, exact);
         if (exact && dup2(gate, launch_ack_fd) < 0) fail_launch(report, errno, exact);
-        closefrom(exact ? launch_first_unreserved_fd : launch_ack_fd);
+        if (settings_read >= 0 && dup2(settings_read, launch_settings_fd) < 0) fail_launch(report, errno, exact);
+        if (!exact) close(launch_ack_fd);
+        if (settings_read < 0) close(launch_settings_fd);
+        closefrom(launch_first_unreserved_fd);
         if (chdir("/") < 0) fail_launch(report, errno, exact);
         if (exact) confirm_generation(report, launch_ack_fd);
         execve(executable, (char *const *)argv, (char *const *)envp);
@@ -307,7 +368,7 @@ spawn_done:
 
 static int launch_with_signals(const char *helper_executable, const char *executable,
                                const char *const *argv, size_t argc,
-                               const char *const *envp, int startup_write, int output_write, int *launched_pid,
+                               const char *const *envp, int startup_write, int output_write, int settings_read, int *launched_pid,
                                unsigned long long *launched_started) {
     struct sigaction previous, normal = {0};
     normal.sa_handler = SIG_DFL;
@@ -315,13 +376,13 @@ static int launch_with_signals(const char *helper_executable, const char *execut
     if (sigaction(SIGCHLD, &normal, &previous) != 0) return errno;
     // The helper must remain waitable even when the caller inherited
     // SIG_IGN or SA_NOCLDWAIT. Its Host grandchild also inherits SIG_DFL.
-    int result = launch_detached(helper_executable, executable, argv, argc, envp, startup_write, output_write, launched_pid, launched_started);
+    int result = launch_detached(helper_executable, executable, argv, argc, envp, startup_write, output_write, settings_read, launched_pid, launched_started);
     int restore_error = sigaction(SIGCHLD, &previous, NULL) == 0 ? 0 : errno;
     return result != 0 ? result : restore_error;
 }
 
 int rui_launch_detached(const char *executable, const char *const *argv, size_t argc) {
-    return launch_with_signals(executable, executable, argv, argc, (const char *const *)environ, -1, -1, NULL, NULL);
+    return launch_with_signals(executable, executable, argv, argc, (const char *const *)environ, -1, -1, -1, NULL, NULL);
 }
 
 static int launch_observed(const char *helper_executable, const char *executable,
@@ -334,7 +395,7 @@ static int launch_observed(const char *helper_executable, const char *executable
     close(channel[1]);
     if (result == 0 && (fcntl(channel[0], F_SETFD, FD_CLOEXEC) < 0 ||
         fcntl(channel[0], F_SETFL, O_NONBLOCK) < 0)) result = errno;
-    if (result == 0) result = launch_with_signals(helper_executable, executable, argv, argc, envp, writer, -1, launched_pid, launched_started);
+    if (result == 0) result = launch_with_signals(helper_executable, executable, argv, argc, envp, writer, -1, -1, launched_pid, launched_started);
     if (writer >= 0) close(writer);
     if (result != 0) close(channel[0]);
     else *startup_read = channel[0];
@@ -361,7 +422,7 @@ int rui_launch_pinned(const char *helper_executable, const char *executable,
 }
 
 int rui_launch_detached_reported(const char *executable, const char *const *argv,
-                                 size_t argc, int *startup_read, int *output_read,
+                                 size_t argc, int settings_read, int *startup_read, int *output_read,
                                  int *launched_pid, unsigned long long *launched_started) {
     int channels[2][2];
     int writers[2] = {-1, -1};
@@ -371,6 +432,9 @@ int rui_launch_detached_reported(const char *executable, const char *const *argv
     *output_read = -1;
     *launched_pid = 0;
     *launched_started = 0;
+    // Borrow the caller input, but move our copy above all reserved actions.
+    int input = settings_read < 0 ? -1 : fcntl(settings_read, F_DUPFD_CLOEXEC, launch_first_unreserved_fd);
+    if (settings_read >= 0 && input < 0) return errno;
     for (int i = 0; i < 2; ++i) {
         if (pipe(channels[i]) != 0) { result = errno; break; }
         opened++;
@@ -380,7 +444,8 @@ int rui_launch_detached_reported(const char *executable, const char *const *argv
             fcntl(channels[i][0], F_SETFL, O_NONBLOCK) < 0) { result = errno; break; }
     }
     if (!result) result = launch_with_signals(executable, executable, argv, argc,
-        (const char *const *)environ, writers[0], writers[1], launched_pid, launched_started);
+        (const char *const *)environ, writers[0], writers[1], input, launched_pid, launched_started);
+    if (input >= 0) close(input);
     for (int i = 0; i < opened; ++i) {
         if (writers[i] >= 0) close(writers[i]);
         if (result) close(channels[i][0]);

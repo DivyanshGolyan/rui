@@ -2,6 +2,7 @@ import ctypes
 import os
 import pathlib
 import platform
+import shutil
 import socket
 import struct
 import subprocess
@@ -50,6 +51,10 @@ vars(_module).update(semantics(sys.platform))
 
 def simulate(platform_name):
     return mock.patch.multiple(_module, **semantics(platform_name))
+
+
+def file_access_tracer():
+    return shutil.which("strace") if _module.PROC_FS else None
 
 
 def unix_stream():

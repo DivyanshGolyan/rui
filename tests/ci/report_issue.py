@@ -27,7 +27,7 @@ RECORD = re.compile(r"^([a-z0-9-]+) (passed|failed): exit=\d+.*$", re.M)
 # Zig prints "failed command:" for any step with stderr, passing or not; only an
 # exit or signal line before it marks the step failed. A standalone gate names
 # its script there.
-COMMAND = re.compile(r"^error: process (?:exited with code \d+|terminated with signal \w+)\n"
+COMMAND = re.compile(r"^error: process (?:exited with code \d+|terminated with signal \w+)(?: \(expected exited with code 0\))?\n"
                      r"failed command: (.+)$", re.M)
 SCRIPT = re.compile(r"tests/integration/[\w./-]+\.py")
 FAILED_COMMAND = re.compile(r"^failed command: (.+)$", re.M)

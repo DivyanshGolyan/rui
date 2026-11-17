@@ -9,6 +9,8 @@ from pathlib import Path
 ALLOWLIST = ("DivyanshGolyan",)
 HOSTED = "macos-15"
 SELF_HOSTED = ["self-hosted", "macOS", "ARM64", "rui-mac"]
+# The dedicated macOS account the runner service uses (tests/ci/mac-runner/install.sh).
+RUNNER_USER = "ruici"
 
 
 def _object(value):

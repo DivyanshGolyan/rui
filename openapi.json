@@ -14665,6 +14665,7 @@
                   "find_tools",
                   "message_agent",
                   "read_action",
+                  "read_image",
                   "read_transcript",
                   "skill",
                   "start_agent",

@@ -276,6 +276,64 @@ test "a Bash binding that is unknown, unattempted or without its revision is sta
     try std.testing.expect(!storage.isFenced());
 }
 
+test "local Action execution validates descriptors before runner binding" {
+    inline for (.{ .bash, .read_image }) |runner| {
+        inline for (.{ false, true }) |wrong_runner| {
+            for ([_]enum { intact, arguments, name }{ .intact, .arguments, .name }) |damage| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try testingStore(&storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+
+                var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+                var configuration = try completeConfiguration("local-descriptor", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
+                const tool = if (runner == .bash) "bash" else "read_image";
+                const arguments = if (runner == .bash) "{\"cmd\":\"true\",\"description\":\"Run\"}" else "{\"path\":\"image.png\"}";
+                const encoded = try std.json.Stringify.valueAlloc(std.testing.allocator, arguments, .{});
+                defer std.testing.allocator.free(encoded);
+                configuration.configuration.tools = try .of(&.{tool});
+                configuration.configuration.permission_mode.state = .value;
+                try configuration.configuration.permission_mode.value.set("bypass");
+                const configured = try storage.configure(&configuration, .{});
+                try std.testing.expect(configured == .accepted);
+                const session = configured.accepted.session;
+                try submitTestMessage(&storage, &tmp, "local-descriptor-input", "local-descriptor-message", session.slice(), "propose");
+                const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                try settleCallsForTesting(&storage, &tmp, model, "local-descriptor-calls", &.{.{
+                    .item_id = "local-item",
+                    .name = tool,
+                    .encoded_call_id = "local-call",
+                    .decoded_call_id = "local-call",
+                    .encoded_arguments = encoded[1 .. encoded.len - 1],
+                    .decoded_arguments = arguments,
+                }});
+                const selected = (try storage.nextAction(runner, .fromFree(1, false))).?;
+                const binding = (try storage.admitActionAttempt(selected, 300_000, .{})).?.permit.binding;
+                switch (damage) {
+                    .intact => {},
+                    .arguments => try sqlite.exec(storage.sqliteDatabase(), "UPDATE model_tool_call SET arguments_content_id=name_content_id"),
+                    .name => try sqlite.exec(storage.sqliteDatabase(), "UPDATE model_tool_call SET name_content_id=call_id_content_id"),
+                }
+                var input: ActionExecutionInput = undefined;
+                const requested: @TypeOf(selected.runner) = comptime if (wrong_runner) (if (runner == .bash) .read_image else .bash) else runner;
+                const result = storage.readActionExecutionInput(requested, binding, &input);
+                if (damage != .intact) {
+                    try std.testing.expectError(error.CorruptStore, result);
+                    try std.testing.expect(storage.isFenced());
+                } else if (wrong_runner) {
+                    try std.testing.expectError(error.StaleActionAttemptBinding, result);
+                    try std.testing.expect(!storage.isFenced());
+                    try storage.readActionExecutionInput(runner, binding, &input);
+                } else {
+                    try result;
+                    try std.testing.expect(!storage.isFenced());
+                }
+            }
+        }
+    }
+}
+
 test "revoking a sender runs main's statements, with no transaction, and a missing Attempt changes nothing" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

@@ -3978,6 +3978,50 @@
       ]
     },
     {
+      "name": "read-image-approval",
+      "note": "Built-in image read awaiting approval; exact local path and no MCP server label",
+      "open": "Review checkout image",
+      "cast": [
+        {
+          "label": "Review checkout image",
+          "workspace": "code/shop",
+          "mode": "ask",
+          "messages": [
+            "Review the checkout design with an image consent check."
+          ],
+          "settle": "pending"
+        }
+      ],
+      "steps": [
+        {
+          "wait": "Tool: read_image"
+        },
+        {
+          "wait": "design/checkout.png"
+        },
+        {
+          "wait": "Allow once"
+        },
+        {
+          "wait": "Deny"
+        }
+      ],
+      "expect": [
+        "Tool: read_image",
+        "{\"path\": \"design/checkout.png\"}",
+        "Allow once",
+        "Deny",
+        " · ask"
+      ],
+      "absent": [
+        "Server:",
+        "enter sends"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[smhd]) *(?:│.*)?$"
+      ]
+    },
+    {
       "name": "approval-hover",
       "note": "Pointer over Deny; L2 SGR motion, selection unchanged",
       "open": "Schema migration",

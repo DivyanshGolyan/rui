@@ -41,6 +41,8 @@ pub const names = [_][]const u8{
     "reload-skills",
     "session",
     "settings",
+    @import("host_settings_handoff.zig").input_option,
+    @import("host_settings_handoff.zig").check_option,
     "since",
     "store",
     "store-hex",
