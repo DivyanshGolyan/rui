@@ -2110,7 +2110,7 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     defer std.heap.c_allocator.destroy(settings);
     settings.* = .{};
     defer settings.deinit();
-    var tuning = try server.Tuning.fromOptions(parsed, null);
+    var tuning = try server.Tuning.fromOptions(parsed);
     tuning.home = init.environ_map.get("HOME");
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const selected = try selectedStore(init, parsed.get("store"), &selected_buffer);

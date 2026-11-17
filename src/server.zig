@@ -881,11 +881,12 @@ pub noinline fn serve(
     allocator: std.mem.Allocator,
     host_directory: []const u8,
     prepared: host_settings.Prepared,
-    tuning: Tuning,
+    input_tuning: Tuning,
     failure: *?start_report.Failure,
 ) !void {
     failure.* = null;
     const settings = prepared.get();
+    const tuning = input_tuning.withSettings(settings);
     const active_capacity = settings.execution.active_capacity.value;
     const limits = tuning.limits;
     const served_value = providers.fromSettings(settings);
@@ -1001,6 +1002,7 @@ pub noinline fn serve(
         active_capacity,
         limits,
         tuning.hooks,
+        tuning.catalog_url,
         served,
         settings.tools.bash.path.slice(),
         settings.tools.bash.timeout_ms.value,
@@ -1027,6 +1029,7 @@ fn serveOpened(
     active_capacity: usize,
     limits: Limits,
     hooks: Hooks,
+    catalog_url: ?[]const u8,
     served: *const providers.Providers,
     bash_path: []const u8,
     bash_timeout_ms: u64,
@@ -1082,6 +1085,7 @@ fn serveOpened(
         .lease = lease,
         .store = storage,
         .hooks = hooks,
+        .catalog_url = catalog_url,
         .limits = limits,
         .providers = served,
         .presets = settings.presets.specs,

@@ -5501,6 +5501,27 @@
             "additionalProperties": false,
             "description": "Host-wide transport trust."
           },
+          "models": {
+            "type": "object",
+            "properties": {
+              "catalogUrl": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "maxLength": 2048,
+                    "x-maxBytes": 2048,
+                    "format": "https_endpoint",
+                    "description": "Model catalog URL. Default: models.dev."
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "additionalProperties": false,
+            "description": "Model catalog settings."
+          },
           "tools": {
             "type": "object",
             "properties": {

@@ -59,7 +59,6 @@ pub const names = [_][]const u8{
     "test-inspection-reply-delay-ms",
     "test-inspection-reply-gate-path",
     "test-model-result-gate-path",
-    "test-models-dev-url",
     "test-observation-fd",
     "test-observation-plan",
     "test-observation-state-fd",

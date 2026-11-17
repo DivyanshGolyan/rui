@@ -42,7 +42,6 @@ pub const Limits = struct {
 };
 
 pub const Hooks = struct {
-    models_dev_url: ?[]const u8 = null,
     failures: std.EnumSet(Failure) = .empty,
     bash_lifecycle: bash.LifecycleFault = .none,
     pauses: std.EnumArray(std.meta.Tag(Pause), Hold) = .initFill(.{}),
@@ -226,10 +225,17 @@ pub const Tuning = struct {
     /// A directory already admitted together with private frozen placement.
     admitted_directory: ?[]const u8 = null,
     home: ?[]const u8 = null,
+    catalog_url: ?[]const u8 = null,
     limits: Limits = .{},
     hooks: Hooks = .{},
 
-    pub fn fromOptions(parsed: *const cli_grammar.Parsed, models_dev_env: ?[]const u8) !Tuning {
+    pub fn withSettings(self: Tuning, settings: *const @import("host_settings.zig").Settings) Tuning {
+        var tuned = self;
+        tuned.catalog_url = if (settings.models.catalog_url) |*url| url.slice() else null;
+        return tuned;
+    }
+
+    pub fn fromOptions(parsed: *const cli_grammar.Parsed) !Tuning {
         var tuning: Tuning = .{};
         const limits = &tuning.limits;
         const hooks = &tuning.hooks;
@@ -248,7 +254,6 @@ pub const Tuning = struct {
             hooks.pauses.getPtr(.model_result).delay_ms = delay;
         }
         hooks.pauses.getPtr(.model_result).gate_path = parsed.get("test-model-result-gate-path");
-        hooks.models_dev_url = parsed.get("test-models-dev-url") orelse models_dev_env;
         hooks.retry_recovery_gate_path = parsed.get("test-retry-recovery-gate-path");
         hooks.inspection_reply.gate_path = parsed.get("test-inspection-reply-gate-path");
         if (try parsed.number(i64, "test-inspection-reply-delay-ms")) |delay| hooks.inspection_reply.delay_ms = delay;
@@ -299,44 +304,42 @@ fn parseRetryWaits(value: []const u8) !retry_policy.Waits {
     return waits;
 }
 
-fn tuningFor(args: []const []const u8, models_dev_env: ?[]const u8) !Tuning {
+fn tuningFor(args: []const []const u8) !Tuning {
     var storage: [1024]u8 = undefined;
     var fixed = std.heap.FixedBufferAllocator.init(&storage);
     var refusal: cli_grammar.Refusal = undefined;
     const parsed = try serve_grammar.definition.parse(args, fixed.allocator(), &refusal);
-    return Tuning.fromOptions(&parsed, models_dev_env);
+    return Tuning.fromOptions(&parsed);
 }
 
 test "the hidden serve options narrow a Host" {
-    const plain = try tuningFor(&.{}, null);
+    const plain = try tuningFor(&.{});
     try std.testing.expectEqual(scratch_limit_bytes, plain.limits.bash_scratch_limit_bytes);
     try std.testing.expectEqual(@as(?usize, null), plain.limits.retention_entry_capacity);
-    try std.testing.expect(!plain.hooks.phase_trace and plain.hooks.models_dev_url == null and plain.hooks.control_gate == null);
+    try std.testing.expect(!plain.hooks.phase_trace and plain.catalog_url == null and plain.hooks.control_gate == null);
 
-    try std.testing.expectEqual(@as(?usize, 2), (try tuningFor(&.{ "--test-retention-entry-capacity", "2" }, null)).limits.retention_entry_capacity);
-    try std.testing.expectError(error.InvalidOptionValue, tuningFor(&.{ "--test-retention-entry-capacity", "1" }, null));
-    try std.testing.expectError(error.InvalidOptionValue, tuningFor(&.{ "--test-before-launch-delay-ms", "10001" }, null));
-    try std.testing.expectError(error.InvalidOptionValue, tuningFor(&.{ "--test-provider-inactivity-seconds", "0" }, null));
-    try std.testing.expectError(error.InvalidOptionValue, tuningFor(&.{ "--test-request-preparation-byte-allowance", "0" }, null));
-    const held = try tuningFor(&.{ "--test-before-launch-delay-ms", "10000", "--test-before-result-delay-ms", "5" }, null);
+    try std.testing.expectEqual(@as(?usize, 2), (try tuningFor(&.{ "--test-retention-entry-capacity", "2" })).limits.retention_entry_capacity);
+    try std.testing.expectError(error.InvalidOptionValue, tuningFor(&.{ "--test-retention-entry-capacity", "1" }));
+    try std.testing.expectError(error.InvalidOptionValue, tuningFor(&.{ "--test-before-launch-delay-ms", "10001" }));
+    try std.testing.expectError(error.InvalidOptionValue, tuningFor(&.{ "--test-provider-inactivity-seconds", "0" }));
+    try std.testing.expectError(error.InvalidOptionValue, tuningFor(&.{ "--test-request-preparation-byte-allowance", "0" }));
+    const held = try tuningFor(&.{ "--test-before-launch-delay-ms", "10000", "--test-before-result-delay-ms", "5" });
     try std.testing.expectEqual(@as(i64, 10_000), held.hooks.pauses.get(.action_launch).delay_ms);
     try std.testing.expectEqual(@as(i64, 10_000), held.hooks.pauses.get(.model_launch).delay_ms);
     try std.testing.expectEqual(@as(i64, 5), held.hooks.pauses.get(.action_result).delay_ms);
     try std.testing.expectEqual(@as(i64, 5), held.hooks.pauses.get(.model_result).delay_ms);
     try std.testing.expectEqual(@as(i64, 0), held.hooks.pauses.get(.preparation_advanced).delay_ms);
-    try std.testing.expectError(error.InvalidRetryWaits, tuningFor(&.{ "--test-retry-waits-ms", "1,2" }, null));
+    try std.testing.expectError(error.InvalidRetryWaits, tuningFor(&.{ "--test-retry-waits-ms", "1,2" }));
 
-    try std.testing.expectError(error.IncompleteControlGate, tuningFor(&.{ "--test-control-gate-keys", "k" }, null));
-    try std.testing.expectError(error.IncompleteControlGate, tuningFor(&.{ "--test-control-gate-path", "/g" }, null));
-    try std.testing.expectError(error.IncompleteTestTransitionGate, tuningFor(&.{ "--test-transition", "action-result-ready" }, null));
-    const gated = try tuningFor(&.{ "--test-control-gate-keys", "k", "--test-control-gate-path", "/g", "--test-transition", "action-result-ready", "--test-transition-gate-path", "/t" }, null);
+    try std.testing.expectError(error.IncompleteControlGate, tuningFor(&.{ "--test-control-gate-keys", "k" }));
+    try std.testing.expectError(error.IncompleteControlGate, tuningFor(&.{ "--test-control-gate-path", "/g" }));
+    try std.testing.expectError(error.IncompleteTestTransitionGate, tuningFor(&.{ "--test-transition", "action-result-ready" }));
+    const gated = try tuningFor(&.{ "--test-control-gate-keys", "k", "--test-control-gate-path", "/g", "--test-transition", "action-result-ready", "--test-transition-gate-path", "/t" });
     try std.testing.expectEqualStrings("/g", gated.hooks.control_gate.?.path);
     try std.testing.expectEqual(Hooks.Transition.action_result_ready, gated.hooks.transition.?.transition);
-    try std.testing.expectError(error.UnknownTestTransition, tuningFor(&.{ "--test-transition", "action_result_ready", "--test-transition-gate-path", "/t" }, null));
+    try std.testing.expectError(error.UnknownTestTransition, tuningFor(&.{ "--test-transition", "action_result_ready", "--test-transition-gate-path", "/t" }));
 
-    try std.testing.expect((try tuningFor(&.{ "--test-observation-fd", "3" }, null)).hooks.phase_trace);
-    try std.testing.expectEqualStrings("env", (try tuningFor(&.{}, "env")).hooks.models_dev_url.?);
-    try std.testing.expectEqualStrings("flag", (try tuningFor(&.{ "--test-models-dev-url", "flag" }, "env")).hooks.models_dev_url.?);
+    try std.testing.expect((try tuningFor(&.{ "--test-observation-fd", "3" })).hooks.phase_trace);
 }
 
 pub const HookProgress = struct {
@@ -355,6 +358,7 @@ pub const Host = struct {
     hooks: Hooks = .{},
     limits: Limits = .{},
     providers: *const providers_module.Providers = &providers_module.none,
+    catalog_url: ?[]const u8 = null,
     presets: []const core_tools.Preset = &.{},
     model_lists: ModelLists = .{},
     listings_requested: std.atomic.Value(bool) = .init(false),

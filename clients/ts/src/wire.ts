@@ -1338,6 +1338,10 @@ export interface components {
                     hex: string;
                 }) | null;
             };
+            /** @description Model catalog settings. */
+            models?: {
+                catalogUrl?: string | null;
+            };
             /** @description The tool Adapters offered to Sessions. */
             tools?: {
                 /** @description The built-in Bash tool. */

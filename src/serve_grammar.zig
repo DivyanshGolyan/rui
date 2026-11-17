@@ -147,7 +147,6 @@ pub const settings_options = host_destination ++ &[_]Option{
 };
 const serve_test = &[_]Option{
     .{ .name = "fault", .argument = "VALUE", .hidden = true, .repeated = true },
-    hiddenValue("test-models-dev-url"),
     hiddenNumber("test-bash-scratch-limit-bytes", 0, std.math.maxInt(u64)),
     hiddenNumber("test-retention-entry-capacity", 2, retention_capacity.entries),
     hiddenFlag("test-retention-removal-failure"),

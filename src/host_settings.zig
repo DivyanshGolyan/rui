@@ -182,6 +182,7 @@ pub const Settings = struct {
     store: Store = .{ .sqlite = .{} },
     providers: Providers = .{},
     network: Network = .{},
+    models: Models = .{},
     tools: Tools = .{},
     interface: Interface = .{},
     execution: Execution = .{},
@@ -190,6 +191,7 @@ pub const Settings = struct {
         .store = "Where the Host keeps canonical facts. One Adapter.",
         .providers = "The providers served, exactly the listed set when present.",
         .network = "Host-wide transport trust.",
+        .models = "Model catalog settings.",
         .tools = "The tool Adapters offered to Sessions.",
         .interface = "Where clients reach the Host and what ends it.",
         .execution = "How Turns run.",
@@ -249,6 +251,10 @@ pub fn ProviderEntry(comptime credential: provider_name.Facts.Credential) type {
         },
     };
 }
+pub const Models = struct {
+    catalog_url: ?Url(.https_endpoint) = null,
+    pub const doc = .{ .catalog_url = "Model catalog URL. Default: models.dev." };
+};
 pub const Network = struct {
     ca_file: ?PathKind(max_path_bytes, .trust) = null,
     pub const doc = .{ .ca_file = "Trust only this PEM file; absent uses system trust. Applies to every provider." };
