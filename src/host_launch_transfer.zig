@@ -90,11 +90,97 @@ pub fn readFrame(gpa: std.mem.Allocator, io: std.Io, fd: c_int) !frame.Owned {
     var buffer: [8192]u8 = undefined;
     defer std.crypto.secureZero(u8, &buffer);
     while (true) {
-        const n = try file.readStreaming(io, &.{&buffer});
+        const n = file.readStreaming(io, &.{&buffer}) catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => return err,
+        };
         if (n == 0) break;
         if (n > frame.max_bytes -| bytes.items.len) return error.SettingsInvalid;
         try bytes.appendSlice(private, buffer[0..n]);
     }
     _ = try frame.inspect(bytes.items);
     return .{ .bytes = try bytes.toOwnedSlice(private) };
+}
+
+test "frozen launch input consumes EOF and closes valid malformed and truncated descriptors" {
+    const gpa = std.testing.allocator;
+    const settings = try gpa.create(@import("host_settings.zig").Settings);
+    defer gpa.destroy(settings);
+    settings.* = .{};
+    defer settings.deinit();
+    var failure: @import("start_report.zig").Failure = undefined;
+    var owned = try frame.freeze(gpa, "/frozen-input", settings, .automatic, &failure);
+    defer owned.deinit(gpa);
+    for ([_][]const u8{ owned.bytes, owned.bytes[0 .. owned.bytes.len - 1], "not a frame" }, 0..) |bytes, i| {
+        var pipe = try Pipe.init();
+        defer pipe.close();
+        try std.testing.expectEqual(@as(c_long, @intCast(bytes.len)), rui_write_launch_input(pipe.writer, bytes.ptr, bytes.len));
+        _ = std.c.close(pipe.writer);
+        pipe.writer = -1;
+        const fd = pipe.reader;
+        pipe.reader = -1; // readFrame owns and closes it on every exit.
+        if (i == 0) {
+            var read = try readFrame(gpa, std.testing.io, fd);
+            defer read.deinit(gpa);
+            try std.testing.expectEqualSlices(u8, owned.bytes, read.bytes);
+        } else try std.testing.expectError(error.SettingsInvalid, readFrame(gpa, std.testing.io, fd));
+        try std.testing.expect(std.c.fcntl(fd, std.c.F.GETFD) < 0);
+    }
+}
+
+test "frozen launch transfer drains both channels through partial interrupted blocked and closed writes" {
+    const Fixture = struct {
+        calls: usize = 0,
+        reads: [2]usize = .{ 0, 0 },
+        sent: [4]u8 = undefined,
+        length: usize = 0,
+        fn read(context: ?*anyopaque, fd: c_int, buffer: []u8) isize {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            const index: usize = if (fd == 11) 0 else 1;
+            self.reads[index] += 1;
+            buffer[0] = @intCast(self.reads[index]);
+            return 1;
+        }
+        fn write(context: ?*anyopaque, _: c_int, bytes: []const u8) isize {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            defer self.calls += 1;
+            switch (self.calls) {
+                0 => return -@as(isize, @backingInt(std.posix.E.INTR)),
+                1 => return -@as(isize, @backingInt(std.posix.E.AGAIN)),
+                2, 3 => {
+                    self.sent[self.length] = bytes[0];
+                    self.length += 1;
+                    return 1;
+                },
+                else => return -@as(isize, @backingInt(std.posix.E.PIPE)),
+            }
+        }
+    };
+    var fixture: Fixture = .{};
+    var pipe = try Pipe.init();
+    defer pipe.close();
+    var transfer: Transfer = .{ .input = pipe.writer, .bytes = "abcd" };
+    pipe.writer = -1;
+    defer transfer.deinit();
+    var a: [1]u8 = undefined;
+    var b: [1]u8 = undefined;
+    for (0..5) |_| {
+        const step_result = try transfer.step(.{ .context = &fixture, .read = Fixture.read, .write = Fixture.write }, .{
+            .{ .fd = 11, .buffer = &a }, .{ .fd = 12, .buffer = &b },
+        });
+        try std.testing.expectEqual([2]usize{ 1, 1 }, step_result.counts);
+    }
+    try std.testing.expectEqual([2]usize{ 5, 5 }, fixture.reads);
+    try std.testing.expectEqualStrings("ab", fixture.sent[0..fixture.length]);
+    try std.testing.expectEqual(@as(usize, 2), transfer.offset);
+    try std.testing.expect(transfer.closed_early);
+    try std.testing.expectEqual(@as(c_int, -1), transfer.input);
+}
+
+test "frozen launch native closed reader reports EPIPE without terminating the caller" {
+    var pipe = try Pipe.init();
+    defer pipe.close();
+    _ = std.c.close(pipe.reader);
+    pipe.reader = -1;
+    try std.testing.expectEqual(-@as(c_long, @backingInt(std.posix.E.PIPE)), rui_write_launch_input(pipe.writer, "input", 5));
 }
