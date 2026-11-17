@@ -577,6 +577,8 @@ POLICY_SELF_CHECKS = (
     ("test_client_locality", CLIENT_LOCALITY_INPUTS),
     # TLC runs only when a model, its runner or its CI wrapper changes.
     ("test_formal_models", ("tests/formal/*", "tests/ci/test_formal_models.py")),
+    ("test_native_acceptance", ("build.zig", "build/*.zig", ".github/workflows/check.yml",
+                                "tests/ci/select_tests.py", "tests/ci/test_native_acceptance.py")),
 )
 
 

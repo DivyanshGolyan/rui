@@ -153,10 +153,11 @@ jobs:
           needed=$(python3 -B tests/ci/caller_errors.py --bootstrap-needed)
           echo "needed=$needed" >> "$GITHUB_OUTPUT"
       - uses: ./.github/actions/setup
-        if: ${{ steps.caller-bootstrap.outputs.needed == 'true' }}
+        if: ${{ steps.caller-bootstrap.outputs.needed == 'true' || !contains(fromJSON(needs.plan.outputs.policy_skips), 'test_native_acceptance') }}
         with:
           # Install only the existing pinned compiler: no build/package caches,
-          # selected fixture dependencies or native compilation in policy.
+          # selected fixture dependencies or product compilation in policy.
+          # The input-scoped native acceptance self-check uses a minimal Zig graph.
           targets: '[]'
           compiled: 'true'
           cold: 'true'

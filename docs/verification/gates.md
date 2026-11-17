@@ -149,6 +149,7 @@ Composed gates, long witnesses, launch, Debug admission, reply delivery, H2 and 
 Within a macOS worker using verified CI artifacts, independent acceptance commands overlap through Zig's existing DAG scheduler.
 The shared build CI owner checks their exit status and keeps execution fresh while buffering combined output on stderr; inherited terminal I/O would hold Zig's global stderr lock.
 Compilation, generated outputs, explicit I/O checks and Zig test protocols keep their existing owners.
+The compiler-backed acceptance self-check follows its inputs in `POLICY_SELF_CHECKS`; the existing policy setup installs the pinned compiler when that self-check or caller bootstrap needs it.
 A Selected checks dispatch can supply a JSON `native_targets` array to reproduce an exact native selection through the same producer, matrix and acceptance owners; this diagnostic mode disables retries and quarantine.
 The `linux` and `macos` statuses fail if any selected job fails or is cancelled.
 A failing aggregate names each failed job of its run and whether infrastructure or a check failed it ([failure_cause.py](../../tests/ci/failure_cause.py)), so a red never reads only as an exit code.
