@@ -1229,7 +1229,7 @@ test "legacy creation receipts resolve null compaction and replay creating Messa
 
 test "creation receipt rejects mismatched revision identity and malformed tool sets" {
     try store_testing.forEachEngine(struct {
-        const Damage = enum { revision_key, configured_missing, loaded_missing, configured_count, loaded_count, duplicate_name };
+        const Damage = enum { revision_key, configured_missing, loaded_missing, configured_count, loaded_count, duplicate_name, configured_dangling, loaded_dangling, configured_ordinal, loaded_ordinal };
         fn run(case: *store_testing.Case) !void {
             for ([_]bool{ false, true }) |as_message| {
                 for (std.enums.values(Damage)) |damage| {
@@ -1267,6 +1267,21 @@ test "creation receipt rejects mismatched revision identity and malformed tool s
                         .loaded_missing => try store_testing.withoutForeignKeys(&storage, "UPDATE session_revision SET loaded_tool_set_id=9223372036854775807 WHERE session_ref=?1 AND revision=1", .{session.slice()}),
                         .configured_count => try store_testing.exec(&storage, "UPDATE tool_set SET member_count=member_count+1 WHERE tool_set_id=(SELECT tool_set_id FROM session_revision WHERE session_ref=?1 AND revision=1)", .{session.slice()}),
                         .loaded_count => try store_testing.exec(&storage, "UPDATE tool_set SET member_count=member_count+1 WHERE tool_set_id=(SELECT loaded_tool_set_id FROM session_revision WHERE session_ref=?1 AND revision=1)", .{session.slice()}),
+                        .configured_ordinal, .loaded_ordinal => {
+                            const set = if (damage == .configured_ordinal)
+                                try store_testing.queryU64(&storage, "SELECT tool_set_id FROM session_revision WHERE session_ref=?1 AND revision=1", .{session.slice()})
+                            else
+                                try store_testing.queryU64(&storage, "SELECT loaded_tool_set_id FROM session_revision WHERE session_ref=?1 AND revision=1", .{session.slice()});
+                            try store_testing.exec(&storage, "UPDATE tool_set_member SET ordinal=128 WHERE tool_set_id=?1 AND ordinal=0", .{set});
+                        },
+                        .configured_dangling, .loaded_dangling => {
+                            const set = if (damage == .configured_dangling)
+                                try store_testing.queryU64(&storage, "SELECT tool_set_id FROM session_revision WHERE session_ref=?1 AND revision=1", .{session.slice()})
+                            else
+                                try store_testing.queryU64(&storage, "SELECT loaded_tool_set_id FROM session_revision WHERE session_ref=?1 AND revision=1", .{session.slice()});
+                            try store_testing.withoutForeignKeys(&storage, "UPDATE tool_set_member SET tool_record_id=9223372036854775807 WHERE tool_set_id=?1 AND ordinal=0", .{set});
+                            try store_testing.exec(&storage, "UPDATE tool_set SET member_count=member_count-1 WHERE tool_set_id=?1", .{set});
+                        },
                         .duplicate_name => {
                             const set = try store_testing.queryU64(&storage, "SELECT tool_set_id FROM session_revision WHERE session_ref=?1 AND revision=1", .{session.slice()});
                             const record = try store_testing.queryU64(&storage, "SELECT tool_record_id FROM tool_set_member WHERE tool_set_id=?1 AND ordinal=0", .{set});
@@ -1460,6 +1475,69 @@ test "queued creation receipt survives later job and lost batch" {
                         try std.testing.expect(storage.engine.mysql.state.testing_shape.reconnects > reconnects);
                 }
             };
+        }
+    }.run);
+}
+
+test "fresh creation rejects reused corrupt tool sets" {
+    try store_testing.forEachEngine(struct {
+        const Damage = enum { count, missing_member, duplicate_member, dangling_member, wrong_member, out_of_range_ordinal };
+        fn run(case: *store_testing.Case) !void {
+            for ([_]bool{ false, true }) |as_message| {
+                for ([_]bool{ false, true }) |loaded| {
+                    for (std.enums.values(Damage)) |damage| {
+                        var tmp = std.testing.tmpDir(.{});
+                        defer tmp.cleanup();
+                        var storage: Store = undefined;
+                        try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                        defer storage.close() catch unreachable;
+                        var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+                        const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+                        var seed = try completeConfiguration("reuse-seed", "", workspace, "model-a");
+                        seed.configuration.tools = try .of(&.{ "bash", "find_tools", "web_search" });
+                        seed.configuration.loaded_tools = try .of(&.{ "bash", "find_tools" });
+                        const created = try storage.configure(&seed, .{});
+                        try std.testing.expect(created == .accepted);
+                        const session = created.accepted.session;
+                        const configured_set = try store_testing.queryU64(&storage, "SELECT tool_set_id FROM session_revision WHERE session_ref=?1 AND revision=1", .{session.slice()});
+                        const loaded_set = try store_testing.queryU64(&storage, "SELECT loaded_tool_set_id FROM session_revision WHERE session_ref=?1 AND revision=1", .{session.slice()});
+                        try std.testing.expect(configured_set != loaded_set);
+                        const set = if (loaded) loaded_set else configured_set;
+                        switch (damage) {
+                            .count => try store_testing.exec(&storage, "UPDATE tool_set SET member_count=member_count+1 WHERE tool_set_id=?1", .{set}),
+                            .missing_member => try store_testing.exec(&storage, "DELETE FROM tool_set_member WHERE tool_set_id=?1 AND ordinal=0", .{set}),
+                            .out_of_range_ordinal => try store_testing.exec(&storage, "UPDATE tool_set_member SET ordinal=128 WHERE tool_set_id=?1 AND ordinal=0", .{set}),
+                            .wrong_member => {
+                                const replacement = try store_testing.queryU64(&storage, "SELECT min(tool_record_id) FROM tool_record WHERE tool_record_id NOT IN (SELECT tool_record_id FROM tool_set_member WHERE tool_set_id=?1)", .{set});
+                                try store_testing.exec(&storage, "UPDATE tool_set_member SET tool_record_id=?1 WHERE tool_set_id=?2 AND ordinal=0", .{ replacement, set });
+                            },
+                            .dangling_member => {
+                                try store_testing.withoutForeignKeys(&storage, "UPDATE tool_set_member SET tool_record_id=9223372036854775807 WHERE tool_set_id=?1 AND ordinal=0", .{set});
+                                try store_testing.exec(&storage, "UPDATE tool_set SET member_count=member_count-1 WHERE tool_set_id=?1", .{set});
+                            },
+                            .duplicate_member => {
+                                const record = try store_testing.queryU64(&storage, "SELECT tool_record_id FROM tool_set_member WHERE tool_set_id=?1 AND ordinal=0", .{set});
+                                try store_testing.exec(&storage, "UPDATE tool_set_member SET tool_record_id=?1 WHERE tool_set_id=?2 AND ordinal=1", .{ record, set });
+                            },
+                        }
+                        var create = seed;
+                        try create.key.set("reuse-target");
+                        var receipt: @import("../../creation_receipt.zig").Configuration = undefined;
+                        if (as_message) {
+                            var message: wire_request.MessageCommand = .{ .configuration = create.configuration };
+                            try message.key.set("reuse-target");
+                            message.text = try testingBytesContent(&tmp, "reuse-target-input", "initial");
+                            defer message.removeTemporaryContent(std.testing.io) catch unreachable;
+                            try std.testing.expect(storage.submitMessageWithModelInto(&message, null, &receipt, .{}) == .infrastructure_failure);
+                        } else {
+                            try std.testing.expect((try storage.configureInto(&create, &receipt, .{})) == .infrastructure_failure);
+                        }
+                        try std.testing.expect(storage.isFenced());
+                        try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{}));
+                        try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM core_command WHERE command_key=?1", .{"reuse-target"}));
+                    }
+                }
+            }
         }
     }.run);
 }
