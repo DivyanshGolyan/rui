@@ -259,12 +259,13 @@ def chat_info_ready(tty, folder):
     actions = ("Rename", "Archive", "Copy last answer")
     def ready():
         lines = tty.screen.completed.split("\n")
-        return bool(lines) and " · info" in lines[-1] and "esc close" in lines[-1] and all(
+        return bool(lines) and re.fullmatch(r"Chat +esc", composer_line(tty.screen.completed, len(lines) - 1)) and all(
             any(line.strip().startswith(label) and "unavailable" not in line for line in lines) for label in fields) and all(
                 any(action in line for line in lines) for action in actions)
     tty.wait(ready, label="chat info fields and footer")
     lines = tty.screen.completed.split("\n")
-    assert [index for index, line in enumerate(lines) if " · info" in line] == [len(lines) - 1], \
+    assert [index for index in range(len(lines)) if re.fullmatch(
+        r"Chat +esc", composer_line(tty.screen.completed, index))] == [len(lines) - 1], \
         ("single bottom info footer", tty.screen.completed)
     value = next(line.split("Folder", 1)[1].strip() for line in lines if line.strip().startswith("Folder"))
     assert value.endswith("/" + folder), ("read-only Folder retains basename", value, folder)
