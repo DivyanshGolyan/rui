@@ -91,7 +91,7 @@ pub const Calls = struct {
         };
         active.binding = binding;
         prepare(host, active) catch |err| {
-            if (host.store.isFenced()) fenceDispatch(host, "MCP input", err) else settle(host, active, .spawn_failed, "Failed, not run: the Host could not prepare this MCP call.");
+            preparationFailed(host, active, err);
             active.destroy(host);
             return .admitted;
         };
@@ -189,6 +189,16 @@ fn settle(host: *Host, active: *Active, code: store.ActionResolutionCode, text: 
     };
 }
 
+fn preparationFailed(host: *Host, active: *Active, err: anyerror) void {
+    if (host.store.isFenced()) {
+        fenceDispatch(host, "MCP input", err);
+    } else if (err == error.SupersededByControl) {
+        cancel(host, active);
+    } else {
+        settle(host, active, .spawn_failed, "Failed, not run: the Host could not prepare this MCP call.");
+    }
+}
+
 noinline fn prepare(host: *Host, active: *Active) !void {
     const arena = active.arena.allocator();
     const input = try arena.create(store.ActionExecutionInput);
@@ -204,7 +214,7 @@ noinline fn prepare(host: *Host, active: *Active) !void {
     var turn: std.Io.Writer.Allocating = .init(arena);
     try protocol.writeShape(&turn.writer, .{protocol.Hole.decimal}, .{active.binding.turn_id});
     try host.custody.consumeLaunchAuthority(active.token, .{ .action = active.binding }, std.Io.Clock.Timestamp.now(host.io, .awake));
-    try active.running.start(host.allocator, .{
+    const start: Running.Input = .{
         .server = .{ .target = config.target, .bearer_token = config.token },
         .client = offered.client,
         .name = input.runner.mcp.name.slice(),
@@ -225,8 +235,14 @@ noinline fn prepare(host: *Host, active: *Active) !void {
             .action_id = active.binding.action_id,
             .attempt_ordinal = @import("attempt.zig").action_attempt_ordinal,
         },
-    }, nowMs(host));
-    active.started = true;
+    };
+    try host.store.withActionLaunchHandoff(active.binding, .{ .host = host, .active = active, .input = start }, struct {
+        fn handoff(context: anytype, cutoff: u64) !void {
+            try context.active.running.start(context.host.allocator, context.input, nowMs(context.host));
+            context.active.started = true;
+            try context.host.custody.watchMessages(context.active.token, cutoff);
+        }
+    }.handoff);
 }
 
 fn readContent(host: *Host, allocator: std.mem.Allocator, reference: store.ContentReference) ![]const u8 {
@@ -245,7 +261,7 @@ fn readContent(host: *Host, allocator: std.mem.Allocator, reference: store.Conte
 }
 
 fn cancel(host: *Host, active: *Active) void {
-    const sent = active.running.requestSent();
+    const sent = active.started and active.running.requestSent();
     const text = @import("mcp/action_text.zig");
     var buffer: [@max(text.stop_unknown.len, text.stop_not_sent.len)]u8 = undefined;
     var out: std.Io.Writer = .fixed(&buffer);
@@ -360,7 +376,7 @@ test "MCP ordinary custody covers preparation failure init failure stop shutdown
     const store_testing = store.testing;
     const tools = @import("tools.zig");
     const output_retention = @import("output_retention.zig");
-    const Case = enum { capacity_zero, capacity_occupied, capacity_detached, allocation, preparation, unavailable, init_failed, stop, shutdown, settlement };
+    const Case = enum { capacity_zero, capacity_occupied, capacity_detached, allocation, preparation, unavailable, init_failed, stop, stop_preparation, shutdown, settlement };
     const records = comptime store_testing.hostToolRecordsWith(&.{.{ .name = "fetch_page", .owner = .mcp, .server = "docs", .description = "Fetch.", .input_schema = "{\"type\":\"object\"}" }});
     var digests: [records.len][32]u8 = undefined;
     for (&records, &digests) |*record, *digest| digest.* = tools.recordDigest(record);
@@ -420,6 +436,23 @@ test "MCP ordinary custody covers preparation failure init failure stop shutdown
                 try std.testing.expectError(error.StaleCustody, host.custody.cleanupComplete(token));
                 try host.custody.releaseUnused(recycled);
             }
+            continue;
+        }
+        if (case == .stop_preparation) {
+            const token = host.custody.reserve().?;
+            const active = try host.allocator.create(Active);
+            active.* = .{ .token = token, .binding = undefined, .arena = .init(host.allocator) };
+            var admission = (try storage.admitActionAttempt(selected, 30_000, .{})).?;
+            active.binding = try host.custody.attach(token, &admission.permit);
+            var stop = try store.testingCompleteSessionStop("stop-preparation", session.slice());
+            try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+            if (prepare(&host, active)) |_| return error.TestUnexpectedResult else |err| {
+                try std.testing.expectEqual(error.SupersededByControl, err);
+                preparationFailed(&host, active, err);
+            }
+            active.destroy(&host);
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND resolution_code='cancelled'", .{selected.action_id}));
+            try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
             continue;
         }
         var calls: Calls = .{};

@@ -503,3 +503,96 @@ test "a model admission freezes an offer the Host's tool set no longer holds, an
         }
     }.run);
 }
+
+test "stop_action follows the frozen read_action offer" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            for (0..4) |mask| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+                var configure = try completeConfiguration("paired-config", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
+                configure.configuration.tools = try switch (mask) {
+                    0 => @import("../../command_input.zig").ToolsField.of(&.{}),
+                    1 => @import("../../command_input.zig").ToolsField.of(&.{"read_action"}),
+                    2 => @import("../../command_input.zig").ToolsField.of(&.{"stop_action"}),
+                    3 => @import("../../command_input.zig").ToolsField.of(&.{ "read_action", "stop_action" }),
+                    else => unreachable,
+                };
+                const session = (try storage.configure(&configure, .{})).accepted.session;
+                try submitTestMessage(&storage, &tmp, "paired-input", "paired-input", session.slice(), "check tools");
+                const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                const frozen = try store_testing.queryU64(&storage, "SELECT tool_set_id FROM model_operation WHERE operation_id=?1", .{model.operation_id});
+                const count = try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_set_member m JOIN tool_record t ON t.tool_record_id=m.tool_record_id WHERE m.tool_set_id=?1 AND t.name='stop_action'", .{frozen});
+                try std.testing.expectEqual(@as(u64, if (mask & 1 != 0) 1 else 0), count);
+            }
+        }
+    }.run);
+}
+
+test "stop_action effective offer preserves the historical settings limit" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            const extras = comptime blk: {
+                @setEvalBranchQuota(1_000_000);
+                var records: [126]tool_defs.Record = undefined;
+                for (&records, 0..) |*record, i| record.* = .{
+                    .name = std.fmt.comptimePrint("stub{d:0>3}", .{i}),
+                    .owner = .mcp,
+                    .server = "docs",
+                    .read_only = true,
+                    .description = "Read a page.",
+                    .input_schema = "{\"type\":\"object\"}",
+                };
+                break :blk records;
+            };
+            const records = comptime testingHostToolRecords(&extras);
+            var digests: [records.len][32]u8 = undefined;
+            for (&records, &digests) |*record, *digest| digest.* = tool_defs.recordDigest(record);
+            const host_tools: tool_defs.HostToolSet = .{ .records = &records, .digests = &digests };
+            for ([_]usize{ 127, 128 }) |count| {
+                for ([_]bool{ false, true }) |explicit| {
+                    for ([_]bool{ false, true }) |loaded_read| {
+                        var tmp = std.testing.tmpDir(.{});
+                        defer tmp.cleanup();
+                        var storage: Store = undefined;
+                        try store_testing.testingStoreWith(case, &storage, &tmp, std.testing.io, .{ .host_tool_set = &host_tools });
+                        defer storage.close() catch unreachable;
+                        var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+                        var configure = try completeConfiguration("offer-limit", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
+                        var allowed: protocol.ToolsField = .{ .state = .value };
+                        var loaded: protocol.ToolsField = .{ .state = .value };
+                        try allowed.insert("find_tools");
+                        try loaded.insert("find_tools");
+                        try allowed.insert("read_action");
+                        if (loaded_read) try loaded.insert("read_action");
+                        if (explicit) {
+                            try allowed.insert("stop_action");
+                            try loaded.insert("stop_action");
+                        }
+                        for (extras[0 .. count - 2 - @intFromBool(explicit)]) |record| {
+                            try allowed.insert(record.name);
+                            try loaded.insert(record.name);
+                        }
+                        configure.configuration.tools = allowed;
+                        configure.configuration.loaded_tools = loaded;
+                        const session = (try storage.configure(&configure, .{})).accepted.session;
+                        try submitTestMessage(&storage, &tmp, "offer-limit-input", "offer-limit-input", session.slice(), "check");
+                        const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                        var page: TestingPage = undefined;
+                        page.open(&storage, binding);
+                        defer page.close();
+                        var settings: historical_domain.HistoricalSettings = undefined;
+                        try page.settings(&settings);
+                        const expected = count - @as(usize, @intFromBool(!loaded_read)) - @as(usize, @intFromBool(explicit and !loaded_read)) + @as(usize, @intFromBool(!explicit and loaded_read));
+                        try std.testing.expectEqual(@as(u64, @intCast(expected)), settings.tool_count);
+                        try std.testing.expect(!storage.isFenced());
+                    }
+                }
+            }
+        }
+    }.run);
+}

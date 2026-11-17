@@ -1158,16 +1158,6 @@ def held_message_denial_cases(state, processes, endpoints):
         actions.sort(key=lambda action: int(action["call_ordinal"]))
 
         message(state, store, f"{label}-reason", session, "Don't run that; use the cached copy instead")
-        assert observe(store, f"{label}-reason").get("result") is None
-        assert len(endpoint.requests) == 1, endpoint.requests
-
-        command("action", "deny", "--store", store, "--session", session, "--action", actions[0]["action"],
-                "--record", state / f"{label}-deny.json", "--key", f"{label}-deny")
-        if siblings == 2:
-            assert len(endpoint.requests) == 1, endpoint.requests
-            assert observe(store, f"{label}-reason").get("result") is None
-            command("action", "allow", "--store", store, "--session", session, "--action", actions[1]["action"],
-                    "--record", state / f"{label}-allow.json", "--key", f"{label}-allow")
 
         for key in (f"{label}-start", f"{label}-reason"):
             wait_for(lambda key=key: completed_observation(store, key), f"{key} result")
@@ -1178,11 +1168,9 @@ def held_message_denial_cases(state, processes, endpoints):
         outputs = [item for item in continuation if item.get("type") == "function_call_output"]
         tail = continuation[-(siblings + 1):]
         assert tail[:siblings] == outputs, continuation
-        assert outputs[0] == {"type": "function_call_output", "call_id": f"{label}-call-0",
-                              "output": "Permission denied."}, outputs
-        if siblings == 2:
-            assert outputs[1]["call_id"] == f"{label}-call-1", outputs
-            assert "sibling-ran" in outputs[1]["output"], outputs
+        assert outputs == [{"type": "function_call_output", "call_id": f"{label}-call-{ordinal}",
+                            "output": "declined: a new message arrived; ask again if still needed"}
+                           for ordinal in range(siblings)], outputs
         assert tail[-1] == {"role": "user", "content": [
             {"type": "input_text", "text": "Don't run that; use the cached copy instead"}]}, continuation
         users = [item for item in continuation if item.get("role") == "user"]
@@ -1191,7 +1179,7 @@ def held_message_denial_cases(state, processes, endpoints):
         stop_host(host)
         processes.remove(host)
         stop_endpoint(endpoint, endpoints)
-    print("Held Message: denial and pending reason share one continuation request, after the complete call group")
+    print("Held Message: all pending approvals decline before the reason reaches the continuation")
 
 
 def builtin_instruction_cases(state, processes, endpoints, releases):
@@ -1855,19 +1843,6 @@ def main(mode="all", correlation_case="all"):
             queued_continuation_session,
             "input queued during tool wait",
         )
-        command(
-            "action", "deny",
-            "--store",
-            continuation_store,
-            "--record",
-            state / "queued-denial.json",
-            "--key",
-            "queued-denial",
-            "--session",
-            queued_continuation_session,
-            "--action",
-            queued_action["action"],
-        )
         assert len(continuation_endpoint.requests) == 3, continuation_endpoint.requests
         stop_host(continuation_host)
         processes.remove(continuation_host)
@@ -1887,7 +1862,7 @@ def main(mode="all", correlation_case="all"):
         queued_outputs = [item for item in queued_input if item.get("type") == "function_call_output"]
         assert [item["call_id"] for item in queued_outputs] == [call[1] for call in queued_calls], queued_outputs
         assert [item["output"] for item in queued_outputs] == [
-            "Permission denied.",
+            "declined: a new message arrived; ask again if still needed",
             "Unknown tool: missing-tool.",
         ], queued_outputs
         relevant_input = [

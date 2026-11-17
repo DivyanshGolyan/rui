@@ -85,7 +85,8 @@ def execute(batch, ci_artifacts):
     print("Executing: " + " ".join(batch), flush=True)
     start = time.monotonic()
     output = []
-    with subprocess.Popen(command(batch, ci_artifacts), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+    with subprocess.Popen(command(batch, ci_artifacts), env=dict(os.environ, RUI_UNIT_TEST_TIMEOUT=TEST_TIMEOUT),
+                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                           text=True, errors="replace") as process:
         for line in process.stdout:
             sys.stdout.write(line)

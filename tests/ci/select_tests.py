@@ -650,7 +650,9 @@ def normalize(targets: set) -> set:
 
 def select(paths, phase, available, graph=None, contents=None, fixture_literals=None):
     graph = graph or tree_graph()
-    paths = [BUILD_HUB if BUILD_MODULES.get(path) == BUILD_HUB else path for path in paths]
+    build_paths = [BUILD_HUB if BUILD_MODULES.get(path) == BUILD_HUB else path for path in paths]
+    # A core imported by the build still needs its own boundary tests.
+    paths = list(dict.fromkeys([*build_paths, *(path for path in paths if path in graph.cores)]))
     contents = contents or {}
     rows = fixture_rows(*contents[FIXTURE_TABLE]) if FIXTURE_TABLE in paths and FIXTURE_TABLE in contents else None
     content_changed = {rule for rule, (patterns, changed) in CONTENT_RULES.items()

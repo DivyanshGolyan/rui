@@ -841,6 +841,102 @@ test "configuration answers replay without reverting newer settings" {
     }.run);
 }
 
+test "explicit native and preset restrictions survive reopen and resumed model requests" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            const Surface = enum { configure, preset };
+            const selections = [_]struct { allowed: []const []const u8, loaded: []const []const u8 }{
+                .{ .allowed = &.{}, .loaded = &.{} },
+                .{ .allowed = &.{"bash"}, .loaded = &.{"bash"} },
+                .{ .allowed = &.{ "bash", "find_tools", "web_search" }, .loaded = &.{ "bash", "find_tools" } },
+            };
+            for (std.enums.values(Surface)) |surface| for (selections) |selection| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+                const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+                var create: wire_request.ConfigureCommand = .{};
+                try create.key.set("restricted-create");
+                create.configuration = try shared_fixtures.testingAgentSpec(selection.allowed, "ask");
+                create.configuration.provider.state = .value;
+                try create.configuration.provider.value.set("codex");
+                create.configuration.workspace.state = .value;
+                try create.configuration.workspace.value.set(workspace);
+                create.configuration.loaded_tools = try .of(selection.loaded);
+                var request: wire_request.ConfigureCommand = .{ .key = create.key };
+                var memory: std.heap.ArenaAllocator = .init(std.testing.allocator);
+                defer memory.deinit();
+                if (surface == .preset) {
+                    request.preset = .{};
+                    try request.preset.?.set("reader");
+                    const arena = memory.allocator();
+                    const bytes = try std.json.Stringify.valueAlloc(arena, .{
+                        .provider = "codex",
+                        .workspace = workspace,
+                        .model = create.configuration.model.value.slice(),
+                        .effort = create.configuration.reasoning_effort.value.slice(),
+                        .compactAt = 100000,
+                        .tools = selection.allowed,
+                        .loadedTools = selection.loaded,
+                        .permissionMode = "ask",
+                    }, .{});
+                    const preset = (try std.json.parseFromSliceLeaky(std.json.Value, arena, bytes, .{})).object;
+                    try std.testing.expect(try @import("../../core_tools.zig").parseAgentSpec(arena, preset, &create.configuration) == .accepted);
+                }
+                var session: protocol.Bounded(protocol.session_id_bytes) = .{};
+                {
+                    var storage: Store = undefined;
+                    try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                    defer storage.close() catch unreachable;
+                    const result = switch (surface) {
+                        .configure => try storage.configure(&create, .{}),
+                        .preset => try storage.configureWithPreset(&create, &.{ .request_digest = request.presetRequestDigest() }, .{}),
+                    };
+                    try std.testing.expect(result == .accepted);
+                    try session.set(result.accepted.session.slice());
+                    const saved = try storage.inspectSessionForTesting(session.slice());
+                    try expectToolSetNames(&storage, saved.tool_set_id, selection.allowed);
+                    try std.testing.expectEqualStrings("ask", saved.permission_mode.slice());
+                    try store_testing.answerTestTurn(&storage, &tmp, session.slice(), "restricted-first", &.{.{ .encoded = "done", .decoded = "done" }});
+                }
+                {
+                    var storage: Store = undefined;
+                    try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                    defer storage.close() catch unreachable;
+                    var patch: wire_request.ConfigureCommand = .{};
+                    try patch.key.set("restricted-rename");
+                    try patch.session.set(session.slice());
+                    patch.configuration.label.state = .value;
+                    try patch.configuration.label.value.set("Resumed reader");
+                    try std.testing.expect(try storage.configure(&patch, .{}) == .accepted);
+                    try store_testing.submitTestMessage(&storage, &tmp, "restricted-resume", "restricted-resume", session.slice(), "continue");
+                    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                    var view: store_testing.TestingPage = undefined;
+                    view.open(&storage, binding);
+                    defer view.close();
+                    const settings = try shared_fixtures.testSettings(&view);
+                    try std.testing.expectEqual(@as(u64, @intCast(selection.loaded.len)), settings.tool_count);
+                    var tool: @import("../domain/historical.zig").HistoricalTool = .{};
+                    for (selection.loaded) |name| {
+                        try std.testing.expect(try view.nextTool(&tool));
+                        try std.testing.expectEqualStrings(name, tool.name.slice());
+                    }
+                    try std.testing.expect(!try view.nextTool(&tool));
+                    try std.testing.expectEqualStrings(create.configuration.model.value.slice(), settings.model.slice());
+                    try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .low), settings.reasoning_effort);
+                    try std.testing.expectEqual(@as(?u64, 100000), settings.compaction_trigger);
+                    const resumed = try storage.inspectSessionForTesting(session.slice());
+                    try std.testing.expectEqual(@as(u64, 2), resumed.revision);
+                    try expectToolSetNames(&storage, resumed.tool_set_id, selection.allowed);
+                    const loaded_id = try store_testing.queryU64(&storage, "SELECT coalesce(loaded_tool_set_id,tool_set_id) FROM session WHERE session_ref=?1", .{session.slice()});
+                    try expectToolSetNames(&storage, loaded_id, selection.loaded);
+                    try std.testing.expectEqualStrings("ask", resumed.permission_mode.slice());
+                }
+            };
+        }
+    }.run);
+}
+
 test "core preserves empty and NUL keys while Session references stay canonical" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
@@ -1060,7 +1156,7 @@ test "a Label is configured, replayed, cleared and validated like any setting" {
     }.run);
 }
 
-test "definite rejections retain decisions without retaining payloads" {
+test "definite rejections retain decisions without retaining payloads for configuration; Messages retain input" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
@@ -1103,8 +1199,9 @@ test "definite rejections retain decisions without retaining payloads" {
             try std.testing.expect(exhausted_reply == .rejected);
             try std.testing.expectEqual(protocol.ConfigurationRejection.revision_exhausted, exhausted_reply.rejected.code);
 
-            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, store_testing.content_beside_tools, .{}));
-            try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM core_command WHERE accepted=0 AND (primary_content_id IS NOT NULL OR secondary_content_id IS NOT NULL)", .{}));
+            try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, store_testing.content_beside_tools, .{}));
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM core_command cmd JOIN content c ON c.content_id=cmd.primary_content_id WHERE cmd.command_key=?1 AND cmd.kind=2 AND cmd.accepted=0 AND cmd.secondary_content_id IS NULL AND c.byte_length=?2 AND c.digest=?3 AND c.form=0", .{ unknown_message.key.slice(), unknown_message.text.length, store_testing.Blob{ .bytes = &unknown_message.text.digest } }));
+            try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM core_command WHERE accepted=0 AND kind<>2 AND (primary_content_id IS NOT NULL OR secondary_content_id IS NOT NULL)", .{}));
 
             try storage.close();
             try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
@@ -1123,7 +1220,7 @@ test "definite rejections retain decisions without retaining payloads" {
             try changed_kind.session.set("absent");
             changed_kind.text = unknown_message.text;
             try std.testing.expect(storage.submitMessageWithModel(&changed_kind, null, .{}) == .conflict);
-            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, store_testing.content_beside_tools, .{}));
+            try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, store_testing.content_beside_tools, .{}));
         }
     }.run);
 }
