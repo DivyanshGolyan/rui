@@ -48,6 +48,21 @@ def copy(path, destination):
         raise ProofError(f"special checkpoint file: {path}")
 
 
+def output_link(path, directory):
+    """Validate a relative cached-file alias without copying through it."""
+    target = os.readlink(path)
+    lexical = Path(os.path.normpath(path.parent / target))
+    if Path(target).is_absolute() or not lexical.is_relative_to(directory):
+        raise ProofError(f"output symlink leaves its cached file tree: {path}")
+    try:
+        resolved = path.resolve(strict=True)
+        if not resolved.is_relative_to(directory) or not resolved.is_file():
+            raise ProofError(f"output symlink leaves its cached file tree: {path}")
+    except (OSError, RuntimeError) as error:
+        raise ProofError(f"invalid output symlink: {path}: {error}") from error
+    return target
+
+
 def metadata(directory):
     """Read metadata, never the multi-GB output bytes; atime is immaterial."""
     found = {}
@@ -55,24 +70,28 @@ def metadata(directory):
         for name in sorted(dirs + files):
             path = Path(parent) / name
             info = path.lstat()
-            if not (stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode)):
+            if not (stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)):
                 raise ProofError(f"unsupported output entry: {path}")
             # Directory ctime/mtime changes on quarantine rename; file identity must not.
             value = (info.st_dev, info.st_ino, info.st_mode)
-            if stat.S_ISREG(info.st_mode):
+            if stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
                 value += (info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+            if stat.S_ISLNK(info.st_mode):
+                value += (output_link(path, directory),)
             found[str(path.relative_to(directory))] = value
     return found
 
 
-def tree_bytes(path):
+def tree_bytes(path, directory=None):
+    directory = path if directory is None else directory
     if path.is_symlink():
-        raise ProofError(f"symlink in checkpoint: {path}")
+        output_link(path, directory)
+        return path.lstat().st_size
     if path.is_file():
         return path.stat().st_size
     if not path.is_dir():
         raise ProofError(f"special checkpoint entry: {path}")
-    return sum(tree_bytes(child) for child in path.iterdir())
+    return sum(tree_bytes(child, directory) for child in path.iterdir())
 
 
 def contains_elf_output(directory, inventory):
@@ -143,8 +162,10 @@ class Checkpoint:
         self.copied_bytes = sum(tree_bytes(path) for path, _ in planned)
         if self.copied_bytes > budget_bytes:
             raise ProofError(f"checkpoint copy budget exceeded: {self.copied_bytes} > {budget_bytes}")
-        if shutil.disk_usage(self.destination.parent).free < self.copied_bytes + reserve_bytes:
-            raise ProofError("checkpoint would exhaust the configured disk reserve")
+        available_bytes = shutil.disk_usage(self.destination.parent).free
+        if available_bytes < self.copied_bytes + reserve_bytes:
+            raise ProofError(f"checkpoint would exhaust the configured disk reserve: "
+                             f"{self.copied_bytes} copy + {reserve_bytes} reserve > {available_bytes} available")
         self.quarantine.mkdir(parents=True, exist_ok=False)
         for index in range(len(self.roots)):
             (self.destination / str(index) / "non-o").mkdir(parents=True)
@@ -156,7 +177,7 @@ class Checkpoint:
             "roots": list(map(str, self.roots)), "initial_o": [sorted(n) for n in self.initial],
             "mutable_o": [sorted(n) for n in self.mutable], "metadata": self.frozen,
             "copied_bytes": self.copied_bytes, "budget_bytes": budget_bytes,
-            "reserve_bytes": reserve_bytes,
+            "reserve_bytes": reserve_bytes, "available_bytes_before_copy": available_bytes,
             "strategy": "all global o; local o without ELF ET_EXEC/ET_DYN; all non-o",
         }, sort_keys=True))
 
@@ -318,7 +339,7 @@ def parse_output(text):
                 name, status = match.groups()
                 nodes[DIGEST.sub("<digest>", name)][status] += 1
                 # screen's child suppresses its own summary; a miss has no inner-node proof.
-                if status == "success" and re.search(r"(?:^|[/ ])zig(?:\.exe)?(?:\s|$)", name):
+                if body.startswith("run ") and status == "success" and re.search(r"(?:^|[/ ])zig(?:\.exe)?(?:\s|$)", name):
                     problems.append("nested build ran without per-node cache evidence: " + name)
             elif not re.search(r"\((?:reused|\+\d+ more reused dependencies)\)$", body):
                 problems.append("unparsed build node: " + body)
@@ -369,6 +390,7 @@ def stage(argv, destination, *, workspace, env):
     destination.mkdir(parents=True, exist_ok=False)
     record = dict(command=list(map(str, argv)), started_ns=time.time_ns())
     started = time.monotonic()
+    print(json.dumps(dict(stage=str(destination), event="start", command=record["command"])), flush=True)
     try:
         with (destination / "output.log").open("wb") as output:
             result = subprocess.run(argv, cwd=workspace, env=env, stdout=output, stderr=subprocess.STDOUT)
@@ -379,6 +401,7 @@ def stage(argv, destination, *, workspace, env):
     finally:
         record["elapsed_seconds"] = time.monotonic() - started
         (destination / "status.json").write_text(json.dumps(record, indent=2))
+        print(json.dumps(dict(stage=str(destination), event="finish", **record)), flush=True)
     if result.returncode:
         raise ProofError(f"stage failed ({result.returncode}): {destination}")
     return (destination / "output.log").read_text(errors="replace")
@@ -509,7 +532,10 @@ def run(args):
                 result["errors"].append(f"cleanup {type(error).__name__}: {error}")
         result["parity"] &= not result["errors"]
         (output / "summary.json").write_text(json.dumps(result, indent=2))
-    print(json.dumps(dict(summary=str(output / "summary.json"), parity=result["parity"])))
+    print(json.dumps(dict(summary=str(output / "summary.json"), parity=result["parity"],
+                          errors=result["errors"],
+                          pairs=[{key: pair[key] for key in ("profile", "scenario", "parity", "differences")
+                                  if key in pair} for pair in result["pairs"]]), indent=2))
     return 0 if result["parity"] else 1
 
 
