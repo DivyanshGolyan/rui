@@ -181,6 +181,14 @@ root_install() {
     /usr/bin/dscl . -passwd /Users/ruici "$password"
     unset password
     /usr/bin/dscl . -create /Users/ruici IsHidden 1
+    # A new directory-service record is not resolvable by name (chown, sudo -u)
+    # until opendirectoryd's cache catches up; wait for it instead of failing.
+    /usr/bin/dscacheutil -flushcache
+    for _ in {1..20}; do
+        /usr/bin/id ruici >/dev/null 2>&1 && break
+        /bin/sleep 0.5
+    done
+    /usr/bin/id ruici >/dev/null 2>&1 || fail 'The new ruici account did not become resolvable; rerun setup.'
     /bin/mkdir -p "$RUNNER_HOME"
     /usr/sbin/chown root:wheel "$RUNNER_HOME"
     /bin/chmod -N "$RUNNER_HOME"
