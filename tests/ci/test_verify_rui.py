@@ -219,6 +219,7 @@ class VerifyRuiTest(unittest.TestCase):
         listed = {"sessions": [{"reference": sid} for sid in normal.values()]}
         cases = [
             ("normal", {"sessions": normal, "no_sessions": False}, listed, 0, True),
+            ("tree build", {"sha": "tree-" + "a" * 64, "sessions": normal}, listed, 0, True),
             ("legacy normal", {"sessions": normal}, listed, 0, True),
             ("intentional empty", {"sessions": {}, "no_sessions": True}, {"sessions": []}, 0, True),
             ("unmarked empty", {"sessions": {}}, {"sessions": []}, 0, False),
@@ -278,7 +279,7 @@ class VerifyRuiTest(unittest.TestCase):
                         return types.SimpleNamespace(returncode=0, stdout='{"instance":"host"}', stderr="")
                     run.rui_cmd = unittest.mock.Mock(side_effect=command)
                     replacements = {"Run": lambda _path: run, "sha256": lambda _path: "hash",
-                        "load_build": lambda _sha: {"files_sha256": {"rui": "hash"}},
+                        "load_build": lambda identifier: {"sha": identifier, "head": "sha", "files_sha256": {"rui": "hash"}},
                         "process_start": lambda _pid: ("start",), "accessibility": lambda: "unused",
                         "append_jsonl": lambda _path, report: reports.append(report)}
                     with patch.dict(doctor.__globals__, replacements), \
@@ -294,6 +295,24 @@ class VerifyRuiTest(unittest.TestCase):
                     self.assertEqual(reports[0]["verdict"], "PASS" if expected else "ISSUES")
                     self.assertEqual(sum(call.args[:2] == ("session", "list")
                                          for call in run.rui_cmd.call_args_list), 1)
+
+    def test_tap_resolves_recorded_build_in_run_cache(self):
+        tap = runpy.run_path(str(SCRIPT))["tap_main"]
+        with tempfile.TemporaryDirectory() as temp:
+            cache = Path(temp) / "cache"
+            for identifier in ("a" * 40, "tree-" + "b" * 64):
+                with self.subTest(identifier=identifier):
+                    build = cache / "builds" / identifier
+                    build.mkdir(parents=True)
+                    (build / "manifest.json").write_text(json.dumps({"screen_library": identifier}))
+                    run = types.SimpleNamespace(root=cache / "runs" / "run",
+                                                meta={"sha": identifier, "source": "/source"})
+                    def require_screen(record):
+                        self.assertEqual(record["screen_library"], identifier)
+                        raise RuntimeError("build resolved")
+                    with patch.dict(tap.__globals__, {"Run": lambda _path: run, "require_screen": require_screen}), \
+                            self.assertRaisesRegex(RuntimeError, "build resolved"):
+                        tap(types.SimpleNamespace(run="run"))
 
     def test_scratch_root_follows_host_platform(self):
         for platform, expected in (("darwin", "/private/tmp"), ("linux", "/tmp")):
