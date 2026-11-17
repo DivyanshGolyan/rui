@@ -709,6 +709,65 @@ def frozen_upgrade_cases(root, binary, releases):
             print(f"upgrade native: frozen {source_kind} A -> new checked B -> {mutation} C consumed B; full verification passed", flush=True)
 
 
+def frozen_credential_refusal_case(root, binary, releases):
+    """Reference selection freezes; later credential contents still resolve."""
+    with contextlib.ExitStack() as interfaces, case(root, binary, releases, "frozen-child-credential-refusal") as c:
+        runtime = interfaces.enter_context(host_process.short_interface_directory())
+        c.store.mkdir(mode=0o700)
+        key_file = c.root / "private-openai.key"
+        test_key = "sk-native-frozen-reference-test-key"
+        key_file.write_text(test_key + "\n")
+        key_file.chmod(0o600)
+        saved = c.store / "host.json"
+        # HTTPS loopback satisfies normal credential endpoint admission; no
+        # unauthenticated/fixture bypass can skip resolving this selected file.
+        saved.write_text(json.dumps({"interface": {"dir": str(runtime)},
+                                     "execution": {"activeCapacity": 2},
+                                     "providers": {"openai": {"endpoint": "https://127.0.0.1:9/v1/responses",
+                                                               "key": {"file": str(key_file)}}}}))
+        saved.chmod(0o600)
+        old, previous = c.start_host(sources_only=True)
+        assert previous["capabilities"]["providers"]["openai"] == "key_file", previous
+        assert test_key not in os_semantics.process_environment(old.pid, env=c.env)
+        c.select(c.build("checked-credential-target"))
+        gate = c.root / "credential-after-check.gate"
+        gate.touch(mode=0o600)
+        c.env["RUI_TEST_UPGRADE_BEFORE_START_GATE"] = str(gate)
+        restart = subprocess.Popen([str(c.binary), "host", "restart", "--all"], env=c.env,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        c.children.append(restart)
+        try:
+            def checked_and_retired():
+                if restart.poll() is not None:
+                    output, diagnostic = restart.communicate(timeout=3)
+                    raise AssertionError(("credential target failed before successful check/retirement", restart.returncode,
+                                          output, diagnostic))
+                return gate.with_name(gate.name + ".entered").exists()
+
+            wait_for(checked_and_retired, "valid key source checked before old Host retirement", timeout=20)
+            assert gate.exists() and restart.poll() is None
+            assert key_file.read_text() == test_key + "\n", "referenced key changed before the post-check interposition"
+            assert old.poll() is not None and c.status()["status"] == "unavailable"
+            # Only reference contents change. The checked source document and
+            # its immutable private frame never contain the resolved test key.
+            key_file.unlink()
+            assert test_key not in saved.read_text()
+        finally:
+            gate.unlink(missing_ok=True)
+        output, diagnostic = restart.communicate(timeout=30)
+        combined = output + diagnostic
+        assert restart.returncode == 6, (restart.returncode, output, diagnostic)
+        assert f"{c.store}: refused at starting" in output, combined
+        assert "failed at starting" not in output and "0 restarted" in output and "1 failed" in output, combined
+        failures = [json.loads(line)["rui_start_error"] for line in output.splitlines()
+                    if line.startswith('{"rui_start_error":')]
+        assert failures == [{"code": "settings_invalid",
+                             "message": "providers.openai.key: credential source is missing, unreadable, insecure or invalid"}], combined
+        assert test_key not in combined, "a child-only refusal exposed resolved credential bytes"
+        assert not key_file.exists() and c.status()["status"] == "unavailable"
+        print("upgrade native: checked credential reference survives stop, missing child file preserves exact typed starting refusal", flush=True)
+
+
 def pre_freeze_target_case(root, binary, releases, pre_freeze_binary):
     """An actual earlier native target's public check is not frame capability."""
     with contextlib.ExitStack() as interfaces, case(root, binary, releases, "actual-pre-freeze-target") as c:
@@ -742,6 +801,7 @@ def pre_freeze_target_case(root, binary, releases, pre_freeze_binary):
 
 def lifecycle_cases(root, binary, releases):
     frozen_upgrade_cases(root, binary, releases)
+    frozen_credential_refusal_case(root, binary, releases)
     with case(root, binary, releases, "managed-host-restart") as c:
         c.old_selection()
         old_host, previous = c.start_host()
@@ -2135,6 +2195,7 @@ def main():
     try:
         if selection == "frozen-settings":
             frozen_upgrade_cases(root, binary, releases)
+            frozen_credential_refusal_case(root, binary, releases)
         if selection == "pre-freeze-target":
             pre_freeze_target_case(root, binary, releases, pathlib.Path(sys.argv[3]).resolve(strict=True))
         if selection == "future-target":

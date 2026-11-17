@@ -861,7 +861,7 @@ def frozen_settings_launches(root, env):
     key.write_text("frozen-source-test-key")
     key.chmod(0o600)
     source = failure_root / "settings.json"
-    write_source(source, {"providers": {"openai": {"endpoint": "http://127.0.0.1:9/v1/responses", "key": {"file": str(key)}}}})
+    write_source(source, {"providers": {"openai": {"endpoint": "https://127.0.0.1:9/v1/responses", "key": {"file": str(key)}}}})
     report = held_start(failure_root / "host", ["--settings", source], key.unlink,
                         expected_refusal="providers.openai.key")
     assert "frozen-source-test-key" not in json.dumps(report), report
