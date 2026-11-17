@@ -5029,10 +5029,10 @@ test "every accepted control publishes exactly one hint before reply handling" {
             std.testing.allocator.rawFree(memory, alignment, ret_addr);
         }
     };
-    var covered: u16 = 0;
+    var covered: std.EnumSet(command_spec.CommandKind) = .empty;
     inline for (comptime std.meta.tags(command_spec.CommandKind)) |kind| {
         if (comptime !command_spec.spec(kind).is_control) continue;
-        covered |= @as(u16, 1) << @backingInt(kind);
+        covered.insert(kind);
         const Result = host_reply.MutationResult(kind);
         const rejected: Result = .{ .rejected = .{ .replayed = false, .code = .invalid_session_reference } };
         for ([_]Result{ MutationWitness.accepted(kind), rejected, .conflict, .infrastructure_failure }) |initial| {
@@ -5088,7 +5088,11 @@ test "every accepted control publishes exactly one hint before reply handling" {
             }
         }
     }
-    try std.testing.expectEqual(@as(u16, 0xfc), covered);
+    const expected: std.EnumSet(command_spec.CommandKind) = .initMany(&.{
+        .session_stop, .session_archive,   .model_interruption, .permission_decision,
+        .session_pin,  .action_background, .action_stop,
+    });
+    try std.testing.expectEqual(expected, covered);
 }
 
 // Each symbol below is captured by the old decoders at 5472ccf5, independently
