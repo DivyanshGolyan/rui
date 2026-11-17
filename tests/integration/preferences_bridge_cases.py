@@ -49,6 +49,11 @@ def preferences_bridge(binary, root, store_settings, env):
     try:
         with host_process.short_interface_directory() as runtime:
             clean["RUI_RUNTIME_DIR"] = str(runtime)
+            if "sqlite" in store_settings:
+                placement = subprocess.run([str(binary), "host", "set", "--store", store_settings["sqlite"]["dir"],
+                                            "interface.dir", str(runtime)], env=clean, cwd=workspace,
+                                           text=True, capture_output=True, timeout=20)
+                assert placement.returncode == 0, placement
             document = {"store": store_settings, "interface": {"dir": str(runtime), "lifetime": "stdin"},
                         "execution": {"paused": True}, "network": {"caFile": str(root / "cert.pem")},
                         "providers": {"openai": {"endpoint": "https://api.openai.com/v1/responses",
@@ -125,7 +130,7 @@ def preferences_bridge(binary, root, store_settings, env):
                     original = preferences.read_bytes()
                     preferences.write_text(original.decode().replace("reasoning_effort=max", "reasoning_effort=low")
                                            .replace("permission_mode=bypass", "permission_mode=ask"))
-                    replay = invoke("request", "recover", "--store", store, "--record", record)
+                    replay = invoke("request", "recover", "--store", store, "--record", record, "--kind", "configure")
                     preferences.write_bytes(original)
                     assert replay["answer"]["replayed"] is True and replay["context"]["session"] == receipt["context"]["session"], replay
 
@@ -162,7 +167,7 @@ def preferences_bridge(binary, root, store_settings, env):
                         changed = preferences.read_bytes()
                         preferences.write_text(changed.decode().replace("reasoning_effort=max", "reasoning_effort=low")
                                                .replace("permission_mode=bypass", "permission_mode=ask"))
-                        replay = invoke("request", "recover", "--store", store, "--record", record)
+                        replay = invoke("request", "recover", "--store", store, "--record", record, "--kind", "configure")
                         preferences.write_bytes(changed)
                         assert replay["answer"]["replayed"] is True and replay["context"]["session"] == child, replay
                         assert inspect(child) == saved
