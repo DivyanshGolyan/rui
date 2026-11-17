@@ -294,6 +294,95 @@ fn pathDefault(comptime text: []const u8) OsBytes(max_path_bytes) {
     return result;
 }
 
+// Public layers are individually bounded; assigning a preset replaces that
+// entire entry, so each of 64 retained specs may come from a separate 1 MiB
+// layer. JSON normalization costs at most six bytes per original byte (\uXXXX).
+// The typed remainder is bounded recursively, including names, punctuation,
+// optional/union alternatives and the larger of escaped or hex OS-byte forms.
+// This is a document bound only; the private frame owner adds its own framing
+// and ProviderIntent budget instead of borrowing the public input limit.
+pub const max_composed_document_bytes: usize = blk: {
+    @setEvalBranchQuota(100_000);
+    break :blk composedBound(Settings);
+};
+
+fn quotedBound(bytes: usize) usize {
+    return 2 + 6 * bytes;
+}
+fn osBytesBound(bytes: usize) usize {
+    return @max(quotedBound(bytes), "{\"hex\":\"\"}".len + 2 * bytes);
+}
+fn composedBound(comptime T: type) usize {
+    if (@typeInfo(T) == .optional) return @max(4, composedBound(@typeInfo(T).optional.child));
+    if (comptime isKind(T)) return switch (T.kind) {
+        .text => quotedBound(T.max_bytes),
+        .path => @max(4, osBytesBound(T.max_bytes)),
+        .url => @max(4, quotedBound(T.max_bytes)),
+        .count => @bitSizeOf(T.Number) + 1,
+        .flag => 5,
+        .choice => blk: {
+            var largest: usize = 0;
+            inline for (@typeInfo(T.Enum).@"enum".field_names) |name| largest = @max(largest, quotedBound(name.len));
+            break :blk largest;
+        },
+        .secret => @max("{\"owner\":true}".len, @max("{\"env\":}".len + osBytesBound(max_secret_env_name_bytes), "{\"file\":}".len + osBytesBound(max_path_bytes))),
+        .named => 2 + T.max * (quotedBound(max_mcp_name_bytes) + 2 + composedBound(T.Child)),
+        .providers => composedBound(T.Table),
+        .presets => 2 + preset_value.max_presets * (quotedBound(preset_value.max_preset_name_bytes) + 2 + 6 * max_document_bytes),
+    };
+    return switch (@typeInfo(T)) {
+        .@"struct" => |info| blk: {
+            var size: usize = 2;
+            inline for (info.field_names, info.field_types) |name, Field| size += quotedBound(camel(name).len) + 2 + composedBound(Field);
+            break :blk size;
+        },
+        .@"union" => |info| blk: {
+            var largest: usize = 0;
+            inline for (info.field_names, info.field_types) |name, Field| largest = @max(largest, quotedBound(camel(name).len) + 1 + composedBound(Field));
+            break :blk 2 + largest;
+        },
+        else => @compileError("not a Host settings kind"),
+    };
+}
+
+/// Prove the typed tree contains source descriptions, not owned credentials.
+/// Named vacant slots count too: omission by write must not hide live owners.
+/// References are deliberately not opened or resolved by this proof.
+pub fn unresolved(settings: *const Settings) bool {
+    return unresolvedValue(Settings, settings);
+}
+fn unresolvedValue(comptime T: type, value: *const T) bool {
+    if (@typeInfo(T) == .optional) {
+        if (value.*) |*present| return unresolvedValue(@typeInfo(T).optional.child, present);
+        return true;
+    }
+    if (comptime isKind(T)) {
+        switch (T.kind) {
+            .secret => {
+                if (value.bytes.slice().len != 0) return false;
+                if (T.default_source == .mysql) return value.bytes.parsed == null and value.bytes.allocator == null;
+                return true;
+            },
+            .named => {
+                for (&value.values) |*entry| if (!unresolvedValue(T.Child, entry)) return false;
+                return true;
+            },
+            .providers => return unresolvedValue(T.Table, &value.entries),
+            else => return true,
+        }
+    }
+    switch (@typeInfo(T)) {
+        .@"struct" => |info| inline for (info.field_names, info.field_types) |name, Field| {
+            if (!unresolvedValue(Field, &@field(value, name))) return false;
+        },
+        .@"union" => switch (value.*) {
+            inline else => |*payload| return unresolvedValue(@TypeOf(payload.*), payload),
+        },
+        else => @compileError("not a Host settings kind"),
+    }
+    return true;
+}
+
 pub const Schema = struct {
     pub const os_bytes_pattern = "^([0-9a-f]{2})*(?![\\s\\S])";
 
@@ -582,12 +671,20 @@ fn childPath(arena: std.mem.Allocator, prefix: []const u8, name: []const u8) err
     return utf8_validation.validPrefix(result[0..end]);
 }
 
-const Read = struct { arena: std.mem.Allocator, gpa: std.mem.Allocator, origin: Origin, check: PresetCheck, failure: *start_report.Failure };
+const Read = struct {
+    arena: std.mem.Allocator,
+    gpa: std.mem.Allocator,
+    origin: Origin,
+    check: PresetCheck,
+    failure: *start_report.Failure,
+    max_bytes: usize = max_document_bytes,
+    max_depth: usize = protocol.max_json_depth,
+};
 const Json = struct {
     scanner: std.json.Scanner,
     read: *const Read,
     fn next(self: *Json, at: []const u8) Error!std.json.Token {
-        return self.scanner.nextAllocMax(self.read.arena, .alloc_always, max_document_bytes) catch |err| switch (err) {
+        return self.scanner.nextAllocMax(self.read.arena, .alloc_always, self.read.max_bytes) catch |err| switch (err) {
             error.OutOfMemory => error.OutOfMemory,
             else => refuse(self.read.failure, at, "must be well-formed JSON"),
         };
@@ -607,10 +704,10 @@ const JsonFrame = struct {
     key_path: []const u8 = "",
 };
 fn parseJson(read: *const Read, document: []const u8, at: []const u8) Error!std.json.Value {
-    if (document.len > max_document_bytes) return refuse(read.failure, at, "exceeds the document byte bound");
+    if (document.len > read.max_bytes) return refuse(read.failure, at, "exceeds the document byte bound");
     var json: Json = .{ .scanner = .initCompleteInput(read.arena, document), .read = read };
     defer json.scanner.deinit();
-    const frames = try read.arena.alloc(JsonFrame, protocol.max_json_depth);
+    const frames = try read.arena.alloc(JsonFrame, read.max_depth);
     var depth: usize = 0;
     var root: ?std.json.Value = null;
     while (true) {
@@ -668,10 +765,27 @@ fn parseJson(read: *const Read, document: []const u8, at: []const u8) Error!std.
 }
 
 pub fn apply(settings: *Settings, gpa: std.mem.Allocator, document: []const u8, origin: Origin, check: PresetCheck, failure: *start_report.Failure) Error!void {
+    return applyBounded(settings, gpa, document, origin, check, failure, max_document_bytes, protocol.max_json_depth);
+}
+/// Decode only the private composed document. Public apply and assign keep
+/// their original per-layer limits and file/pipe admission policy.
+pub fn applyComposed(settings: *Settings, gpa: std.mem.Allocator, document: []const u8, check: PresetCheck, failure: *start_report.Failure) Error!void {
+    // A root preset assignment gains Settings and presets containers.
+    return applyBounded(settings, gpa, document, .file, check, failure, max_composed_document_bytes, protocol.max_json_depth + 2);
+}
+fn applyBounded(settings: *Settings, gpa: std.mem.Allocator, document: []const u8, origin: Origin, check: PresetCheck, failure: *start_report.Failure, max_bytes: usize, max_depth: usize) Error!void {
     var wiping: secret_value.WipingAllocator = .{ .backing = gpa };
     var memory: std.heap.ArenaAllocator = .init(wiping.allocator());
     defer memory.deinit();
-    const read: Read = .{ .arena = memory.allocator(), .gpa = gpa, .origin = origin, .check = check, .failure = failure };
+    const read: Read = .{
+        .arena = memory.allocator(),
+        .gpa = gpa,
+        .origin = origin,
+        .check = check,
+        .failure = failure,
+        .max_bytes = max_bytes,
+        .max_depth = max_depth,
+    };
     errdefer settings.wipe();
     const value = try parseJson(&read, document, "");
     try readValue(Settings, settings, value, "", &read);
@@ -2291,4 +2405,181 @@ test "Host settings automatic background threshold defaults and document CLI bou
     try assign(settings, gpa, "execution.backgroundAfterMs", "1", checkSample, &failure);
     try std.testing.expectEqual(@as(u64, 1), settings.execution.background_after_ms.value);
     try std.testing.expectError(error.SettingsInvalid, assign(settings, gpa, "execution.backgroundAfterMs", "0", checkSample, &failure));
+}
+
+test "Host settings composed documents retain independent large preset layers without widening public input" {
+    const gpa = std.testing.allocator;
+    const a = try gpa.create(Settings);
+    defer gpa.destroy(a);
+    a.* = .{};
+    defer a.deinit();
+    const b = try gpa.create(Settings);
+    defer gpa.destroy(b);
+    b.* = .{};
+    defer b.deinit();
+    var failure: start_report.Failure = undefined;
+    var spec: std.Io.Writer.Allocating = .init(gpa);
+    defer spec.deinit();
+    try spec.writer.writeAll("{\"description\":\"");
+    try spec.writer.splatByteAll('a', max_document_bytes / 2 + 1);
+    try spec.writer.writeAll("\"}");
+    try assign(a, gpa, "presets.first", spec.written(), checkSample, &failure);
+    try assign(a, gpa, "presets.second", spec.written(), checkSample, &failure);
+    var encoded: std.Io.Writer.Allocating = .init(gpa);
+    defer encoded.deinit();
+    try write(a, &encoded.writer);
+    try std.testing.expect(encoded.written().len > max_document_bytes);
+    try std.testing.expect(encoded.written().len <= max_composed_document_bytes);
+    try std.testing.expectError(error.SettingsInvalid, apply(b, gpa, encoded.written(), .file, checkSample, &failure));
+    try applyComposed(b, gpa, encoded.written(), checkSample, &failure);
+    try std.testing.expectEqual(@as(usize, 2), b.presets.specs.len);
+    try std.testing.expectEqualStrings(a.presets.specs[0].spec.get("description").?.string, b.presets.specs[0].spec.get("description").?.string);
+    try std.testing.expectEqualStrings(a.presets.specs[1].spec.get("description").?.string, b.presets.specs[1].spec.get("description").?.string);
+    try std.testing.expect(unresolved(b));
+}
+
+test "Host settings composed decoder covers normalized tokens and root preset nesting" {
+    const gpa = std.testing.allocator;
+    const a = try gpa.create(Settings);
+    defer gpa.destroy(a);
+    a.* = .{};
+    defer a.deinit();
+    const b = try gpa.create(Settings);
+    defer gpa.destroy(b);
+    b.* = .{};
+    defer b.deinit();
+    var failure: start_report.Failure = undefined;
+    var spec: std.Io.Writer.Allocating = .init(gpa);
+    defer spec.deinit();
+    try spec.writer.writeAll("{\"number\":");
+    // Legal JSON number text is retained, not converted to a floating value.
+    try spec.writer.splatByteAll('1', max_document_bytes - 12);
+    try spec.writer.writeByte('}');
+    try assign(a, gpa, "presets.number", spec.written(), checkSample, &failure);
+    var encoded: std.Io.Writer.Allocating = .init(gpa);
+    defer encoded.deinit();
+    try write(a, &encoded.writer);
+    try applyComposed(b, gpa, encoded.written(), checkSample, &failure);
+    try std.testing.expectEqualStrings(a.presets.specs[0].spec.get("number").?.number_string, b.presets.specs[0].spec.get("number").?.number_string);
+
+    var deep: std.Io.Writer.Allocating = .init(gpa);
+    defer deep.deinit();
+    try deep.writer.writeAll("{\"nested\":");
+    for (0..protocol.max_json_depth - 1) |_| try deep.writer.writeByte('[');
+    try deep.writer.writeAll("null");
+    for (0..protocol.max_json_depth - 1) |_| try deep.writer.writeByte(']');
+    try deep.writer.writeByte('}');
+    try assign(a, gpa, "presets.deep", deep.written(), checkSample, &failure);
+    var nested: std.Io.Writer.Allocating = .init(gpa);
+    defer nested.deinit();
+    try write(a, &nested.writer);
+    try applyComposed(b, gpa, nested.written(), checkSample, &failure);
+    try std.testing.expectEqual(@as(usize, 2), b.presets.specs.len);
+}
+
+const UnresolvedWitness = struct {
+    fn visit(comptime T: type, value: *T, root: *const Settings, gpa: std.mem.Allocator) !usize {
+        if (@typeInfo(T) == .optional) {
+            if (value.*) |*present| return visit(@typeInfo(T).optional.child, present, root, gpa);
+            return 0;
+        }
+        if (comptime isKind(T)) {
+            switch (T.kind) {
+                .secret => {
+                    try std.testing.expect(unresolved(root));
+                    value.source = .literal;
+                    try std.testing.expect(unresolved(root));
+                    if (T.default_source == .mysql) {
+                        value.bytes.raw = @constCast("x");
+                        try std.testing.expect(!unresolved(root));
+                        value.bytes.raw = &.{};
+                        var parsed: MysqlValue = .{};
+                        value.bytes.parsed = &parsed;
+                        try std.testing.expect(!unresolved(root));
+                        value.bytes.parsed = null;
+                        value.bytes.allocator = gpa;
+                        try std.testing.expect(!unresolved(root));
+                        value.bytes.allocator = null;
+                    } else {
+                        value.bytes.bytes[0] = 'x';
+                        value.bytes.len = 1;
+                        try std.testing.expect(!unresolved(root));
+                        value.bytes.bytes[0] = 0;
+                        value.bytes.len = 0;
+                    }
+                    try std.testing.expect(unresolved(root));
+                    return 1;
+                },
+                .named => {
+                    var count: usize = 0;
+                    // Deliberately visit all vacant slots, not just len.
+                    for (&value.values) |*entry| count += try visit(T.Child, entry, root, gpa);
+                    return count;
+                },
+                .providers => return visit(T.Table, &value.entries, root, gpa),
+                else => return 0,
+            }
+        }
+        var count: usize = 0;
+        switch (@typeInfo(T)) {
+            .@"struct" => |info| inline for (info.field_names, info.field_types) |name, Field| {
+                count += try visit(Field, &@field(value, name), root, gpa);
+            },
+            .@"union" => switch (value.*) {
+                inline else => |*payload| return visit(@TypeOf(payload.*), payload, root, gpa),
+            },
+            else => @compileError("not a Host settings kind"),
+        }
+        return count;
+    }
+};
+
+test "Host settings unresolved proof checks every typed secret including vacant named owners" {
+    const gpa = std.testing.allocator;
+    const settings = try gpa.create(Settings);
+    defer gpa.destroy(settings);
+    settings.* = .{ .store = .{ .mysql = .{} } };
+    defer settings.deinit();
+    const count = try UnresolvedWitness.visit(Settings, settings, settings, gpa);
+    try std.testing.expect(count > max_mcp_servers);
+    try std.testing.expectEqual(@as(usize, 0), settings.tools.mcp.len);
+    try std.testing.expect(unresolved(settings));
+    try settings.store.mysql.url.bytes.set(gpa, "mysql://user:credential@localhost/database");
+    try std.testing.expect(!unresolved(settings));
+    settings.store.mysql.url.bytes.wipe();
+    try std.testing.expect(unresolved(settings));
+}
+
+test "Host settings private decode preserves every secret reference and empty owner but refuses file literals" {
+    const gpa = std.testing.allocator;
+    const a = try gpa.create(Settings);
+    defer gpa.destroy(a);
+    const b = try gpa.create(Settings);
+    defer gpa.destroy(b);
+    for (leaves) |leaf| {
+        if (!std.mem.eql(u8, leaf.kind, "secret")) continue;
+        const at = try concrete(gpa, leaf.pattern);
+        defer gpa.free(at);
+        for ([_][]const u8{ "env:SOURCE_\xff", "file:/tmp/source-\xff", "{\"owner\":true}" }) |source| {
+            a.* = .{};
+            defer a.deinit();
+            b.* = .{};
+            defer b.deinit();
+            var failure: start_report.Failure = undefined;
+            try assign(a, gpa, at, source, checkSample, &failure);
+            try std.testing.expect(unresolved(a));
+            var encoded: std.Io.Writer.Allocating = .init(gpa);
+            defer encoded.deinit();
+            try write(a, &encoded.writer);
+            try applyComposed(b, gpa, encoded.written(), checkSample, &failure);
+            try std.testing.expect(unresolved(b));
+            try expectSame(Settings, a, b);
+        }
+        a.* = .{};
+        defer a.deinit();
+        var failure: start_report.Failure = undefined;
+        const literal = try sampleDocument(gpa, at, "{\"value\":\"credential\"}", false);
+        defer gpa.free(literal);
+        try std.testing.expectError(error.SettingsInvalid, applyComposed(a, gpa, literal, checkSample, &failure));
+    }
 }

@@ -62,6 +62,7 @@ const cores = .{
     .{ "host_reply.zig", @import("host_reply.zig") },
     .{ "host_restart.zig", @import("host_restart.zig") },
     .{ "host_settings.zig", @import("host_settings.zig") },
+    .{ "host_settings_handoff.zig", @import("host_settings_handoff.zig") },
     .{ "HostStartupWait.zig", @import("HostStartupWait.zig") },
     .{ "http1/Parser.zig", @import("http1/Parser.zig") },
     .{ "http1/request.zig", @import("http1/request.zig") },
