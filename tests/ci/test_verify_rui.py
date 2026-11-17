@@ -10,7 +10,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import time
 import urllib.request
 import types
 import unittest
@@ -57,6 +56,8 @@ class VerifyRuiTest(unittest.TestCase):
             self.assertEqual(captured["env"]["HOST_ONLY"], "secret")
 
     def test_image_consent_fixture_emits_one_typed_image_call_then_summary(self):
+        from host_process import wait_for
+
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             scratch = root / "scratch"
@@ -71,9 +72,8 @@ class VerifyRuiTest(unittest.TestCase):
                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE) as provider:
                 try:
                     port = scratch / "fixture.port"
-                    deadline = time.monotonic() + 10
-                    while not port.exists() and provider.poll() is None and time.monotonic() < deadline:
-                        time.sleep(.01)
+                    wait_for(lambda: port.exists() or provider.poll() is not None,
+                             "image fixture port or child exit", timeout=10)
                     self.assertTrue(port.exists(), "image fixture did not start")
                     url = "http://127.0.0.1:" + port.read_text() + "/responses"
                     user = {"role": "user", "content": "Review with an image consent check."}
