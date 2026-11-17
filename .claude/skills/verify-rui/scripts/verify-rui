@@ -4060,9 +4060,7 @@ def cmd_publish(args):
 # ---------------------------------------------------------------- CLI
 
 
-def main():
-    if not CACHE.is_absolute():
-        die("VERIFY_RUI_CACHE must be an absolute path")
+def build_parser():
     parser = argparse.ArgumentParser(prog="verify-rui", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     p = sub.add_parser("build", help="build a pinned SHA once (ReleaseSafe) into the cache")
@@ -4194,7 +4192,13 @@ def main():
     p = sub.add_parser("_fixture")
     p.add_argument("run")
     p.set_defaults(func=fixture_main)
-    args = parser.parse_args()
+    return parser
+
+
+def main():
+    if not CACHE.is_absolute():
+        die("VERIFY_RUI_CACHE must be an absolute path")
+    args = build_parser().parse_args()
     if args.command in ("_tap",) and args.argv and args.argv[0] == "--":
         args.argv = args.argv[1:]
     if args.command == "term" and args.argv and args.argv[0] == "--":

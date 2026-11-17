@@ -1,8 +1,12 @@
 """Contract checks for the screen workflow's artifact and writer wiring."""
+import contextlib
+import io
 import json
 import os
 import pathlib
 import re
+import runpy
+import shlex
 import subprocess
 import sys
 import tarfile
@@ -14,6 +18,63 @@ WORKFLOW = pathlib.Path(__file__).resolve().parents[2] / '.github/workflows/scre
 
 
 class ScreensWorkflowTest(unittest.TestCase):
+    def test_all_verify_rui_commands_parse_with_real_cli(self):
+        tool = WORKFLOW.parents[2] / '.claude/skills/verify-rui/scripts/verify-rui'
+        parser = runpy.run_path(str(tool))['build_parser']()
+        commands = []
+        for line in WORKFLOW.read_text().splitlines():
+            if '"$V"' not in line:
+                continue
+            command = line.split('"$V"', 1)[1]
+            command = re.split(r'\s(?:2>&1|>|\|)|;|\)(?=\s|$)', command, maxsplit=1)[0]
+            command = re.sub(r'\$\{[^}]+\}|\$[A-Za-z_][A-Za-z_0-9]*', 'placeholder', command)
+            self.assertNotIn('$', command, line)
+            argv = shlex.split(command)
+            with self.subTest(line=line):
+                parsed = parser.parse_args(argv)
+                if parsed.command == 'shots':
+                    self.assertEqual(parsed.shard, 'placeholder/4')
+                    self.assertTrue(parsed.scenario.endswith('/frames.json'))
+                    self.assertIsNotNone(parsed.out)
+                if parsed.command == 'shots-merge':
+                    self.assertTrue(parsed.directories)
+                    self.assertIsNotNone(parsed.out)
+                with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                    parser.parse_args(argv + ['--not-a-real-option'])
+            commands.append(parsed.command)
+        self.assertEqual(commands.count('build'), 2)
+        self.assertEqual(commands.count('shots'), 2)
+        self.assertEqual(commands.count('shots-merge'), 3)
+
+    def test_unchanged_publication_skips_commit_and_push(self):
+        workflow = WORKFLOW.read_text()
+        start = workflow.index('          if [ -n "$remote_sha" ]; then\n            remote_tree=')
+        end = workflow.index('          echo "Screen preview wall time:', start)
+        script = textwrap.dedent(workflow[start:end])
+        for existing in (False, True):
+            with self.subTest(existing=existing), tempfile.TemporaryDirectory() as tmp:
+                root = pathlib.Path(tmp)
+                workspace = root / 'workspace'
+                workspace.mkdir()
+                published = root / 'published'
+                published.mkdir()
+                subprocess.run(['git', 'init', '-q', str(workspace)], check=True)
+                subprocess.run(['git', '-C', str(workspace), 'config', 'user.name', 'Test'], check=True)
+                subprocess.run(['git', '-C', str(workspace), 'config', 'user.email', 'test@example.com'], check=True)
+                remote_sha = ''
+                if existing:
+                    (workspace / 'image.png').write_bytes(b'image')
+                    (published / 'image.png').write_bytes(b'image')
+                    subprocess.run(['git', '-C', str(workspace), 'add', '.'], check=True)
+                    subprocess.run(['git', '-C', str(workspace), 'commit', '-qm', 'existing'], check=True)
+                    remote_sha = subprocess.check_output(['git', '-C', str(workspace), 'rev-parse', 'HEAD'], text=True).strip()
+                env = {**os.environ, 'RUNNER_TEMP': tmp, 'GH_TOKEN': '', 'GITHUB_REPOSITORY': 'example/repo'}
+                result = subprocess.run(['bash', '-euc', 'remote_sha="$1"\n' + script, 'bash', remote_sha],
+                                        cwd=workspace, env=env, text=True, capture_output=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn('No screenshot changes to publish.', result.stdout)
+        self.assertLess(end, workflow.index('python3 tests/ci/screens_comment.py', end))
+
     def test_every_verify_rui_job_uses_isolated_main_tooling(self):
         workflow = WORKFLOW.read_text()
         self.assertIn('echo "tooling=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"', workflow)
@@ -203,6 +264,8 @@ class ScreensWorkflowTest(unittest.TestCase):
             self.assertEqual(len(json.loads((root / 'capture-failures.json').read_text())), 8)
             self.assertTrue((root / 'merged/diff.json').is_file())
             self.assertEqual(json.loads((root / 'merged/shots.json').read_text()), [])
+            for side in ('baseline', 'merged'):
+                self.assertTrue(json.loads((root / side / 'shots-meta.json').read_text())['failed'])
 
     def test_cached_baseline_is_rechecked_by_merge_owner(self):
         workflow = WORKFLOW.read_text()

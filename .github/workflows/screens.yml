@@ -461,6 +461,7 @@ jobs:
           if [ "${#shards[@]}" -eq 0 ]; then
             mkdir -p "$RUNNER_TEMP/empty-candidate"
             echo '[]' > "$RUNNER_TEMP/empty-candidate/shots.json"
+            echo '{"failed":true}' > "$RUNNER_TEMP/empty-candidate/shots-meta.json"
             shards+=("$RUNNER_TEMP/empty-candidate")
           fi
           if [ -n "$BASE" ]; then
@@ -486,6 +487,7 @@ jobs:
             if [ "${#base_shards[@]}" -eq 0 ]; then
               mkdir -p "$RUNNER_TEMP/empty-baseline"
               echo '[]' > "$RUNNER_TEMP/empty-baseline/shots.json"
+              echo '{"failed":true}' > "$RUNNER_TEMP/empty-baseline/shots-meta.json"
               base_shards+=("$RUNNER_TEMP/empty-baseline")
             fi
             if ! "$V" shots-merge "${base_shards[@]}" --out "$RUNNER_TEMP/baseline"; then
@@ -624,13 +626,22 @@ jobs:
                   shutil.rmtree(path)
           (root / '.order').unlink(missing_ok=True)
           PY
+          if [ -n "$remote_sha" ]; then
+            remote_tree=$(git rev-parse "$remote_sha^{tree}")
+          else
+            remote_tree=$(git hash-object -t tree /dev/null)
+          fi
           cd "$RUNNER_TEMP/published"
           git init -q
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add .
-          git commit -qm 'Publish screen captures'
-          git -c "http.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)" push --force-with-lease="refs/heads/pr-screens:$remote_sha" "https://github.com/$GITHUB_REPOSITORY.git" HEAD:refs/heads/pr-screens
+          if [ "$(git write-tree)" != "$remote_tree" ]; then
+            git commit -qm 'Publish screen captures'
+            git -c "http.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)" push --force-with-lease="refs/heads/pr-screens:$remote_sha" "https://github.com/$GITHUB_REPOSITORY.git" HEAD:refs/heads/pr-screens
+          else
+            echo 'No screenshot changes to publish.'
+          fi
           echo "Screen preview wall time: $(( $(date +%s) - STARTED )) seconds" >> "$GITHUB_STEP_SUMMARY"
           if [ -n "$PR" ]; then
             cd "$GITHUB_WORKSPACE"
