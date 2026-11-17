@@ -498,3 +498,61 @@ test "creation receipt rejects stored tool names with empty comma segments" {
         };
     }
 }
+
+test "creation receipt corruption work is bounded by ordinal range in SQLite steps" {
+    const wire_request = @import("../../wire_request.zig");
+    const Run = struct {
+        fn steps(as_message: bool, replay: bool, extra: usize) !u64 {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try testingStore(&storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try store_testing.canonicalCwd(std.testing.io, &workspace_buffer);
+            var create = try completeConfiguration("ordinal-seed", "", workspace, "model-a");
+            create.configuration.tools = try .of(&.{"bash"});
+            create.configuration.loaded_tools = try .of(&.{"bash"});
+            var message: wire_request.MessageCommand = .{ .configuration = create.configuration };
+            try message.key.set("ordinal-seed");
+            message.text = try tests.testingBytesContent(&tmp, "ordinal-input", "initial");
+            defer message.removeTemporaryContent(std.testing.io) catch unreachable;
+            var receipt: @import("../../creation_receipt.zig").Configuration = undefined;
+            const session = if (as_message) blk: {
+                const result = storage.submitMessageWithModelInto(&message, null, &receipt, .{});
+                try std.testing.expect(result == .accepted);
+                break :blk result.accepted.session;
+            } else blk: {
+                const result = try storage.configureInto(&create, &receipt, .{});
+                try std.testing.expect(result == .accepted);
+                break :blk result.accepted.session;
+            };
+            const set = try store_testing.queryU64(&storage, "SELECT tool_set_id FROM session_revision WHERE session_ref=?1 AND revision=1", .{session.slice()});
+            const record = try store_testing.queryU64(&storage, "SELECT tool_record_id FROM tool_set_member WHERE tool_set_id=?1 AND ordinal=0", .{set});
+            for (0..extra) |index| {
+                try store_testing.exec(&storage, "INSERT INTO tool_set_member(tool_set_id,ordinal,tool_record_id) VALUES(?1,?2,?3)", .{ set, @as(u64, @intCast(128 + index)), record });
+            }
+            if (!replay) {
+                try create.key.set("ordinal-target");
+                try message.key.set("ordinal-target");
+            }
+            var counter: TestingSteps = .{};
+            counter.begin(storage.sqliteDatabase());
+            const failed = if (as_message)
+                storage.submitMessageWithModelInto(&message, null, &receipt, .{}) == .infrastructure_failure
+            else
+                (try storage.configureInto(&create, &receipt, .{})) == .infrastructure_failure;
+            counter.end(storage.sqliteDatabase());
+            try std.testing.expect(failed and storage.isFenced());
+            return counter.steps;
+        }
+    };
+    for ([_]bool{ false, true }) |as_message| {
+        for ([_]bool{ false, true }) |replay| {
+            const few = try Run.steps(as_message, replay, 1);
+            const many = try Run.steps(as_message, replay, 1024);
+            try std.testing.expect(few > 0);
+            try std.testing.expectEqual(few, many);
+        }
+    }
+}
