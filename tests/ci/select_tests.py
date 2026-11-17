@@ -602,7 +602,7 @@ def execution_batches(targets, check_part="all"):
         raise ValueError(f"Unknown full-check part: {check_part}")
     isolated = {"check", "check-full", "admission-debug-integration", "test-full",
                 "host-launch-integration", "server-delivery-integration",
-                "transport-h2-integration", "codex-h2-integration"}
+                "transport-h2-integration", "codex-h2-integration", "upgrade-integration"}
     shared = [target for target in targets if target not in isolated]
     return (([shared] if shared else [])
             + [[target, "-Dcheck-part=callers"] if target == "check-full" and check_part == "callers"

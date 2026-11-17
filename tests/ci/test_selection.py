@@ -1714,12 +1714,12 @@ fi
     def test_batches_share_builds_but_isolate_timing_witnesses(self):
         targets = ["test", "dispatch-integration", "transport-h2-integration",
                    "test-full", "admission-debug-integration",
-                   "host-launch-integration", "check-full"]
+                   "host-launch-integration", "check-full", "upgrade-integration"]
         self.assertEqual(execution_batches(targets), [
             ["test", "dispatch-integration"],
             ["transport-h2-integration"],
             ["test-full"], ["admission-debug-integration"],
-            ["host-launch-integration"], ["check-full"],
+            ["host-launch-integration"], ["check-full"], ["upgrade-integration"],
         ])
         self.assertEqual(execution_batches([]), [])
 
