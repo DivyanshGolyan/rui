@@ -91,24 +91,37 @@ pub fn attach(gate: []const u8, part: Part, destination: *std.Build.Step, runs: 
     }
 }
 
-const NativeGroup = struct { binaries: []*std.Build.Step.Compile, final: *std.Build.Step.Run };
+const NativeGroup = struct { binaries: []*std.Build.Step.Compile, final: *std.Build.Step };
 
-fn nativeGroup(b: *std.Build, ci: CiArtifacts, identities: []const UnitRoot.Id, tests: []const *std.Build.Step.Compile, filtered: bool) NativeGroup {
+fn unitRun(b: *std.Build, ci: CiArtifacts, compile: *std.Build.Step.Compile, mode: []const u8) *std.Build.Step {
+    const run = b.addSystemCommand(&.{ "python3", "-B" });
+    run.addFileArg(b.path("tests/ci/store_shards.py"));
+    run.addArg(mode);
+    run.addFileArg(ci.path(compile));
+    run.addArgs(&.{ "--timeout", "1200" });
+    run.has_side_effects = true;
+    run.setEnvironmentVariable("RUI_TEST_EXACT_INACTIVITY", "0");
+    return &run.step;
+}
+
+fn nativeGroup(b: *std.Build, ci: CiArtifacts, identities: []const UnitRoot.Id, tests: []const *std.Build.Step.Compile, filtered: bool, runs: *Runs) NativeGroup {
     const definition = group(.native_pair);
     const grouped = if (!filtered) definition.roots else &.{definition.filtered};
-    if (grouped.len == 0) @panic("Native group must contain a unit root");
     const binaries = b.allocator.alloc(*std.Build.Step.Compile, grouped.len) catch @panic("OOM");
-    var previous: ?*std.Build.Step.Run = null;
+    const combined = b.step("unit-roots", "Run the native root and Store shards concurrently");
     for (grouped, binaries) |identity, *binary| {
         const index = std.mem.indexOfScalar(UnitRoot.Id, identities, identity) orelse @panic("Uncompiled native group member");
         binary.* = tests[index];
-        const run = ci.run(tests[index]);
-        run.has_side_effects = true;
-        run.setEnvironmentVariable("RUI_TEST_EXACT_INACTIVITY", "0");
-        if (previous) |prior| run.step.dependOn(&prior.step);
-        previous = run;
+        const run = if (filtered) filtered_run: {
+            const single = ci.run(tests[index]);
+            single.has_side_effects = true;
+            single.setEnvironmentVariable("RUI_TEST_EXACT_INACTIVITY", "0");
+            break :filtered_run &single.step;
+        } else unitRun(b, ci, tests[index], if (identity == .store) "run" else "native");
+        runs.set(identity, run);
+        combined.dependOn(run);
     }
-    return .{ .binaries = binaries, .final = previous.? };
+    return .{ .binaries = binaries, .final = combined };
 }
 
 pub const Units = struct {
@@ -131,7 +144,9 @@ pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pin
         const generate = b.addSystemCommand(&.{ "python3", "-B" });
         generate.addFileArg(b.path("tests/ci/unit_test_runner.py"));
         generate.addFileArg(std.Build.LazyPath.zig_lib.path(b, "compiler/test_runner.zig"));
-        break :runner generate.addOutputFileArg("unit_test_runner.zig");
+        const output = generate.addOutputFileArg("unit_test_runner.zig");
+        generate.addFileArg(b.path("tests/ci/store_test_times.json"));
+        break :runner output;
     } else null;
     const filtered_runner: ?std.Build.Step.Compile.TestRunner = if (test_filters.len != 0) runner: {
         const generate = b.addSystemCommand(&.{ "python3", "-B" });
@@ -162,6 +177,7 @@ pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pin
         if (unit_runner != null) {
             const options = b.addOptions();
             options.addOption(usize, "root", @backingInt(partition));
+            options.addOption(bool, "sharded", partition == .store);
             compile.root_module.addOptions("unit_test_options", options);
             compile.root_module.addImport("unit_test_partition", b.createModule(.{
                 .root_source_file = b.path("src/unit_test_partition.zig"),
@@ -170,16 +186,10 @@ pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pin
             }));
         }
         product.configureUnitRoot(b, compile, target, pinned_transport);
-        if (!definition.filtered_only) {
-            const standalone = ci.run(compile);
-            standalone.has_side_effects = true;
-            standalone.setEnvironmentVariable("RUI_TEST_EXACT_INACTIVITY", "0");
-            runs.set(identity, &standalone.step);
-        }
     }
-    const native = nativeGroup(b, ci, identities, tests, test_filters.len != 0);
-    runs.set(.native_pair, &native.final.step);
-    if (test_filters.len != 0) runs.set(native_group.filtered, &native.final.step);
+    const native = nativeGroup(b, ci, identities, tests, test_filters.len != 0, &runs);
+    runs.set(.native_pair, native.final);
+    if (test_filters.len != 0) runs.set(native_group.filtered, native.final);
     const test_step = b.step(root(.filtered).target, "Run unit, Store, and protocol tests");
     const deadline_witness = b.addTest(.{
         .use_llvm = if (target.result.cpu.arch == .x86_64) false else null,

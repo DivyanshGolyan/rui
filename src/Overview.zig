@@ -1829,8 +1829,8 @@ const Seen = struct {
         provider: ?protocol.Bounded(64) = null,
         model: ?protocol.Bounded(64) = null,
         permission_mode: protocol.Bounded(64) = .{},
-        tools: ?protocol.Bounded(64) = null,
-        loaded_tools: ?protocol.Bounded(64) = null,
+        tools: ?protocol.Bounded(protocol.max_tool_names_bytes) = null,
+        loaded_tools: ?protocol.Bounded(protocol.max_tool_names_bytes) = null,
         label: ?protocol.Bounded(64) = null,
         reasoning_effort: ?protocol.Bounded(64) = null,
     } = .{},
@@ -1905,8 +1905,8 @@ const fake_operations: Operations = .{
                 .provider = if (settings.provider.present) Seen.bounded(settings.provider.value) else null,
                 .model = if (settings.model.present) Seen.bounded(settings.model.value) else null,
                 .permission_mode = Seen.bounded(settings.permission_mode.value),
-                .tools = if (settings.tools) |tools| Seen.bounded(tools) else null,
-                .loaded_tools = if (settings.loaded_tools) |loaded| Seen.bounded(loaded) else null,
+                .tools = if (settings.tools) |tools| protocol.Bounded(protocol.max_tool_names_bytes).from(tools) catch unreachable else null,
+                .loaded_tools = if (settings.loaded_tools) |loaded| protocol.Bounded(protocol.max_tool_names_bytes).from(loaded) catch unreachable else null,
                 .label = if (settings.label.value) |label| Seen.bounded(label) else null,
                 .reasoning_effort = if (settings.reasoning_effort.present) Seen.bounded(settings.reasoning_effort.value orelse "") else null,
             };
@@ -2425,12 +2425,13 @@ test "empty Session creation reads saved permissions even with explicit selector
     }
 }
 
-test "empty creation sends no loaded tools" {
+test "empty creation sends the fresh tool profile" {
     const rig = try openOverview();
     defer rig.close();
     try std.testing.expect(try rig.press("\r") == null);
     try std.testing.expect(try rig.settle() == null);
-    try std.testing.expect(Seen.now.creation.loaded_tools == null);
+    try std.testing.expectEqualStrings(product_defaults.tools, Seen.now.creation.tools.?.slice());
+    try std.testing.expectEqualStrings(product_defaults.loaded_tools, Seen.now.creation.loaded_tools.?.slice());
 }
 
 test "empty creation takes saved effort only when the launch reads defaults" {
@@ -6371,7 +6372,7 @@ test "accepted empty creation opens the returned Session with blank focused chat
         try std.testing.expectEqualStrings("ask", Seen.now.creation.permission_mode.slice());
         try std.testing.expectEqualStrings("high", Seen.now.creation.reasoning_effort.?.slice());
         try std.testing.expectEqualStrings(product_defaults.tools, Seen.now.creation.tools.?.slice());
-        try std.testing.expect(Seen.now.creation.loaded_tools == null);
+        try std.testing.expectEqualStrings(product_defaults.loaded_tools, Seen.now.creation.loaded_tools.?.slice());
         try std.testing.expect(Seen.now.creation.label == null);
         try std.testing.expect(frontend.reader.thread == null);
         const focused = rig.last_focus orelse return error.ExpectedChatFocus;

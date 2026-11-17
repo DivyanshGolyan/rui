@@ -128,15 +128,16 @@ pub fn open(storage: *Store, tmp: *std.testing.TmpDir, io: std.Io, options: test
                 try text.writer.writeAll(rest);
                 try run(text.written());
             }
-            try run("CREATE USER IF NOT EXISTS 'rui_conformance'@'localhost' IDENTIFIED BY 'rui_conformance'");
-            try run(try std.fmt.bufPrint(&buffer, "GRANT SELECT,INSERT,UPDATE ON {s}.* TO 'rui_conformance'@'localhost'", .{name}));
+            const config = (try dialect.rootConfig()).?;
+            try run(try std.fmt.bufPrint(&buffer, "CREATE USER IF NOT EXISTS '{s}'@'localhost' IDENTIFIED BY 'rui_conformance'", .{config.conformance_user}));
+            try run(try std.fmt.bufPrint(&buffer, "GRANT SELECT,INSERT,UPDATE ON {s}.* TO '{s}'@'localhost'", .{ name, config.conformance_user }));
         }
         databases.appendAssumeCapacity(.{ .name = fresh_name, .path = owned_path });
         break :name fresh_name;
     };
     const name = std.mem.sliceTo(&name_buffer, 0);
     const config = (try dialect.rootConfig()).?;
-    try storage.openTarget(io, .{ .mysql = .{ .address = .{ .unix_socket = config.socket }, .user = "rui_conformance", .password = "rui_conformance", .database = name } }, options.identity orelse path, .{ .served = options.served, .host_tool_set = options.host_tool_set });
+    try storage.openTarget(io, .{ .mysql = .{ .address = .{ .unix_socket = config.socket }, .user = config.conformance_user, .password = "rui_conformance", .database = name } }, options.identity orelse path, .{ .served = options.served, .host_tool_set = options.host_tool_set });
     storage.engine.mysql.state.testing_database = name_buffer;
 }
 
@@ -402,7 +403,7 @@ fn admitMetadata(name: []const u8, selector: []const u8) !Mysql {
     const config = (try dialect.rootConfig()).?;
     return Mysql.open(std.testing.io, .{
         .address = .{ .unix_socket = config.socket },
-        .user = "rui_conformance",
+        .user = config.conformance_user,
         .password = "rui_conformance",
         .database = name,
     }, selector, .{});
