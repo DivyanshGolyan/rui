@@ -97,10 +97,10 @@ Call rejection, Action denial, failure, cancellation and uncertainty all produce
 #### Authorizing exact actions
 
 The model-visible **Tool Catalog** contains definitions/schema/result contracts, not execution authority.
-It holds `bash`, which Rui runs as Actions; `find_tools`, `message_agent`, `read_action`, `read_transcript`, `skill`, `start_agent` and `stop_action`, which the core runs itself; and `web_search`, which the provider hosts: the request names it (OpenAI with live page access) and the provider runs it inside the response, so it never becomes an Action and needs no approval.
-The CLI and TUI allow all built-in tools in a fresh Session and initially load `bash`, `find_tools`, `skill` and `web_search`; the Host never supplies a tools list (D104).
+It holds `bash` and `read_image`, which Rui runs as Actions; `find_tools`, `message_agent`, `read_action`, `read_transcript`, `skill`, `start_agent` and `stop_action`, which the core runs itself; and `web_search`, which the provider hosts: the request names it (OpenAI with live page access) and the provider runs it inside the response, so it never becomes an Action and needs no approval.
+The CLI and TUI allow all built-in tools in a fresh Session and initially load `bash`, `find_tools`, `read_image`, `skill` and `web_search`; a model known not to accept images omits `read_image` from the default set. The Host never supplies a tools list (D104). Existing Sessions retain their saved sets.
 Explicit tool selections retain their own loaded-tool behavior.
-CLI `--tools` accepts a comma list of those names or `none`; the public configuration and report arrays list each chosen tool once, in catalog order (`bash`, `find_tools`, `message_agent`, `read_action`, `read_transcript`, `skill`, `start_agent`, `stop_action`, `web_search`).
+CLI `--tools` accepts a comma list of those names or `none`; the public configuration and report arrays list each chosen tool once, in catalog order (`bash`, `find_tools`, `message_agent`, `read_action`, `read_image`, `read_transcript`, `skill`, `start_agent`, `stop_action`, `web_search`).
 A Session's optional `loaded_tools` uses the same name-list grammar (`--loaded-tools a,b|none` in the CLI), defaults to all its `tools` when omitted from an explicit spec, and records loaded-name intent; the Operation's projected, frozen offer is sent to the model and used to validate calls.
 Every loaded name must be in its resulting tools or configure refuses `loaded_tools_not_in_tools`; a strict subset must contain `find_tools` or configure refuses `loaded_tools_unreachable`.
 Changing tools without specifying loaded_tools keeps equality when the saved sets were equal; otherwise it intersects the saved loaded set with the new tools and applies the same checks.
@@ -113,6 +113,7 @@ It loads at most eight matches in name order, in one call-keyed command and one 
 A no-match call writes no revision.
 A strict `loaded_tools` subset must include `find_tools`; NULL in the saved loaded set means all configured tools.
 Newly loaded definitions join the next request as `additional_tools`; a call to an unloaded tool still settles as `unknown_tool`.
+`read_image(path)` reads a regular local file relative to the frozen Workspace or by absolute Host-local path after exact Action authorization. It snapshots and validates PNG or JPEG bytes in charged custody and settles the original Action with an image observation; failures settle explicitly, and replay uses the saved Resolution without reopening the path. It uses the shared Action lifecycle for stopping and backgrounding.
 `read_action(action, offset?)` accepts canonical decimal strings and reads only the caller's Session, using the same sole Resolution and bounded UTF-8 byte cursor as native `action read`.
 Pending calls report their approval, queued or attempted state; settled calls return the immutable final identity and up to 4096 bytes, with `next` and `more` for continued reads.
 Reading neither consumes nor stops an Action and does not subscribe to completion. The Operation's frozen offer controls availability; invalid arguments, foreign Actions and invalid cursors resolve the tool call failed when it runs.
