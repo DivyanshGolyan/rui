@@ -105,7 +105,8 @@ jobs:
           tar -cf "$RUNNER_TEMP/screens-build.tar" -C "$RUNNER_TEMP" screens-build
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: screens-build-${{ github.run_id }}-${{ github.run_attempt }}
+          overwrite: true
+          name: screens-build-${{ github.run_id }}
           path: ${{ runner.temp }}/screens-build.tar
           retention-days: 1
           if-no-files-found: error
@@ -144,7 +145,8 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: ${{ steps.probe.outputs.missing == 'false' }}
         with:
-          name: screens-baseline-cached-${{ github.run_id }}-${{ github.run_attempt }}
+          overwrite: true
+          name: screens-baseline-cached-${{ github.run_id }}
           path: ${{ runner.temp }}/cached-baseline.tar
           retention-days: 1
           if-no-files-found: error
@@ -177,7 +179,8 @@ jobs:
           tar -cf "$RUNNER_TEMP/screens-baseline-build.tar" -C "$RUNNER_TEMP" screens-baseline-build
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: screens-baseline-build-${{ github.run_id }}-${{ github.run_attempt }}
+          overwrite: true
+          name: screens-baseline-build-${{ github.run_id }}
           path: ${{ runner.temp }}/screens-baseline-build.tar
           retention-days: 1
           if-no-files-found: error
@@ -198,7 +201,7 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: screens-baseline-build-${{ github.run_id }}-${{ github.run_attempt }}
+          name: screens-baseline-build-${{ github.run_id }}
           path: ${{ runner.temp }}
       - name: Restore base build and source
         env:
@@ -256,7 +259,8 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: ${{ always() }}
         with:
-          name: screens-baseline-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
+          overwrite: true
+          name: screens-baseline-${{ matrix.shard }}-${{ github.run_id }}
           path: ${{ runner.temp }}/baseline-shard
           retention-days: 3
           if-no-files-found: error
@@ -277,7 +281,7 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: screens-build-${{ github.run_id }}-${{ github.run_attempt }}
+          name: screens-build-${{ github.run_id }}
           path: ${{ runner.temp }}
       - name: Restore candidate build
         run: |
@@ -330,7 +334,8 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: ${{ always() }}
         with:
-          name: screens-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
+          overwrite: true
+          name: screens-${{ matrix.shard }}-${{ github.run_id }}
           path: ${{ runner.temp }}/results
           retention-days: 3
           if-no-files-found: error
@@ -354,17 +359,17 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          pattern: screens-[1-4]-${{ github.run_id }}-${{ github.run_attempt }}
+          pattern: screens-[1-4]-${{ github.run_id }}
           path: ${{ runner.temp }}/shards
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         if: ${{ needs.baseline_probe.outputs.missing == 'true' }}
         with:
-          pattern: screens-baseline-[1-4]-${{ github.run_id }}-${{ github.run_attempt }}
+          pattern: screens-baseline-[1-4]-${{ github.run_id }}
           path: ${{ runner.temp }}/baseline-shards
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         if: ${{ needs.baseline_probe.outputs.missing == 'false' }}
         with:
-          name: screens-baseline-cached-${{ github.run_id }}-${{ github.run_attempt }}
+          name: screens-baseline-cached-${{ github.run_id }}
           path: ${{ runner.temp }}
       - name: Merge captures
         id: merge
@@ -378,7 +383,7 @@ jobs:
           baseline_ok=true
           shards=()
           for number in 1 2 3 4; do
-            shard="$RUNNER_TEMP/shards/screens-$number-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+            shard="$RUNNER_TEMP/shards/screens-$number-$GITHUB_RUN_ID"
             test -f "$shard/head/shots.json"
             case "$(cat "$shard/verdict")" in
               success) ;;
@@ -396,7 +401,7 @@ jobs:
               base_shards+=("$RUNNER_TEMP/cached-baseline")
             else
               for number in 1 2 3 4; do
-                shard="$RUNNER_TEMP/baseline-shards/screens-baseline-$number-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+                shard="$RUNNER_TEMP/baseline-shards/screens-baseline-$number-$GITHUB_RUN_ID"
                 test -f "$shard/shots.json"
                 case "$(cat "$shard/verdict")" in
                   success) ;;
@@ -425,7 +430,8 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: ${{ always() }}
         with:
-          name: screens-merged-${{ github.run_id }}-${{ github.run_attempt }}
+          overwrite: true
+          name: screens-merged-${{ github.run_id }}
           path: ${{ runner.temp }}/merged
           retention-days: 3
           if-no-files-found: ignore

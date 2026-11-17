@@ -2,6 +2,7 @@
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import tarfile
@@ -16,12 +17,22 @@ class ScreensWorkflowTest(unittest.TestCase):
     def test_build_is_transferred_once_and_all_four_shards_are_required(self):
         workflow = WORKFLOW.read_text()
         self.assertIn('matrix:\n        shard: [1, 2, 3, 4]', workflow)
-        self.assertIn('pattern: screens-[1-4]-${{ github.run_id }}-${{ github.run_attempt }}', workflow)
+        self.assertIn('pattern: screens-[1-4]-${{ github.run_id }}', workflow)
         self.assertIn('for number in 1 2 3 4; do', workflow)
         self.assertIn('test -f "$shard/head/shots.json"', workflow)
         self.assertIn('tar -cf "$RUNNER_TEMP/screens-build.tar"', workflow)
         self.assertIn('tar -xf "$RUNNER_TEMP/screens-build.tar"', workflow)
         self.assertIn("record['tree'] + '^{tree}'", workflow)
+
+    def test_artifacts_are_shared_across_attempts_and_uploads_overwrite(self):
+        workflow = WORKFLOW.read_text()
+        self.assertNotIn('github.run_attempt', workflow)
+        self.assertNotIn('GITHUB_RUN_ATTEMPT', workflow)
+        uploaders = re.findall(r'(?ms)^      - uses: actions/upload-artifact@[^\n]*\n(.*?)(?=^      - |^  [a-z_]+:|\Z)', workflow)
+        self.assertEqual(len(uploaders), 6)
+        for upload in uploaders:
+            self.assertRegex(upload, r'(?m)^          name: .+')
+            self.assertRegex(upload, r'(?m)^          overwrite: true$')
 
     def test_build_manifests_round_trip_through_cache_for_both_shards(self):
         workflow = WORKFLOW.read_text()
@@ -71,7 +82,7 @@ class ScreensWorkflowTest(unittest.TestCase):
                         for number in range(1, 5):
                             for kind in ('candidate', 'baseline'):
                                 shard = (root / ('shards' if kind == 'candidate' else 'baseline-shards') /
-                                         (f'screens-{number}-1-1' if kind == 'candidate' else f'screens-baseline-{number}-1-1'))
+                                         (f'screens-{number}-1' if kind == 'candidate' else f'screens-baseline-{number}-1'))
                                 capture = shard / 'head' if kind == 'candidate' else shard
                                 capture.mkdir(parents=True)
                                 broken = kind == side and number == 1
@@ -84,7 +95,7 @@ class ScreensWorkflowTest(unittest.TestCase):
                                 (shard / 'verdict').write_text('failure' if broken and failure == 'exit' else 'success')
                         output = root / 'outputs'
                         env = {**os.environ, 'RUNNER_TEMP': tmp, 'GITHUB_RUN_ID': '1',
-                               'GITHUB_RUN_ATTEMPT': '1', 'GITHUB_OUTPUT': str(output),
+                               'GITHUB_RUN_ATTEMPT': '2', 'GITHUB_OUTPUT': str(output),
                                'BASE': 'base' if with_base else '', 'BASELINE_MISSING': 'true'}
                         result = subprocess.run(['bash', '-c', script], cwd=repo, env=env, capture_output=True, text=True)
                         self.assertEqual(result.returncode, 0, result.stderr)
@@ -109,7 +120,7 @@ class ScreensWorkflowTest(unittest.TestCase):
                 record = {'name': 'screen', 'size': '80x24', 'ok': True, 'reason': None,
                           'fingerprint': 'same', 'files': {}}
                 for number in range(1, 5):
-                    shard = root / f'shards/screens-{number}-1-1'
+                    shard = root / f'shards/screens-{number}-1'
                     (shard / 'head').mkdir(parents=True)
                     (shard / 'head/shots.json').write_text(json.dumps([record] if number == 1 else []))
                     (shard / 'head/shots-meta.json').write_text(json.dumps({'failed': False}))
@@ -121,7 +132,7 @@ class ScreensWorkflowTest(unittest.TestCase):
                 with tarfile.open(root / 'cached-baseline.tar', 'w') as archive:
                     archive.add(cached, arcname='main/base')
                 output = root / 'outputs'
-                env = {**os.environ, 'RUNNER_TEMP': tmp, 'GITHUB_RUN_ID': '1', 'GITHUB_RUN_ATTEMPT': '1',
+                env = {**os.environ, 'RUNNER_TEMP': tmp, 'GITHUB_RUN_ID': '1', 'GITHUB_RUN_ATTEMPT': '2',
                        'GITHUB_OUTPUT': str(output), 'BASE': 'base', 'BASELINE_MISSING': 'false'}
                 result = subprocess.run(['bash', '-c', script], cwd=WORKFLOW.parents[2], env=env, capture_output=True, text=True)
                 self.assertEqual(result.returncode, 0, result.stderr)
