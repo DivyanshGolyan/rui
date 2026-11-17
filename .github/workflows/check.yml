@@ -11,6 +11,10 @@ on:
       base:
         description: Base commit; selection covers base..ref
         required: true
+      native_targets:
+        description: Optional JSON native target array for macOS diagnostics
+        type: string
+        default: ''
       cache_profile:
         description: Record Linux producer cache contents and filesystem reuse
         type: boolean
@@ -92,6 +96,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           PROMOTION: ${{ inputs.promotion || false }}
           COMPILE_ONLY: ${{ inputs.compile_only || false }}
+          NATIVE_TARGETS: ${{ inputs.native_targets || '' }}
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$CANDIDATE_REF"
@@ -106,9 +111,10 @@ jobs:
           from ci_plan import plan
           selection = json.load(open('selection.json'))
           kind = classify(selection['base'], selection['head'])
+          native = {'native_targets': json.loads(os.environ['NATIVE_TARGETS'])} if os.environ.get('NATIVE_TARGETS') else {}
           result = plan(selection, event_name=os.environ['EVENT_NAME'],
                         draft=os.environ['DRAFT'] == 'true', promotion=os.environ['PROMOTION'] == 'true',
-                        change_kind=kind, compile_only=os.environ['COMPILE_ONLY'] == 'true')
+                        change_kind=kind, compile_only=os.environ['COMPILE_ONLY'] == 'true', **native)
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
               print('candidate_ref=' + os.environ['CANDIDATE_REF'], file=f)
               for key, value in result.outputs.items():
