@@ -379,9 +379,10 @@ test "an omitted provider selects the Host's sole served provider" {
             var storage: Store = undefined;
             try store_testing.testingStoreWith(case, &storage, &tmp, std.testing.io, .{ .served = routes });
             defer storage.close() catch unreachable;
-            var command = try completeConfiguration("host-provider", "", "/", "model-a");
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            var command = try completeConfiguration("host-provider", "", workspace, "model-a");
             command.configuration.provider.state = .omitted;
-            command.configuration.workspace.state = .omitted;
             command.configuration.tools = try .of(&.{});
             command.require_model = true;
             const reply = try storage.configure(&command, .{});
@@ -404,9 +405,10 @@ test "an omitted provider is refused on a Host serving several" {
             var storage: Store = undefined;
             try store_testing.testingStoreWith(case, &storage, &tmp, std.testing.io, .{ .served = routes });
             defer storage.close() catch unreachable;
-            var command = try completeConfiguration("several-providers", "", "/", "model-a");
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            var command = try completeConfiguration("several-providers", "", workspace, "model-a");
             command.configuration.provider.state = .omitted;
-            command.configuration.workspace.state = .omitted;
             command.configuration.tools = try .of(&.{});
             const reply = try storage.configure(&command, .{});
             try std.testing.expect(reply == .rejected);
@@ -1275,6 +1277,7 @@ test "standalone creation always requires Workspace and replays saved refusal ac
                     var message: wire_request.MessageCommand = .{};
                     try message.key.set("missing-workspace");
                     message.configuration = configure.configuration;
+                    message.configuration.?.model.state = .omitted;
                     message.text = try testingBytesContent(&tmp, "missing-workspace-message", "create in my Workspace");
                     defer message.removeTemporaryContent(std.testing.io) catch unreachable;
                     const refused = storage.submitMessageWithModel(&message, null, .{});
@@ -1291,6 +1294,7 @@ test "standalone creation always requires Workspace and replays saved refusal ac
                     try std.testing.expect(accepted == .accepted);
                     const observed = try storage.inspectSessionForTesting(accepted.accepted.session.slice());
                     try std.testing.expectEqualStrings(workspace, observed.workspace.slice());
+                    try std.testing.expectEqualStrings(@import("../../product_defaults.zig").recommended_model, observed.model.slice());
                 } else {
                     const refused = try storage.configure(&configure, .{});
                     try std.testing.expect(refused == .rejected);

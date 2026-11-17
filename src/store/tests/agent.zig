@@ -1023,6 +1023,7 @@ test "parent authority refuses omitted defaults across Configure Message and sta
                     }
                 }
                 try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE parent_ref=?1", .{parent.slice()}));
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE parent_ref=?1 AND model=?2", .{ parent.slice(), @import("../../product_defaults.zig").recommended_model }));
             };
         }
     }.run);
