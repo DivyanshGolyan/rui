@@ -240,7 +240,12 @@ class Case:
         return self.run("upgrade", "--store", self.store, *args, expect=expect)
 
     def build(self, name, version=None, *, managed=True):
-        build = (self.home / ".local/lib/rui" if managed else self.root) / name
+        # Cases can share HOME to exercise a whole-Host batch. Retained
+        # artifacts still belong to each Case, not to that shared installation
+        # selector. Keep one managed leaf (the production ownership shape).
+        owner = hashlib.sha256(os.fsencode(self.root)).hexdigest()[:16]
+        build = self.home / ".local/lib/rui" / f"{owner}-{name}" if managed else self.root / name
+        # Never reuse an installation or overwrite an executable of a live Host.
         (build / "bin").mkdir(parents=True)
         executable = build / "bin/rui"
         if version is None:

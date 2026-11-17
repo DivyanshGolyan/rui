@@ -37,7 +37,7 @@ const accepted_resolutions = store_schema.accepted_resolutions;
 
 pub const PrefixSeal = prefix_seal.PrefixSeal;
 
-const historical_content_columns_sql = "content.byte_length,content.digest,content.private";
+const historical_content_columns_sql = "content.byte_length,content.digest,content.private,content.form";
 
 pub const HistoricalContent = struct {
     view: *RequestPage,
@@ -762,7 +762,7 @@ const ReadAhead = struct {
         const from = &ahead.from;
         const kept = std.meta.eql(from.keys, keysOf(view)) and kept: {
             ahead.groups.finish(view) catch break :kept false;
-            ahead.batch.finish(view, from.after_position) catch break :kept false;
+            ahead.batch.finish(null, view, from.after_position) catch break :kept false;
             break :kept true;
         };
         if (!kept) {
@@ -829,7 +829,7 @@ pub const SettingsRead = struct {
         const page = view.page.?;
         if (!row.catalogs_consistent) return error.CorruptStore;
         page.keep(.batch, row.instructions_content_id, &row.instructions_bytes);
-        if (row.member_count > tool_defs.max_tools or row.provider_count > row.member_count) return error.CorruptStore;
+        if (row.member_count > @import("../../tool_name.zig").max_offered_tools or row.provider_count > row.member_count) return error.CorruptStore;
         view.tool_set_id = row.tool_set_id.get();
         view.tool_count = row.member_count;
         view.provider_tool_count = row.provider_count;
@@ -1248,7 +1248,7 @@ const historical_entries = rsql.Read(.{
         "WHERE current.operation_id=?1 AND e.session_position>?2 AND e.session_position<current.admission_position " ++
         "AND e.entry_kind IN (1,2,4) AND (e.entry_kind=2 OR e.session_position>?3 OR e.session_position=?4" ++
         " OR " ++ history_floor_domain.firstMessageSkillSql("e", "?4") ++ ") UNION ALL " ++
-        "SELECT item.session_position,3,NULL,NULL,NULL,NULL,r.model,r.provider,item.item_kind,item.item_id_digest," ++
+        "SELECT item.session_position,3,NULL,NULL,NULL,NULL,NULL,r.model,r.provider,item.item_kind,item.item_id_digest," ++
         store_schema.oneOf("owner.resolution_code", &accepted_resolutions) ++ " AND owner.session_ref=item.session_ref " ++
         "AND owner_turn.session_ref=item.session_ref " ++
         "AND owner.attempt_ordinal=item.attempt_ordinal AND owner.admission_position<item.session_position " ++
@@ -1261,7 +1261,7 @@ const historical_entries = rsql.Read(.{
         "LEFT JOIN session_revision r ON r.session_ref=owner.session_ref AND r.revision=owner.settings_revision " ++
         "WHERE current.operation_id=?1 AND item.session_position>?2 AND item.session_position<current.admission_position " ++
         "AND " ++ servedItemSql("?3", "?5") ++ " UNION ALL " ++
-        "SELECT earlier.admission_position,4,NULL,NULL,NULL,NULL,revision.model,NULL,NULL,NULL,NULL,NULL,NULL,NULL," ++ operation_effort.effectiveSql("earlier") ++ ",earlier.tool_set_id," ++
+        "SELECT earlier.admission_position,4,NULL,NULL,NULL,NULL,NULL,revision.model,NULL,NULL,NULL,NULL,NULL,NULL,NULL," ++ operation_effort.effectiveSql("earlier") ++ ",earlier.tool_set_id," ++
         "EXISTS(SELECT 1 FROM " ++ declared_members_from ++ " WHERE " ++ declared_members_where("earlier.tool_set_id", "earlier.admission_position", "?6") ++ "),NULL " ++
         "FROM model_operation current JOIN model_operation earlier ON earlier.session_ref=current.session_ref " ++
         "JOIN session_revision revision ON revision.session_ref=earlier.session_ref AND revision.revision=earlier.settings_revision " ++
@@ -1276,6 +1276,7 @@ const historical_entries = rsql.Read(.{
         byte_length: ?u64,
         digest: ?[32]u8,
         private: ?bool,
+        form: ?u8,
         model: ?Bounded(model_capability.max_model_bytes),
         provider: ?provider_name.Provider,
         item_kind: ?u8,
@@ -1332,9 +1333,27 @@ const EntryBatch = struct {
     view: *RequestPage,
     decoded: *historical_entries.Row,
     failure: ?error{CorruptStore} = null,
+    unsupported: ?content_domain.Value = null,
 
     pub fn visit(batch: *EntryBatch, row: *const historical_entries.Row) bool {
         const view = batch.view;
+        if (row.form) |form| {
+            if (form == 1) {
+                if (row.private != false or row.content_id == null or row.byte_length == null or row.digest == null) {
+                    batch.failure = error.CorruptStore;
+                } else {
+                    batch.unsupported = content_domain.Value.of(row.content_id.?.get(), form, row.byte_length.?, row.digest.?) catch {
+                        batch.failure = error.CorruptStore;
+                        return false;
+                    };
+                }
+                return false;
+            }
+            if (form != 0) {
+                batch.failure = error.CorruptStore;
+                return false;
+            }
+        }
         view.entries[view.entries_end] = historicalEntry(view, row) catch |err| {
             batch.failure = err;
             return false;
@@ -1414,11 +1433,16 @@ const BatchRead = struct {
         if (read.ahead) view.page.?.tools_walk = .{};
     }
 
-    fn finish(read: *const BatchRead, view: *RequestPage, after_position: u64) error{CorruptStore}!void {
+    fn finish(read: *const BatchRead, a: ?*ReadAccess, view: *RequestPage, after_position: u64) !void {
         errdefer read.discard(view);
         const page = view.page.?;
         if (!read.sources.consistent) return error.CorruptStore;
         if (read.entries.failure) |err| return err;
+        if (read.entries.unsupported) |value| {
+            const access = a orelse return error.CorruptStore;
+            try @import("content_parts.zig").verify(access, value);
+            return error.InputPartsNotSupported;
+        }
         if (view.entries_end < RequestPage.entry_batch)
             view.entries_done_after = if (view.entries_end == 0) after_position else view.entries[view.entries_end - 1].position;
         page.parts_complete = read.parts.past or page.parts_end < Page.part_batch;
@@ -1434,7 +1458,7 @@ fn nextOrdinaryHistoricalEntry(a: *ReadAccess, view: *RequestPage, after_positio
         read.discard(view);
         return err;
     };
-    try read.finish(view, after_position);
+    try read.finish(a, view, after_position);
     return if (view.entries_end == 0) null else &view.entries[0];
 }
 
@@ -1683,6 +1707,7 @@ const Page = struct {
         output_length: ?u64,
         output_digest: ?[32]u8,
         output_private: ?bool,
+        output_form: ?u8,
     };
 
     fn store(page: *Page, comptime side: Side, row: anytype, out: anytype) void {
@@ -2099,7 +2124,7 @@ fn readNextHistoricalToolGroup(a: *ReadAccess, view: *RequestPage, after_positio
             if (rides) read.discard(view);
             return err;
         };
-        const batch: error{CorruptStore}!void = if (rides) read.finish(view, after_position) else {};
+        const batch: anyerror!void = if (rides) read.finish(a, view, after_position) else {};
         try groups.finish(view);
         try batch;
         if (page.groups_end == 0 and !scan.done) return error.HistoricalPending;
@@ -2259,14 +2284,14 @@ fn readHistoricalToolResultHeld(
     defer entry.release();
     var access: ReadAccess = .open(&entry);
     defer access.deinit();
-    return entry.finish(Ordinary.none, nextGroupResult(&access, view));
+    return entry.finish(error{InputPartsNotSupported}, nextGroupResult(&access, view));
 }
 
 const group_results = rsql.Read(.{
     .sql = "SELECT tool_call.call_ordinal,tool_call.call_id_content_id,call_id.byte_length AS call_id_length,call_id.digest AS call_id_digest," ++
         "call_id.private AS call_id_private," ++ pageBytesSql("call_id", "call_id_bytes") ++ "," ++
         "output.content_id AS output_content_id,output.byte_length AS output_length,output.digest AS output_digest," ++
-        "output.private AS output_private," ++ pageBytesSql("output", "output_bytes") ++ " " ++
+        "output.private AS output_private,output.form AS output_form," ++ pageBytesSql("output", "output_bytes") ++ " " ++
         "FROM model_operation current " ++
         "CROSS JOIN model_operation source ON source.operation_id=?2 AND source.session_ref=current.session_ref " ++
         "CROSS JOIN model_tool_call tool_call ON tool_call.operation_id=source.operation_id LEFT JOIN action_operation action " ++
@@ -2288,6 +2313,7 @@ const group_results = rsql.Read(.{
         output_length: ?u64,
         output_digest: ?[32]u8,
         output_private: ?bool,
+        output_form: ?u8,
         output_bytes: ?Page.Bytes,
     },
     .cardinality = .each,
@@ -2312,7 +2338,11 @@ fn nextGroupResult(a: *ReadAccess, view: *RequestPage) !?HistoricalToolResult {
     if (row.call_ordinal != view.active_tool_group_count or view.active_tool_group_count >= view.active_tool_group_expected)
         return error.CorruptStore;
     const call_id = try viewContent(view, (row.call_id_content_id orelse return error.CorruptStore).get(), &try pageMetadata(row.call_id_length, row.call_id_digest, row.call_id_private), false);
-    const output = try viewContent(view, (row.output_content_id orelse return error.CorruptStore).get(), &try pageMetadata(row.output_length, row.output_digest, row.output_private), false);
+    const output_id = (row.output_content_id orelse return error.CorruptStore).get();
+    var output_metadata = try pageMetadata(row.output_length, row.output_digest, row.output_private);
+    output_metadata.form = row.output_form orelse return error.CorruptStore;
+    _ = try @import("content_parts.zig").publicMetadata(a, output_id, &output_metadata);
+    const output = try viewContent(view, output_id, &output_metadata, false);
     page.results_next += 1;
     view.active_tool_group_count += 1;
     return .{ .call_id = call_id, .output = output };

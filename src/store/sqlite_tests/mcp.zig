@@ -192,12 +192,15 @@ test "MCP permission and core authorization coexist in one Turn" {
     const configured = try storage.configure(&command, .{});
     try std.testing.expect(configured == .accepted);
     const session = configured.accepted.session;
+    const recipient = try configureTestSession(&storage, "mixed-recipient");
+    try submitTestMessage(&storage, &tmp, "recipient-input", "recipient-key", recipient.slice(), "stay busy");
+    _ = (try storage.admitNextModelAttempt(.{})).?;
     try submitTestMessage(&storage, &tmp, "mixed-input", "mixed-key", session.slice(), "fetch and delegate");
     const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     var decoded_buffer: [96]u8 = undefined;
-    const decoded = try std.fmt.bufPrint(&decoded_buffer, "{{\"id\":\"{s}\",\"text\":\"hi\"}}", .{session.slice()});
+    const decoded = try std.fmt.bufPrint(&decoded_buffer, "{{\"id\":\"{s}\",\"text\":\"hi\"}}", .{recipient.slice()});
     var encoded_buffer: [128]u8 = undefined;
-    const encoded = try std.fmt.bufPrint(&encoded_buffer, "{{\\\"id\\\":\\\"{s}\\\",\\\"text\\\":\\\"hi\\\"}}", .{session.slice()});
+    const encoded = try std.fmt.bufPrint(&encoded_buffer, "{{\\\"id\\\":\\\"{s}\\\",\\\"text\\\":\\\"hi\\\"}}", .{recipient.slice()});
     const calls = [_]TestingCall{
         .{ .item_id = "mcp-item", .name = "fetch_page", .encoded_call_id = "mcp-call", .decoded_call_id = "mcp-call", .encoded_arguments = "{}", .decoded_arguments = "{}" },
         .{ .item_id = "message-item", .name = "message_agent", .encoded_call_id = "message-call", .decoded_call_id = "message-call", .encoded_arguments = encoded, .decoded_arguments = decoded },
@@ -214,7 +217,7 @@ test "MCP permission and core authorization coexist in one Turn" {
     try std.testing.expect(std.mem.indexOf(u8, report, "\"tool\":\"start_agent\",\"permission_revision\":\"1\",\"authorization\":\"core\"") != null);
     const message = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
     try std.testing.expect(message.tool == .message_agent);
-    try std.testing.expect(try storage.deliverAgentMessage(message.binding, session.slice(), "hi", .{}) == .delivered);
+    try std.testing.expect(try storage.deliverAgentMessage(message.binding, recipient.slice(), "hi", .{}) == .delivered);
     const start = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
     try std.testing.expect(start.tool == .start_agent);
     try std.testing.expect(try storage.failCoreCall(start.binding, "Nothing was started.", .{}));
