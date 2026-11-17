@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from host_settings_locality import ROOT, declaration_members, facts, scan, surfaces, violations, vocabulary
+from host_settings_locality import ROOT, declaration_members, facts, scan, surfaces, violations, vocabulary, running_source_violations, host_child_violations
 
 
 class HostSettingsLocalityTest(unittest.TestCase):
@@ -142,6 +142,8 @@ fn read(settings: *SessionSettings) void { _ = settings.tools; }
             root = Path(directory)
             (root / 'src').mkdir()
             (root / 'openapi.json').write_text((ROOT / 'openapi.json').read_text())
+            (root / 'src/serve_grammar.zig').write_text('fn runningSources() void { currentArguments(); }\n')
+            (root / 'src/HostLifecycle.zig').write_text('fn finish() void { previousProviders(); }\n')
             path = root / 'src/cli.zig'
             clean = 'const x = "store";\n'
             path.write_text(clean)
@@ -154,3 +156,61 @@ fn read(settings: *SessionSettings) void { _ = settings.tools; }
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RunningSourceLocalityTest(unittest.TestCase):
+    def test_duplicate_reader_mutation_turns_gate_red(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "src").mkdir()
+            (root / "src/serve_grammar.zig").write_text(
+                "pub fn currentArguments() void {}\n"
+                "pub fn previousProviders() void {}\n"
+                "pub fn runningSources() void { currentArguments(); }\n")
+            consumer = root / "src/HostLifecycle.zig"
+            consumer.write_text("fn finish() void { previousProviders(); }\n")
+            self.assertEqual(running_source_violations(root), [])
+            consumer.write_text(consumer.read_text() + "fn injected() void { serve_grammar.currentArguments(); }\n")
+            found = running_source_violations(root)
+            self.assertEqual(len(found), 1, found)
+            self.assertIn("currentArguments must have one production caller", found[0])
+            consumer.write_text("fn finish() void { previousProviders(); }\n"
+                                'test "test reader" { currentArguments(); }\n'
+                                'const words = "currentArguments()";\n')
+            self.assertEqual(running_source_violations(root), [])
+
+    def test_duplicate_provider_transition_mutation_turns_gate_red(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "src").mkdir()
+            (root / "src/serve_grammar.zig").write_text(
+                "fn runningSources() void { currentArguments(); }\n")
+            consumer = root / "src/HostLifecycle.zig"
+            consumer.write_text("fn finish() void { previousProviders(); previousProviders(); }\n")
+            found = running_source_violations(root)
+            self.assertEqual(len(found), 1, found)
+            self.assertIn("previousProviders must have one production caller", found[0])
+
+
+class HostChildLocalityTest(unittest.TestCase):
+    def test_duplicate_child_builder_mutation_turns_gate_red(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "src").mkdir()
+            owner = root / "src/host_start.zig"
+            owner.write_text('pub fn spawn() void { argv[1] = "host"; argv[2] = "serve"; }\n')
+            other = root / "src/HostLifecycle.zig"
+            clean = 'fn read() void { _ = eql(argv[1], "host"); _ = eql(argv[2], "serve"); }\n'
+            other.write_text(clean)
+            self.assertEqual(host_child_violations(root), [])
+            for mutation in (
+                'fn duplicate() void { const argv = &.{"rui", "host", "serve"}; }\n',
+                'fn duplicate() void { argv[1] = "host"; argv[2] = "serve"; }\n',
+            ):
+                other.write_text(clean + mutation)
+                found = host_child_violations(root)
+                self.assertEqual(len(found), 1, found)
+                self.assertIn("Host child argv must be built only by host_start.spawn", found[0])
+            other.write_text(clean)
+            owner.write_text(owner.read_text() + 'fn second() void { const args = &.{"host", "serve"}; }\n')
+            self.assertEqual(len(host_child_violations(root)), 1)
