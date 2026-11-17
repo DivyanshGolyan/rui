@@ -1109,7 +1109,7 @@ EXIT_KEY = "C-c"
 
 KEYS = {"M-?": b"\x1b?", "M-i": b"\x1bi", "M-d": b"\x1bd", "Enter": b"\r", "Esc": b"\x1b", "C-c": b"\x03", "C-g": b"\x07", "C-o": b"\x0f", "C-r": b"\x12", "C-x": b"\x18", "BSpace": b"\x7f",
         "PgUp": b"\x1b[5~", "PgDn": b"\x1b[6~", "Up": b"\x1b[A", "Down": b"\x1b[B", "Right": b"\x1b[C", "Left": b"\x1b[D", "End": b"\x1b[F", "Home": b"\x1b[H",
-        "Tab": b"\t", "S-Up": b"\x1b[1;2A", "S-PgUp": b"\x1b[5;2~",
+        "Tab": b"\t", "S-Up": b"\x1b[1;2A", "S-Down": b"\x1b[1;2B", "S-PgUp": b"\x1b[5;2~",
         # Exact SGR wheel reports for L2 injection; terminal tracking determines
         # how a physical wheel reaches Rui.
         "SGRWheelUp": b"\x1b[<64;10;10M", "SGRWheelDown": b"\x1b[<65;10;10M"}
@@ -2724,7 +2724,7 @@ def frame_steps(run, terminal, steps, exiting=False):
             between = lines[headings[0] + 1:targets[0] + 1]
             if any("needs you" in line or "more above" in line for line in between):
                 raise FrameFailure(f"cannot select {label!r} from a scrolled viewport")
-            terminal.write(KEYS["Home"] + KEYS["Down"] * (1 + sum(bool(line.strip()) for line in between)))
+            terminal.write(KEYS["Home"] + KEYS["S-Down"] * (1 + sum(bool(line.strip()) for line in between)))
             terminal.wait(lambda c: c.style(label) is not None and c.style(label).bold,
                           f"selected overview row {label!r}")
         elif "birth" in step:
@@ -2871,7 +2871,8 @@ def frame_ready(terminal, state, allow_exit=False, sessions=None):
     if state.get("first_frame", False):
         return
     expected, absent = frame_expectations(state), frame_absences(state, sessions)
-    terminal.wait(lambda c: all(frame_contains(text, c.completed) for text in expected)
+    terminal.wait(lambda c: (not state.get("full_overview") or is_full_overview(c.frame))
+                  and all(frame_contains(text, c.completed) for text in expected)
                   and all(text not in c.completed for text in absent)
                   and frame_row_failure(state, c.completed) is None,
                   "state expectations: " + repr({
@@ -2887,6 +2888,8 @@ def frame_capture(run, target, out, state, size, reason):
     frame = target.frame
     state = frame_viewport_state(state, frame.columns, frame.lines)
     plain, ansi, page = cells_render(frame)
+    if state.get("full_overview") and not is_full_overview(frame) and reason is None:
+        reason = "state left full overview before capture"
     missing = next((text for text in frame_expectations(state) if not frame_contains(text, plain)), None)
     if missing is not None and reason is None:
         reason = f"state left before capture: {missing}"

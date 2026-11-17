@@ -470,10 +470,14 @@
         },
         "46x30": {
           "expect": [
-            "Tree root"
+            "Start an agent",
+            "verify-rui creator birth",
+            "gpt-6.1-sol"
           ],
           "absent": [
-            "Attached worker"
+            "+ New Session",
+            "Sessions  Archived",
+            "Opening"
           ]
         }
       },
@@ -488,10 +492,14 @@
             },
             "46x30": {
               "expect": [
-                "Tree root"
+                "Start an agent",
+                "verify-rui creator birth",
+                "gpt-6.1-sol"
               ],
               "absent": [
-                "Attached worker"
+                "+ New Session",
+                "Sessions  Archived",
+                "Opening"
               ]
             }
           }
@@ -525,10 +533,14 @@
         },
         "46x30": {
           "expect": [
-            "Tree root"
+            "Start an agent",
+            "verify-rui creator birth",
+            "gpt-6.1-sol"
           ],
           "absent": [
-            "Attached worker"
+            "+ New Session",
+            "Sessions  Archived",
+            "Opening"
           ]
         }
       },

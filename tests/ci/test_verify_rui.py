@@ -334,14 +334,32 @@ class FramesTest(unittest.TestCase):
                                          wait=lambda predicate, *_a, **_k: self.assertTrue(predicate(capture)))
         self.helper["frame_steps"](None, terminal, [{"select_row": "Root"}])
         keys = self.helper["KEYS"]
-        self.assertEqual(captured, [keys["Home"] + keys["Down"] * 2])
+        self.assertEqual(captured, [keys["Home"] + keys["S-Down"] * 2])
         gap = committed("+ New Session\nSessions Archived\n\n Root\nSettings", columns=140)
         terminal.frame = gap
         self.helper["frame_steps"](None, terminal, [{"select_row": "Root"}])
-        self.assertEqual(captured[-1], keys["Home"] + keys["Down"] * 2)
+        self.assertEqual(captured[-1], keys["Home"] + keys["S-Down"] * 2)
         terminal.frame = committed("+ New Session\nSessions Archived\n↑ 1 needs you\n Root\nSettings", columns=140)
         with self.assertRaisesRegex(self.helper["FrameFailure"], "scrolled"):
             self.helper["frame_steps"](None, terminal, [{"select_row": "Root"}])
+
+    def test_full_overview_is_required_at_readiness_and_capture(self):
+        state = {"name": "fold", "full_overview": True, "expect": ["Root"]}
+        full = committed("+ New Session".ljust(41) + " \nSessions  Archived\n Root\nSettings", columns=140)
+        for separator in ("│", "|"):
+            split = committed("+ New Session".ljust(40) + separator + " chat\nSessions  Archived\n Root\nSettings", columns=140)
+            observed = []
+            def wait(predicate, *_args, **_kwargs):
+                for frame in (split, full):
+                    observed.append(predicate(types.SimpleNamespace(frame=frame, completed=frame.text)))
+            terminal = types.SimpleNamespace(frame=split, wait=wait)
+            self.helper["frame_ready"](terminal, state)
+            self.assertEqual(observed, [False, True])
+            run = types.SimpleNamespace(meta={"sha": "a" * 40, "sessions": {}})
+            with tempfile.TemporaryDirectory() as temp:
+                record = self.helper["frame_capture"](run, terminal, Path(temp), state, (140, 40), None)
+            self.assertFalse(record["ok"])
+            self.assertEqual(record["reason"], "state left full overview before capture")
 
     def test_creator_birth_uses_public_tool_and_proves_both_relationships(self):
         creator_birth = self.helper["creator_birth"]
