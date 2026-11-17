@@ -471,3 +471,31 @@ test "upgrade test gate is opt-in, acknowledges only held gates and bounds cance
     // The held input still belongs to the fixture, including on timeout.
     _ = try std.Io.Dir.cwd().statFile(io, gate, .{});
 }
+
+test "frozen launch forwarding drains both diagnostics before oversized-pipe input and reaps early refusal" {
+    const gpa = std.testing.allocator;
+    const input = try gpa.alloc(u8, 256 * 1024);
+    defer gpa.free(input);
+    @memset(input, 'i');
+    const result = try runIn(gpa, std.testing.io, &.{ "/bin/sh", "-c", "printf 'out:'; printf 'err:' >&2; cat" }, null, input.len + 4, .fromSeconds(10), .{ .input = input });
+    defer dispose(gpa, result);
+    try std.testing.expect(result.term.success());
+    try std.testing.expectEqualStrings("err:", result.stderr);
+    try std.testing.expectEqualStrings("out:", result.stdout[0..4]);
+    try std.testing.expectEqualSlices(u8, input, result.stdout[4..]);
+    const refused = try runIn(gpa, std.testing.io, &.{ "/bin/sh", "-c", "exec 0<&-; printf 'refused'; printf 'reason' >&2; exit 2" }, null, 1024, .fromSeconds(5), .{ .input = input });
+    defer dispose(gpa, refused);
+    try std.testing.expect(!refused.term.success());
+    try std.testing.expectEqualStrings("refused", refused.stdout);
+    try std.testing.expectEqualStrings("reason", refused.stderr);
+}
+
+test "frozen launch forwarding deadline covers an unread pipe and a child with closed diagnostics" {
+    const gpa = std.testing.allocator;
+    const input = try gpa.alloc(u8, 256 * 1024);
+    defer gpa.free(input);
+    @memset(input, 'i');
+    for ([_][]const u8{ "exec sleep 300", "exec 1>&- 2>&-; exec sleep 300" }) |script| {
+        try std.testing.expectError(error.Timeout, runIn(gpa, std.testing.io, &.{ "/bin/sh", "-c", script }, null, 1024, .fromMilliseconds(100), .{ .input = input }));
+    }
+}

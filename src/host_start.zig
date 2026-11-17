@@ -1702,12 +1702,16 @@ pub noinline fn spawn(init: std.process.Init, typed: Spawn, ops: Ops, progress: 
         result.outcome.failed.cause.refusal_code = reach_failure.code;
         return;
     };
-    @import("upgrade_process.zig").waitForTestGate(init.gpa, io, init.environ_map.get("RUI_TEST_HOST_AFTER_FREEZE_GATE"), null, .fromSeconds(300)) catch |err| return launchFailure(result, .interrupted, err, null);
-    var dir = std.Io.Dir.cwd().createDirPathOpen(io, selected, .{ .permissions = .fromMode(0o700) }) catch |err| return launchFailure(result, .setup, err, null);
-    dir.close(io);
+    const frame_bytes = typed.frozen orelse frozen.?.bytes;
+    const admitted_directory = (launch_frame.inspect(frame_bytes) catch unreachable).directory;
+    // Placement and the selected directory come from the same retained intake,
+    // before creating a directory or publishing a child. Never select again
+    // from saved sources (or the original directory alias) after freezing.
     var paths = platform.placementPaths(io, settings) catch |err| return launchFailure(result, .store_access, err, null);
-    var selector_buffer: [protocol.max_store_bytes]u8 = undefined;
-    paths.host_directory.set(platform.canonicalStoreDestination(io, selected, &selector_buffer) catch |err| return launchFailure(result, .setup, err, null)) catch unreachable;
+    paths.host_directory.set(admitted_directory) catch unreachable;
+    @import("upgrade_process.zig").waitForTestGate(init.gpa, io, init.environ_map.get("RUI_TEST_HOST_AFTER_FREEZE_GATE"), null, .fromSeconds(300)) catch |err| return launchFailure(result, .interrupted, err, null);
+    var dir = std.Io.Dir.cwd().createDirPathOpen(io, admitted_directory, .{ .permissions = .fromMode(0o700) }) catch |err| return launchFailure(result, .setup, err, null);
+    dir.close(io);
     var executable_buffer: [std.Io.Dir.max_path_bytes + 1]u8 = undefined;
     const length = std.process.executablePath(io, &executable_buffer) catch |err| return launchFailure(result, .setup, err, paths.selector());
     if (length == executable_buffer.len) return launchFailure(result, .setup, error.ExecutablePathTooLong, paths.selector());
@@ -1722,9 +1726,7 @@ pub noinline fn spawn(init: std.process.Init, typed: Spawn, ops: Ops, progress: 
     argv[1] = "host";
     argv[2] = "serve";
     argv[3] = "--store";
-    var host_buffer: [protocol.max_store_bytes]u8 = undefined;
-    const host_dir = platform.canonicalStoreDestination(io, selected, &host_buffer) catch |err| return launchFailure(result, .setup, err, null);
-    const directory = gpa.dupeSentinel(u8, host_dir, 0) catch |err| return launchFailure(result, .setup, err, paths.selector());
+    const directory = gpa.dupeSentinel(u8, admitted_directory, 0) catch |err| return launchFailure(result, .setup, err, paths.selector());
     defer gpa.free(directory);
     argv[4] = directory.ptr;
     const settings_file = if (request.settings_file) |file| gpa.dupeSentinel(u8, file, 0) catch |err| return launchFailure(result, .setup, err, paths.selector()) else null;
@@ -1749,7 +1751,7 @@ pub noinline fn spawn(init: std.process.Init, typed: Spawn, ops: Ops, progress: 
     argv[provenance_argc + 1] = "5";
     var input_pipe = transfer.Pipe.init() catch |err| return launchFailure(result, .setup, err, paths.selector());
     defer input_pipe.close();
-    var delivery: transfer.Transfer = .{ .input = input_pipe.writer, .bytes = typed.frozen orelse frozen.?.bytes };
+    var delivery: transfer.Transfer = .{ .input = input_pipe.writer, .bytes = frame_bytes };
     input_pipe.writer = -1;
     defer delivery.deinit();
     var startup_read: c_int = -1;
