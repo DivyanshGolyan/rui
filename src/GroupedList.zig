@@ -4,11 +4,11 @@ const vxfw = vaxis.vxfw;
 const Self = @This();
 const overview_view = @import("overview_view.zig");
 const widget_style = @import("widget_style.zig");
-const List = @import("widgets/List.zig");
+const List = @import("widgets/List.zig").List(overview_view.Target);
 const RowInset = @import("widgets/RowInset.zig");
 
 pub const Segment = overview_view.Segment;
-pub const Target = overview_view.Click;
+pub const Target = overview_view.Target;
 pub const Region = struct { start: u16, end: u16, target: Target, selected: bool = false };
 pub const Row = struct {
     segments: []const Segment,
@@ -52,47 +52,28 @@ aboveFn: ?*const fn (u32, std.mem.Allocator) std.mem.Allocator.Error!List.Line =
 belowFn: ?*const fn (u32, std.mem.Allocator) std.mem.Allocator.Error!List.Line = null,
 list: *vxfw.ListView = undefined,
 shown: List.Range = .{},
-shown_at: []const Span = &.{},
+shown_at: []const List.Span = &.{},
 
 pub const Tail = struct { widget: vxfw.Widget, rows: u16 };
 
-const Span = struct { row: i17, height: u16, target: ?Target };
-const Captured = struct { id: u32, target: Target };
-
 const Frame = struct {
-    owner: *Self,
-    targets: std.ArrayList(Captured) = .empty,
-
     fn count(raw: *const anyopaque, first: u32) u32 {
-        const self: *const Frame = @ptrCast(@alignCast(raw));
-        return self.owner.rows.countFromFn.?(self.owner.rows.userdata, first);
+        const owner: *const Self = @ptrCast(@alignCast(raw));
+        return owner.rows.countFromFn.?(owner.rows.userdata, first);
     }
 
     fn row(raw: *const anyopaque, index: usize, arena: std.mem.Allocator) std.mem.Allocator.Error!List.Row {
-        const self: *Frame = @ptrCast(@alignCast(@constCast(raw)));
-        const owner = self.owner;
+        const owner: *const Self = @ptrCast(@alignCast(raw));
         const built = try owner.rows.rowFn(owner.rows.userdata, index, arena);
         const selected = owner.selected != null and owner.selected.? == index;
         std.debug.assert(!(selected and built.heading));
         const segments = try widget_style.segments(arena, owner.caps, built.segments, if (selected) owner.selection_background else null);
-        const target_id: ?u32 = if (built.target) |target| blk: {
-            const id: u32 = @intCast(self.targets.items.len);
-            try self.targets.append(arena, .{ .id = id, .target = target });
-            break :blk id;
-        } else null;
-        const alternate_id: ?u32 = if (built.alternate_target) |target| blk: {
-            const id: u32 = @intCast(self.targets.items.len);
-            try self.targets.append(arena, .{ .id = id, .target = target });
-            break :blk id;
-        } else null;
         const regions = try arena.alloc(List.Region, built.regions.len);
         for (built.regions, regions) |region, *dest| {
-            const id: u32 = @intCast(self.targets.items.len);
-            try self.targets.append(arena, .{ .id = id, .target = region.target });
-            dest.* = .{ .start = region.start +| RowInset.left, .end = region.end +| RowInset.left, .tint_start = region.start, .tint_end = region.end +| RowInset.left +| RowInset.right, .target = id, .selected = region.selected };
+            dest.* = .{ .start = region.start +| RowInset.left, .end = region.end +| RowInset.left, .tint_start = region.start, .tint_end = region.end +| RowInset.left +| RowInset.right, .target = region.target, .selected = region.selected };
         }
         const lines = try arena.dupe(List.Line, &.{segments});
-        return .{ .lines = lines, .target = target_id, .alternate_target = alternate_id, .regions = regions };
+        return .{ .lines = lines, .target = built.target, .alternate_target = built.alternate_target, .regions = regions };
     }
 };
 
@@ -101,10 +82,10 @@ pub fn widget(self: *Self) vxfw.Widget {
     return .{ .userdata = self, .eventHandler = event, .drawFn = draw };
 }
 
-fn reportPress(raw: *anyopaque, ctx: *vxfw.EventContext, id: u32) anyerror!void {
-    const frame: *Frame = @ptrCast(@alignCast(raw));
-    const press = frame.owner.on_press orelse return;
-    for (frame.targets.items) |target| if (target.id == id) return press.pressed(press.userdata, ctx, target.target);
+fn reportPress(raw: *anyopaque, ctx: *vxfw.EventContext, target: Target) anyerror!void {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    const press = self.on_press orelse return;
+    return press.pressed(press.userdata, ctx, target);
 }
 
 fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
@@ -114,16 +95,14 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
 
 fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const self: *Self = @ptrCast(@alignCast(raw));
-    const frame = try ctx.arena.create(Frame);
-    frame.* = .{ .owner = self };
     self.inner.inset_rows = true;
-    self.inner.rows = .{ .userdata = frame, .count = self.rows.count, .rowFn = Frame.row, .countFromFn = if (self.rows.countFromFn != null) Frame.count else null };
+    self.inner.rows = .{ .userdata = self, .count = self.rows.count, .rowFn = Frame.row, .countFromFn = if (self.rows.countFromFn != null) Frame.count else null };
     self.inner.aboveFn = self.aboveFn;
     self.inner.belowFn = self.belowFn;
     self.inner.indicator_align = .center;
     self.inner.indicator_style = widget_style.of(self.caps, .{ .colour = .quiet });
     self.inner.selected = self.selected;
-    self.inner.on_press = if (self.on_press != null) .{ .userdata = frame, .pressed = reportPress } else null;
+    self.inner.on_press = if (self.on_press != null) .{ .userdata = self, .pressed = reportPress } else null;
     self.inner.base_style = widget_style.of(self.caps, .{});
     self.inner.selection_style = widget_style.of(self.caps, .{ .background = self.selection_background });
     self.inner.hover_style = widget_style.of(self.caps, .{ .background = .hover });
@@ -140,14 +119,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     }
     surface.widget = self.widget();
     self.shown = self.inner.shown;
-    const spans = try ctx.arena.alloc(Span, self.inner.shown_at.len);
-    for (self.inner.shown_at, spans) |span, *dest| {
-        const target = if (span.target) |id| for (frame.targets.items) |item| {
-            if (item.id == id) break item.target;
-        } else null else null;
-        dest.* = .{ .row = span.row, .height = span.height, .target = target };
-    }
-    self.shown_at = spans;
+    self.shown_at = self.inner.shown_at;
     return surface;
 }
 
