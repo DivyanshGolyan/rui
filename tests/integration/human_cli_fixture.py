@@ -206,7 +206,6 @@ def overview_title(frame):
 
 def overview_frame(master, accept, keys=b"", timeout=15, *, ready=True):
     return keyed_frame(master, keys, lambda screen, x, y: accept(screen) and overview_title(screen)
-                       and (not ready or "enter open" in screen)
                        and not re.search(r"(?m)(?:^|│)\s*[›>](?: |$)", screen), timeout)
 
 
