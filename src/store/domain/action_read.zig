@@ -23,19 +23,63 @@ const metadata = rsql.Read(.{
     .cardinality = .optional,
 });
 
+const next_value = rsql.Read(.{
+    .sql = "SELECT v.ordinal,v.publication_key,v.content_id,c.byte_length,c.digest,c.private,c.form FROM action_value v JOIN content c ON c.content_id=v.content_id WHERE v.action_id=?1 AND v.ordinal>?2 ORDER BY v.ordinal",
+    .Args = struct { action_id: u64, after: u64 },
+    .Row = struct { ordinal: rsql.Positive, publication_key: Bounded(128), content_id: rsql.Positive, byte_length: u64, digest: [32]u8, private: bool, form: u8 },
+    .cardinality = .each,
+});
+
+const ValueRows = struct {
+    rows: [read.page_items + 1]next_value.Row = undefined,
+    count: usize = 0,
+
+    pub fn visit(self: *ValueRows, row: *const next_value.Row) bool {
+        self.rows[self.count] = row.*;
+        self.count += 1;
+        return self.count < self.rows.len;
+    }
+};
+
+fn readValues(a: anytype, after: u64, rows: *const ValueRows, page: *read.Values) !void {
+    page.count = 0;
+    page.length = 0;
+    page.next = after;
+    page.more = false;
+    for (rows.rows[0..rows.count]) |row| {
+        if (row.private or row.form != 0 or row.byte_length > read.page_bytes) return error.CorruptStore;
+        const len: usize = @intCast(row.byte_length);
+        if (page.count == read.page_items or len > page.bytes.len - page.length) {
+            page.more = true;
+            return;
+        }
+        var reader: content.ContentReader = undefined;
+        reader.open(.{ .store = a.store, .content_id = @intCast(row.content_id.get()), .reference = .{ .length = row.byte_length, .digest = row.digest } });
+        defer reader.close();
+        const bytes = page.bytes[page.length..][0..len];
+        if (try reader.readWithAccess(a, 0, bytes) != len or !std.unicode.utf8ValidateSlice(bytes)) return error.CorruptStore;
+        page.items[page.count] = .{ .ordinal = row.ordinal.get(), .key = row.publication_key, .start = page.length, .length = len };
+        page.count += 1;
+        page.length += len;
+        page.next = row.ordinal.get();
+    }
+}
+
 pub const Projection = enum { bytes, model_tool };
 
 pub fn actionRead(a: anytype, request: *const read.Request, projection: Projection, out: *read.Read) !void {
     if (request.action_id == 0 or request.action_id > std.math.maxInt(i64)) return error.ActionNotFound;
     var selected: metadata.Result = null;
+    if (request.after > std.math.maxInt(i64)) return error.InvalidCursor;
+    var values: ValueRows = .{};
     a.read(metadata, .{ .session = request.session.slice(), .action_id = request.action_id }, &selected);
+    a.readEach(next_value, .{ .action_id = request.action_id, .after = request.after }, read.page_items + 1, &values);
     try a.run();
     const row = selected orelse return error.ActionNotFound;
-    out.* = .{
-        .session = request.session,
-        .action_id = request.action_id,
-        .status = .{ .pending = if (row.attempt_ordinal != 0) .attempted else if (row.authorized) .queued else .waiting_approval },
-    };
+    out.session = request.session;
+    out.action_id = request.action_id;
+    out.status = .{ .pending = if (row.attempt_ordinal != 0) .attempted else if (row.authorized) .queued else .waiting_approval };
+    try readValues(a, request.after, &values, &out.values);
     const final = try resolution(a, row) orelse {
         if (request.offset != 0) return error.InvalidCursor;
         return;

@@ -3250,7 +3250,7 @@ fn readAction(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     var reply_buffer: client.ReplyBuffer = .{};
     var output: JsonOutput = undefined;
     var sink: JsonOutput.Sink = .{ .writer = output.init(init.io, .stdout) };
-    const reply = (client.Requests{ .io = init.io }).readAction(selected, parsed.get("session").?, (try parsed.number(u64, "action")).?, (try parsed.number(u64, "offset")) orelse 0, &sink, &reply_buffer) catch |err| return readTransportFailure(init.io, selected, err);
+    const reply = (client.Requests{ .io = init.io }).readAction(selected, parsed.get("session").?, (try parsed.number(u64, "action")).?, (try parsed.number(u64, "offset")) orelse 0, (try parsed.number(u64, "after")) orelse 0, &sink, &reply_buffer) catch |err| return readTransportFailure(init.io, selected, err);
     switch (reply) {
         .report => {
             try sink.writer.writeByte('\n');

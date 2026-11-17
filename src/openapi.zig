@@ -124,8 +124,8 @@ pub const routes = [_]Route{
         .path = "/v1/read-action",
         .kind = .read_action,
         .summary = "Reads one Session-owned Action's status and one bounded final-result window without waiting or consuming it.",
-        .variants = &.{variant(protocol.read_action_request.head ++ .{Optional(protocol.read_action_request.offset)} ++ protocol.read_action_request.tail, .{})},
-        .reply = jsonReply(.{ protocol.action_read_reply.head ++ protocol.action_read_reply.pending, protocol.action_read_reply.head ++ protocol.action_read_reply.final }),
+        .variants = &.{variant(protocol.read_action_request.head ++ .{ Optional(protocol.read_action_request.offset), Optional(protocol.read_action_request.after) } ++ protocol.read_action_request.tail, .{})},
+        .reply = jsonReply(.{ protocol.action_read_reply.head ++ protocol.action_read_reply.pending ++ actionValuesShape(), protocol.action_read_reply.head ++ protocol.action_read_reply.final ++ actionValuesShape() }),
     },
     .{
         .path = "/v1/observe-command",
@@ -266,6 +266,10 @@ fn Optional(comptime shape: anytype) type {
 
 fn isOptional(comptime part: anytype) bool {
     return @TypeOf(part) == type and @hasDecl(part, "optional_shape");
+}
+
+fn actionValuesShape() @TypeOf(.{",\"values\":{\"items\":"} ++ .{BoundedListOf(protocol.action_read_reply.item, @import("action_read.zig").page_items, false)} ++ .{ ",\"next\":\"", Hole.decimal, "\",\"more\":", Hole.boolean, "}}" }) {
+    return .{",\"values\":{\"items\":"} ++ .{BoundedListOf(protocol.action_read_reply.item, @import("action_read.zig").page_items, false)} ++ .{ ",\"next\":\"", Hole.decimal, "\",\"more\":", Hole.boolean, "}}" };
 }
 
 const SenderSchema = struct {

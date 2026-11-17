@@ -2,6 +2,7 @@ const std = @import("std");
 
 pub const names = [_][]const u8{
     "action",
+    "after",
     "check",
     "paths",
     "set",

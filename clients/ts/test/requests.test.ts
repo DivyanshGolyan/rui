@@ -252,12 +252,13 @@ test("Action reads preserve identity and byte cursor without mutation", async ()
 	const link: Link = {
 		async exchange(path, build) {
 			requests.push({ path, body: JSON.parse(build("store")) });
-			return Buffer.from(JSON.stringify({ version: WIRE_VERSION, type: "action_read", session: "session", action, state: "queued", final: null }));
+			return Buffer.from(JSON.stringify({ version: WIRE_VERSION, type: "action_read", session: "session", action, state: "queued", final: null, values: { items: [{ ordinal: "17", key: "k", text: "hello" }], next: "17", more: false } }));
 		},
 	};
 	const session = new Session(link, "session");
-	await session.readAction(action, "16383");
-	assert.deepEqual(requests, [{ path: "/v1/read-action", body: { version: WIRE_VERSION, kind: "read_action", store: "store", session: "session", action, offset: "16383" } }]);
+	const result = await session.readAction(action, "16383", "16");
+	assert.deepEqual(result.values, { items: [{ ordinal: "17", key: "k", text: "hello" }], next: "17", more: false });
+	assert.deepEqual(requests, [{ path: "/v1/read-action", body: { version: WIRE_VERSION, kind: "read_action", store: "store", session: "session", action, offset: "16383", after: "16" } }]);
 });
 
 

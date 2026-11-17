@@ -175,6 +175,12 @@ pub fn renderActionRead(response: protocol.JsonOut, value: *const @import("actio
         .resolved => |*final| try response.appendShape(shapes.final, .{ final.resolution.position, final.resolution.code.slice(), final.resolution.content.length, final.resolution.content.digest, final.window.offset, final.window.next, final.window.more, final.window.text.slice() }),
         .resolved_parts => |*final| try response.appendShape(shapes.parts, .{ final.position, final.code.slice(), final.content.length, final.content.digest }),
     }
+    try response.writer.writeAll(shapes.values_head);
+    for (value.values.items[0..value.values.count], 0..) |item, index| {
+        if (index != 0) try response.writer.writeByte(',');
+        try response.appendShape(shapes.item, .{ item.ordinal, item.key.slice(), value.values.bytes[item.start..][0..item.length] });
+    }
+    try response.appendShape(shapes.values_tail, .{ value.values.next, value.values.more });
 }
 
 pub fn commandObservationBytes(observed: *const command_reply.Observed) usize {
@@ -582,6 +588,13 @@ test "Action read JSON reaches its exact bound with an escaped final window" {
             .window = .{ .offset = max, .next = max, .more = false, .text = .{ .bytes = @splat(1), .len = @import("action_read.zig").window_bytes } },
         } },
     };
+    value.values.count = @import("action_read.zig").page_items;
+    value.values.length = @import("action_read.zig").page_bytes;
+    value.values.next = max;
+    @memset(&value.values.bytes, 1);
+    for (&value.values.items, 0..) |*item, i| {
+        item.* = .{ .ordinal = max, .key = .{ .bytes = @splat(1), .len = 128 }, .start = 0, .length = if (i == 0) value.values.length else 0 };
+    }
     const bytes = try std.testing.allocator.alloc(u8, protocol.action_read_reply.max_bytes);
     defer std.testing.allocator.free(bytes);
     var writer = std.Io.Writer.fixed(bytes);
@@ -595,5 +608,5 @@ test "Action read JSON reaches its exact bound with an escaped final window" {
     value.status = .{ .pending = .queued };
     writer = .fixed(bytes);
     try renderActionRead(.{ .writer = &writer }, value);
-    try std.testing.expect(std.mem.endsWith(u8, writer.buffered(), "\"final\":null}"));
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "\"final\":null,\"values\":") != null);
 }
