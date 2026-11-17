@@ -142,6 +142,8 @@ class CheckpointTests(unittest.TestCase):
             with self.assertRaisesRegex(proof.ProofError, "cache namespace changed"):
                 fixture.checkpoint.restore()
             self.assertEqual((foreign / "keep").read_bytes(), b"foreign data")
+            self.assertEqual((detached / ("a" * 32) / "rui-release-safe-check").read_bytes(), fixture.candidate_bytes)
+            self.assertEqual((fixture.local / "h" / "manifest").read_bytes(), b"original manifest")
             original.unlink()
             detached.rename(original)
             fixture.checkpoint.restore()

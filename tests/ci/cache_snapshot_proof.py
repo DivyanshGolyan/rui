@@ -249,14 +249,18 @@ class Checkpoint:
                     saved = self.destination / str(index) / "mutable" / name
                     attempt(str(saved), lambda saved=saved, target=target: restore_copy(saved, target))
             if safe[index]:
-                entries = []
-                attempt(str(root), lambda: entries.extend(root.iterdir()))
-                for path in entries:
-                    if path.name != "o":
-                        attempt(str(path), lambda path=path: remove(path))
                 saved_entries = []
                 saved_root = self.destination / str(index) / "non-o"
                 attempt(str(saved_root), lambda: saved_entries.extend(saved_root.iterdir()))
+                saved_names = {path.name for path in saved_entries}
+                entries = []
+                attempt(str(root), lambda: entries.extend(root.iterdir()))
+                for path in entries:
+                    # A substituted o can leave its original tree at another
+                    # root entry. Preserve unknown entries in this failure
+                    # state, while still restoring independent saved h/b/etc.
+                    if path.name != "o" and (outputs[index] or path.name in saved_names):
+                        attempt(str(path), lambda path=path: remove(path))
                 for path in saved_entries:
                     attempt(str(path), lambda path=path: restore_copy(path, root / path.name))
         if failures:
