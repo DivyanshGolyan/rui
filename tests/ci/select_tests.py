@@ -27,6 +27,10 @@ from release_numbers import SCHEMA as STORE_SCHEMA, digest_rows, migration_steps
 
 
 ROOT = Path(__file__).resolve().parents[2]
+# Git paths and source can contain invalid UTF-8. Keep those bytes distinct
+# from valid text without dropping them or changing universal newline handling.
+TEXT_DECODING = {"encoding": "utf-8", "errors": "surrogateescape"}
+
 RUI = "src/cli.zig"
 HOST = "src/server.zig"
 CALLER = "src/client.zig"
@@ -322,10 +326,23 @@ class Graph:
                    if path in driven and (path not in self.cores or path in self.owners[target])})
 
 
+def git_paths(*args):
+    raw = subprocess.check_output(["git", *args])
+    return [path.decode(**TEXT_DECODING) for path in raw.split(b"\0") if path]
+
+
+def tracked_files(*pathspec):
+    return (name for name in git_paths("-C", str(ROOT), "ls-files", "-z", *pathspec)
+            if (ROOT / name).is_file())
+
+
+def worktree_text(name):
+    return (ROOT / name).read_text(**TEXT_DECODING)
+
+
 @cache
 def tree_graph():
-    tracked = subprocess.check_output(["git", "-C", str(ROOT), "ls-files", "-z"]).decode().split("\0")
-    return Graph([name for name in tracked if name and (ROOT / name).is_file()], lambda name: (ROOT / name).read_text())
+    return Graph(tracked_files(), worktree_text)
 
 
 def script_literals(source, suffix):
@@ -369,11 +386,10 @@ def tree_uncommon_texts(candidates):
     if not candidates:
         return frozenset()
     counts = dict.fromkeys(candidates, 0)
-    tracked = subprocess.check_output(["git", "-C", str(ROOT), "ls-files", "-z", "src/"]).decode().split("\0")
-    for name in tracked:
-        if not name or matches(name, TEST_CODE) or not (ROOT / name).is_file():
+    for name in tracked_files("src/"):
+        if matches(name, TEST_CODE):
             continue
-        source = source_strings((ROOT / name).read_text())
+        source = source_strings(worktree_text(name))
         for text, count in counts.items():
             if count < 3 and text in source:
                 counts[text] += 1
@@ -973,14 +989,13 @@ def changed_paths(base, head):
             text=True, stderr=subprocess.PIPE).strip()
     head_commit, base_commit = commit(head), commit(base)
     # No rename inference: both deleted and added owners select their checks.
-    raw = subprocess.check_output(["git", "diff", "--no-renames", "--name-only", "-z",
-                                   base_commit, head_commit])
-    return [p.decode("utf-8", "surrogateescape") for p in raw.split(b"\0") if p], base_commit
+    return git_paths("diff", "--no-renames", "--name-only", "-z", base_commit, head_commit), base_commit
 
 
 def revision_text(commit, path):
     """The path's text at commit, or None where the commit has no such file."""
-    shown = subprocess.run(["git", "show", f"{commit}:{path}"], capture_output=True, text=True)
+    shown = subprocess.run(["git", "show", f"{commit}:{path}"], capture_output=True, text=True,
+                           **TEXT_DECODING)
     return shown.stdout if shown.returncode == 0 else None
 
 

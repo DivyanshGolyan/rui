@@ -1,4 +1,5 @@
 import ast
+import errno
 import json
 import re
 import os
@@ -45,6 +46,119 @@ def covered(target, targets):
             or any(target in cases and broad in targets for broad, cases in FIXTURE_COVERS.items())
             or target in {"check", "stack-frames"} and "check-full" in targets
             or target == "stack-frames" and "check" in targets)
+
+
+class BinarySourceSelectionTest(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        ci = Path(__file__).resolve().parent
+        shutil.copytree(ci, self.root / "tests/ci", ignore=shutil.ignore_patterns("__pycache__"))
+        for path in build_files.files():
+            self.write(path.relative_to(build_files.ROOT), path.read_bytes())
+        self.git("init", "--quiet", "--template=")
+        self.write("src/logic_tests.zig", b"const cores = .{\n};\n")
+
+    def write(self, name, payload):
+        path = self.root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(payload)
+
+    def git(self, *args):
+        result = subprocess.run(["git", "-c", "core.autocrlf=false", "-c", "user.name=Selector Test",
+                                 "-c", "user.email=selector@example.invalid", "-c", "commit.gpgsign=false", *args],
+                                cwd=self.root, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.strip()
+
+    def commit(self):
+        self.git("add", "--all", "--", "src", "tests")
+        self.git("commit", "--quiet", "-m", "selection input")
+        return self.git("rev-parse", "HEAD")
+
+    def plan(self, base, head):
+        result = subprocess.run([sys.executable, "-B", "tests/ci/select_tests.py", "--base", base, "--head", head],
+                                cwd=self.root, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        plan = json.loads(result.stdout)
+        self.assertEqual((plan["base"], plan["head"]), (base, head))
+        return plan
+
+    def test_source_readers_preserve_bytes_and_newlines(self):
+        path = "src/octets.bin"
+        octets = bytes(range(256))
+        self.write(path, b"caf\xc3\xa9\r\nline\rline\n" + octets)
+        head = self.commit()
+        result = subprocess.run([sys.executable, "-B", "-c", dedent('''
+            import sys
+            from select_tests import revision_text, worktree_text
+
+            for source in (revision_text(*sys.argv[1:]), worktree_text(sys.argv[2])):
+                sys.stdout.buffer.write(source.encode("utf-8", "surrogateescape"))
+        '''), head, path], cwd=self.root / "tests/ci", capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr.decode(errors="backslashreplace"))
+        expected = b"caf\xc3\xa9\nline\nline\n" + octets.replace(b"\r", b"\n")
+        self.assertEqual(result.stdout, expected + expected)
+
+    def assert_targets(self, plan, targets, *, compiled, stack_frames=False):
+        self.assertEqual(plan["targets"], ["stack-frames", *targets] if stack_frames else targets)
+        self.assertEqual(plan["native_targets"], targets)
+        self.assertTrue(plan["native_required"])
+        self.assertIs(plan["typecheck_macos"], compiled)
+
+    def test_binary_add_edit_delete_keep_graph_and_fallback(self):
+        embedded = "codecs/fixtures/image-input/octets.bin"
+        self.write("src/tests.zig", f'const payload = @embedFile("{embedded}");\n'.encode())
+        base = self.commit()
+        for path, targets, compiled, reason in (
+            (f"src/{embedded}", ["test-native"], True, "Import graph: the unit roots and fixtures that reach the changed file"),
+            ("src/codecs/fixtures/image-input/pixel.png", ["check"], False, "Source no import or rule reaches: full fallback"),
+        ):
+            for operation, payload in (("add", bytes(range(256))), ("edit", bytes(reversed(range(256)))),
+                                       ("delete", None)):
+                if payload is None:
+                    (self.root / path).unlink()
+                else:
+                    self.write(path, payload)
+                head = self.commit()
+                with self.subTest(path=path, operation=operation):
+                    plan = self.plan(base, head)
+                    self.assert_targets(plan, targets, compiled=compiled, stack_frames=compiled)
+                    self.assertIn(reason, plan["reasons"])
+                base = head
+
+    def test_unchanged_binary_preserves_asserted_text_prevalence(self):
+        rare = b"A fixture waits for the rendered response"
+        shared = b"A status shared across\napparently unrelated files"
+        self.write("src/tests.zig", b'const owner = @import("render.zig");\n')
+        self.write("src/render.zig", b"// no asserted prose yet\n")
+        self.write("src/mirror.txt", b'"' + rare + b'"\n"' + shared + b'"\n')
+        # Both candidates occur in the text edit and mirror. Only the shared
+        # message occurs intact in the binary; a skipped file or byte changes ownership.
+        self.write("src/pixel.png", b'\x89PNG\0"' + rare.replace(b"rendered", b"ren\x80dered")
+                   + b'"\r\n"' + shared.replace(b"\n", b"\r\n") + b'"\r\n')
+        self.write("tests/integration/host_launch_integration.py", b"expected = " + repr(rare.decode()).encode())
+        self.write("tests/integration/installer_integration.py", b"expected = " + repr(shared.decode()).encode())
+        base = self.commit()
+        self.write("src/render.zig", b'const rare = "' + rare + b'";\r\nconst shared =\r\n'
+                   + b"".join(b"    \\\\" + line + b"\r\n" for line in shared.splitlines()) + b";\r\n")
+        plan = self.plan(base, self.commit())
+        self.assert_targets(plan, ["host-launch-integration", "test-native"], compiled=True)
+        self.assertIn("Asserted text: a fixture waits for text this file draws", plan["reasons"])
+
+    def test_graph_keeps_tracked_names_with_non_utf8_bytes(self):
+        name = b"fixture-\x80.zig"
+        payload = b"octets-\xff.bin"
+        try:
+            self.write("src/" + os.fsdecode(name), b'const image = @embedFile("' + payload + b'");\n')
+        except OSError as error:
+            if error.errno in (errno.EILSEQ, errno.EINVAL):
+                self.skipTest("filesystem cannot create a non-UTF-8 filename")
+            raise
+        self.write("src/tests.zig", b'const fixture = @import("' + name + b'");\n')
+        self.write("src/" + os.fsdecode(payload), b"\x80\0")
+        base = self.commit()
+        self.write("src/" + os.fsdecode(payload), b"\x81\0")
+        self.assert_targets(self.plan(base, self.commit()), ["test-native"], compiled=True, stack_frames=True)
 
 
 class AssertedTextSelectionTest(unittest.TestCase):
