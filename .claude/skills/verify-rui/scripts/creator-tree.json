@@ -1050,11 +1050,32 @@
         "before": {
           "expect": [],
           "expect_regex": [],
-          "final_full_overview": true
+          "final_full_overview": true,
+          "expect_viewport": {}
         }
       },
       "note": "Alt-? opens an actual attention Session",
-      "final_full_overview": false
+      "final_full_overview": false,
+      "expect_viewport": {
+        "140x40": {
+          "expect_regex": [
+            "(?m)(Question leaf|Edge question)"
+          ]
+        },
+        "46x30": {
+          "expect": [
+            "Allow once",
+            "Deny",
+            "alt+i info"
+          ],
+          "expect_regex": [],
+          "absent": [
+            "+ New Session",
+            "Sessions  Archived",
+            "Opening"
+          ]
+        }
+      }
     },
     {
       "name": "edge-below-ascii",
@@ -1181,11 +1202,32 @@
         "before": {
           "expect": [],
           "expect_regex": [],
-          "final_full_overview": true
+          "final_full_overview": true,
+          "expect_viewport": {}
         }
       },
       "note": "ASCII Alt-? opens an actual attention Session",
-      "final_full_overview": false
+      "final_full_overview": false,
+      "expect_viewport": {
+        "140x40": {
+          "expect_regex": [
+            "(?m)(Question leaf|Edge question|ASCII edge question)"
+          ]
+        },
+        "46x30": {
+          "expect": [
+            "Allow once",
+            "Deny",
+            "alt+i info"
+          ],
+          "expect_regex": [],
+          "absent": [
+            "+ New Session",
+            "Sessions  Archived",
+            "Opening"
+          ]
+        }
+      }
     }
   ]
 }

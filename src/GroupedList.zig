@@ -56,7 +56,8 @@ list: *vxfw.ListView = undefined,
 shown: List.Range = .{},
 shown_at: []const Span = &.{},
 anchor: ?struct { target: Target, index: u32, row: i17 } = null,
-anchor_after_wheel: ?i16 = null,
+anchor_after_scroll: ?i16 = null,
+pointer_row: ?i16 = null,
 
 pub const Tail = struct { widget: vxfw.Widget, rows: u16 };
 
@@ -132,13 +133,15 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     switch (input) {
         .mouse_leave => {
             self.anchor = null;
-            self.anchor_after_wheel = null;
+            self.anchor_after_scroll = null;
+            self.pointer_row = null;
         },
         .mouse => |mouse| if (mouse.type == .motion or mouse.type == .press) {
+            self.pointer_row = mouse.row;
             self.anchor = null;
-            self.anchor_after_wheel = null;
+            self.anchor_after_scroll = null;
             if (mouse.button == .wheel_up or mouse.button == .wheel_down or mouse.button == .wheel_left or mouse.button == .wheel_right) {
-                self.anchor_after_wheel = mouse.row;
+                self.anchor_after_scroll = mouse.row;
                 try self.inner.widget().handleEvent(ctx, input);
                 return;
             }
@@ -152,6 +155,13 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
         else => {},
     }
     try self.inner.widget().handleEvent(ctx, input);
+}
+
+pub fn followSelection(self: *Self) void {
+    if (self.pointer_row) |row| {
+        self.anchor = null;
+        self.anchor_after_scroll = row;
+    }
 }
 
 fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
@@ -198,8 +208,8 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         dest.* = .{ .row = span.row, .height = span.height, .target = target, .index = self.inner.shown.first + @as(u32, @intCast(offset)) };
     }
     self.shown_at = spans;
-    if (self.anchor_after_wheel) |pointer_row| {
-        self.anchor_after_wheel = null;
+    if (self.anchor_after_scroll) |pointer_row| {
+        self.anchor_after_scroll = null;
         for (spans) |span| {
             if (pointer_row >= span.row and pointer_row < span.row + span.height) {
                 if (span.target) |target| self.anchor = .{ .target = target, .index = span.index, .row = span.row };
@@ -611,7 +621,7 @@ test "GroupedList shows moved row flash with and without selection in each colou
     };
 }
 
-test "GroupedList recaptures the pointer after wheel before a new row arrives" {
+test "GroupedList recaptures the pointer after scroll before a new row arrives" {
     const Fixture = struct {
         rows: []const Row,
         fn at(raw: *const anyopaque, index: usize, _: std.mem.Allocator) std.mem.Allocator.Error!Row {
@@ -626,7 +636,7 @@ test "GroupedList recaptures the pointer after wheel before a new row arrives" {
             return null;
         }
     };
-    for ([_]?u32{ null, 0, 8 }) |selection| {
+    for ([_]?u32{ null, 0, 8 }) |selection| for ([_]bool{ false, true }) |keyboard| {
         var before: [8]Row = undefined;
         for (&before, 0..) |*row, index| row.* = .{ .segments = &.{.{ .text = "row", .style = .{} }}, .target = .{ .open = numbered(index) } };
         var after: [9]Row = undefined;
@@ -640,7 +650,12 @@ test "GroupedList recaptures the pointer after wheel before a new row arrives" {
         _ = try list.widget().draw(ctx);
         var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
         try list.widget().handleEvent(&events, .{ .mouse = .{ .col = 1, .row = 1, .button = .none, .type = .motion, .mods = .{} } });
-        try list.widget().handleEvent(&events, .{ .mouse = .{ .col = 1, .row = 1, .button = .wheel_down, .type = .press, .mods = .{} } });
+        if (keyboard) {
+            list.selected = 7;
+            list.followSelection();
+        } else {
+            try list.widget().handleEvent(&events, .{ .mouse = .{ .col = 1, .row = 1, .button = .wheel_down, .type = .press, .mods = .{} } });
+        }
         _ = try list.widget().draw(ctx);
         try std.testing.expect(list.shown.first > 0);
         const anchor = list.anchor orelse return error.TestExpectedEqual;
@@ -653,5 +668,5 @@ test "GroupedList recaptures the pointer after wheel before a new row arrives" {
             if (span.target) |target| if (std.meta.eql(target, anchor.target)) break span.row;
         } else return error.TestExpectedEqual;
         try std.testing.expectEqual(anchor.row, physical);
-    }
+    };
 }

@@ -488,7 +488,8 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
         .tick => {
             if (self.state.pointer_over and (!self.root.listVisible() or self.root.input.layer != .main)) {
                 self.app_sessions.anchor = null;
-                self.app_sessions.anchor_after_wheel = null;
+                self.app_sessions.anchor_after_scroll = null;
+                self.app_sessions.pointer_row = null;
                 try self.appNext(ctx, try self.event(.{ .list_presence = .{ .at_ms = self.realMs(), .pointer_over = false } }));
                 ctx.redraw = true;
             }
@@ -542,6 +543,7 @@ fn appKey(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event, delivery:
         .left => .left,
         else => .ignored,
     };
+    const before = self.state.selected;
     try self.appNext(ctx, try self.event(.{ .input = .{
         .key = semantic,
         .under = delivery.under == .settings,
@@ -550,6 +552,12 @@ fn appKey(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event, delivery:
         .list_origin = delivery.list_origin,
         .at_ms = self.realMs(),
     } }));
+    if (delivery.list_origin and !delivery.pasted and delivery.under == .main and !std.meta.eql(before, self.state.selected)) {
+        if (semantic == .action) switch (semantic.action) {
+            .previous, .next, .select_previous, .select_next, .first, .last => self.app_sessions.followSelection(),
+            else => {},
+        };
+    }
     ctx.consumeAndRedraw();
 }
 
@@ -557,7 +565,8 @@ fn appPresence(raw: *anyopaque, ctx: *vxfw.EventContext, over: bool) anyerror!vo
     const self: *Self = @ptrCast(@alignCast(raw));
     if (!over) {
         self.app_sessions.anchor = null;
-        self.app_sessions.anchor_after_wheel = null;
+        self.app_sessions.anchor_after_scroll = null;
+        self.app_sessions.pointer_row = null;
     }
     if (self.state.pointer_over == over) return;
     const revision = self.state.presentation_revision;
@@ -4715,6 +4724,55 @@ test "App overview prepares full-width list rows and splits only beside a Sessio
     try std.testing.expectEqual(@as(u16, 99), panes[2].surface.size.width);
     try std.testing.expectEqual(@as(usize, 1), Find.count(panes[0].surface, header));
     try std.testing.expectEqual(@as(usize, 1), Find.count(panes[2].surface, chat.widget()));
+}
+
+test "App overview keyboard selection scrolls while pointer stays over list" {
+    const chat: vxfw.Text = .{ .text = "Chat", .width_basis = .parent };
+    for ([_]bool{ false, true }) |sidebar| for ([_]bool{ false, true }) |shift| {
+        const rig = try openListed();
+        defer rig.close();
+        const overview = rig.overview;
+        if (sidebar) {
+            overview.root.session = chat.widget();
+            overview.root.input.area = .list;
+        }
+        overview.state.selected = .{ .session = shownRow(rig, 0) };
+        var initial = try rig.shown(if (sidebar) 140 else 46, 7);
+        defer initial.deinit();
+        const span = overview.app_sessions.shown_at[0];
+        var ctx = rig.context();
+        defer ctx.cmds.deinit(std.testing.allocator);
+        try overview.app_sessions.widget().handleEvent(&ctx, .{ .mouse = .{ .col = 1, .row = @intCast(span.row), .button = .none, .type = .motion, .mods = .{} } });
+        try std.testing.expect(overview.app_sessions.anchor != null);
+        for (0..4) |_| try appKey(overview, &ctx, .{ .key_press = .{ .codepoint = vaxis.Key.down, .mods = .{ .shift = shift } } }, .{ .under = .main, .pasted = false, .wide = sidebar });
+        var after = try rig.shown(if (sidebar) 140 else 46, 7);
+        defer after.deinit();
+        const selected = overview.app_sessions.selected orelse return error.TestExpectedEqual;
+        try std.testing.expect(selected >= overview.app_sessions.shown.first and selected < overview.app_sessions.shown.end);
+    };
+}
+
+test "App overview keeps pointer anchor for chat-origin and unbound keys" {
+    const rig = try openListed();
+    defer rig.close();
+    const overview = rig.overview;
+    overview.state.selected = .{ .session = shownRow(rig, 0) };
+    var initial = try rig.shown(46, 7);
+    defer initial.deinit();
+    const span = overview.app_sessions.shown_at[0];
+    var ctx = rig.context();
+    defer ctx.cmds.deinit(std.testing.allocator);
+    try overview.app_sessions.widget().handleEvent(&ctx, .{ .mouse = .{ .col = 1, .row = @intCast(span.row), .button = .none, .type = .motion, .mods = .{} } });
+    const anchor = overview.app_sessions.anchor orelse return error.TestExpectedEqual;
+    try appKey(overview, &ctx, .{ .key_press = .{ .codepoint = vaxis.Key.page_down } }, .{ .under = .main, .pasted = false });
+    try std.testing.expectEqualDeep(anchor, overview.app_sessions.anchor.?);
+    try appKey(overview, &ctx, .{ .key_press = .{ .codepoint = vaxis.Key.down, .mods = .{ .shift = true } } }, .{ .under = .main, .pasted = false, .list_origin = false });
+    try std.testing.expectEqualDeep(anchor, overview.app_sessions.anchor.?);
+    try appKey(overview, &ctx, .{ .key_press = .{ .codepoint = vaxis.Key.end } }, .{ .under = .main, .pasted = false });
+    try std.testing.expect(overview.state.selected == .settings);
+    var after = try rig.shown(46, 7);
+    defer after.deinit();
+    try std.testing.expect(overview.app_sessions.pointer_row != null);
 }
 
 test "App overview list stays live beside a focused child and wheels stay in their panes" {

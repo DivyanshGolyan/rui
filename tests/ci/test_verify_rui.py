@@ -370,6 +370,11 @@ class FramesTest(unittest.TestCase):
             before = {**state, **state["comparison"]["before"]}
             self.assertTrue(before["final_full_overview"])
             self.assertIn("Allow once", state["expect"])
+            narrow = self.helper["frame_viewport_state"](state, 46, 30)
+            self.assertEqual(narrow["expect_regex"], [])
+            self.assertEqual(narrow["expect"], ["Allow once", "Deny", "alt+i info"])
+            self.assertIn("Opening", narrow["absent"])
+            self.assertEqual(before["expect_viewport"], {})
             split = committed("+ New Session".ljust(40) + "│ chat\nQuestion leaf\nAllow once\nSettings", columns=140)
             outcomes = []
             terminal = types.SimpleNamespace(frame=split, wait=lambda predicate, *_a, **_k:
