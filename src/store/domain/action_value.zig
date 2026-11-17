@@ -15,9 +15,9 @@ pub const Refusal = enum { unknown_handle, stopped, resolved, conflict, too_larg
 pub const Result = union(enum) { accepted: Receipt, refused: Refusal };
 
 const replay = rsql.Read(.{
-    .sql = "SELECT v.action_id,v.ordinal,v.admission_id,c.digest FROM action_value v JOIN content c ON c.content_id=v.content_id WHERE v.handle=?1 AND v.publication_key=?2",
+    .sql = "SELECT v.action_id,v.ordinal,v.admission_id,c.digest,c.form FROM action_value v JOIN content c ON c.content_id=v.content_id WHERE v.handle=?1 AND v.publication_key=?2",
     .Args = struct { handle: []const u8, key: []const u8 },
-    .Row = struct { action_id: rsql.Positive, ordinal: rsql.Positive, admission_id: ?rsql.Positive, digest: [32]u8 },
+    .Row = struct { action_id: rsql.Positive, ordinal: rsql.Positive, admission_id: ?rsql.Positive, digest: [32]u8, form: u64 },
     .cardinality = .optional,
 });
 const facts = rsql.Read(.{
@@ -64,6 +64,7 @@ pub const Publish = struct {
         if (at == .fault) return error.InjectedCommitFailure;
         if (at == .facts) {
             if (t.old) |saved| {
+                if (try @import("../../input_parts.zig").Form.decode(saved.form) != .bytes) return error.CorruptStore;
                 if (!std.mem.eql(u8, &saved.digest, &t.imported.digest)) return .{ .done = .{ .refused = .conflict } };
                 return .{ .done = .{ .accepted = .{ .action_id = saved.action_id.get(), .ordinal = saved.ordinal.get(), .admission_id = if (saved.admission_id) |id| id.get() else null, .replayed = true } } };
             }

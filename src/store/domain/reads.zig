@@ -589,7 +589,7 @@ pub fn publicEntryRead(comptime columns: []const u8, comptime also: []const u8, 
 
 pub fn publicEntryColumns(comptime also: []const u8) []const u8 {
     return "CASE WHEN " ++ also ++ "(c.content_id IS NOT NULL AND c.private=0 AND t.session_ref=e.session_ref AND " ++
-        "((e.entry_kind=1 AND m.session_ref=e.session_ref AND m.turn_id=e.turn_id AND m.content_id=e.content_id) OR " ++
+        "((e.entry_kind=1 AND m.session_ref=e.session_ref AND m.turn_id=e.turn_id AND m.content_id=e.content_id AND " ++ sourced_input.actionConsistentSql("m") ++ ") OR " ++
         "(e.entry_kind=3 AND o.purpose=0 AND o.session_ref=e.session_ref AND o.turn_id=e.turn_id " ++
         "AND item.item_kind=2 AND item.message_content_id=e.content_id AND item.session_ref=e.session_ref " ++
         "AND item.session_position=e.session_position AND item.attempt_ordinal=o.attempt_ordinal " ++
@@ -604,7 +604,7 @@ pub const public_entry_joins = "LEFT JOIN turn t ON t.turn_id=e.turn_id " ++
 
 const public_entry = rsql.Read(.{
     .sql = publicEntryRead("e.content_id,CASE WHEN e.entry_kind=1 THEN m.admitted_at END AS admitted_at," ++
-        "CASE WHEN e.entry_kind=1 THEN m.sender_session_ref END AS sender,CASE WHEN e.entry_kind=1 THEN m.source_action_id END AS source_action,e.recorded_at", "", "WHERE e.session_ref=?1 AND e.session_position=?2 AND e.entry_kind IN(1,3)"),
+        "CASE WHEN e.entry_kind=1 THEN m.sender_session_ref END AS sender,CASE WHEN e.entry_kind=1 THEN " ++ sourced_input.actionIdSql("m") ++ " END AS source_action,e.recorded_at", "", "WHERE e.session_ref=?1 AND e.session_position=?2 AND e.entry_kind IN(1,3)"),
     .Args = struct { session: []const u8, position: u64 },
     .Row = struct { content_id: rsql.Positive, admitted_at: ?rsql.Positive, sender: ?SessionText, source_action: ?rsql.Positive, recorded_at: rsql.Positive, consistent: bool },
     .cardinality = .each,
@@ -1144,7 +1144,7 @@ const activity_message = rsql.Read(.{
         sourced_input.consistentSql("m", "c") ++ " " ++
         "AND (m.turn_id IS NULL OR (t.session_ref=m.session_ref AND EXISTS(SELECT 1 FROM conversation_entry e " ++
         "WHERE e.source_admission_id=m.admission_id AND e.session_ref=m.session_ref AND e.turn_id=m.turn_id AND e.content_id=m.content_id))) AS consistent," ++
-        "m.admitted_at,m.sender_session_ref,m.source_action_id FROM message_admission m " ++
+        "m.admitted_at,m.sender_session_ref," ++ sourced_input.actionIdSql("m") ++ " AS source_action_id FROM message_admission m " ++
         "LEFT JOIN core_command c ON c.command_key=m.command_key LEFT JOIN turn t ON t.turn_id=m.turn_id " ++
         "WHERE m.session_ref=?1 AND m.admission_id=?3",
     .Args = struct { session: []const u8, end: u64, admission: u64 },

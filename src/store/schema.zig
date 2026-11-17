@@ -1309,7 +1309,7 @@ pub const tables = [_]Table{
             .{ .name = "ordinal", .type = .int, .check = "ordinal>0" },
             .{ .name = "handle", .type = .{ .text = .{ .min = 32, .max = 32 } }, .check = "@charset(handle,'0-9a-f')" },
             .{ .name = "publication_key", .type = .{ .text = .{ .min = 1, .max = 128 } } },
-            .{ .name = "content_id", .type = .int, .holds = .value },
+            .{ .name = "content_id", .type = .int },
             .{ .name = "admission_id", .type = .int, .nullable = true },
             .{ .name = "published_at", .type = .int, .check = "published_at>0" },
         },

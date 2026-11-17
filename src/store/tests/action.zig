@@ -1274,7 +1274,7 @@ test "background final input joins the next Turn boundary without changing an in
                     }
                     if (entry.source_action) |source| {
                         try std.testing.expectEqual(action, source.id);
-                        try std.testing.expectEqualStrings(session.slice(), source.session.slice());
+                        try std.testing.expectEqualStrings(session.slice(), &source.session);
                         var reader: store_testing.TestingReader = undefined;
                         try page.openContent(entry.content.?, &reader);
                         defer reader.close();
@@ -2028,6 +2028,7 @@ test "action values publish replay refuse and bound the pending backlog" {
                 try std.testing.expect((try storage.publishActionValue(handle, "oversized", &oversized)).refused == .too_large);
                 try std.testing.expectEqual(before_oversized, try ValueRowCounts.read(&storage));
                 try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_value WHERE action_id=?1", .{action_id}));
+                try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT c.form FROM action_value v JOIN content c ON c.content_id=v.content_id WHERE v.action_id=?1", .{action_id}));
                 try std.testing.expectEqual(@as(u64, if (background) 1 else 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_value WHERE action_id=?1 AND admission_id IS NOT NULL", .{action_id}));
                 if (background) {
                     for (1..value.max_pending) |index| {
@@ -2084,6 +2085,54 @@ test "resolved action value replay survives retirement of its sender handle" {
             try std.testing.expect((try storage.publishActionValue(handle, "fresh", "resolved payload")).refused == .resolved);
             try std.testing.expectEqual(resolved_counts, try ValueRowCounts.read(&storage));
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_value WHERE action_id=?1", .{action_id}));
+        }
+    }.run);
+}
+
+test "published action values retain public provenance while queued and applied" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try shared_fixtures.configureTestSessionWithMode(&storage, "value-provenance", "bypass");
+            const action_id = try NativePromotion.promoted(&storage, &tmp, session.slice());
+            const binding = (try storage.admitNextActionAttempt(.fromFree(2, true), 30_000, .{})).?.permit.binding;
+            var input: action_domain.ActionExecutionInput = undefined;
+            try storage.readActionExecutionInput(.bash, binding, &input);
+            try std.testing.expect((try storage.publishActionValue(input.sender_handle.slice(), "value", "published value")) == .accepted);
+
+            const queued = try store_core.activityPageForTesting(&storage, .{ .session = session, .kinds = .initOne(.received) });
+            try std.testing.expectEqual(@as(usize, 1), queued.count);
+            try std.testing.expectEqual(action_id, queued.items[0].value.received.source_action.?);
+            try std.testing.expect(queued.items[0].value.received.sender == null);
+            try std.testing.expect(queued.items[0].value.received.state == .queued);
+            try std.testing.expectEqualSlices(u8, &protocol.contentDigest("published value"), &queued.items[0].value.received.content.digest);
+
+            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            const applied = try store_core.activityPageForTesting(&storage, .{ .session = session, .kinds = .initMany(&.{ .received, .user }) });
+            var count: usize = 0;
+            for (applied.items[0..applied.count]) |item| switch (item.value) {
+                .received, .user => |message| if (std.mem.eql(u8, &message.content.digest, &protocol.contentDigest("published value"))) {
+                    try std.testing.expectEqual(action_id, message.source_action.?);
+                    try std.testing.expect(message.sender == null);
+                    try std.testing.expect(message.state == .applied);
+                    count += 1;
+                },
+                else => {},
+            };
+            try std.testing.expectEqual(@as(usize, 2), count);
+            const public = try store_core.publicConversationPageForTesting(&storage, .{ .session = session });
+            var found = false;
+            for (public.items[0..public.count]) |item| if (std.mem.eql(u8, &item.content.digest, &protocol.contentDigest("published value"))) {
+                try std.testing.expectEqual(action_id, item.source_action.?);
+                try std.testing.expect(item.sender == null);
+                found = true;
+            };
+            try std.testing.expect(found);
+            try NativePromotion.finishModel(&storage, &tmp, model);
         }
     }.run);
 }
