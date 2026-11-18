@@ -1161,8 +1161,8 @@ fn serveOpened(
         };
         socket_owned = false;
         _ = host.advance(.draining);
-        if (comptime test_pause.enabled) pause_owner.close();
         execution_thread.join();
+        if (comptime test_pause.enabled) pause_owner.close();
     }
     try writeReadiness(&lease.paths, host.instance, active_capacity, intake_capacity, descriptor_requirement, descriptor_limit_text, retention_entries.len, served.any());
     stderr.release();
@@ -1172,8 +1172,7 @@ fn serveOpened(
     if (diagnostics.*) |*writer| {
         if (writer.failure != null) writer.reportFailure();
         writer.record("ready", "serving");
-        writer.close();
-        diagnostics.* = null;
+        host.attachDiagnostics(writer);
     }
 
     return intake.run(&listener, &listener_open, &socket_owned);
@@ -4713,6 +4712,38 @@ test "SH-51 a read the Store refuses without fencing leaves the Host serving" {
     const failed = try exchangeRead(&host, arena, reads[0]);
     try std.testing.expect(std.mem.indexOf(u8, failed.body, "canonical_store_failure") != null);
     try std.testing.expect(storage.isFenced() and !host.launchAllowed());
+}
+
+test "SH-53 a dispatch fence records its reason in the Host diagnostics file" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var writer = try HostDiagnostics.open(io, tmp.dir, HostDiagnostics.default_cap_bytes);
+    defer writer.close();
+
+    var unattached = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined };
+    fenceDispatch(&unattached, "before readiness", error.Unattached);
+    try std.testing.expect(unattached.stopping());
+
+    var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined };
+    writer.record("ready", "serving");
+    host.attachDiagnostics(&writer);
+    server_host.retainDispatchFence(&host, "retained cleanup", error.Retained);
+    server_host.retainDispatchFence(&host, "retained again", error.RetainedAgain);
+    fenceDispatch(&host, "Action status observation", error.InputPartsNotSupported);
+    fenceDispatch(&host, "second fence", error.Later);
+    try std.testing.expect(host.stopping());
+
+    var buffer: [4096]u8 = undefined;
+    const bytes = try tmp.dir.readFile(io, "diagnostics/host-1.jsonl", &buffer);
+    var lines = std.mem.splitScalar(u8, std.mem.trimEnd(u8, bytes, "\n"), '\n');
+    const expected = [_][]const u8{
+        "\"classification\":\"startup\",\"phase\":\"ready\",\"detail\":\"serving\"}",
+        "\"classification\":\"fenced\",\"phase\":\"retained cleanup\",\"detail\":\"Retained\"}",
+        "\"classification\":\"stopping\",\"phase\":\"Action status observation\",\"detail\":\"InputPartsNotSupported\"}",
+    };
+    for (expected) |suffix| try std.testing.expect(std.mem.endsWith(u8, lines.next() orelse "", suffix));
+    try std.testing.expectEqual(null, lines.next());
 }
 
 test "Host startup reports MCP tool collision and excess tools as owned failures" {

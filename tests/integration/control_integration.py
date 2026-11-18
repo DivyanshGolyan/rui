@@ -19,7 +19,7 @@ import threading
 import time
 
 import host_process
-from host_process import HeldReplies, STORE_SCHEMA, HostDiagnostics, PeerCensus, ReleaseGate, TestHTTPServer, canonical_fixture_root, hold, is_peer_disconnect, preserve_failure_metadata, retain_failure_state, stop_process, wait_for, wait_for_execution_release
+from host_process import HeldReplies, STORE_SCHEMA, HostDiagnostics, PeerCensus, PauseGate, ReleaseGate, TestHTTPServer, canonical_fixture_root, hold, is_peer_disconnect, preserve_failure_metadata, retain_failure_state, stop_process, wait_for, wait_for_execution_release
 from control_fixture import RUI, StreamingEndpoint, assert_intake_progress, command, configure, environment_header, inspect_execution, message, observe, open_partial, raw_request, read_http_response, start_host, stop_session, successful_sse
 import io
 import contextlib
@@ -595,21 +595,21 @@ def prove_pre_handoff_stop(state):
 
 
 def prove_sealed_interruption_and_cleanup(state):
+    # PAU-15
     store = state / "sealed-store"
     store.mkdir(mode=0o700)
     endpoint, endpoint_thread = start_success_endpoint()
     process = None
     milestones = None
-    settlement_gate = ReleaseGate(state / "sealed-result-gate")
+    settlement_gate = PauseGate("model.result_ready", occurrence=1)
     try:
         url = f"http://127.0.0.1:{endpoint.server_address[1]}/responses"
         process, _ = start_host(
             store,
             url,
             "--test-phase-trace",
-            "--test-model-result-gate-path",
-            settlement_gate.path,
             "--test-suppress-first-control-hint",
+            pause=settlement_gate,
         )
         milestones = HostDiagnostics(process)
         session = configure(state, store, "sealed-config")
@@ -620,9 +620,8 @@ def prove_sealed_interruption_and_cleanup(state):
             "sealed processing identity",
         )
         endpoint.release.set()
-        milestones.wait(
-            "sealed_before_settlement", operation=processing["operation"]
-        )
+        arrival = settlement_gate.wait(operation=processing["operation"])
+        assert arrival["context"]["attempt"] == int(processing["attempt"]), arrival
         interrupted = interrupt_model(
             state,
             store,
@@ -673,28 +672,25 @@ def prove_sealed_interruption_and_cleanup(state):
             timeout=15,
         )
         assert unavailable.returncode != 0, unavailable
-        os.mkfifo(settlement_gate.path, mode=0o600)
         message(state, store, "released-gate-message", session, "after release")
         successor_deadline = time.monotonic() + 8
         released = wait_for(
             lambda: (value := observe(store, "released-gate-message", deadline=successor_deadline))
             .get("result", {}).get("status") == "completed" and value,
-            "settlement gate with no writer does not strand its reader",
+            "later result passes the selected first arrival",
             deadline=successor_deadline,
         )
         milestones.wait_model_cleanup(released["binding"], successor_deadline)
         wait_execution_release(milestones, store, session, successor_deadline)
     finally:
-        stop_control_case(
-            process, milestones, endpoint, endpoint_thread,
-            settlement_gate.release,
-            lambda: settlement_gate.path.unlink(missing_ok=True),
-        )
+        settlement_gate.close()
+        stop_control_case(process, milestones, endpoint, endpoint_thread)
         if milestones is not None and sys.exc_info()[1] is None:
             milestones.assert_model_cleanup_census(processing, released["binding"])
 
 
 def prove_delivery_and_settlement_contention(state, *, sample_host=None):
+    # PAU-16
     store = state / "contention-store"
     store.mkdir(mode=0o700)
     endpoint, endpoint_thread = start_success_endpoint()
@@ -702,17 +698,15 @@ def prove_delivery_and_settlement_contention(state, *, sample_host=None):
     milestones = None
     inspections = []
     inspection_gate = ReleaseGate(state / "contention-inspection-gate")
-    settlement_gate = ReleaseGate(state / "contention-result-gate")
+    settlement_gate = PauseGate("model.result_ready", occurrence=1)
     try:
         url = f"http://127.0.0.1:{endpoint.server_address[1]}/responses"
         extra = [
             "--test-phase-trace",
             "--test-inspection-reply-gate-path",
             inspection_gate.path,
-            "--test-model-result-gate-path",
-            settlement_gate.path,
         ]
-        process, fields = start_host(store, url, *extra, active_capacity=101, observations="control_peers")
+        process, fields = start_host(store, url, *extra, active_capacity=101, observations="control_peers", pause=settlement_gate)
         milestones = HostDiagnostics(process)
         peers = PeerCensus(milestones)
         resource_samples = {}
@@ -763,7 +757,8 @@ def prove_delivery_and_settlement_contention(state, *, sample_host=None):
             )
 
         endpoint.release.set()
-        milestones.wait("sealed_before_settlement", timeout=8)
+        arrival = settlement_gate.wait()
+        assert arrival["context"]["operation"] in {int(p["operation"]) for p in processings}, arrival
         control_requests = [peers.expect("session_stop") for _ in range(CONTROL_HEADROOM)]
         control_deadline = time.monotonic() + 10
         barrier = threading.Barrier(CONTROL_HEADROOM + 1, timeout=10)
@@ -872,9 +867,10 @@ def prove_delivery_and_settlement_contention(state, *, sample_host=None):
             "resource_samples": resource_samples,
         }
     finally:
+        settlement_gate.close()
         stop_control_case(
             process, milestones, endpoint, endpoint_thread,
-            inspection_gate.release, settlement_gate.release,
+            inspection_gate.release,
             connections=inspections,
         )
         if milestones is not None and sys.exc_info()[1] is None:
