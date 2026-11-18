@@ -4752,6 +4752,88 @@ test "chat info inspection refresh preserves a choice and late captures never re
     try std.testing.expect((try rowWith(held, "Late")) != null);
 }
 
+test "SUI-4 late activity inspection cannot cover Settings Keys" {
+    const Frame = struct {
+        fn text(held: *HeldFrontend) ![]const u8 {
+            const width = held.size.width.?;
+            const height = held.size.height.?;
+            const allocator = held.arena.allocator();
+            const surface = try held.root.widget().draw(.{ .arena = allocator, .cell_arena = allocator, .min = .{}, .max = held.size, .cell_size = .{} });
+            var screen: vaxis.Screen = try .init(allocator, .{ .rows = height, .cols = width, .x_pixel = 0, .y_pixel = 0 });
+            const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = height, .screen = &screen };
+            try surface.render(window, held.root.settings_page.widget());
+            var result: std.Io.Writer.Allocating = .init(allocator);
+            for (0..height) |row| {
+                for (0..width) |col| try result.writer.writeAll(screen.readCell(@intCast(col), @intCast(row)).?.char.grapheme);
+                try result.writer.writeByte('\n');
+            }
+            return result.written();
+        }
+        fn keys(held: *HeldFrontend) ![]const u8 {
+            const shown = try text(held);
+            errdefer std.debug.print("Keys frame:\n{s}\n", .{shown});
+            try std.testing.expect(held.root.input.layer.settingsOpen());
+            try std.testing.expect(held.root.settings_page.keys_open);
+            try std.testing.expect(!held.self.info_open);
+            try std.testing.expect(std.mem.indexOf(u8, shown, "earlier message") != null);
+            // The shared Keys row legitimately says "list/chat · info actions".
+            // Only that occurrence of the info marker may appear here.
+            const info_count = std.mem.count(u8, shown, " · info");
+            try std.testing.expectEqual(@intFromBool(std.mem.indexOf(u8, shown, "list/chat · info actions") != null), info_count);
+            for ([_][]const u8{ "Copy last answer", "/help", "Commands", "Marks", "Esc returns", "Ctrl-X twice", "ctrl+g", "ctrl+d", "ctrl+n", "ctrl+end", "ctrl+c/d", "pgup/pgdn", "first session", "latest / last", "scroll / select" }) |stale|
+                try std.testing.expect(std.mem.indexOf(u8, shown, stale) == null);
+            return shown;
+        }
+    };
+    for ([_]vxfw.MaxSize{ .{ .width = 140, .height = 40 }, .{ .width = 46, .height = 30 } }) |size| {
+        var checkpoint: []const u8 = "fixture";
+        errdefer std.debug.print("late inspection width={d} checkpoint={s}\n", .{ size.width.?, checkpoint });
+        const fixture = try FeedFixture.create();
+        defer fixture.destroy();
+        const held = fixture.held;
+        const self = &held.self;
+        held.size = size;
+        checkpoint = "opening";
+        try fixture.page(.opening, &.{.{ .key = 1, .text = "answer before inspection\n" }}, true, true);
+        checkpoint = "open info";
+        try captureInfo(held, "Before");
+        try held.keys("\x1bi");
+        try std.testing.expect(self.info_open and self.inspection.status_requested);
+        try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "Copy last answer") != null);
+
+        // Freeze the activity read while info owns it, then defer settlement
+        // until after the user has closed info and opened Settings > Keys.
+        checkpoint = "freeze activity";
+        const job = self.freeze(.activity);
+        try std.testing.expect(job.open_status and job.watch_status);
+        status_page.sample(job.status_taken);
+        try job.status_taken.label.set("Late inspection");
+        job.result.status = true;
+        try self.launch(job, struct {
+            fn complete(_: *anyopaque, _: *Task) !void {}
+        }.complete);
+        checkpoint = "close info";
+        try held.keys("\x1b");
+        try std.testing.expect(!self.info_open);
+        var ctx = held.context();
+        checkpoint = "open settings";
+        try held.root.openSettings(&ctx);
+        _ = try Frame.text(held);
+        held.root.settings_page.select(.keys);
+        try @import("testing/app_events.zig").send(&ctx, "\r", held.root.widget(), held.root.settings_page.widget());
+        checkpoint = "keys before";
+        const before = try Frame.keys(held);
+        checkpoint = "settle";
+        try self.settleReader();
+        checkpoint = "keys after";
+        const after = try Frame.keys(held);
+        try std.testing.expectEqualStrings(before, after);
+        try std.testing.expectEqualStrings("Late inspection", self.inspection.sessions[self.inspection.status.?].label.slice());
+        const next = try Frame.keys(held);
+        try std.testing.expectEqualStrings(before, next);
+    }
+}
+
 test "chat info saves typed edits without touching the draft and reports refusal on the field" {
     const held = try HeldFrontend.create();
     defer held.destroy();
