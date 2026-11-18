@@ -1170,9 +1170,9 @@ test "App Session retains the draft across a permission card arriving during pas
     const draw_context: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 24 }, .cell_size = .{} };
     try seedFeed(screen, "\x1b[2mtheme witness\x1b[0m");
     for ([_]struct { caps: overview_view.Caps, ground: vaxis.Color, band: vaxis.Color }{
-        .{ .caps = .{}, .ground = .{ .rgb = .{ 0x12, 0x19, 0x33 } }, .band = .{ .rgb = .{ 0x1a, 0x22, 0x46 } } },
-        .{ .caps = .{ .background = .{ 255, 255, 255 } }, .ground = .{ .rgb = .{ 0xf3, 0xee, 0xe2 } }, .band = .{ .rgb = .{ 0xe6, 0xdd, 0xc8 } } },
-        .{ .caps = .{ .depth = .indexed }, .ground = .{ .index = 234 }, .band = .{ .index = 236 } },
+        .{ .caps = .{}, .ground = .{ .rgb = .{ 0x1b, 0x21, 0x36 } }, .band = .{ .rgb = .{ 0x24, 0x2b, 0x45 } } },
+        .{ .caps = .{ .background = .{ 255, 255, 255 } }, .ground = .{ .rgb = .{ 0xf3, 0xee, 0xe2 } }, .band = .{ .rgb = .{ 0xea, 0xe2, 0xcf } } },
+        .{ .caps = .{ .depth = .indexed }, .ground = .{ .index = 235 }, .band = .{ .index = 236 } },
         .{ .caps = .{ .depth = .none }, .ground = .default, .band = .default },
     }) |case| {
         self.app_caps = case.caps;
