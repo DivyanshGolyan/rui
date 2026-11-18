@@ -319,7 +319,7 @@ jobs:
             ignores=()
             # 1.7.7 predates GitHub's server-enforced cache policy key.
             case "$workflow" in
-              .github/workflows/qualify-macos.yml|.github/workflows/previous-release-upgrade.yml|.github/workflows/release.yml)
+              .github/workflows/qualify-macos.yml|.github/workflows/previous-release-upgrade.yml|.github/workflows/release.yml|.github/workflows/release-build.yml)
                 ignores+=(-ignore '^unexpected key "cache-mode" for "workflow" section\.') ;;
             esac
             # 1.7.7 predates GitHub's bounded concurrency queue option.
@@ -665,7 +665,7 @@ jobs:
           setup-outcome: ${{ steps.setup.outcome == 'success' && steps.restore.outcome == 'success' && 'success' || 'failure' }}
           work-outcome: ${{ steps.compile.outcome }}
       - name: Start Postgres 15 with TLS for test-pg's live rounds
-        if: ${{ contains(matrix.targets, 'test-pg') || contains(matrix.targets, 'check') || (contains(matrix.targets, 'check-full') && matrix.part != 'callers') }}
+        if: ${{ matrix.live_postgres }}
         run: |
           set -euo pipefail
           certs="$RUNNER_TEMP/pg-certs"

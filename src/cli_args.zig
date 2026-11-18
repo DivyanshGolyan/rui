@@ -36,6 +36,8 @@ pub const Command = enum {
     session_unpin,
     session_interrupt_model,
     session_read_conversation,
+    session_inspect_part,
+    session_read_image_part,
     session_resume,
     request_inspect,
     request_wait,
@@ -50,6 +52,8 @@ pub const Command = enum {
     action_deny,
     action_read_call_id,
     action_read_arguments,
+    action_inspect_part,
+    action_read_image_part,
     host_start,
     host_pause,
     host_status,
@@ -85,6 +89,7 @@ pub const Command = enum {
             .session_unpin => .{ .resource = .session, .name = "unpin", .description = "Unpin a Session without changing its work. An already unpinned Session is unchanged.", .options = destination ++ session ++ capture, .mutation = true, .requires = need_session },
             .session_interrupt_model => .{ .resource = .session, .name = "interrupt-model", .description = "Interrupt the exact model Operation after inspecting its Session and Turn.", .options = destination ++ session ++ capture ++ &[_]Option{ value("turn", "ID"), value("operation", "ID") }, .mutation = true, .requires = need_session ++ &[_][]const []const u8{ &.{"turn"}, &.{"operation"} } },
             .session_read_conversation => .{ .resource = .session, .name = "read-conversation", .description = "Stream the exact saved public Conversation content at position and ordinal.", .options = destination ++ session ++ &[_]Option{ value("position", "POSITION"), value("ordinal", "ORDINAL") }, .requires = need_session ++ &[_][]const []const u8{ &.{"position"}, &.{"ordinal"} } },
+            .session_inspect_part, .session_read_image_part => .{ .resource = .session, .name = if (self == .session_inspect_part) "inspect-part" else "read-image-part", .description = if (self == .session_inspect_part) "Inspect typed metadata for a Message part by zero-based ordinal." else "Stream exact bytes of an image in a Message.", .options = destination ++ session ++ &[_]Option{ numeric("admission", "ID", 1, std.math.maxInt(i64), .id_malformed), numeric("ordinal", "N", 0, @import("input_parts.zig").max_parts, .count_malformed) }, .requires = need_session ++ &[_][]const []const u8{ &.{"admission"}, &.{"ordinal"} } },
             .session_resume => .{ .resource = .session, .name = "resume", .description = "Open an existing Session in the live terminal frontend. Requires terminal input/output; starts or attaches to a managed Host.", .options = destination ++ session, .positional = "ID", .positional_conflicts = &.{.{ .code = .session_selector_repeated, .option = "session" }}, .requires = &.{&.{ "", "session" }} },
             .request_inspect => .{ .resource = .request, .name = "inspect", .description = "Observe the original submitted command once. HANDLE loads its saved identity; --store and --key address it explicitly. Never transmits captured intent.", .options = destination ++ key, .positional = "HANDLE", .positional_conflicts = saved_identity, .requires = &.{&.{ "", "key", "key-hex" }} },
             .request_wait => .{ .resource = .request, .name = "wait", .description = "Wait for the original request to end or need permission. Prints the latest request inspect JSON, never an answer or token. Polls without holding capture or Host resources and never starts, resumes or retargets work. --timeout-seconds defaults to 300 (1..86400). Exits 0 when ended or waiting for permission, 5 on timeout or signal while pending, 4 if absent: rui request recover HANDLE.", .options = destination ++ key ++ &[_]Option{numeric("timeout-seconds", "N", 1, @import("request_wait.zig").max_timeout_seconds, .count_malformed)}, .positional = "HANDLE", .positional_conflicts = saved_identity, .requires = &.{&.{ "", "key", "key-hex" }} },
@@ -99,6 +104,7 @@ pub const Command = enum {
             .action_read => .{ .resource = .action, .name = "read", .description = "Read an Action's status and one final-result window; --offset continues at a returned byte cursor. Does not wait or consume.", .options = destination ++ session ++ action ++ &[_]Option{numeric("offset", "BYTES", 0, @import("content_string.zig").max_bytes, .count_malformed)}, .requires = need_action },
             .action_read_call_id => .{ .resource = .action, .name = "read-call-id", .description = "Stream the exact saved Action call ID bytes.", .options = destination ++ session ++ action, .requires = need_action },
             .action_read_arguments => .{ .resource = .action, .name = "read-arguments", .description = "Stream the exact saved Action argument bytes.", .options = destination ++ session ++ action, .requires = need_action },
+            .action_inspect_part, .action_read_image_part => .{ .resource = .action, .name = if (self == .action_inspect_part) "inspect-part" else "read-image-part", .description = if (self == .action_inspect_part) "Inspect typed metadata for an Action Resolution part by zero-based ordinal." else "Stream exact bytes of an image in an Action Resolution.", .options = destination ++ session ++ action ++ &[_]Option{numeric("ordinal", "N", 0, @import("input_parts.zig").max_parts, .count_malformed)}, .requires = need_action ++ &[_][]const []const u8{&.{"ordinal"}} },
             .host_start => .{ .resource = .host, .name = "start", .description = "Start or connect to a managed Host. An already-running Host keeps its original settings.", .options = serve_grammar.settings_options, .retired_options = serve_grammar.retired_options },
             .host_set => .{ .resource = .host, .name = "set", .description = "Save one Host setting. @FILE reads a JSON value from a file.", .options = serve_grammar.host_destination, .positional = "PATH", .positional_tail = "VALUE", .requires = &.{ &.{""}, &.{"#2"} } },
             .host_unset => .{ .resource = .host, .name = "unset", .description = "Remove one saved Host setting, restoring its default.", .options = serve_grammar.host_destination, .positional = "PATH", .requires = &.{&.{""}} },
@@ -313,7 +319,7 @@ test "option name set covers every grammar and rejects unknown names" {
     try std.testing.expect(!hasOptionName("made-up-option-name"));
 }
 
-test "grammar rejects ambiguous invocations before any effect" {
+test "CLI-2 invalid_input_is_local" {
     try expectValidation(.session_send, &.{ "--to", "a", "--to", "a", "hi" }, error.DuplicateArgument);
     try expectValidation(.session_send, &.{ "--to", "a", "--text", "f" }, error.UnknownArgument);
     try expectValidation(.session_send, &.{ "--to", "a", "hi", "again" }, error.InvalidArguments);
@@ -343,6 +349,23 @@ test "grammar rejects ambiguous invocations before any effect" {
     try expectValidation(.session_resume, &.{ "--session", "a", "REF" }, error.ConflictingArguments);
     try expectValidation(.session_resume, &.{ "--store", "/s", "--last" }, error.UnknownArgument);
     try expectValidation(.host_serve, &.{ "--test-phase-trace", "--fault", "before-commit", "--set", "example=value" }, false);
+    const Selector = struct { command: Command, id: []const u8, id_flag: []const u8 };
+    for ([_]Selector{
+        .{ .command = .session_inspect_part, .id = "admission", .id_flag = "--admission" },
+        .{ .command = .session_read_image_part, .id = "admission", .id_flag = "--admission" },
+        .{ .command = .action_inspect_part, .id = "action", .id_flag = "--action" },
+        .{ .command = .action_read_image_part, .id = "action", .id_flag = "--action" },
+    }) |selector| {
+        try checkNumericRange(.{ .command = selector.command, .name = selector.id, .code = .id_malformed, .low = "1", .high = "9223372036854775807" });
+        try checkNumericRange(.{ .command = selector.command, .name = "ordinal", .code = .count_malformed, .low = "0", .high = "1500" });
+        var storage: [1024]u8 = undefined;
+        const parsed = try testParse(selector.command.definition(), &.{ "--session", "k7m2qx", selector.id_flag, "7", "--ordinal", "2" }, &storage);
+        try std.testing.expect(parsed.missing() == null);
+        try std.testing.expectEqual(@as(u64, 7), try std.fmt.parseInt(u64, parsed.getNamed(selector.id).?, 10));
+        try std.testing.expectEqual(@as(?u64, 2), try parsed.number(u64, "ordinal"));
+        try std.testing.expectEqualStrings("ordinal", (try expectMissing(selector.command, &.{ "--session", "k7m2qx", selector.id_flag, "7" })).?);
+        try expectValidation(selector.command, &.{ "--session", "k7m2qx", selector.id_flag, "7", "--ordinal", "2", "--ordinal", "3" }, error.DuplicateArgument);
+    }
     try expectValidation(.session_list, &.{"--test-drop-reply"}, error.UnknownArgument);
 }
 
@@ -592,9 +615,10 @@ test "typed choices share enum names with help and refuse unknown values" {
     }
 }
 
+const NumericCase = struct { command: Command, name: []const u8, code: caller_error.Code, low: []const u8, high: []const u8 };
+
 test "numeric options reject malformed decimals and state their accepted range" {
-    const Case = struct { command: Command, name: []const u8, code: caller_error.Code, low: []const u8, high: []const u8 };
-    const cases = [_]Case{
+    const cases = [_]NumericCase{
         .{ .command = .action_read, .name = "offset", .code = .count_malformed, .low = "0", .high = std.fmt.comptimePrint("{d}", .{@import("content_string.zig").max_bytes}) },
         .{ .command = .action_inspect, .name = "action", .code = .id_malformed, .low = "1", .high = "9223372036854775807" },
         .{ .command = .session_interrupt_model, .name = "turn", .code = .id_malformed, .low = "1", .high = "9223372036854775807" },
@@ -606,25 +630,27 @@ test "numeric options reject malformed decimals and state their accepted range" 
         .{ .command = .store_schema, .name = "from", .code = .count_malformed, .low = "0", .high = std.fmt.comptimePrint("{d}", .{std.math.maxInt(u64)}) },
         .{ .command = .host_serve, .name = "test-retention-entry-capacity", .code = .count_malformed, .low = "2", .high = std.fmt.comptimePrint("{d}", .{retention_capacity.entries}) },
     };
-    for (cases) |case| {
-        var spelling: [64]u8 = undefined;
-        const flag_name = try std.fmt.bufPrint(&spelling, "--{s}", .{case.name});
-        for ([_][]const u8{ "12x", "-1", "+1", "1_0", "", "18446744073709551616" }) |invalid| {
-            const refusal = try expectRefusal(case.command, &.{ flag_name, invalid }, case.code, case.name);
-            try std.testing.expectEqualStrings(invalid, refusal.value.?);
-            try std.testing.expect(std.mem.indexOf(u8, refusal.accepted.?.grammar, case.low) != null);
-            try std.testing.expect(std.mem.indexOf(u8, refusal.accepted.?.grammar, case.high) != null);
-        }
-        if (!std.mem.eql(u8, case.low, "0")) _ = try expectRefusal(case.command, &.{ flag_name, "0" }, case.code, case.name);
-        const upper = try std.fmt.parseInt(u64, case.high, 10);
-        if (upper < std.math.maxInt(u64)) {
-            var beyond: [32]u8 = undefined;
-            _ = try expectRefusal(case.command, &.{ flag_name, try std.fmt.bufPrint(&beyond, "{d}", .{upper + 1}) }, case.code, case.name);
-        }
-        for ([_][]const u8{ case.low, case.high }) |valid| {
-            var storage: [1024]u8 = undefined;
-            _ = try testParse(case.command.definition(), &.{ flag_name, valid }, &storage);
-        }
+    for (cases) |case| try checkNumericRange(case);
+}
+
+fn checkNumericRange(case: NumericCase) !void {
+    var spelling: [64]u8 = undefined;
+    const flag_name = try std.fmt.bufPrint(&spelling, "--{s}", .{case.name});
+    for ([_][]const u8{ "12x", "-1", "+1", "1_0", "", "18446744073709551616" }) |invalid| {
+        const refusal = try expectRefusal(case.command, &.{ flag_name, invalid }, case.code, case.name);
+        try std.testing.expectEqualStrings(invalid, refusal.value.?);
+        try std.testing.expect(std.mem.indexOf(u8, refusal.accepted.?.grammar, case.low) != null);
+        try std.testing.expect(std.mem.indexOf(u8, refusal.accepted.?.grammar, case.high) != null);
+    }
+    if (!std.mem.eql(u8, case.low, "0")) _ = try expectRefusal(case.command, &.{ flag_name, "0" }, case.code, case.name);
+    const upper = try std.fmt.parseInt(u64, case.high, 10);
+    if (upper < std.math.maxInt(u64)) {
+        var beyond: [32]u8 = undefined;
+        _ = try expectRefusal(case.command, &.{ flag_name, try std.fmt.bufPrint(&beyond, "{d}", .{upper + 1}) }, case.code, case.name);
+    }
+    for ([_][]const u8{ case.low, case.high }) |valid| {
+        var storage: [1024]u8 = undefined;
+        _ = try testParse(case.command.definition(), &.{ flag_name, valid }, &storage);
     }
 }
 

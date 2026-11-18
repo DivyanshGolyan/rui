@@ -59,8 +59,8 @@ def main():
         catalog = AppModelCatalog(host)
         caller = spawn([str(fixture.RUI), "--store", str(store)], cwd=state,
                        env=env, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
-        launch = read_terminal(master, "Type a task", composer=True)
-        assert "+ New Session" in launch and any(split_pane_row(row)[1] for row in launch.splitlines()), launch
+        launch = read_terminal(master, "What shall we work on?", composer=True)
+        assert "+ New chat" in launch and any(split_pane_row(row)[1] for row in launch.splitlines()), launch
         initial = host_process.wait_for(
             lambda: json.loads(cli("session", "list", "--store", store, "--all"))["sessions"],
             "wide launch Session")

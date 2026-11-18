@@ -147,9 +147,10 @@ class WiringTest(unittest.TestCase):
         text = (ROOT / ".github/workflows/promote.yml").read_text()
         for name in PROMOTE_AGGREGATES:
             body = re.search(rf"(?ms)^  {name}:\n(.*?)(?=^  [a-z_]+:|\Z)", text)[1]
-            self.assertIn("needs: [batch, selected, upgrade, renderer]", body)
+            self.assertIn("needs: [batch, release_build, selected, upgrade, renderer]", body)
         release = re.search(r"(?ms)^  release:\n(.*?)(?=^  [a-z_]+:|\Z)", text)[1]
-        self.assertIn("needs: [batch, qualified]", release, "a rerun's Release waits for the rerun verdict")
+        # Release reads the version from release_build, which a rerun keeps unless it failed.
+        self.assertIn("needs: [batch, release_build, qualified]", release, "a rerun's Release waits for the rerun verdict")
         self.assertNotIn("if:", release, "Release runs only when qualified succeeds")
 
     def test_the_retry_runs_trusted_code_once_per_failed_pr_run_or_promotion(self):

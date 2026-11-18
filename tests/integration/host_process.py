@@ -794,11 +794,12 @@ class _H2StreamWriter:
 class PauseGate:
     """Own one private child endpoint and its armed Action selection."""
 
-    def __init__(self, point):
+    def __init__(self, point, occurrence=None):
         from pause_client import PauseClient
         parent, self.child = socket.socketpair()
         self.client = PauseClient(parent)
         self.point = point
+        self.occurrence = occurrence
         self.arrival = None
 
     def arguments(self):
@@ -807,11 +808,16 @@ class PauseGate:
     def started(self, process):
         self.client.attach_process(process)
         self.child.close()
-        self.client.arm(self.point)
+        self.client.arm(self.point, occurrence=self.occurrence)
         self.client.start()
 
-    def wait(self, action=None):
-        self.arrival = self.client.wait(self.point, {"action": int(action)} if action is not None else None)
+    def wait(self, action=None, operation=None):
+        context = {}
+        if action is not None:
+            context["action"] = int(action)
+        if operation is not None:
+            context["operation"] = int(operation)
+        self.arrival = self.client.wait(self.point, context or None, occurrence=self.occurrence)
         return self.arrival
 
     def release(self):

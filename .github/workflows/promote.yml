@@ -1,6 +1,8 @@
 name: Promote
 # Manual only. Qualify main HEAD with the expensive tier over the batch since
 # stable, the last promoted release, then publish and advance stable on green.
+# The release archives are built cold first, beside the suites; the upgrade
+# check and renderer contracts test them, and Release publishes those bytes.
 # A failing job bisects the batch with its own command; the run never merges.
 on:
   workflow_dispatch:
@@ -45,6 +47,17 @@ jobs:
             git log --first-parent --format='- %h %s' "$base..$HEAD_SHA"
           } | tee -a "$GITHUB_STEP_SUMMARY"
           if [ "$size" = 0 ]; then echo 'stable already holds main HEAD; nothing to promote' | tee -a "$GITHUB_STEP_SUMMARY"; fi
+  release_build:
+    # Version planning and cold release archives of the batch head. Publishes nothing.
+    needs: batch
+    if: ${{ needs.batch.outputs.size != '0' }}
+    permissions:
+      # The plan sees draft reservations only with push access; it never writes.
+      contents: write
+      actions: read
+    uses: ./.github/workflows/release-build.yml
+    with:
+      sha: ${{ needs.batch.outputs.head }}
   selected:
     # Full check-full, frame gate and Debug recovery on Linux and macOS, plus
     # the targets the batch's paths select.
@@ -63,22 +76,31 @@ jobs:
     secrets:
       MAC_RUNNER_STATUS_TOKEN: ${{ secrets.MAC_RUNNER_STATUS_TOKEN }}
   upgrade:
-    needs: batch
+    # Tests the release executables; without a planned release it compiles the candidate.
+    needs: [batch, release_build]
     if: ${{ needs.batch.outputs.size != '0' }}
+    permissions:
+      contents: read
+      actions: read
     uses: ./.github/workflows/previous-release-upgrade.yml
     with:
       candidate-ref: ${{ needs.batch.outputs.head }}
       batch-base: ${{ needs.batch.outputs.base }}
+      release-version: ${{ needs.release_build.outputs.version }}
   renderer:
-    needs: batch
+    needs: [batch, release_build]
     if: ${{ needs.batch.outputs.size != '0' }}
+    permissions:
+      contents: read
+      actions: read
     uses: ./.github/workflows/renderer-contracts.yml
     with:
       ref: ${{ needs.batch.outputs.head }}
       batch-base: ${{ needs.batch.outputs.base }}
+      release-version: ${{ needs.release_build.outputs.version }}
   qualified:
     # The sole promotion verdict. Only success of every tier qualifies the batch.
-    needs: [batch, selected, upgrade, renderer]
+    needs: [batch, release_build, selected, upgrade, renderer]
     if: ${{ always() && needs.batch.outputs.size != '0' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -86,17 +108,19 @@ jobs:
       - name: Require every selected promotion tier
         env:
           BATCH_RESULT: ${{ needs.batch.result }}
+          RELEASE_BUILD_RESULT: ${{ needs.release_build.result }}
           SELECTED_RESULT: ${{ needs.selected.result }}
           UPGRADE_RESULT: ${{ needs.upgrade.result }}
           RENDERER_RESULT: ${{ needs.renderer.result }}
         run: |
           set -euo pipefail
-          for result in "$BATCH_RESULT" "$SELECTED_RESULT" "$UPGRADE_RESULT" "$RENDERER_RESULT"; do
+          for result in "$BATCH_RESULT" "$RELEASE_BUILD_RESULT" "$SELECTED_RESULT" "$UPGRADE_RESULT" "$RENDERER_RESULT"; do
             test "$result" = success
           done
   release:
-    # Cold builds, publication and the stable fast-forward of the qualified SHA.
-    needs: [batch, qualified]
+    # Publication of the archives Release build made and the tiers tested, and the
+    # stable fast-forward of the qualified SHA. It rebuilds nothing.
+    needs: [batch, release_build, qualified]
     permissions:
       contents: write
       actions: write
@@ -105,6 +129,7 @@ jobs:
     uses: ./.github/workflows/release.yml
     with:
       sha: ${{ needs.batch.outputs.head }}
+      version: ${{ needs.release_build.outputs.version }}
   report:
     # One issue per failure signature, with the bisect's verdict on it.
     needs: [batch, selected, upgrade, renderer]
