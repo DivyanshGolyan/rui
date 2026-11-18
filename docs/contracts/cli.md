@@ -49,7 +49,7 @@ A typed ID with valid syntax that Rui does not list is admitted with one line, `
 `session configure --parent ID` without a Session selector and `session start --parent ID` capture the existing create-only parent relation.
 They send the creation spec through the native inherit-and-narrow owner: provider, Workspace and saved Bash environment come from the parent, configured allowed tool names and Permission Mode may only narrow, and explicit provider or Workspace overrides remain present for canonical refusal even when equal.
 The CLI adds neither its default provider nor its current directory to an attached spec.
-For attached creation without a preset, the CLI sends the selected model and explicit choices, with saved effort and Permission Mode separately as creation preferences; the Host resolves omitted settings at admission. An omitted compaction trigger uses the inherited provider: with a Codex parent and `gpt-6.1-sol` it is 244,800 tokens whether the saved provider is OpenAI or Codex. Before this change the saved OpenAI case sent 945,000 while the saved Codex case sent 244,800. An explicit `--compaction-trigger TOKENS` fixes the threshold and is preserved.
+For attached creation without a preset, the CLI sends the selected model and explicit choices, with saved effort and Permission Mode separately as creation preferences; the Host resolves omitted settings at admission. An omitted compaction trigger uses the inherited provider: with a Codex parent and `gpt-6.1-sol` it is 450,000 tokens whether the saved provider is OpenAI or Codex. In the earlier baseline the saved OpenAI case sent 945,000 while the saved Codex case sent 244,800; main later raised the Codex model default to 450,000. An explicit `--compaction-trigger TOKENS` fixes the threshold and is preserved.
 An attached spec with explicit model, effort, Permission Mode and concrete compactAt bypasses unused binding preferences, so an absent HOME or stale saved provider cannot prevent its canonical parent refusal.
 Missing or archived parents and parent on an addressed update reach the saved native refusals.
 Addressed configuration preserves the exact canonical ID and sparse update inputs.
@@ -330,9 +330,8 @@ Missing or unreadable future defaults do not prevent a Host from serving existin
 A pin with invalid syntax rejects fresh CLI creation before capture rather than falling back to the recommendation.
 
 The Host resolves omitted fresh effort using an applicable saved creation preference, then the product effort `low` if accepted, otherwise the lowest listed effort, otherwise no effort. An explicit effort or reset takes precedence over the saved preference.
-ChatGPT sign-in’s default compactAt is the smaller of the provider-keyed product default 244,800 tokens and 90% of the catalog window, using the unlisted context estimate for a missing or null window.
-This keeps 244,800 tokens for large windows but uses 115,200 for a 128,000-token window such as `gpt-5.3-codex-spark`, including when resetting compactAt to its default.
-Other providers default to 90% of the catalog window, or 115,200 tokens for a missing or null window.
+For Codex, the Host uses a model-specific product trigger when available, otherwise the provider fallback of 244,800 tokens; either is capped at 90% of the selected catalog window. A missing or null window uses the unlisted context estimate.
+For example, `gpt-6.1-sol` defaults to 450,000 tokens with its shipped window, while `gpt-5.3-codex-spark` defaults to 115,200. Other providers default to 90% of the selected window. The same rule applies when resetting compactAt.
 Omitted updates preserve existing settings; explicit default requests use the Host rule. Frozen Operations do not change.
 
 The fetched live lists are a Host's OpenAI key list and its ChatGPT plan list behind [`/v1/model-list`](inspection.md#public-session-activity); the ChatGPT device sign-in uses the selected catalog's OpenAI IDs because its backend publishes no list.

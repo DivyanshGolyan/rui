@@ -53,7 +53,7 @@ The creation spec may carry personal saved effort and Permission Mode in its `pr
 Addressed configure preserves every omitted setting; provider and Workspace remain immutable, while the model may change within the provider (D192).
 A creating spec may also name `parent`, a Session ID relation, never a revisioned setting (D178).
 The child inherits that Session's Workspace and provider and may only narrow its configured tool names and Permission Mode, through the same admission owner as `start_agent` (D122, D140).
-For an omitted child `compactAt`, the Host uses the inherited provider, not a personal saved provider. For example, with a Codex parent and `gpt-6.1-sol`, the threshold is 244,800 tokens whether the client saved OpenAI or Codex; before this change the saved OpenAI case sent 945,000 while the saved Codex case sent 244,800.
+For an omitted child `compactAt`, the Host uses the inherited provider, not a personal saved provider. For example, with a Codex parent and `gpt-6.1-sol`, the threshold is 450,000 tokens whether the client saved OpenAI or Codex. In the earlier baseline, the saved OpenAI case sent 945,000 and the saved Codex case sent 244,800; main later raised the Codex model default to 450,000.
 Naming provider or Workspace, even equal values, is refused, as is a wider tool set or bypass under an asking parent; refusals name the field and never silently intersect the spec.
 Missing parents and parents with an archive intent are refused as `unknown_session`; an update naming `parent` is refused as `parent_on_update`.
 A native configure creation admits no task Message. Child approval forwarding and ending Messages use the saved parent relation as for attached agents.
