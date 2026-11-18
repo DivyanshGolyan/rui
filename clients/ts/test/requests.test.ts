@@ -82,7 +82,7 @@ test("status requests the Current profile and maps reported facts and parent los
 	}
 });
 
-test("status and list expose exactly the Host served facts", async () => {
+async function servedCase0() {
 	const facts = { attention: { kind: "approval", turn: "7", step: "9" }, group: "needs_you", actions: { stop: true, interrupt: { turn: "7", operation: "8" }, decide: null } } as const;
 	const link: Link = { async exchange(path) {
 		return Buffer.from(JSON.stringify(path === "/v1/inspect-session"
@@ -96,9 +96,9 @@ test("status and list expose exactly the Host served facts", async () => {
 		assert.ok(result);
 		for (const [key, value] of Object.entries(expected)) assert.deepEqual(result[key as keyof typeof expected], value);
 	}
-});
+}
 
-test("status and list reject missing served facts", async () => {
+async function servedCase1() {
 	for (const missing of ["attention", "group", "actions"] as const) {
 		const work: Record<string, unknown> = { ...idleWork };
 		delete work[missing];
@@ -108,7 +108,7 @@ test("status and list reject missing served facts", async () => {
 		await assert.rejects(new Session(link, "abc123").status(), /missing served facts/);
 		await assert.rejects(new Sessions(link).list(), /missing served facts/);
 	}
-});
+}
 
 test("status preserves configured and loaded tool intent from each Current report", async () => {
 	const configurations = [
@@ -399,7 +399,7 @@ test("stop Action preserves the existing Resolution position", async () => {
     assert.equal(await new Session(link, "session").stopAction("42"), "9007199254740993");
 });
 
-test("feed rejects full replies missing served work facts", async () => {
+async function servedCase2() {
 	for (const missing of ["attention", "group", "actions"] as const) {
 		const work: Record<string, unknown> = { ...idleWork };
 		delete work[missing];
@@ -408,4 +408,10 @@ test("feed rejects full replies missing served work facts", async () => {
 		} }, "abc123");
 		await assert.rejects(session.listActivity().next(), /missing served facts/);
 	}
+}
+
+test("SUI-29 typescript_served_work", async () => {
+	await servedCase0();
+	await servedCase1();
+	await servedCase2();
 });
