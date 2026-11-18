@@ -1576,7 +1576,10 @@ fn names(comptime side: Expr, comptime sources: []const Source, comptime index: 
 fn renderStatement(comptime sql: []const u8, comptime arguments: usize) [:0]const u8 {
     comptime {
         @setEvalBranchQuota(200 * sql.len + 10_000 + schema.objects_quota);
-        var out: []const u8 = "";
+        // Each marker adds at most three pieces: the text before it, a fixed
+        // word and its argument.
+        var pieces: [3 * std.mem.countScalar(u8, sql, '@') + 1][]const u8 = undefined;
+        var count: usize = 0;
         var start: usize = 0;
         var index: usize = 0;
         while (index < sql.len) {
@@ -1591,7 +1594,8 @@ fn renderStatement(comptime sql: []const u8, comptime arguments: usize) [:0]cons
             const name_end = wordEnd(sql, index + 1);
             const name = sql[index + 1 .. name_end];
             if (std.mem.eql(u8, name, "now")) {
-                out = out ++ sql[start..index] ++ std.fmt.comptimePrint("?{d}", .{arguments + 1});
+                pieces[count..][0..2].* = .{ sql[start..index], std.fmt.comptimePrint("?{d}", .{arguments + 1}) };
+                count += 2;
                 index = name_end;
                 start = index;
                 continue;
@@ -1605,12 +1609,18 @@ fn renderStatement(comptime sql: []const u8, comptime arguments: usize) [:0]cons
             const argument = std.mem.trim(u8, sql[name_end + 1 .. close], " \n");
             if (std.mem.eql(u8, name, "index")) {
                 if (!schema.hasIndex(argument)) @compileError("rsql: no index named " ++ argument ++ " in the schema: " ++ sql);
-                out = out ++ sql[start..index] ++ "INDEXED BY " ++ argument;
-            } else out = out ++ sql[start..index] ++ argument;
+                pieces[count..][0..3].* = .{ sql[start..index], "INDEXED BY ", argument };
+                count += 3;
+            } else {
+                pieces[count..][0..2].* = .{ sql[start..index], argument };
+                count += 2;
+            }
             index = close + 1;
             start = index;
         }
-        const text = renderSqlite(out ++ sql[start..]) ++ "\x00";
+        pieces[count] = sql[start..];
+        count += 1;
+        const text = renderSqlite(joinPieces(pieces[0..count])) ++ "\x00";
         return text[0 .. text.len - 1 :0];
     }
 }
@@ -1618,7 +1628,8 @@ fn renderStatement(comptime sql: []const u8, comptime arguments: usize) [:0]cons
 fn renderSqlite(comptime text: []const u8) []const u8 {
     comptime {
         @setEvalBranchQuota(100 * text.len + 1000);
-        var out: []const u8 = "";
+        var pieces: [2 * std.mem.countScalar(u8, text, '@') + 1][]const u8 = undefined;
+        var count: usize = 0;
         var start: usize = 0;
         var index: usize = 0;
         while (index < text.len) {
@@ -1630,17 +1641,21 @@ fn renderSqlite(comptime text: []const u8) []const u8 {
                 index += 1;
                 continue;
             }
-            out = out ++ text[start..index];
+            pieces[count] = text[start..index];
+            count += 1;
             const name_end = wordEnd(text, index + 1);
             const name = text[index + 1 .. name_end];
             if (name_end >= text.len or text[name_end] != '(') @compileError("rsql: @" ++ name ++ " needs arguments in parentheses: " ++ text);
             const close = closingParenthesis(text, name_end);
             const arguments = splitArguments(text[name_end + 1 .. close]);
-            out = out ++ marker(name, arguments, text);
+            pieces[count] = marker(name, arguments, text);
+            count += 1;
             index = close + 1;
             start = index;
         }
-        return out ++ text[start..];
+        pieces[count] = text[start..];
+        count += 1;
+        return joinPieces(pieces[0..count]);
     }
 }
 
@@ -1682,14 +1697,63 @@ fn marker(comptime name: []const u8, comptime arguments: []const []const u8, com
     if (std.mem.eql(u8, name, "after")) return renderAfterSqlite(arguments, text);
     const kind = expressionMarker(name) orelse @compileError("rsql: unknown marker @" ++ name ++ ": " ++ text);
     if (arguments.len != kind.arity) @compileError("rsql: @" ++ name ++ " takes " ++ std.fmt.comptimePrint("{d}", .{kind.arity}) ++ " arguments: " ++ text);
-    var out: []const u8 = "";
-    for (kind.sqlite) |byte| out = out ++ switch (byte) {
-        arg_a[0] => renderSqlite(arguments[0]),
-        arg_b[0] => renderSqlite(arguments[1]),
-        arg_set[0] => characterSet(arguments[1], text),
-        else => &[_]u8{byte},
+    var pieces: [2 * kind.sqlite.len + 1][]const u8 = undefined;
+    var count: usize = 0;
+    var from: usize = 0;
+    for (kind.sqlite, 0..) |byte, index| {
+        if (byte > arg_set[0]) continue;
+        pieces[count..][0..2].* = .{ kind.sqlite[from..index], switch (byte) {
+            arg_a[0] => renderSqlite(arguments[0]),
+            arg_b[0] => renderSqlite(arguments[1]),
+            arg_set[0] => characterSet(arguments[1], text),
+            else => unreachable,
+        } };
+        count += 2;
+        from = index + 1;
+    }
+    pieces[count] = kind.sqlite[from..];
+    count += 1;
+    return joinPieces(pieces[0..count]);
+}
+
+/// Concatenates `pieces` in halves, so each byte is copied once per level:
+/// appending piece by piece to one slice copies the whole prefix every time.
+fn joinPieces(comptime pieces: []const []const u8) []const u8 {
+    comptime {
+        return switch (pieces.len) {
+            0 => "",
+            1 => pieces[0],
+            else => joinPieces(pieces[0 .. pieces.len / 2]) ++ joinPieces(pieces[pieces.len / 2 ..]),
+        };
+    }
+}
+
+/// A comptime list that doubles its storage when full, so n appends copy
+/// O(n) items in all; `list = list ++ .{item}` copies the whole list each time.
+fn ComptimeList(comptime T: type) type {
+    return struct {
+        storage: []T = &.{},
+        len: usize = 0,
+
+        fn append(list: *@This(), item: T) void {
+            if (list.len == list.storage.len) {
+                var grown: [@max(8, 2 * list.storage.len)]T = undefined;
+                @memcpy(grown[0..list.len], list.storage);
+                list.storage = &grown;
+            }
+            list.storage[list.len] = item;
+            list.len += 1;
+        }
+
+        fn items(list: *const @This()) []const T {
+            return list.storage[0..list.len];
+        }
+
+        fn finish(list: *const @This()) []const T {
+            const final = list.storage[0..list.len].*;
+            return &final;
+        }
     };
-    return out;
 }
 
 pub const Slot = union(enum) {
@@ -1708,8 +1772,9 @@ pub const Template = struct {
 
     pub fn prepared(comptime template: Template) [:0]const u8 {
         comptime {
-            var text: []const u8 = template.parts[0];
-            for (template.parts[1..]) |part| text = text ++ "?" ++ part;
+            var pieces: [2 * template.parts.len][]const u8 = undefined;
+            for (template.parts, 0..) |part, index| pieces[2 * index ..][0..2].* = .{ if (index == 0) "" else "?", part };
+            const text = joinPieces(&pieces);
             const terminated = text ++ "\x00";
             return terminated[0..text.len :0];
         }
@@ -1736,7 +1801,8 @@ pub fn mysqlRendering(comptime text: []const u8) MysqlRendering {
         };
         var renderer: MysqlRenderer = .{ .text = text, .tokens = tokens, .skips = skips };
         renderer.range(0, tokens.len) catch return .{ .refused = renderer.message };
-        return .{ .rendered = .{ .parts = renderer.parts ++ .{renderer.current}, .slots = renderer.slots } };
+        renderer.endPart();
+        return .{ .rendered = .{ .parts = renderer.parts.finish(), .slots = renderer.slots.finish() } };
     }
 }
 
@@ -1815,19 +1881,24 @@ const MysqlRenderer = struct {
     text: []const u8,
     tokens: []const Token,
     skips: []const [2]usize = &.{},
-    parts: []const []const u8 = &.{},
-    current: []const u8 = "",
-    slots: []const Slot = &.{},
+    // The pieces of the part being rendered, joined once when a slot ends it.
+    current: ComptimeList([]const u8) = .{},
+    parts: ComptimeList([]const u8) = .{},
+    slots: ComptimeList(Slot) = .{},
     message: []const u8 = "",
 
     fn emit(r: *MysqlRenderer, text: []const u8) void {
-        r.current = r.current ++ text;
+        if (text.len != 0) r.current.append(text);
+    }
+
+    fn endPart(r: *MysqlRenderer) void {
+        r.parts.append(joinPieces(r.current.items()));
+        r.current.len = 0;
     }
 
     fn slot(r: *MysqlRenderer, which: Slot) void {
-        r.parts = r.parts ++ .{r.current};
-        r.current = "";
-        r.slots = r.slots ++ .{which};
+        r.endPart();
+        r.slots.append(which);
     }
 
     fn refuse(r: *MysqlRenderer, message: []const u8) error{Refused} {
