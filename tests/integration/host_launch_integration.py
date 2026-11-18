@@ -872,7 +872,7 @@ def frozen_settings_launches(root, env):
     for label, payload in (("missing", b""), ("future", b"rui-host-settings-v99\n")):
         directory = private / ("refused-private-" + label)
         failed = subprocess.run([str(RUI), "host", "start", "--store", directory,
-                                 "--settings-handoff-input-v1", "0"], input=payload,
+                                 "--settings-handoff-input-v2", "0"], input=payload,
                                 env=selected_env, capture_output=True, timeout=COMMAND_TIMEOUT)
         assert failed.returncode == 2, (label, failed.returncode, failed.stdout, failed.stderr)
         assert json.loads(failed.stdout)["rui_start_error"]["code"] == "settings_invalid", failed.stdout
@@ -1001,6 +1001,45 @@ def frozen_settings_launches(root, env):
         checked += 1
     finally:
         forced_crash_cleanup(directory)
+
+    # The selected MySQL destination is sampled before the launch gate, then
+    # resolved again by the child. No server is needed for refusal cases.
+    destination_cases = (
+        ("replace", "mysql://user:pass@host/db", "mysql://user:pass@host/dc", True),
+        ("in-place", "mysql://user:pass@host/db", "mysql://user:pass@host/dc", False),
+        ("user", "mysql://user:pass@host/db", "mysql://usEr:pass@host/db", False),
+        ("host", "mysql://user:pass@host/db", "mysql://user:pass@hOst/db", False),
+        ("port", "mysql://user:pass@host:3306/db", "mysql://user:pass@host:3307/db", False),
+        ("socket", "mysql://user:pass@/tmp/a.sock/db", "mysql://user:pass@/tmp/b.sock/db", False),
+        ("ca", "mysql://user:pass@host/db?ssl-ca=/tmp/a", "mysql://user:pass@host/db?ssl-ca=/tmp/b", False),
+    )
+    for label, before, after, atomic in destination_cases:
+        case = private / ("mysql-bound-" + label)
+        case.mkdir(mode=0o700)
+        directory = case / "host"
+        directory.mkdir(mode=0o700)
+        runtime = case / "runtime"
+        url_file = case / "mysql-url"
+        url_file.write_text(before)
+        url_file.chmod(0o600)
+        write_source(directory / "host.json", {"providers": {}, "interface": {"dir": str(runtime)},
+                     "store": {"mysql": {"url": {"file": str(url_file)}}}})
+
+        def change_url():
+            if atomic:
+                replacement = case / "replacement"
+                replacement.write_text(after)
+                replacement.chmod(0o600)
+                os.replace(replacement, url_file)
+            else:
+                assert len(before) == len(after)
+                url_file.write_text(after)
+
+        report = held_start(directory, [], change_url,
+                            expected_refusal="store.mysql.url: the MySQL destination changed after this start was admitted; start the Host again")
+        assert report["message"] == "store.mysql.url: the MySQL destination changed after this start was admitted; start the Host again", report
+        assert not (runtime / "rui.lock").exists(), "runtime lease acquired before destination comparison"
+        assert not (runtime / "diagnostics").exists(), "service opened before destination comparison"
 
     # Literal credentials in a file are rejected before snapshot creation,
     # gate acknowledgement, directory creation, diagnostics, or a Host child.

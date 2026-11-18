@@ -1646,26 +1646,49 @@ pub fn freezeStart(init: std.process.Init, request: Spawn, settings: *hs.Setting
     const intent = try readStart(init, request, settings, failure);
     var canonical: [protocol.max_store_bytes]u8 = undefined;
     const directory = try platform.canonicalStoreDestination(init.io, request.dir, &canonical);
-    return settings_handoff.freeze(init.gpa, directory, settings, intent, .none, failure);
+    const binding = try sampleDestination(init, settings, failure);
+    return settings_handoff.freeze(init.gpa, directory, settings, intent, binding, failure);
 }
 
-pub fn decodeStart(init: std.process.Init, bytes: []const u8, selected: []const u8, settings: *hs.Settings, failure: *start_report.Failure) !ProviderIntent {
+pub fn decodeStart(init: std.process.Init, bytes: []const u8, selected: []const u8, settings: *hs.Settings, failure: *start_report.Failure) !settings_handoff.Decoded {
     var canonical: [protocol.max_store_bytes]u8 = undefined;
     const directory = try platform.canonicalStoreDestination(init.io, selected, &canonical);
     const intent = try settings_handoff.decode(bytes, directory, settings, init.gpa, checkPreset, failure);
     try detachedValue(settings, failure);
     try anchorPlacement(init, settings, directory, failure);
-    return intent.intent;
+    return intent;
 }
 
 pub fn intakeFrozen(init: std.process.Init, bytes: []const u8, selected: []const u8, settings: *hs.Settings, failure: *start_report.Failure) !void {
     try refuseRetiredEnvironment(init.environ_map, failure);
-    const intent = try decodeStart(init, bytes, selected, settings, failure);
-    try finishDetached(init, settings, intent, failure);
+    const decoded = try decodeStart(init, bytes, selected, settings, failure);
+    try finishDetached(init, settings, decoded, failure);
 }
 
-pub fn finishDetached(init: std.process.Init, settings: *hs.Settings, intent: ProviderIntent, failure: *start_report.Failure) !void {
-    try finishSources(init, settings, intent, failure);
+fn sampleDestination(init: std.process.Init, settings: *hs.Settings, failure: *start_report.Failure) !settings_handoff.Binding {
+    if (settings.store != .mysql) return .none;
+    const secret = &settings.store.mysql.url;
+    defer secret.bytes.wipe();
+    resolve(init, secret) catch |err| return resolutionFailure(failure, "store.mysql.url", err);
+    const parsed = secret.bytes.parsed orelse return resolutionFailure(failure, "store.mysql.url", error.SettingsInvalid);
+    return .{ .mysql = hs.MysqlDestination.of(parsed) };
+}
+
+fn requireBoundDestination(settings: *const hs.Settings, binding: settings_handoff.Binding, failure: *start_report.Failure) error{SettingsInvalid}!void {
+    if (settings.store == .mysql and binding == .mysql) {
+        if (settings.store.mysql.url.bytes.parsed) |parsed| {
+            const actual = hs.MysqlDestination.of(parsed);
+            if (actual.eql(&binding.mysql)) return;
+        }
+    } else if (settings.store != .mysql and binding == .none) return;
+    failure.* = .init(.settings_invalid, "store.mysql.url: the MySQL destination changed after this start was admitted; start the Host again");
+    return error.SettingsInvalid;
+}
+
+pub fn finishDetached(init: std.process.Init, settings: *hs.Settings, decoded: settings_handoff.Decoded, failure: *start_report.Failure) !void {
+    if (settings.store == .mysql) resolve(init, &settings.store.mysql.url) catch |err| return resolutionFailure(failure, "store.mysql.url", err);
+    try requireBoundDestination(settings, decoded.binding, failure);
+    try finishSources(init, settings, decoded.intent, failure);
     try resolveProviders(init, settings, failure);
 }
 
