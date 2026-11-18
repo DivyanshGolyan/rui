@@ -36,7 +36,7 @@ pub const Version = enum {
 const compaction_request = ",\"tool_choice\":\"none\",\"context_management\":[{\"type\":\"compaction\",\"compact_threshold\":1000}]";
 
 pub const Carry = struct {
-    input_comma: bool = false,
+    input: enum { unopened, first, comma, owed } = .unopened,
     version: Version,
     effort: ?codec_abi.Effort = null,
 };
@@ -72,12 +72,14 @@ pub const Encoder = struct {
                     inline else => |value| ",\"reasoning\":{\"effort\":\"" ++ @tagName(value) ++ "\"}",
                 });
             },
-            .instructions => {
-                out.literal(",\"instructions\":\"");
-                out.content(0, .json_string_v1);
-                out.literal("\",\"input\":[");
-            },
             .message => |author| {
+                if (author == .instruction and self.carry.version == .one and self.carry.input == .unopened) {
+                    out.literal(",\"instructions\":\"");
+                    out.content(0, .json_string_v1);
+                    out.literal("\",\"input\":[");
+                    self.carry.input = .first;
+                    return;
+                }
                 self.separateInput(out);
                 out.literal(switch (author) {
                     .user => "{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"",
@@ -211,6 +213,17 @@ pub const Encoder = struct {
                 self.tool_comma = false;
                 out.literal("]}");
             },
+            .history_start => switch (self.carry.input) {
+                .unopened => {
+                    out.literal(",\"input\":[");
+                    self.carry.input = .first;
+                },
+                .comma => {
+                    out.literal(",");
+                    self.carry.input = .owed;
+                },
+                .first, .owed => {},
+            },
             .history_end => {},
             .compaction_trigger => switch (self.carry.version) {
                 .one, .two => {
@@ -220,6 +233,14 @@ pub const Encoder = struct {
                 .three => self.compact = true,
             },
             .tools_start => {
+                switch (self.carry.input) {
+                    .unopened => {
+                        out.literal(",\"input\":[");
+                        self.carry.input = .first;
+                    },
+                    .owed => return error.Declined,
+                    .first, .comma => {},
+                }
                 self.tool_comma = false;
                 out.literal("],\"tools\":[");
             },
@@ -264,8 +285,12 @@ pub const Encoder = struct {
     }
 
     fn separateInput(self: *Encoder, out: *Pieces) void {
-        if (self.carry.input_comma) out.literal(",");
-        self.carry.input_comma = true;
+        switch (self.carry.input) {
+            .unopened => out.literal(",\"input\":["),
+            .comma => out.literal(","),
+            .first, .owed => {},
+        }
+        self.carry.input = .comma;
     }
 };
 
@@ -1872,9 +1897,10 @@ test "every item at its longest fits max_pieces and names only handles it has" {
         count += 1;
     };
     for ([_]Case{
-        .{ .item = .instructions, .handles = &.{0b1} },
+        .{ .item = .{ .message = .instruction }, .handles = &.{0b1} },
         .{ .item = .output_close, .handles = &.{ 0, 0b1 } },
         .{ .item = .tool_result, .handles = &.{0b11} },
+        .{ .item = .history_start, .handles = &.{0} },
         .{ .item = .history_end, .handles = &.{0} },
         .{ .item = .compaction_trigger, .handles = &.{0} },
         .{ .item = .tools_start, .handles = &.{0} },
@@ -1890,14 +1916,15 @@ test "every item at its longest fits max_pieces and names only handles it has" {
     }
     var longest: u8 = 0;
     for (cases[0..count]) |case| for (case.handles) |handles| {
-        for ([_]bool{ false, true }) |comma| for ([_]bool{ false, true }) |omit| for (std.enums.values(codec_abi.PartArray)) |array| for (std.enums.values(Version)) |version| {
-            var encoder: Encoder = .{ .carry = .{ .input_comma = comma, .version = version, .effort = .low }, .tool_comma = comma, .omit_reasoning_text = omit, .array = array };
+        for ([_]bool{ false, true }) |comma| for ([_]@TypeOf(@as(Carry, undefined).input){ .unopened, .first, .comma, .owed }) |input| for ([_]bool{ false, true }) |omit| for (std.enums.values(codec_abi.PartArray)) |array| for (std.enums.values(Version)) |version| {
+            var encoder: Encoder = .{ .carry = .{ .input = input, .version = version, .effort = .low }, .tool_comma = comma, .omit_reasoning_text = omit, .array = array };
             const header: ItemHeader = .{ .item = case.item, .handles = handles };
             var pieces: Pieces = .{ .len = 0 };
             const declined = switch (case.item) {
                 .operation => |value| value == null and version == .two,
                 .tool => version != .one,
                 .declare_open, .declared_tool, .declare_close => version == .one,
+                .tools_start => input == .owed,
                 else => false,
             };
             if (declined) {
@@ -1927,6 +1954,7 @@ test "version two keeps the starting effort at the top and changes it at the Ope
     try one.encodeItem(&header, &pieces);
     try std.testing.expectEqualStrings(",\"reasoning\":{\"effort\":\"high\"}", pieces.items[pieces.len - 1].literal);
 
+    two.carry.input = .first;
     try two.encodeItem(&.{ .item = .{ .operation = .low }, .handles = 0 }, &pieces);
     try std.testing.expectEqual(@as(u8, 0), pieces.len);
     try two.encodeItem(&.{ .item = .{ .operation = .high }, .handles = 0 }, &pieces);
@@ -2237,7 +2265,7 @@ test "a web search call reads as its action, its strings and its outcome" {
 
 test "version two declares function tools in the history and keeps only provider-run tools at the top" {
     var pieces: Pieces = .{ .len = 0 };
-    var two: Encoder = .{ .carry = .{ .input_comma = true, .version = .two } };
+    var two: Encoder = .{ .carry = .{ .input = .comma, .version = .two } };
     try two.encodeItem(&.{ .item = .declare_open, .handles = 0 }, &pieces);
     try std.testing.expectEqualStrings(",", pieces.items[0].literal);
     try std.testing.expectEqualStrings("{\"type\":\"additional_tools\",\"role\":\"developer\",\"tools\":[", pieces.items[1].literal);
@@ -2278,4 +2306,52 @@ test "effort update refusal requires an unambiguous parameter and invalid reques
         classify(&scratch, case.body, &found);
         try std.testing.expectEqual(case.refused, effortChangeRefused(&scratch, case.status, case.body));
     }
+}
+
+test "CM-43 input boundary transitions cover each version and carry state" {
+    const State = @TypeOf(@as(Carry, undefined).input);
+    for (std.enums.values(Version)) |version| for (std.enums.values(State)) |state| {
+        for ([_]codec_abi.Item{ .{ .message = .instruction }, .{ .message = .user }, .history_start, .tools_start }) |item| {
+            var encoder: Encoder = .{ .carry = .{ .version = version, .input = state } };
+            var pieces: Pieces = .{ .len = 0 };
+            const header: ItemHeader = .{ .item = item, .handles = 1 };
+            if (item == .tools_start and state == .owed) {
+                try std.testing.expectError(error.Declined, encoder.encodeItem(&header, &pieces));
+                continue;
+            }
+            try encoder.encodeItem(&header, &pieces);
+            switch (item) {
+                .message => |author| {
+                    if (version == .one and state == .unopened and author == .instruction) {
+                        try std.testing.expectEqualStrings(",\"instructions\":\"", pieces.items[0].literal);
+                        try std.testing.expectEqual(State.first, encoder.carry.input);
+                    } else {
+                        if (state == .unopened) try std.testing.expectEqualStrings(",\"input\":[", pieces.items[0].literal);
+                        if (state == .comma) try std.testing.expectEqualStrings(",", pieces.items[0].literal);
+                        try std.testing.expectEqual(State.comma, encoder.carry.input);
+                        const role_index: usize = if (state == .unopened or state == .comma) 1 else 0;
+                        try std.testing.expect(std.mem.indexOf(u8, pieces.items[role_index].literal, if (author == .instruction) "\"developer\"" else "\"user\"") != null);
+                    }
+                },
+                .history_start => {
+                    try std.testing.expectEqual(switch (state) {
+                        .unopened => State.first,
+                        .comma => State.owed,
+                        else => state,
+                    }, encoder.carry.input);
+                    switch (state) {
+                        .unopened => try std.testing.expectEqualStrings(",\"input\":[", pieces.items[0].literal),
+                        .comma => try std.testing.expectEqualStrings(",", pieces.items[0].literal),
+                        .first, .owed => try std.testing.expectEqual(@as(u8, 0), pieces.len),
+                    }
+                },
+                .tools_start => {
+                    try std.testing.expectEqual(if (state == .unopened) State.first else state, encoder.carry.input);
+                    if (state == .unopened) try std.testing.expectEqualStrings(",\"input\":[", pieces.items[0].literal);
+                    try std.testing.expectEqualStrings("],\"tools\":[", pieces.items[pieces.len - 1].literal);
+                },
+                else => unreachable,
+            }
+        }
+    };
 }

@@ -527,8 +527,10 @@ def prove_reused_session(state):
         assert fixture.read_result(store, "reuse-second") == b"second-turn-answer"
         assert len(endpoint.requests) == 4, endpoint.requests
         initial_request = json.loads(endpoint.requests[0])
-        assert initial_request["instructions"] == fixture.model_instructions(fixture.ROOT, store=store, session=session, model="gpt-6-sol"), initial_request
+        prompt = fixture.model_instructions(fixture.ROOT, store=store, session=session, model="gpt-6-sol")
+        assert fixture.request_system_prompt(initial_request) == prompt, initial_request
         assert [item for item in initial_request["input"] if item.get("type") != "additional_tools"] == [
+            {"role": "developer", "content": [{"type": "input_text", "text": prompt}]},
             {"role": "user", "content": [{"type": "input_text", "text": "first work"}]},
         ], initial_request
         second_request = json.loads(endpoint.requests[2])

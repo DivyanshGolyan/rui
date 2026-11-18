@@ -397,9 +397,9 @@ class AdmissionTest(unittest.TestCase):
         calls = ['python3 -B tests/ci/caller_errors.py', 'python3 -B tests/ci/flake_sources.py',
                  'python3 -B tests/ci/client_locality.py',
                  'python3 -B tests/ci/policy_suite.py --skips ["test_unchanged"]',
-                 'python3 -m ruff check --select F821 tests', 'npm ci --ignore-scripts --no-audit --no-fund',
+                 'python3 -B tests/ci/rsql_table.py fingerprint', 'python3 -m ruff check --select F821 tests', 'npm ci --ignore-scripts --no-audit --no-fund',
                  'npm run check', 'npm test', 'actionlint -shellcheck= .github/workflows/check.yml']
-        last_of_each_check = [calls[index] for index in (0, 1, 2, 3, 4, 7, 8)]
+        last_of_each_check = [calls[index] for index in (0, 1, 2, 3, 4, 5, 8, 9)]
         for failing in [[]] + [[call] for call in last_of_each_check] + [last_of_each_check]:
             with self.subTest(failing=failing), tempfile.TemporaryDirectory() as root:
                 root = Path(root)

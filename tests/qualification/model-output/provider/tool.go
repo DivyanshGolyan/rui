@@ -31,7 +31,7 @@ type ToolConfig struct {
 	Workspace   string
 	Store       string
 	ArtifactDir string
-	Barrier string
+	Barrier     string
 	BarrierWait string
 }
 
@@ -267,19 +267,23 @@ func (s *ToolServer) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var request struct {
-		Instructions string            `json:"instructions"`
-		Input        []json.RawMessage `json:"input"`
+		Input []json.RawMessage `json:"input"`
 	}
 	if err := json.Unmarshal(body, &request); err != nil || len(request.Input) == 0 {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
-	session, err := requestSession(request.Instructions)
+	instructions, err := measurement.RequestSystemPrompt(body)
+	if err != nil {
+		http.Error(w, "invalid prompt", http.StatusBadRequest)
+		return
+	}
+	session, err := requestSession(instructions)
 	s.mu.Lock()
 	s.summary.Requests++
 	s.summary.H2Streams++
 	fact := s.sessions[session]
-	if err != nil || fact == nil || request.Instructions != measurement.ModelInstructions(s.config.Workspace, session, "gpt-6-luna") {
+	if err != nil || fact == nil || instructions != measurement.ModelInstructions(s.config.Workspace, session, "gpt-6-luna") {
 		s.fail(fmt.Sprintf("unexpected request session %q: %v", session, err))
 		s.mu.Unlock()
 		http.Error(w, "unexpected session", http.StatusConflict)
