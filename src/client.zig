@@ -3299,13 +3299,13 @@ test "transport failure provenance excludes local sinks, valid physical EOF and 
     }
 }
 
-test "observation transport owns a larger buffer without growing ordinary replies" {
+test "observation transport enforces its own bound independently of ordinary replies" {
     try std.testing.expectEqual(@sizeOf(protocol.ResponseBuffer), @sizeOf(ReplyBuffer));
     try std.testing.expectEqual(@sizeOf(protocol.CommandObservationBuffer), @sizeOf(ObservationBuffer));
     const sockets = try socketPair();
     defer closeTestDescriptor(sockets[0]);
     defer closeTestDescriptor(sockets[1]);
-    var body: [protocol.max_response_bytes + 1]u8 = @splat(' ');
+    var body: [protocol.command_observation_reply.max_bytes]u8 = @splat(' ');
     body[0] = '{';
     body[1] = '}';
     var header: [256]u8 = undefined;
@@ -3316,8 +3316,8 @@ test "observation transport owns a larger buffer without growing ordinary replie
     try std.testing.expectEqual(@as(?anyerror, null), if (read) |_| @as(?anyerror, null) else |err| @as(?anyerror, err));
     const reply = try read;
     try std.testing.expectEqualStrings(&body, reply.body);
-    const head: ResponseHead = .{ .status = 200, .kind = .command_json, .content_length = body.len, .total = null, .next = null };
     var ordinary: ReplyBuffer = .{};
+    const head: ResponseHead = .{ .status = 200, .kind = .command_json, .content_length = ordinary.bytes.len + 1, .total = null, .next = null };
     try std.testing.expectError(error.ResponseTooLarge, readCommandBodyUntil(.{ .io = std.testing.io }, sockets[0], head, &ordinary, .{}, null));
     var too_large = head;
     too_large.content_length = observation.bytes.len + 1;
@@ -6495,7 +6495,7 @@ test "creation capture preserves raw saved preferences independently of explicit
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes[0..length], .{});
     defer parsed.deinit();
     const configuration = parsed.value.object.get("configuration").?.object;
-    try std.testing.expectEqualStrings("low", configuration.get("reasoning_effort").?.string);
+    try std.testing.expectEqualStrings("low", configuration.get("effort").?.string);
     try std.testing.expect(!configuration.contains("model"));
     const prefs = configuration.get("preferences").?.object;
     try std.testing.expectEqualStrings("high", prefs.get("reasoning_effort").?.string);
