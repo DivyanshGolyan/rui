@@ -12,3 +12,4 @@ First drafts, written from the README and the contracts and checked against fixe
 | [CLI, inspection, local protocol and the TypeScript client](cli-inspection.md) | 33 |
 | [Session UI and diagnostics](session-ui.md) | 38 |
 | [CI tooling and policy checks](ci-tooling.md) | 64 |
+| [Test pause point owner](pause.md) | 7 |
