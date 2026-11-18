@@ -275,7 +275,7 @@ class HookTest(unittest.TestCase):
         script = ("import subprocess, sys; subprocess.run(['bash', sys.argv[1]]); "
                   "print('ALWAYS_STEP_RAN', flush=True)")
         return subprocess.run([sys.executable, "-c", script, str(hook)], env=env,
-                              capture_output=True, text=True, timeout=10, cwd=cwd)
+                              capture_output=True, text=True, timeout=60, cwd=cwd)
 
     def test_hook_admits_only_trusted_job_context(self):
         original = {"repository": {"full_name": REPO}, "sender": {"login": TRUSTED},

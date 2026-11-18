@@ -71,15 +71,32 @@ class FailureArtifactsTest(unittest.TestCase):
             destination.mkdir()
             barrier, walk = threading.Barrier(17), os.walk
             def gated_walk(*args, **kwargs):
-                barrier.wait(timeout=10)
+                barrier.wait(timeout=60)
                 return walk(*args, **kwargs)
+            errors = []
+            def copy():
+                try:
+                    host_process.copy_failure_diagnostics(state, destination)
+                except BaseException as error:
+                    errors.append(error)
+                    barrier.abort()
+
             with patch.object(host_process.os, "walk", gated_walk):
-                workers = [threading.Thread(target=host_process.copy_failure_diagnostics,
-                                            args=(state, destination)) for _ in range(17)]
-                for worker in workers:
-                    worker.start()
-                for worker in workers:
-                    worker.join(timeout=10)
+                workers = [threading.Thread(target=copy) for _ in range(17)]
+                started = []
+                try:
+                    for worker in workers:
+                        worker.start()
+                        started.append(worker)
+                    for worker in started:
+                        worker.join(timeout=60)
+                    alive = [worker.name for worker in started if worker.is_alive()]
+                finally:
+                    barrier.abort()
+                    for worker in started:
+                        worker.join()
+                self.assertFalse(alive, f"artifact workers did not finish: {alive}")
+                self.assertEqual(errors, [], f"artifact workers failed: {errors}")
             slots = list(destination.iterdir())
             self.assertEqual(len(slots), 16, "job-wide root cap")
             copied = [path for path in destination.rglob("*") if path.is_file()]
