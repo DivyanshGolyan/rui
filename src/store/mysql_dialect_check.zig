@@ -1248,6 +1248,9 @@ test "schema 75 MySQL pin migration refuses absent and ambiguous kind checks bef
 }
 
 test "obligation projection MySQL row counts match SQLite for null changed unchanged missing and refused values" {
+    // The cases below format their expected text at comptime, and a statement served from the table spends none
+    // of this function's branches, so the test sets what its own formatting needs.
+    @setEvalBranchQuota(100_000);
     const Projection = rsql.ObligationProjection(.{
         .sql = "SELECT session_ref,obligation_since AS saved_since,?2 AS owed_since FROM session WHERE session_ref=?1 UNION ALL " ++
             "SELECT session_ref,obligation_since AS saved_since,?3 AS owed_since FROM session WHERE session_ref=?1",
