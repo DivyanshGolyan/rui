@@ -960,8 +960,9 @@ pub noinline fn serve(
     defer if (mysql_url) |url| url.destroy();
     var socket_buffer: [host_settings.max_launch_socket_path_bytes]u8 = undefined;
     const socket_path = if (!settings.interface.dir.anchored) try std.fmt.bufPrint(&socket_buffer, "{s}/" ++ host_settings.socket_name, .{settings.interface.dir.slice()}) else "";
-    const lease = try allocator.create(platform.StoreLease);
-    defer allocator.destroy(lease);
+    const serving = try createUnfilled(allocator, struct { lease: platform.StoreLease, storage: store_module.Store });
+    defer allocator.destroy(serving);
+    const lease = &serving.lease;
     if (mysql_url != null)
         try lease.acquireMysql(io, settings.interface.dir.slice(), socket_path)
     else
@@ -987,16 +988,16 @@ pub noinline fn serve(
     errdefer if (diagnostics) |*writer| writer.record("failed", startup_failure);
     var tool_set_memory = std.heap.ArenaAllocator.init(allocator);
     defer tool_set_memory.deinit();
-    var storage: store_module.Store = undefined;
-    openStoreForHost(io, &storage, lease, served, &limits, mcp_servers.len != 0, mysql_url, if (diagnostics) |*writer| writer else null) catch |err| {
+    const storage = &serving.storage;
+    openStoreForHost(io, storage, lease, served, &limits, mcp_servers.len != 0, mysql_url, if (diagnostics) |*writer| writer else null) catch |err| {
         if (err == error.StoreIdentityMismatch) startup_failure = "store_identity_mismatch";
         return err;
     };
     defer storage.close() catch |err| stderr.print("rui: Store close failed: {s}\n", .{@errorName(err)});
-    return finishServing(&storage, failure, serveOpened(
+    return finishServing(storage, failure, serveOpened(
         io,
         allocator,
-        &storage,
+        storage,
         lease,
         active_capacity,
         limits,
@@ -1908,7 +1909,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             try fd.json(200, activity_reply.max_search_bytes, host_reply.renderActivitySearch, .{page});
         },
         .public_parts => |*command| {
-            const report = capturePublicParts(host, command, request_number) catch |err| switch (err) {
+            const report = capturePublicParts(host, fd, command, request_number) catch |err| switch (err) {
                 error.ContentNotFound, error.ContentIsText => return respondStatic(fd, 409, .parts_unavailable, @errorName(err)),
                 error.ReportScratchCleanupFailed => {
                     fenceDispatch(host, "public parts scratch cleanup", err);
@@ -2060,13 +2061,14 @@ fn createUnfilled(allocator: std.mem.Allocator, comptime T: type) error{OutOfMem
 /// Certifies the owner's parts once, then captures the whole list into report
 /// scratch under the shared retention budget. A fault mid-walk discards the
 /// capture, so no partial list is ever delivered.
-fn capturePublicParts(host: *Host, command: *const protocol.PublicParts, request_number: u64) !store_module.SessionReport {
-    var capture: store_module.SessionReportCapture = .{ .io = host.io, .writer = null, .budget = host.retention.sharedBudget() };
+fn capturePublicParts(host: *Host, reply: *Reply, command: *const protocol.PublicParts, request_number: u64) !store_module.SessionReport {
+    const capture = &reply.parts_capture;
+    capture.* = .{ .io = host.io, .writer = null, .budget = host.retention.sharedBudget() };
     try capture.create(host.lease.paths.scratch.slice(), request_number, host.hooks.fails(.report_unlink));
     errdefer capture.deinit();
     var reader = try store_module.PublicParts.Reader.init(command.session, command.owner);
     defer reader.deinit();
-    var writer: protocol.public_parts_reply.Writer(store_module.SessionReportCapture) = .{ .capture = &capture, .session = command.session.slice() };
+    var writer: protocol.public_parts_reply.Writer(store_module.SessionReportCapture) = .{ .capture = capture, .session = command.session.slice() };
     while (true) switch (try host.store.readPublicParts(&reader)) {
         .pending => {},
         .certified => |value| try writer.head(value),
@@ -2294,6 +2296,7 @@ fn respondStatic(reply: *Reply, status: u16, kind: protocol.ErrorType, code: []c
 }
 
 const Reply = struct {
+    parts_capture: store_module.SessionReportCapture = undefined,
     io: std.Io,
     allocator: std.mem.Allocator,
     header: [320]u8 = undefined,

@@ -400,24 +400,44 @@ class AdmissionTest(unittest.TestCase):
                  'python3 -B tests/ci/rsql_table.py fingerprint', 'python3 -m ruff check --select F821 tests', 'npm ci --ignore-scripts --no-audit --no-fund',
                  'npm run check', 'npm test', 'actionlint -shellcheck= .github/workflows/check.yml']
         last_of_each_check = [calls[index] for index in (0, 1, 2, 3, 4, 5, 8, 9)]
-        for failing in [[]] + [[call] for call in last_of_each_check] + [last_of_each_check]:
-            with self.subTest(failing=failing), tempfile.TemporaryDirectory() as root:
+        names = ['Check caller error coverage and shrink-only pending causes',
+                 'Check flake sources and shrink-only allowances',
+                 'Check client locality and shrink-only exceptions',
+                 'Run tests/ci, less self-checks whose inputs are unchanged',
+                 'Check the Store statement table was generated from the current inputs',
+                 'Reject undefined fixture names before native builds',
+                 "Check the TypeScript client's generated wire types and type-check it",
+                 'Validate workflows with pinned-linter compatibility exceptions']
+        cases = [(failing, []) for failing in [[]] + [[call] for call in last_of_each_check] + [last_of_each_check]]
+        cases.append(([last_of_each_check[0]], [last_of_each_check[2]]))
+        for failing, killed in cases:
+            with self.subTest(failing=failing, killed=killed), tempfile.TemporaryDirectory() as root:
                 root = Path(root)
                 for directory in ('bin', 'clients/ts', '.github/workflows', 'actionlint'):
                     (root / directory).mkdir(parents=True)
                 (root / '.github/workflows/check.yml').write_text('on: push\n')
                 (root / 'failing').write_text(''.join(call + '\n' for call in failing))
+                (root / 'killed').write_text(''.join(call + '\n' for call in killed))
                 for tool in ('bin/python3', 'bin/npm', 'actionlint/actionlint'):
                     (root / tool).write_text(
                         '#!/bin/sh\ncall="$(basename "$0") $*"\necho "$call" >> "$CALLS"\n'
+                        'echo "output from $call"\n'
+                        'if grep -qxF -- "$call" "$KILLED"; then kill -TERM $$; fi\n'
                         'if grep -qxF -- "$call" "$FAILING"; then exit 3; fi\n')
                     (root / tool).chmod(0o755)
                 result = subprocess.run(['bash', str(POLICY_CHECKS)], cwd=root, capture_output=True, text=True,
                                         env=dict(os.environ, PATH=f"{root / 'bin'}:{os.environ['PATH']}",
                                                  RUNNER_TEMP=str(root), SKIPS='["test_unchanged"]',
-                                                 CALLS=str(root / 'calls'), FAILING=str(root / 'failing')))
+                                                 CALLS=str(root / 'calls'), FAILING=str(root / 'failing'),
+                                                 KILLED=str(root / 'killed')))
                 self.assertEqual(sorted((root / 'calls').read_text().splitlines()), sorted(calls), result.stdout)
-                self.assertEqual(result.returncode, 1 if failing else 0, result.stdout + result.stderr)
+                self.assertEqual(result.returncode, 1 if failing or killed else 0, result.stdout + result.stderr)
+                for name, call in zip(names, last_of_each_check):
+                    group = result.stdout.split('::group::' + name + '\n', 1)[1].split('::endgroup::', 1)[0]
+                    self.assertIn('output from ' + call, group)
+                    self.assertEqual(('::error::' + name + ' failed') in result.stdout, call in failing + killed)
+                if killed:
+                    self.assertIn('exit 143', result.stdout)
 
     def test_policy_skips_only_the_named_unchanged_self_checks(self):
         script = 'python3 -B tests/ci/policy_suite.py --skips "$SKIPS"'
