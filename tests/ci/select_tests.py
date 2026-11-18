@@ -665,10 +665,10 @@ def live_mysql_suites(targets, mysql_suites):
 def covers(target, targets) -> bool:
     """Whether a selected target executes target's checks.
 
-    check-full deliberately excludes stack-frames; promotion adds it separately.
+    check-full deliberately excludes stack-frames and rsql-table; promotion adds them separately.
     """
     broader = {"test": {"test-native", "test-store"},
-               "check": CHECK_COVERS | {"stack-frames"},
+               "check": CHECK_COVERS | {"stack-frames", "rsql-table"},
                "check-full": CHECK_COVERS | {"check"}, **FIXTURE_COVERS}
     return target in targets or any(target in broader.get(selected, ()) for selected in targets)
 
