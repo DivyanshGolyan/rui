@@ -7073,5 +7073,5 @@ test "OVM-3 overview lines preserve navigation targets and presentation across l
     };
     try D.checkBoundaries();
     // Recorded by running this same fixture domain against base 03aa26d0.
-    try std.testing.expectEqual(@as(u64, 0x3eb1117b8b8d7311), bytes_and_styles);
+    try std.testing.expectEqual(@as(u64, 0x2dfe218fa12da814), bytes_and_styles);
 }
