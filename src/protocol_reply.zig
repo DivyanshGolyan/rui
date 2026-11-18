@@ -2483,6 +2483,17 @@ test "activity page delta variants validate tokens and preserve the cursor" {
     try std.testing.expect((try ActivityPage.parse(writer.buffered(), .{})).facts.token == null);
 }
 
+test "the integration empty queue matches the Activity writer and decoder" {
+    var facts: protocol.ActivityFacts = .{ .end = 40, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
+    try facts.work.workspace.set("/w");
+    var buffer: [activity_reply.max_page_bytes]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try activity_reply.writePage(&writer, &facts);
+    const fixture = @embedFile("codecs/fixtures/activity/empty-queue.json");
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), fixture) != null);
+    try std.testing.expectEqualDeep(protocol.Queued{}, (try ActivityPage.parse(writer.buffered(), .{})).facts.queued);
+}
+
 test "an activity page's queued Messages are none or a span at its boundary" {
     var facts: protocol.ActivityFacts = .{ .end = 40, .work = .{ .work = .{ .state = .{ .working = .{ .since = 1 } } }, .revision = 1 } };
     try facts.work.workspace.set("/w");
