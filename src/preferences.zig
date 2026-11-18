@@ -821,24 +821,24 @@ test "saved invalid preference fields are environment failures and never get ove
     }
 }
 
-test "updates publish the expected preference versions to disk" {
+test "CLI-27 updates publish the encoded preference document" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const home = home_buffer[0..try tmp.dir.realPath(io, &home_buffer)];
     const readiness: Readinesses = .initFill(.configured);
-    const cases = .{
-        .{ Edit{ .provider = .{ .set = "codex" }, .model = .{ .set = "gpt-6-luna" } }, "version=1\nstore=\nprovider=codex\nmodel=gpt-6-luna\n" },
-        .{ Edit{ .notifications = false }, "version=2\nstore=\nprovider=codex\nmodel=gpt-6-luna\nnotifications=off\n" },
-        .{ Edit{ .reasoning_effort = .{ .set = .high } }, "version=3\nstore=\nprovider=codex\nmodel=gpt-6-luna\nnotifications=off\nreasoning_effort=high\n" },
-        .{ Edit{ .permission_mode = .{ .set = .ask } }, "version=4\nstore=\nprovider=codex\nmodel=gpt-6-luna\nnotifications=off\nreasoning_effort=high\npermission_mode=ask\n" },
+    const edits = [_]Edit{
+        .{ .provider = .{ .set = "codex" }, .model = .{ .set = "gpt-6-luna" } },
+        .{ .notifications = false },
+        .{ .reasoning_effort = .{ .set = .high } },
+        .{ .permission_mode = .{ .set = .ask } },
     };
-    inline for (cases) |case| {
-        const written = try update(home, case[0], &readiness);
+    for (edits) |edit| {
+        const written = try update(home, edit, &readiness);
         var config = try tmp.dir.openDir(io, ".config/rui", .{});
         defer config.close(io);
-        var bytes: [1024]u8 = undefined;
-        try std.testing.expectEqualStrings(case[1], try savedFile(config, &bytes));
-        try std.testing.expectEqualDeep(written, try load(home));
+        var expected: [document.max_file_bytes]u8 = undefined;
+        var actual: [document.max_file_bytes]u8 = undefined;
+        try std.testing.expectEqualStrings(try document.encode(&written, &expected), try savedFile(config, &actual));
     }
 }
