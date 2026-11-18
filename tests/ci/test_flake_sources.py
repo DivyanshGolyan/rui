@@ -243,6 +243,13 @@ class SleepOrderingTest(unittest.TestCase):
         self.assertEqual(python_sleep_ordering("tests/integration/cases.py", python),
                          {("tests/integration/cases.py", "cached_parsing"): 1})
         self.assertEqual(python_sleep_ordering("tests/integration/cases.py", python.replace("sleep", "wake")), {})
+        for source, expected in (
+            ('def case():\n    time.sleep(1)\n', {("tests/cases.py", "case"): 1}),
+            ('def case():\n    time.ｓｌｅｅｐ(1)\n', {("tests/cases.py", "case"): 1}),
+            ('def case():\n    time.wake(1)\n', {}),
+        ):
+            with self.subTest(source=source):
+                self.assertEqual(python_sleep_ordering("tests/cases.py", source), expected)
 
     def test_a_moved_test_keeps_only_its_own_allowance(self):
         base = Counter({("a.zig", "t"): 2, ("a.zig", "u"): 1})
