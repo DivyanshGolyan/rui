@@ -594,10 +594,24 @@ test "typed choices share enum names with help and refuse unknown values" {
     }
 }
 
+test "Action read accepts a bounded value ordinal cursor" {
+    // ARD-6
+    for ([_][]const u8{ "0", "1", "9223372036854775807" }) |valid| {
+        var storage: [1024]u8 = undefined;
+        const parsed = try testParse(Command.action_read.definition(), &.{ "--after", valid }, &storage);
+        try std.testing.expectEqualStrings(valid, parsed.get("after").?);
+    }
+    for ([_][]const u8{ "12x", "-1", "+1", "1_0", "", "9223372036854775808", "18446744073709551616" }) |invalid| {
+        const refusal = try expectRefusal(.action_read, &.{ "--after", invalid }, .count_malformed, "after");
+        try std.testing.expectEqualStrings(invalid, refusal.value.?);
+        try std.testing.expect(std.mem.indexOf(u8, refusal.accepted.?.grammar, "0") != null);
+        try std.testing.expect(std.mem.indexOf(u8, refusal.accepted.?.grammar, "9223372036854775807") != null);
+    }
+}
+
 test "numeric options reject malformed decimals and state their accepted range" {
     const Case = struct { command: Command, name: []const u8, code: caller_error.Code, low: []const u8, high: []const u8 };
     const cases = [_]Case{
-        .{ .command = .action_read, .name = "after", .code = .count_malformed, .low = "0", .high = "9223372036854775807" },
         .{ .command = .action_read, .name = "offset", .code = .count_malformed, .low = "0", .high = std.fmt.comptimePrint("{d}", .{@import("content_string.zig").max_bytes}) },
         .{ .command = .action_inspect, .name = "action", .code = .id_malformed, .low = "1", .high = "9223372036854775807" },
         .{ .command = .session_interrupt_model, .name = "turn", .code = .id_malformed, .low = "1", .high = "9223372036854775807" },

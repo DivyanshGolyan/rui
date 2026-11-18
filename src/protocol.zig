@@ -2213,10 +2213,10 @@ pub const action_read_reply = struct {
     pub const final = .{ "\"state\":\"resolved\",\"final\":{\"position\":\"", Hole.decimal, "\",\"code\":", Hole{ .string = max_code_bytes }, ",\"content\":{\"bytes\":\"", Hole.decimal, "\",\"sha256\":\"", Hole{ .hex = 32 }, "\"},\"window\":{\"offset\":\"", Hole.decimal, "\",\"next\":\"", Hole.decimal, "\",\"more\":", Hole.boolean, ",\"text\":", Hole{ .string = content_window_bytes }, "}}" };
     pub const parts = .{ "\"state\":\"resolved\",\"final\":{\"position\":\"", Hole.decimal, "\",\"code\":", Hole{ .string = max_code_bytes }, ",\"content\":{\"type\":\"parts\",\"bytes\":\"", Hole.decimal, "\",\"sha256\":\"", Hole{ .hex = 32 }, "\"},\"window\":null}" };
     pub const item = .{ "{\"ordinal\":\"", Hole.decimal, "\",\"key\":", Hole{ .string = 128 }, ",\"text\":", Hole{ .string = @import("action_read.zig").page_bytes }, "}" };
-    pub const values_head = ",\"values\":{\"items\":[";
-    pub const values_tail = .{ "],\"next\":\"", Hole.decimal, "\",\"more\":", Hole.boolean, "}}" };
+    pub const values_head = ",\"values\":{\"items\":";
+    pub const values_tail = .{ ",\"next\":\"", Hole.decimal, "\",\"more\":", Hole.boolean, "}}" };
     // The total text budget is shared by all items, rather than repeated per item.
-    pub const max_bytes = maxShapeBytes(.{ head ++ pending, head ++ final, head ++ parts }) + values_head.len + jsonListBytes(@import("action_read.zig").page_items, shapeBytes(item) - 6 * @import("action_read.zig").page_bytes) + 6 * @import("action_read.zig").page_bytes + shapeBytes(values_tail);
+    pub const max_bytes = maxShapeBytes(.{ head ++ pending, head ++ final, head ++ parts }) + values_head.len + 2 + jsonListBytes(@import("action_read.zig").page_items, shapeBytes(item) - 6 * @import("action_read.zig").page_bytes) + 6 * @import("action_read.zig").page_bytes + shapeBytes(values_tail);
 };
 
 pub const MessageUnknownOutcome = message_observation.MessageUnknownOutcome;
@@ -3303,6 +3303,7 @@ test "session pin parser requires an explicit desired value and binds semantic r
 }
 
 test "Action read request preserves canonical identity and optional cursor" {
+    // ARD-2
     const head = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"read_action\",\"store\":\"s\",\"session\":\"k7m2qx\",\"action\":\"42\"";
     inline for (.{ "}", ",\"offset\":\"0\"}", ",\"offset\":\"16383\"}" }, .{ 0, 0, 16383 }) |tail, offset| {
         var source: MetadataSource = .{ .input = head ++ tail };
@@ -3310,6 +3311,7 @@ test "Action read request preserves canonical identity and optional cursor" {
         const request = (try parseForTest(&parser)).read_action;
         try std.testing.expectEqual(@as(u64, 42), request.action_id);
         try std.testing.expectEqual(@as(u64, offset), request.offset);
+        try std.testing.expectEqual(@as(u64, 0), request.after);
         try std.testing.expectEqualStrings("k7m2qx", request.session.slice());
     }
     {
@@ -3318,6 +3320,13 @@ test "Action read request preserves canonical identity and optional cursor" {
         const request = (try parseForTest(&parser)).read_action;
         try std.testing.expectEqual(@as(u64, 9), request.offset);
         try std.testing.expectEqual(@as(u64, 16), request.after);
+    }
+    {
+        var source: MetadataSource = .{ .input = head ++ ",\"after\":\"18446744073709551615\",\"offset\":\"0\"}" };
+        var parser = Tested.Parser{ .source = &source };
+        const request = (try parseForTest(&parser)).read_action;
+        try std.testing.expectEqual(std.math.maxInt(u64), request.after);
+        try std.testing.expectEqual(@as(u64, 0), request.offset);
     }
     inline for (.{ ",\"after\":\"01\"}", ",\"after\":\"-1\"}", ",\"after\":\"18446744073709551616\"}" }) |tail| {
         var source: MetadataSource = .{ .input = head ++ tail };

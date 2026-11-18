@@ -2234,6 +2234,7 @@ test "APV-9 resolved Actions reject fresh publications" {
 }
 
 test "action value pages preserve delivery state" {
+    // ARD-1
     const action_read = @import("../../action_read.zig");
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {

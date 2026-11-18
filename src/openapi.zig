@@ -268,8 +268,8 @@ fn isOptional(comptime part: anytype) bool {
     return @TypeOf(part) == type and @hasDecl(part, "optional_shape");
 }
 
-fn actionValuesShape() @TypeOf(.{",\"values\":{\"items\":"} ++ .{BoundedListOf(protocol.action_read_reply.item, @import("action_read.zig").page_items, false)} ++ .{ ",\"next\":\"", Hole.decimal, "\",\"more\":", Hole.boolean, "}}" }) {
-    return .{",\"values\":{\"items\":"} ++ .{BoundedListOf(protocol.action_read_reply.item, @import("action_read.zig").page_items, false)} ++ .{ ",\"next\":\"", Hole.decimal, "\",\"more\":", Hole.boolean, "}}" };
+fn actionValuesShape() @TypeOf(.{protocol.action_read_reply.values_head} ++ .{BoundedListOf(protocol.action_read_reply.item, @import("action_read.zig").page_items, false)} ++ protocol.action_read_reply.values_tail) {
+    return .{protocol.action_read_reply.values_head} ++ .{BoundedListOf(protocol.action_read_reply.item, @import("action_read.zig").page_items, false)} ++ protocol.action_read_reply.values_tail;
 }
 
 const SenderSchema = struct {
@@ -1605,6 +1605,50 @@ fn matches(pattern: []const u8, text: []const u8) bool {
     return true;
 }
 
+test "action read replies conform to the published schema" {
+    // ARD-5
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var document: Document = .init(a);
+    const built = try document.build();
+    const schemas = built.object.get("components").?.object.get("schemas").?.object;
+    const schema = schemas.get("ReadActionReply").?;
+    var out: std.Io.Writer.Allocating = .init(a);
+    const action_read = @import("action_read.zig");
+    const host_reply = @import("host_reply.zig");
+    const action = try a.create(action_read.Read);
+    action.* = .{ .session = .{}, .action_id = 1, .status = .{ .pending = .queued } };
+    try action.session.set("k7m2qx");
+    for ([_]bool{ false, true }) |populated| {
+        action.values.count = if (populated) 1 else 0;
+        action.values.next = if (populated) 17 else 0;
+        action.values.more = populated;
+        if (populated) {
+            action.values.items[0] = .{ .ordinal = 17, .key = .{}, .start = 0, .length = 3 };
+            try action.values.items[0].key.set("key");
+            @memcpy(action.values.bytes[0..3], "雪");
+            action.values.length = 3;
+        }
+        for (std.enums.values(action_read.PendingState)) |state| {
+            action.status = .{ .pending = state };
+            try host_reply.renderActionRead(.{ .writer = &out.writer }, action);
+            const json = try std.json.parseFromSliceLeaky(Value, a, out.written(), .{});
+            try std.testing.expect(conforms(schemas, schema, json));
+            out.clearRetainingCapacity();
+        }
+        action.status = .{ .resolved = .{
+            .resolution = .{ .position = 2, .code = .{}, .content = .{ .length = 0, .digest = protocol.contentDigest("") } },
+            .window = .{ .offset = 0, .next = 0, .more = false, .text = .{} },
+        } };
+        try action.status.resolved.resolution.code.set("succeeded");
+        try host_reply.renderActionRead(.{ .writer = &out.writer }, action);
+        const json = try std.json.parseFromSliceLeaky(Value, a, out.written(), .{});
+        try std.testing.expect(conforms(schemas, schema, json));
+        out.clearRetainingCapacity();
+    }
+}
+
 test "replies the Host renders conform to their schemas" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -1631,24 +1675,6 @@ test "replies the Host renders conform to their schemas" {
 
     const reply = @import("command_reply.zig");
     const host_reply = @import("host_reply.zig");
-    const action_read = @import("action_read.zig");
-    const action = try a.create(action_read.Read);
-    action.* = .{ .session = .{}, .action_id = 1, .status = .{ .pending = .queued } };
-    try action.session.set("k7m2qx");
-    for (std.enums.values(action_read.PendingState)) |state| {
-        action.status = .{ .pending = state };
-        try host_reply.renderActionRead(.{ .writer = &out.writer }, action);
-        try Case.check(schemas, "ReadActionReply", out.written(), a);
-        out.clearRetainingCapacity();
-    }
-    action.status = .{ .resolved = .{
-        .resolution = .{ .position = 2, .code = .{}, .content = .{ .length = 0, .digest = protocol.contentDigest("") } },
-        .window = .{ .offset = 0, .next = 0, .more = false, .text = .{} },
-    } };
-    try action.status.resolved.resolution.code.set("succeeded");
-    try host_reply.renderActionRead(.{ .writer = &out.writer }, action);
-    try Case.check(schemas, "ReadActionReply", out.written(), a);
-    out.clearRetainingCapacity();
     var configured: reply.ConfigureReply = .{ .rejected = .{ .replayed = false, .code = .mcp_server_unavailable } };
     var host_tool_set = @import("tools.zig").built_in_tool_set;
     host_tool_set.configured_servers = &.{"notes"};

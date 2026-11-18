@@ -176,10 +176,12 @@ pub fn renderActionRead(response: protocol.JsonOut, value: *const @import("actio
         .resolved_parts => |*final| try response.appendShape(shapes.parts, .{ final.position, final.code.slice(), final.content.length, final.content.digest }),
     }
     try response.writer.writeAll(shapes.values_head);
+    try response.writer.writeByte('[');
     for (value.values.items[0..value.values.count], 0..) |item, index| {
         if (index != 0) try response.writer.writeByte(',');
         try response.appendShape(shapes.item, .{ item.ordinal, item.key.slice(), value.values.bytes[item.start..][0..item.length] });
     }
+    try response.writer.writeByte(']');
     try response.appendShape(shapes.values_tail, .{ value.values.next, value.values.more });
 }
 
@@ -577,6 +579,7 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
 }
 
 test "Action read JSON reaches its exact bound with an escaped final window" {
+    // ARD-3
     const Read = @import("action_read.zig").Read;
     const value = try std.testing.allocator.create(Read);
     defer std.testing.allocator.destroy(value);
@@ -606,6 +609,13 @@ test "Action read JSON reaches its exact bound with an escaped final window" {
     const decoded = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, writer.buffered(), .{});
     defer decoded.deinit();
     try std.testing.expectEqualStrings("resolved", decoded.value.object.get("state").?.string);
+    const values = decoded.value.object.get("values").?.object;
+    try std.testing.expectEqual(@as(usize, 16), values.get("items").?.array.items.len);
+    try std.testing.expectEqualStrings("18446744073709551615", values.get("next").?.string);
+    try std.testing.expect(!values.get("more").?.bool);
+    const first = values.get("items").?.array.items[0].object;
+    try std.testing.expectEqual(@as(usize, 16384), first.get("text").?.string.len);
+    try std.testing.expectEqualSlices(u8, value.values.bytes[0..value.values.length], first.get("text").?.string);
     value.status = .{ .pending = .queued };
     writer = .fixed(bytes);
     try renderActionRead(.{ .writer = &writer }, value);
