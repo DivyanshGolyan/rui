@@ -12,6 +12,7 @@ directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 python3 "$directory/host_process.py" exec true
 release_safe=$1
 pause_binary=${RUI_TEST_PAUSE_BINARY:-$release_safe}
+pause_socket_binary=${RUI_TEST_PAUSE_SOCKET_BINARY:?pause socket fixture binary is required}
 debug=$2
 printf 'Actual native platform: %s %s\n' "$(uname -s)" "$(uname -m)"
 
@@ -59,6 +60,7 @@ cases() {
     run_case callers model-picker python3 "$directory/model_picker_integration.py" "$release_safe"
     run_case callers model-picker-signin python3 "$directory/model_picker_signin_integration.py" "$release_safe"
     run_case callers model-picker-failure python3 "$directory/model_picker_failure_integration.py" "$release_safe"
+    run_case callers pause-socket python3 "$directory/pause_socket_test.py" "$pause_socket_binary"
     run_case callers request-wait python3 "$directory/request_wait_integration.py" "$pause_binary"
     run_case callers preference-policy python3 "$directory/preference_policy_integration.py" "$preference_policy_actor"
     run_case execution bash-lifecycle python3 "$directory/bash_lifecycle_integration.py" "$release_safe"

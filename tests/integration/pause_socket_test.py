@@ -5,6 +5,8 @@ import sys
 import threading
 import unittest
 
+import host_process
+
 from pause_client import ChildExited, PauseClient, PauseError
 
 BINARY = sys.argv.pop(1)
@@ -163,4 +165,5 @@ class SocketTest(unittest.TestCase):
 
 
 if __name__ == "__main__":
+    host_process.enter()
     unittest.main()

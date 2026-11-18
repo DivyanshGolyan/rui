@@ -133,20 +133,6 @@ pub const Units = struct {
 };
 
 pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pinned_transport: ?product.PinnedTransport, test_filters: []const []const u8) Units {
-    const pause_fixture = b.addExecutable(.{
-        .name = "pause-socket-fixture",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/pause_socket_fixture.zig"),
-            .target = target,
-            .optimize = .ReleaseSafe,
-            .link_libc = true,
-        }),
-    });
-    product.configurePauses(b, pause_fixture, true);
-    const pause_socket_test = b.addSystemCommand(&.{"python3"});
-    pause_socket_test.addFileArg(b.path("tests/integration/pause_socket_test.py"));
-    pause_socket_test.addFileArg(ci.path(pause_fixture));
-    b.step("pause-socket-test", "Run cross-process pause socket tests").dependOn(&pause_socket_test.step);
     const native_group = group(.native_pair);
     if (native_group.roots.len == 0) @panic("Native group must contain a unit root");
     const identities = b.allocator.alloc(UnitRoot.Id, if (test_filters.len == 0) unit_partition.roots.len else 1) catch @panic("OOM");

@@ -5,7 +5,7 @@ pub const Fixture = struct {
     step: []const u8,
     description: []const u8,
     script: []const u8,
-    rui: enum { release_safe, debug, pause } = .release_safe,
+    rui: enum { release_safe, debug, pause, pause_socket } = .release_safe,
     screen: bool = false,
     args: []const []const u8 = &.{},
 };
@@ -16,6 +16,7 @@ pub const fixtures = [_]Fixture{
     .{ .step = "skills-integration", .description = "Run isolated native skills capture, replay and creation cases", .script = "tests/integration/skills_integration.py", .screen = true },
     .{ .step = "login-signal-integration", .description = "Run the Linux-only one-shot login signal loader witness", .script = "tests/integration/login_signal_integration.py" },
     .{ .step = "current-facts-integration", .description = "Run the real Current producer/consumer observation oracle", .script = "tests/integration/current_facts_integration.py" },
+    .{ .step = "pause-socket-test", .description = "Run cross-process pause socket tests", .script = "tests/integration/pause_socket_test.py", .rui = .pause_socket },
     .{ .step = "request-wait-integration", .description = "Run request wait completion, recovery and conditional polling witnesses", .script = "tests/integration/request_wait_integration.py", .rui = .pause },
     .{ .step = "canonical-failure-integration", .description = "Run canonical invocation failure at real producer and caller boundaries", .script = "tests/integration/canonical_failure_integration.py", .screen = true },
     .{ .step = "server-delivery-integration", .description = "Run real reply inactivity, connection headroom and Host drain separately from load", .script = "tests/integration/server_delivery_integration.py" },
@@ -41,7 +42,7 @@ pub const fixtures = [_]Fixture{
     .{ .step = "host-allocator-integration", .description = "Observe the Host allocator environment before main", .script = "tests/integration/host_allocator_test.py" },
 };
 
-pub fn add(b: *std.Build, screen: std.Build.LazyPath, release_safe: std.Build.LazyPath, debug: std.Build.LazyPath, pause: std.Build.LazyPath) void {
+pub fn add(b: *std.Build, screen: std.Build.LazyPath, release_safe: std.Build.LazyPath, debug: std.Build.LazyPath, pause: std.Build.LazyPath, pause_socket: std.Build.LazyPath) void {
     for (fixtures) |fixture| {
         const run = if (fixture.screen) screen_module.screenCommand(b, screen, &.{"python3"}) else b.addSystemCommand(&.{"python3"});
         run.addFileArg(b.path(fixture.script));
@@ -49,6 +50,7 @@ pub fn add(b: *std.Build, screen: std.Build.LazyPath, release_safe: std.Build.La
             .release_safe => release_safe,
             .debug => debug,
             .pause => pause,
+            .pause_socket => pause_socket,
         });
         run.addArgs(fixture.args);
         b.step(fixture.step, fixture.description).dependOn(&run.step);
