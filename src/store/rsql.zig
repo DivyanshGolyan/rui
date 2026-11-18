@@ -345,7 +345,7 @@ fn WriteFrom(comptime table: type, comptime spec: WriteSpec) type {
     const hit = comptime tableHit(table, .write, spec.sql, spec.Args, void, false);
     const facts: Facts = comptime if (hit) |found| found.facts else factsOf(accepted(.write, spec.sql, spec.Args, void, false));
     comptime if (shapeExpectError(facts.shape, spec.expect)) |message| @compileError(message ++ ": " ++ spec.sql);
-    comptime if (facts.shape == .delete and !@import("builtin").is_test) @compileError(delete_message ++ ": " ++ spec.sql);
+    comptime if (shapeDeleteError(facts.shape, @import("builtin").is_test)) |message| @compileError(message ++ ": " ++ spec.sql);
     const Made = struct {
         pub const kind: StatementKind = .write;
         pub const made_from = spec;
@@ -425,7 +425,12 @@ fn signature(comptime kind: StatementKind, comptime Args: type, comptime Row: ty
 }
 
 fn factsOf(comptime parsed: Parsed) Facts {
-    const shape: Shape = switch (parsed.statement) {
+    const shape = shapeOf(parsed.statement);
+    return .{ .uses_now = parsed.uses_now, .shape = shape, .single_row = shape == .select_one };
+}
+
+fn shapeOf(comptime statement: Statement) Shape {
+    return switch (statement) {
         .select => |select| if (returnsOneRow(select)) .select_one else .select,
         .insert => |insert| switch (insert.values) {
             .row => .insert_row,
@@ -434,7 +439,6 @@ fn factsOf(comptime parsed: Parsed) Facts {
         .update => .update,
         .delete => .delete,
     };
-    return .{ .uses_now = parsed.uses_now, .shape = shape, .single_row = shape == .select_one };
 }
 
 fn shapeExpectError(comptime shape: Shape, comptime expect: Expect) ?[]const u8 {
@@ -557,28 +561,15 @@ fn writeError(comptime sql: []const u8, comptime Args: type, comptime expect: Ex
 }
 
 fn expectError(comptime statement: Statement, comptime expect: Expect) ?[]const u8 {
-    if (statement != .insert) return null;
-    const select = switch (statement.insert.values) {
-        .row => return switch (expect) {
-            .exact => |guard| if (guard.rows > 1) values_message else null,
-            .at_most => null,
-            .counted => values_message,
-        },
-        .select => |select| select,
-    };
-    const declares_one = switch (expect) {
-        .exact => |guard| guard.rows == 1,
-        .at_most => |rows| rows == 1,
-        .counted => false,
-    };
-    if (returnsOneRow(select)) {
-        if (!declares_one) return "rsql: an INSERT ... SELECT of at most one row declares .exact or .at_most 1";
-    } else if (expect != .counted) return "rsql: an INSERT ... SELECT of more than one row declares .counted, so its caller states the count";
-    return null;
+    return shapeExpectError(shapeOf(statement), expect);
 }
 
 fn deleteError(comptime statement: Statement, comptime is_test: bool) ?[]const u8 {
-    if (statement != .delete or is_test) return null;
+    return shapeDeleteError(shapeOf(statement), is_test);
+}
+
+fn shapeDeleteError(comptime shape: Shape, comptime is_test: bool) ?[]const u8 {
+    if (shape != .delete or is_test) return null;
     return delete_message;
 }
 
@@ -2674,7 +2665,7 @@ test "a statement calls only the functions every engine spells, by argument coun
     try std.testing.expectEqualStrings(text, comptime mysqlRendering(text).rendered.parts[0]);
 }
 
-test "SH-74: a statement serves its table entry only while its text, signature and the table's inputs all match" {
+test "SH-92: a statement serves its table entry only while its text, signature and the table's inputs all match" {
     const text = "SELECT next_position FROM session WHERE session_ref=?1";
     const written = "UPDATE session SET prefix_seal=?2 WHERE session_ref=@session(?1)";
     const Args = struct { session: []const u8 };
