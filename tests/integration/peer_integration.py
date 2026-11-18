@@ -667,7 +667,7 @@ def stdin_start_contract():
                 "reasoning_effort": effort, "effort_source": source}, start_receipt
             tools = DEFAULTS.tools.split(",")
             loaded = DEFAULTS.loaded_tools.split(",")
-            if sys.platform not in ("linux", "darwin"):
+            if not (os_semantics.PROC_FS or os_semantics.DARWIN):
                 tools.remove("read_image")
                 loaded.remove("read_image")
             creation = {"provider": "codex", "model": model, "reasoning_effort": effort,
