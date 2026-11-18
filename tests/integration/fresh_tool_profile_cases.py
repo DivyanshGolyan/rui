@@ -86,10 +86,10 @@ def fresh_callers(world, engine):
             known = references(w)
             with w.overview(columns=columns, keep_launch=True) as screen:
                 if columns < 100:
-                    screen.wait(lambda frame: "+ New Session" in frame and "Settings" in frame
-                                and "Type a task" not in frame, "narrow overview ready")
+                    screen.wait(lambda frame: "+ New chat" in frame and "Settings" in frame
+                                and "What shall we work on?" not in frame, "narrow overview ready")
                     screen.keys(b"\x1b[H\r")
-                screen.wait(lambda frame: "Type a task" in frame and screen.capture.draft("", 2),
+                screen.wait(lambda frame: "What shall we work on?" in frame and screen.capture.draft("", 2),
                             "fresh chat composer")
                 session, = references(w) - known
                 profile(w, session, allowed, loaded)

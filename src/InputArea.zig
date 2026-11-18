@@ -65,7 +65,7 @@ test "InputArea keeps facts below the composer when a notice replaces the status
     const facts: vxfw.RichText = .{ .text = &.{.{ .text = "new Session · gpt-6.1-sol · high · ~/rui" }}, .softwrap = false, .width_basis = .parent };
     var status: vxfw.RichText = .{ .text = &.{.{ .text = "enter sends" }}, .softwrap = false, .width_basis = .parent };
     var input: Self = .{
-        .composer = .{ .editor = &editor, .placeholder = "Type a task" },
+        .composer = .{ .editor = &editor, .placeholder = "What shall we work on?" },
         .facts = facts.widget(),
         .status = status.widget(),
     };

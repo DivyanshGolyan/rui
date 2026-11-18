@@ -782,15 +782,15 @@
       "open": "overview",
       "steps": [
         {
-          "wait": "+ New Session"
+          "wait": "+ New chat"
         },
         {
-          "wait": "Type a task",
+          "wait": "What shall we work on?",
           "min_columns": 100
         }
       ],
       "expect": [
-        "Type a task"
+        "What shall we work on?"
       ],
       "absent": [
         "enter open"
@@ -804,9 +804,9 @@
       "note": "Bare narrow launch opens the full overview without an open hint",
       "open": "overview",
       "sizes": ["46x30"],
-      "steps": [{"wait": "+ New Session"}],
-      "expect": ["+ New Session", "Settings"],
-      "absent": ["Type a task", "enter open"],
+      "steps": [{"wait": "+ New chat"}],
+      "expect": ["+ New chat", "Settings"],
+      "absent": ["What shall we work on?", "enter open"],
       "absent_sidebar_regex": [
         "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
@@ -816,16 +816,16 @@
       "note": "Archived stays available with nothing archived",
       "open": "overview",
       "steps": [
-        {"wait": "+ New Session"},
-        {"wait": "Type a task", "min_columns": 100},
+        {"wait": "+ New chat"},
+        {"wait": "What shall we work on?", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"gone": "Type a task"},
+        {"gone": "What shall we work on?"},
         {
-          "wait": "+ New Session"
+          "wait": "+ New chat"
         }
       ],
       "expect": [
-        "+ New Session",
+        "+ New chat",
         "Settings",
         "Archived"
       ],
@@ -886,7 +886,7 @@
       "absent": [
         "Browsing · Esc returns",
         "enter retry",
-        "Type a task",
+        "What shall we work on?",
         "alt+i info"
       ],
       "absent_sidebar_regex": [
@@ -928,10 +928,10 @@
       "open": "overview",
       "steps": [
         {
-          "wait": "+ New Session"
+          "wait": "+ New chat"
         },
         {
-          "wait": "Type a task",
+          "wait": "What shall we work on?",
           "min_columns": 100
         },
         {
@@ -940,7 +940,7 @@
           ]
         },
         {
-          "gone": "Type a task"
+          "gone": "What shall we work on?"
         },
         {
           "wait": "Input tint chat"
@@ -952,11 +952,11 @@
           ]
         },
         {
-          "wait": "Type a task"
+          "wait": "What shall we work on?"
         }
       ],
       "expect": [
-        "› Type a task",
+        "› What shall we work on?",
         "gpt-6.1-sol"
       ],
       "absent": [
@@ -966,7 +966,7 @@
         "alt+i info"
       ],
       "expect_background": {
-        "› Type a task": "#121933"
+        "› What shall we work on?": "#121933"
       },
       "absent_sidebar_regex": [
         "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
@@ -1038,7 +1038,7 @@
       "absent": [
         "Browsing · Esc returns",
         "enter retry",
-        "Type a task",
+        "What shall we work on?",
         "alt+i info"
       ],
       "absent_sidebar_regex": [
@@ -1080,10 +1080,10 @@
       "open": "overview",
       "steps": [
         {
-          "wait": "+ New Session"
+          "wait": "+ New chat"
         },
         {
-          "wait": "Type a task",
+          "wait": "What shall we work on?",
           "min_columns": 100
         },
         {
@@ -1092,7 +1092,7 @@
           ]
         },
         {
-          "gone": "Type a task"
+          "gone": "What shall we work on?"
         },
         {
           "wait": "Input tint chat"
@@ -1104,11 +1104,11 @@
           ]
         },
         {
-          "wait": "Type a task"
+          "wait": "What shall we work on?"
         }
       ],
       "expect": [
-        "› Type a task",
+        "› What shall we work on?",
         "gpt-6.1-sol"
       ],
       "absent": [
@@ -1118,7 +1118,7 @@
         "alt+i info"
       ],
       "expect_background": {
-        "› Type a task": "#f3eee2"
+        "› What shall we work on?": "#f3eee2"
       },
       "absent_sidebar_regex": [
         "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
@@ -1163,10 +1163,10 @@
         }
       ],
       "steps": [
-        {"wait": "+ New Session"},
-        {"wait": "Type a task", "min_columns": 100},
+        {"wait": "+ New chat"},
+        {"wait": "What shall we work on?", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"gone": "Type a task"},
+        {"gone": "What shall we work on?"},
         {
           "wait": "You wrote"
         }
@@ -1175,7 +1175,7 @@
         "You wrote"
       ],
       "absent": [
-        "No Sessions yet."
+        "No chats yet."
       ],
       "absent_sidebar_regex": [
         "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
@@ -1217,10 +1217,10 @@
         }
       ],
       "steps": [
-        {"wait": "+ New Session"},
-        {"wait": "Type a task", "min_columns": 100},
+        {"wait": "+ New chat"},
+        {"wait": "What shall we work on?", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"gone": "Type a task"},
+        {"gone": "What shall we work on?"},
         {
           "wait": "Agent working"
         },
@@ -1238,7 +1238,7 @@
         "Agent working"
       ],
       "absent": [
-        "No Sessions yet.",
+        "No chats yet.",
         "Host stopped"
       ],
       "expect_dim": [
@@ -1597,10 +1597,10 @@
           ]
         },
         {
-          "wait": "Type a task"
+          "wait": "What shall we work on?"
         },
         {
-          "wait": "○ New Session",
+          "wait": "○ New chat",
           "min_columns": 140
         },
         {
@@ -1608,7 +1608,7 @@
         }
       ],
       "expect": [
-        "Type a task",
+        "What shall we work on?",
         "~/code/rui",
         "gpt-6.1-sol"
       ],
@@ -1636,10 +1636,10 @@
           ]
         },
         {
-          "wait": "Type a task"
+          "wait": "What shall we work on?"
         },
         {
-          "wait": "○ New Session",
+          "wait": "○ New chat",
           "min_columns": 140
         },
         {
@@ -1647,7 +1647,7 @@
         }
       ],
       "expect": [
-        "Type a task",
+        "What shall we work on?",
         "~/code/rui",
         "gpt-6.1-sol"
       ],
@@ -1708,16 +1708,16 @@
       "note": "Sessions and Archived tabs stay below the separate New Session action",
       "open": "overview",
       "steps": [
-        {"wait": "+ New Session"},
-        {"wait": "Type a task", "min_columns": 100},
+        {"wait": "+ New chat"},
+        {"wait": "What shall we work on?", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"gone": "Type a task"},
+        {"gone": "What shall we work on?"},
         {
           "wait": "Archived"
         }
       ],
       "expect": [
-        "+ New Session",
+        "+ New chat",
         "Archived"
       ],
       "absent": [
@@ -1733,10 +1733,10 @@
       "note": "Down from New Session selects Sessions; Right selects Archived, Left returns to Sessions",
       "open": "overview",
       "steps": [
-        {"wait": "+ New Session"},
-        {"wait": "Type a task", "min_columns": 100},
+        {"wait": "+ New chat"},
+        {"wait": "What shall we work on?", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"gone": "Type a task"},
+        {"gone": "What shall we work on?"},
         {
           "wait": "Archived"
         },
@@ -1751,7 +1751,7 @@
         }
       ],
       "expect": [
-        "+ New Session",
+        "+ New chat",
         "Archived"
       ],
       "absent": [
@@ -1766,10 +1766,10 @@
       "note": "Enter on Archived opens the existing archived view: plain names, no archived marker",
       "open": "overview",
       "steps": [
-        {"wait": "+ New Session"},
-        {"wait": "Type a task", "min_columns": 100},
+        {"wait": "+ New chat"},
+        {"wait": "What shall we work on?", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"gone": "Type a task"},
+        {"gone": "What shall we work on?"},
         {
           "wait": "Archived"
         },
@@ -1786,7 +1786,7 @@
         }
       ],
       "expect": [
-        "+ New Session",
+        "+ New chat",
         "Archived",
         "Archive audit"
       ],
@@ -1803,10 +1803,10 @@
       "note": "A click on Archived opens the archived view",
       "open": "overview",
       "steps": [
-        {"wait": "+ New Session"},
-        {"wait": "Type a task", "min_columns": 100},
+        {"wait": "+ New chat"},
+        {"wait": "What shall we work on?", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"gone": "Type a task"},
+        {"gone": "What shall we work on?"},
         {
           "wait": "Archived"
         },
@@ -1821,7 +1821,7 @@
         }
       ],
       "expect": [
-        "+ New Session",
+        "+ New chat",
         "Archived",
         "Archive audit"
       ],
@@ -1837,10 +1837,10 @@
       "note": "Esc in the archived view returns to the usual list",
       "open": "overview",
       "steps": [
-        {"wait": "+ New Session"},
-        {"wait": "Type a task", "min_columns": 100},
+        {"wait": "+ New chat"},
+        {"wait": "What shall we work on?", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"gone": "Type a task"},
+        {"gone": "What shall we work on?"},
         {
           "wait": "Archived"
         },
@@ -1865,13 +1865,13 @@
         }
       ],
       "expect": [
-        "+ New Session",
+        "+ New chat",
         "Archived"
       ],
       "absent": [
         "enter open",
         "Archive audit",
-        "No archived Sessions"
+        "No archived chats"
       ],
       "absent_sidebar_regex": [
         "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
@@ -1914,21 +1914,20 @@
       "first_run": true,
       "steps": [
         {
-          "wait": "Sign in to Rui"
+          "wait": "Welcome to Rui"
         }
       ],
       "expect": [
-        "Sign in to Rui",
+        "Welcome to Rui",
         "ChatGPT",
         "API key",
-        "[ Close ]",
-        "Choose an account.",
-        "Tab / Shift-Tab"
+        "Close",
+        "Sign in to begin."
       ],
       "absent": [
         "Provider: [c]",
         "Host stopped",
-        "Type a task",
+        "What shall we work on?",
         "[ChatGPT]",
         "[API key]",
         "Codex"
@@ -1944,7 +1943,7 @@
       },
       "steps": [
         {
-          "wait": "Sign in to Rui"
+          "wait": "Welcome to Rui"
         },
         {
           "keys": [
@@ -1986,7 +1985,7 @@
       },
       "steps": [
         {
-          "wait": "Sign in to Rui"
+          "wait": "Welcome to Rui"
         },
         {
           "keys": [
@@ -2028,7 +2027,7 @@
       "first_run": true,
       "steps": [
         {
-          "wait": "Sign in to Rui"
+          "wait": "Welcome to Rui"
         },
         {
           "mouse": {
@@ -2065,18 +2064,18 @@
       "note": "01-overview-empty: pinned actions without an editor or copied chat facts",
       "open": "overview",
       "steps": [
-        {"wait": "+ New Session"},
-        {"wait": "Type a task", "min_columns": 100},
+        {"wait": "+ New chat"},
+        {"wait": "What shall we work on?", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"gone": "Type a task"}
+        {"gone": "What shall we work on?"}
       ],
       "expect": [
-        "+ New Session",
+        "+ New chat",
         "Settings"
       ],
       "absent": [
         "enter open",
-        "Type a task",
+        "What shall we work on?",
         "enter start",
         "gpt-6.1-sol \u00b7 low"
       ],
@@ -2090,10 +2089,10 @@
       "open": "overview",
       "steps": [
         {
-          "wait": "+ New Session"
+          "wait": "+ New chat"
         },
         {
-          "wait": "Type a task",
+          "wait": "What shall we work on?",
           "min_columns": 100
         },
         {
@@ -2102,7 +2101,7 @@
           ]
         },
         {
-          "gone": "Type a task"
+          "gone": "What shall we work on?"
         },
         {
           "keys": [
@@ -2111,15 +2110,15 @@
           ]
         },
         {
-          "wait": "Type a task"
+          "wait": "What shall we work on?"
         },
         {
-          "wait": "○ New Session",
+          "wait": "○ New chat",
           "min_columns": 140
         }
       ],
       "expect": [
-        "Type a task",
+        "What shall we work on?",
         "gpt-6.1-sol · low",
         "code/rui",
         "gpt-6.1-sol"
@@ -2211,10 +2210,10 @@
       "note": "App settings by selecting the list's Settings row (End) and pressing Enter",
       "open": "overview",
       "steps": [
-        {"wait": "+ New Session"},
-        {"wait": "Type a task", "min_columns": 100},
+        {"wait": "+ New chat"},
+        {"wait": "What shall we work on?", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"gone": "Type a task"},
+        {"gone": "What shall we work on?"},
         {
           "keys": [
             "End",
@@ -2236,7 +2235,7 @@
         "Keys"
       ],
       "absent": [
-        "Type a task"
+        "What shall we work on?"
       ],
       "absent_sidebar_regex": [
         "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
@@ -2247,10 +2246,10 @@
       "note": "Open Settings from the overview, move to Model, and open the shared choice",
       "open": "overview",
       "steps": [
-        {"wait": "+ New Session"},
-        {"wait": "Type a task", "min_columns": 100},
+        {"wait": "+ New chat"},
+        {"wait": "What shall we work on?", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"gone": "Type a task"},
+        {"gone": "What shall we work on?"},
         {
           "keys": [
             "End",
@@ -2284,7 +2283,7 @@
       "absent": [
         "Filter:",
         "\u2191 ",
-        "Type a task"
+        "What shall we work on?"
       ],
       "absent_sidebar_regex": [
         "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
@@ -2295,10 +2294,10 @@
       "note": "Filter the shared settings Model choice by typing sol",
       "open": "overview",
       "steps": [
-        {"wait": "+ New Session"},
-        {"wait": "Type a task", "min_columns": 100},
+        {"wait": "+ New chat"},
+        {"wait": "What shall we work on?", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"gone": "Type a task"},
+        {"gone": "What shall we work on?"},
         {
           "keys": [
             "End",
@@ -2338,7 +2337,7 @@
         "Filter:",
         "\u2191 ",
         "gpt-5.5",
-        "Type a task"
+        "What shall we work on?"
       ],
       "absent_sidebar_regex": [
         "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
@@ -2349,10 +2348,10 @@
       "note": "Pointer over Notifications; L2 SGR motion, selection unchanged",
       "open": "overview",
       "steps": [
-        {"wait": "+ New Session"},
-        {"wait": "Type a task", "min_columns": 100},
+        {"wait": "+ New chat"},
+        {"wait": "What shall we work on?", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"gone": "Type a task"},
+        {"gone": "What shall we work on?"},
         {
           "keys": [
             "End",
@@ -2379,7 +2378,7 @@
         "Version"
       ],
       "absent": [
-        "Type a task"
+        "What shall we work on?"
       ],
       "absent_sidebar_regex": [
         "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
@@ -2390,10 +2389,10 @@
       "note": "Empty-chat model word opens the shared Model choice alone above the input",
       "open": "overview",
       "steps": [
-        {"wait": "+ New Session"},
-        {"wait": "Type a task", "min_columns": 100},
+        {"wait": "+ New chat"},
+        {"wait": "What shall we work on?", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"gone": "Type a task"},
+        {"gone": "What shall we work on?"},
         {
           "keys": [
             "Home",
@@ -2401,10 +2400,10 @@
           ]
         },
         {
-          "wait": "Type a task"
+          "wait": "What shall we work on?"
         },
         {
-          "wait": "\u25cb New Session",
+          "wait": "\u25cb New chat",
           "min_columns": 140
         },
         {
@@ -2421,7 +2420,7 @@
         "Model",
         "gpt-6.1-sol",
         "\u2713",
-        "Type a task"
+        "What shall we work on?"
       ],
       "absent": [
         "Notifications",
@@ -2440,10 +2439,10 @@
       "note": "Tab Tab Enter opens the shared Effort choice alone above the input",
       "open": "overview",
       "steps": [
-        {"wait": "+ New Session"},
-        {"wait": "Type a task", "min_columns": 100},
+        {"wait": "+ New chat"},
+        {"wait": "What shall we work on?", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"gone": "Type a task"},
+        {"gone": "What shall we work on?"},
         {
           "keys": [
             "Home",
@@ -2451,10 +2450,10 @@
           ]
         },
         {
-          "wait": "Type a task"
+          "wait": "What shall we work on?"
         },
         {
-          "wait": "\u25cb New Session",
+          "wait": "\u25cb New chat",
           "min_columns": 140
         },
         {
@@ -2475,7 +2474,7 @@
         "high",
         "xhigh",
         "\u2713",
-        "Type a task"
+        "What shall we work on?"
       ],
       "absent": [
         "Notifications",
@@ -2494,10 +2493,10 @@
       "note": "Picking xhigh in the empty-chat Effort choice saves this Session\u2019s effort and closes the choice",
       "open": "overview",
       "steps": [
-        {"wait": "+ New Session"},
-        {"wait": "Type a task", "min_columns": 100},
+        {"wait": "+ New chat"},
+        {"wait": "What shall we work on?", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"gone": "Type a task"},
+        {"gone": "What shall we work on?"},
         {
           "keys": [
             "Home",
@@ -2505,10 +2504,10 @@
           ]
         },
         {
-          "wait": "Type a task"
+          "wait": "What shall we work on?"
         },
         {
-          "wait": "\u25cb New Session",
+          "wait": "\u25cb New chat",
           "min_columns": 140
         },
         {
@@ -2533,7 +2532,7 @@
       ],
       "expect": [
         "gpt-6.1-sol \u00b7 xhigh",
-        "Type a task"
+        "What shall we work on?"
       ],
       "absent": [
         "gpt-6.1-sol \u00b7 high",
@@ -2561,10 +2560,10 @@
         }
       ],
       "steps": [
-        {"wait": "+ New Session"},
-        {"wait": "Type a task", "min_columns": 100},
+        {"wait": "+ New chat"},
+        {"wait": "What shall we work on?", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"gone": "Type a task"},
+        {"gone": "What shall we work on?"},
         {
           "wait": "Existing conversation"
         },
@@ -2575,7 +2574,7 @@
           ]
         },
         {
-          "wait": "Type a task"
+          "wait": "What shall we work on?"
         },
         {
           "keys": [
@@ -2583,17 +2582,17 @@
           ]
         },
         {
-          "gone": "Type a task"
+          "gone": "What shall we work on?"
         }
       ],
       "expect": [
-        "+ New Session",
+        "+ New chat",
         "Settings",
         "Existing conversation"
       ],
       "absent": [
         "enter open",
-        "Type a task",
+        "What shall we work on?",
         "enter start"
       ],
       "absent_sidebar_regex": [
@@ -2610,10 +2609,10 @@
       "note": "Picking a different model without sending a Message still leaves no empty overview row",
       "open": "overview",
       "steps": [
-        {"wait": "+ New Session"},
-        {"wait": "Type a task", "min_columns": 100},
+        {"wait": "+ New chat"},
+        {"wait": "What shall we work on?", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"gone": "Type a task"},
+        {"gone": "What shall we work on?"},
         {
           "wait": "Existing conversation"
         },
@@ -2624,7 +2623,7 @@
           ]
         },
         {
-          "wait": "Type a task"
+          "wait": "What shall we work on?"
         },
         {
           "mouse": {
@@ -2662,17 +2661,17 @@
           ]
         },
         {
-          "gone": "Type a task"
+          "gone": "What shall we work on?"
         }
       ],
       "expect": [
-        "+ New Session",
+        "+ New chat",
         "Settings",
         "Existing conversation"
       ],
       "absent": [
         "enter open",
-        "Type a task",
+        "What shall we work on?",
         "enter start"
       ],
       "absent_sidebar_regex": [
@@ -2699,10 +2698,10 @@
         }
       ],
       "steps": [
-        {"wait": "+ New Session"},
-        {"wait": "Type a task", "min_columns": 100},
+        {"wait": "+ New chat"},
+        {"wait": "What shall we work on?", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"gone": "Type a task"},
+        {"gone": "What shall we work on?"},
         {
           "wait": "Existing second conversation"
         },
@@ -2713,7 +2712,7 @@
           ]
         },
         {
-          "wait": "Type a task"
+          "wait": "What shall we work on?"
         },
         {
           "keys": [
@@ -2721,7 +2720,7 @@
           ]
         },
         {
-          "gone": "Type a task"
+          "gone": "What shall we work on?"
         },
         {
           "keys": [
@@ -2730,7 +2729,7 @@
           ]
         },
         {
-          "wait": "Type a task"
+          "wait": "What shall we work on?"
         },
         {
           "keys": [
@@ -2738,18 +2737,18 @@
           ]
         },
         {
-          "gone": "Type a task"
+          "gone": "What shall we work on?"
         }
       ],
       "expect": [
-        "+ New Session",
+        "+ New chat",
         "Settings",
         "Existing conversation",
         "Existing second conversation"
       ],
       "absent": [
         "enter open",
-        "Type a task",
+        "What shall we work on?",
         "enter start"
       ],
       "absent_sidebar_regex": [
@@ -2766,10 +2765,10 @@
       "note": "Click the pinned Settings row using terminal mouse modes",
       "open": "overview",
       "steps": [
-        {"wait": "+ New Session"},
-        {"wait": "Type a task", "min_columns": 100},
+        {"wait": "+ New chat"},
+        {"wait": "What shall we work on?", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"gone": "Type a task"},
+        {"gone": "What shall we work on?"},
         {
           "wait": "Settings"
         },
@@ -2796,7 +2795,7 @@
         "Version"
       ],
       "absent": [
-        "Type a task"
+        "What shall we work on?"
       ],
       "absent_sidebar_regex": [
         "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
@@ -2807,10 +2806,10 @@
       "note": "02-overview",
       "open": "overview",
       "steps": [
-        {"wait": "+ New Session"},
-        {"wait": "Type a task", "min_columns": 100},
+        {"wait": "+ New chat"},
+        {"wait": "What shall we work on?", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"gone": "Type a task"},
+        {"gone": "What shall we work on?"},
         {
           "wait": "Schema migration"
         },
@@ -2892,7 +2891,7 @@
         "\u25a0"
       ],
       "absent": [
-        "Type a task"
+        "What shall we work on?"
       ],
       "absent_sidebar_regex": [
         "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
@@ -2903,10 +2902,10 @@
       "note": "Pointer over Release notes for 0.60; L2 SGR motion, selection unchanged",
       "open": "overview",
       "steps": [
-        {"wait": "+ New Session"},
-        {"wait": "Type a task", "min_columns": 100},
+        {"wait": "+ New chat"},
+        {"wait": "What shall we work on?", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"gone": "Type a task"},
+        {"gone": "What shall we work on?"},
         {
           "wait": "Schema migration"
         },
@@ -2927,7 +2926,7 @@
         "Release notes for 0.60"
       ],
       "absent": [
-        "Type a task"
+        "What shall we work on?"
       ],
       "absent_sidebar_regex": [
         "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
@@ -2938,10 +2937,10 @@
       "note": "Pointer over Settings; L2 SGR motion, selection unchanged",
       "open": "overview",
       "steps": [
-        {"wait": "+ New Session"},
-        {"wait": "Type a task", "min_columns": 100},
+        {"wait": "+ New chat"},
+        {"wait": "What shall we work on?", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"gone": "Type a task"},
+        {"gone": "What shall we work on?"},
         {
           "wait": "Schema migration"
         },
@@ -2961,7 +2960,7 @@
         "\u25a0"
       ],
       "absent": [
-        "Type a task"
+        "What shall we work on?"
       ],
       "absent_sidebar_regex": [
         "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
@@ -2972,10 +2971,10 @@
       "note": "03-overview-busy: one-line working Sessions",
       "open": "overview",
       "steps": [
-        {"wait": "+ New Session"},
-        {"wait": "Type a task", "min_columns": 100},
+        {"wait": "+ New chat"},
+        {"wait": "What shall we work on?", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"gone": "Type a task"},
+        {"gone": "What shall we work on?"},
         {
           "send": {
             "to": "Benchmark idle memory",
@@ -3020,7 +3019,7 @@
         "Settings"
       ],
       "absent": [
-        "Type a task"
+        "What shall we work on?"
       ],
       "absent_sidebar_regex": [
         "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
@@ -3062,7 +3061,7 @@
         "asks before Bash/MCP",
         "Type a message",
         "enter sends",
-        "Type a task",
+        "What shall we work on?",
         "enter start",
         "Fail with exit 127 \u00b7 127",
         "Fail with an excerpt \u00b7 1"
@@ -3460,7 +3459,7 @@
           ]
         },
         {
-          "gone": "Type a task"
+          "gone": "What shall we work on?"
         },
         {
           "keys": [
@@ -3931,11 +3930,11 @@
     },
     {
       "name": "chat-failed",
-      "note": "16-conversation-failed: \u00d7 Model reply unreadable, without a saved code or provider report",
+      "note": "16-conversation-failed: \u00d7 The model's reply didn't come through, without a saved code or provider report",
       "open": "Flaky upload test",
       "steps": [
         {
-          "wait": "\u00d7 Model reply unreadable \u00b7 ctrl+r retries"
+          "wait": "\u00d7 The model's reply didn't come through \u00b7 ctrl+r retries"
         }
       ],
       "absent": [
@@ -4102,10 +4101,10 @@
       "note": "Shared key reference, aligned pairs at 140 and one column at 46",
       "open": "overview",
       "steps": [
-        {"wait": "+ New Session"},
-        {"wait": "Type a task", "min_columns": 100},
+        {"wait": "+ New chat"},
+        {"wait": "What shall we work on?", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"gone": "Type a task"},
+        {"gone": "What shall we work on?"},
         {
           "keys": [
             "End",
@@ -4169,7 +4168,7 @@
         "/status",
         "/configure",
         "/model",
-        "Type a task"
+        "What shall we work on?"
       ],
       "absent_sidebar_regex": [
         "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
@@ -4244,10 +4243,10 @@
       "note": "The list ignores printable input and has no command path",
       "open": "overview",
       "steps": [
-        {"wait": "+ New Session"},
-        {"wait": "Type a task", "min_columns": 100},
+        {"wait": "+ New chat"},
+        {"wait": "What shall we work on?", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"gone": "Type a task"},
+        {"gone": "What shall we work on?"},
         {
           "text": "/nope"
         },
@@ -4266,16 +4265,16 @@
           ]
         },
         {
-          "gone": "Type a task"
+          "gone": "What shall we work on?"
         }
       ],
       "expect": [
-        "+ New Session",
+        "+ New chat",
         "Settings"
       ],
       "absent": [
         "enter open",
-        "Type a task",
+        "What shall we work on?",
         "/nope",
         "Unknown command",
         "/sessions",
@@ -4816,10 +4815,10 @@
       "note": "App settings inline Model value editor with compact matches",
       "open": "overview",
       "steps": [
-        {"wait": "+ New Session"},
-        {"wait": "Type a task", "min_columns": 100},
+        {"wait": "+ New chat"},
+        {"wait": "What shall we work on?", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"gone": "Type a task"},
+        {"gone": "What shall we work on?"},
         {
           "keys": [
             "End",
@@ -4851,7 +4850,7 @@
       "absent": [
         "Filter:",
         "\u2191 ",
-        "Type a task"
+        "What shall we work on?"
       ],
       "absent_sidebar_regex": [
         "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
@@ -4862,10 +4861,10 @@
       "note": "App settings Model inline value filtered by ter; no separate Filter row",
       "open": "overview",
       "steps": [
-        {"wait": "+ New Session"},
-        {"wait": "Type a task", "min_columns": 100},
+        {"wait": "+ New chat"},
+        {"wait": "What shall we work on?", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"gone": "Type a task"},
+        {"gone": "What shall we work on?"},
         {
           "keys": [
             "End",
@@ -4903,7 +4902,7 @@
       "absent": [
         "Filter:",
         "\u2191 ",
-        "Type a task"
+        "What shall we work on?"
       ],
       "absent_sidebar_regex": [
         "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
@@ -4914,10 +4913,10 @@
       "note": "48-new-chat-draft: task typing happens only after New Session opens",
       "open": "overview",
       "steps": [
-        {"wait": "+ New Session"},
-        {"wait": "Type a task", "min_columns": 100},
+        {"wait": "+ New chat"},
+        {"wait": "What shall we work on?", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"gone": "Type a task"},
+        {"gone": "What shall we work on?"},
         {
           "keys": [
             "Home",
@@ -4925,7 +4924,7 @@
           ]
         },
         {
-          "wait": "Type a task"
+          "wait": "What shall we work on?"
         },
         {
           "text": "Add a --json flag to rui session list"
@@ -4950,10 +4949,10 @@
       "note": "50c-long-label",
       "open": "overview",
       "steps": [
-        {"wait": "+ New Session"},
-        {"wait": "Type a task", "min_columns": 100},
+        {"wait": "+ New chat"},
+        {"wait": "What shall we work on?", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"gone": "Type a task"},
+        {"gone": "What shall we work on?"},
         {
           "wait": "Migrate the billing"
         }
@@ -4974,7 +4973,7 @@
         "Settings"
       ],
       "absent": [
-        "Type a task"
+        "What shall we work on?"
       ],
       "absent_sidebar_regex": [
         "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
@@ -4985,10 +4984,10 @@
       "note": "51-many-sessions",
       "open": "overview",
       "steps": [
-        {"wait": "+ New Session"},
-        {"wait": "Type a task", "min_columns": 100},
+        {"wait": "+ New chat"},
+        {"wait": "What shall we work on?", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"gone": "Type a task"},
+        {"gone": "What shall we work on?"},
         {
           "wait": "Batch job"
         }
@@ -5014,7 +5013,7 @@
       "absent": [
         "\u2191",
         "\u2193 0 more",
-        "Type a task"
+        "What shall we work on?"
       ],
       "absent_sidebar_regex": [
         "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
@@ -5025,10 +5024,10 @@
       "note": "51a-many-sessions-middle",
       "open": "overview",
       "steps": [
-        {"wait": "+ New Session"},
-        {"wait": "Type a task", "min_columns": 100},
+        {"wait": "+ New chat"},
+        {"wait": "What shall we work on?", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"gone": "Type a task"},
+        {"gone": "What shall we work on?"},
         {
           "wait": "Batch job"
         },
@@ -5069,12 +5068,12 @@
         "\u2193",
         "more",
         "Settings",
-        "+ New Session"
+        "+ New chat"
       ],
       "absent": [
         "\u2191 0 more",
         "\u2193 0 more",
-        "Type a task"
+        "What shall we work on?"
       ],
       "absent_sidebar_regex": [
         "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
@@ -5085,10 +5084,10 @@
       "note": "51b-many-sessions-end",
       "open": "overview",
       "steps": [
-        {"wait": "+ New Session"},
-        {"wait": "Type a task", "min_columns": 100},
+        {"wait": "+ New chat"},
+        {"wait": "What shall we work on?", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"gone": "Type a task"},
+        {"gone": "What shall we work on?"},
         {
           "wait": "Batch job"
         },
@@ -5110,13 +5109,13 @@
         "Settings",
         "\u2191",
         "more",
-        "+ New Session"
+        "+ New chat"
       ],
       "absent": [
         "enter open",
         "\u2193",
         "\u2191 0 more",
-        "Type a task"
+        "What shall we work on?"
       ],
       "absent_sidebar_regex": [
         "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
@@ -5127,10 +5126,10 @@
       "note": "51c-many-sessions-pinned-end",
       "open": "overview",
       "steps": [
-        {"wait": "+ New Session"},
-        {"wait": "Type a task", "min_columns": 100},
+        {"wait": "+ New chat"},
+        {"wait": "What shall we work on?", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"gone": "Type a task"},
+        {"gone": "What shall we work on?"},
         {
           "wait": "Batch job"
         },
@@ -5152,7 +5151,7 @@
         "140x40"
       ],
       "expect": [
-        "+ New Session",
+        "+ New chat",
         "\u2191",
         "more",
         "Settings"
@@ -5160,7 +5159,7 @@
       "absent": [
         "\u2193",
         "\u2191 0 more",
-        "Type a task"
+        "What shall we work on?"
       ],
       "absent_sidebar_regex": [
         "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
@@ -5188,7 +5187,7 @@
       ],
       "expect_last": "gpt-6.1-sol",
       "absent": [
-        "+ New Session",
+        "+ New chat",
         "alt+i info"
       ],
       "cast": [
@@ -5226,7 +5225,7 @@
       ],
       "expect_last": "gpt-6.1-sol",
       "absent": [
-        "+ New Session",
+        "+ New chat",
         "alt+i info"
       ],
       "absent_sidebar_regex": [
@@ -5238,19 +5237,19 @@
       "note": "70-light-overview",
       "open": "overview",
       "steps": [
-        {"wait": "+ New Session"},
-        {"wait": "Type a task", "min_columns": 100},
+        {"wait": "+ New chat"},
+        {"wait": "What shall we work on?", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"gone": "Type a task"}
+        {"gone": "What shall we work on?"}
       ],
       "theme": "day",
       "expect": [
-        "+ New Session",
+        "+ New chat",
         "Settings"
       ],
       "absent": [
         "enter open",
-        "Type a task",
+        "What shall we work on?",
         "enter start",
         "gpt-6.1-sol \u00b7 low"
       ],
@@ -5329,10 +5328,10 @@
       "note": "60-host-down-overview",
       "open": "overview",
       "steps": [
-        {"wait": "+ New Session"},
-        {"wait": "Type a task", "min_columns": 100},
+        {"wait": "+ New chat"},
+        {"wait": "What shall we work on?", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"gone": "Type a task"},
+        {"gone": "What shall we work on?"},
         {
           "host": "pause"
         },
@@ -5341,7 +5340,7 @@
         }
       ],
       "absent": [
-        "Type a task"
+        "What shall we work on?"
       ],
       "absent_sidebar_regex": [
         "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
@@ -5379,10 +5378,10 @@
       "note": "61-host-back",
       "open": "overview",
       "steps": [
-        {"wait": "+ New Session"},
-        {"wait": "Type a task", "min_columns": 100},
+        {"wait": "+ New chat"},
+        {"wait": "What shall we work on?", "min_columns": 100},
         {"keys": ["Esc"]},
-        {"gone": "Type a task"},
+        {"gone": "What shall we work on?"},
         {
           "host": "start"
         },
@@ -5392,7 +5391,7 @@
       ],
       "expect": "Batch job",
       "absent": [
-        "Type a task"
+        "What shall we work on?"
       ],
       "absent_sidebar_regex": [
         "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
@@ -5409,7 +5408,7 @@
           ]
         },
         {
-          "wait": "Detached. Host work continues."
+          "wait": "Your chats keep working while you are away."
         },
         {
           "exited": 0
@@ -5419,7 +5418,7 @@
         "46x30",
         "140x40"
       ],
-      "expect": "Detached. Host work continues.",
+      "expect": "Your chats keep working while you are away.",
       "absent_sidebar_regex": [
         "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
       ]
@@ -6530,7 +6529,7 @@
         "esc"
       ],
       "absent": [
-        "Type a task",
+        "What shall we work on?",
         "esc close"
       ],
       "absent_sidebar_regex": [

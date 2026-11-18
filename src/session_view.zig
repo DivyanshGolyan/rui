@@ -1391,7 +1391,7 @@ test "a descendant's ending names the agent without codes or advice" {
     try agentEnded(&sink, "9f8e7d", "provider_http_401", false);
     try agentEnded(&sink, "9f8e7d", "cancelled", false);
     try agentEnded(&sink, "bad\x1b[2J", "malformed_provider_output", false);
-    try std.testing.expectEqualStrings("× Agent 9f8e7d · Sign-in expired\n■ Agent 9f8e7d stopped\n× Agent bad\\x1b[2J · Model reply unreadable\n", out.buffered());
+    try std.testing.expectEqualStrings("× Agent 9f8e7d · Sign-in expired\n■ Agent 9f8e7d stopped\n× Agent bad\\x1b[2J · The model's reply didn't come through\n", out.buffered());
 }
 
 test "an ended Turn shows one plain cause line for every failure class, and its provider's usage place for quota" {
@@ -1418,8 +1418,8 @@ test "an ended Turn shows one plain cause line for every failure class, and its 
         .{ "retry_exhausted", null, "× Retries ran out" },
         .{ "cancelled", null, "■ Stopped" },
         .{ "provider_http_400", null, "× Provider refused the request" },
-        .{ "unknown\x1b[2J", null, "× Something went wrong" },
-        .{ "malformed_provider_output", null, "× Model reply unreadable" },
+        .{ "unknown\x1b[2J", null, "× That didn't work" },
+        .{ "malformed_provider_output", null, "× The model's reply didn't come through" },
     };
     var seen: std.enums.EnumSet(failure_class.Class) = .empty;
     inline for (cases) |case| {
@@ -1447,9 +1447,9 @@ test "turn and agent ending marks use their table tones" {
     try workEnded(&sink, "cancelled", null, true);
     try agentEnded(&sink, "9f8e7d", "malformed_provider_output", true);
     try agentEnded(&sink, "9f8e7d", "cancelled", true);
-    try std.testing.expectEqualStrings("\x1b[91m×\x1b[39m Model reply unreadable\n" ++
+    try std.testing.expectEqualStrings("\x1b[91m×\x1b[39m The model's reply didn't come through\n" ++
         "\x1b[39m■\x1b[39m Stopped\n" ++
-        "\x1b[91m×\x1b[39m Agent 9f8e7d · Model reply unreadable\n" ++
+        "\x1b[91m×\x1b[39m Agent 9f8e7d · The model's reply didn't come through\n" ++
         "\x1b[39m■\x1b[39m Agent 9f8e7d stopped\n", out.buffered());
 }
 

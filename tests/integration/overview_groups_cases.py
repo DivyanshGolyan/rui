@@ -61,7 +61,7 @@ def needs_you():
             lines = frame.split("\n")
             headings = [line for line in lines if re.fullmatch(r"   \S.* · \d+", line)]
             assert headings == [], frame
-            assert lines[0] == "   + New Session" and lines[1] == "     Sessions  Archived", frame
+            assert lines[0] == "   + New chat" and lines[1] == "     Chats  Archived", frame
             asked = row(frame, "Asks before running")
             assert re.fullmatch(r"   \? Asks before running {2,}now", asked), asked
             assert len(asked) == 96, asked

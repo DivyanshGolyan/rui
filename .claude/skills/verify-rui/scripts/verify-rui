@@ -2910,13 +2910,12 @@ def frame_steps(run, terminal, steps, exiting=False):
 def frame_initial_ready(terminal, first_wait=None, allow_exit=False):
     def ready(capture):
         text = capture.completed
-        guided = (re.search(r"^ *Sign in to Rui *$", text, re.M) is not None
+        guided = (re.search(r"^ *Welcome to Rui *$", text, re.M) is not None
                   and all(re.search(r"^ *" + re.escape(label) + r" {2,}\S", text, re.M)
                           for label in ("ChatGPT", "API key"))
-                  and re.search(r"^ *(?:Close {2,}\S|\[ Close \] *$)", text, re.M) is not None
-                  and re.search(r"^ *(?:Navigation {2,})?Tab / Shift-Tab", text, re.M) is not None)
+                  and re.search(r"^ *Close(?: {2,}\S| *$)", text, re.M) is not None)
         return (("›" in text or all(marker in text for marker in
-                 ("+ New Session", "Settings")) or guided)
+                 ("+ New chat", "Settings")) or guided)
                 and "Opening…" not in text and (not first_wait or first_wait in text))
 
     terminal.wait(ready, "initial screen ready" + (f" with {first_wait!r}" if first_wait else ""),
@@ -3261,7 +3260,7 @@ def frame_chat_ready(plain, witness=None, empty=False):
         prompt = pane(lines[top + 1])
         if re.match(r"^\s*[›>](?:\s|$)", prompt) is None:
             continue
-        if empty and (top + 2 != index or re.fullmatch(r"\s*[›>]\s+Type a task\s*", prompt) is None):
+        if empty and (top + 2 != index or re.fullmatch(r"\s*[›>]\s+What shall we work on\?\s*", prompt) is None):
             continue
         footer = []
         for line in lines[index + 1:index + 4]:
@@ -3287,7 +3286,7 @@ def frame_drive_upgrade(run, terminal, state, fixture):
         return
     releases, gate, version = fixture
     if state["upgrade"] != "chat":
-        frame_wait(run, terminal, "Type a task")
+        frame_wait(run, terminal, "What shall we work on?")
     before = state.get("comparison_side") == "before"
     if state["upgrade"] in ("current", "available"):
         if before:

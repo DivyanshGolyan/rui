@@ -729,7 +729,7 @@ test "FeedView retry click hits only painted suffix cells including wrapped tail
     const gpa = std.testing.allocator;
     const window = try testWindow();
     defer gpa.destroy(window);
-    const words = "× Model reply unreadable\n";
+    const words = "× The model's reply didn't come through\n";
     const older = "ctrl+r retries elsewhere\n";
     try window.append(&.{
         .{ .key = .{ .position = 10 }, .text = .{ .bytes = older }, .tight = true },
@@ -742,7 +742,7 @@ test "FeedView retry click hits only painted suffix cells including wrapped tail
     defer arena.deinit();
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = gpa, .cmds = .empty };
     defer ctx.cmds.deinit(gpa);
-    const shown = older ++ "× Model reply unreadable · ctrl+r retries\n";
+    const shown = older ++ "× The model's reply didn't come through · ctrl+r retries\n";
     const start = std.mem.lastIndexOf(u8, shown, "ctrl+r retries").?;
     var expected: viewport.Sized(256, true) = .{ .sidenotes = true, .quotes = true };
     try expected.append(shown);
@@ -781,7 +781,7 @@ test "FeedView retry click cancels drag departure and lost eligibility or ending
     const gpa = std.testing.allocator;
     const window = try testWindow();
     defer gpa.destroy(window);
-    try window.append(&.{.{ .key = .{ .position = 20 }, .text = .{ .bytes = "× Model reply unreadable\n" } }});
+    try window.append(&.{.{ .key = .{ .position = 20 }, .text = .{ .bytes = "× The model's reply didn't come through\n" } }});
     var anchor: Feed = .{};
     var clicks: RetryClicks = .{};
     const latest: resident.LatestEnding = .{ .key = .{ .position = 20 }, .cause = @import("marks.zig").cause("malformed_provider_output", null) };
@@ -822,7 +822,7 @@ test "FeedView retry click accepts left and legacy no-button release only" {
     const gpa = std.testing.allocator;
     const window = try testWindow();
     defer gpa.destroy(window);
-    try window.append(&.{.{ .key = .{ .position = 20 }, .text = .{ .bytes = "× Model reply unreadable\n" } }});
+    try window.append(&.{.{ .key = .{ .position = 20 }, .text = .{ .bytes = "× The model's reply didn't come through\n" } }});
     var anchor: Feed = .{};
     var clicks: RetryClicks = .{};
     var view: Self = .{ .window = window, .anchor = &anchor, .handler = clicks.handler(), .retry_actionable = true, .latest_ending = .{ .key = .{ .position = 20 }, .cause = @import("marks.zig").cause("malformed_provider_output", null) } };
@@ -886,7 +886,7 @@ test "FeedView tool rows and retry chips hover only their painted targets withou
     try heading.prepare();
     try window.append(&.{
         .{ .key = .{ .position = 10 }, .text = resident.Text.fromDocument(&heading), .tight = true },
-        .{ .key = .{ .position = 20 }, .text = .{ .bytes = "× Model reply unreadable\n" }, .tight = true },
+        .{ .key = .{ .position = 20 }, .text = .{ .bytes = "× The model's reply didn't come through\n" }, .tight = true },
     });
     var anchor: Feed = .{};
     var actions: Actions = .{};

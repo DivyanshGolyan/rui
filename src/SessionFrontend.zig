@@ -1003,7 +1003,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     self.app_screen.style = normal;
     self.app_input.composer.caret = self.app_hooks.root.input.mainFocused() and !self.info_open and !self.app_info.standaloneOpen() and self.app_hooks.root.input.field == .input;
     self.app_input.composer.setCaps(self.app_caps);
-    self.app_input.composer.placeholder = if (self.line.read != null and self.line.folder != null) "Type a task" else "";
+    self.app_input.composer.placeholder = if (self.line.read != null and self.line.folder != null) "What shall we work on?" else "";
     self.app_input.composer.editor = &self.input.editors[self.input.active];
     self.app_card.style = normal;
     self.app_card.quiet = quiet;
@@ -7097,7 +7097,7 @@ test "failed reply newer Message accepted before retry completion supersedes the
     defer fixture.destroy();
     const held = fixture.held;
     const self = &held.self;
-    try seedFeed(held.screen, "× Model reply unreadable\n");
+    try seedFeed(held.screen, "× The model's reply didn't come through\n");
     self.failedRetryForTest();
     self.live.latest_ending.?.key = held.screen.feed.high.?;
     const ending = self.live.latest_ending.?;
@@ -7213,7 +7213,7 @@ test "failed reply stale pre-admission scan must not authorize a fresh Ctrl-R af
     const held = fixture.held;
     const self = &held.self;
     try seedFeed(held.screen, "old literal Message\n");
-    try seedFeed(held.screen, "× Model reply unreadable\n");
+    try seedFeed(held.screen, "× The model's reply didn't come through\n");
     self.failedRetryForTest();
     self.live.latest_ending.?.key = held.screen.feed.high.?;
     const ending = self.live.latest_ending.?;
@@ -7329,7 +7329,7 @@ test "failed reply rejected Message then discard supersedes pending retry but a 
     defer fixture.destroy();
     const held = fixture.held;
     const self = &held.self;
-    try seedFeed(held.screen, "× Model reply unreadable\n");
+    try seedFeed(held.screen, "× The model's reply didn't come through\n");
     self.failedRetryForTest();
     self.live.latest_ending.?.key = held.screen.feed.high.?;
     const ending = self.live.latest_ending.?;
@@ -7367,7 +7367,7 @@ test "failed reply reopening during newer work hides retry tail and ignores Ctrl
         const held = try HeldFrontend.create();
         defer held.destroy();
         const self = &held.self;
-        try seedFeed(held.screen, "× Model reply unreadable\n");
+        try seedFeed(held.screen, "× The model's reply didn't come through\n");
         self.reading.opening = true;
         _ = self.freeze(.activity);
         self.job.result = .{
@@ -7493,21 +7493,21 @@ test "failed reply retry tail follows only the latest ending and frontend eligib
     const held = try HeldFrontend.create();
     defer held.destroy();
     const self = &held.self;
-    try seedFeed(held.screen, "× Model reply unreadable\n");
-    try seedFeed(held.screen, "× Model reply unreadable\n");
+    try seedFeed(held.screen, "× The model's reply didn't come through\n");
+    try seedFeed(held.screen, "× The model's reply didn't come through\n");
     self.failedRetryForTest();
     self.live.latest_ending.?.key = held.screen.feed.high.?;
     var shown = try held.shown();
     errdefer std.debug.print("retry tail screen:\n{s}\n", .{shown});
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, shown, "ctrl+r retries"));
-    try std.testing.expect(std.mem.indexOf(u8, shown, "× Model reply unreadable · ctrl+r retries") != null);
+    try std.testing.expect(std.mem.indexOf(u8, shown, "× The model's reply didn't come through · ctrl+r retries") != null);
     self.submission.intent = .{ .decision = .{ .action = 1, .decision = .deny } };
     shown = try held.shown();
-    try std.testing.expect(std.mem.indexOf(u8, shown, "× Model reply unreadable · ctrl+r retries") == null);
+    try std.testing.expect(std.mem.indexOf(u8, shown, "× The model's reply didn't come through · ctrl+r retries") == null);
     self.submission.intent = null;
     self.live.latest_ending.?.cause = @import("marks.zig").cause("provider_quota", null);
     shown = try held.shown();
-    try std.testing.expect(std.mem.indexOf(u8, shown, "× Model reply unreadable · ctrl+r retries") == null);
+    try std.testing.expect(std.mem.indexOf(u8, shown, "× The model's reply didn't come through · ctrl+r retries") == null);
 }
 
 test "failed reply retry gesture waits behind a reader and drops every superseded fence" {
@@ -7954,7 +7954,7 @@ test "SessionFrontend close from browsed feed returns to end before saving the c
 }
 
 fn retryCellForTest(self: *Self) !struct { row: i16, col: i16 } {
-    const text = "× Model reply unreadable · ctrl+r retries\n";
+    const text = "× The model's reply didn't come through · ctrl+r retries\n";
     const start = std.mem.indexOf(u8, text, "ctrl+r retries").?;
     const width = self.app_content.drawn.width;
     var expected: viewport.Sized(128, true) = .{ .sidenotes = true, .quotes = true };
@@ -7982,7 +7982,7 @@ test "failed reply retry click schedules the same exact Message with draft and c
         self.files.scratch = file;
         const text = "/literal\n\t café 💚\r\n";
         try file.writePositionalAll(std.testing.io, text, 0);
-        try seedFeed(held.screen, "× Model reply unreadable\n");
+        try seedFeed(held.screen, "× The model's reply didn't come through\n");
         self.failedRetryForTest();
         self.live.latest_ending.?.key = held.screen.feed.high.?;
         try held.keys("draft éZ\x1b[D");
@@ -8010,7 +8010,7 @@ test "failed reply retry click revalidates the frontend predicate before schedul
     const held = try HeldFrontend.create();
     defer held.destroy();
     const self = &held.self;
-    try seedFeed(held.screen, "× Model reply unreadable\n");
+    try seedFeed(held.screen, "× The model's reply didn't come through\n");
     self.failedRetryForTest();
     self.live.latest_ending.?.key = held.screen.feed.high.?;
     _ = try held.draw();
@@ -8260,7 +8260,7 @@ test "failed reply retry settlement lets queued inspections cancel the read and 
     defer file.close(io);
     self.files.inspection = file;
     self.requests = RetrySettlementWorker.requests;
-    try seedFeed(held.screen, "× Model reply unreadable\n");
+    try seedFeed(held.screen, "× The model's reply didn't come through\n");
     self.failedRetryForTest();
     self.live.latest_ending.?.key = held.screen.feed.high.?;
     try held.keys("\x12");
@@ -8280,7 +8280,7 @@ test "failed reply retry settlement lets queued inspections cancel the read and 
     try std.testing.expect(std.mem.indexOf(u8, self.screen.browsing.text(), "RETRY-REQUESTS-PAGE") != null);
     try held.keys("\x07");
     try std.testing.expect(self.retryable() != null);
-    try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "× Model reply unreadable · ctrl+r retries") != null);
+    try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "× The model's reply didn't come through · ctrl+r retries") != null);
 }
 
 test "failed reply retry settlement accepts upgrade cancellation and returns the tail after reobservation" {
@@ -8288,7 +8288,7 @@ test "failed reply retry settlement accepts upgrade cancellation and returns the
     const held = try HeldFrontend.create();
     defer held.destroy();
     const self = &held.self;
-    try seedFeed(held.screen, "× Model reply unreadable\n");
+    try seedFeed(held.screen, "× The model's reply didn't come through\n");
     self.failedRetryForTest();
     self.live.latest_ending.?.key = held.screen.feed.high.?;
     const ending = self.live.latest_ending;
@@ -8311,7 +8311,7 @@ test "failed reply retry settlement accepts upgrade cancellation and returns the
     job.result.latest_ending = ending;
     try self.applyReader(.complete);
     try std.testing.expect(self.retryable() != null);
-    try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "× Model reply unreadable · ctrl+r retries") != null);
+    try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "× The model's reply didn't come through · ctrl+r retries") != null);
 }
 
 test "failed reply retry settlement preserves fatal Host diagnostics across supersession and worker reset" {
@@ -10222,11 +10222,11 @@ test "empty chat composer placeholder follows current no-message facts" {
     for ([_]u16{ 46, 140 }) |width| {
         const ctx: vxfw.DrawContext = .{ .arena = fixture.arena.allocator(), .cell_arena = fixture.arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 24 }, .cell_size = .{} };
         _ = try fixture.widget.draw(ctx);
-        try std.testing.expectEqualStrings("Type a task", fixture.self.app_input.composer.placeholder);
+        try std.testing.expectEqualStrings("What shall we work on?", fixture.self.app_input.composer.placeholder);
         const composer = try fixture.self.app_input.composer.widget().draw(ctx.withConstraints(.{}, .{ .width = width, .height = 3 }));
         var text: std.ArrayList(u8) = .empty;
         for (0..width) |col| try text.appendSlice(fixture.arena.allocator(), composer.readCell(col, 1).char.grapheme);
-        try std.testing.expect(std.mem.indexOf(u8, text.items, "Type a task") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text.items, "What shall we work on?") != null);
         fixture.self.line.folder = null;
         _ = try fixture.widget.draw(ctx);
         try std.testing.expectEqualStrings("", fixture.self.app_input.composer.placeholder);

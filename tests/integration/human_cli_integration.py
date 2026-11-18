@@ -596,7 +596,7 @@ def conversation_wait_oracles():
         def rows(answer, draft="", listed=marker):
             chat = ["", answer, "⠹ Waiting" if answer != marker else "", "› " + draft]
             return ([f"{left:20}┆ {right}" for left, right in zip(
-                ("+ New Session", listed, "", ""), chat)] if wide else [" " + row for row in chat])
+                ("+ New chat", listed, "", ""), chat)] if wide else [" " + row for row in chat])
 
         pending, complete = rows("edited 1"), rows(marker)
         for mode in ("shown", "fresh", "await"):
@@ -800,7 +800,7 @@ def persistent_copy_case():
             assert not saved.is_symlink() and stat.S_ISREG(saved.lstat().st_mode), saved
             assert saved.read_bytes() == large.encode() and saved.lstat().st_mode & 0o777 == 0o600, saved
             assert list(here.iterdir()) == [saved], list(here.iterdir())
-            terminal_step(master, "\x03", "Detached.")
+            terminal_step(master, "\x03", "Your chats keep working")
             assert caller.wait(timeout=5) == 0
         completed = True
         print("persistent copy: /copy and /copy code sent exact OSC 52 bytes; /copy file saved the exact answer", flush=True)
@@ -814,7 +814,7 @@ def persistent_copy_case():
 
 
 def provider_prompt(master):
-    return await_screen(master, "Sign in to Rui")
+    return await_screen(master, "Welcome to Rui")
 
 
 def chatgpt_method(master):
@@ -1023,7 +1023,7 @@ int fsync(int fd) {
         listing = terminal_step(master, "/requests", "Local recovery handles", composer=True)
         assert handle in listing and failed_notice in listing and f"{stopped} (session_stop)" in listing, listing
         assert invalid not in listing and all(handle not in listing for handle in rejected_handles), listing
-        terminal_step(master, "\x03", "Detached.")
+        terminal_step(master, "\x03", "Your chats keep working")
         assert entered.wait(timeout=5) == 0
     print("saved capture owner: pinned original bytes, preference-independent recovery, failed announcement, "
         "sync uncertainty, listing asymmetry", flush=True)
@@ -1363,8 +1363,8 @@ def renderer_cases():
         master, writer = os.pipe()
         try:
             tty = Terminal(master, None, None)
-            os.write(writer, terminal_frame(["   + New Session ┆", "    edited 2      ┆ edited 1", "                  ┆ ⠹ Waiting"])
-                + terminal_frame(["   + New Session ┆", "    edited 2      ┆ edited 2", "                  ┆ ›"]))
+            os.write(writer, terminal_frame(["   + New chat ┆", "    edited 2      ┆ edited 1", "                  ┆ ⠹ Waiting"])
+                + terminal_frame(["   + New chat ┆", "    edited 2      ┆ edited 2", "                  ┆ ›"]))
             observed = tty.wait("edited 2", after=0)
             assert "\nedited 2" in conversation_text(observed), observed
         finally:
@@ -1698,7 +1698,7 @@ def provider_line_cases():
             cwd=state, env={**os.environ, "HOME": str(no_tty)}, input="script task",
             capture_output=True, text=True, timeout=5)
         assert scripted.returncode == 6 and "[store_unavailable]" in scripted.stderr, scripted
-        assert "Sign in to Rui" not in scripted.stdout and "Provider: [c]" not in scripted.stdout
+        assert "Welcome to Rui" not in scripted.stdout and "Provider: [c]" not in scripted.stdout
         assert not (no_tty / ".config").exists() and not (no_tty / "store").exists()
         for choice in ("codex", "ready-key", "key", "browser", "device", "escape"):
             home = state / choice
@@ -1793,7 +1793,7 @@ def provider_line_cases():
                         os.write(master, b"\r")
                         read_terminal(master, "Connect with an API key")
                         os.write(master, b"\x1b")
-                        read_terminal(master, "Sign in to Rui", fresh=True)
+                        read_terminal(master, "Welcome to Rui", fresh=True)
                 os.write(master, b"\x03")
                 output, errors = terminal_exit(caller, master)
                 assert caller.returncode == 0, (choice, caller.returncode, errors)
@@ -2133,7 +2133,7 @@ def main(selected="all"):
         ) as (entered, master):
             assert "Session:" not in read_terminal(master, "› ")
             assert "Copy last answer" in chat_info_frame(master)
-            terminal_step(master, "\x03", "Detached.")
+            terminal_step(master, "\x03", "Your chats keep working")
             assert entered.wait(timeout=5) == 0
         saved.unlink()
         fallback.parent.mkdir(parents=True)
@@ -2143,7 +2143,7 @@ def main(selected="all"):
         ) as (entered, master):
             assert "Session:" not in read_terminal(master, "› ")
             assert "Copy last answer" in chat_info_frame(master)
-            terminal_step(master, "\x03", "Detached.")
+            terminal_step(master, "\x03", "Your chats keep working")
             assert entered.wait(timeout=5) == 0
         fallback.unlink()
         saved.write_text(f"version=1\nstore={state / 'missing'}\nprovider=codex\nmodel=gpt-6-luna\n")
@@ -2188,7 +2188,7 @@ def main(selected="all"):
             raise
         try:
             offered = provider_prompt(master)
-            assert "Sign in to Rui" in offered and "API key" in offered, offered
+            assert "Welcome to Rui" in offered and "API key" in offered, offered
             os.write(master, b"\x03")
             terminal_exit(deferred, master)
             assert deferred.wait(timeout=5) == 0
@@ -2213,7 +2213,7 @@ def main(selected="all"):
             dispose_all(lambda: close_pty(master), lambda: close_pty(slave))
             raise
         try:
-            assert "Sign in to Rui" in provider_prompt(master)
+            assert "Welcome to Rui" in provider_prompt(master)
             codex_fixture.credentials(explicit_config / "codex.json")
             reuse_chatgpt(master)
             welcome = overview_frame(master, lambda frame: "Sign-in saved; couldn't save default" in frame, timeout=10, ready=False)
@@ -2242,7 +2242,7 @@ def main(selected="all"):
             dispose_all(lambda: close_pty(master), lambda: close_pty(slave))
             raise
         try:
-            assert "Sign in to Rui" in provider_prompt(master)
+            assert "Welcome to Rui" in provider_prompt(master)
             credential_file = explicit_config / "codex.json"
             codex_fixture.credentials(credential_file, access="synthetic-opaque-access")
             renewed_at = int(time.time()) - 8 * 24 * 60 * 60 - 1
@@ -2279,7 +2279,7 @@ def main(selected="all"):
                     dispose_all(lambda: close_pty(master), lambda: close_pty(slave))
                     raise
                 try:
-                    assert "Sign in to Rui" in provider_prompt(master)
+                    assert "Welcome to Rui" in provider_prompt(master)
                     defaults(changing_home, "--store", after)
                     codex_fixture.credentials(changing_home / ".config/rui/codex.json")
                     reuse_chatgpt(master)
@@ -2326,7 +2326,7 @@ def main(selected="all"):
                 assert permission_row(status, mode), status
                 assert fixture.command("session", "inspect", "--store", store, "--session", warning_ref)["session"]["permission_mode"] == mode
                 assert mode == "bypass" or "without asking" not in status, status
-                terminal_step(master, "\x03", "Detached.")
+                terminal_step(master, "\x03", "Your chats keep working")
                 assert caller.wait(timeout=5) == 0
         records = preferences_home / ".config/rui/requests"
         before_records = set(records.glob("*.json"))
@@ -2364,10 +2364,10 @@ def main(selected="all"):
             overview_frame(master, overview_title)
             refused = overview_frame(master, lambda frame: "Not created: NotDir" in frame,
                                      keys=b"\x1b[H\r", ready=False)
-            assert "Type a task" not in refused, refused
+            assert "What shall we work on?" not in refused, refused
             os.write(master, b"\x03")
             output, errors = terminal_exit(blocked, master, timeout=20)
-            assert blocked.returncode == 0 and errors.startswith(b"\nDetached. Host work continues.\n"), (output, errors)
+            assert blocked.returncode == 0 and errors.startswith(b"\nYour chats keep working while you are away.\n"), (output, errors)
             assert b"request: " not in output + errors, (output, errors)
             assert os_semantics.user_termios(termios.tcgetattr(slave)) == os_semantics.user_termios(original_mode)
             assert (blocked_config / "requests").read_text() == "not a directory"
@@ -2573,7 +2573,7 @@ def main(selected="all"):
                 assert receipt not in configured_body, configured
             panel_frame(master, lambda frame: "Copy last answer" not in frame, b"\x1b")
             chat_info_frame(master)
-            assert "Detached. Host work continues." in terminal_step(master, "\x03", "Detached.")
+            assert "Your chats keep working while you are away." in terminal_step(master, "\x03", "Your chats keep working")
             assert entered.wait(timeout=5) == 0
         finally:
             dispose_all(lambda: stop_process(entered, timeout=5),
@@ -2686,7 +2686,7 @@ def main(selected="all"):
             assert "code: provider_http_422" in failed and "successor done" not in failed, failed
             result = terminal_step(master, f"/result {queued_key}", "result: completed", composer=True)
             assert "result: completed\nsuccessor done" in conversation_text(result), result
-            terminal_step(master, "\x03", "Detached.")
+            terminal_step(master, "\x03", "Your chats keep working")
             assert entered.wait(timeout=5) == 0
 
         stop_release = threading.Event()
@@ -2909,7 +2909,7 @@ def main(selected="all"):
                 read_terminal(master, "› ")
                 status = chat_info_frame(master)
                 assert "\x1b[2J" not in status and "\u202e" not in status, status
-                assert "Detached." in terminal_step(master, "\x03", "Detached.")
+                assert "Your chats keep working" in terminal_step(master, "\x03", "Your chats keep working")
                 assert entered.wait(timeout=5) == 0
         finally:
             unsafe_release.set()
@@ -2924,7 +2924,7 @@ def main(selected="all"):
             status = chat_info_frame(master)
             assert "Copy last answer" in status, status
             assert "\x1b[2J" not in status and "\u202e" not in status, status
-            assert "Detached." in terminal_step(master, "\x03", "Detached.")
+            assert "Your chats keep working" in terminal_step(master, "\x03", "Your chats keep working")
             assert entered.wait(timeout=5) == 0
         empty_session = create_session(home, "--store", store,
             "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-sol")
@@ -3055,7 +3055,7 @@ def main(selected="all"):
             assert next(item["content"][0]["text"] for item in reversed(body["input"])
                 if item.get("role") == "user") == "A中Xe\u0301", body
             os.write(master, b"\x04")
-            assert "Detached. Host work continues." in read_terminal(master, "Detached.")
+            assert "Your chats keep working while you are away." in read_terminal(master, "Your chats keep working")
             assert entered.wait(timeout=5) == 0
             assert termios.tcgetattr(master)[3] & termios.ICANON
         finally:
@@ -3070,7 +3070,7 @@ def main(selected="all"):
             fixture.wait_for(lambda: not termios.tcgetattr(master)[3] & termios.ICANON,
                 "terminal ready for Ctrl+C")
             os.write(master, b"\x03")
-            assert "Detached. Host work continues." in read_terminal(master, "Detached.")
+            assert "Your chats keep working while you are away." in read_terminal(master, "Your chats keep working")
             assert entered.wait(timeout=5) == 0
             assert termios.tcgetattr(master)[3] & termios.ICANON
         finally:
@@ -3089,7 +3089,7 @@ def main(selected="all"):
                 os.write(master, b"\x03")
                 output, errors = terminal_exit(entered, master)
                 assert entered.returncode == 0, errors
-                assert b"Detached. Host work continues." in errors, errors
+                assert b"Your chats keep working while you are away." in errors, errors
                 actual = termios.tcgetattr(slave)
                 assert os_semantics.user_termios(actual) == os_semantics.user_termios(original_terminal)
                 assert set((fresh_home / ".config/rui/requests").glob("*.json")) == before

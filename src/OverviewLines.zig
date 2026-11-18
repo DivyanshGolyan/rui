@@ -201,7 +201,7 @@ test "session tabs press only separate drawn destinations and clear clipped targ
             try shown.render(window, controls.widget());
             var line: std.ArrayList(u8) = .empty;
             for (0..width) |col| try line.appendSlice(arena.allocator(), screen.readCell(@intCast(col), 0).?.char.grapheme);
-            try std.testing.expect(std.mem.startsWith(u8, line.items, "   + New Session"));
+            try std.testing.expect(std.mem.startsWith(u8, line.items, "   + New chat"));
         }
         for (0..3) |row| for (0..@max(1, width)) |col| {
             clicks.got = null;
