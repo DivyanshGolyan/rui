@@ -1363,7 +1363,6 @@ fn advanceBash(host: *Host, slots: []ExecutionSlot, workspace: *Workspace) bool 
             if (service.leader_observed_with_open_pipes) {
                 traceAction(host, "bash_leader_observed_with_open_pipes", active.binding);
                 if (comptime test_pause.enabled) reachAction(host, .action_bash_exit_observed, active.binding);
-                pause(host, .bash_exit_observed);
             }
             if (service.fault) |err| {
                 made_progress = failBash(host, slot, "Bash process service", err) or made_progress;
@@ -2705,7 +2704,6 @@ fn shutdownExecution(host: *Host, slots: []ExecutionSlot, workspace: *Workspace)
     if (comptime test_pause.enabled) if (host.pause_owner) |owner| {
         _ = owner.reach(.host_shutdown_signalled, .{}) catch {};
     };
-    pause(host, .shutdown_signalled);
     var retained_cleanup_at = std.Io.Clock.Timestamp.now(host.io, .awake);
     while (hasOwnedSlots(slots)) {
         var made_progress = advanceBash(host, slots, workspace);
