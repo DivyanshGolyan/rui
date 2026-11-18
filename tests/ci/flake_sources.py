@@ -10,6 +10,7 @@ from collections import Counter
 from functools import lru_cache
 import io
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -200,10 +201,15 @@ def trusted_sources(root, base):
 def read_sources(root=ROOT):
     root = Path(root)
     excluded = {'.git', '.zig-cache', 'zig-cache', 'zig-out', 'zig-pkg', 'node_modules', '__pycache__', '.venv'}
-    return {path.relative_to(root).as_posix(): path.read_text()
-            for path in root.rglob('*')
-            if path.is_file() and not excluded.intersection(path.relative_to(root).parts)
-            and target(path.relative_to(root).as_posix())}
+    sources = {}
+    for directory, dirs, files in os.walk(root):
+        dirs[:] = [name for name in dirs if name not in excluded]
+        for name in files:
+            path = Path(directory) / name
+            relative = path.relative_to(root).as_posix()
+            if name not in excluded and target(relative) and path.is_file():
+                sources[relative] = path.read_text()
+    return sources
 
 
 def validate(value):
