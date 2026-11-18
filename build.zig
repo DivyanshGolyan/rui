@@ -161,7 +161,7 @@ pub fn build(b: *std.Build) void {
     const public_parts_integration = b.addSystemCommand(&.{ "python3", "-B" });
     public_parts_integration.addFileArg(b.path("tests/integration/public_parts_integration.py"));
     public_parts_integration.addFileArg(ci.path(release_safe));
-    public_parts_integration.addFileArg(public_parts_seed.getEmittedBin());
+    public_parts_integration.addFileArg(ci.path(public_parts_seed));
     b.step("public-parts-integration", "Inspect and export Store-seeded Message and Action parts through the CLI").dependOn(&public_parts_integration.step);
 
     const cli_image_integration = b.addSystemCommand(&.{ "python3", "-B" });
