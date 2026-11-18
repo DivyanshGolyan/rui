@@ -1096,6 +1096,19 @@ fn serveOpened(
         .custody = execution.CustodyPool.initialize(custody_records),
         .turns_paused = .init(settings.execution.paused.value),
     };
+    const test_pause = @import("testing/pause.zig");
+    var pause_owner = test_pause.PauseController.init(io, std.heap.c_allocator);
+    defer pause_owner.deinit();
+    const pause_adapter = if (comptime test_pause.enabled) adapter: {
+        if (hooks.pause_fd) |fd| {
+            host.pause_owner = &pause_owner;
+            break :adapter try @import("testing/pause_socket.zig").Adapter.start(std.heap.c_allocator, io, &pause_owner, fd);
+        }
+        break :adapter null;
+    } else {};
+    defer if (comptime test_pause.enabled) {
+        if (pause_adapter) |adapter| adapter.stop();
+    };
     storage.modelTimingSource().* = host.custody.timingSource();
     defer storage.modelTimingSource().* = .{};
     try host.mcp_servers.init(allocator, mcp_servers);
@@ -1138,6 +1151,7 @@ fn serveOpened(
     host.intake_wake = intake.wake[1];
     StopSignals.attach(intake.wake[1]);
     defer StopSignals.detach();
+    if (comptime test_pause.enabled) if (pause_adapter) |adapter| try adapter.waitStart();
     const execution_thread = try signal_stack.spawn(.{}, executionMain, .{&host});
     defer {
         if (listener_open) listener.deinit(io);
@@ -1147,6 +1161,7 @@ fn serveOpened(
         };
         socket_owned = false;
         _ = host.advance(.draining);
+        if (comptime test_pause.enabled) pause_owner.close();
         execution_thread.join();
     }
     try writeReadiness(&lease.paths, host.instance, active_capacity, intake_capacity, descriptor_requirement, descriptor_limit_text, retention_entries.len, served.any());
