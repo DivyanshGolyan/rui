@@ -16,7 +16,7 @@ import threading
 import time
 
 import host_process
-from host_process import HostDiagnostics, PeerCensus, ReleaseGate, canonical_fixture_root, dispose_all, preserve_failure_metadata, retain_failure_state, stop_process, wait_for_execution_release
+from host_process import HostDiagnostics, PauseGate, PeerCensus, ReleaseGate, canonical_fixture_root, dispose_all, preserve_failure_metadata, retain_failure_state, stop_process, wait_for_execution_release
 from product_defaults import DEFAULTS, compaction_trigger, start_effort
 from model_fixture import (
     ROOT, RUI, FailureEndpoint, ResponseSpec, SuccessEndpoint,
@@ -1795,34 +1795,29 @@ def main(mode="all", correlation_case="all"):
         assert continuation_before_admission_crash["returncode"] == -signal.SIGKILL
         with sqlite3.connect(continuation_store / "rui.sqlite3") as database:
             assert database.execute("SELECT count(*) FROM model_operation").fetchone() == (1,)
+        # EXR-58
+        continuation_handoff = PauseGate("model.before_handoff")
+        releases.append(continuation_handoff.close)
         continuation_host = start_host(
             continuation_store,
             f"http://127.0.0.1:{continuation_endpoint.server_port}/responses",
-            "--test-before-launch-delay-ms",
-            "5000",
+            pause=continuation_handoff,
         )
         processes.append(continuation_host)
         continuation_diagnostics = HostDiagnostics(continuation_host)
-        continuation_deadline = time.monotonic() + 8
-
-        def continuation_successor_admitted():
-            value = observe(continuation_store, "continuation-first", deadline=continuation_deadline)
-            return (
-                value
-                if value.get("state") == "processing"
-                and value.get("binding") == {
-                    "turn": continuation_first_processing["turn"], "operation": "2", "attempt": "1",
-                }
-                else None
-            )
-
-        wait_for(continuation_successor_admitted, "tool-result successor admission", deadline=continuation_deadline)
+        held = continuation_handoff.wait(operation=2)
+        assert held["context"]["attempt"] == 1, held
+        successor = observe(continuation_store, "continuation-first")
+        assert successor.get("state") == "processing" and successor.get("binding") == {
+            "turn": continuation_first_processing["turn"], "operation": "2", "attempt": "1",
+        }, successor
         assert len(continuation_endpoint.requests) == 1, continuation_endpoint.requests
         continuation_after_admission_crash = crash_host(
             continuation_host, state, "continuation-after-admission-crash", diagnostics=continuation_diagnostics
         )
         continuation_diagnostics = None
         processes.remove(continuation_host)
+        continuation_handoff.close()
         assert continuation_after_admission_crash["returncode"] == -signal.SIGKILL
         with sqlite3.connect(continuation_store / "rui.sqlite3") as database:
             assert database.execute(
@@ -3806,11 +3801,13 @@ def main(mode="all", correlation_case="all"):
         endpoints[prelaunch_endpoint] = prelaunch_thread
         prelaunch_thread.start()
         prelaunch_store = state / "crash-prelaunch-store"
+        # EXR-57
+        prelaunch_handoff = PauseGate("model.before_handoff")
+        releases.append(prelaunch_handoff.close)
         prelaunch_host = start_host(
             prelaunch_store,
             f"http://127.0.0.1:{prelaunch_endpoint.server_port}/responses",
-            "--test-before-launch-delay-ms",
-            "5000",
+            pause=prelaunch_handoff,
         )
         processes.append(prelaunch_host)
         prelaunch_session = configure(
@@ -3824,22 +3821,16 @@ def main(mode="all", correlation_case="all"):
             "crash before launch",
         )
 
-        def prelaunch_attempt_one():
-            observation = observe(prelaunch_store, "prelaunch-message")
-            return (
-                observation
-                if observation.get("binding", {}).get("attempt") == "1"
-                else None
-            )
-
-        prelaunch_observation = wait_for(
-            prelaunch_attempt_one,
-            "publicly observed prelaunch Attempt 1",
-        )
-        assert prelaunch_observation["state"] == "processing"
+        held = prelaunch_handoff.wait()
+        assert held["context"]["attempt"] == 1, held
+        prelaunch_observation = observe(prelaunch_store, "prelaunch-message")
+        assert prelaunch_observation["state"] == "processing", prelaunch_observation
+        assert prelaunch_observation["binding"]["operation"] == str(held["context"]["operation"]), prelaunch_observation
+        assert prelaunch_observation["binding"]["attempt"] == "1", prelaunch_observation
         assert prelaunch_endpoint.requests == []
         prelaunch_crash = crash_host(prelaunch_host, state, "prelaunch-crash")
         processes.remove(prelaunch_host)
+        prelaunch_handoff.close()
         assert prelaunch_crash["returncode"] == -signal.SIGKILL, {
             "crash": prelaunch_crash,
             "endpoint_requests": prelaunch_endpoint.requests,
@@ -3956,11 +3947,13 @@ def main(mode="all", correlation_case="all"):
         endpoints[sealed_endpoint] = sealed_thread
         sealed_thread.start()
         sealed_store = state / "crash-sealed-store"
+        # EXR-62
+        sealed_result = PauseGate("model.result_ready")
+        releases.append(sealed_result.close)
         sealed_host = start_host(
             sealed_store,
             f"http://127.0.0.1:{sealed_endpoint.server_port}/responses",
-            "--test-before-result-delay-ms",
-            "5000",
+            pause=sealed_result,
         )
         processes.append(sealed_host)
         sealed_session = configure(state, sealed_store, "sealed-config", None, "gpt-6-sol")
@@ -3971,12 +3964,17 @@ def main(mode="all", correlation_case="all"):
             sealed_session,
             "crash after seal",
         )
-        wait_for(lambda: len(sealed_endpoint.requests) == 1, "sealed response delivery")
-        time.sleep(0.5)
+        held = sealed_result.wait()
+        assert len(sealed_endpoint.requests) == 1, sealed_endpoint.requests
         sealed_observation = observe(sealed_store, "sealed-message")
-        assert sealed_observation["binding"]["attempt"] == "1" and "result" not in sealed_observation, sealed_observation
+        assert sealed_observation["binding"] == {
+            "turn": sealed_observation["binding"]["turn"],
+            "operation": str(held["context"]["operation"]),
+            "attempt": "1",
+        } and "result" not in sealed_observation, sealed_observation
         stop_host(sealed_host)
         processes.remove(sealed_host)
+        sealed_result.close()
         database = sqlite3.connect(sealed_store / "rui.sqlite3")
         assert database.execute(
             "SELECT attempt_ordinal,(resolution_code IS NULL AND retry_due_at_ms IS 0),resolution_code FROM model_operation"
@@ -4428,8 +4426,6 @@ def main(mode="all", correlation_case="all"):
             "--set", 'execution.activeCapacity=101',
             "--test-retry-recovery-gate-path",
             str(recovery_gate.path),
-            "--test-before-launch-delay-ms",
-            "100",
             "--test-retry-waits-ms",
             "60000,60000,60000",
         )
@@ -4929,16 +4925,15 @@ def main(mode="all", correlation_case="all"):
         endpoints[preparation_stop_endpoint] = preparation_stop_thread
         preparation_stop_thread.start()
         preparation_stop_store = state / "preparation-stop-store"
+        # EXR-63
+        preparation_stop_gate = PauseGate("model.preparation_advanced", occurrence=1)
+        releases.append(preparation_stop_gate.close)
         preparation_stop_host = start_host(
             preparation_stop_store,
             f"http://127.0.0.1:{preparation_stop_endpoint.server_port}/responses",
-            "--test-phase-trace",
-            "--test-request-preparation-advance-delay-ms",
-            "1500",
-            observations="dispatch",
+            pause=preparation_stop_gate,
         )
         processes.append(preparation_stop_host)
-        preparation_stop_trace = HostDiagnostics(preparation_stop_host)
         preparation_stop_session = configure(
             state,
             preparation_stop_store,
@@ -4953,7 +4948,7 @@ def main(mode="all", correlation_case="all"):
             preparation_stop_session,
             "p" * (64 * 1024),
         )
-        preparation_stop_trace.wait("preparation_advance_completed")
+        preparation_stop_gate.wait()
         stopped_preparation = command(
             "session", "stop",
             "--store",
@@ -4966,6 +4961,7 @@ def main(mode="all", correlation_case="all"):
             preparation_stop_session,
         )
         assert stopped_preparation["answer"]["status"] == "accepted", stopped_preparation
+        preparation_stop_gate.release()
         stopped_resources = wait_for(
             lambda: (lambda value: value if value["execution"]["custody_occupied"] == "0"
                     and value["execution"]["scratch_used_bytes"] == "0" else None)(
@@ -4983,6 +4979,7 @@ def main(mode="all", correlation_case="all"):
         assert preparation_stop_endpoint.requests == []
         stop_process(preparation_stop_host)
         processes.remove(preparation_stop_host)
+        preparation_stop_gate.close()
         with sqlite3.connect(preparation_stop_store / "rui.sqlite3") as database:
             assert database.execute(
                 "SELECT attempt_ordinal,resolution_code FROM model_operation"
@@ -5021,20 +5018,19 @@ def main(mode="all", correlation_case="all"):
         )
         stop_host(offline_shutdown_host)
         processes.remove(offline_shutdown_host)
+        # EXR-64
+        preparation_shutdown_gate = PauseGate("model.preparation_advanced", occurrence=1)
+        releases.append(preparation_shutdown_gate.close)
         preparation_shutdown_host = start_host(
             preparation_shutdown_store,
             f"http://127.0.0.1:{preparation_shutdown_endpoint.server_port}/responses",
             "--fault",
             "shutdown-after-accept",
-            "--test-phase-trace",
-            "--test-request-preparation-advance-delay-ms",
-            "1500",
             accelerated_retries=False,
-            observations="dispatch",
+            pause=preparation_shutdown_gate,
         )
         processes.append(preparation_shutdown_host)
-        preparation_shutdown_trace = HostDiagnostics(preparation_shutdown_host)
-        preparation_shutdown_trace.wait("preparation_advance_completed")
+        preparation_shutdown_gate.wait()
         shutdown_trigger = subprocess.run(
             [
                 str(RUI),
@@ -5048,9 +5044,11 @@ def main(mode="all", correlation_case="all"):
             timeout=10,
         )
         assert shutdown_trigger.returncode in (0, 1, 6), shutdown_trigger
+        preparation_shutdown_gate.release()
         assert preparation_shutdown_host.wait(timeout=10) != 0
         stop_process(preparation_shutdown_host)
         processes.remove(preparation_shutdown_host)
+        preparation_shutdown_gate.close()
         assert preparation_shutdown_endpoint.requests == []
         assert not list((preparation_shutdown_store / "scratch").glob("provider-request-*.tmp"))
         preparation_shutdown_host = start_host(
@@ -5391,13 +5389,14 @@ def main(mode="all", correlation_case="all"):
         )
         database.commit()
         database.close()
-        host = start_host(race_store, url, "--test-before-launch-delay-ms", "1500")
+        # EXR-59
+        race_handoff = PauseGate("model.before_handoff")
+        releases.append(race_handoff.close)
+        host = start_host(race_store, url, pause=race_handoff)
         processes.append(host)
         message(state, race_store, "race-message", race_session, "race")
-        wait_for(
-            lambda: observe(race_store, "race-message")["state"] == "processing",
-            "admitted request before launch",
-        )
+        race_handoff.wait()
+        assert observe(race_store, "race-message")["state"] == "processing"
         canonical_read = subprocess.run(
             [str(RUI), "session", "inspect", "--store", str(race_store), "--session", other_session],
             text=True,
@@ -5405,10 +5404,12 @@ def main(mode="all", correlation_case="all"):
             timeout=10,
         )
         assert canonical_read.returncode != 0
+        race_handoff.release()
         wait_for(lambda: host.poll() is not None, "effect-aware Host shutdown", timeout=5)
         assert host.returncode != 0
         stop_host(host)
         processes.remove(host)
+        race_handoff.close()
         assert endpoint.requests == []
         database = sqlite3.connect(race_store / "rui.sqlite3")
         uncertain = database.execute(

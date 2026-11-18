@@ -1,0 +1,18 @@
+name: macOS temporary directory shape
+description: Point TMPDIR at a long path reached through a /var symlink, as macOS's is
+runs:
+  using: composite
+  steps:
+    # macOS's TMPDIR is /var/folders/XX/<30>/T/ through a symlink to
+    # /private/var. Linux's short real /tmp hid that class three times
+    # (#579, #724, #755); here it fails on Linux first.
+    - shell: bash
+      run: |
+        set -euo pipefail
+        real=/private/var/folders/rq/rui0linux0shaped0like0darwin00/T
+        sudo mkdir -p "$real"
+        sudo chown -R "$(id -u):$(id -g)" /private/var/folders
+        sudo ln -sfn /private/var/folders /var/folders
+        tmp=/var/folders/rq/rui0linux0shaped0like0darwin00/T/
+        test "$(realpath "$tmp")" = "$real"
+        echo "TMPDIR=$tmp" >> "$GITHUB_ENV"

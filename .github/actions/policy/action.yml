@@ -1,0 +1,69 @@
+name: Policy checks
+description: Run after the job's infrastructure steps (pinned packages, Node, pinned workflow linter), which stay job steps so a failure there reads as infrastructure. tests/ci self-checks, caller-error, flake-source and client-locality ratchets, the TypeScript client and workflow lint; no native builds
+inputs:
+  skips:
+    description: JSON list of policy self-checks whose inputs are unchanged
+    required: true
+  compiler-installed:
+    description: "'true' when the job already ran the setup action, so the caller inventory's pinned-stdlib bootstrap needs no compiler install"
+    default: 'false'
+runs:
+  using: composite
+  steps:
+    - name: Determine whether caller inventory needs its pinned-stdlib bootstrap
+      id: caller-bootstrap
+      shell: bash
+      run: |
+        needed=$(python3 -B tests/ci/caller_errors.py --bootstrap-needed)
+        echo "needed=$needed" >> "$GITHUB_OUTPUT"
+    - uses: ./.github/actions/setup
+      if: ${{ steps.caller-bootstrap.outputs.needed == 'true' && inputs.compiler-installed != 'true' }}
+      with:
+        # Install only the existing pinned compiler: no build/package caches,
+        # selected fixture dependencies or native compilation in policy.
+        targets: '[]'
+        compiled: 'true'
+        cold: 'true'
+        publish-caches: 'false'
+    - name: Check caller error coverage and shrink-only pending causes
+      shell: bash
+      run: python3 -B tests/ci/caller_errors.py
+    - name: Check flake sources and shrink-only allowances
+      shell: bash
+      run: python3 -B tests/ci/flake_sources.py
+    - name: Check client locality and shrink-only exceptions
+      shell: bash
+      run: python3 -B tests/ci/client_locality.py
+    - name: Run tests/ci, less self-checks whose inputs are unchanged
+      shell: bash
+      env:
+        SKIPS: ${{ inputs.skips }}
+      run: python3 -B tests/ci/policy_suite.py --skips "$SKIPS"
+    - name: Reject undefined fixture names before native builds
+      # ruff is pinned in tests/ci/requirements.txt, which the pre-push hook installs too.
+      shell: bash
+      run: python3 -m ruff check --select F821 tests
+    - name: Check the TypeScript client's generated wire types and type-check it
+      shell: bash
+      working-directory: clients/ts
+      run: |
+        npm ci --ignore-scripts --no-audit --no-fund
+        npm run check
+        npm test
+    - name: Validate workflows with pinned-linter compatibility exceptions
+      shell: bash
+      run: |
+        set -euo pipefail
+        for workflow in .github/workflows/*.yml; do
+          ignores=()
+          # 1.7.7 predates GitHub's server-enforced cache policy key.
+          case "$workflow" in
+            .github/workflows/qualify-macos.yml|.github/workflows/previous-release-upgrade.yml|.github/workflows/release.yml|.github/workflows/release-build.yml)
+              ignores+=(-ignore '^unexpected key "cache-mode" for "workflow" section\.') ;;
+          esac
+          # 1.7.7 predates GitHub's bounded concurrency queue option.
+          if [ "$workflow" = .github/workflows/screens-comment.yml ]; then
+            ignores+=(-ignore '^unexpected key "queue" for "concurrency" section\.')
+          fi
+          "$RUNNER_TEMP/actionlint/actionlint" -shellcheck= "${ignores[@]}" "$workflow"
+        done

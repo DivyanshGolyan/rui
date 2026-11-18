@@ -60,6 +60,10 @@ def latest_run(pr, runs):
     return max(matches, key=lambda run: run["run_number"], default=None)
 
 
+# The jobs that run the policy checks: `policy`, or on a ready PR the single `linux pr` job.
+POLICY_JOBS = ("policy", "linux pr")
+
+
 def checked_since(run, policy):
     if policy is not None and policy["status"] in ("in_progress", "completed"):
         return timestamp(policy["started_at"])
@@ -74,8 +78,9 @@ def select_rerun(pr, files, runs, jobs, published, now):
     run = latest_run(pr, runs)
     if run is None:
         return Selection(None, "no check.yml PR run for the current head yet")
-    policy = [job for job in jobs if job["run_id"] == run["id"]
-              and job["run_attempt"] == run["run_attempt"] and job["name"] == "policy"]
+    latest = [job for job in jobs if job["run_id"] == run["id"]
+              and job["run_attempt"] == run["run_attempt"] and job["name"] in POLICY_JOBS]
+    policy = [job for job in latest if job["conclusion"] != "skipped"] or latest[:1]
     if len(policy) > 1:
         raise ValueError(f"run {run['id']} has multiple latest policy jobs")
     policy = policy[0] if policy else None
@@ -88,7 +93,7 @@ def select_rerun(pr, files, runs, jobs, published, now):
         return Selection(None, f"latest run {run['id']} is {run['status']}", waiting=True)
     if policy is None or policy["status"] != "completed" or policy["conclusion"] == "skipped":
         return Selection(None, f"run {run['id']} has no completed policy check yet")
-    return Selection(policy["id"], f"policy in run {run['id']} and its dependents (including admission)")
+    return Selection(policy["id"], f"{policy['name']} in run {run['id']} and its dependents (including admission)")
 
 
 def check_runs(api, repo, pr):

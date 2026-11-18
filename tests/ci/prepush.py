@@ -200,6 +200,12 @@ def unit_target(targets, cause, graph, registry=None):
     return next(iter(mapped)) if len(mapped) == 1 else None
 
 
+# check.yml's single ready-PR job and its compile and execution steps.
+PR_JOB = "linux pr"
+PR_COMPILE_STEP = "Compile only the binaries the selected targets need"
+PR_RUN_STEP = "Run selected targets on SQLite, stopping at the first failure"
+
+
 def red_command(job, cause, available, *, compile_targets=(), graph=None):
     name = job["name"]
     zig = ["zig", "build", "-j1"]
@@ -211,11 +217,22 @@ def red_command(job, cause, available, *, compile_targets=(), graph=None):
         return Skipped("Upgrade requires an exclusive ordinary hosted runner UID")
     if name == "linux_build_unit":
         return unit_compile()
+    if name == PR_JOB:
+        # The single PR job logs its compile targets, then (when compile passes) its execution
+        # targets; compile_targets holds those of the phase that failed.
+        failed = {step["name"] for step in job.get("steps", ()) if step.get("conclusion") in ("failure", "cancelled")}
+        if PR_COMPILE_STEP in failed:
+            name = "linux_build"
+        elif PR_RUN_STEP not in failed:
+            compile_targets = ()
     if name == "linux_build":
         if not compile_targets or not set(compile_targets) <= available:
             return Skipped("producer's selected compile targets are unavailable in this checkout")
         return [*build_artifact.compile_command(compile_targets, jobs=1), "--summary", "line"]
-    selected = matrix_targets(name.partition("(")[2].removesuffix(")"))
+    if name == PR_JOB:
+        selected = tuple((target, "all") for target in compile_targets)
+    else:
+        selected = matrix_targets(name.partition("(")[2].removesuffix(")"))
     targets = [target for target, _ in selected]
     if cause.zig_test:
         graph = graph or tree_graph()
@@ -362,7 +379,8 @@ def remote_red(repository, ref, head, revision, available):
         causes = report_issue.failure_causes(log, report_issue.fixtures(ROOT / "tests/integration/check.sh"),
                                              keep_unexplained=True) if log is not None else []
         causes = causes or [report_issue.Cause(f"{job['name']}: cause unexplained")]
-        targets = report_issue.compile_targets(log) if log is not None and job["name"] == "linux_build" else ()
+        targets = (report_issue.compile_targets(log)
+                   if log is not None and job["name"] in ("linux_build", PR_JOB) else ())
         for cause in causes:
             command = red_command(job, cause, available, compile_targets=targets) if log is not None else Skipped("job log unavailable")
             item = (f"last CI red: {cause.signature}", command)

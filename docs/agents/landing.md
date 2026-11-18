@@ -79,8 +79,13 @@ Arm auto-merge only on a PR whose base is `main`; on a stacked PR it would merge
 Diagnose failures through [rui-ci-triage](../../.claude/skills/rui-ci-triage/SKILL.md) and follow [Evidence](../../CODING_STANDARDS.md#evidence) for reruns, strict-path holds and failure retention.
 The pre-push hook re-runs the last CI red as described in [local feedback evidence](../../CODING_STANDARDS.md#evidence).
 A red whose failing file or fixture is outside the PR's diff is first reproduced on `main`; when `main` itself is red, it gets one fix owner, and the PR's owner is not asked to fix it.
-The fastest fix for a red `main` is often a revert of the one merged PR that broke it.
-The [main build](../../.github/workflows/main-build.yml) names the PRs merged since `main` last compiled in its `ci-red` issue, and when two of them crossed, a revert of the later one is the fast fix.
+
+`main` is red while an open `main-red` issue says so.
+PRs run a fast tier, so a break can reach `main`; [Qualify main](../verification/release.md#qualify-main) finds it within one three-hour tick, bisects each failed step to the commit that broke it and files one `main-red` issue per cause, naming that commit.
+The thread that authored the named commit's PR owns the fix and starts it promptly, as its next work: a fix-forward PR with `Fixes #N`, or a pure revert of that one PR, which merges on green `admission` without another Codex review.
+When that thread has ended, the coordinating agent hands the issue to the thread that owns the failing fixture.
+A verdict that the red did not reproduce at HEAD, or already failed at the batch's base, names no commit; triage it as below.
+While `main` is red, Promote can still publish an earlier commit with a green `main-qualified` record (`-f sha=qualified`).
 A red counts as fixed only when a commit between the red and a later green changed its failing fixture or owner.
 For a recurring fixture-and-assertion signature on SHAs that did not touch its code, update or file one issue for that signature and own the race fix.
 Preserve the assertion's strength.
@@ -96,7 +101,8 @@ A reopened issue keeps its label; change it if the next fix finds another cause.
 ## Promote
 
 Promotion publishes a release and advances `stable`; merging never does.
-Promote without asking once the merged batch holds the fixes users are waiting for, and at least before each working day: `gh workflow run promote.yml --ref main`.
+Promote publishes a commit [Qualify main](../verification/release.md#qualify-main) already qualified in minutes; it qualifies main HEAD itself, as below, only when no green record of that commit still holds its archives.
+Promote without asking once the merged batch holds the fixes users are waiting for, and at least before each working day: `gh workflow run promote.yml --ref main`, or `-f sha=qualified` for the newest green commit while main HEAD is red or still qualifying.
 Whoever dispatches a promotion watches it to the end and reports the result unprompted.
 A failed step means the promotion is red even while its bisect step keeps the run in progress for up to four hours; report it then.
 A red promotion names, on each `promotion-red` issue it files, the first batch commit where each failed step of that job fails; a suite batch with several causes names only its earliest.
