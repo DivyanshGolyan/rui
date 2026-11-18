@@ -160,6 +160,14 @@ def working_directory_link(pid):
     return PROCESS_RECORDS / str(pid) / "cwd"
 
 
+def launch_records(pid):
+    """pid's argument and environment records as {"cmdline": bytes, "environ": bytes}, for checking that a
+    secret never reached them; None where the kernel exposes neither to a reader (Darwin)."""
+    if not _module.PROC_FS:
+        return None
+    return {name: (PROCESS_RECORDS / str(pid) / name).read_bytes() for name in ("cmdline", "environ")}
+
+
 def process_commands():
     """(pid, argv) for every process the census can read. A process that ends while it is read is left
     out; any other read failure propagates, so a caller never acts on an incomplete census."""

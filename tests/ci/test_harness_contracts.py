@@ -443,6 +443,23 @@ class ProcessCensusTest(unittest.TestCase):
         self.assertEqual(Path(census[os.getpid()][0]).name, Path(sys.orig_argv[0]).name)
         self.assertEqual(census[os.getpid()][1:], sys.orig_argv[1:])
 
+    def test_launch_records_hold_arguments_and_environment_where_the_kernel_shows_them(self):
+        child = subprocess.Popen([sys.executable, "-S", "-c", "import sys; sys.stdin.read()", "argument-marker"],
+                                 env={"RUI_LAUNCH_MARKER": "environment-marker"}, stdin=subprocess.PIPE)
+        try:
+            records = self.semantics.launch_records(child.pid)
+        finally:
+            child.stdin.close()
+            child.wait(timeout=5)
+        if not self.semantics.PROC_FS:
+            self.assertIsNone(records)
+            return
+        self.assertEqual(set(records), {"cmdline", "environ"})
+        self.assertIn(b"argument-marker", records["cmdline"])
+        self.assertIn(b"RUI_LAUNCH_MARKER=environment-marker", records["environ"])
+        with self.semantics.simulate("darwin"):
+            self.assertIsNone(self.semantics.launch_records(os.getpid()))
+
     def test_locks_exclude_other_open_descriptions_until_released(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "host.lock"
