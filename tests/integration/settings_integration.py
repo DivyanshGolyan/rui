@@ -12,9 +12,11 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 import host_process
+import model_fixture as model
 import os_semantics
 from preset_creation_cases import preset_creation
 from settings_fixture import WIRE, frame, host_info, mcp_server, output, post, refusal, wait_for_host
@@ -297,6 +299,70 @@ def credential_location_matrix():
         print("credential location process matrix: client status, settings check and Host start")
 
 
+def signin_dispatch_matrix():
+    """Admission seals a path; actual file access happens at model dispatch."""
+    class Capture(model.SuccessHandler):
+        def do_POST(self):
+            self.server.auth.append(self.headers.get("Authorization"))
+            super().do_POST()
+
+    reply = model.sse_answer("matrix-response", "matrix-reasoning", "matrix-message", "matrix answer")[0]
+    endpoint = model.SuccessEndpoint([reply] * 8)
+    endpoint.RequestHandlerClass = Capture
+    endpoint.auth = []
+    thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with tempfile.TemporaryDirectory(prefix="rui-signin-dispatch-") as temporary:
+            root = pathlib.Path(temporary).resolve()
+            for leaf, variable, present in itertools.product((False, True), repeat=3):
+                case = root / f"{int(leaf)}{int(variable)}{int(present)}"
+                case.mkdir(mode=0o700)
+                home = case / "home"
+                config = home / ".config" / "rui"
+                config.mkdir(mode=0o700, parents=True)
+                default, named, explicit = config / "codex.json", case / "named", case / "explicit"
+                chosen = explicit if leaf else named if variable else default
+                # A wrong location either cannot authenticate (chosen present)
+                # or can authenticate (chosen absent), making fallback observable.
+                for other in {default, named, explicit} - {chosen}:
+                    codex_fixture.credentials(other, state="refresh_pending" if present else "ready")
+                if present:
+                    codex_fixture.credentials(chosen)
+                env = {**os.environ, "HOME": str(home)}
+                env.pop("RUI_CODEX_CREDENTIAL_FILE", None)
+                if variable:
+                    env["RUI_CODEX_CREDENTIAL_FILE"] = str(named)
+                store = case / "store"
+                args = [RUI, "host", "serve", "--store", store, "--set", 'providers={"codex":{}}',
+                        "--set", f"providers.codex.endpoint=http://127.0.0.1:{endpoint.server_port}/responses"]
+                if leaf:
+                    args += ["--set", f"providers.codex.credentialFile={explicit}"]
+                host = None
+                count = len(endpoint.requests)
+                try:
+                    host, _ = host_process.start_ready_process(args, env=env, isolate_providers=False)
+                    session = model.configure(case, store, "configure", None, "gpt-6-sol")
+                    model.message(case, store, "dispatch", session, "Credential location witness")
+                    observed = model.wait_for(lambda: model.observe(store, "dispatch").get("result"), "credential dispatch result")
+                    if present:
+                        assert observed["status"] == "completed", (case, observed)
+                        assert model.read_result(store, "dispatch") == b"matrix answer", case
+                        assert len(endpoint.requests) == count + 1, case
+                        assert endpoint.auth[-1] == "Bearer " + codex_fixture.ACCESS, (case, endpoint.auth)
+                    else:
+                        assert observed["code"] == "provider_authentication_backend_failed", (case, observed)
+                        assert len(endpoint.requests) == count, case
+                finally:
+                    if host is not None:
+                        model.stop_host(host)
+        print("sign-in dispatch matrix: selected file is read at dispatch")
+    finally:
+        endpoint.shutdown()
+        endpoint.server_close()
+        thread.join(timeout=5)
+
+
 def token_endpoint_refusals(root):
     """All Host admission doors name a forbidden token target before serving."""
     for door in ("serve", "start", "check"):
@@ -335,6 +401,7 @@ def main(network, ci):
     flag_start_failures(root)
     token_endpoint_refusals(root)
     credential_location_matrix()
+    signin_dispatch_matrix()
 
     other = root / "other"
     other.mkdir(mode=0o700)
