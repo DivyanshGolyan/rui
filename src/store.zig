@@ -91,6 +91,7 @@ pub const minimum_schema_version = store_schema.migration_baseline;
 pub const SessionReport = report_domain.SessionReport;
 pub const SessionReportCapture = report_domain.SessionReportCapture;
 pub const checkSessionReportsForTesting = @import("store/tests.zig").checkSessionReportsForTesting;
+pub const admitRetryForTesting = store_test_fixtures.admitRetryForTesting;
 pub const SessionStopReply = command_domain.SessionStopReply;
 pub const SessionArchiveReply = command_domain.SessionArchiveReply;
 pub const SessionPinReply = command_domain.SessionPinReply;

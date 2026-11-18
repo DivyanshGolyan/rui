@@ -6,7 +6,7 @@ Tracking issue: [#1729](https://github.com/DivyanshGolyan/rui/issues/1729).
 Rui's tests are derived from its promises, not from its code or its bug history.
 Each area keeps an invariant catalog: the promises a user or caller relies on, written top-down from the product level to each module.
 Every test owns one catalog invariant, and every invariant has one owner test.
-The approach follows Design by Contract (preconditions, postconditions and invariants define the system), specification-first design (write down the promise before the code), property-based testing (state what always holds and check it over generated inputs) and deterministic simulation (check invariants over a seeded world with an injected clock).
+The approach follows Design by Contract (preconditions, postconditions and invariants define the system), specification-first design (write down the promise before the code), property-based testing (state what always holds and check it over generated inputs) and deterministic simulation (check invariants over a seeded world, with time passed in as a value).
 
 ## Invariant catalogs
 
@@ -41,7 +41,7 @@ A test is kept only when all of these hold:
 | Level | Promises | How it is tested |
 | --- | --- | --- |
 | Product | What a user gets end to end, such as one answer per message, no rerun after a crash during Bash, Sessions kept across an upgrade, the terminal restored after exit | Few scripted scenarios with real binaries, the scripted fake provider, an injected clock and a private Store. Only for what only a real process shows |
-| Host | The Host's contract with any client: Store ownership, commit before reply, no lost or doubled input, wire compatibility | The Host in process, driven over the wire, with an injected clock, a temporary Store and injected pause or crash points |
+| Host | The Host's contract with any client: Store ownership, commit before reply, no lost or doubled input, wire compatibility | The Host in process, driven over the wire, with chosen times, a temporary Store and injected pause or crash points |
 | Surface | What the CLI, the terminal UI and the TypeScript client show and accept | Pure render and parse functions over state snapshots: state in, text grid or exit status out. No PTY |
 | Module | Each functional core's rule over its whole domain: encoders round-trip, policies decide consistently, state machines never reach a forbidden state | Unit and property tests; the existing model checks for concurrency protocols |
 
@@ -57,7 +57,7 @@ No test exists only to replay one bug.
 
 | Source | Root fix |
 | --- | --- |
-| Time: sleeps, timeouts, the wall clock | Code under test takes a clock as input; tests advance it and wait for an event Rui emits, never a duration |
+| Time: sleeps, timeouts, the wall clock | Time is a value: every decision that depends on time (deadlines, retries, expiry, dates) takes the current time as an argument, and only the imperative shell reads the clock. Tests pass chosen times and wait for events Rui emits, never a duration. A real timeout in a test is only a watchdog for a broken harness ([#1732](https://github.com/DivyanshGolyan/rui/issues/1732)) |
 | PTYs and terminals | Screens are a pure function of state, tested without a PTY; the few Product PTY tests use one shared PTY owner |
 | Shared processes and ports | Each test owns its Host, Store and socket path under its own temporary directory |
 | Leftover state | A test's processes die with the test; nothing outlives it |
