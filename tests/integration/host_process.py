@@ -31,7 +31,7 @@ def enter():
     network = {name: os.environ[name] for name in NETWORK if name in os.environ}
     kept = {name: os.environ[name] for name in INHERITED if name in os.environ}
     os.environ.clear()
-    os.environ.update(kept, TERM="xterm-256color", RUI_TEST_MODELS_DEV_URL="")
+    os.environ.update(kept, TERM="xterm-256color")
     return network
 
 
@@ -1222,10 +1222,9 @@ def isolated_host_arguments(args):
     args = list(map(str, args))
     if "--settings" not in args:
         provider_settings = any(value.startswith(("providers=", "providers.")) for value in args)
-        fixture_endpoint = any(value.startswith("--test-") and "fixture-endpoint" in value for value in args)
         saved = ("--store" in args and
                  (pathlib.Path(args[args.index("--store") + 1]) / "host.json").exists())
-        if not provider_settings and not fixture_endpoint and not saved:
+        if not provider_settings and not saved:
             args += ["--set", "providers={}"]
     return args
 

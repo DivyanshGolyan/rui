@@ -5,6 +5,7 @@ pub const BuiltinInstructions = enum {
     terra,
     sol,
     astra,
+    sol_astra_6_2,
 
     pub fn bytes(self: BuiltinInstructions) []const u8 {
         return switch (self) {
@@ -12,20 +13,19 @@ pub const BuiltinInstructions = enum {
             .luna => @embedFile("model_instructions/luna.txt"),
             .terra, .astra => @embedFile("model_instructions/terra-astra.txt"),
             .sol => @embedFile("model_instructions/sol.txt"),
+            .sol_astra_6_2 => @embedFile("model_instructions/sol-astra-62.txt"),
         };
     }
 };
 
-// Codex had not published 6.2 templates on 2026-11-17; gpt-6.2-sol and gpt-6.2-astra reuse
-// the 6.1 Sol and Terra/Astra assets until it does (model_instructions/README.md).
 pub fn builtinInstructions(model: []const u8) BuiltinInstructions {
     const reviewed = .{
         .{ "gpt-6-luna", BuiltinInstructions.luna },
         .{ "gpt-6.1-terra", BuiltinInstructions.terra },
         .{ "gpt-6.1-sol", BuiltinInstructions.sol },
         .{ "gpt-6-astra", BuiltinInstructions.astra },
-        .{ "gpt-6.2-sol", BuiltinInstructions.sol },
-        .{ "gpt-6.2-astra", BuiltinInstructions.astra },
+        .{ "gpt-6.2-sol", BuiltinInstructions.sol_astra_6_2 },
+        .{ "gpt-6.2-astra", BuiltinInstructions.sol_astra_6_2 },
     };
     inline for (reviewed) |entry| if (std.mem.eql(u8, model, entry[0])) return entry[1];
     return .generic;
@@ -198,8 +198,8 @@ test "built-in instructions select only six exact requested model identities" {
         .{ "gpt-6.1-terra", BuiltinInstructions.terra, @embedFile("model_instructions/terra-astra.txt") },
         .{ "gpt-6.1-sol", BuiltinInstructions.sol, @embedFile("model_instructions/sol.txt") },
         .{ "gpt-6-astra", BuiltinInstructions.astra, @embedFile("model_instructions/terra-astra.txt") },
-        .{ "gpt-6.2-sol", BuiltinInstructions.sol, @embedFile("model_instructions/sol.txt") },
-        .{ "gpt-6.2-astra", BuiltinInstructions.astra, @embedFile("model_instructions/terra-astra.txt") },
+        .{ "gpt-6.2-sol", BuiltinInstructions.sol_astra_6_2, @embedFile("model_instructions/sol-astra-62.txt") },
+        .{ "gpt-6.2-astra", BuiltinInstructions.sol_astra_6_2, @embedFile("model_instructions/sol-astra-62.txt") },
     };
     inline for (cases) |case| {
         try std.testing.expectEqual(case[1], builtinInstructions(case[0]));

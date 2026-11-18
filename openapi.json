@@ -5330,6 +5330,20 @@
                         "x-rui-kind": "bytes",
                         "x-rui-native-path-limit": true
                       },
+                      "tokenEndpoint": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "maxLength": 2048,
+                            "x-maxBytes": 2048,
+                            "format": "https_endpoint",
+                            "description": "Token refresh endpoint. Default: the provider's own."
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
                       "unauthenticated": {
                         "type": "boolean",
                         "description": "Send no credential to a development endpoint."
@@ -5533,6 +5547,20 @@
                         "x-rui-kind": "bytes",
                         "x-rui-native-path-limit": true
                       },
+                      "tokenEndpoint": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "maxLength": 2048,
+                            "x-maxBytes": 2048,
+                            "format": "https_endpoint",
+                            "description": "Token refresh endpoint. Default: the provider's own."
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
                       "unauthenticated": {
                         "type": "boolean",
                         "description": "Send no credential to a development endpoint."
@@ -5589,6 +5617,27 @@
             },
             "additionalProperties": false,
             "description": "Host-wide transport trust."
+          },
+          "models": {
+            "type": "object",
+            "properties": {
+              "catalogUrl": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "maxLength": 2048,
+                    "x-maxBytes": 2048,
+                    "format": "https_endpoint",
+                    "description": "Model catalog URL. Default: models.dev."
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "additionalProperties": false,
+            "description": "Model catalog settings."
           },
           "tools": {
             "type": "object",
@@ -7889,11 +7938,36 @@
                                 "type": "null"
                               }
                             ]
+                          },
+                          "attention": {
+                            "anyOf": [
+                              {
+                                "$ref": "#/components/schemas/WorkAttentionJson"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "group": {
+                            "type": "string",
+                            "enum": [
+                              "needs_you",
+                              "working",
+                              "queued",
+                              "done"
+                            ]
+                          },
+                          "actions": {
+                            "$ref": "#/components/schemas/WorkActionsJson"
                           }
                         },
                         "required": [
                           "state",
-                          "first_action"
+                          "first_action",
+                          "attention",
+                          "group",
+                          "actions"
                         ],
                         "additionalProperties": false
                       }
@@ -7988,11 +8062,36 @@
                                 "type": "null"
                               }
                             ]
+                          },
+                          "attention": {
+                            "anyOf": [
+                              {
+                                "$ref": "#/components/schemas/WorkAttentionJson"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "group": {
+                            "type": "string",
+                            "enum": [
+                              "needs_you",
+                              "working",
+                              "queued",
+                              "done"
+                            ]
+                          },
+                          "actions": {
+                            "$ref": "#/components/schemas/WorkActionsJson"
                           }
                         },
                         "required": [
                           "state",
-                          "first_action"
+                          "first_action",
+                          "attention",
+                          "group",
+                          "actions"
                         ],
                         "additionalProperties": false
                       }
@@ -8103,11 +8202,36 @@
                                 "type": "null"
                               }
                             ]
+                          },
+                          "attention": {
+                            "anyOf": [
+                              {
+                                "$ref": "#/components/schemas/WorkAttentionJson"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "group": {
+                            "type": "string",
+                            "enum": [
+                              "needs_you",
+                              "working",
+                              "queued",
+                              "done"
+                            ]
+                          },
+                          "actions": {
+                            "$ref": "#/components/schemas/WorkActionsJson"
                           }
                         },
                         "required": [
                           "state",
-                          "first_action"
+                          "first_action",
+                          "attention",
+                          "group",
+                          "actions"
                         ],
                         "additionalProperties": false
                       }
@@ -8223,11 +8347,36 @@
                                 "type": "null"
                               }
                             ]
+                          },
+                          "attention": {
+                            "anyOf": [
+                              {
+                                "$ref": "#/components/schemas/WorkAttentionJson"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "group": {
+                            "type": "string",
+                            "enum": [
+                              "needs_you",
+                              "working",
+                              "queued",
+                              "done"
+                            ]
+                          },
+                          "actions": {
+                            "$ref": "#/components/schemas/WorkActionsJson"
                           }
                         },
                         "required": [
                           "state",
-                          "first_action"
+                          "first_action",
+                          "attention",
+                          "group",
+                          "actions"
                         ],
                         "additionalProperties": false
                       }
@@ -8339,11 +8488,36 @@
                                 "type": "null"
                               }
                             ]
+                          },
+                          "attention": {
+                            "anyOf": [
+                              {
+                                "$ref": "#/components/schemas/WorkAttentionJson"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "group": {
+                            "type": "string",
+                            "enum": [
+                              "needs_you",
+                              "working",
+                              "queued",
+                              "done"
+                            ]
+                          },
+                          "actions": {
+                            "$ref": "#/components/schemas/WorkActionsJson"
                           }
                         },
                         "required": [
                           "state",
-                          "first_action"
+                          "first_action",
+                          "attention",
+                          "group",
+                          "actions"
                         ],
                         "additionalProperties": false
                       },
@@ -8463,11 +8637,36 @@
                                 "type": "null"
                               }
                             ]
+                          },
+                          "attention": {
+                            "anyOf": [
+                              {
+                                "$ref": "#/components/schemas/WorkAttentionJson"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "group": {
+                            "type": "string",
+                            "enum": [
+                              "needs_you",
+                              "working",
+                              "queued",
+                              "done"
+                            ]
+                          },
+                          "actions": {
+                            "$ref": "#/components/schemas/WorkActionsJson"
                           }
                         },
                         "required": [
                           "state",
-                          "first_action"
+                          "first_action",
+                          "attention",
+                          "group",
+                          "actions"
                         ],
                         "additionalProperties": false
                       },
@@ -8576,11 +8775,36 @@
                                 "type": "null"
                               }
                             ]
+                          },
+                          "attention": {
+                            "anyOf": [
+                              {
+                                "$ref": "#/components/schemas/WorkAttentionJson"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "group": {
+                            "type": "string",
+                            "enum": [
+                              "needs_you",
+                              "working",
+                              "queued",
+                              "done"
+                            ]
+                          },
+                          "actions": {
+                            "$ref": "#/components/schemas/WorkActionsJson"
                           }
                         },
                         "required": [
                           "state",
-                          "first_action"
+                          "first_action",
+                          "attention",
+                          "group",
+                          "actions"
                         ],
                         "additionalProperties": false
                       }
@@ -8688,11 +8912,36 @@
                                 "type": "null"
                               }
                             ]
+                          },
+                          "attention": {
+                            "anyOf": [
+                              {
+                                "$ref": "#/components/schemas/WorkAttentionJson"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "group": {
+                            "type": "string",
+                            "enum": [
+                              "needs_you",
+                              "working",
+                              "queued",
+                              "done"
+                            ]
+                          },
+                          "actions": {
+                            "$ref": "#/components/schemas/WorkActionsJson"
                           }
                         },
                         "required": [
                           "state",
-                          "first_action"
+                          "first_action",
+                          "attention",
+                          "group",
+                          "actions"
                         ],
                         "additionalProperties": false
                       }
@@ -8816,11 +9065,36 @@
                                 "type": "null"
                               }
                             ]
+                          },
+                          "attention": {
+                            "anyOf": [
+                              {
+                                "$ref": "#/components/schemas/WorkAttentionJson"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "group": {
+                            "type": "string",
+                            "enum": [
+                              "needs_you",
+                              "working",
+                              "queued",
+                              "done"
+                            ]
+                          },
+                          "actions": {
+                            "$ref": "#/components/schemas/WorkActionsJson"
                           }
                         },
                         "required": [
                           "state",
-                          "first_action"
+                          "first_action",
+                          "attention",
+                          "group",
+                          "actions"
                         ],
                         "additionalProperties": false
                       }
@@ -8949,11 +9223,36 @@
                                 "type": "null"
                               }
                             ]
+                          },
+                          "attention": {
+                            "anyOf": [
+                              {
+                                "$ref": "#/components/schemas/WorkAttentionJson"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "group": {
+                            "type": "string",
+                            "enum": [
+                              "needs_you",
+                              "working",
+                              "queued",
+                              "done"
+                            ]
+                          },
+                          "actions": {
+                            "$ref": "#/components/schemas/WorkActionsJson"
                           }
                         },
                         "required": [
                           "state",
-                          "first_action"
+                          "first_action",
+                          "attention",
+                          "group",
+                          "actions"
                         ],
                         "additionalProperties": false
                       }
@@ -9078,11 +9377,36 @@
                                 "type": "null"
                               }
                             ]
+                          },
+                          "attention": {
+                            "anyOf": [
+                              {
+                                "$ref": "#/components/schemas/WorkAttentionJson"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "group": {
+                            "type": "string",
+                            "enum": [
+                              "needs_you",
+                              "working",
+                              "queued",
+                              "done"
+                            ]
+                          },
+                          "actions": {
+                            "$ref": "#/components/schemas/WorkActionsJson"
                           }
                         },
                         "required": [
                           "state",
-                          "first_action"
+                          "first_action",
+                          "attention",
+                          "group",
+                          "actions"
                         ],
                         "additionalProperties": false
                       },
@@ -9215,11 +9539,36 @@
                                 "type": "null"
                               }
                             ]
+                          },
+                          "attention": {
+                            "anyOf": [
+                              {
+                                "$ref": "#/components/schemas/WorkAttentionJson"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "group": {
+                            "type": "string",
+                            "enum": [
+                              "needs_you",
+                              "working",
+                              "queued",
+                              "done"
+                            ]
+                          },
+                          "actions": {
+                            "$ref": "#/components/schemas/WorkActionsJson"
                           }
                         },
                         "required": [
                           "state",
-                          "first_action"
+                          "first_action",
+                          "attention",
+                          "group",
+                          "actions"
                         ],
                         "additionalProperties": false
                       },
@@ -12544,6 +12893,28 @@
               }
             ]
           },
+          "attention": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkAttentionJson"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "group": {
+            "type": "string",
+            "enum": [
+              "needs_you",
+              "working",
+              "queued",
+              "done"
+            ]
+          },
+          "actions": {
+            "$ref": "#/components/schemas/WorkActionsJson"
+          },
           "last_line": {
             "anyOf": [
               {
@@ -12570,6 +12941,9 @@
           "turn",
           "operation",
           "first_action",
+          "attention",
+          "group",
+          "actions",
           "last_line",
           "revision",
           "workspace"
@@ -13941,13 +14315,38 @@
                 "type": "null"
               }
             ]
+          },
+          "attention": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkAttentionJson"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "group": {
+            "type": "string",
+            "enum": [
+              "needs_you",
+              "working",
+              "queued",
+              "done"
+            ]
+          },
+          "actions": {
+            "$ref": "#/components/schemas/WorkActionsJson"
           }
         },
         "required": [
           "state",
           "turn",
           "operation",
-          "first_action"
+          "first_action",
+          "attention",
+          "group",
+          "actions"
         ],
         "additionalProperties": false
       },
@@ -14165,6 +14564,81 @@
           "description",
           "code",
           "publication_position"
+        ],
+        "additionalProperties": false
+      },
+      "WorkActionsJson": {
+        "type": "object",
+        "properties": {
+          "stop": {
+            "type": "boolean"
+          },
+          "interrupt": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkInterruptJson"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "decide": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "stop",
+          "interrupt",
+          "decide"
+        ],
+        "additionalProperties": false
+      },
+      "WorkAttentionJson": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "approval",
+              "failed",
+              "finished"
+            ]
+          },
+          "turn": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "step": {
+            "$ref": "#/components/schemas/Decimal"
+          }
+        },
+        "required": [
+          "kind",
+          "turn",
+          "step"
+        ],
+        "additionalProperties": false
+      },
+      "WorkInterruptJson": {
+        "type": "object",
+        "properties": {
+          "turn": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "operation": {
+            "$ref": "#/components/schemas/Decimal"
+          }
+        },
+        "required": [
+          "turn",
+          "operation"
         ],
         "additionalProperties": false
       },
@@ -14919,6 +15393,28 @@
               }
             ]
           },
+          "attention": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkAttentionJson"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "group": {
+            "type": "string",
+            "enum": [
+              "needs_you",
+              "working",
+              "queued",
+              "done"
+            ]
+          },
+          "actions": {
+            "$ref": "#/components/schemas/WorkActionsJson"
+          },
           "latest_outcome": {
             "anyOf": [
               {
@@ -14935,6 +15431,9 @@
           "turn",
           "operation",
           "first_action",
+          "attention",
+          "group",
+          "actions",
           "latest_outcome"
         ],
         "additionalProperties": false

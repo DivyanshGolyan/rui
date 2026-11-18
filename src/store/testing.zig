@@ -1133,8 +1133,8 @@ pub fn settleTestActionParts(storage: *Store, tmp: *std.testing.TmpDir, binding:
         }
         try capture.end();
     }
-    const reply = try storage.settleActionAttemptParts(binding, .succeeded, try capture.seal(), .{});
-    try std.testing.expectEqual(@import("domain/action.zig").ActionSettlement.effect, reply);
+    const reply = (try storage.settleActionAttemptParts(binding, .succeeded, try capture.seal(), .{})).outcome;
+    try std.testing.expectEqual(@import("domain/action.zig").ActionSettlement.Outcome.effect, reply);
 }
 
 pub fn testingPublicProjection(

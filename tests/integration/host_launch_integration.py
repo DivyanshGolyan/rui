@@ -723,7 +723,8 @@ def new_host_provider_policy(root, env):
                         dispose_provider_case(process, store)
         assert checked == 60 and intercepted_cases == 25, (checked, intercepted_cases)
         with proxy.receipt_lock:
-            assert proxy.targets == {"api.openai.com:443"}, proxy.targets
+            assert "api.openai.com:443" in proxy.targets, proxy.targets
+            assert proxy.targets <= {"api.openai.com:443", "models.dev:443"}, proxy.targets
             assert not proxy.authorized, "provider authorization escaped a refused CONNECT"
     finally:
         stop_endpoint(proxy, proxy_threads)
@@ -1538,20 +1539,15 @@ def main():
         finally:
             forced_crash_cleanup(invalid_store)
         key_file.write_text("sk-host-launch\n")
-        for base, served, message in (("https://proxy.example/v1", "key_file", None),
-                                      ("http://proxy.example/v1", "unserved", "this Host starts without OpenAI")):
-            openai_store = root / f"openai-{served}"
-            openai_env = {**env, "RUI_OPENAI_KEY_FILE": str(key_file), "RUI_OPENAI_BASE_URL": base}
-            try:
-                started = run_start(openai_store, openai_env)
-                assert started.returncode == 0, started.stderr
-                assert (message is None) == ("RUI_OPENAI_BASE_URL" not in started.stderr), started.stderr
-                if message:
-                    assert message in started.stderr, started.stderr
-                providers = status(openai_store, openai_env)["capabilities"]["providers"]
-                assert providers == {"codex": "chatgpt_device", "openai": served, "chatgpt": "unserved"}, providers
-            finally:
-                forced_crash_cleanup(openai_store)
+        openai_store = root / "openai-explicit-endpoint"
+        openai_env = {**env, "RUI_OPENAI_KEY_FILE": str(key_file)}
+        try:
+            started = run_start(openai_store, openai_env, "--set", "providers.openai.endpoint=https://proxy.example/v1/responses")
+            assert started.returncode == 0, started.stderr
+            providers = status(openai_store, openai_env)["capabilities"]["providers"]
+            assert providers["openai"] == "key_file", providers
+        finally:
+            forced_crash_cleanup(openai_store)
 
         store = root / "detached-store"
         store.mkdir(mode=0o700)

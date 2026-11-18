@@ -14,7 +14,7 @@ import tempfile
 import threading
 import time
 
-from control_fixture import command, configure, inspect_execution, message, observe, start_host, stop_session, successful_sse
+from control_fixture import command, configure, inspect_execution, message, observe, start_host as control_start_host, stop_session, successful_sse
 from host_process import wait_for
 from conversation_page_fixture import host_resources
 from conversation_page_fixture import idle_resources, provider_connections
@@ -28,6 +28,11 @@ SESSION = None
 TEXT = "é中🙂\n\\\"/" * 12000
 CALLS = [("bash", "exact-call", '{"cmd":"exit 0","timeout_ms":null,"description":"Exit with success"}')]
 CALLS += [("unknown", f"rejected-{i}", TEXT if i == 1 else "{}") for i in range(1, 18)]
+
+
+def start_host(store, endpoint):
+    # Exclude external catalog connections from this reader-FD census.
+    return control_start_host(store, endpoint, "--set", "models.catalogUrl=http://127.0.0.1:1/api.json")
 
 
 def caller(store, mode, *args, session=None, ok=True, timeout=10):
@@ -261,7 +266,8 @@ def main():
             valid = {"version": host_process.WIRE_VERSION, "type": "activity_page", "delta": "full", "since": None, "end": str(2**63-1), "direction": "forward", "more": False,
                 "call_activity": {"total": "0", "entries": []},
                 "queued": {"count": "0", "oldest_position": "0", "newest_admission": "0", "newest_position": "0"},
-                "work": {"creator": None, "read_version": "0"*32 + ".0", "state": {"kind": "idle", "since": "1"}, "turn": None, "operation": None, "first_action": None, "last_line": None, "revision": "1", "workspace": "/w"},
+                "work": {"creator": None, "read_version": "0"*32 + ".0", "state": {"kind": "idle", "since": "1"}, "turn": None, "operation": None, "first_action": None, "attention": None, "group": "done",
+                    "actions": {"stop": False, "interrupt": None, "decide": None}, "last_line": None, "revision": "1", "workspace": "/w"},
                 "items": [{"position": str(i+1), "ordinal": "0", "at": str(2**63-1), "value": {"admission": {"admission": str(i+1), "key": "\0"*128,
                     "turn": None, "state": "queued", "admitted_at": str(2**63-1), "sender": None, "content": {"bytes": "0", "sha256": digest(b"").hex()}}}} for i in range(16)]}
             mock_reply(fields["socket"], store, "page", json.dumps(valid).encode(), ok=True)

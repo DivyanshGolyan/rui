@@ -10,6 +10,7 @@ Git history keeps earlier test specifications and dated results.
 
 ## Canonical gates
 
+- For what a test must be, invariant catalogs, and moving tests onto those rules, read [Test requirements](docs/verification/testing.md).
 - For test selection, fixture rules, composed gates, or caches, read [Canonical verification gates](docs/verification/gates.md).
 - For candidate admission, landing cadence, promotion, or release publication, read [Landing and release evidence](docs/verification/release.md).
 - For native platforms, resource campaigns, or release demonstrations, read [Native qualification and demonstrations](docs/verification/qualification.md).
@@ -17,6 +18,18 @@ Git history keeps earlier test specifications and dated results.
 ## Sidebar and upgrade feedback
 
 The [Session UI contract](docs/contracts/session-ui.md#required-evidence) requires owner-domain tests for memory fitting, the divider immediately above a single row with Settings and either memory or an update control, update-button states and separate drawn-target admission, and chat-only footer feedback, including narrow widths. Available, running and failed update labels replace memory completely, even when both would fit. Current and completed versions have no bottom label or target; available reads `Update to <version>`, running reads `Updating…`, and failure reads exactly `Update failed`, with its full diagnostic retained in Settings Version. Reverting mutations must fail the relevant assertions. Capture current, available, updating and failed sidebar states and the chat after an update in day and night at 140×40 and 46×30 using verify-rui, before and after. Frames are renderer evidence, not physical-input evidence.
+
+## Input-contained panels
+
+The [Session UI contract](docs/contracts/session-ui.md#required-evidence) requires shared placement evidence for the command list, chat info and Settings inside the input rules, plain unboxed backgrounds and the usual selection bar, compact command overflow and matching `esc` footers. The `panels-command-list`, `panels-chat-info` and `panels-settings` verify-rui recipes cover night at 140×40 and 46×30. Run the affected native owner tests, including the consent/panel adoption and focus domain and the single-list Settings layout domain, the panel integration group and verify-rui recipe unit/map tests. Frame recipes are required capture inputs, not a claim that frames have been captured.
+
+## Settings Keys scrolling
+
+The [Session UI contract](docs/contracts/session-ui.md#required-evidence) requires a bounded Keys viewport that makes the full shortcut reference reachable without shrinking or changing a retained draft. Exercise unmodified Up/Down by row, Page Up/Down (including shifted page keys) by viewport, both ends and overscroll, narrow and short viewports, resize and reopen at the top, and verify every shared key row becomes visible. Cover the actual input/close path and assert the exact retained draft and input geometry before, during and after scrolling; include a broken-scroll or bounds negative control. Capture the relevant changed-binary terminal cells at wide and narrow sizes, including a scrolled view. These are required checks and captures, not evidence that they have been run; renderer frames do not establish physical input.
+
+## First launch list
+
+Run `zig build test-logic -Dtest-filter='initial presentation core'` and `zig build test-native -Dtest-filter='initial list is queued'` and capture wide-launch, narrow-launch and chat before and after. The Session UI evidence row covers early, late, unavailable and empty live answers; PTY frames are not physical-terminal evidence.
 
 ## List tint padding
 
@@ -36,15 +49,15 @@ The subsystem references keep accepted behavior and required evidence together. 
 
 - [Admission and Session configuration](docs/contracts/admission.md#required-evidence).
 - [Conversation, settings, and skills](docs/contracts/conversation.md#required-evidence).
-- [Model requests and provider context](docs/contracts/model-io.md#required-evidence).
+- [Model requests and provider context](docs/contracts/model-io.md#required-evidence), including the shared tool-result route, MCP image ordering, a single text budget, failure and replay, and synthetic provider request evidence.
 - [Tools, execution, and recovery](docs/contracts/execution.md#required-evidence).
 - [Store transactions and representation](docs/contracts/store.md#required-evidence).
 - [Session stops and outcomes](docs/contracts/sessions.md#required-evidence).
 - [CLI operations and configuration](docs/contracts/cli.md#required-evidence).
-- [Session UI and terminal lifetime](docs/contracts/session-ui.md#required-evidence), including footer-domain and SessionChrome tests crossing visible/hidden list with context below, at and above half used at 46 and 140 columns. Require list-dependent name visibility, thresholded `N% context left`, no permanent info hint, retained clickable chat info and Alt-I in Keys; `human_cli_integration.py session-chrome` checks the native path, and frame recipes include context below half. The same contract requires shared full-list/sidebar row marks, state-age boundaries, alignment, 100 ms spinner frames and the earliest visible row-age/quota-countdown deadline, including header-only countdowns and minute-scale quota wording. Native empty-chat Escape and spinner repaint tests preserve all four row states at narrow width; frame resize tests reject old-viewport spinner commits until the resize reset and repaint commit. Input and User-message appearance evidence includes both widths and themes, preserved input/rule positions, the shared timestamp domain and indexed before/after frames; see the owning evidence table.
+- [Session UI and terminal lifetime](docs/contracts/session-ui.md#required-evidence), including footer-domain and SessionChrome tests crossing visible/hidden list with context below, at and above half used at 46 and 140 columns. Require list-dependent name visibility, thresholded `N% context left`, no permanent info hint, retained clickable chat info and Alt-I in Keys; `human_cli_integration.py session-chrome` checks the native path, and frame recipes include context below half. The same contract requires shared full-list/sidebar row marks, state-age boundaries, alignment, 100 ms spinner frames and the earliest visible row-age/quota-countdown deadline, including header-only countdowns and minute-scale quota wording. Native empty-chat Escape and spinner repaint tests preserve all four row states at narrow width; frame resize tests reject old-viewport spinner commits until the resize reset and repaint commit. Input and User-message appearance evidence includes both widths and themes, preserved input/rule positions, the shared timestamp domain and indexed before/after frames; see the owning evidence table. `widget_style.zig` `line stitches use thread in every capability` checks horizontal and vertical stitch glyphs and thread foreground across Unicode/ASCII and direct, indexed and no-colour depths.
 - [Reports, Activity, and local protocol](docs/contracts/inspection.md#required-evidence).
 - [Host ownership and lifetime](docs/contracts/host.md#required-evidence), including frozen detached consumption, later-source upgrade admission and private-target capability refusal.
-- [Resources and selection progress](docs/contracts/resources.md#required-evidence).
+- [Resources and selection progress](docs/contracts/resources.md#required-evidence), including fitting output, optional spill yielding, live scratch charges and retained-queue handoff.
 - [Diagnostic records and stderr](docs/contracts/diagnostics.md#required-evidence).
 
 Upgrade discovery handoff verification runs the `UpgradeJob` discovery-handoff domain and the adopted-candidate precondition domain, including in-flight success/failure, cancellation, retained candidate custody and recovered transport. `upgrade-integration` keeps the exact `terminal_download_recovery` curl-attempt sequence: normal lookup failure, IPv4 lookup and checksums, then the archive over the same IPv4 owner, without a second discovery.

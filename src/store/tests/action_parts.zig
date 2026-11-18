@@ -301,3 +301,101 @@ test "compound Action Resolution background final yields and certifies maximum p
         }
     }.run);
 }
+
+test "Action settlement reports whether stop replaced text and parts" {
+    try testing.forEachEngine(struct {
+        fn run(engine: *testing.Case) !void {
+            var digests: [records.len][32]u8 = undefined;
+            const tool_set = hostToolSet(&digests);
+            inline for ([_]tools.Runner{ .bash, .mcp }) |runner| {
+                for ([_]u8{ 0, 1, 2, 3 }) |stop| {
+                    for ([_]bool{ false, true }) |parts| {
+                        var tmp = std.testing.tmpDir(.{});
+                        defer tmp.cleanup();
+                        var storage: core.Store = undefined;
+                        try testing.testingStoreWith(engine, &storage, &tmp, std.testing.io, .{ .host_tool_set = &tool_set });
+                        defer storage.close() catch unreachable;
+                        var workspace: [protocol.max_workspace_bytes]u8 = undefined;
+                        var configure = try testing.completeConfiguration("kept-config", "", try testing.canonicalCwd(std.testing.io, &workspace), "model-a");
+                        const name = if (runner == .bash) "bash" else "fetch_page";
+                        configure.configuration.tools = try .of(&.{ name, "read_action", "stop_action" });
+                        configure.configuration.permission_mode.state = .value;
+                        try configure.configuration.permission_mode.value.set("bypass");
+                        const session = (try storage.configure(&configure, .{})).accepted.session;
+                        try testing.submitTestMessage(&storage, &tmp, "kept-input", "kept-message", session.slice(), "Run the tool.");
+                        const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                        const arguments = if (runner == .bash) "{\"description\":\"Return parts\",\"cmd\":\"true\"}" else "{}";
+                        const encoded = try std.json.Stringify.valueAlloc(std.testing.allocator, arguments, .{});
+                        defer std.testing.allocator.free(encoded);
+                        try shared.settleCallsForTesting(&storage, &tmp, model, "kept-calls", &.{
+                            .{ .item_id = "target-item", .name = name, .encoded_call_id = "target-call", .decoded_call_id = "target-call", .encoded_arguments = encoded[1 .. encoded.len - 1], .decoded_arguments = arguments },
+                            .{ .item_id = "stop-item", .name = "stop_action", .encoded_call_id = "stop-call", .decoded_call_id = "stop-call", .encoded_arguments = "{\\\"action\\\":\\\"1\\\"}", .decoded_arguments = "{\"action\":\"1\"}" },
+                        });
+                        const selected = (try storage.nextAction(runner, .fromFree(2, true))).?;
+                        const binding = (try storage.admitActionAttempt(selected, 300_000, .{})).?.permit.binding;
+                        const direct = stop == 2 or stop == 3;
+                        const session_stop = stop == 1 or stop == 3;
+                        if (direct) {
+                            const source = (try storage.nextCoreWork(.fromFree(2, true))).?.action;
+                            const stopped = try storage.stopAction(source.binding, binding.action_id, .{});
+                            try std.testing.expect(stopped == .selected);
+                        }
+                        if (session_stop) {
+                            var command = try shared.completeSessionStop("kept-stop", session.slice());
+                            try std.testing.expect(storage.stopSession(&command, .{}) == .accepted);
+                        }
+                        const settlement = if (parts)
+                            try settlePartsForKept(&storage, &tmp, binding)
+                        else
+                            try storage.settleActionAttempt(binding, .succeeded, "original result", .{});
+                        const expected_kept = !direct and (!session_stop or runner == .mcp);
+                        try std.testing.expectEqual(expected_kept, settlement.kept);
+                        try std.testing.expectEqual(if (stop != 0) action.ActionSettlement.Outcome.session_stop else .effect, settlement.outcome);
+                        const content_id = try testing.queryU64(&storage, "SELECT resolution_content_id FROM action_operation WHERE action_id=?1", .{binding.action_id});
+                        const expected_code = if (expected_kept) "succeeded" else "cancelled";
+                        try std.testing.expectEqual(@as(u64, 1), try testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND resolution_code=?2", .{ binding.action_id, expected_code }));
+                        if (parts and expected_kept) {
+                            try std.testing.expectEqual(@as(u64, mixed.len), try testing.queryU64(&storage, "SELECT count(*) FROM content_part WHERE content_id=?1", .{content_id}));
+                            for (mixed, 0..) |part, ordinal| {
+                                const part_id = try testing.queryU64(&storage, "SELECT part_content_id FROM content_part WHERE content_id=?1 AND ordinal=?2", .{ content_id, ordinal });
+                                const reference = try shared.testingContentReference(&storage, part_id);
+                                try std.testing.expectEqual(@as(u64, part.bytes.len), reference.length);
+                                try std.testing.expectEqualSlices(u8, &protocol.contentDigest(part.bytes), &reference.digest);
+                            }
+                        } else {
+                            const content = try shared.testingContentReference(&storage, content_id);
+                            const expected = if (expected_kept) "original result" else if (direct) "Action was stopped." else "Cancelled by Session stop.";
+                            try shared.expectContent(&storage, content, expected);
+                        }
+                    }
+                }
+            }
+        }
+    }.run);
+}
+
+fn settlePartsForKept(storage: *core.Store, tmp: *std.testing.TmpDir, binding: action.ActionAttemptBinding) !action.ActionSettlement {
+    const Capture = @import("../../InputCapture.zig");
+    var used: std.atomic.Value(u64) = .init(0);
+    var capture: Capture = undefined;
+    {
+        const spool = try tmp.dir.createFile(std.testing.io, "kept-spool", .{ .read = true });
+        errdefer spool.close(std.testing.io);
+        const index = try tmp.dir.createFile(std.testing.io, "kept-index", .{ .read = true });
+        errdefer index.close(std.testing.io);
+        try tmp.dir.deleteFile(std.testing.io, "kept-spool");
+        try tmp.dir.deleteFile(std.testing.io, "kept-index");
+        capture.init(std.testing.io, spool, index, .{ .used = &used, .limit = 4 * 1024 * 1024 });
+    }
+    defer capture.close();
+    for (mixed) |part| {
+        try capture.begin(part.kind, part.bytes.len);
+        var at: usize = 0;
+        while (at < part.bytes.len) {
+            var allowance = part.bytes.len - at;
+            at += try capture.append(part.bytes[at..], &allowance, false);
+        }
+        try capture.end();
+    }
+    return storage.settleActionAttemptParts(binding, .succeeded, try capture.seal(), .{});
+}

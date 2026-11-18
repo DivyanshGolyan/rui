@@ -174,7 +174,7 @@ test "each transition that lets a Turn continue without input makes it selectabl
                                 const action = (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
                                 try std.testing.expect((try storage.admitModelAttempt(.tool_continuation, .{})) == null);
                                 if (path == .settled) {
-                                    try std.testing.expectEqual(ActionSettlement.effect, try storage.settleActionAttempt(action, .succeeded, "Bash succeeded.", .{}));
+                                    try std.testing.expectEqual(ActionSettlement.Outcome.effect, (try storage.settleActionAttempt(action, .succeeded, "Bash succeeded.", .{})).outcome);
                                 } else {
                                     try std.testing.expect(try storage.recoverOneUncertainAction(ActiveOperationFilter.empty()));
                                 }
@@ -575,7 +575,7 @@ test "the dispatch work read answers as each admission owner does, in every stat
             try std.testing.expect((try WorkParity.model(&storage, .tool_continuation)) == null);
             const action = (try WorkParity.bash(&storage)).?;
             try WorkParity.idle(&storage);
-            try std.testing.expectEqual(ActionSettlement.effect, try storage.settleActionAttempt(action, .succeeded, "Bash succeeded.", .{}));
+            try std.testing.expectEqual(ActionSettlement.Outcome.effect, (try storage.settleActionAttempt(action, .succeeded, "Bash succeeded.", .{})).outcome);
             try std.testing.expect((try WorkParity.bash(&storage)) == null);
             try std.testing.expect((try WorkParity.model(&storage, .tool_continuation)) == null);
             const joined = (try WorkParity.model(&storage, .open_turn_message)).?;

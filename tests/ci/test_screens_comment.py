@@ -38,6 +38,15 @@ class RenderTest(unittest.TestCase):
         self.assertIn('old (46x30)', body)
         self.assertIn('<summary>4 unchanged captures</summary>', body)
 
+    def test_run_level_failure_shows_first_reason_and_artifact_link(self):
+        failures = [{'side': 'candidate', 'shard': 2, 'reason': 'verify-rui: Host aborted | bad\nmore detail'}]
+        body = comment.render(diff(), 'o/r', 7, 'head', 'base', capture_failures=failures, run_id=42)
+        self.assertIn('0 changed, 0 new, 0 unchanged, 1 failed', body)
+        self.assertIn('candidate shard 2', body)
+        self.assertIn('capture failed: Host aborted &#124; bad', body)
+        self.assertNotIn('more detail', body)
+        self.assertIn('https://github.com/o/r/actions/runs/42', body)
+
     def test_unchanged_other_size_uses_shot_manifests(self):
         def capture(name, size, filename):
             return {'name': name, 'size': size, **record(filename)}

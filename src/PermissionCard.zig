@@ -11,6 +11,7 @@ consent: *Consent,
 body: vxfw.Widget,
 userdata: *anyopaque,
 on_decision: *const fn (*anyopaque, *vxfw.EventContext, Policy.Decision) anyerror!void,
+caps: @import("overview_view.zig").Caps = .{},
 method: vaxis.gwidth.Method = .unicode,
 style: vaxis.Style = .{},
 quiet: vaxis.Style = .{ .dim = true },
@@ -97,7 +98,7 @@ pub fn drawInput(self: *Self, ctx: vxfw.DrawContext, composer: ?vxfw.Widget) std
         children[count] = .{ .origin = .{ .col = 0, .row = body_height }, .surface = drawn };
     } else {
         if (rule != 0) for (0..size.width) |col| {
-            const cell: vaxis.Cell = .{ .char = .{ .grapheme = "─", .width = 1 }, .style = self.quiet };
+            const cell = @import("widget_style.zig").line(self.caps, .horizontal);
             surface.writeCell(@intCast(col), body_height, cell);
             surface.writeCell(@intCast(col), size.height - 1, cell);
         };
@@ -163,8 +164,8 @@ test "PermissionCard decides the drawn request at tiny sizes and ignores pasted 
     owner.decision = null;
     consent.adopt(63);
     const shown = try card.widget().draw(ctx);
-    try std.testing.expectEqualStrings("─", shown.readCell(0, 2).char.grapheme);
-    try std.testing.expectEqualStrings("─", shown.readCell(39, 4).char.grapheme);
+    try std.testing.expectEqualStrings("┄", shown.readCell(0, 2).char.grapheme);
+    try std.testing.expectEqualStrings("┄", shown.readCell(39, 4).char.grapheme);
     try std.testing.expect(shown.readCell(3, 3).style.reverse);
     try std.testing.expect(!shown.readCell(17, 3).style.reverse);
     const click: vaxis.Mouse = .{ .col = 0, .row = 3, .button = .left, .type = .press, .mods = .{} };
