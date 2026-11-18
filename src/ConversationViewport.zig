@@ -55,7 +55,8 @@ fn hanging(line: []const u8, width: u16, user: bool) struct { bytes: usize, cell
         if (std.mem.startsWith(u8, line[bytes..], glyph) and std.mem.startsWith(u8, line[bytes + glyph.len ..], " ")) {
             bytes += glyph.len + 1;
             cells += 2;
-            quoted = std.mem.eql(u8, glyph, "?") or std.mem.eql(u8, glyph, "$") or std.mem.eql(u8, glyph, "│");
+            const approval = state_marks.marks.get(.needs_you);
+            quoted = std.mem.eql(u8, glyph, approval.unicode) or std.mem.eql(u8, glyph, approval.ascii) or std.mem.eql(u8, glyph, "$") or std.mem.eql(u8, glyph, "│");
             break;
         }
     }
@@ -893,6 +894,27 @@ test "an Action's wrapped description, command and stdin rows carry a wrap mark,
     }
 }
 
+test "APPROVAL-2 wrapped permission headings mark continuation rows in both scripts" {
+    const approval = state_marks.marks.get(.needs_you);
+    for ([_][]const u8{ approval.unicode, approval.ascii }) |glyph| {
+        for ([_]bool{ false, true }) |quotes| {
+            var text: [128]u8 = undefined;
+            const line = try std.fmt.bufPrint(&text, "{s} Approval description continues on another row\n", .{glyph});
+            var view: Sized(256, false) = .{ .quotes = quotes };
+            try view.append(line);
+            try view.prepare();
+            var screen: TestScreen = undefined;
+            const drawn = view.draw(screen.window(20, 10), .{}, true, false, .{}, .{});
+            try std.testing.expect(drawn.rows > 1);
+            var storage: [128]u8 = undefined;
+            try std.testing.expect(std.mem.startsWith(u8, screen.row(0, &storage), glyph));
+            for (1..drawn.rows) |row| {
+                try std.testing.expect(std.mem.startsWith(u8, screen.row(@intCast(row), &storage), if (quotes) "┆ " else "  "));
+            }
+        }
+    }
+}
+
 test "every state mark hangs continuation text in both scripts" {
     for (state_marks.marks.values) |mark| {
         for ([_][]const u8{ mark.unicode, mark.ascii }) |glyph| {
@@ -908,7 +930,7 @@ test "every state mark hangs continuation text in both scripts" {
 
 test "vaxis wraps reading text at words with hanging indentation" {
     var view: Sized(256, false) = .{};
-    try view.append("  The plain rui command isn't on PATH\n0123456789abcdef next\n› a longword\n  supercalifragilistic x\n⠹ one two three four\n中中中中中中中中Z\n  │ alpha beta gamma");
+    try view.append("  The plain rui command isn't on PATH\n0123456789abcdef next\n› a longword\n  supercalifragilistic x\n◝ one two three four\n中中中中中中中中Z\n  │ alpha beta gamma");
     try view.prepare();
     const layout: Layout = .{ .width = 16, .method = .unicode };
     var test_screen: TestScreen = undefined;
@@ -918,7 +940,7 @@ test "vaxis wraps reading text at words with hanging indentation" {
         "0123456789abcdef", "next",
         "› a longword",
         "  supercalifragi", "  listic x",
-        "⠹ one two three",
+        "◝ one two three",
         "  four",
         "中中中中中中中中",
         "Z",
