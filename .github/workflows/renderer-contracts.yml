@@ -25,7 +25,8 @@ permissions:
   actions: read
 
 concurrency:
-  group: renderer-contracts-${{ github.event_name }}-${{ github.ref }}${{ inputs.ref && '-promotion' || '' }}
+  # The caller's name keeps Promote and Qualify main on one SHA from cancelling each other.
+  group: renderer-contracts-${{ github.event_name }}-${{ github.ref }}${{ inputs.ref && format('-promotion-{0}', github.workflow) || '' }}
   cancel-in-progress: true
 
 # Cache timeout accounting, not a setup deadline:

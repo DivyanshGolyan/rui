@@ -445,7 +445,7 @@ class ProcessCensusTest(unittest.TestCase):
         return child
 
     def test_process_state_tells_running_from_zombie_from_reaped(self):
-        # CI-68
+        # CI-70
         child = self.ready_child()
         try:
             self.assertFalse(self.semantics.process_state(child.pid).startswith("Z"))
@@ -459,13 +459,13 @@ class ProcessCensusTest(unittest.TestCase):
         self.assertIn(str(os.getpid()), listing)
 
     def test_command_census_reads_each_process_argv(self):
-        # CI-69
+        # CI-71
         census = dict(self.semantics.process_commands())
         self.assertEqual(Path(census[os.getpid()][0]).name, Path(sys.orig_argv[0]).name)
         self.assertEqual(census[os.getpid()][1:], sys.orig_argv[1:])
 
     def test_launch_records_hold_arguments_and_environment_where_the_kernel_shows_them(self):
-        # CI-70
+        # CI-72
         child = self.ready_child("argument-marker", env={"RUI_LAUNCH_MARKER": "environment-marker"})
         try:
             records = self.semantics.launch_records(child.pid)
@@ -481,7 +481,7 @@ class ProcessCensusTest(unittest.TestCase):
             self.assertIsNone(self.semantics.launch_records(os.getpid()))
 
     def test_resource_readers_observe_a_live_process(self):
-        # CI-71
+        # CI-73
         child = self.ready_child()
         try:
             names = self.semantics.open_descriptor_names(child.pid)
@@ -503,7 +503,7 @@ class ProcessCensusTest(unittest.TestCase):
         self.assertIsNone(self.semantics.socket_table("rui-no-such-table"))
 
     def test_locks_exclude_other_open_descriptions_until_released(self):
-        # CI-72
+        # CI-74
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "host.lock"
             path.touch()

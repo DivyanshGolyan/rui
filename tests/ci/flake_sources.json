@@ -134,9 +134,6 @@
   "tests/ci/test_mac_runner.py": {
     "test_double": 16
   },
-  "tests/ci/test_main_build.py": {
-    "test_double": 7
-  },
   "tests/ci/test_model_instruction_fixtures.py": {
     "test_double": 3
   },
