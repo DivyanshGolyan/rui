@@ -463,6 +463,15 @@ class BuildModuleTest(unittest.TestCase):
 
 
 class SelectionTest(unittest.TestCase):
+    def test_ordered_message_capture_selects_provider_and_capture_witnesses(self):
+        # CI-21: touched Message capture owners select their real provider witness.
+        for path in ("src/InputCapture.zig", "src/client.zig", "src/mutation_answer.zig",
+                     "src/cli_args.zig", "src/cli_grammar.zig", "tests/integration/cli_image_integration.py"):
+            with self.subTest(path=path):
+                selected = select([path], "review", AVAILABLE)
+                for family in ("targets", "native_targets"):
+                    self.assertIn("cli-image-integration", selected[family])
+
     def test_verify_rui_map_is_never_skipped_for_map_inputs(self):
         for path in (".claude/skills/verify-rui/scripts/frames.json",
                      ".claude/skills/verify-rui/features/README.md",
