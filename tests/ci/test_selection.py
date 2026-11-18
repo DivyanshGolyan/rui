@@ -1434,7 +1434,7 @@ class SelectionTest(unittest.TestCase):
         for targets in ([], ["test-logic"], ["installer-integration"], ["ts-client"]):
             with self.subTest(targets=targets):
                 self.assertFalse(setup_requirements(targets)["screen"])
-        for targets in (["check"], ["check-full"], ["terminal-restoration-integration"], ["test-logic", "direct-pty"]):
+        for targets in (["check"], ["check-full"], ["terminal-restoration-integration"], ["read-image-integration"], ["test-logic", "direct-pty"]):
             with self.subTest(targets=targets):
                 self.assertTrue(setup_requirements(targets)["screen"])
         build = build_files.source()
