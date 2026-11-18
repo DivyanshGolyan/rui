@@ -5702,7 +5702,7 @@ const ReplyDomainWitness = struct {
         return !work.object.contains("attention") or !work.object.contains("group") or !work.object.contains("actions");
     }
 
-    fn check(lines: *std.mem.SplitIterator(u8, .scalar), label: []const u8, actual: []const u8, fields: []const Field, tighten_pinned: bool, legacy_work: ?[]const bool) !void {
+    noinline fn check(lines: *std.mem.SplitIterator(u8, .scalar), label: []const u8, actual: []const u8, fields: []const Field, tighten_pinned: bool, legacy_work: ?[]const bool) !void {
         const line = lines.next() orelse return error.MissingDomainBaseline;
         const split = std.mem.indexOfScalar(u8, line, ' ') orelse return error.InvalidDomainBaseline;
         try std.testing.expectEqualStrings(label, line[0..split]);
@@ -5740,6 +5740,45 @@ const ReplyDomainWitness = struct {
         }
     }
 
+    // Keep the runtime edit sweeps out of the per-command inline expansions.
+    noinline fn checkMutation(
+        lines: *std.mem.SplitIterator(u8, .scalar),
+        body: []const u8,
+        status: u16,
+        binding: reply.MutationTarget,
+        command_name: []const u8,
+        result_name: []const u8,
+        replayed: bool,
+        tighten_pinned: bool,
+    ) !void {
+        var actual: [1 + MutationWitness.fields.len * 3]u8 = undefined;
+        actual[0] = mutation(body, status, binding);
+        for (MutationWitness.fields, 0..) |field, index| {
+            for (0..3) |edit| {
+                var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
+                defer parsed.deinit();
+                actual[1 + index * 3 + edit] = mutation(try editField(&parsed, field, edit), status, binding);
+            }
+        }
+        var label_buffer: [128]u8 = undefined;
+        const label = try std.fmt.bufPrint(&label_buffer, "mutation/{s}/{s}/{d}", .{ command_name, result_name, @intFromBool(replayed) });
+        try check(lines, label, &actual, &MutationWitness.fields, tighten_pinned, null);
+    }
+
+    noinline fn collectObservationEdits(body: []const u8, fields: []const Field, actual: []u8, legacy: []bool) !void {
+        actual[0] = observation(body);
+        legacy[0] = try legacyWork(body);
+        for (fields, 0..) |field, index| {
+            for (0..3) |edit| {
+                var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
+                defer parsed.deinit();
+                const edited = try editField(&parsed, field, edit);
+                actual[1 + index * 3 + edit] = observation(edited);
+                legacy[1 + index * 3 + edit] = try legacyWork(edited);
+            }
+        }
+    }
+
     fn run() !void {
         @setEvalBranchQuota(20_000);
         var lines = std.mem.splitScalar(u8, fixture, '\n');
@@ -5766,18 +5805,16 @@ const ReplyDomainWitness = struct {
                         .conflict => 409,
                         .infrastructure_failure => 500,
                     };
-                    var actual: [1 + MutationWitness.fields.len * 3]u8 = undefined;
-                    actual[0] = mutation(response.slice(), status, MutationWitness.target(kind, false));
-                    for (MutationWitness.fields, 0..) |field, index| {
-                        for (0..3) |edit| {
-                            var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, response.slice(), .{});
-                            defer parsed.deinit();
-                            actual[1 + index * 3 + edit] = mutation(try editField(&parsed, field, edit), status, MutationWitness.target(kind, false));
-                        }
-                    }
-                    var label_buffer: [128]u8 = undefined;
-                    const label = try std.fmt.bufPrint(&label_buffer, "mutation/{s}/{s}/{d}", .{ @tagName(kind), @tagName(result), @intFromBool(replayed) });
-                    try check(&lines, label, &actual, &MutationWitness.fields, kind == .session_pin and (result == .rejected or result == .conflict), null);
+                    try checkMutation(
+                        &lines,
+                        response.slice(),
+                        status,
+                        MutationWitness.target(kind, false),
+                        @tagName(kind),
+                        @tagName(result),
+                        replayed,
+                        kind == .session_pin and (result == .rejected or result == .conflict),
+                    );
                 }
             }
             inline for (.{ false, true }) |accepted| {
@@ -5801,17 +5838,7 @@ const ReplyDomainWitness = struct {
                 const body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"command_observation\",\"key\":\"k\",\"delta\":\"full\",\"since\":null,\"observation\":{\"kind\":\"" ++ @tagName(kind) ++ "\",\"target\":\"k7m2qx\",\"status\":\"" ++ (if (accepted) "accepted\"" else "rejected\",\"code\":\"unknown_session\"") ++ fields ++ "}}";
                 var actual: [1 + observation_fields.len * 3]u8 = undefined;
                 var legacy: [actual.len]bool = undefined;
-                actual[0] = observation(body);
-                legacy[0] = try legacyWork(body);
-                for (observation_fields, 0..) |field, index| {
-                    for (0..3) |edit| {
-                        var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
-                        defer parsed.deinit();
-                        const edited = try editField(&parsed, field, edit);
-                        actual[1 + index * 3 + edit] = observation(edited);
-                        legacy[1 + index * 3 + edit] = try legacyWork(edited);
-                    }
-                }
+                try collectObservationEdits(body, &observation_fields, &actual, &legacy);
                 try check(&lines, "observation/" ++ @tagName(kind) ++ "/" ++ (if (accepted) "accepted" else "rejected"), &actual, &observation_fields, false, &legacy);
             }
         }
@@ -5821,17 +5848,7 @@ const ReplyDomainWitness = struct {
             defer std.testing.allocator.free(body);
             var actual: [1 + message_fields.len * 3]u8 = undefined;
             var legacy: [actual.len]bool = undefined;
-            actual[0] = observation(body);
-            legacy[0] = try legacyWork(body);
-            for (message_fields, 0..) |field, index| {
-                for (0..3) |edit| {
-                    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
-                    defer parsed.deinit();
-                    const edited = try editField(&parsed, field, edit);
-                    actual[1 + index * 3 + edit] = observation(edited);
-                    legacy[1 + index * 3 + edit] = try legacyWork(edited);
-                }
-            }
+            try collectObservationEdits(body, &message_fields, &actual, &legacy);
             const label = try std.mem.concat(std.testing.allocator, u8, &.{ "message/", edge.name });
             defer std.testing.allocator.free(label);
             try check(&lines, label, &actual, &message_fields, false, &legacy);

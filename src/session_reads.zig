@@ -2410,23 +2410,32 @@ test "session_reads hides every background Action admission without fetching con
 test "session_reads queued summary ignores background Actions among person and peer Messages" {
     var peer: protocol.NamedPeer = .{ .session = .{} };
     try peer.session.set("9f8e7d");
+    const newest_text = "update the docs\nwith this example";
+    var newest = FakeHost.message(2).admission;
+    newest.content = .{ .text = .{ .length = newest_text.len, .digest = protocol.contentDigest(newest_text) } };
     var incoming = FakeHost.message(3).admission;
     incoming.sender = peer;
     var background = FakeHost.message(4).admission;
     background.source_action = 19;
     const tail = [_]FakeHost.Tail{
         .{ .value = FakeHost.message(1) },
-        .{ .value = FakeHost.message(2) },
+        .{ .value = .{ .admission = newest } },
         .{ .value = .{ .received = incoming } },
         .{ .value = .{ .received = background } },
     };
     for ([_]bool{ false, true }) |held| {
-        var host: FakeHost = .{ .history = 0, .tail = &tail, .end = 4, .held = held };
+        var host: FakeHost = .{ .history = 0, .tail = &tail, .end = 4, .held = held, .content_texts = &.{ FakeHost.text, newest_text, FakeHost.text, FakeHost.text } };
         var job: Job = .{ .opening = true, .line_read = .{ .revision = 1, .end = 4 } };
         try host.read(&job);
-        try std.testing.expectEqualDeep(protocol.Queued{ .count = 2, .oldest_position = 1, .newest_admission = 2, .newest_position = 2 }, job.result.queued);
+        try std.testing.expectEqualDeep(protocol.Queued{
+            .count = 2,
+            .oldest_position = 1,
+            .newest_admission = 2,
+            .newest_position = 2,
+            .newest_content = newest.content,
+        }, job.result.queued);
         try std.testing.expectEqual(@as(u64, 2), job.result.queued_line.?.admission);
-        try std.testing.expectEqualStrings("please wait", job.result.queued_line.?.line.slice());
+        try std.testing.expectEqualStrings("update the docs", job.result.queued_line.?.line.slice());
         try std.testing.expectEqual(@as(usize, 3), job.result.row_count);
         try std.testing.expect(std.mem.indexOf(u8, host.shown, "Received message") != null);
         try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, host.shown, "Background Action"));
