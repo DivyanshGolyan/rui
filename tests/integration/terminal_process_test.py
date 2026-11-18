@@ -620,13 +620,13 @@ class TerminalProcessTest(unittest.TestCase):
     def test_approval_title_count_uses_one_committed_frame_not_read_history(self):
         import human_cli_fixture as human
 
-        title = "? Check successful shell exit"
+        title = "● Check successful shell exit"
         for history, expected_titles in ((True, 2), (False, 1)):
             with self.subTest(history=history):
                 master, slave = open_pty()
                 capture = human.terminal_capture(master)
                 capture.feed(("\x1b[?1049h\x1b[?2026h\x1b[H\x1b[2J" + title +
-                              "\r\n? Needs approval\x1b[?2026l").encode())
+                              "\r\n● Needs approval\x1b[?2026l").encode())
                 generation = capture.generation
                 capture.feed(("\x1b[?2026h\x1b[H\x1b[2J  " + title +
                               "\r\n    $ true\r\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\r\n"

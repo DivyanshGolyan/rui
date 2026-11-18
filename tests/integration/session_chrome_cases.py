@@ -586,6 +586,30 @@ def info_natural_height_case():
     print("session chrome: natural-height info leaves saved feed above; Model grows/shrinks by its rows; model/effort clicks keep feed and draft; the footer and Alt-I share one transition", flush=True)
 
 
+def approval_glyph_domain():
+    # APPROVAL-3: the terminal carries locale selection into the Action read.
+    with Chrome("rui-chrome-approval-glyph.", []) as chrome:
+        session = chrome.session(permission="ask")
+        chrome.endpoint.responses.append(fixture.sse_tool_calls("glyph", [
+            ("bash", "glyph-call", json.dumps({
+                "cmd": "printf done", "description": "Review approval glyph", "timeout_ms": None}))]))
+        request = admit(chrome.home, "session", "send", "--to", session, input="Review this")["request"]
+        fixture.wait_for(lambda: fixture.observe(chrome.store, request)["state"] == "waiting_for_permission", "pending request")
+        for locale, glyph in (("C", "?"), ("C.UTF-8", "●")):
+            for width, height in ((140, 40), (46, 30)):
+                master, slave = open_pty(width, height)
+                chrome.descriptors += [master, slave]
+                caller = spawn([str(fixture.RUI), "session", "resume", "--", session],
+                    env={**os.environ, "HOME": str(chrome.home), "LC_ALL": locale}, cwd=str(chrome.workspace),
+                    stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+                chrome.callers.append(caller)
+                title = f"{glyph} Review approval glyph"
+                shown = chrome.frame(master, b"", lambda screen: title in screen and "Allow once" in screen)
+                assert title in shown and ("●" if glyph == "?" else "?") + " Review approval glyph" not in shown, shown
+                chrome.detach(master, caller)
+    print("session chrome: approval headings match the terminal locale at both widths", flush=True)
+
+
 def approval_overflow_case():
     with Chrome("rui-chrome-approval-overflow.", []) as chrome:
         for count in (40, 3):
@@ -765,6 +789,7 @@ def main():
     scroll_marker_case()
     pages_case()
     info_natural_height_case()
+    approval_glyph_domain()
     approval_overflow_case()
     opening_case()
     notice_case()

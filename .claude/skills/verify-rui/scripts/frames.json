@@ -3960,9 +3960,11 @@
         }
       ],
       "expect": [
-        " \u00b7 ask"
+        " \u00b7 ask",
+        "● Record thirty progress steps"
       ],
       "absent": [
+        "? Record thirty progress steps",
         "asks before Bash/MCP",
         "Type a message",
         "enter sends",

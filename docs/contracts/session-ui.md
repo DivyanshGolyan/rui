@@ -253,7 +253,7 @@ No nested conversation login owner is retained.
 
 Interactive input uses the single conversation-first frontend described under [staged persistent input](#staged-persistent-input).
 It captures each exact Message before transmission and observes Host activity without a separate per-prompt follow loop or follow reminders.
-Permission presents one exact Action above an Allow once / Deny choice that a fresh Enter confirms: Bash keeps its description and complete decoded command; MCP shows its frozen tool name and server, its call description when present, and the original JSON arguments.
+Permission presents one exact Action above an Allow once / Deny choice that a fresh Enter confirms: Bash keeps its description and complete decoded command; MCP shows its frozen tool name and server, its call description when present, and the original JSON arguments. Its heading uses the shared needs-you mark and attention tone: `●` in Unicode and `?` in ASCII, matching the Session row.
 Queued chat, typeahead and marked paste authorize nothing.
 The durable decision retains that exact target for Host revalidation.
 One-shot `action inspect` JSON retains the Action ID, opaque call ID and complete arguments, escaping every non-ASCII code point so control and bidirectional characters cannot disguise the proposal on a terminal.

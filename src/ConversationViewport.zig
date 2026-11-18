@@ -55,7 +55,8 @@ fn hanging(line: []const u8, width: u16, user: bool) struct { bytes: usize, cell
         if (std.mem.startsWith(u8, line[bytes..], glyph) and std.mem.startsWith(u8, line[bytes + glyph.len ..], " ")) {
             bytes += glyph.len + 1;
             cells += 2;
-            quoted = std.mem.eql(u8, glyph, "?") or std.mem.eql(u8, glyph, "$") or std.mem.eql(u8, glyph, "│");
+            const approval = state_marks.marks.get(.needs_you);
+            quoted = std.mem.eql(u8, glyph, approval.unicode) or std.mem.eql(u8, glyph, approval.ascii) or std.mem.eql(u8, glyph, "$") or std.mem.eql(u8, glyph, "│");
             break;
         }
     }
@@ -889,6 +890,27 @@ test "an Action's wrapped description, command and stdin rows carry a wrap mark,
             var field = false;
             for (0..drawn.rows) |index| field = field or std.mem.eql(u8, test_screen.row(@intCast(index), &storage), "  Time limit: 5 s");
             try std.testing.expect(field);
+        }
+    }
+}
+
+test "APPROVAL-2 wrapped permission headings mark continuation rows in both scripts" {
+    const approval = state_marks.marks.get(.needs_you);
+    for ([_][]const u8{ approval.unicode, approval.ascii }) |glyph| {
+        for ([_]bool{ false, true }) |quotes| {
+            var text: [128]u8 = undefined;
+            const line = try std.fmt.bufPrint(&text, "{s} Approval description continues on another row\n", .{glyph});
+            var view: Sized(256, false) = .{ .quotes = quotes };
+            try view.append(line);
+            try view.prepare();
+            var screen: TestScreen = undefined;
+            const drawn = view.draw(screen.window(20, 10), .{}, true, false, .{}, .{});
+            try std.testing.expect(drawn.rows > 1);
+            var storage: [128]u8 = undefined;
+            try std.testing.expect(std.mem.startsWith(u8, screen.row(0, &storage), glyph));
+            for (1..drawn.rows) |row| {
+                try std.testing.expect(std.mem.startsWith(u8, screen.row(@intCast(row), &storage), if (quotes) "┆ " else "  "));
+            }
         }
     }
 }

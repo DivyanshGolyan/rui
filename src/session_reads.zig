@@ -177,6 +177,7 @@ pub const Job = struct {
     session: []const u8 = "",
     files: Files = undefined,
     colour: bool = false,
+    unicode_script: bool = true,
     width_method: Viewport.Method = .wcwidth,
     command: Command = undefined,
     configure: ?Configure = null,
@@ -444,7 +445,7 @@ pub fn permission(raw: *anyopaque, task: *Task) !void {
     if (job.result.work.work.first_action) |action| {
         try job.files.action.setLength(task.io, 0);
         var output: DisplayCapture = .{ .task = task, .file = job.files.action };
-        if (!try View.permission(task.requests(), job.store, job.session, action, job.files.scratch, &output, job.colour)) return;
+        if (!try View.permission(task.requests(), job.store, job.session, action, job.files.scratch, &output, job.colour, job.unicode_script)) return;
         job.result.action = action;
     }
 }
