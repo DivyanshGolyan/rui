@@ -338,7 +338,7 @@ test "Session pin alternate gestures never activate New Session or Settings" {
     };
 }
 
-test "session tab focus survives pointer hover without changing active filter" {
+test "SUI-30 session tab shade matches word hit bounds under hover" {
     var state: overview_view.State = undefined;
     try state.init(std.testing.allocator, .{ .cwd = "/w", .home = "/h" });
     defer state.deinit();
@@ -346,18 +346,25 @@ test "session tab focus survives pointer hover without changing active filter" {
     defer arena.deinit();
     var clicks: Clicks = .{};
     var controls: SessionControls = .{ .state = &state, .userdata = &clicks, .on_click = Clicks.take };
-    const draw: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 2 }, .cell_size = .{} };
     var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-    for ([_]overview_view.ArchiveFilter{ .active, .archived }) |filter| for ([_]overview_view.Selection{ .sessions, .archived }) |focus| for ([_]i16{ 5, 15, 30 }) |pointer| {
+    for ([_]u16{ 46, 140 }) |width| for ([_]overview_view.ArchiveFilter{ .active, .archived }) |filter| for ([_]overview_view.Selection{ .sessions, .archived }) |focus| for ([_]i16{ 4, 5, 9, 10, 11, 12, 19, 20, 30 }) |pointer| {
+        const draw: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 2 }, .cell_size = .{} };
         state.archive = filter;
         state.selected = focus;
         _ = try controls.widget().draw(draw);
         try controls.widget().handleEvent(&events, .{ .mouse = .{ .col = pointer, .row = 1, .button = .none, .type = .motion, .mods = .{} } });
         const shown = try controls.widget().draw(draw);
-        var screen: vaxis.Screen = try .init(arena.allocator(), .{ .cols = 46, .rows = 2, .x_pixel = 0, .y_pixel = 0 });
-        const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 46, .height = 2, .screen = &screen };
+        var screen: vaxis.Screen = try .init(arena.allocator(), .{ .cols = width, .rows = 2, .x_pixel = 0, .y_pixel = 0 });
+        const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 2, .screen = &screen };
         try shown.render(window, controls.widget());
-        try std.testing.expectEqual(widget_style.of(.{}, .{ .background = .selection }).bg, screen.readCell(if (focus == .sessions) 5 else 15, 1).?.style.bg);
+        for (0..width) |column| {
+            const chat = column >= 5 and column < 10;
+            const archived = column >= 12 and column < 20;
+            const selected = if (focus == .sessions) chat else archived;
+            const hovered = (chat and pointer >= 5 and pointer < 10) or (archived and pointer >= 12 and pointer < 20);
+            const ground: overview_view.Background = if (selected) .selection else if (hovered) .hover else .ground;
+            try std.testing.expectEqual(widget_style.of(.{}, .{ .background = ground }).bg, screen.readCell(@intCast(column), 1).?.style.bg);
+        }
         try std.testing.expectEqual(filter == .active, screen.readCell(5, 1).?.style.bold);
         try std.testing.expectEqual(filter == .archived, screen.readCell(15, 1).?.style.bold);
         try std.testing.expectEqual(focus, state.selected);
