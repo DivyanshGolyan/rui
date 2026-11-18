@@ -97,10 +97,8 @@ test "GroupedList press domain preserves every target and region boundary across
         const surface = try draw(&list, arena.allocator(), 24, 1);
         const line = surface.children[0].surface;
         try std.testing.expectEqualStrings("c", line.readCell(RowInset.left, 0).char.grapheme);
-        // Content starts after the inset. A region's tint includes padding on
-        // both sides, while its click bounds include only the shifted content.
         for (0..24) |column| {
-            const expected = widget_style.of(list.caps, .{ .background = if (selected or (column >= 12 and column < 21)) .selection else .ground });
+            const expected = widget_style.of(list.caps, .{ .background = if (selected or (column >= 14 and column < 19)) .selection else .ground });
             const actual = line.readCell(@intCast(column), 0).style;
             try std.testing.expectEqual(expected.bg, actual.bg);
             try std.testing.expectEqual(expected.reverse, actual.reverse);

@@ -67,7 +67,9 @@ pub const Adapter = struct {
         self.start_mutex.lockUncancelable(self.io);
         defer self.start_mutex.unlock(self.io);
         while (!self.started and !self.closed) self.start_changed.waitUncancelable(self.io, &self.start_mutex);
-        if (self.closed) return error.Closed;
+        // A peer may start and then close before this thread wakes; start
+        // happened, so the close is the session's later EOF, not a refusal.
+        if (!self.started) return error.Closed;
     }
     pub fn stop(self: *Adapter) void {
         _ = socket.shutdown(self.fd, 2);

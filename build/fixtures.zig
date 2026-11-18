@@ -12,7 +12,7 @@ pub const Fixture = struct {
 
 pub const fixtures = [_]Fixture{
     .{ .step = "read-image-integration", .description = "Run image Action authorization, explicit input failures and pending lifecycle", .script = "tests/integration/read_image_integration.py" },
-    .{ .step = "dispatch-integration", .description = "Run the targeted model dispatch, output, retry, and recovery shortcut", .script = "tests/integration/dispatch_integration.py" },
+    .{ .step = "dispatch-integration", .description = "Run the targeted model dispatch, output, retry, and recovery shortcut", .script = "tests/integration/dispatch_integration.py", .rui = .pause },
     .{ .step = "skills-integration", .description = "Run isolated native skills capture, replay and creation cases", .script = "tests/integration/skills_integration.py", .screen = true },
     .{ .step = "login-signal-integration", .description = "Run the Linux-only one-shot login signal loader witness", .script = "tests/integration/login_signal_integration.py" },
     .{ .step = "current-facts-integration", .description = "Run the real Current producer/consumer observation oracle", .script = "tests/integration/current_facts_integration.py" },
@@ -26,11 +26,11 @@ pub const fixtures = [_]Fixture{
     .{ .step = "bash-owner-integration", .description = "Run focused Bash owner transition cases", .script = "tests/integration/bash_owner_integration.py" },
     .{ .step = "bash-lifecycle-integration", .description = "Run Bash lifecycle syscall-failure and custody cases", .script = "tests/integration/bash_lifecycle_integration.py" },
     .{ .step = "bash-recovery-integration", .description = "Run fresh-Host Bash recovery cuts for admitted and committed Actions", .script = "tests/integration/bash_recovery_integration.py", .screen = true, .rui = .pause },
-    .{ .step = "codex-integration", .description = "Run synthetic managed-route credentials, Bash continuation and fresh-Host caller journey", .script = "tests/integration/codex_integration.py" },
+    .{ .step = "codex-integration", .description = "Run synthetic managed-route credentials, Bash continuation and fresh-Host caller journey", .script = "tests/integration/codex_integration.py", .rui = .pause },
     .{ .step = "chatgpt-plan-integration", .description = "Run a synthetic ChatGPT plan sign-in: bearer only, codec 3, refresh at expiry and on a 401", .script = "tests/integration/chatgpt_plan_integration.py" },
     .{ .step = "chatgpt-login-integration", .description = "Run synthetic ChatGPT plan login by listener and paste, returning login, logout and status", .script = "tests/integration/chatgpt_login_integration.py" },
     .{ .step = "codex-h2-integration", .description = "Run synthetic managed TLS/H2 negotiation and observed sequential reuse (requires h2==4.3.0)", .script = "tests/integration/codex_h2_integration.py" },
-    .{ .step = "control-integration", .description = "Run Session-stop, exact-interruption, and protected-capacity cases", .script = "tests/integration/control_integration.py" },
+    .{ .step = "control-integration", .description = "Run Session-stop, exact-interruption, and protected-capacity cases", .script = "tests/integration/control_integration.py", .rui = .pause },
     .{ .step = "descriptor-capacity-integration", .description = "Run reduced-limit startup rejection and adequate-limit fill/drain cases", .script = "tests/integration/descriptor_capacity_integration.py", .rui = .pause },
     .{ .step = "host-launch-integration", .description = "Run detached Host launch, alias convergence and startup-failure cases", .script = "tests/integration/host_launch_integration.py", .screen = true },
     .{ .step = "installer-integration", .description = "Run source and release installer cases through the production publication owner", .script = "tests/integration/installer_integration.py" },

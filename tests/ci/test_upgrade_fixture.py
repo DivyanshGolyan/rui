@@ -276,22 +276,22 @@ class UpgradeEmptyChatTest(unittest.TestCase):
         return self.screen.empty_overview(self.case, self.session)
 
     def test_hidden_empty_overview_requires_real_list_and_no_editor_or_chat(self):
-        frame = "+ New Session\nSettings"
+        frame = "+ New chat\nSettings"
         self.assertEqual(frame, self.hidden(frame))
         for extra in (self.session, "alt+i info"):
             with self.subTest(extra=extra), self.assertRaises(AssertionError):
                 self.hidden(frame + "\n" + extra)
-        for extra in ("Type a task", "› hidden draft"):
+        for extra in ("What shall we work on?", "› hidden draft"):
             with self.subTest(extra=extra), self.assertRaises(NotReady):
                 self.hidden(frame + "\n" + extra)
-        for wrong in ("Settings", "+ New Session", "Notifications"):
+        for wrong in ("Settings", "+ New chat", "Notifications"):
             with self.subTest(wrong=wrong), self.assertRaises(NotReady):
                 self.hidden(wrong)
 
     def test_overview_waits_past_sidebar_controls_for_the_full_list(self):
-        sidebar = f" + New Session                Archived {VERTICAL_DIVIDER}\n   Settings {VERTICAL_DIVIDER} gpt-6-luna · low\n"
-        frames = [sidebar + f"{VERTICAL_DIVIDER} › Type a task", sidebar + f"{VERTICAL_DIVIDER} › unsent draft",
-                  "+ New Session                Archived\nSettings"]
+        sidebar = f" + New chat                Archived {VERTICAL_DIVIDER}\n   Settings {VERTICAL_DIVIDER} gpt-6-luna · low\n"
+        frames = [sidebar + f"{VERTICAL_DIVIDER} › What shall we work on?", sidebar + f"{VERTICAL_DIVIDER} › unsent draft",
+                  "+ New chat                Archived\nSettings"]
         self.screen.observe = Mock(side_effect=frames)
         self.case.json.side_effect = [copy.deepcopy(self.report), copy.deepcopy(self.listing)]
         readiness = []
@@ -312,7 +312,7 @@ class UpgradeEmptyChatTest(unittest.TestCase):
     def test_legacy_and_stitch_dividers_preserve_overview_and_upgrade_readiness(self):
         for divider in DIVIDER_GLYPHS:
             with self.subTest(divider=divider):
-                sidebar = f"{'+ New Session'.ljust(40)}{divider} chat\n{'Settings'.ljust(40)}{divider} model\n"
+                sidebar = f"{'+ New chat'.ljust(40)}{divider} chat\n{'Settings'.ljust(40)}{divider} model\n"
                 with self.assertRaises(NotReady):
                     self.hidden(sidebar + f"{''.ljust(40)}{divider} › unsent draft")
                 self.screen.observe = lambda: f"{'Settings 38 MB'.ljust(40)}{divider} chat"
@@ -322,7 +322,7 @@ class UpgradeEmptyChatTest(unittest.TestCase):
                 self.assertIn("gpt-6-luna", self.screen.empty_chat(self.case, self.session))
 
     def test_hidden_projection_does_not_weaken_stored_identity_or_zero_messages(self):
-        frame = "+ New Session\nSettings"
+        frame = "+ New chat\nSettings"
         self.case.json.reset_mock()
         self.hidden(frame)
         self.assertEqual(self.case.json.call_args_list, [

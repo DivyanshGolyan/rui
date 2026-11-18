@@ -7,7 +7,7 @@ A working chat shows **Thinking** or the running tool and offers **ctrl+x stop**
 - Ctrl-X stops work in the open chat or on the selected list row. Clicking the chat's **ctrl+x stop** hint uses the same action.
 - A queued follow-up shows **◌** and its text. Parallel tools have their own working marks.
 - The first settled stop frame and its list row agree; the old answer preview must not survive as the stop result.
-- An unreadable reply shows **× Model reply unreadable · ctrl+r retries**. Ctrl-R retries through the existing request handling.
+- An unreadable reply shows **× The model's reply didn't come through · ctrl+r retries**. Ctrl-R retries through the existing request handling.
 - A stopped Host offers a start or retry when available. Use the shown control; `r` is the start key in chat. A ready Host removes the stopped notice.
 
 ## How to get to it (user POV)

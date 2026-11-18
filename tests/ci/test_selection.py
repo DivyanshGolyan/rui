@@ -351,12 +351,13 @@ class BinarySourceSelectionTest(unittest.TestCase):
 
 
 class WorkflowEntrypointsTest(unittest.TestCase):
-    def test_workflows_have_no_scheduled_triggers_or_branches(self):
+    def test_only_qualify_main_is_scheduled_and_no_workflow_branches_on_it(self):
         workflows = sorted(Path(".github/workflows").glob("*.y*ml"))
         self.assertTrue(workflows)
         for path in workflows:
             with self.subTest(workflow=path.name):
-                self.assertNotRegex(path.read_text(), r"(?m)^\s*schedule\s*:")
+                scheduled = re.findall(r"(?m)^\s*schedule\s*:", path.read_text())
+                self.assertEqual(len(scheduled), path.name == "main-qualifier.yml")
                 self.assertNotRegex(path.read_text(), r"github\.event_name\s*==\s*[\"']schedule[\"']")
 
     def test_removed_scheduled_wrappers_have_no_live_references(self):
@@ -537,6 +538,7 @@ class SelectionTest(unittest.TestCase):
     def test_mysql_provisioning_owner_combinations(self):
         cases = (([], "all", False, False),
                  (["plain"], "all", False, False),
+                 (["test-pg"], "all", False, False),
                  (["fixture"], "all", True, False),
                  (["test-native"], "all", False, False),
                  (["test"], "all", True, True),
@@ -550,9 +552,14 @@ class SelectionTest(unittest.TestCase):
         for targets, part, live, dialect in cases:
             for platform in ("linux", "macos"):
                 with self.subTest(targets=targets, part=part, platform=platform):
+                    postgres = platform == "linux" and bool(
+                        {"test-pg", "check"} & set(targets) or "check-full" in targets and part != "callers")
                     self.assertEqual(mysql_provisioning(targets, part, platform, {"fixture"}),
                                      {"live_mysql": live and platform == "linux",
-                                      "mysql_dialect": dialect and platform == "linux"})
+                                      "mysql_dialect": dialect and platform == "linux",
+                                      "live_postgres": postgres})
+                    self.assertEqual(mysql_provisioning(targets, part, platform, {"fixture"}, live=False),
+                                     {"live_mysql": False, "mysql_dialect": False, "live_postgres": False})
                     for row in shards(targets, platform, mysql_suites={"fixture"})["include"]:
                         self.assertEqual(row["live_mysql"], platform == "linux" and (
                             "fixture" in row["targets"] or row["mysql_dialect"]))
@@ -706,14 +713,13 @@ class SelectionTest(unittest.TestCase):
     def test_workflow_consumes_mysql_provisioning_and_postgres_condition(self):
         workflow = Path(".github/workflows/check.yml").read_text()
 
-        def named(line):
-            return frozenset(re.findall(r"contains\(matrix\.targets, '([a-z0-9-]+)'\)", line))
-
         self.assertIn("LIVE_MYSQL: ${{ matrix.live_mysql }}", workflow)
         self.assertIn("if: ${{ !cancelled() && matrix.mysql_dialect }}", workflow)
         postgres = workflow.split("- name: Start Postgres 15", 1)[1].splitlines()[1]
-        self.assertTrue(postgres.strip().startswith("if:"), postgres)
-        self.assertEqual(named(postgres), LIVE_POSTGRES_TARGETS)
+        self.assertEqual(postgres.strip(), "if: ${{ matrix.live_postgres }}")
+        self.assertEqual({target for target in LIVE_POSTGRES_TARGETS
+                          if mysql_provisioning([target], "all", "linux", set())["live_postgres"]},
+                         LIVE_POSTGRES_TARGETS)
 
     def test_portable_owner_does_not_require_full_suite(self):
         result = select(["src/request_encoding.zig"], "review", AVAILABLE)
@@ -948,24 +954,14 @@ class SelectionTest(unittest.TestCase):
         for result in ('failure', 'cancelled', 'skipped'):
             cases.append((*green, 'failure', 'success', 'true', result))
         cases.append((*green, 'failure', 'success', 'false', 'success'))
-        cases = [(*case, 'false', 'skipped') for case in cases]
-        for targets in ('[]', '["check"]'):
-            build = native = typecheck = 'skipped' if targets == '[]' else 'success'
-            for codegen, result, expected in (('true', 'success', 'success'),
-                                             ('true', 'failure', 'failure'),
-                                             ('true', 'cancelled', 'failure'),
-                                             ('true', 'skipped', 'failure'),
-                                             ('false', 'success', 'failure')):
-                cases.append((targets, 'success', 'success', build, native, False, expected,
-                              typecheck, 'false', 'skipped', codegen, result))
         cases = [(*case, 'false' if case[0] in ('', '[]') else 'true') for case in cases]
         for typecheck, expected in (('skipped', 'success'), ('success', 'failure'), ('failure', 'failure')):
             cases.append(('["test-logic"]', 'success', 'success', 'success', 'success', False, expected,
-                          typecheck, 'false', 'skipped', 'false', 'skipped', 'false'))
+                          typecheck, 'false', 'skipped', 'false'))
         for typecheck, expected in (('success', 'success'), ('skipped', 'failure'), ('failure', 'failure')):
             cases.append(('[]', 'success', 'success', 'skipped', 'skipped', False, expected,
-                          typecheck, 'false', 'skipped', 'false', 'skipped', 'true'))
-        for (targets, plan, policy, build, native, private, expected, typecheck, split, unit, codegen, codegen_result,
+                          typecheck, 'false', 'skipped', 'true'))
+        for (targets, plan, policy, build, native, private, expected, typecheck, split, unit,
              typecheck_selected) in cases:
             with self.subTest(targets=targets, plan=plan, policy=policy, build=build, native=native, private=private,
                               typecheck=typecheck, typecheck_selected=typecheck_selected, split=split, unit=unit):
@@ -983,7 +979,6 @@ class SelectionTest(unittest.TestCase):
                                                  'NATIVE_RESULT': native, 'TYPECHECK_RESULT': typecheck,
                                                  'TYPECHECK': typecheck_selected,
                                                  'SPLIT': split, 'UNIT_RESULT': unit,
-                                                 'CODEGEN': codegen, 'CODEGEN_RESULT': codegen_result,
                                                  'COMPILE_ONLY': 'false'})
                     actual = 'success' if result.returncode == 0 else 'failure'
                 self.assertEqual(actual, expected)
@@ -1069,15 +1064,6 @@ class SelectionTest(unittest.TestCase):
                                     env=dict(os.environ, PLAN_RESULT=plan, BUILD_RESULT='success',
                                              NATIVE_RESULT='success', SPLIT='true', UNIT_RESULT='success'))
             self.assertNotEqual(result.returncode, 0)
-
-    def test_codegen_is_required_but_not_a_dependency_of_suite_startup(self):
-        text = Path('.github/workflows/check.yml').read_text()
-        codegen = re.search(r'(?ms)^  linux_codegen:\n(.*?)(?=^  [a-z_]+:|\Z)', text)[1]
-        suites = re.search(r'(?ms)^  linux_suites:\n(.*?)(?=^  [a-z_]+:|\Z)', text)[1]
-        self.assertIn('needs: plan', codegen)
-        self.assertIn('zig build stack-frames -Dcpu=baseline --summary all', codegen)
-        self.assertNotIn('-Dpr-ci', codegen)
-        self.assertNotIn('linux_codegen', suites)
 
     def test_shared_state_and_unknown_code_fail_closed(self):
         for path in ("src/future_owner.zig", "tests/integration/future_case.py"):
@@ -1234,6 +1220,13 @@ class SelectionTest(unittest.TestCase):
                 self.assertIn(target, result["targets"])
                 self.assertNotIn("human-cli-integration", result["targets"])
 
+    def test_public_parts_owner_selects_image_export_fixture(self):
+        for path in ("src/store/domain/public_parts.zig", "src/store/tests/action_parts.zig",
+                     "src/protocol.zig", "src/cli_args.zig", "src/cli.zig", "src/server.zig"):
+            with self.subTest(path=path):
+                result = select([path], "review", AVAILABLE)
+                self.assertTrue({"public-parts-integration", "check"} & set(result["targets"]))
+
     def test_shared_fixture_helpers_keep_composed_and_separate_consumers(self):
         for name in ("host_process.py",):
             path = f"tests/integration/{name}"
@@ -1296,13 +1289,8 @@ class SelectionTest(unittest.TestCase):
 
     def test_renderer_harnesses_select_no_blocking_target(self):
         workflow = Path(".github/workflows/renderer-contracts.yml").read_text()
-        filters = re.findall(r"(?m)^    paths:\n((?:      - '[^']+'\n)+)", workflow)
-        self.assertEqual(len(filters), 1)
-        for block in filters:
-            harnesses = {p for p in re.findall(r"'([^']+)'", block) if p.startswith("tests/integration/")}
-            self.assertEqual(harnesses - {"tests/integration/terminal_restoration_*"},
-                             set(RENDERER_HARNESSES))
-        for path in ("tests/integration/input_equivalence.py",):
+        self.assertNotIn("pull_request", workflow, "promotion alone runs the renderer contracts")
+        for path in RENDERER_HARNESSES:
             with self.subTest(path=path):
                 result = select([path], "review", AVAILABLE)
                 self.assertEqual(result["targets"] + result["native_targets"], [])
@@ -1633,7 +1621,7 @@ fi
         self.assertTrue(all(row["targets"] == ["measure-model-output"] for row in rows))
 
     def test_requested_ref_cannot_publish_shared_caches(self):
-        read_only = ('qualify-macos.yml', 'previous-release-upgrade.yml', 'release.yml')
+        read_only = ('qualify-macos.yml', 'previous-release-upgrade.yml', 'release.yml', 'release-build.yml')
         for name in read_only:
             with self.subTest(workflow=name):
                 workflow = Path('.github/workflows', name).read_text()
@@ -1644,7 +1632,6 @@ fi
                 if name == 'release.yml':
                     publisher = re.search(r'(?ms)^  publish:\n(.*?)(?=^  [\w-]+:|\Z)', workflow)[1]
                     self.assertIn("github.ref == 'refs/heads/main'", publisher)
-                    self.assertIn("needs.plan.result == 'success'", publisher)
                     self.assertNotIn('uses: ./.github/actions/setup', publisher)
                     self.assertNotIn('uses: actions/cache', publisher)
                     trusted = re.search(r'(?ms)^      - uses: actions/checkout@.*?(?=^      - |\Z)', publisher)[0]

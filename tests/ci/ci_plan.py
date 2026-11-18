@@ -52,12 +52,21 @@ def plan(selection: dict, *, event_name: str, draft: bool, promotion: bool,
         quarantine = 'off'
     elif promotion:
         core = {'check-full', 'test-logic', 'admission-debug-integration'}
-        p['targets'] = sorted(normalize(set(p['targets']) | core) | {'stack-frames'})
+        # Every check the PR tier skips runs here whatever the batch touched: the LLVM frame
+        # gate and the live MySQL wire client, as well as native macOS below.
+        p['targets'] = sorted(normalize(set(p['targets']) | core) | {'stack-frames', 'mysql-wire-integration'})
         p['targets'] = sorted(set(p['targets']) | live_mysql_suites(p['targets'], p['mysql_suites']))
         p['native_targets'] = sorted(normalize(set(p['native_targets']) | core))
         p['retry'] = False
     elif ready_pr:
-        p['native_targets'] = (p['native_targets'] or ['check']) if p['mac_required'] else []
+        # The PR tier: Linux compilation and select_tests.fast_tier's Linux suites, on SQLite
+        # only. Promotion owns whole-suite gates, live engines, macOS, the LLVM frame gate,
+        # the upgrade, cache-execution and Linux memory checks.
+        p['targets'] = list(p['fast_targets'])
+        p['native_targets'] = []
+        p['cache_execution_checks'] = False
+        p['typecheck_macos'] = False
+        p['linux_memory_checks'] = False
         p['retry'] = False
     else:
         p['native_targets'] = []
@@ -72,12 +81,7 @@ def plan(selection: dict, *, event_name: str, draft: bool, promotion: bool,
         p['native_targets'] = list(native_targets)
         p['retry'] = False
         quarantine = 'off'
-    p['linux_codegen'] = (event_name == 'pull_request'
-                          and bool({'check', 'stack-frames'} & set(p['targets'])))
-    if p['linux_codegen']:
-        p['targets'] = [t for t in p['targets'] if t != 'stack-frames']
     p['native_required'] = bool(p['native_targets'])
-    p['upgrade_required'] = ready_pr and kind == ChangeKind.NORMAL and p['upgrade_required']
     compile_targets = list(p['targets'])
     if ready_pr and kind == ChangeKind.NORMAL and p.get('unit_compile_required', False):
         if not {'test', 'check', 'check-full'} & set(compile_targets):
@@ -89,13 +93,11 @@ def plan(selection: dict, *, event_name: str, draft: bool, promotion: bool,
         targets=p['targets'],
         linux_compile_targets=compile_targets,
         native_targets=p['native_targets'],
-        linux_matrix=shards(p['targets'], mysql_suites=p['mysql_suites']),
+        linux_matrix=shards(p['targets'], mysql_suites=p['mysql_suites'], live=not ready_pr),
         linux_split=split_build(compile_targets),
         macos_split=split_build(p['native_targets']),
-        linux_codegen=p['linux_codegen'],
         macos_matrix=shards(p['native_targets'], 'macos', mysql_suites=p['mysql_suites']),
         native=p['native_required'],
-        upgrade=p['upgrade_required'],
         retry=p['retry'],
         quarantine=quarantine,
         linux_memory=p['linux_memory_checks'],

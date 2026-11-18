@@ -4,6 +4,7 @@ const cli_grammar = @import("cli_grammar.zig");
 const serve_grammar = @import("serve_grammar.zig");
 const core_tools = @import("core_tools.zig");
 const TestObservation = @import("TestObservation.zig");
+const HostDiagnostics = @import("HostDiagnostics.zig");
 const trace_native = @import("posix");
 const bash = @import("bash.zig");
 const environment = @import("environment.zig");
@@ -105,9 +106,6 @@ pub const Hooks = struct {
         model_launch: store_module.AttemptBinding,
         action_result: store_module.ActionAttemptBinding,
         model_result: store_module.AttemptBinding,
-        preparation_advanced,
-        bash_exit_observed,
-        shutdown_signalled,
     };
 
     pub const Hold = struct {
@@ -238,7 +236,6 @@ pub const Tuning = struct {
             hooks.pauses.getPtr(.action_result).delay_ms = delay;
             hooks.pauses.getPtr(.model_result).delay_ms = delay;
         }
-        hooks.pauses.getPtr(.model_result).gate_path = parsed.get("test-model-result-gate-path");
         hooks.retry_recovery_gate_path = parsed.get("test-retry-recovery-gate-path");
         hooks.inspection_reply.gate_path = parsed.get("test-inspection-reply-gate-path");
         if (try parsed.number(i64, "test-inspection-reply-delay-ms")) |delay| hooks.inspection_reply.delay_ms = delay;
@@ -252,8 +249,6 @@ pub const Tuning = struct {
         if (try parsed.number(c_int, "test-observation-state-fd")) |fd| hooks.observation_state_fd = fd;
         if (parsed.get("test-observation-plan")) |plan| hooks.observation_plan = std.meta.stringToEnum(TestObservation.Plan, plan) orelse
             return error.InvalidTestObservationPlan;
-        hooks.pauses.getPtr(.bash_exit_observed).gate_path = parsed.get("test-bash-observed-exit-gate-path");
-        hooks.pauses.getPtr(.shutdown_signalled).gate_path = parsed.get("test-shutdown-signalled-gate-path");
         hooks.bash_reclaim_gate_path = parsed.get("test-bash-cleanup-gate-path");
         const control_gate_keys = parsed.get("test-control-gate-keys");
         const control_gate_path = parsed.get("test-control-gate-path");
@@ -264,7 +259,6 @@ pub const Tuning = struct {
         if (try parsed.number(u64, "test-request-scratch-limit")) |limit| limits.request_scratch_limit_bytes = limit;
         if (try parsed.number(usize, "test-request-preparation-byte-allowance")) |allowance| limits.request_preparation_byte_allowance = allowance;
         if (try parsed.number(usize, "test-request-preparation-item-allowance")) |allowance| limits.request_preparation_item_allowance = allowance;
-        if (try parsed.number(i64, "test-request-preparation-advance-delay-ms")) |delay| hooks.pauses.getPtr(.preparation_advanced).delay_ms = delay;
         if ((control_gate_keys == null) != (control_gate_path == null)) return error.IncompleteControlGate;
         if (control_gate_keys) |keys| hooks.control_gate = .{ .keys = keys, .path = control_gate_path.? };
         return tuning;
@@ -307,7 +301,6 @@ test "the hidden serve options narrow a Host" {
     try std.testing.expectEqual(@as(i64, 10_000), held.hooks.pauses.get(.model_launch).delay_ms);
     try std.testing.expectEqual(@as(i64, 5), held.hooks.pauses.get(.action_result).delay_ms);
     try std.testing.expectEqual(@as(i64, 5), held.hooks.pauses.get(.model_result).delay_ms);
-    try std.testing.expectEqual(@as(i64, 0), held.hooks.pauses.get(.preparation_advanced).delay_ms);
     try std.testing.expectError(error.InvalidRetryWaits, tuningFor(&.{ "--test-retry-waits-ms", "1,2" }));
 
     try std.testing.expectError(error.IncompleteControlGate, tuningFor(&.{ "--test-control-gate-keys", "k" }));
@@ -371,6 +364,8 @@ pub const Host = struct {
     trace_sequence: u64 = 0,
     trace_lost: std.atomic.Value(bool) = .init(false),
     test_observation: ?*TestObservation = null,
+    /// Attached after readiness, when the Host's stderr may be /dev/null; launch_mutex guards writes.
+    diagnostics: ?*HostDiagnostics = null,
     last_unprocessed_completions: ?u64 = null,
 
     pub fn launchAllowed(self: *const Host) bool {
@@ -391,6 +386,23 @@ pub const Host = struct {
         const previous = self.phase.load(.monotonic);
         if (@backingInt(target) > @backingInt(previous)) self.phase.store(target, .release);
         return previous;
+    }
+
+    /// Advances like `advance`, and records the reason when this call made the transition.
+    pub fn fence(self: *Host, target: Phase, phase: []const u8, err: anyerror) Phase {
+        self.launch_mutex.lockUncancelable(self.io);
+        defer self.launch_mutex.unlock(self.io);
+        const previous = self.phase.load(.monotonic);
+        if (@backingInt(target) <= @backingInt(previous)) return previous;
+        self.phase.store(target, .release);
+        if (self.diagnostics) |writer| writer.recordAs(@tagName(target), phase, @errorName(err));
+        return previous;
+    }
+
+    pub fn attachDiagnostics(self: *Host, writer: *HostDiagnostics) void {
+        self.launch_mutex.lockUncancelable(self.io);
+        defer self.launch_mutex.unlock(self.io);
+        self.diagnostics = writer;
     }
 
     pub fn stopAsked(self: *Host) bool {
@@ -566,7 +578,7 @@ pub const BashWork = union {
 };
 
 pub fn fenceDispatch(host: *Host, phase: []const u8, err: anyerror) void {
-    if (host.advance(.stopping) == .stopping) return;
+    if (host.fence(.stopping, phase, err) == .stopping) return;
     stderr.print("rui: dispatch fenced after {s} failure: {s}\nHost cannot safely continue; wait for shutdown before restarting this Store. Use saved request handles; do not resubmit uncertain work.\n", .{ phase, @errorName(err) });
     wakeListener(host);
 }
@@ -576,7 +588,7 @@ pub fn wakeListener(host: *Host) void {
 }
 
 pub fn retainDispatchFence(host: *Host, phase: []const u8, err: anyerror) void {
-    _ = host.advance(.fenced);
+    _ = host.fence(.fenced, phase, err);
     stderr.print("rui: dispatch fenced after {s} failure: {s}\nNew work is blocked; retained cleanup is still owned. Inspect saved requests; do not resubmit uncertain work.\n", .{ phase, @errorName(err) });
 }
 
@@ -948,15 +960,13 @@ noinline fn writeActionDeadlineTrace(
 
 pub fn pause(host: *Host, point: Hooks.Pause) void {
     const hold = host.hooks.pauses.get(point);
-    if (hold.delay_ms == 0 and hold.gate_path == null) return;
+    if (hold.delay_ms == 0) return;
     switch (point) {
         .action_launch => |binding| traceAction(host, "prepared_before_handoff", binding),
         .model_launch => |binding| traceOperation(host, "prepared_before_handoff", binding),
         .action_result => |binding| traceAction(host, "sealed_before_settlement", binding),
         .model_result => |binding| traceOperation(host, "sealed_before_settlement", binding),
-        .preparation_advanced, .bash_exit_observed, .shutdown_signalled => {},
     }
-    if (hold.gate_path) |path| waitAtTestGate(host, path);
     if (hold.delay_ms != 0) host.io.sleep(.fromMilliseconds(hold.delay_ms), .awake) catch {};
 }
 
@@ -980,32 +990,6 @@ pub fn bashReclaimHeld(host: *Host, binding: store_module.ActionAttemptBinding, 
     if (testGateActive(host, path)) return true;
     if (!attempted) traceAction(host, "cleanup_release_observed", binding);
     return false;
-}
-
-pub fn waitAtTestGate(host: *Host, path: []const u8) void {
-    // Release is a byte or persistent EOF after unlink/sole-writer close.
-    // macOS does not broadcast EOF to all already-blocked FIFO reads. Keep
-    // reads nonblocking so every waiter observes the shared release fact,
-    // including an opener that resolved the name before it was unlinked.
-    const fd = std.posix.openat(std.posix.AT.FDCWD, path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true, .CLOEXEC = true }, 0) catch return;
-    var gate: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = true } };
-    defer gate.close(host.io);
-    var release: [1]u8 = undefined;
-    var waiting_traced = false;
-    while (true) {
-        _ = std.posix.read(fd, &release) catch |err| switch (err) {
-            error.WouldBlock => {
-                if (!waiting_traced) {
-                    traceSubject(host, "test_gate_waiting", "path", path);
-                    waiting_traced = true;
-                }
-                std.Io.sleep(host.io, .fromMilliseconds(10), .awake) catch return;
-                continue;
-            },
-            else => return,
-        };
-        return;
-    }
 }
 
 pub fn testGateActive(host: *Host, path: []const u8) bool {

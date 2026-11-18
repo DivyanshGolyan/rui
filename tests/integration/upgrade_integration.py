@@ -923,8 +923,8 @@ class TerminalScreen:
 
     def launch_overview(self):
         frame = wait_for(self.observe, "wide launch chat beside the overview", timeout=15,
-                         ready=lambda screen: "+ New Session" in screen and any(split_pane_row(row)[1] for row in screen.splitlines())
-                         and "Type a task" in screen and self.capture.draft("", 2))
+                         ready=lambda screen: "+ New chat" in screen and any(split_pane_row(row)[1] for row in screen.splitlines())
+                         and "What shall we work on?" in screen and self.capture.draft("", 2))
         assert "Settings" in frame, frame
         self.send("\x1b")
         return self.overview()
@@ -932,11 +932,11 @@ class TerminalScreen:
     def overview(self, *, ready=True):
         frame = wait_for(self.observe, "terminal overview list and footer", timeout=15,
                          ready=lambda screen: all(shown(marker, screen) for marker in
-                                                  ("+ New Session", "Settings"))
+                                                  ("+ New chat", "Settings"))
                          and "Notifications" not in screen
-                         and "Type a task" not in screen
+                         and "What shall we work on?" not in screen
                          and not any(re.match(r"\s*[›>](?: |$)", split_pane_row(row)[2]) for row in screen.splitlines()))
-        assert "Type a task" not in frame, ("overview has an editor", frame)
+        assert "What shall we work on?" not in frame, ("overview has an editor", frame)
         assert not any(re.match(r"\s*[›>](?: |$)", split_pane_row(row)[2]) for row in frame.splitlines()), ("overview has a composer", frame)
         return frame
 

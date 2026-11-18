@@ -2751,9 +2751,41 @@ def frame_divider_column(lines):
     return None
 
 
+FRAME_WORDING = (
+    ("What shall we work on?", "Type a task"),
+    ("New chat", "New Session"),
+    ("Chats  Archived", "Sessions  Archived"),
+    ("Welcome to Rui", "Sign in to Rui"),
+    ("Sign in to begin.", "Choose an account."),
+    ("No chats yet.", "No unarchived Sessions.", "No Sessions yet."),
+    ("No archived chats", "No archived Sessions"),
+    ("The model's reply didn't come through", "Model reply unreadable"),
+    ("That didn't work", "Something went wrong"),
+    ("Your chats keep working while you are away.", "Detached. Host work continues."),
+)
+
+
+def frame_wording(text):
+    variants = {text}
+    for group in FRAME_WORDING:
+        expanded = set(variants)
+        for value in variants:
+            for item in group:
+                if item in value:
+                    expanded.update(value.replace(item, other) for other in group)
+        variants = expanded
+    if text in ("Close", "[ Close ]"):
+        variants.update(("Close", "[ Close ]"))
+    return variants
+
+
+def frame_wording_contains(text, plain):
+    return any(variant in plain for variant in frame_wording(text))
+
+
 def frame_wait(run, terminal, text, absent=False, timeout=20, allow_exit=False, empty_composer=False):
     def ready(capture):
-        if (text in capture.completed) == absent:
+        if frame_wording_contains(text, capture.completed) == absent:
             return False
         if not empty_composer:
             return True
@@ -2916,14 +2948,14 @@ def frame_steps(run, terminal, steps, exiting=False):
 def frame_initial_ready(terminal, first_wait=None, allow_exit=False):
     def ready(capture):
         text = capture.completed
-        guided = (re.search(r"^ *Sign in to Rui *$", text, re.M) is not None
+        guided = (any(re.search(r"^ *" + re.escape(title) + r" *$", text, re.M)
+                      for title in frame_wording("Welcome to Rui"))
                   and all(re.search(r"^ *" + re.escape(label) + r" {2,}\S", text, re.M)
                           for label in ("ChatGPT", "API key"))
-                  and re.search(r"^ *(?:Close {2,}\S|\[ Close \] *$)", text, re.M) is not None
-                  and re.search(r"^ *(?:Navigation {2,})?Tab / Shift-Tab", text, re.M) is not None)
-        return (("›" in text or all(marker in text for marker in
-                 ("+ New Session", "Settings")) or guided)
-                and "Opening…" not in text and (not first_wait or first_wait in text))
+                  and any(re.search(r"^ *" + re.escape(close) + r"(?: {2,}\S| *$)", text, re.M)
+                          for close in frame_wording("Close")))
+        return (("›" in text or ("Settings" in text and frame_wording_contains("+ New chat", text)) or guided)
+                and "Opening…" not in text and (not first_wait or frame_wording_contains(first_wait, text)))
 
     terminal.wait(ready, "initial screen ready" + (f" with {first_wait!r}" if first_wait else ""),
                   allow_exit=allow_exit)
@@ -2958,11 +2990,11 @@ def frame_row_failure(state, plain):
         for text in sidebar:
             if re.fullmatch(pattern, text):
                 return f"unexpected sidebar row matching {pattern!r}: {text!r}"
-    if (last := state.get("expect_last")) and (not lines or last not in lines[-1]):
+    if (last := state.get("expect_last")) and (not lines or not frame_wording_contains(last, lines[-1])):
         return f"last physical row must contain {last!r}"
     for row, detail in state.get("expect_next", {}).items():
-        at = next((i for i, line in enumerate(lines) if row in line), None)
-        if at is None or at + 1 >= len(lines) or detail not in lines[at + 1]:
+        at = next((i for i, line in enumerate(lines) if frame_wording_contains(row, line)), None)
+        if at is None or at + 1 >= len(lines) or not frame_wording_contains(detail, lines[at + 1]):
             return f"row {row!r} must be followed by {detail!r}"
     for pattern in state.get("expect_regex", []):
         if re.search(pattern, plain, re.MULTILINE) is None:
@@ -2976,19 +3008,22 @@ def frame_row_failure(state, plain):
     return None
 
 
-def frame_marker_cells(frame, text):
+def frame_marker_cells(frame, text, compatible=False):
     """Return the committed cells spanning text's first occurrence, or None."""
     for row in frame.cells:
-        start = "".join(cell.data for cell in row).find(text)
-        if start < 0:
-            continue
-        offset, matched = 0, []
-        for cell in row:
-            end = offset + len(cell.data)
-            if end > start and offset < start + len(text):
-                matched.append(cell)
-            offset = end
-        return matched
+        plain = "".join(cell.data for cell in row)
+        markers = (text, *sorted(frame_wording(text) - {text})) if compatible else (text,)
+        for marker in markers:
+            start = plain.find(marker)
+            if start < 0:
+                continue
+            offset, matched = 0, []
+            for cell in row:
+                end = offset + len(cell.data)
+                if end > start and offset < start + len(marker):
+                    matched.append(cell)
+                offset = end
+            return matched
     return None
 
 
@@ -2998,7 +3033,7 @@ def frame_dim_failure(state, frame):
         if frame.columns < rule.get("min_columns", 1):
             continue
         text = rule["text"]
-        cells = frame_marker_cells(frame, text)
+        cells = frame_marker_cells(frame, text, compatible=True)
         if cells is None:
             return f"missing dim specimen {text!r}"
         if not all(cell.faint == rule["dim"] for cell in cells):
@@ -3031,7 +3066,7 @@ def frame_style_failure(state, frame):
 def frame_background_failure(state, frame):
     """Assert committed cell backgrounds under each marker, not output bytes."""
     for text, color in state.get("expect_background", {}).items():
-        cells = frame_marker_cells(frame, text)
+        cells = frame_marker_cells(frame, text, compatible=True)
         if cells is None:
             return f"missing background specimen {text!r}"
         if not all(frame.colors(cell)[1] == color[1:].lower() for cell in cells):
@@ -3040,7 +3075,7 @@ def frame_background_failure(state, frame):
 
 
 def frame_contains(text, plain):
-    if text in plain:
+    if frame_wording_contains(text, plain):
         return True
     if text.startswith("https://"):
         from terminal_screen import shown
@@ -3055,7 +3090,7 @@ def frame_ready(terminal, state, allow_exit=False, sessions=None):
         return
     expected, absent = frame_expectations(state), frame_absences(state, sessions)
     terminal.wait(lambda c: all(frame_contains(text, c.completed) for text in expected)
-                  and all(text not in c.completed for text in absent)
+                  and all(not frame_wording_contains(text, c.completed) for text in absent)
                   and frame_row_failure(state, c.completed) is None,
                   "state expectations: " + repr({
                       "expect": expected, "absent": absent, "absent_regex": frame_absent_regex(state)}),
@@ -3072,7 +3107,7 @@ def frame_capture(run, target, out, state, size, reason):
     missing = next((text for text in frame_expectations(state) if not frame_contains(text, plain)), None)
     if missing is not None and reason is None:
         reason = f"state left before capture: {missing}"
-    unexpected = next((text for text in frame_absences(state, run.meta.get("sessions", {})) if text in plain), None)
+    unexpected = next((text for text in frame_absences(state, run.meta.get("sessions", {})) if frame_wording_contains(text, plain)), None)
     if unexpected is not None and reason is None:
         reason = f"unexpected on screen: {unexpected}"
     if reason is None:
@@ -3267,7 +3302,9 @@ def frame_chat_ready(plain, witness=None, empty=False):
         prompt = pane(lines[top + 1])
         if re.match(r"^\s*[›>](?:\s|$)", prompt) is None:
             continue
-        if empty and (top + 2 != index or re.fullmatch(r"\s*[›>]\s+Type a task\s*", prompt) is None):
+        if empty and (top + 2 != index or not any(
+                re.fullmatch(r"\s*[›>]\s+" + re.escape(placeholder) + r"\s*", prompt)
+                for placeholder in frame_wording("What shall we work on?"))):
             continue
         footer = []
         for line in lines[index + 1:index + 4]:
@@ -3288,19 +3325,20 @@ def frame_failure_settled(terminal, before):
                   "failed Upgrade reread the open conversation")
 
 
-def frame_drive_upgrade(run, terminal, state, fixture):
+def frame_drive_upgrade(run, terminal, state, fixture, steps=None):
+    steps = steps or frame_steps
     if fixture is None:
         return
     releases, gate, version = fixture
     if state["upgrade"] != "chat":
-        frame_wait(run, terminal, "Type a task")
+        frame_wait(run, terminal, "What shall we work on?")
     before = state.get("comparison_side") == "before"
     if state["upgrade"] in ("current", "available"):
         if before:
             return
         terminal.wait(lambda _c: f"/releases/tag/v{releases.version}" in releases.requests, "release discovery HTTP response")
         return
-    frame_steps(run, terminal, [{"mouse": {"at": "Settings", "do": "click"}}, {"wait": "Notifications"},
+    steps(run, terminal, [{"mouse": {"at": "Settings", "do": "click"}}, {"wait": "Notifications"},
                                 {"keys": ["Down"] * 5 + ["Enter"]}])
     if gate is not None:
         frame_wait(run, terminal, " · publishing", timeout=40)
@@ -3317,7 +3355,7 @@ def frame_drive_upgrade(run, terminal, state, fixture):
         if status["instance"] == run.meta["upgrade_previous_instance"]:
             raise FrameFailure("Upgrade did not replace the original Host instance")
         return
-    frame_steps(run, terminal, [{"keys": ["Esc"]}, {"gone": "Notifications"}])
+    steps(run, terminal, [{"keys": ["Esc"]}, {"gone": "Notifications"}])
     if gate is not None and not before:
         selected = run.home / ".local/bin/rui"
         terminal.wait(lambda c: selected.resolve() != run.home / ".local/lib/rui/old/bin/rui"
