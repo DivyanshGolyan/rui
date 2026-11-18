@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"rui.local/qualification/measurement"
 )
 
 func TestWireRequestIncludesAllocatedIdentityAndNoSyntheticSystemMessage(t *testing.T) {
@@ -19,6 +21,22 @@ func TestWireRequestIncludesAllocatedIdentityAndNoSyntheticSystemMessage(t *test
 	}
 	if bytes.Equal(body, wireRequest("/other-workspace", "k7m2qx", [][]byte{userItem("capacity-1-0")})) {
 		t.Fatal("request oracle ignored the configuration's Workspace")
+	}
+}
+
+func TestWireRequestDeveloperBaselineAndHistory(t *testing.T) {
+	const workspace, session = "/workspace\"\n雪", "k7m2qx"
+	prefix := `{"model":"gpt-6-luna","parallel_tool_calls":true,"store":false,"stream":true,"include":["reasoning.encrypted_content"],"reasoning":{"effort":"medium"},"input":[{"role":"developer","content":[{"type":"input_text","text":` + measurement.JSONString(measurement.ModelInstructions(workspace, session, "gpt-6-luna")) + `}]}`
+	for _, items := range [][][]byte{nil, {userItem("one")}, {userItem("one"), userItem("two\n雪")}} {
+		want := []byte(prefix)
+		for _, item := range items {
+			want = append(want, ',')
+			want = append(want, item...)
+		}
+		want = append(want, []byte(`],"tools":[],"text":{"verbosity":"low"}}`)...)
+		if got := wireRequest(workspace, session, items); !bytes.Equal(got, want) {
+			t.Fatalf("wire request: got %s, want %s", got, want)
+		}
 	}
 }
 

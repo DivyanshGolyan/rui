@@ -806,3 +806,16 @@ func TestRequestSystemPrompt(t *testing.T) {
 		}
 	}
 }
+
+func TestDeveloperInstructionItem(t *testing.T) {
+	prompt := "quoted\" slash\\ newline\n control\x01 雪"
+	want := `{"role":"developer","content":[{"type":"input_text","text":"quoted\" slash\\ newline\n control\u0001 雪"}]}`
+	got := DeveloperInstructionItem(prompt)
+	if got != want {
+		t.Fatalf("developer item = %s, want %s", got, want)
+	}
+	read, err := RequestSystemPrompt([]byte(`{"input":[` + got + `]}`))
+	if err != nil || read != prompt {
+		t.Fatalf("round trip = %q, %v", read, err)
+	}
+}

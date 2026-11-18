@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -180,6 +181,17 @@ func TestExpectedCapacityRequestDigest(t *testing.T) {
 		if otherDigest == digest {
 			t.Fatal("request oracle ignored the configuration's Workspace")
 		}
+	}
+}
+
+func TestExpectedCapacityRequestDigestDeveloperBaseline(t *testing.T) {
+	const workspace, session, key = "/workspace\"\n雪", "k7m2qx", "capacity-1-0"
+	body := `{"model":"gpt-6-luna","parallel_tool_calls":true,"store":false,"stream":true,"include":["reasoning.encrypted_content"],"reasoning":{"effort":"medium"},"input":[{"role":"developer","content":[{"type":"input_text","text":` + measurement.JSONString(measurement.ModelInstructions(workspace, session, "gpt-6-luna")) + `}]},{"role":"user","content":[{"type":"input_text","text":"capacity-1-0"}]}],"tools":[],"text":{"verbosity":"low"}}`
+	bodyDigest := sha256.Sum256([]byte(body))
+	setDigest := sha256.Sum256([]byte(hex.EncodeToString(bodyDigest[:]) + "\n"))
+	gotBytes, gotDigest := expectedCapacityRequests([]string{key}, []string{session}, workspace, "/store")
+	if gotBytes != len(body) || gotDigest != hex.EncodeToString(setDigest[:]) {
+		t.Fatalf("got %d bytes, %s; want %d bytes, %x", gotBytes, gotDigest, len(body), setDigest)
 	}
 }
 

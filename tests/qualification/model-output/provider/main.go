@@ -553,9 +553,9 @@ func requestHistoryValid(body []byte, current, workspace, session string) bool {
 		if !ok || len(input) == 0 {
 			return false
 		}
-		baseline := map[string]any{
-			"role":    "developer",
-			"content": []any{map[string]any{"type": "input_text", "text": prompt}},
+		var baseline any
+		if json.Unmarshal([]byte(measurement.DeveloperInstructionItem(prompt)), &baseline) != nil {
+			return false
 		}
 		if !reflect.DeepEqual(input[0], baseline) {
 			return false

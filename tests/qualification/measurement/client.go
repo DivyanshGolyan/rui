@@ -49,6 +49,11 @@ func JSONString(value string) string {
 	return out.String()
 }
 
+// DeveloperInstructionItem encodes the baseline input item used by Responses codecs 2 and 3.
+func DeveloperInstructionItem(prompt string) string {
+	return `{"role":"developer","content":[{"type":"input_text","text":` + JSONString(prompt) + `}]}`
+}
+
 // RequestSystemPrompt reads the baseline from any supported Responses codec.
 func RequestSystemPrompt(body []byte) (string, error) {
 	var request struct {
