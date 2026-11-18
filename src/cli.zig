@@ -3156,7 +3156,7 @@ fn stopAllSessions(init: std.process.Init, parsed: *const cli_args.Parsed) !void
             return err;
         };
         for (page.rows[0..page.count]) |*row| {
-            if (!overview_view.rules.get(row.work.state).stoppable) continue;
+            if (!row.work.actions.stop) continue;
             const session = row.reference.slice();
             asked += 1;
             stderr.diagnostic("rui: stopping {s}\n", .{session});
