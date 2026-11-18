@@ -3000,7 +3000,7 @@ test "activity search wire validates query and paired backward cursor" {
     }
 }
 
-test "the request parser refuses what each command's grammar forbids" {
+test "WIR-1 wire_object_grammar" {
     const v = "{\"version\":\"" ++ wire_version ++ "\",";
     const message = v ++ "\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"sender\":null,\"sender_handle\":null,";
     const inspect = v ++ "\"kind\":\"inspect_session\",\"store\":\"s\",\"session\":\"peer\",";
@@ -3051,6 +3051,7 @@ test "the request parser refuses what each command's grammar forbids" {
         var parser: Tested.Parser = .{ .source = &source, .expected_kind = case.route, .captured = &.{ .{}, .{}, .{} } };
         if (case.failure) |failure| try std.testing.expectError(failure, parseForTest(&parser)) else _ = try parseForTest(&parser);
     }
+    try publicPartSelectorGrammar();
 }
 
 test "presets allow partial creating configure in either field order" {
@@ -3358,17 +3359,20 @@ test "Action promotion parses one owned target and binds semantic replay" {
     }
 }
 
-test "public part selectors validate owner, ordinal, and canonical numbers" {
-    const Case = struct { fields: []const u8, failure: ?anyerror = null };
+fn publicPartSelectorGrammar() !void {
+    const Case = struct { fields: []const u8, failure: ?anyerror = null, id: u64 = 1, ordinal: u64 = 0, action: bool = false };
     const cases = [_]Case{
         .{ .fields = "\"session\":\"k7m2qx\",\"id\":\"1\",\"ordinal\":\"0\",\"target\":\"message\"" },
-        .{ .fields = "\"session\":\"k7m2qx\",\"id\":\"4\",\"ordinal\":\"1499\",\"target\":\"action\"" },
-        .{ .fields = "\"session\":\"k7m2qx\",\"id\":\"4\",\"ordinal\":\"1500\",\"target\":\"action\"" },
+        .{ .fields = "\"target\":\"action\",\"ordinal\":\"1499\",\"id\":\"4\",\"session\":\"k7m2qx\"", .id = 4, .ordinal = 1499, .action = true },
+        .{ .fields = "\"session\":\"k7m2qx\",\"id\":\"4\",\"ordinal\":\"1500\",\"target\":\"action\"", .id = 4, .ordinal = 1500, .action = true },
         .{ .fields = "\"session\":\"k7m2qx\",\"id\":\"0\",\"ordinal\":\"0\",\"target\":\"message\"", .failure = error.InvalidCursor },
         .{ .fields = "\"session\":\"k7m2qx\",\"id\":\"1\",\"ordinal\":\"1501\",\"target\":\"message\"", .failure = error.InvalidCursor },
         .{ .fields = "\"session\":\"k7m2qx\",\"id\":\"01\",\"ordinal\":\"0\",\"target\":\"message\"", .failure = error.InvalidIdentity },
+        .{ .fields = "\"session\":\"k7m2qx\",\"id\":\"1\",\"ordinal\":\"00\",\"target\":\"message\"", .failure = error.InvalidIdentity },
         .{ .fields = "\"session\":\"k7m2qx\",\"id\":\"1\",\"ordinal\":\"0\"", .failure = error.MissingField },
         .{ .fields = "\"session\":\"k7m2qx\",\"id\":\"1\",\"ordinal\":\"0\",\"target\":\"other\"", .failure = error.InvalidTarget },
+        .{ .fields = "\"session\":\"k7m2qx\",\"id\":\"1\",\"ordinal\":\"0\",\"target\":\"message\",\"target\":\"action\"", .failure = error.UnexpectedField },
+        .{ .fields = "\"session\":\"k7m2qx\",\"id\":\"1\",\"ordinal\":\"0\",\"target\":\"message\",\"extra\":true", .failure = error.UnexpectedField },
     };
     inline for (.{ "public_part", "public_part_bytes" }) |kind| for (cases) |case| {
         var buffer: [512]u8 = undefined;
@@ -3380,9 +3384,14 @@ test "public part selectors validate owner, ordinal, and canonical numbers" {
         } else {
             const parsed = try parseForTest(&parser);
             const selected = if (comptime std.mem.eql(u8, kind, "public_part")) parsed.public_part else parsed.public_part_bytes;
-            try std.testing.expect(switch (selected.target) {
-                inline else => |id| id != 0,
-            } and selected.ordinal <= @import("input_parts.zig").max_parts);
+            try std.testing.expectEqual(case.ordinal, selected.ordinal);
+            try std.testing.expectEqual(case.action, selected.target == .action);
+            try std.testing.expectEqual(case.id, switch (selected.target) {
+                inline else => |id| id,
+            });
+            var wrong_source: MetadataSource = .{ .input = json };
+            var wrong_parser = Tested.Parser{ .source = &wrong_source, .expected_kind = if (comptime std.mem.eql(u8, kind, "public_part")) .public_part_bytes else .public_part };
+            try std.testing.expectError(error.RouteKindMismatch, parseForTest(&wrong_parser));
         }
     };
 }

@@ -8,13 +8,44 @@ import tempfile
 import subprocess
 import sys
 
+# Both build artifacts must remain addressable after the seed changes cwd.
+sys.argv[1:3] = [str(pathlib.Path(arg).resolve()) for arg in sys.argv[1:3]]
+
 import host_process
 import model_fixture as fixture
 
 
-def digest(value):
-    domain = b"rui/content/v1"
-    return hashlib.sha256(len(domain).to_bytes(8, "big") + domain + value).hexdigest()
+def INS_10_public_part_selection(store, seed, values):
+    # INS-10: selected typed metadata, image bytes, and refusals.
+    for resource, flag, identity in (("session", "--admission", seed["admission"]),
+                                     ("action", "--action", seed["action"])):
+        base = ["--store", str(store), "--session", seed["session"], flag, identity]
+        for ordinal, (kind, content, mime) in enumerate(values):
+            domain = b"rui/content/v1"
+            digest = hashlib.sha256(len(domain).to_bytes(8, "big") + domain + content).hexdigest()
+            expected = {"ordinal": str(ordinal), "type": kind, "bytes": str(len(content)), "sha256": digest}
+            if mime:
+                expected["mime"] = mime
+            assert fixture.command(resource, "inspect-part", *base, "--ordinal", str(ordinal))["part"] == expected
+            result = subprocess.run([str(fixture.RUI), resource, "read-image-part", *base,
+                                     "--ordinal", str(ordinal)], capture_output=True, timeout=15)
+            if kind == "image":
+                assert result.returncode == 0, (result.stdout, result.stderr)
+                assert result.stdout == content
+            else:
+                assert result.returncode != 0 and not result.stdout, (result.stdout, result.stderr)
+        assert fixture.command(resource, "inspect-part", *base, "--ordinal", "5")["part"] is None
+        for wrong in (["--store", str(store), "--session", seed["session"], flag, identity, "--ordinal", "5"],
+                      ["--store", str(store), "--session", "000000", flag, identity, "--ordinal", "1"]):
+            result = subprocess.run([str(fixture.RUI), resource, "read-image-part", *wrong], capture_output=True, timeout=15)
+            assert result.returncode != 0 and not result.stdout, (result.stdout, result.stderr)
+    result = subprocess.run([str(fixture.RUI), "action", "read", "--store", str(store),
+                             "--session", seed["session"], "--action", seed["action"]],
+                            capture_output=True, timeout=15)
+    assert result.returncode != 0 and not result.stdout, (result.stdout, result.stderr)
+    result = subprocess.run([str(fixture.RUI), "request", "inspect", "--store", str(store),
+                             "--key", "cli-mixed-message"], capture_output=True, timeout=15)
+    assert result.returncode != 0 and not result.stdout, (result.stdout, result.stderr)
 
 
 def main():
@@ -31,26 +62,8 @@ def main():
               ("image", jpeg, "image/jpeg"), ("text", b"", None)]
     host = fixture.start_host(store, None)
     try:
-        for resource, flag, identity in (("session", "--admission", seed["admission"]),
-                                         ("action", "--action", seed["action"])):
-            base = ["--store", str(store), "--session", seed["session"], flag, identity]
-            for ordinal, (kind, content, mime) in enumerate(values):
-                args = [resource, "inspect-part", *base, "--ordinal", str(ordinal)]
-                actual = fixture.command(*args)["part"]
-                expected = {"ordinal": str(ordinal), "type": kind, "bytes": str(len(content)), "sha256": digest(content)}
-                if mime:
-                    expected["mime"] = mime
-                assert actual == expected, (args, actual, expected)
-                if kind == "image":
-                    exported = subprocess.run([str(fixture.RUI), resource, "read-image-part", *base,
-                                               "--ordinal", str(ordinal)], capture_output=True, timeout=15)
-                    assert exported.returncode == 0, (exported.stdout, exported.stderr)
-                    assert exported.stdout == content
-            assert fixture.command(resource, "inspect-part", *base, "--ordinal", "5")["part"] is None
-            text_export = subprocess.run([str(fixture.RUI), resource, "read-image-part", *base,
-                                          "--ordinal", "0"], capture_output=True, timeout=15)
-            assert text_export.returncode != 0 and not text_export.stdout
-        print("Seeded Message and Action: ordered Text, PNG and JPEG metadata and exact image bytes")
+        INS_10_public_part_selection(store, seed, values)
+        print("INS-10: selected Message and Action image bytes and refusals")
     finally:
         fixture.stop_host(host)
         directory.cleanup()

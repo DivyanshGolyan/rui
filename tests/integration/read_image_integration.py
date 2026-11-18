@@ -2,8 +2,6 @@
 """Real-Host image Action authorization, explicit failures and pending lifecycle."""
 import base64
 import http.server
-import hashlib
-import subprocess
 import json
 import os
 import re
@@ -199,18 +197,8 @@ def prove_case(root, name):
             lambda remaining: fixture.command("session", "inspect", "--store", store, "--session", session,
                                               timeout=remaining)["execution"], deadline)
         if expected == "succeeded":
-            metadata = command("action", "inspect-part", "--store", store, "--session", session,
-                               "--action", action, "--ordinal", "0")["part"]
-            assert metadata == {"ordinal": "0", "type": "image", "mime": "image/png",
-                                "bytes": str(len(PNG.read_bytes())),
-                                "sha256": hashlib.sha256(len(b"rui/content/v1").to_bytes(8, "big") + b"rui/content/v1" + PNG.read_bytes()).hexdigest()}, metadata
-            exported = subprocess.run([str(fixture.RUI), "action", "read-image-part", "--store", str(store),
-                                       "--session", session, "--action", action, "--ordinal", "0"],
-                                      capture_output=True, timeout=15)
-            assert exported.returncode == 0, (exported.stdout, exported.stderr)
-            assert exported.stdout == PNG.read_bytes()
-            # Byte-only readers refuse parts. The provider proves typed delivery;
-            # inspect the committed Resolution after releasing the Store lease.
+            # The provider proves typed delivery; inspect the committed
+            # Resolution after releasing the Store lease.
             fixture.stop_host(processes.pop())
             saved = rows(store, "SELECT resolution_code,acceptance_position FROM action_operation WHERE session_ref=? AND action_id=?", (session, int(action)))
             assert len(saved) == 1 and saved[0][0] == expected and saved[0][1] > 0, saved

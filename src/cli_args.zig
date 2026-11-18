@@ -319,7 +319,7 @@ test "option name set covers every grammar and rejects unknown names" {
     try std.testing.expect(!hasOptionName("made-up-option-name"));
 }
 
-test "grammar rejects ambiguous invocations before any effect" {
+test "CLI-2 invalid_input_is_local" {
     try expectValidation(.session_send, &.{ "--to", "a", "--to", "a", "hi" }, error.DuplicateArgument);
     try expectValidation(.session_send, &.{ "--to", "a", "--text", "f" }, error.UnknownArgument);
     try expectValidation(.session_send, &.{ "--to", "a", "hi", "again" }, error.InvalidArguments);
@@ -349,6 +349,23 @@ test "grammar rejects ambiguous invocations before any effect" {
     try expectValidation(.session_resume, &.{ "--session", "a", "REF" }, error.ConflictingArguments);
     try expectValidation(.session_resume, &.{ "--store", "/s", "--last" }, error.UnknownArgument);
     try expectValidation(.host_serve, &.{ "--test-phase-trace", "--fault", "before-commit", "--set", "example=value" }, false);
+    const Selector = struct { command: Command, id: []const u8, id_flag: []const u8 };
+    for ([_]Selector{
+        .{ .command = .session_inspect_part, .id = "admission", .id_flag = "--admission" },
+        .{ .command = .session_read_image_part, .id = "admission", .id_flag = "--admission" },
+        .{ .command = .action_inspect_part, .id = "action", .id_flag = "--action" },
+        .{ .command = .action_read_image_part, .id = "action", .id_flag = "--action" },
+    }) |selector| {
+        try checkNumericRange(.{ .command = selector.command, .name = selector.id, .code = .id_malformed, .low = "1", .high = "9223372036854775807" });
+        try checkNumericRange(.{ .command = selector.command, .name = "ordinal", .code = .count_malformed, .low = "0", .high = "1500" });
+        var storage: [1024]u8 = undefined;
+        const parsed = try testParse(selector.command.definition(), &.{ "--session", "k7m2qx", selector.id_flag, "7", "--ordinal", "2" }, &storage);
+        try std.testing.expect(parsed.missing() == null);
+        try std.testing.expectEqual(@as(u64, 7), try std.fmt.parseInt(u64, parsed.getNamed(selector.id).?, 10));
+        try std.testing.expectEqual(@as(?u64, 2), try parsed.number(u64, "ordinal"));
+        try std.testing.expectEqualStrings("ordinal", (try expectMissing(selector.command, &.{ "--session", "k7m2qx", selector.id_flag, "7" })).?);
+        try expectValidation(selector.command, &.{ "--session", "k7m2qx", selector.id_flag, "7", "--ordinal", "2", "--ordinal", "3" }, error.DuplicateArgument);
+    }
     try expectValidation(.session_list, &.{"--test-drop-reply"}, error.UnknownArgument);
 }
 
@@ -598,44 +615,42 @@ test "typed choices share enum names with help and refuse unknown values" {
     }
 }
 
+const NumericCase = struct { command: Command, name: []const u8, code: caller_error.Code, low: []const u8, high: []const u8 };
+
 test "numeric options reject malformed decimals and state their accepted range" {
-    const Case = struct { command: Command, name: []const u8, code: caller_error.Code, low: []const u8, high: []const u8 };
-    const cases = [_]Case{
+    const cases = [_]NumericCase{
         .{ .command = .action_read, .name = "offset", .code = .count_malformed, .low = "0", .high = std.fmt.comptimePrint("{d}", .{@import("content_string.zig").max_bytes}) },
         .{ .command = .action_inspect, .name = "action", .code = .id_malformed, .low = "1", .high = "9223372036854775807" },
         .{ .command = .session_interrupt_model, .name = "turn", .code = .id_malformed, .low = "1", .high = "9223372036854775807" },
         .{ .command = .session_interrupt_model, .name = "operation", .code = .id_malformed, .low = "1", .high = "9223372036854775807" },
         .{ .command = .session_read_conversation, .name = "position", .code = .id_malformed, .low = "1", .high = "9223372036854775807" },
         .{ .command = .session_read_conversation, .name = "ordinal", .code = .count_malformed, .low = "0", .high = "9223372036854775807" },
-        .{ .command = .session_inspect_part, .name = "admission", .code = .id_malformed, .low = "1", .high = "9223372036854775807" },
-        .{ .command = .session_inspect_part, .name = "ordinal", .code = .count_malformed, .low = "0", .high = "1500" },
-        .{ .command = .session_read_image_part, .name = "ordinal", .code = .count_malformed, .low = "0", .high = "1500" },
-        .{ .command = .action_inspect_part, .name = "ordinal", .code = .count_malformed, .low = "0", .high = "1500" },
-        .{ .command = .action_read_image_part, .name = "ordinal", .code = .count_malformed, .low = "0", .high = "1500" },
         .{ .command = .session_inspect, .name = "attempt", .code = .count_malformed, .low = "1", .high = "9223372036854775807" },
         .{ .command = .request_wait, .name = "timeout-seconds", .code = .count_malformed, .low = "1", .high = "86400" },
         .{ .command = .store_schema, .name = "from", .code = .count_malformed, .low = "0", .high = std.fmt.comptimePrint("{d}", .{std.math.maxInt(u64)}) },
         .{ .command = .host_serve, .name = "test-retention-entry-capacity", .code = .count_malformed, .low = "2", .high = std.fmt.comptimePrint("{d}", .{retention_capacity.entries}) },
     };
-    for (cases) |case| {
-        var spelling: [64]u8 = undefined;
-        const flag_name = try std.fmt.bufPrint(&spelling, "--{s}", .{case.name});
-        for ([_][]const u8{ "12x", "-1", "+1", "1_0", "", "18446744073709551616" }) |invalid| {
-            const refusal = try expectRefusal(case.command, &.{ flag_name, invalid }, case.code, case.name);
-            try std.testing.expectEqualStrings(invalid, refusal.value.?);
-            try std.testing.expect(std.mem.indexOf(u8, refusal.accepted.?.grammar, case.low) != null);
-            try std.testing.expect(std.mem.indexOf(u8, refusal.accepted.?.grammar, case.high) != null);
-        }
-        if (!std.mem.eql(u8, case.low, "0")) _ = try expectRefusal(case.command, &.{ flag_name, "0" }, case.code, case.name);
-        const upper = try std.fmt.parseInt(u64, case.high, 10);
-        if (upper < std.math.maxInt(u64)) {
-            var beyond: [32]u8 = undefined;
-            _ = try expectRefusal(case.command, &.{ flag_name, try std.fmt.bufPrint(&beyond, "{d}", .{upper + 1}) }, case.code, case.name);
-        }
-        for ([_][]const u8{ case.low, case.high }) |valid| {
-            var storage: [1024]u8 = undefined;
-            _ = try testParse(case.command.definition(), &.{ flag_name, valid }, &storage);
-        }
+    for (cases) |case| try checkNumericRange(case);
+}
+
+fn checkNumericRange(case: NumericCase) !void {
+    var spelling: [64]u8 = undefined;
+    const flag_name = try std.fmt.bufPrint(&spelling, "--{s}", .{case.name});
+    for ([_][]const u8{ "12x", "-1", "+1", "1_0", "", "18446744073709551616" }) |invalid| {
+        const refusal = try expectRefusal(case.command, &.{ flag_name, invalid }, case.code, case.name);
+        try std.testing.expectEqualStrings(invalid, refusal.value.?);
+        try std.testing.expect(std.mem.indexOf(u8, refusal.accepted.?.grammar, case.low) != null);
+        try std.testing.expect(std.mem.indexOf(u8, refusal.accepted.?.grammar, case.high) != null);
+    }
+    if (!std.mem.eql(u8, case.low, "0")) _ = try expectRefusal(case.command, &.{ flag_name, "0" }, case.code, case.name);
+    const upper = try std.fmt.parseInt(u64, case.high, 10);
+    if (upper < std.math.maxInt(u64)) {
+        var beyond: [32]u8 = undefined;
+        _ = try expectRefusal(case.command, &.{ flag_name, try std.fmt.bufPrint(&beyond, "{d}", .{upper + 1}) }, case.code, case.name);
+    }
+    for ([_][]const u8{ case.low, case.high }) |valid| {
+        var storage: [1024]u8 = undefined;
+        _ = try testParse(case.command.definition(), &.{ flag_name, valid }, &storage);
     }
 }
 
