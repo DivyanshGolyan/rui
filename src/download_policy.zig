@@ -13,7 +13,7 @@ pub const connect_timeout_ns: i96 = secondsToNs(connect_timeout_seconds);
 pub const download_timeout_ns: i96 = secondsToNs(download_timeout_seconds);
 
 fn secondsToNs(seconds: u32) i96 {
-    return @as(i96, seconds) * std.time.ns_per_s;
+    return @as(i96, seconds) * 1_000_000_000;
 }
 
 /// The transport owns both curl timeouts and disables curl's config file.
