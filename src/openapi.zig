@@ -1701,10 +1701,19 @@ fn publishedReplyExamples() !void {
     try host_reply.renderConfigureReply(.{ .writer = &out.writer }, "", configured);
     try Case.check(schemas, "ConfigureReply", out.written(), a);
     out.clearRetainingCapacity();
-    const message: reply.MessageReply = .{ .rejected = .{ .replayed = false, .code = .mcp_server_unavailable, .message = configured.rejected.message, .content = .{ .length = 4, .digest = protocol.contentDigest("task") } } };
-    try host_reply.renderMessageReply(.{ .writer = &out.writer }, "", message);
-    try Case.check(schemas, "MessageReply", out.written(), a);
-    out.clearRetainingCapacity();
+    var message_session: @FieldType(reply.AcceptedMessage, "session") = .{};
+    try message_session.set("k7m2qx");
+    const message_content: reply.ContentReference = .{ .length = 4, .digest = protocol.contentDigest("task") };
+    for ([_]@import("input_parts.zig").Form{ .bytes, .parts }) |form| {
+        for ([_]reply.MessageReply{
+            .{ .accepted = .{ .form = form, .replayed = false, .session = message_session, .admission_id = 1, .content = message_content } },
+            .{ .rejected = .{ .form = form, .replayed = false, .code = .mcp_server_unavailable, .message = configured.rejected.message, .content = message_content } },
+        }) |message| {
+            try host_reply.renderMessageReply(.{ .writer = &out.writer }, message_session.slice(), message);
+            try Case.check(schemas, "MessageReply", out.written(), a);
+            out.clearRetainingCapacity();
+        }
+    }
 
     const ids = "gpt-6.1-sol\nmy\"model\n";
     try out.writer.writeAll(protocol.model_list_reply.head);

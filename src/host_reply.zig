@@ -624,7 +624,7 @@ test "SH-50 Message replies and observations preserve the input form" {
             try response.render(renderMessageReply, .{ session.slice(), reply });
             try std.testing.expect(std.mem.indexOf(u8, response.slice(), expected) != null);
         }
-        var observation: command_reply.CommandObservation = .{ .status = .accepted, .target = session, .kind = .{ .message = .{ .form = form, .content = content, .queue = .{ .admission_id = 1, .state = .queued } } } };
+        var observation: command_reply.CommandObservation = .{ .status = .accepted, .target = session, .kind = .{ .message = .{ .form = form, .content = content, .queue = .{ .admission_id = 1, .state = .queued }, .work = .{ .state = .{ .pending = .{ .since = 10 } } } } } };
         var response: protocol.CommandObservationBuffer = .{};
         try response.render(renderFullCommandObservation, .{ "key", &observation, null });
         try std.testing.expect(std.mem.indexOf(u8, response.slice(), expected) != null);
