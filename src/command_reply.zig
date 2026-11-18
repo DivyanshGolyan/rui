@@ -159,7 +159,7 @@ pub const PublicConversationItem = struct {
     position: u64,
     ordinal: u64,
     kind: conversation_read.ConversationItemKind,
-    content: ContentReference,
+    content: @import("content_value.zig").Value,
     presentation: ?tool_presentation.ToolPresentation = null,
     admitted_at: ?u64 = null,
     sender: ?protocol.NamedPeer = null,

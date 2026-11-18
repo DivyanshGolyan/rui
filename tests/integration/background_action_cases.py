@@ -146,7 +146,7 @@ def prove_native_background(state, *, deadline=None):
                 page = command("action", "read", "--store", store, "--session", session, "--action", identity, "--offset", window["next"])
             domain = b"rui/content/v1"
             digest = hashlib.sha256(len(domain).to_bytes(8, "big") + domain + assembled).hexdigest()
-            assert metadata["content"] == {"bytes": str(len(assembled)), "sha256": digest}, metadata
+            assert metadata["content"] == {"type": "text", "bytes": str(len(assembled)), "sha256": digest}, metadata
             if name != "stopped":
                 assert (workspace / "expected-final").read_bytes() in assembled
             assert command("action", "read", "--store", store, "--session", session, "--action", identity) == first

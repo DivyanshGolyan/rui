@@ -486,6 +486,60 @@ fn collect(
 ) void {
     comptime {
         @setEvalBranchQuota(100 * (sql.len + sqlite.len) + 1_000_000);
+        _ = Exported(@tagName(kind) ++ "\x1f" ++ sql ++ "\x1f" ++ checked ++ "\x1f" ++ sqlite ++ "\x1f" ++ templateRecord(mysql) ++ "\x1f" ++
+            (if (facts.uses_now) "1" else "0") ++ "\x1f" ++ @tagName(facts.shape) ++ "\x1f" ++ inputs() ++ "\x1c");
+    }
+}
+
+/// A Store test fixture's text (store_testing.exec, queryU64, withoutForeignKeys) as MySQL renders it,
+/// after fixtureRendering's checks. The table's `fixtures` serve it on a text and inputs match, which
+/// means those checks passed under the same inputs; any other text is checked and rendered here.
+pub fn fixtureTemplate(comptime text: []const u8) Template {
+    return switch (comptime fixtureFrom(statement_table, text)) {
+        .refused => |message| @compileError(message ++ ": " ++ text),
+        .rendered => |template| template,
+    };
+}
+
+/// The MySQL rendering of a text mysql_testing sends: the table's fixture entry for it, else
+/// mysqlRendering. An entry holds what mysqlRendering produced under the same inputs.
+pub fn sentTemplate(comptime text: []const u8) Template {
+    return comptime servedFixture(statement_table, text) orelse mysqlTemplate(text);
+}
+
+fn servedFixture(comptime table: type, comptime text: []const u8) ?Template {
+    comptime {
+        if (collecting() or !std.mem.eql(u8, table.inputs, inputs()) or !@hasDecl(table.fixtures, text)) return null;
+        return @field(table.fixtures, text);
+    }
+}
+
+fn fixtureFrom(comptime table: type, comptime text: []const u8) MysqlRendering {
+    comptime {
+        if (servedFixture(table, text)) |template| return .{ .rendered = template };
+        const rendering = fixtureRendering(text);
+        if (collecting() and rendering == .rendered) _ = Exported("fixture\x1f" ++ text ++ "\x1f" ++ templateRecord(rendering.rendered) ++ "\x1f" ++ inputs() ++ "\x1c");
+        return rendering;
+    }
+}
+
+/// Every rule a fixture text meets, in order: portable Rui SQL naming no SQLite mechanism, each
+/// statement parsing as the Store's own grammar, and a MySQL rendering.
+pub fn fixtureRendering(comptime text: []const u8) MysqlRendering {
+    comptime {
+        if (fixtureTextError(text)) |message| return .{ .refused = message };
+        if (fixtureError(text)) |message| return .{ .refused = "fixture: " ++ message };
+        return switch (mysqlRendering(text)) {
+            .refused => |message| .{ .refused = "fixture: MySQL rendering refuses it: " ++ message },
+            .rendered => |template| .{ .rendered = template },
+        };
+    }
+}
+
+/// A template's MySQL parts (0x1e between them), 0x1f, then its slots.
+fn templateRecord(comptime mysql: Template) []const u8 {
+    comptime {
+        @setEvalBranchQuota(1_000_000);
         var parts: []const u8 = "";
         for (mysql.parts, 0..) |part, i| parts = parts ++ (if (i == 0) "" else "\x1e") ++ part;
         var slots: []const u8 = "";
@@ -494,8 +548,7 @@ fn collect(
             .now => "n,",
             .served => |provider| "s" ++ @tagName(provider) ++ ",",
         };
-        _ = Exported(@tagName(kind) ++ "\x1f" ++ sql ++ "\x1f" ++ checked ++ "\x1f" ++ sqlite ++ "\x1f" ++ parts ++ "\x1f" ++ slots ++ "\x1f" ++
-            (if (facts.uses_now) "1" else "0") ++ "\x1f" ++ @tagName(facts.shape) ++ "\x1f" ++ inputs() ++ "\x1c");
+        return parts ++ "\x1f" ++ slots;
     }
 }
 
@@ -670,6 +723,61 @@ pub fn fixtureError(comptime text: []const u8) ?[]const u8 {
         }
         return null;
     }
+}
+
+pub const fixture_sqlite_words = [_][]const u8{
+    "PRAGMA", "temp",      "CREATE", "ALTER",  "DROP",     "TRIGGER", "VIEW",
+    "ATTACH", "SAVEPOINT", "BEGIN",  "COMMIT", "ROLLBACK", "VACUUM",
+};
+
+pub const fixture_sqlite_prefixes = [_][]const u8{ "sqlite_", "pragma_" };
+
+pub fn fixtureTextError(comptime text: []const u8) ?[]const u8 {
+    comptime {
+        @setEvalBranchQuota(1000 * text.len + 10000);
+        if (portabilityError(text, reserved_names_checked)) |message| return message;
+        var index: usize = 0;
+        var previous: []const u8 = "";
+        while (index < text.len) {
+            if (text[index] == '\'') {
+                index += 1;
+                while (index < text.len) : (index += 1) {
+                    if (text[index] != '\'') continue;
+                    if (index + 1 < text.len and text[index + 1] == '\'') {
+                        index += 1;
+                        continue;
+                    }
+                    break;
+                }
+                index += 1;
+                previous = "";
+                continue;
+            }
+            if (!isFixtureWordByte(text[index])) {
+                if (!std.ascii.isWhitespace(text[index])) previous = "";
+                index += 1;
+                continue;
+            }
+            var end = index;
+            while (end < text.len and isFixtureWordByte(text[end])) end += 1;
+            const word = text[index..end];
+            index = end;
+            for (fixture_sqlite_words) |sqlite_word| {
+                if (std.ascii.eqlIgnoreCase(word, sqlite_word)) return "fixture: '" ++ word ++ "' is a SQLite mechanism; write the test under sqlite_tests/";
+            }
+            for (fixture_sqlite_prefixes) |prefix| {
+                if (std.ascii.startsWithIgnoreCase(word, prefix)) return "fixture: '" ++ word ++ "' is a SQLite mechanism; write the test under sqlite_tests/";
+            }
+            if (std.ascii.eqlIgnoreCase(previous, "AS") and std.ascii.eqlIgnoreCase(word, "TEXT"))
+                return "fixture: 'AS TEXT' is not a MySQL cast; compare the bytes another way";
+            previous = word;
+        }
+        return null;
+    }
+}
+
+fn isFixtureWordByte(byte: u8) bool {
+    return std.ascii.isAlphanumeric(byte) or byte == '_';
 }
 
 pub const max_parameters = 65;
@@ -1717,7 +1825,10 @@ fn names(comptime side: Expr, comptime sources: []const Source, comptime index: 
 fn renderStatement(comptime sql: []const u8, comptime arguments: usize) [:0]const u8 {
     comptime {
         @setEvalBranchQuota(200 * sql.len + 10_000 + schema.objects_quota);
-        var out: []const u8 = "";
+        // Each marker adds at most three pieces: the text before it, a fixed
+        // word and its argument.
+        var pieces: [3 * std.mem.countScalar(u8, sql, '@') + 1][]const u8 = undefined;
+        var count: usize = 0;
         var start: usize = 0;
         var index: usize = 0;
         while (index < sql.len) {
@@ -1732,7 +1843,8 @@ fn renderStatement(comptime sql: []const u8, comptime arguments: usize) [:0]cons
             const name_end = wordEnd(sql, index + 1);
             const name = sql[index + 1 .. name_end];
             if (std.mem.eql(u8, name, "now")) {
-                out = out ++ sql[start..index] ++ std.fmt.comptimePrint("?{d}", .{arguments + 1});
+                pieces[count..][0..2].* = .{ sql[start..index], std.fmt.comptimePrint("?{d}", .{arguments + 1}) };
+                count += 2;
                 index = name_end;
                 start = index;
                 continue;
@@ -1746,12 +1858,18 @@ fn renderStatement(comptime sql: []const u8, comptime arguments: usize) [:0]cons
             const argument = std.mem.trim(u8, sql[name_end + 1 .. close], " \n");
             if (std.mem.eql(u8, name, "index")) {
                 if (!schema.hasIndex(argument)) @compileError("rsql: no index named " ++ argument ++ " in the schema: " ++ sql);
-                out = out ++ sql[start..index] ++ "INDEXED BY " ++ argument;
-            } else out = out ++ sql[start..index] ++ argument;
+                pieces[count..][0..3].* = .{ sql[start..index], "INDEXED BY ", argument };
+                count += 3;
+            } else {
+                pieces[count..][0..2].* = .{ sql[start..index], argument };
+                count += 2;
+            }
             index = close + 1;
             start = index;
         }
-        const text = renderSqlite(out ++ sql[start..]) ++ "\x00";
+        pieces[count] = sql[start..];
+        count += 1;
+        const text = renderSqlite(joinPieces(pieces[0..count])) ++ "\x00";
         return text[0 .. text.len - 1 :0];
     }
 }
@@ -1759,7 +1877,8 @@ fn renderStatement(comptime sql: []const u8, comptime arguments: usize) [:0]cons
 fn renderSqlite(comptime text: []const u8) []const u8 {
     comptime {
         @setEvalBranchQuota(100 * text.len + 1000);
-        var out: []const u8 = "";
+        var pieces: [2 * std.mem.countScalar(u8, text, '@') + 1][]const u8 = undefined;
+        var count: usize = 0;
         var start: usize = 0;
         var index: usize = 0;
         while (index < text.len) {
@@ -1771,17 +1890,21 @@ fn renderSqlite(comptime text: []const u8) []const u8 {
                 index += 1;
                 continue;
             }
-            out = out ++ text[start..index];
+            pieces[count] = text[start..index];
+            count += 1;
             const name_end = wordEnd(text, index + 1);
             const name = text[index + 1 .. name_end];
             if (name_end >= text.len or text[name_end] != '(') @compileError("rsql: @" ++ name ++ " needs arguments in parentheses: " ++ text);
             const close = closingParenthesis(text, name_end);
             const arguments = splitArguments(text[name_end + 1 .. close]);
-            out = out ++ marker(name, arguments, text);
+            pieces[count] = marker(name, arguments, text);
+            count += 1;
             index = close + 1;
             start = index;
         }
-        return out ++ text[start..];
+        pieces[count] = text[start..];
+        count += 1;
+        return joinPieces(pieces[0..count]);
     }
 }
 
@@ -1823,14 +1946,63 @@ fn marker(comptime name: []const u8, comptime arguments: []const []const u8, com
     if (std.mem.eql(u8, name, "after")) return renderAfterSqlite(arguments, text);
     const kind = expressionMarker(name) orelse @compileError("rsql: unknown marker @" ++ name ++ ": " ++ text);
     if (arguments.len != kind.arity) @compileError("rsql: @" ++ name ++ " takes " ++ std.fmt.comptimePrint("{d}", .{kind.arity}) ++ " arguments: " ++ text);
-    var out: []const u8 = "";
-    for (kind.sqlite) |byte| out = out ++ switch (byte) {
-        arg_a[0] => renderSqlite(arguments[0]),
-        arg_b[0] => renderSqlite(arguments[1]),
-        arg_set[0] => characterSet(arguments[1], text),
-        else => &[_]u8{byte},
+    var pieces: [2 * kind.sqlite.len + 1][]const u8 = undefined;
+    var count: usize = 0;
+    var from: usize = 0;
+    for (kind.sqlite, 0..) |byte, index| {
+        if (byte > arg_set[0]) continue;
+        pieces[count..][0..2].* = .{ kind.sqlite[from..index], switch (byte) {
+            arg_a[0] => renderSqlite(arguments[0]),
+            arg_b[0] => renderSqlite(arguments[1]),
+            arg_set[0] => characterSet(arguments[1], text),
+            else => unreachable,
+        } };
+        count += 2;
+        from = index + 1;
+    }
+    pieces[count] = kind.sqlite[from..];
+    count += 1;
+    return joinPieces(pieces[0..count]);
+}
+
+/// Concatenates `pieces` in halves, so each byte is copied once per level:
+/// appending piece by piece to one slice copies the whole prefix every time.
+fn joinPieces(comptime pieces: []const []const u8) []const u8 {
+    comptime {
+        return switch (pieces.len) {
+            0 => "",
+            1 => pieces[0],
+            else => joinPieces(pieces[0 .. pieces.len / 2]) ++ joinPieces(pieces[pieces.len / 2 ..]),
+        };
+    }
+}
+
+/// A comptime list that doubles its storage when full, so n appends copy
+/// O(n) items in all; `list = list ++ .{item}` copies the whole list each time.
+fn ComptimeList(comptime T: type) type {
+    return struct {
+        storage: []T = &.{},
+        len: usize = 0,
+
+        fn append(list: *@This(), item: T) void {
+            if (list.len == list.storage.len) {
+                var grown: [@max(8, 2 * list.storage.len)]T = undefined;
+                @memcpy(grown[0..list.len], list.storage);
+                list.storage = &grown;
+            }
+            list.storage[list.len] = item;
+            list.len += 1;
+        }
+
+        fn items(list: *const @This()) []const T {
+            return list.storage[0..list.len];
+        }
+
+        fn finish(list: *const @This()) []const T {
+            const final = list.storage[0..list.len].*;
+            return &final;
+        }
     };
-    return out;
 }
 
 pub const Slot = union(enum) {
@@ -1849,8 +2021,9 @@ pub const Template = struct {
 
     pub fn prepared(comptime template: Template) [:0]const u8 {
         comptime {
-            var text: []const u8 = template.parts[0];
-            for (template.parts[1..]) |part| text = text ++ "?" ++ part;
+            var pieces: [2 * template.parts.len][]const u8 = undefined;
+            for (template.parts, 0..) |part, index| pieces[2 * index ..][0..2].* = .{ if (index == 0) "" else "?", part };
+            const text = joinPieces(&pieces);
             const terminated = text ++ "\x00";
             return terminated[0..text.len :0];
         }
@@ -1877,7 +2050,8 @@ pub fn mysqlRendering(comptime text: []const u8) MysqlRendering {
         };
         var renderer: MysqlRenderer = .{ .text = text, .tokens = tokens, .skips = skips };
         renderer.range(0, tokens.len) catch return .{ .refused = renderer.message };
-        return .{ .rendered = .{ .parts = renderer.parts ++ .{renderer.current}, .slots = renderer.slots } };
+        renderer.endPart();
+        return .{ .rendered = .{ .parts = renderer.parts.finish(), .slots = renderer.slots.finish() } };
     }
 }
 
@@ -1956,19 +2130,24 @@ const MysqlRenderer = struct {
     text: []const u8,
     tokens: []const Token,
     skips: []const [2]usize = &.{},
-    parts: []const []const u8 = &.{},
-    current: []const u8 = "",
-    slots: []const Slot = &.{},
+    // The pieces of the part being rendered, joined once when a slot ends it.
+    current: ComptimeList([]const u8) = .{},
+    parts: ComptimeList([]const u8) = .{},
+    slots: ComptimeList(Slot) = .{},
     message: []const u8 = "",
 
     fn emit(r: *MysqlRenderer, text: []const u8) void {
-        r.current = r.current ++ text;
+        if (text.len != 0) r.current.append(text);
+    }
+
+    fn endPart(r: *MysqlRenderer) void {
+        r.parts.append(joinPieces(r.current.items()));
+        r.current.len = 0;
     }
 
     fn slot(r: *MysqlRenderer, which: Slot) void {
-        r.parts = r.parts ++ .{r.current};
-        r.current = "";
-        r.slots = r.slots ++ .{which};
+        r.endPart();
+        r.slots.append(which);
     }
 
     fn refuse(r: *MysqlRenderer, message: []const u8) error{Refused} {
@@ -2546,12 +2725,90 @@ test "canonical form classification keeps filtered count portable inside an aggr
     );
 }
 
-test "markers nest, and text outside them is copied" {
-    try std.testing.expectEqualStrings(
-        "x IS NULL OR (length(CAST(x AS BLOB))=6 AND (x NOT GLOB '*[^a-f]*' AND length(x)=length(CAST(x AS BLOB)))) AND '@octets(y)'='@'",
-        comptime render(.sqlite, "x IS NULL OR (@octets(x)=6 AND @charset(x,'a-f')) AND '@octets(y)'='@'"),
-    );
-    try std.testing.expectEqualStrings("(length(CAST(a AS BLOB)) IS b)", comptime render(.sqlite, "@same(@octets(a), b)"));
+fn repeated(comptime text: []const u8, comptime times: usize) []const u8 {
+    comptime {
+        var out: [text.len * times]u8 = undefined;
+        for (0..times) |index| @memcpy(out[index * text.len ..][0..text.len], text);
+        const final = out;
+        return &final;
+    }
+}
+
+test "SH-90 a statement renders the same SQLite and MySQL text whatever its pieces" {
+    const Reordered = Write(.{
+        .sql = "UPDATE turn SET outcome_at=@now WHERE turn_id=?2 AND session_ref=@session(?1) AND operation_id>?2",
+        .Args = struct { session: SessionHead, turn_id: u64 },
+        .expect = .{ .at_most = 1 },
+    });
+    const Indexed = Read(.{
+        .sql = "SELECT action_id FROM action_operation @index(action_operation_executable) WHERE action_id>?1",
+        .Args = struct { after: u64 },
+        .Row = struct { action_id: Positive },
+        .cardinality = .optional,
+    });
+    const Quoted = Read(.{
+        .sql = "SELECT content_id FROM content WHERE content_id=?1 AND digest<>'@now @octets(x) ?2'",
+        .Args = struct { content_id: u64 },
+        .Row = struct { content_id: Positive },
+        .cardinality = .optional,
+    });
+    const nested = "x IS NULL OR (@same(@octets(x),6) AND @count_where(@charset(x,'a-f'))=1) AND '@octets(y)'='@'";
+    const long_text = "@same(a,1)" ++ comptime repeated(" OR @same(a,1)", 80);
+    const Case = struct { sqlite: []const u8, mysql: []const u8, slots: []const Slot, want_sqlite: []const u8, want_mysql: []const u8, want_slots: []const Slot };
+    const cases = [_]Case{
+        // Repeated and reordered parameters, @now after the Args, @session as its parameter.
+        .{
+            .sqlite = Reordered.sql,
+            .mysql = comptime Reordered.mysql.prepared(),
+            .slots = Reordered.mysql.slots,
+            .want_sqlite = "UPDATE turn SET outcome_at=?3 WHERE turn_id=?2 AND session_ref=?1 AND operation_id>?2",
+            .want_mysql = "UPDATE turn SET outcome_at=? WHERE turn_id=? AND session_ref=? AND operation_id>?",
+            .want_slots = &.{ .now, .{ .argument = 1 }, .{ .argument = 0 }, .{ .argument = 1 } },
+        },
+        // @index is INDEXED BY on SQLite; MySQL drops an index it cannot force.
+        .{
+            .sqlite = Indexed.sql,
+            .mysql = comptime Indexed.mysql.prepared(),
+            .slots = Indexed.mysql.slots,
+            .want_sqlite = "SELECT action_id FROM action_operation INDEXED BY action_operation_executable WHERE action_id>?1",
+            .want_mysql = "SELECT action_id FROM action_operation  WHERE action_id>?",
+            .want_slots = &.{.{ .argument = 0 }},
+        },
+        // Marker and parameter text inside a string literal stays text.
+        .{
+            .sqlite = Quoted.sql,
+            .mysql = comptime Quoted.mysql.prepared(),
+            .slots = Quoted.mysql.slots,
+            .want_sqlite = "SELECT content_id FROM content WHERE content_id=?1 AND digest<>'@now @octets(x) ?2'",
+            .want_mysql = "SELECT content_id FROM content WHERE content_id=? AND digest<>'@now @octets(x) ?2'",
+            .want_slots = &.{.{ .argument = 0 }},
+        },
+        // Nested markers beside text and a quoted marker, which are copied.
+        .{
+            .sqlite = comptime render(.sqlite, nested),
+            .mysql = comptime render(.mysql, nested),
+            .slots = &.{},
+            .want_sqlite = "x IS NULL OR ((length(CAST(x AS BLOB)) IS 6) AND count(*) FILTER (WHERE (x NOT GLOB '*[^a-f]*' AND length(x)=length(CAST(x AS BLOB))))=1) AND '@octets(y)'='@'",
+            .want_mysql = "x IS NULL OR ((OCTET_LENGTH(x) <=> 6) AND count(CASE WHEN (NOT REGEXP_LIKE(x,'[^a-f]','c')) THEN 1 END)=1) AND '@octets(y)'='@'",
+            .want_slots = &.{},
+        },
+        // The empty text.
+        .{ .sqlite = comptime render(.sqlite, ""), .mysql = comptime render(.mysql, ""), .slots = &.{}, .want_sqlite = "", .want_mysql = "", .want_slots = &.{} },
+        // A text over 1 KB of markers.
+        .{
+            .sqlite = comptime render(.sqlite, long_text),
+            .mysql = comptime render(.mysql, long_text),
+            .slots = &.{},
+            .want_sqlite = "(a IS 1)" ++ comptime repeated(" OR (a IS 1)", 80),
+            .want_mysql = "(a <=> 1)" ++ comptime repeated(" OR (a <=> 1)", 80),
+            .want_slots = &.{},
+        },
+    };
+    for (cases) |case| {
+        try std.testing.expectEqualStrings(case.want_sqlite, case.sqlite);
+        try std.testing.expectEqualStrings(case.want_mysql, case.mysql);
+        try std.testing.expectEqualDeep(case.want_slots, case.slots);
+    }
 }
 
 test "each marker renders its MySQL spelling" {
@@ -2564,23 +2821,6 @@ test "each marker renders its MySQL spelling" {
     try std.testing.expectEqualStrings("max(CASE WHEN r.permission_mode=0 THEN a.decided_at END)", comptime render(.mysql, "@max_where(a.decided_at,r.permission_mode=0)"));
     try std.testing.expectEqualStrings("GROUP_CONCAT(tool.name SEPARATOR ',')", comptime render(.mysql, "@list(tool.name)"));
     try std.testing.expectEqualStrings("GREATEST(a, b)>LEAST(c,d) AND max(e)=1 AND f='@octets(g)'", comptime render(.mysql, "max(a, b)>min(c,d) AND max(e)==1 AND f='@octets(g)'"));
-}
-
-test "a statement's MySQL text has a slot for each parameter, @now and @session, and drops a lowered @index" {
-    const W = Write(.{
-        .sql = "UPDATE turn SET outcome_at=@now WHERE turn_id=?1 AND session_ref=@session(?2) AND operation_id>?1",
-        .Args = struct { turn_id: u64, session: SessionHead },
-        .expect = .{ .at_most = 1 },
-    });
-    try std.testing.expectEqualStrings("UPDATE turn SET outcome_at=? WHERE turn_id=? AND session_ref=? AND operation_id>?", comptime W.mysql.prepared());
-    try std.testing.expectEqualDeep(@as([]const Slot, &.{ .now, .{ .argument = 0 }, .{ .argument = 1 }, .{ .argument = 0 } }), W.mysql.slots);
-    const S = Read(.{
-        .sql = "SELECT action_id FROM action_operation @index(action_operation_executable) WHERE action_id>?1",
-        .Args = struct { after: u64 },
-        .Row = struct { action_id: Positive },
-        .cardinality = .optional,
-    });
-    try std.testing.expectEqualStrings("SELECT action_id FROM action_operation  WHERE action_id>?", comptime S.mysql.prepared());
 }
 
 test "@served is the opening's function on SQLite and a slot per provider on MySQL" {
@@ -2665,7 +2905,7 @@ test "a statement calls only the functions every engine spells, by argument coun
     try std.testing.expectEqualStrings(text, comptime mysqlRendering(text).rendered.parts[0]);
 }
 
-test "SH-92: a statement serves its table entry only while its text, signature and the table's inputs all match" {
+test "SH-92: a statement or fixture serves its table entry only while its text, signature and the table's inputs all match" {
     const text = "SELECT next_position FROM session WHERE session_ref=?1";
     const written = "UPDATE session SET prefix_seal=?2 WHERE session_ref=@session(?1)";
     const Args = struct { session: []const u8 };
@@ -2688,23 +2928,31 @@ test "SH-92: a statement serves its table entry only while its text, signature a
                     pub const @"SELECT next_position FROM session WHERE session_ref=?1": TableEntry = entry.of(read_signature, .select);
                     pub const @"UPDATE session SET prefix_seal=?2 WHERE session_ref=@session(?1)": TableEntry = entry.of(write_signature, .insert_row);
                 };
+                pub const fixtures = struct {
+                    pub const @"UPDATE session SET next_position=?1 WHERE session_ref=?2": Template = .{ .parts = &.{ "SERVED", "FROM THE TABLE" }, .slots = &.{.now} };
+                };
             };
         }
     };
     const current = @import("build_options").rsql_inputs;
     const cases = .{
-        .{ Table.of(current, "r0:.:next_position,", "w0:H."), true },
-        .{ Table.of(current ++ "0", "r0:.:next_position,", "w0:H."), false },
-        .{ Table.of(current, "r0:.:other,", "w0:.."), false },
-        .{ Table.of(current, "r1:.:next_position,", "w0:H"), false },
+        // table, statements served, fixture served (a fixture has no signature: text and inputs decide)
+        .{ Table.of(current, "r0:.:next_position,", "w0:H."), true, true },
+        .{ Table.of(current ++ "0", "r0:.:next_position,", "w0:H."), false, false },
+        .{ Table.of(current, "r0:.:other,", "w0:.."), false, true },
+        .{ Table.of(current, "r1:.:next_position,", "w0:H"), false, true },
         .{ struct {
             pub const inputs = current;
             pub const entries = struct {};
-        }, false },
+            pub const fixtures = struct {
+                pub const @"UPDATE session SET next_position=?1 WHERE session_ref=?3": Template = .{ .parts = &.{ "SERVED", "FROM THE TABLE" }, .slots = &.{.now} };
+            };
+        }, false, false },
     };
     inline for (cases) |case| {
         const R = ReadFrom(case[0], .{ .sql = text, .Args = Args, .Row = Row, .cardinality = .optional });
         const W = WriteFrom(case[0], .{ .sql = written, .Args = WriteArgs, .expect = .{ .at_most = 1 } });
+        const fixture = comptime fixtureFrom(case[0], "UPDATE session SET next_position=?1 WHERE session_ref=?2").rendered;
         if (case[1]) {
             try std.testing.expectEqualStrings("SERVED FROM THE TABLE", R.sql);
             try std.testing.expectEqualStrings("SERVED?FROM THE TABLE", comptime R.mysql.prepared());
@@ -2718,6 +2966,7 @@ test "SH-92: a statement serves its table entry only while its text, signature a
             try std.testing.expectEqualStrings("UPDATE session SET prefix_seal=?2 WHERE session_ref=?1", W.sql);
             try std.testing.expect(!W.uses_now and W.guarded);
         }
+        try std.testing.expectEqualStrings(if (case[2]) "SERVED?FROM THE TABLE" else "UPDATE session SET next_position=? WHERE session_ref=?", comptime fixture.prepared());
     }
 }
 

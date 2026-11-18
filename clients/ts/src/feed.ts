@@ -114,11 +114,11 @@ function camelCase(row: Record<string, unknown>): Record<string, unknown> {
 	return Object.fromEntries(Object.entries(row).map(([name, value]) => [camel(name), value]));
 }
 
-function isReference(value: unknown): value is Schemas["ActivityItemContent"] {
+function isReference(value: unknown): value is Schemas["ContentValue"] {
 	return typeof value === "object" && value !== null && "bytes" in value && "sha256" in value;
 }
 
-function entryOf(row: Row): { entry: FeedEntry; reference: Schemas["ActivityItemContent"] | undefined } {
+function entryOf(row: Row): { entry: FeedEntry; reference: Schemas["ContentValue"] | undefined } {
 	const [kind, payload] = Object.entries(row.value)[0] as [FeedKind, Record<string, unknown>];
 	const reference = isReference(payload.content) ? payload.content : undefined;
 	const wanted = kind !== "turn_ended" || ENDINGS_WITH_TEXT.has(String(payload.ending));

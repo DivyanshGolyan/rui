@@ -699,57 +699,6 @@ pub fn stageObligationUpgrade(storage: *Store) !void {
     }
 }
 
-pub const fixture_sqlite_words = [_][]const u8{
-    "PRAGMA", "temp",      "CREATE", "ALTER",  "DROP",     "TRIGGER", "VIEW",
-    "ATTACH", "SAVEPOINT", "BEGIN",  "COMMIT", "ROLLBACK", "VACUUM",
-};
-
-pub const fixture_sqlite_prefixes = [_][]const u8{ "sqlite_", "pragma_" };
-
-pub fn fixtureTextError(comptime text: []const u8) ?[]const u8 {
-    comptime {
-        @setEvalBranchQuota(1000 * text.len + 10000);
-        if (rsql.portabilityError(text, rsql.reserved_names_checked)) |message| return message;
-        var index: usize = 0;
-        var previous: []const u8 = "";
-        while (index < text.len) {
-            if (text[index] == '\'') {
-                index += 1;
-                while (index < text.len) : (index += 1) {
-                    if (text[index] != '\'') continue;
-                    if (index + 1 < text.len and text[index + 1] == '\'') {
-                        index += 1;
-                        continue;
-                    }
-                    break;
-                }
-                index += 1;
-                previous = "";
-                continue;
-            }
-            if (!isWordByte(text[index])) {
-                if (!std.ascii.isWhitespace(text[index])) previous = "";
-                index += 1;
-                continue;
-            }
-            var end = index;
-            while (end < text.len and isWordByte(text[end])) end += 1;
-            const word = text[index..end];
-            index = end;
-            for (fixture_sqlite_words) |sqlite_word| {
-                if (std.ascii.eqlIgnoreCase(word, sqlite_word)) return "fixture: '" ++ word ++ "' is a SQLite mechanism; write the test under sqlite_tests/";
-            }
-            for (fixture_sqlite_prefixes) |prefix| {
-                if (std.ascii.startsWithIgnoreCase(word, prefix)) return "fixture: '" ++ word ++ "' is a SQLite mechanism; write the test under sqlite_tests/";
-            }
-            if (std.ascii.eqlIgnoreCase(previous, "AS") and std.ascii.eqlIgnoreCase(word, "TEXT"))
-                return "fixture: 'AS TEXT' is not a MySQL cast; compare the bytes another way";
-            previous = word;
-        }
-        return null;
-    }
-}
-
 pub const baseline_sqlite_ddl: [:0]const u8 = @embedFile("migration_baseline.sqlite.sql");
 pub const baseline_mysql_ddl: [:0]const u8 = @embedFile("migration_baseline.mysql.sql");
 pub const baseline_rows: [:0]const u8 = @embedFile("migration_baseline_rows.sql");
@@ -761,13 +710,9 @@ pub const expected_mysql_rows: [:0]const u8 = blk: {
     break :blk @embedFile("migration_expected_content.mysql.sql") ++ expected_rows[first..];
 };
 comptime {
-    if (fixtureTextError(baseline_rows)) |message| @compileError("migration_baseline_rows.sql: " ++ message);
-    if (fixtureTextError(expected_rows)) |message| @compileError("migration_expected_rows.sql: " ++ message);
-    if (fixtureTextError(expected_mysql_rows)) |message| @compileError("migration_expected_content.mysql.sql: " ++ message);
-}
-
-fn isWordByte(byte: u8) bool {
-    return std.ascii.isAlphanumeric(byte) or byte == '_';
+    if (rsql.fixtureTextError(baseline_rows)) |message| @compileError("migration_baseline_rows.sql: " ++ message);
+    if (rsql.fixtureTextError(expected_rows)) |message| @compileError("migration_expected_rows.sql: " ++ message);
+    if (rsql.fixtureTextError(expected_mysql_rows)) |message| @compileError("migration_expected_content.mysql.sql: " ++ message);
 }
 
 pub const fixture_text_cases = [_]struct { text: []const u8, refused: bool }{
@@ -789,13 +734,7 @@ pub const fixture_text_cases = [_]struct { text: []const u8, refused: bool }{
 };
 
 fn fixtureText(comptime text: [:0]const u8) [:0]const u8 {
-    if (comptime fixtureTextError(text)) |message| @compileError(message ++ ": " ++ text);
-    if (comptime rsql.fixtureError(text)) |message| @compileError("fixture: " ++ message ++ ": " ++ text);
-    switch (comptime rsql.mysqlRendering(text)) {
-        .refused => |message| @compileError("fixture: MySQL rendering refuses it: " ++ message ++ ": " ++ text),
-        .rendered => {},
-    }
-    mysql_dialect_check.shadowPrepareFixture(text);
+    mysql_dialect_check.shadowPrepareFixture(comptime rsql.fixtureTemplate(text));
     return text;
 }
 
@@ -889,7 +828,7 @@ pub fn sqliteQueryU64(database: *sqlite.c.sqlite3, sql: [:0]const u8, args: anyt
 pub fn zeroContent(storage: *Store, comptime ids: [:0]const u8) !void {
     _ = fixtureText("UPDATE content_chunk SET bytes=zeroblob(length(bytes)) WHERE content_id IN (" ++ ids ++ ")");
     const sql = "UPDATE content SET payload=zeroblob(byte_length) WHERE content_id IN (" ++ ids ++ ")";
-    if (comptime fixtureTextError(sql)) |message| @compileError(message ++ ": " ++ sql);
+    if (comptime rsql.fixtureTextError(sql)) |message| @compileError(message ++ ": " ++ sql);
     if (storage.engine == .mysql) return mysql_testing.exec(storage, "UPDATE content_chunk SET bytes=zeroblob(length(bytes)) WHERE content_id IN (" ++ ids ++ ")", .{});
     return sqliteExec(storage.sqliteDatabase(), sql, .{});
 }

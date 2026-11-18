@@ -1978,7 +1978,7 @@
                         ]
                       },
                       "content": {
-                        "$ref": "#/components/schemas/ActivityItemContent"
+                        "$ref": "#/components/schemas/ContentValue"
                       }
                     },
                     "required": [
@@ -2076,7 +2076,7 @@
                         ]
                       },
                       "content": {
-                        "$ref": "#/components/schemas/ActivityItemContent"
+                        "$ref": "#/components/schemas/ContentValue"
                       }
                     },
                     "required": [
@@ -2125,7 +2125,7 @@
                     "type": "object",
                     "properties": {
                       "content": {
-                        "$ref": "#/components/schemas/ActivityItemContent"
+                        "$ref": "#/components/schemas/ContentValue"
                       },
                       "final": {
                         "type": "boolean"
@@ -2200,13 +2200,13 @@
                         "type": "array",
                         "prefixItems": [
                           {
-                            "$ref": "#/components/schemas/ActivityItemContent"
+                            "$ref": "#/components/schemas/ContentValue"
                           },
                           {
-                            "$ref": "#/components/schemas/ActivityItemContent"
+                            "$ref": "#/components/schemas/ContentValue"
                           },
                           {
-                            "$ref": "#/components/schemas/ActivityItemContent"
+                            "$ref": "#/components/schemas/ContentValue"
                           }
                         ],
                         "items": false,
@@ -2296,7 +2296,7 @@
                     "type": "object",
                     "properties": {
                       "content": {
-                        "$ref": "#/components/schemas/ActivityItemContent"
+                        "$ref": "#/components/schemas/ContentValue"
                       },
                       "presentation": {
                         "$ref": "#/components/schemas/ToolPresentation"
@@ -2414,7 +2414,7 @@
                       "content": {
                         "anyOf": [
                           {
-                            "$ref": "#/components/schemas/ActivityItemContent"
+                            "$ref": "#/components/schemas/ContentValue"
                           },
                           {
                             "type": "null"
@@ -2542,7 +2542,7 @@
                         "$ref": "#/components/schemas/NamedPeer"
                       },
                       "content": {
-                        "$ref": "#/components/schemas/ActivityItemContent"
+                        "$ref": "#/components/schemas/ContentValue"
                       }
                     },
                     "required": [
@@ -2697,7 +2697,7 @@
                         ]
                       },
                       "content": {
-                        "$ref": "#/components/schemas/ActivityItemContent"
+                        "$ref": "#/components/schemas/ContentValue"
                       }
                     },
                     "required": [
@@ -3065,23 +3065,6 @@
             "description": "One resolved model Operation at its admission position. Timings describe the FINAL attempt only: latency_ms is request sent to resolution; first_event_ms is request sent to the first HTTP response event (including an interim head), not the first token. Missing evidence, usage or timings is null. A resolution may become visible within a previously captured end (D219)."
           }
         ]
-      },
-      "ActivityItemContent": {
-        "type": "object",
-        "properties": {
-          "bytes": {
-            "$ref": "#/components/schemas/Decimal"
-          },
-          "sha256": {
-            "type": "string",
-            "pattern": "^[0-9a-f]{64}$"
-          }
-        },
-        "required": [
-          "bytes",
-          "sha256"
-        ],
-        "additionalProperties": false
       },
       "ActivityPageReply": {
         "anyOf": [
@@ -4207,25 +4190,7 @@
                           "const": "user"
                         },
                         "content": {
-                          "type": "object",
-                          "properties": {
-                            "bytes": {
-                              "$ref": "#/components/schemas/Decimal"
-                            },
-                            "sha256": {
-                              "type": "string",
-                              "pattern": "^[0-9a-f]{64}$"
-                            },
-                            "display": {
-                              "const": "omitted"
-                            }
-                          },
-                          "required": [
-                            "bytes",
-                            "sha256",
-                            "display"
-                          ],
-                          "additionalProperties": false
+                          "$ref": "#/components/schemas/ContentValue"
                         }
                       },
                       "required": [
@@ -4249,25 +4214,7 @@
                           "const": "user"
                         },
                         "content": {
-                          "type": "object",
-                          "properties": {
-                            "bytes": {
-                              "$ref": "#/components/schemas/Decimal"
-                            },
-                            "sha256": {
-                              "type": "string",
-                              "pattern": "^[0-9a-f]{64}$"
-                            },
-                            "display": {
-                              "const": "omitted"
-                            }
-                          },
-                          "required": [
-                            "bytes",
-                            "sha256",
-                            "display"
-                          ],
-                          "additionalProperties": false
+                          "$ref": "#/components/schemas/ContentValue"
                         },
                         "admitted_at": {
                           "$ref": "#/components/schemas/Decimal"
@@ -4317,25 +4264,7 @@
                           "const": "assistant"
                         },
                         "content": {
-                          "type": "object",
-                          "properties": {
-                            "bytes": {
-                              "$ref": "#/components/schemas/Decimal"
-                            },
-                            "sha256": {
-                              "type": "string",
-                              "pattern": "^[0-9a-f]{64}$"
-                            },
-                            "display": {
-                              "const": "omitted"
-                            }
-                          },
-                          "required": [
-                            "bytes",
-                            "sha256",
-                            "display"
-                          ],
-                          "additionalProperties": false
+                          "$ref": "#/components/schemas/ContentValue"
                         }
                       },
                       "required": [
@@ -4359,25 +4288,7 @@
                           "const": "tool_result"
                         },
                         "content": {
-                          "type": "object",
-                          "properties": {
-                            "bytes": {
-                              "$ref": "#/components/schemas/Decimal"
-                            },
-                            "sha256": {
-                              "type": "string",
-                              "pattern": "^[0-9a-f]{64}$"
-                            },
-                            "display": {
-                              "const": "omitted"
-                            }
-                          },
-                          "required": [
-                            "bytes",
-                            "sha256",
-                            "display"
-                          ],
-                          "additionalProperties": false
+                          "$ref": "#/components/schemas/ContentValue"
                         }
                       },
                       "required": [
@@ -4401,25 +4312,7 @@
                           "const": "tool_result"
                         },
                         "content": {
-                          "type": "object",
-                          "properties": {
-                            "bytes": {
-                              "$ref": "#/components/schemas/Decimal"
-                            },
-                            "sha256": {
-                              "type": "string",
-                              "pattern": "^[0-9a-f]{64}$"
-                            },
-                            "display": {
-                              "const": "omitted"
-                            }
-                          },
-                          "required": [
-                            "bytes",
-                            "sha256",
-                            "display"
-                          ],
-                          "additionalProperties": false
+                          "$ref": "#/components/schemas/ContentValue"
                         },
                         "presentation": {
                           "$ref": "#/components/schemas/ToolPresentation"
@@ -4527,25 +4420,7 @@
                           "const": "user"
                         },
                         "content": {
-                          "type": "object",
-                          "properties": {
-                            "bytes": {
-                              "$ref": "#/components/schemas/Decimal"
-                            },
-                            "sha256": {
-                              "type": "string",
-                              "pattern": "^[0-9a-f]{64}$"
-                            },
-                            "display": {
-                              "const": "omitted"
-                            }
-                          },
-                          "required": [
-                            "bytes",
-                            "sha256",
-                            "display"
-                          ],
-                          "additionalProperties": false
+                          "$ref": "#/components/schemas/ContentValue"
                         }
                       },
                       "required": [
@@ -4569,25 +4444,7 @@
                           "const": "user"
                         },
                         "content": {
-                          "type": "object",
-                          "properties": {
-                            "bytes": {
-                              "$ref": "#/components/schemas/Decimal"
-                            },
-                            "sha256": {
-                              "type": "string",
-                              "pattern": "^[0-9a-f]{64}$"
-                            },
-                            "display": {
-                              "const": "omitted"
-                            }
-                          },
-                          "required": [
-                            "bytes",
-                            "sha256",
-                            "display"
-                          ],
-                          "additionalProperties": false
+                          "$ref": "#/components/schemas/ContentValue"
                         },
                         "admitted_at": {
                           "$ref": "#/components/schemas/Decimal"
@@ -4637,25 +4494,7 @@
                           "const": "assistant"
                         },
                         "content": {
-                          "type": "object",
-                          "properties": {
-                            "bytes": {
-                              "$ref": "#/components/schemas/Decimal"
-                            },
-                            "sha256": {
-                              "type": "string",
-                              "pattern": "^[0-9a-f]{64}$"
-                            },
-                            "display": {
-                              "const": "omitted"
-                            }
-                          },
-                          "required": [
-                            "bytes",
-                            "sha256",
-                            "display"
-                          ],
-                          "additionalProperties": false
+                          "$ref": "#/components/schemas/ContentValue"
                         }
                       },
                       "required": [
@@ -4679,25 +4518,7 @@
                           "const": "tool_result"
                         },
                         "content": {
-                          "type": "object",
-                          "properties": {
-                            "bytes": {
-                              "$ref": "#/components/schemas/Decimal"
-                            },
-                            "sha256": {
-                              "type": "string",
-                              "pattern": "^[0-9a-f]{64}$"
-                            },
-                            "display": {
-                              "const": "omitted"
-                            }
-                          },
-                          "required": [
-                            "bytes",
-                            "sha256",
-                            "display"
-                          ],
-                          "additionalProperties": false
+                          "$ref": "#/components/schemas/ContentValue"
                         }
                       },
                       "required": [
@@ -4721,25 +4542,7 @@
                           "const": "tool_result"
                         },
                         "content": {
-                          "type": "object",
-                          "properties": {
-                            "bytes": {
-                              "$ref": "#/components/schemas/Decimal"
-                            },
-                            "sha256": {
-                              "type": "string",
-                              "pattern": "^[0-9a-f]{64}$"
-                            },
-                            "display": {
-                              "const": "omitted"
-                            }
-                          },
-                          "required": [
-                            "bytes",
-                            "sha256",
-                            "display"
-                          ],
-                          "additionalProperties": false
+                          "$ref": "#/components/schemas/ContentValue"
                         },
                         "presentation": {
                           "$ref": "#/components/schemas/ToolPresentation"
@@ -4928,7 +4731,7 @@
             ]
           },
           "content": {
-            "$ref": "#/components/schemas/ActivityItemContent"
+            "$ref": "#/components/schemas/ContentValue"
           }
         },
         "required": [
@@ -17437,21 +17240,7 @@
                     "x-rui-max-bytes": 96
                   },
                   "content": {
-                    "type": "object",
-                    "properties": {
-                      "bytes": {
-                        "$ref": "#/components/schemas/Decimal"
-                      },
-                      "sha256": {
-                        "type": "string",
-                        "pattern": "^[0-9a-f]{64}$"
-                      }
-                    },
-                    "required": [
-                      "bytes",
-                      "sha256"
-                    ],
-                    "additionalProperties": false
+                    "$ref": "#/components/schemas/ContentValue"
                   },
                   "window": {
                     "type": "object",
@@ -17478,6 +17267,63 @@
                       "text"
                     ],
                     "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "position",
+                  "code",
+                  "content",
+                  "window"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "version",
+              "type",
+              "session",
+              "action",
+              "state",
+              "final"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "version": {
+                "const": "21"
+              },
+              "type": {
+                "const": "action_read"
+              },
+              "session": {
+                "type": "string",
+                "maxLength": 128,
+                "x-rui-max-bytes": 128
+              },
+              "action": {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              "state": {
+                "const": "resolved"
+              },
+              "final": {
+                "type": "object",
+                "properties": {
+                  "position": {
+                    "$ref": "#/components/schemas/Decimal"
+                  },
+                  "code": {
+                    "type": "string",
+                    "maxLength": 96,
+                    "x-rui-max-bytes": 96
+                  },
+                  "content": {
+                    "$ref": "#/components/schemas/ContentValue"
+                  },
+                  "window": {
+                    "type": "null"
                   }
                 },
                 "required": [
@@ -18986,7 +18832,7 @@
           "content": {
             "anyOf": [
               {
-                "$ref": "#/components/schemas/ActivityItemContent"
+                "$ref": "#/components/schemas/ContentValue"
               },
               {
                 "type": "null"
@@ -19042,16 +18888,16 @@
             "$ref": "#/components/schemas/Decimal"
           },
           "result": {
-            "$ref": "#/components/schemas/domainreportCurrentJsonTextReference"
+            "$ref": "#/components/schemas/ContentValue"
           },
           "name": {
-            "$ref": "#/components/schemas/domainreportCurrentJsonTextReference"
+            "$ref": "#/components/schemas/ContentValue"
           },
           "call_id": {
-            "$ref": "#/components/schemas/domainreportCurrentJsonTextReference"
+            "$ref": "#/components/schemas/ContentValue"
           },
           "arguments": {
-            "$ref": "#/components/schemas/domainreportCurrentJsonTextReference"
+            "$ref": "#/components/schemas/ContentValue"
           },
           "presentation": {
             "$ref": "#/components/schemas/ToolPresentation"
@@ -19110,7 +18956,7 @@
             "$ref": "#/components/schemas/Decimal"
           },
           "result": {
-            "$ref": "#/components/schemas/domainreportCurrentJsonTextReference"
+            "$ref": "#/components/schemas/ContentValue"
           },
           "presentation": {
             "$ref": "#/components/schemas/ToolPresentation"
@@ -19256,12 +19102,12 @@
             ]
           },
           "instructions": {
-            "$ref": "#/components/schemas/ActivityItemContent"
+            "$ref": "#/components/schemas/ContentValue"
           },
           "output_schema": {
             "anyOf": [
               {
-                "$ref": "#/components/schemas/ActivityItemContent"
+                "$ref": "#/components/schemas/ContentValue"
               },
               {
                 "type": "null"
@@ -19308,27 +19154,6 @@
         ],
         "additionalProperties": false
       },
-      "domainreportCurrentJsonTextReference": {
-        "type": "object",
-        "properties": {
-          "type": {
-            "const": "text"
-          },
-          "bytes": {
-            "$ref": "#/components/schemas/Decimal"
-          },
-          "sha256": {
-            "type": "string",
-            "pattern": "^[0-9a-f]{64}$"
-          }
-        },
-        "required": [
-          "type",
-          "bytes",
-          "sha256"
-        ],
-        "additionalProperties": false
-      },
       "domainreportCurrentJsonUnresolved": {
         "anyOf": [
           {
@@ -19371,10 +19196,10 @@
                 ]
               },
               "call_id": {
-                "$ref": "#/components/schemas/domainreportCurrentJsonTextReference"
+                "$ref": "#/components/schemas/ContentValue"
               },
               "arguments": {
-                "$ref": "#/components/schemas/domainreportCurrentJsonTextReference"
+                "$ref": "#/components/schemas/ContentValue"
               },
               "presentation": {
                 "$ref": "#/components/schemas/ToolPresentation"
@@ -19422,14 +19247,14 @@
                 ]
               },
               "call_id": {
-                "$ref": "#/components/schemas/domainreportCurrentJsonTextReference"
+                "$ref": "#/components/schemas/ContentValue"
               },
               "server": {
                 "type": "string",
                 "pattern": "^[A-Za-z0-9_-]{1,64}$"
               },
               "arguments": {
-                "$ref": "#/components/schemas/domainreportCurrentJsonTextReference"
+                "$ref": "#/components/schemas/ContentValue"
               },
               "presentation": {
                 "$ref": "#/components/schemas/ToolPresentation"
@@ -19866,7 +19691,7 @@
             ]
           },
           "content": {
-            "$ref": "#/components/schemas/ActivityItemContent"
+            "$ref": "#/components/schemas/ContentValue"
           }
         },
         "required": [
@@ -20165,7 +19990,7 @@
           "content": {
             "anyOf": [
               {
-                "$ref": "#/components/schemas/ActivityItemContent"
+                "$ref": "#/components/schemas/ContentValue"
               },
               {
                 "type": "null"

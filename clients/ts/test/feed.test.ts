@@ -33,7 +33,7 @@ function narrowed(entry: FeedEntry): void {
 			const tool: string | null = entry.tool;
 			const server: string | null = entry.server;
 			void [description, tool, server];
-			const fields: [Schemas["ActivityItemContent"], Schemas["ActivityItemContent"], Schemas["ActivityItemContent"]] = entry.fields;
+			const fields: [Schemas["ContentValue"], Schemas["ContentValue"], Schemas["ContentValue"]] = entry.fields;
 			// @ts-expect-error Only top-level camelCase keys are exposed.
 			void entry.call_ordinal;
 			// @ts-expect-error Calls do not have the text-bearing row's extras.
@@ -53,7 +53,7 @@ function narrowed(entry: FeedEntry): void {
 			// @ts-expect-error The wire session field is exposed as sessionId.
 			void entry.session;
 			const ending: "done" | "context_full" | "provider_refused" | "provider_unavailable" | "stopped" | "interrupted" | "failed" = entry.ending;
-			const content: Schemas["ActivityItemContent"] | null = entry.content;
+			const content: Schemas["ContentValue"] | null = entry.content;
 			void [sessionId, ending, content];
 			break;
 		}
@@ -133,7 +133,7 @@ test("feed entry types narrow to each generated kind", () => { void narrowed; })
 
 test("feed camelCases only row keys, preserving nested wire values and content references", async () => {
 	const presentation = { description: "tool", code: "succeeded", publication_position: "7" };
-	const content = { bytes: "2", sha256: "hash" };
+	const content = { type: "text", bytes: "2", sha256: "hash" } as const;
 	const rows = [
 		{ position: "1", ordinal: "0", at: "1", value: { tool_result: { content, presentation } } },
 		{ position: "2", ordinal: "0", at: "1", value: { hosted_call: { presentation } } },
@@ -506,7 +506,7 @@ test("a refused effort change retains its revision and inline provider text", as
 
 test("call and approval mapping preserves saved facts and readContent opens original JSON", async () => {
     const facts = { description: "Fetch saved page", tool: "fetch_page", server: "docs" };
-    const reference = { bytes: "2", sha256: "hash" };
+    const reference = { type: "text", bytes: "2", sha256: "hash" } as const;
     const rows: Schemas["ActivityItem"][] = [
         { position: "1", ordinal: "0", at: "1", value: { call: { operation: "2", turn: "1", call_ordinal: "0", action: "3", rejection: null, fields: [reference, reference, reference], ...facts } } },
         { position: "2", ordinal: "0", at: "1", value: { call: { operation: "2", turn: "1", call_ordinal: "1", action: "4", rejection: null, fields: [reference, reference, reference], description: "Print saved line", tool: "bash", server: null } } },

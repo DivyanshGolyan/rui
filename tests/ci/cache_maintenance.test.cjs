@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const {execFileSync} = require('node:child_process');
-const {mkdtempSync, readFileSync, readdirSync, rmSync} = require('node:fs');
+const {existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync} = require('node:fs');
 const {tmpdir} = require('node:os');
 const {join} = require('node:path');
 const {test} = require('node:test');
@@ -203,6 +203,34 @@ test('build restores keep each part apart and seed parts without snapshots from 
       }
     }
   }
+  // Every key above starts with setup's native tool identity. Linux runner
+  // images that differ only in Ubuntu package revisions (glibc 2.39-0ubuntu8.9
+  // and 8.12 split the fleet on 18 Nov 2026) name one identity, so they share
+  // snapshots; a different perl or glibc version is a different identity.
+  if (!existsSync('/etc/os-release')) return;
+  const action = readFileSync(`${root}/.github/actions/setup/caches/action.yml`, 'utf8');
+  const tools = action.match(/- name: Identify the actual native build tools\n[\s\S]*?^      run: \|\n((?: {8}.*\n|\n)+)/m)[1].replace(/^ {8}/gm, '');
+  const identity = image => {
+    const dir = mkdtempSync(join(tmpdir(), 'rui-tools-'));
+    try {
+      const stub = (name, text) => writeFileSync(join(dir, name), `#!/bin/sh\nprintf '%s\\n' '${text}'\n`, {mode: 0o755});
+      stub('cc', `gcc (Ubuntu 13.3.0-${image.gcc}) 13.3.0`);
+      stub('ldd', `ldd (Ubuntu GLIBC 2.39-${image.glibcPackage}) 2.39`);
+      stub('ld', `GNU ld (GNU Binutils for Ubuntu) 2.42-${image.binutils}`);
+      stub('getconf', `glibc ${image.glibc}`);
+      stub('perl', `perl ${image.perl}`);
+      const output = join(dir, 'output');
+      execFileSync('bash', ['-ec', tools], {env: {PATH: `${dir}:${process.env.PATH}`, RUNNER_TEMP: dir, GITHUB_OUTPUT: output}, stdio: ['ignore', 'ignore', 'inherit']});
+      return readFileSync(output, 'utf8').match(/^identity=([a-f0-9]{64})$/m)[1];
+    } finally { rmSync(dir, {recursive: true, force: true}); }
+  };
+  const image = {gcc: '6ubuntu2~24.04', glibcPackage: '0ubuntu8.9', binutils: '4ubuntu2.5', glibc: '2.39', perl: 'v5.38.2'};
+  const base = identity(image);
+  for (const [change, same] of [
+    [{glibcPackage: '0ubuntu8.12'}, true], [{gcc: '6ubuntu2~24.04.1'}, true], [{binutils: '4ubuntu2.6'}, true],
+    [{glibcPackage: '0ubuntu8.12', gcc: '6ubuntu2~24.04.1', binutils: '4ubuntu2.6'}, true],
+    [{perl: 'v5.40.0'}, false], [{glibc: '2.41'}, false],
+  ]) assert.equal(identity({...image, ...change}) === base, same, JSON.stringify(change));
 });
 
 test('only Linux X64 compiled migrates with ordered legacy fallbacks and unchanged source identity', () => {
@@ -264,9 +292,9 @@ test('only Linux X64 compiled migrates with ordered legacy fallbacks and unchang
   }
 });
 
-function compiledSnapshot(id, version = 4, partial = false) {
+function compiledSnapshot(id, version = 4, partial = false, tools = 'a') {
   const entry = cache(id, 'refs/heads/main', 'Linux-X64', 'compiled');
-  entry.key = `rui-build-v${version}-Linux-X64-0.17.1-${'a'.repeat(64)}-compiled.${'b'.repeat(64)}-${id.toString(16).padStart(64, '0')}`;
+  entry.key = `rui-build-v${version}-Linux-X64-0.17.1-${tools.repeat(64)}-compiled.${'b'.repeat(64)}-${id.toString(16).padStart(64, '0')}`;
   if (partial) entry.key += '-partial-123-1';
   return entry;
 }
@@ -305,31 +333,58 @@ test('partial v4 preserves legacy fallbacks until completion, then retains its o
   }
 });
 
-test('compiled retention covers complete and partial states across v2/v3/v4 and timestamp orders', async () => {
+test('compiled retention covers complete and partial states across v2/v3/v4, tool identities and timestamp orders', async () => {
   // Each bit independently enables a complete or partial generation. Every
-  // enabled group has two snapshots so the oracle also checks newest wins.
+  // enabled group has two snapshots so the oracle also checks newest wins;
+  // when the two come from different native tool identities (two runner
+  // images during a rollout), each is the newest of its own identity.
   for (let state = 0; state < 64; state++) {
     for (const versions of [[2, 3, 4], [4, 3, 2]]) {
-      const entries = [], newest = [];
-      let id = 0;
-      for (const version of versions) {
-        for (const partial of [false, true]) {
-          const bit = (version - 2) * 2 + Number(partial);
-          if (!(state & (1 << bit))) continue;
-          entries.push(compiledSnapshot(++id, version, partial));
-          const latest = compiledSnapshot(++id, version, partial);
-          entries.push(latest);
-          newest.push({entry: latest, version});
+      for (const [older, newer] of [['a', 'a'], ['a', 'c']]) {
+        const entries = [], kept = [];
+        let id = 0;
+        for (const version of versions) {
+          for (const partial of [false, true]) {
+            const bit = (version - 2) * 2 + Number(partial);
+            if (!(state & (1 << bit))) continue;
+            const first = compiledSnapshot(++id, version, partial, older);
+            const latest = compiledSnapshot(++id, version, partial, newer);
+            entries.push(first, latest);
+            if (older !== newer) kept.push({entry: first, version});
+            kept.push({entry: latest, version});
+          }
         }
+        const hasCompleteV4 = Boolean(state & (1 << 4));
+        const expected = kept.filter(({version}) => !hasCompleteV4 || version === 4)
+          .map(({entry}) => entry.id).sort((a, b) => a - b);
+        const result = await run(entries);
+        assert.ifError(result.error);
+        assert.deepEqual(result.ids, expected, `state=${state}, timestamp order=${versions}, tools=${older}/${newer}`);
       }
-      const hasCompleteV4 = Boolean(state & (1 << 4));
-      const expected = newest.filter(({version}) => !hasCompleteV4 || version === 4)
-        .map(({entry}) => entry.id).sort((a, b) => a - b);
-      const result = await run(entries);
-      assert.ifError(result.error);
-      assert.deepEqual(result.ids, expected, `state=${state}, timestamp order=${versions}`);
     }
   }
+  // A mixed runner-image fleet (18 Nov 2026: glibc package 8.9 and 8.12 named
+  // two identities): every group keeps the newest snapshot of each identity,
+  // and an identity's older snapshot still goes.
+  const main = 'refs/heads/main';
+  const tools = c => c.repeat(64), seq = n => n.toString(16).padStart(64, '0');
+  const fleet = [
+    {id: 1, key: `rui-build-v4-Linux-X64-0.17.1-${tools('a')}-compiled.${tools('d')}-${seq(1)}`},
+    {id: 2, key: `rui-build-v4-Linux-X64-0.17.1-${tools('c')}-compiled.${tools('d')}-${seq(2)}`},
+    {id: 3, key: `rui-build-v4-Linux-X64-0.17.1-${tools('a')}-compiled.${tools('d')}-${seq(3)}`},
+    {id: 4, key: `rui-build-v2-Linux-X64-0.17.1-${tools('c')}-baseline.${tools('d')}-${seq(4)}`},
+    {id: 5, key: `rui-build-v2-Linux-X64-0.17.1-${tools('a')}-baseline.${tools('d')}-${seq(5)}`},
+    {id: 6, key: `rui-build-v2-Linux-X64-0.17.1-${tools('c')}-compiled-unit.${tools('d')}-${seq(6)}`},
+    {id: 7, key: `rui-build-v2-Linux-X64-0.17.1-${tools('a')}-compiled-unit.${tools('d')}-${seq(7)}-partial-9-1`},
+    {id: 8, key: `rui-runner-v2-Linux-X64-0.17.1-${tools('a')}-${'e'.repeat(16)}-${seq(8)}`},
+    {id: 9, key: `rui-runner-v2-Linux-X64-0.17.1-${tools('c')}-${'e'.repeat(16)}-${seq(9)}`},
+    {id: 10, key: `rui-build-v2-macOS-ARM64-0.17.1-${tools('a')}-compiled.${tools('d')}-${seq(10)}`},
+    {id: 11, key: `rui-build-v2-macOS-ARM64-0.17.1-${tools('a')}-compiled.${tools('d')}-${seq(11)}`},
+    {id: 12, key: `rui-build-v2-Linux-X64-0.17.1-${tools('c')}-baseline.${tools('d')}-${seq(12)}`},
+  ].map(({id, key}) => ({...cache(id, main), key}));
+  const mixed = await run(fleet);
+  assert.ifError(mixed.error);
+  assert.deepEqual(mixed.ids, [2, 3, 5, 6, 7, 8, 9, 11, 12]);
 });
 
 test('malformed v4 lookalikes neither trigger migration nor participate in pruning', async () => {
