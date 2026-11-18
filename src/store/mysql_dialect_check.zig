@@ -421,9 +421,20 @@ fn Once(comptime text: []const u8) type {
 fn prepareQuery(comptime text: []const u8) []const u8 {
     comptime {
         @setEvalBranchQuota(10 * text.len + 1000);
-        var quoted: []const u8 = "";
-        for (text) |byte| quoted = quoted ++ (if (byte == '\'') "''" else &[_]u8{byte});
-        return "PREPARE rui_dialect_check FROM '" ++ quoted ++ "';DEALLOCATE PREPARE rui_dialect_check";
+        // Fill a buffer sized from the text: appending a byte at a time with
+        // `++` copies the whole prefix on every byte.
+        var quoted: [text.len + std.mem.countScalar(u8, text, '\'')]u8 = undefined;
+        var at: usize = 0;
+        for (text) |byte| {
+            quoted[at] = byte;
+            at += 1;
+            if (byte == '\'') {
+                quoted[at] = byte;
+                at += 1;
+            }
+        }
+        const final = quoted;
+        return "PREPARE rui_dialect_check FROM '" ++ &final ++ "';DEALLOCATE PREPARE rui_dialect_check";
     }
 }
 
