@@ -118,7 +118,7 @@ pub fn writeDiagnostics(result: *const Result, writer: *std.Io.Writer, shown: us
                 try path_text.finish(writer);
                 try writer.writeAll(":\n");
                 try writer.writeAll(result.startup()[shown..]);
-                if (result.startup_len == 0) if (failure.refusal) |*refusal| try start_report.writeSentence(writer, .start, refusal);
+                if (result.startup_len == 0) if (failure.refusal) |*refusal| try @import("host_start.zig").writeSentence(writer, .start, refusal);
                 if (failure.cause.kind == .child_closed) try writer.writeAll("Child closed its startup channel before readiness; exit status unavailable.\n");
                 if (failure.cause.kind == .startup_full) try writer.writeAll("Startup output reached 8 KiB; readiness and exit status remain unconfirmed.\n");
             },

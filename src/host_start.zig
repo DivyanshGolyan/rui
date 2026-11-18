@@ -572,11 +572,20 @@ fn readExact(io: std.Io, file: std.Io.File, buffer: []u8) !void {
 
 pub const Attempt = start_report.Attempt;
 
+pub fn writeSentence(writer: *std.Io.Writer, attempt: Attempt, failure: *const start_report.Failure) !void {
+    const prefix = switch (attempt) {
+        .start => "the Host did not start",
+        .save => "the setting was not saved",
+        .check => "these settings would not start a Host",
+    };
+    try writer.print("rui: {s}: {f} [{s}]\n", .{ prefix, std.zig.fmtString(failure.message.slice()), @tagName(failure.code) });
+}
+
 pub noinline fn report(io: std.Io, attempt: Attempt, failure: *const start_report.Failure) void {
     var buffer: [start_report.max_line_bytes]u8 = undefined;
     if (attempt == .start) std.Io.File.stdout().writeStreamingAll(io, start_report.line(failure, &buffer)) catch {};
     var writer = std.Io.Writer.fixed(&buffer);
-    start_report.writeSentence(&writer, attempt, failure) catch unreachable;
+    writeSentence(&writer, attempt, failure) catch unreachable;
     const sentence = writer.buffered();
     std.Io.File.stderr().writeStreamingAll(io, sentence) catch {};
 }

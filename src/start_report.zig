@@ -37,15 +37,6 @@ pub const Failure = struct {
 
 pub const Attempt = enum { start, save, check };
 
-pub fn writeSentence(writer: *std.Io.Writer, attempt: Attempt, failure: *const Failure) !void {
-    const prefix = switch (attempt) {
-        .start => "the Host did not start",
-        .save => "the setting was not saved",
-        .check => "these settings would not start a Host",
-    };
-    try writer.print("rui: {s}: {f} [{s}]\n", .{ prefix, std.zig.fmtString(failure.message.slice()), @tagName(failure.code) });
-}
-
 pub fn parseLine(gpa: std.mem.Allocator, bytes: []const u8) error{OutOfMemory}!?Failure {
     if (bytes.len > max_line_bytes or !std.mem.endsWith(u8, bytes, "\n")) return null;
     const Envelope = struct { rui_start_error: struct { code: StartError, message: []const u8 } };
