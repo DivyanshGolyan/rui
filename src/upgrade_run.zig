@@ -611,6 +611,31 @@ test "SH-75 a run's ending outcome exit and relaunch follow its facts" {
         try std.testing.expectEqual(status.Ended.cancelled, ending(f, true));
         try std.testing.expectEqual(Exit.not_installable, exit(f));
     }
+    // Absent and failed publications, crossed with the same selection,
+    // release, Host and stopping domains as the successful receipts above.
+    for (rows) |row| for (releases) |release_row| for (selections) |selection| for ([_]bool{ false, true }) |stopping| {
+        var f: Facts = .{ .mode = .install, .selection = .{ .ok = selection }, .release = .{ .ok = release_row[0] }, .census = .{ .ok = 0 }, .resumed = true, .hosts = .{ .ok = row.hosts } };
+        if (selection != .released or stopping) {
+            const expected: status.Ended = if (stopping) .cancelled else .{ .refused = switch (selection) {
+                .absent => .first_install,
+                .ineligible => .package_managed,
+                .source => .source_build,
+                .unknown_managed => .unknown_build,
+                .released => unreachable,
+            } };
+            try std.testing.expectEqualDeep(expected, ending(f, stopping));
+            try std.testing.expectEqual(status.Outcome.unchanged, outcome(f));
+            try std.testing.expect(!installed(f));
+            try std.testing.expectEqual(row.guidance, guidance(f, false, true));
+            try std.testing.expectEqual(if (selection != .released) Exit.not_installable else if (row.exit_class == .restart_failed) Exit.restart_failed else Exit.done, exit(f));
+        }
+        f.published = .{ .failed = .download };
+        try std.testing.expectEqualDeep(if (stopping) status.Ended.cancelled else status.Ended{ .failed = .download }, ending(f, stopping));
+        try std.testing.expectEqual(status.Outcome.unchanged, outcome(f));
+        try std.testing.expect(!installed(f));
+        try std.testing.expect(guidance(f, false, true));
+        try std.testing.expectEqual(if (selection == .released) Exit.install_failed else Exit.not_installable, exit(f));
+    };
     const errors = [_]struct { Cause, status.Failure }{
         .{ .download, .download }, .{ .release, .release }, .{ .preparation, .release }, .{ .other, .other }, .{ .cancelled, .other },
     };
