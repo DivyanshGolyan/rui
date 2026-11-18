@@ -84,7 +84,7 @@ def query(binary, timeout=30, environ=None):
         raise ValueError(f"metadata query timed out: {binary}") from None
     finally:
         for thread in threads:
-            thread.join(timeout=1)
+            thread.join(timeout=60)
     if any(thread.is_alive() for thread in threads):
         raise ValueError("metadata query left open output streams")
     if oversized.is_set():
