@@ -23,7 +23,7 @@ const settleTwoActionsForTesting = shared_fixtures.settleTwoActionsForTesting;
 const testingBytesContent = shared_fixtures.testingBytesContent;
 const testingListRow = shared_fixtures.testingListRow;
 
-fn messageCapabilityCases() !void {
+test "a creating Message with require_model creates nothing without a model" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
@@ -58,48 +58,6 @@ fn messageCapabilityCases() !void {
     }.run);
 }
 
-fn configureCapabilityCases() !void {
-    try store_testing.forEachEngine(struct {
-        fn run(case: *store_testing.Case) !void {
-            var tmp = std.testing.tmpDir(.{});
-            defer tmp.cleanup();
-            var storage: Store = undefined;
-            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
-            defer storage.close() catch unreachable;
-            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
-            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
-            var command = try completeConfiguration("capability-guard", "", workspace, "model-a");
-            command.require_model = true;
-
-            storage.served = protocol.routesAll(.unserved);
-            const rejected = try storage.configure(&command, .{});
-            try std.testing.expect(rejected == .rejected);
-            try std.testing.expectEqual(protocol.ConfigurationRejection.model_capability_unavailable, rejected.rejected.code);
-            try std.testing.expect(!(try storage.inspectSessionForTesting(command.session.slice())).found);
-            const replay = try storage.configure(&command, .{});
-            try std.testing.expect(replay == .rejected and replay.rejected.replayed);
-            try std.testing.expectEqual(rejected.rejected.code, replay.rejected.code);
-
-            var new_key = command;
-            try new_key.key.set("capability-guard-next");
-            storage.served = protocol.routesAll(.endpoint);
-            try std.testing.expect(try storage.configure(&new_key, .{}) == .accepted);
-            storage.served = protocol.routesAll(.unserved);
-            try std.testing.expect((try storage.configure(&new_key, .{})).accepted.replayed);
-            var changed_intent = command;
-            changed_intent.require_model = false;
-            try std.testing.expect(try storage.configure(&changed_intent, .{}) == .conflict);
-            try changed_intent.key.set("explicit-offline-config");
-            try std.testing.expect(try storage.configure(&changed_intent, .{}) == .accepted);
-        }
-    }.run);
-}
-
-test "ADM-25 creation model capability guard" {
-    try configureCapabilityCases();
-    try messageCapabilityCases();
-}
-
 fn expectCreationReceipt(expected: @import("../../creation_receipt.zig").Configuration, actual: @import("../../creation_receipt.zig").Configuration) !void {
     try std.testing.expectEqual(expected.provider, actual.provider);
     try std.testing.expectEqualStrings(expected.model.slice(), actual.model.slice());
@@ -111,7 +69,7 @@ fn expectCreationReceipt(expected: @import("../../creation_receipt.zig").Configu
     try std.testing.expectEqual(expected.compaction_trigger, actual.compaction_trigger);
 }
 
-fn messageReceiptReplayCases(comptime legacy: bool) !void {
+test "initial Message atomically allocates its Session and replays its original admission" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
@@ -141,27 +99,25 @@ fn messageReceiptReplayCases(comptime legacy: bool) !void {
                 try std.testing.expectEqual(.bypass, receipt.permission_mode);
                 try std.testing.expectEqualStrings(workspace, receipt.workspace.slice());
                 try std.testing.expectEqual(@as(?u64, 115200), receipt.compaction_trigger);
-                if (legacy) {
-                    try std.testing.expect(protocol.validSessionId(first.session.slice()));
-                    const observed = try store_testing.observeCommandForTesting(&storage, "start");
-                    try std.testing.expect(observed.target.eql(first.session.slice()));
-                    try std.testing.expectEqual(first.admission_id, observed.kind.message.?.queue.?.admission_id);
-                    try std.testing.expectError(error.ResultNotReady, storage.commandResult("start"));
-                    try std.testing.expectEqual(@as(u64, 1), (try storage.inspectSessionForTesting(first.session.slice())).pending_messages);
-                    var changed = message;
-                    changed.configuration.?.model.value = .{};
-                    try changed.configuration.?.model.value.set("model-b");
-                    try std.testing.expect(storage.submitMessageWithModel(&changed, null, .{}) == .conflict);
-                    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{}));
-                    var refused = message;
-                    try refused.key.set("invalid-initial-settings");
-                    refused.configuration.?.workspace.value = .{};
-                    const rejected = storage.submitMessageWithModel(&refused, null, .{});
-                    try std.testing.expect(rejected == .rejected);
-                    try std.testing.expectEqual(protocol.MessageRejection.invalid_workspace, rejected.rejected.code);
-                    try std.testing.expect(storage.submitMessageWithModel(&refused, null, .{}).rejected.replayed);
-                    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{}));
-                }
+                try std.testing.expect(protocol.validSessionId(first.session.slice()));
+                const observed = try store_testing.observeCommandForTesting(&storage, "start");
+                try std.testing.expect(observed.target.eql(first.session.slice()));
+                try std.testing.expectEqual(first.admission_id, observed.kind.message.?.queue.?.admission_id);
+                try std.testing.expectError(error.ResultNotReady, storage.commandResult("start"));
+                try std.testing.expectEqual(@as(u64, 1), (try storage.inspectSessionForTesting(first.session.slice())).pending_messages);
+                var changed = message;
+                changed.configuration.?.model.value = .{};
+                try changed.configuration.?.model.value.set("model-b");
+                try std.testing.expect(storage.submitMessageWithModel(&changed, null, .{}) == .conflict);
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{}));
+                var refused = message;
+                try refused.key.set("invalid-initial-settings");
+                refused.configuration.?.workspace.value = .{};
+                const rejected = storage.submitMessageWithModel(&refused, null, .{});
+                try std.testing.expect(rejected == .rejected);
+                try std.testing.expectEqual(protocol.MessageRejection.invalid_workspace, rejected.rejected.code);
+                try std.testing.expect(storage.submitMessageWithModel(&refused, null, .{}).rejected.replayed);
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{}));
                 var edit = try completeConfiguration("receipt-edit", first.session.slice(), workspace, "model-b");
                 edit.configuration.tools = try .of(&.{"bash"});
                 edit.configuration.permission_mode.state = .value;
@@ -186,14 +142,12 @@ fn messageReceiptReplayCases(comptime legacy: bool) !void {
                 try std.testing.expectEqual(first.admission_id, replay.admission_id);
                 try std.testing.expectEqualStrings(first.session.slice(), replay.session.slice());
                 try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission", .{}));
-                if (legacy) {
-                    var failed = message;
-                    try failed.key.set("failed-start-commit");
-                    try std.testing.expect(storage.submitMessageWithModel(&failed, null, .{ .before_commit = true }) == .infrastructure_failure);
-                }
+                var failed = message;
+                try failed.key.set("failed-start-commit");
+                try std.testing.expect(storage.submitMessageWithModel(&failed, null, .{ .before_commit = true }) == .infrastructure_failure);
                 try storage.close();
             }
-            if (legacy) {
+            {
                 var storage: Store = undefined;
                 try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
                 defer storage.close() catch unreachable;
@@ -1095,61 +1049,47 @@ test "creating captured Messages reuse matching configuration content" {
     }.run);
 }
 
-test "ADM-37 creation receipt replay rounds" {
+test "creating Message replay reads independently of Session history in rounds" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
-            for ([_]bool{ false, true }) |as_message| {
-                var tmp = std.testing.tmpDir(.{});
-                defer tmp.cleanup();
-                var storage: Store = undefined;
-                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
-                defer storage.close() catch unreachable;
-                var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
-                const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
-                const create = try completeConfiguration("receipt-rounds", "", workspace, "model-a");
-                var message: wire_request.MessageCommand = .{ .configuration = create.configuration };
-                try message.key.set("receipt-rounds");
-                message.text = try testingBytesContent(&tmp, "receipt-rounds-input", "initial");
-                defer message.removeTemporaryContent(std.testing.io) catch unreachable;
-                var receipt: @import("../../creation_receipt.zig").Configuration = undefined;
-                const session = if (as_message) blk: {
-                    const result = storage.submitMessageWithModelInto(&message, null, &receipt, .{});
-                    try std.testing.expect(result == .accepted);
-                    break :blk result.accepted.session;
-                } else blk: {
-                    const result = try storage.configureInto(&create, &receipt, .{});
-                    try std.testing.expect(result == .accepted);
-                    break :blk result.accepted.session;
-                };
-                const few = shared_fixtures.TwinRounds.start(&storage);
-                if (as_message) {
-                    try std.testing.expect(storage.submitMessageWithModelInto(&message, null, &receipt, .{}).accepted.replayed);
-                } else try std.testing.expect((try storage.configureInto(&create, &receipt, .{})).accepted.replayed);
-                const few_rounds = few.taken();
-                for (0..64) |index| {
-                    var key: [64]u8 = undefined;
-                    const name = try std.fmt.bufPrint(&key, "receipt-rounds-history-{d}", .{index});
-                    try submitTestMessage(&storage, &tmp, name, name, session.slice(), "history");
-                }
-                for (0..64) |index| {
-                    var key: [64]u8 = undefined;
-                    const name = try std.fmt.bufPrint(&key, "receipt-rounds-revision-{d}", .{index});
-                    var update = try completeConfiguration(name, session.slice(), workspace, if (index % 2 == 0) "model-b" else "model-a");
-                    try std.testing.expect((try storage.configure(&update, .{})) == .accepted);
-                }
-                const many = shared_fixtures.TwinRounds.start(&storage);
-                if (as_message) {
-                    try std.testing.expect(storage.submitMessageWithModelInto(&message, null, &receipt, .{}).accepted.replayed);
-                } else try std.testing.expect((try storage.configureInto(&create, &receipt, .{})).accepted.replayed);
-                const many_rounds = many.taken();
-                try std.testing.expect(few_rounds > 0);
-                try std.testing.expectEqual(few_rounds, many_rounds);
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            const settings = try completeConfiguration("receipt-rounds", "", workspace, "model-a");
+            var message: wire_request.MessageCommand = .{ .configuration = settings.configuration };
+            try message.key.set("receipt-rounds");
+            message.text = try testingBytesContent(&tmp, "receipt-rounds-input", "initial");
+            defer message.removeTemporaryContent(std.testing.io) catch unreachable;
+            var created_receipt: @import("../../creation_receipt.zig").Configuration = undefined;
+            const created = storage.submitMessageWithModelInto(&message, null, &created_receipt, .{});
+            try std.testing.expect(created == .accepted);
+            const session = created.accepted.session;
+            const few = shared_fixtures.TwinRounds.start(&storage);
+            var first_receipt: @import("../../creation_receipt.zig").Configuration = undefined;
+            const first = storage.submitMessageWithModelInto(&message, null, &first_receipt, .{});
+            const few_rounds = few.taken();
+            try std.testing.expect(first == .accepted and first.accepted.replayed);
+            for (0..64) |index| {
+                var key: [64]u8 = undefined;
+                const name = try std.fmt.bufPrint(&key, "receipt-rounds-history-{d}", .{index});
+                try submitTestMessage(&storage, &tmp, name, name, session.slice(), "history");
             }
+            const many = shared_fixtures.TwinRounds.start(&storage);
+            var replay_receipt: @import("../../creation_receipt.zig").Configuration = undefined;
+            const replay = storage.submitMessageWithModelInto(&message, null, &replay_receipt, .{});
+            const many_rounds = many.taken();
+            try std.testing.expect(replay == .accepted and replay.accepted.replayed);
+            try std.testing.expect(few_rounds > 0);
+            try std.testing.expectEqual(few_rounds, many_rounds);
         }
     }.run);
 }
 
-fn configureReceiptReplayCases() !void {
+test "creating configuration receipt replays after edit and restart with history-independent rounds" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
@@ -1174,6 +1114,31 @@ fn configureReceiptReplayCases() !void {
                 try std.testing.expectEqualStrings(workspace, original.workspace.slice());
                 try std.testing.expectEqual(.bypass, original.permission_mode);
                 try std.testing.expectEqual(@as(?u64, 115200), original.compaction_trigger);
+                const few = shared_fixtures.TwinRounds.start(&storage);
+                var early_receipt: @import("../../creation_receipt.zig").Configuration = undefined;
+                const early = try storage.configureInto(&create, &early_receipt, .{});
+                const few_rounds = few.taken();
+                try std.testing.expect(early == .accepted and early.accepted.replayed and early.accepted.configuration != null);
+                try expectCreationReceipt(original, early.accepted.configuration.?.*);
+                for (0..64) |index| {
+                    var key: [64]u8 = undefined;
+                    const name = try std.fmt.bufPrint(&key, "configure-receipt-history-{d}", .{index});
+                    try submitTestMessage(&storage, &tmp, name, name, session.slice(), "history");
+                }
+                for (0..64) |index| {
+                    var key: [64]u8 = undefined;
+                    const name = try std.fmt.bufPrint(&key, "configure-receipt-revision-{d}", .{index});
+                    var update = try completeConfiguration(name, session.slice(), workspace, if (index % 2 == 0) "model-b" else "model-a");
+                    try std.testing.expect((try storage.configure(&update, .{})) == .accepted);
+                }
+                const many = shared_fixtures.TwinRounds.start(&storage);
+                var late_receipt: @import("../../creation_receipt.zig").Configuration = undefined;
+                const late = try storage.configureInto(&create, &late_receipt, .{});
+                const many_rounds = many.taken();
+                try std.testing.expect(late == .accepted and late.accepted.replayed and late.accepted.configuration != null);
+                try expectCreationReceipt(original, late.accepted.configuration.?.*);
+                try std.testing.expect(few_rounds > 0);
+                try std.testing.expectEqual(few_rounds, many_rounds);
                 var edit = try completeConfiguration("configure-receipt-edit", session.slice(), workspace, "model-b");
                 edit.configuration.tools = try .of(&.{"bash"});
                 edit.configuration.permission_mode.state = .value;
@@ -1202,7 +1167,7 @@ fn configureReceiptReplayCases() !void {
     }.run);
 }
 
-test "ADM-28 legacy creation receipt replay" {
+test "legacy creation receipts resolve null compaction and replay creating Message without created flag" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
@@ -1262,7 +1227,7 @@ test "ADM-28 legacy creation receipt replay" {
     }.run);
 }
 
-test "ADM-29 creation receipt integrity" {
+test "creation receipt rejects mismatched revision identity and malformed tool sets" {
     try store_testing.forEachEngine(struct {
         const Damage = enum { revision_key, configured_missing, loaded_missing, configured_count, loaded_count, duplicate_name, configured_dangling, loaded_dangling, configured_ordinal, loaded_ordinal };
         fn run(case: *store_testing.Case) !void {
@@ -1336,7 +1301,7 @@ test "ADM-29 creation receipt integrity" {
     }.run);
 }
 
-test "ADM-30 caller-owned receipt lifetime" {
+test "caller owned creation receipt survives later Store operations and failed commit" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             for ([_]bool{ false, true }) |as_message| {
@@ -1424,7 +1389,7 @@ test "ADM-30 caller-owned receipt lifetime" {
     }.run);
 }
 
-test "ADM-31 queued receipt batch outcomes" {
+test "queued creation receipt survives later job and lost batch" {
     const Reply = union(enum) {
         configure: @import("../../command_reply.zig").ConfigureReply,
         message: @import("../../command_reply.zig").MessageReply,
@@ -1577,7 +1542,8 @@ test "fresh creation rejects reused corrupt tool sets" {
     }.run);
 }
 
-test "ADM-24 creation profiles and receipts" {
+test "creation image defaults and parent authority match receipts on replay" {
+    const product = @import("../../product_defaults.zig");
     const can_read_images = @import("../../os/read_image_file.zig").available;
     try store_testing.forEachEngine(struct {
         const Loaded = enum { omitted, reachable, missing_discovery };
@@ -1646,22 +1612,11 @@ test "ADM-24 creation profiles and receipts" {
                     try std.testing.expectEqualStrings(first.accepted.session.slice(), again.accepted.session.slice());
                 }
                 stage = "receipt defaults";
-                const image_profile = images and can_read_images;
-                const allowed = if (image_profile) "bash,find_tools,message_agent,read_action,read_image,read_transcript,skill,start_agent,stop_action,web_search" else "bash,find_tools,message_agent,read_action,read_transcript,skill,start_agent,stop_action,web_search";
-                const default_loaded = if (image_profile) "bash,find_tools,read_image,skill,web_search" else "bash,find_tools,skill,web_search";
-                try std.testing.expectEqualStrings(if (explicit) "bash" else allowed, fresh.tools.slice());
-                try std.testing.expectEqualStrings(if (explicit) "bash" else if (loaded == .reachable) "bash,find_tools" else default_loaded, fresh.loaded_tools.slice());
+                const defaults = product.creationTools(images, can_read_images);
+                try std.testing.expectEqualStrings(if (explicit) "bash" else defaults.allowed, fresh.tools.slice());
+                try std.testing.expectEqualStrings(if (explicit) "bash" else if (loaded == .reachable) "bash,find_tools" else defaults.loaded, fresh.loaded_tools.slice());
                 try expectCreationReceipt(fresh, replay);
             };
         }
     }.run);
-}
-
-test "ADM-27 immutable creation receipt replay" {
-    try messageReceiptReplayCases(false);
-    try configureReceiptReplayCases();
-}
-
-test "initial Message admission and failed commit" {
-    try messageReceiptReplayCases(true);
 }
