@@ -2252,9 +2252,9 @@ test "App overview paints its ground and plain footer" {
     const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .provider = "codex", .model = "gpt-5.5" }, fake_operations, &cancellation);
     defer rig.close();
     for ([_]struct { caps: view.Caps, ground: vaxis.Color }{
-        .{ .caps = .{}, .ground = .{ .rgb = .{ 0x12, 0x19, 0x33 } } },
+        .{ .caps = .{}, .ground = .{ .rgb = .{ 0x1b, 0x21, 0x36 } } },
         .{ .caps = .{ .background = .{ 255, 255, 255 } }, .ground = .{ .rgb = .{ 0xf3, 0xee, 0xe2 } } },
-        .{ .caps = .{ .depth = .indexed }, .ground = .{ .index = 234 } },
+        .{ .caps = .{ .depth = .indexed }, .ground = .{ .index = 235 } },
         .{ .caps = .{ .depth = .none }, .ground = .default },
     }) |case| {
         rig.overview.caps = case.caps;
