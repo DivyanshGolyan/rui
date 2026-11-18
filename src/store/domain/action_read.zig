@@ -82,6 +82,13 @@ pub fn readResolution(a: anytype, session: []const u8, action_id: u64) !SavedRes
     return try resolution(a, selected orelse return error.CorruptStore) orelse error.CorruptStore;
 }
 
+pub fn readPublicResolution(a: anytype, session: []const u8, action_id: u64) !SavedResolution {
+    var selected: metadata.Result = null;
+    a.read(metadata, .{ .session = session, .action_id = action_id }, &selected);
+    try a.run();
+    return try resolution(a, selected orelse return error.ContentNotFound) orelse error.ContentNotFound;
+}
+
 fn resolution(a: anytype, row: metadata.Row) !?SavedResolution {
     const position = row.acceptance_position orelse {
         if (row.resolution_code != null or row.resolution_content_id != null or row.length != null or row.digest != null) return error.CorruptStore;
