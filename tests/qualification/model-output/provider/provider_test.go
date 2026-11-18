@@ -89,7 +89,8 @@ func TestFixtureSessionBindingsRequireExactCanonicalPopulation(t *testing.T) {
 	}
 }
 
-func TestRequestHistoryOracleRejectsMissingPriorTurnAndWrongCurrentInput(t *testing.T) {
+func TestCI81CapacityHistoryOracle(t *testing.T) {
+	// CI-81
 	valid := []byte(testRequestEnvelope("k7m2qx") + `"input":[{"role":"user","content":[{"type":"input_text","text":"capacity-2-round-1-0"}]},{"type":"message","id":"capacity-response-capacity-2-round-1-0-message","role":"assistant","content":[{"type":"output_text","text":"capacity answer capacity-2-round-1-0","annotations":[]}]},{"role":"user","content":[{"type":"input_text","text":"capacity-2-round-2-0"}]}]}`)
 	if !requestHistoryValid(valid, "capacity-2-round-2-0", "/workspace", "k7m2qx") {
 		t.Fatal("valid asymmetric stream-zero history was rejected")
@@ -105,11 +106,11 @@ func TestRequestHistoryOracleRejectsMissingPriorTurnAndWrongCurrentInput(t *test
 	}
 	for name, mutate := range map[string]func(map[string]any){
 		"parallel calls disabled": func(body map[string]any) { body["parallel_tool_calls"] = false },
-		"parallel calls string":  func(body map[string]any) { body["parallel_tool_calls"] = "true" },
-		"wrong catalog effort":   func(body map[string]any) { body["reasoning"].(map[string]any)["effort"] = "low" },
-		"missing effort":         func(body map[string]any) { delete(body["reasoning"].(map[string]any), "effort") },
-		"null effort":            func(body map[string]any) { body["reasoning"].(map[string]any)["effort"] = nil },
-		"reasoning scalar":       func(body map[string]any) { body["reasoning"] = "medium" },
+		"parallel calls string":   func(body map[string]any) { body["parallel_tool_calls"] = "true" },
+		"wrong catalog effort":    func(body map[string]any) { body["reasoning"].(map[string]any)["effort"] = "low" },
+		"missing effort":          func(body map[string]any) { delete(body["reasoning"].(map[string]any), "effort") },
+		"null effort":             func(body map[string]any) { body["reasoning"].(map[string]any)["effort"] = nil },
+		"reasoning scalar":        func(body map[string]any) { body["reasoning"] = "medium" },
 		"wrong verbosity": func(body map[string]any) {
 			body["text"].(map[string]any)["verbosity"] = "medium"
 		},
@@ -175,6 +176,30 @@ func TestRequestHistoryOracleRejectsMissingPriorTurnAndWrongCurrentInput(t *test
 	wrongCurrent := []byte(testRequestEnvelope("k7m2qy") + `"input":[{"role":"user","content":[{"type":"input_text","text":"capacity-2-round-1-1"}]},{"role":"assistant","content":[{"type":"output_text","text":"capacity answer capacity-2-round-1-1"}]},{"role":"user","content":[{"type":"input_text","text":"capacity-2-round-2-0"}]}]}`)
 	if requestHistoryValid(wrongCurrent, "capacity-2-round-2-1", "/workspace", "k7m2qy") {
 		t.Fatal("stream-one expectation accepted stream-zero current input")
+	}
+	session := "k7m2qx"
+	var body map[string]any
+	original := testRequestEnvelope(session) + `"input":[{"role":"user","content":[{"type":"input_text","text":"capacity-2-round-1-0"}]}]}`
+	if err := json.Unmarshal([]byte(original), &body); err != nil {
+		t.Fatal(err)
+	}
+	prompt := body["instructions"]
+	delete(body, "instructions")
+	body["input"] = append([]any{map[string]any{"role": "developer", "content": []any{map[string]any{"type": "input_text", "text": prompt}}}}, body["input"].([]any)...)
+	encoded, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !requestHistoryValid(encoded, "capacity-2-round-1-0", "/workspace", session) {
+		t.Fatal("developer baseline rejected")
+	}
+	body["input"].([]any)[0].(map[string]any)["extra"] = true
+	encoded, err = json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requestHistoryValid(encoded, "capacity-2-round-1-0", "/workspace", session) {
+		t.Fatal("extra baseline field accepted")
 	}
 }
 

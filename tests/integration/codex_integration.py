@@ -166,7 +166,7 @@ def run():
         assert any(item.get("type") == "function_call_output" and item["call_id"] == "managed-call" and "tool-witness" in item["output"] for item in continuation["input"])
         assert any(item.get("type") == "reasoning" and item.get("encrypted_content") for item in continuation["input"])
         assert all(item.get("role") != "system" for item in continuation["input"])
-        assert continuation["instructions"] == fixture.model_instructions(fixture.ROOT, "Use the approved tool result.", store=store, session=session, model="gpt-6-sol")
+        assert fixture.request_system_prompt(continuation) == fixture.model_instructions(fixture.ROOT, "Use the approved tool result.", store=store, session=session, model="gpt-6-sol")
 
         fixture.stop_host(host)
         assert bash.rows(store, "SELECT private FROM content WHERE instr(payload, ?) > 0", (b"synthetic-private-reasoning",)) == [(1,)]
@@ -695,8 +695,13 @@ def openai_journey():
             assert fixture.read_result(store, f"same-{provider}") == b"same answer"
         assert len(endpoint.requests) == 2
         codex_body, openai_body = (json.loads(body) for body in endpoint.requests)
-        codex_instructions = codex_body.pop("instructions").replace(sessions["codex"], "SESSION")
-        assert codex_instructions == openai_body.pop("instructions").replace(sessions["openai"], "SESSION")
+        codex_instructions = fixture.request_system_prompt(codex_body).replace(sessions["codex"], "SESSION")
+        assert codex_instructions == fixture.request_system_prompt(openai_body).replace(sessions["openai"], "SESSION")
+        for body in (codex_body, openai_body):
+            if "instructions" in body:
+                del body["instructions"]
+            else:
+                body["input"] = body["input"][1:]
         assert codex_body == openai_body, (codex_body, openai_body)
         (codex_path, codex_bearer, codex_account, codex_affinity, _), (path, bearer, account, affinity, originator) = endpoint.header_observations
         assert codex_bearer == "Bearer " + ACCESS and codex_account == ACCOUNT

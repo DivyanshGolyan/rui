@@ -27,7 +27,7 @@ class AttachedModel(host_process.TestHTTPServer):
         self.lock = threading.Lock()
 
     def respond(self, request):
-        session = model_fixture.instructions_session(request["instructions"])
+        session = model_fixture.instructions_session(model_fixture.request_system_prompt(request))
         inputs = request["input"]
         last_user = max(index for index, item in enumerate(inputs) if item.get("role") == "user")
         text = inputs[last_user]["content"][-1]["text"]
