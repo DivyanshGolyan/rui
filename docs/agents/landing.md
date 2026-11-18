@@ -24,7 +24,6 @@ Documentation-only edits that preserve the reviewed contract also reuse the clea
 Two more changes merge on green `admission` without another Codex review: a commit that only applies the Store format renumber `tests/ci/schema_number.py` computes, and a pure revert of the one merged PR that broke `main`.
 Any other non-test change, including CI, build, release or other operational scripts (the rest of `tests/ci/`, workflows and `build.zig`), needs Codex clean on the new head again.
 Performance changes include A/B numbers.
-For same-repository UI PRs, [screens CI](../../.github/workflows/screens.yml) also posts a sticky comment comparing the PR head with its merge base at both terminal sizes. It captures automatically, lists failures and reports unchanged counts; its matching-head GitHub Actions comment can satisfy admission when it contains an image. Maintainers can dispatch the workflow with a PR number to exercise the same capture path.
 Every UI PR provides actual-implementation screenshots or a screen recording before it is merge-ready.
 Use [verify-rui](../../.claude/skills/verify-rui/SKILL.md) and the [feature map](../../.claude/skills/verify-rui/features/README.md) to select states for the changed screens.
 Build both pinned revisions, then run `$V frames HEAD --before BASE --only <states for the changed screens> --sizes 140x40,46x30 --record` and `$V publish DIR --pr N` (set `V=.claude/skills/verify-rui/scripts/verify-rui`).

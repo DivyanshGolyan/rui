@@ -30,21 +30,14 @@ def image(record, repo, pr, head, label):
 
 
 
-def render(diff, repo, pr, head, base, shots=(), baseline_shots=(), capture_failures=(), run_id=None):
+def render(diff, repo, pr, head, base, shots=()):
     """Build a bounded Markdown comment from the shots diff manifest."""
     groups = {key: diff[key] for key in ('changed', 'new', 'removed', 'failed')}
-    counts = f"{len(groups['changed'])} changed, {len(groups['new'])} new, {diff['same_count']} unchanged, {len(groups['failed']) + len(capture_failures)} failed"
+    counts = f"{len(groups['changed'])} changed, {len(groups['new'])} new, {diff['same_count']} unchanged, {len(groups['failed'])} failed"
     header = f'{MARKER}\n## Screens\n\nHead: `{text(head)}`  \nBase: `{text(base)}`\n\n{counts}\n'
     sections = []
-    if groups['failed'] or capture_failures:
-        sections.append('\n### Failures\n\n')
-        for failure in capture_failures:
-            reason = str(failure.get('reason') or 'unknown capture error').splitlines()[0]
-            reason = reason.removeprefix('verify-rui: ').strip() or 'unknown capture error'
-            sections.append(f"- **{text(failure['side'])} shard {text(failure['shard'])}**: capture failed: {text(reason)}\n")
-        if capture_failures and run_id:
-            sections.append(f"\n[Capture diagnostics in workflow artifacts](https://github.com/{repo}/actions/runs/{quote(str(run_id), safe='')})\n")
     if groups['failed']:
+        sections.append('\n### Failures\n\n')
         for pair in groups['failed']:
             failed = [r for r in (pair.get('before'), pair.get('after')) if r and not r.get('ok', True)]
             for record in failed:
@@ -55,9 +48,6 @@ def render(diff, repo, pr, head, base, shots=(), baseline_shots=(), capture_fail
         for pair in diff.get(category, []):
             rows.setdefault(pair['name'], {})[pair['size']] = pair
     current = {(r['name'], r['size']): r for r in shots}
-    baseline = {(r['name'], r['size']): {**r, 'files': {
-        ext: 'baseline/' + path for ext, path in r.get('files', {}).items()
-    }} for r in baseline_shots}
     if rows:
         title = 'Selected screens' if diff.get('same') else 'Changed and new screens'
         sections.append(f'\n### {title}\n\n| State | 140x40 before / after | 46x30 before / after |\n| --- | --- | --- |\n')
@@ -65,8 +55,8 @@ def render(diff, repo, pr, head, base, shots=(), baseline_shots=(), capture_fail
             cells = []
             for size in SIZES:
                 pair = sizes.get(size)
-                if pair is None and ((name, size) in current or (name, size) in baseline):
-                    pair = {'before': baseline.get((name, size)), 'after': current.get((name, size))}
+                if pair is None and (name, size) in current:
+                    pair = {'before': None, 'after': current[(name, size)]}
                 if pair is None:
                     cells.append('—')
                 else:
@@ -127,9 +117,6 @@ def main():
     parser.add_argument('--head', required=True)
     parser.add_argument('--base', required=True)
     parser.add_argument('--shots', help='merged shots.json for unchanged sizes')
-    parser.add_argument('--baseline-shots', help='baseline shots.json for unchanged sizes')
-    parser.add_argument('--capture-failures', help='capture-level failures for each shard')
-    parser.add_argument('--run-id', help='workflow run containing diagnostic artifacts')
     args = parser.parse_args()
     with open(args.diff, encoding='utf-8') as source:
         diff = json.load(source)
@@ -139,8 +126,7 @@ def main():
         with open(path, encoding='utf-8') as source:
             return json.load(source)
     body = render(diff, args.repo, args.pr, args.head, args.base,
-                  load_optional(args.shots), load_optional(args.baseline_shots),
-                  load_optional(args.capture_failures), args.run_id)
+                  load_optional(args.shots))
     token = os.environ['GITHUB_TOKEN']
     upsert(lambda method, path, body=None: github(method, path, token, body), args.repo, args.pr, args.head, body)
 
