@@ -1446,7 +1446,7 @@ def saved_path_refusal(root, env):
     before = saved.read_bytes()
     edit = host_command(env, "set", "--store", directory, "tools.bash.path", "relative/bash")
     assert edit.returncode == 2 and not edit.stdout and saved.read_bytes() == before, edit
-    assert edit.stderr.split(": ", 1)[1] == start.stderr.split(": ", 1)[1], (edit, start)
+    assert edit.stderr.split(": ", 2)[2] == start.stderr.split(": ", 2)[2], (edit, start)
     after = run_start(directory, env)
     assert after.returncode == 1 and "tools.bash.path" not in after.stderr, after
 
