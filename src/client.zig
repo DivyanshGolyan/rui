@@ -3305,14 +3305,32 @@ test "observation transport enforces its own bound independently of ordinary rep
     const sockets = try socketPair();
     defer closeTestDescriptor(sockets[0]);
     defer closeTestDescriptor(sockets[1]);
+    const capacity: c_int = 1024;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.setsockopt(sockets[1], std.posix.SOL.SOCKET, std.posix.SO.SNDBUF, &capacity, @sizeOf(c_int)));
     var body: [protocol.command_observation_reply.max_bytes]u8 = @splat(' ');
     body[0] = '{';
     body[1] = '}';
     var header: [256]u8 = undefined;
     try writeAll(sockets[1], try std.fmt.bufPrint(&header, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\n\r\n", .{body.len}));
-    try writeAll(sockets[1], &body);
+    const Writer = struct {
+        fd: std.posix.fd_t,
+        bytes: []const u8,
+        failure: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            writeAll(self.fd, self.bytes) catch |err| {
+                self.failure = err;
+            };
+        }
+    };
+    var producer: Writer = .{ .fd = sockets[1], .bytes = &body };
+    const writer = try std.Thread.spawn(.{}, Writer.run, .{&producer});
     var observation: ObservationBuffer = .{};
     const read = readCommandResponseRequest(.{ .io = std.testing.io }, sockets[0], &observation, .{}, null);
+    // If reading failed, wake a writer that may be blocked on a full socket.
+    _ = socket_os.shutdown(sockets[0], std.c.SHUT.RD);
+    writer.join();
+    if (producer.failure) |err| return err;
     try std.testing.expectEqual(@as(?anyerror, null), if (read) |_| @as(?anyerror, null) else |err| @as(?anyerror, err));
     const reply = try read;
     try std.testing.expectEqualStrings(&body, reply.body);
