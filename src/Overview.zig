@@ -5336,6 +5336,7 @@ fn sui4SettingsEntry() !void {
                 _ = overview.app_session.?.frontend.?.input.append("retained draft");
             }
             const previous = overview.root.session;
+            const previous_selection = overview.state.selected;
             const frontend = if (overview.app_session) |left| left.frontend else null;
             var ctx = rig.context();
             defer ctx.cmds.deinit(std.testing.allocator);
@@ -5352,7 +5353,11 @@ fn sui4SettingsEntry() !void {
                 try app_events.send(&ctx, "\r", overview.root.widget(), overview.widget());
             }
             try std.testing.expect(overview.root.input.layer.settingsOpen());
-            try std.testing.expect(overview.state.selected == .settings);
+            if (retained) {
+                try std.testing.expectEqual(previous_selection, overview.state.selected);
+            } else {
+                try std.testing.expect(overview.state.selected == .settings);
+            }
             try std.testing.expect(!ctx.quit);
             try std.testing.expect(ctx.redraw);
             const focus = ctx.cmds.items[ctx.cmds.items.len - 1].request_focus;
