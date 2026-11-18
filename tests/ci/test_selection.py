@@ -1097,16 +1097,19 @@ class SelectionTest(unittest.TestCase):
     def test_bash_lifecycle_values_keep_portable_and_native_owner_checks(self):
         for path in ("src/BashLifecycle.zig", "src/deadline.zig"):
             result = select([path], "review", AVAILABLE)
+            # Core runner conformance tests reach Bash through shared tool settlement,
+            # so both native and Store roots compile these values.
             native = sorted(["bash-integration", "bash-lifecycle-integration", "bash-owner-integration",
-                             "bash-recovery-integration", "test-native", "test-logic"])
+                             "bash-recovery-integration", "test", "test-logic"])
             self.assertEqual(result["native_targets"], native, path)
             self.assertEqual(result["targets"], sorted(native + ["stack-frames"]), path)
 
     def test_codex_credential_values_keep_portable_and_native_owner_checks(self):
         for path in ("src/codex_credential_policy.zig", "src/codex_token_wire.zig"):
             result = select([path], "review", AVAILABLE)
+            # Core runner conformance tests reach Host credentials through settlement.
             native = sorted(["chatgpt-login-integration", "chatgpt-plan-integration", "codex-credential-integration",
-                             "codex-h2-integration", "codex-integration", "test-native", "test-logic"])
+                             "codex-h2-integration", "codex-integration", "test", "test-logic"])
             self.assertEqual(result["native_targets"], native)
             self.assertEqual(result["targets"], sorted(native + ["stack-frames"]))
 

@@ -163,7 +163,6 @@ pub const pending = .{
     "InputOutput",
     "InsecureRecordDirectory",
     "InvalidApiKey",
-    "InvalidBaseUrl",
     "InvalidCharacter",
     "InvalidHexIdentity",
     "InvalidHostStopResponse",

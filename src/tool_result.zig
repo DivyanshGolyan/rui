@@ -81,9 +81,18 @@ pub const Result = struct {
     pub fn destroy(self: *Result) void {
         if (self.capture) |*capture| capture.close();
         if (self.credit) |*credit| credit.releaseUnused();
+        self.releaseSpills();
+        self.host.allocator.destroy(self);
+    }
+
+    fn releaseSpills(self: *Result) void {
         if (self.spill) |*spill| spill.release();
         for (&self.file_spills) |*spill| if (spill.*) |*value| value.release();
-        self.host.allocator.destroy(self);
+    }
+
+    /// Transfer advertised spills only when the Store kept the supplied value.
+    pub fn settleRetention(self: *Result, kept: bool) void {
+        if (kept) self.keep() else self.releaseSpills();
     }
 
     /// Framing is outside the shared content allowance.

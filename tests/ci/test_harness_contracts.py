@@ -707,7 +707,7 @@ class FixtureEntryTest(unittest.TestCase):
             self.assertNotIn("PYTHONPATH", child)
             self.assertEqual({name: child.get(name) for name in named}, named)
             self.assertEqual(child["TERM"], "xterm-256color")
-            self.assertEqual(child["RUI_TEST_MODELS_DEV_URL"], "")
+            self.assertNotIn("RUI_TEST_MODELS_DEV_URL", child)
 
     def test_exec_entry_runs_its_command_only_inside_the_boundary(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -727,7 +727,7 @@ class FixtureEntryTest(unittest.TestCase):
                                       capture_output=True, text=True, timeout=30)
             self.assertEqual(admitted.returncode, 0, admitted.stderr)
             expected = {"PATH": os.environ["PATH"], "HOME": directory, "LANG": "C.UTF-8",
-                        "TERM": "xterm-256color", "RUI_TEST_MODELS_DEV_URL": ""}
+                        "TERM": "xterm-256color"}
             control = subprocess.run([sys.executable, "-c",
                                       "import json, os; print(json.dumps(dict(os.environ)))"],
                                      env=expected, capture_output=True, text=True, timeout=30)

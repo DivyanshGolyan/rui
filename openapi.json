@@ -5213,6 +5213,20 @@
                         "x-rui-kind": "bytes",
                         "x-rui-native-path-limit": true
                       },
+                      "tokenEndpoint": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "maxLength": 2048,
+                            "x-maxBytes": 2048,
+                            "format": "https_endpoint",
+                            "description": "Token refresh endpoint. Default: the provider's own."
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
                       "unauthenticated": {
                         "type": "boolean",
                         "description": "Send no credential to a development endpoint."
@@ -5416,6 +5430,20 @@
                         "x-rui-kind": "bytes",
                         "x-rui-native-path-limit": true
                       },
+                      "tokenEndpoint": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "maxLength": 2048,
+                            "x-maxBytes": 2048,
+                            "format": "https_endpoint",
+                            "description": "Token refresh endpoint. Default: the provider's own."
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
                       "unauthenticated": {
                         "type": "boolean",
                         "description": "Send no credential to a development endpoint."
@@ -5472,6 +5500,27 @@
             },
             "additionalProperties": false,
             "description": "Host-wide transport trust."
+          },
+          "models": {
+            "type": "object",
+            "properties": {
+              "catalogUrl": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "maxLength": 2048,
+                    "x-maxBytes": 2048,
+                    "format": "https_endpoint",
+                    "description": "Model catalog URL. Default: models.dev."
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "additionalProperties": false,
+            "description": "Model catalog settings."
           },
           "tools": {
             "type": "object",

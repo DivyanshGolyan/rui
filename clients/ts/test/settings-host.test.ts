@@ -114,13 +114,9 @@ for (const [engine, adapter] of [["sqlite", "codex"], ["mysql", "codex"], ["mysq
 			}
 			const endpoint = `${adapter === "chatgpt" ? "http" : "https"}://127.0.0.1:${providerAddress.port}/v1/responses`;
 			const credentialFile = join(root, "chatgpt.json");
-			let clientBinary = binary;
 			if (adapter === "chatgpt") {
 				const id = `e30.${Buffer.from(JSON.stringify({ sub: "plan-subject" })).toString("base64url")}.c2ln`;
 				writeFileSync(credentialFile, `version=3\ngeneration=1\naccount_id=plan-subject\nclient_id=rui-test-plan-client\nfedramp=0\nid_token=${id}\naccess_token=${token}\nrefresh_token=fixture-refresh\nexpires_at=4102444800\nrefreshed_at=1750000000\nstate=ready\n`, { mode: 0o600 });
-				const quote = (text: string) => "'" + text.replaceAll("'", "'\"'\"'") + "'";
-				clientBinary = join(root, "fixture-rui");
-				writeFileSync(clientBinary, `#!/bin/sh\nexport RUI_CHATGPT_CREDENTIAL_FILE=${quote(credentialFile)}\nexec ${quote(binary)} "$@" --test-chatgpt-fixture-endpoint ${quote(endpoint)}\n`, { mode: 0o700 });
 			}
 			const spec = {
 				provider: adapter, model: "gpt-6.1-sol", effort: "low" as const, compactAt: 100000,
@@ -128,11 +124,11 @@ for (const [engine, adapter] of [["sqlite", "codex"], ["mysql", "codex"], ["mysq
 			};
 			rui = await Rui.connect({
 				store,
-				providers: adapter === "codex" ? { codex: { endpoint, unauthenticated: true } } : { chatgpt: { endpoint, credentialFile: Buffer.from(credentialFile) } },
+				providers: adapter === "codex" ? { codex: { endpoint, unauthenticated: true } } : { chatgpt: { endpoint, tokenEndpoint: `http://127.0.0.1:${providerAddress.port}/oauth/token`, credentialFile: Buffer.from(credentialFile) } },
 				...(adapter === "codex" ? { network: { caFile: Buffer.from(cert) } } : {}),
 				...(adapter === "chatgpt" ? { presets: { drift: spec } } : {}),
 				tools: { bash: { timeoutMs: 37 }, mcp: { fixture: { url: `http://127.0.0.1:${mcpAddress.port}/mcp`, bearerToken: { env: tokenName }, callTimeoutMs: 1000 } } },
-			}, { binary: clientBinary });
+			}, { binary });
 			assert.equal(rui.hostInfo?.capabilities.providers.codex, adapter === "codex" ? "endpoint" : "unserved");
 			assert.equal(rui.hostInfo?.capabilities.providers.openai, "unserved");
 			assert.equal(rui.hostInfo?.capabilities.providers.chatgpt, adapter === "chatgpt" ? "chatgpt_plan" : "unserved");

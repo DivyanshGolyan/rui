@@ -545,8 +545,8 @@ pub fn executionMain(host: *Host) void {
             continue;
         });
     }
-    const catalog_url = host.hooks.models_dev_url orelse "https://models.dev/api.json";
-    listing_urls.set(.catalog, if (catalog_url.len == 0) null else catalog_url);
+    const catalog_url = host.catalog_url orelse "https://models.dev/api.json";
+    listing_urls.set(.catalog, catalog_url);
     for (listing_urls.values, &workspace.listings.values) |url, *work| work.url = url;
     var reactor_storage: provider.Reactor = undefined;
     const reactor: ?*provider.Reactor = reactor: {
@@ -571,7 +571,7 @@ pub fn executionMain(host: *Host) void {
             .budget = budget,
             .listing_urls = listing_urls,
         }) catch |err| {
-            if (!host.providers.any() and catalog_url.len != 0) {
+            if (!host.providers.any()) {
                 listingFailed(host, .catalog, err);
                 break :reactor null;
             }
@@ -1885,13 +1885,9 @@ fn completeBash(host: *Host, slot: *ExecutionSlot) void {
     };
     pause(host, .{ .action_result = binding });
     testTransition(host, .action_result_ready, binding);
-    const delivered = tool_settle.result(host, .{ .token = active.token, .binding = binding, .publication_phase = "Bash result settlement" }, profile, code, value);
+    const delivered = tool_settle.result(host, .{ .token = active.token, .binding = binding, .publication_phase = "Bash result settlement" }, profile, code, value, result);
     switch (delivered) {
-        .delivered => {
-            result.keep();
-            testTransition(host, .action_result_committed, binding);
-        },
-        .session_stop => testTransition(host, .action_result_committed, binding),
+        .delivered, .session_stop => testTransition(host, .action_result_committed, binding),
         .lost, .fenced => {},
     }
     closeBashDelivery(host, slot);
@@ -3658,6 +3654,172 @@ test "cleanup publication follows complete execution retirement" {
     try std.testing.expectEqual(@as(usize, 1), boundary.releases);
     try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+}
+
+test "Bash releases both spills after lost custody or fenced settlement" {
+    // The result-ready transition runs after both capture files are adopted and
+    // before custody is claimed. Observe it without holding up the Host.
+    const Boundary = struct {
+        queue: *output_retention.Queue,
+        used: *std.atomic.Value(u64),
+        directory: std.Io.Dir,
+        stdout_name: protocol.Bounded(96),
+        stderr_name: protocol.Bounded(96),
+        saw_spills: bool = false,
+
+        fn now(context: ?*anyopaque, clock: std.Io.Clock) std.Io.Timestamp {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            if (self.queue.occupied() == 2 and self.used.load(.acquire) == 48_000) {
+                const stdout = self.directory.statFile(std.testing.io, self.stdout_name.slice(), .{}) catch null;
+                const stderr_file = self.directory.statFile(std.testing.io, self.stderr_name.slice(), .{}) catch null;
+                var stdout_reserved = false;
+                var stderr_reserved = false;
+                for (self.queue.entries) |entry| {
+                    if (entry.state != .reserved) continue;
+                    stdout_reserved = stdout_reserved or std.mem.eql(u8, entry.name.slice(), self.stdout_name.slice());
+                    stderr_reserved = stderr_reserved or std.mem.eql(u8, entry.name.slice(), self.stderr_name.slice());
+                }
+                if (stdout_reserved and stderr_reserved and stdout != null and stderr_file != null and stdout.?.size == 24_000 and stderr_file.?.size == 24_000)
+                    self.saw_spills = true;
+            }
+            return clock.now(std.testing.io);
+        }
+    };
+    for ([_]enum { lost, fenced }{ .lost, .fenced }) |outcome| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: store_module.Store = undefined;
+        try store_module.testingStoreWith(&.{ .engine = .sqlite }, &storage, &tmp, std.testing.io, .{});
+        defer storage.close() catch unreachable;
+        var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+        const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+        var command = try store_module.testingCompleteConfiguration("bash-spill-config", "", root, "model-a");
+        command.configuration.tools = try .of(&.{"bash"});
+        command.configuration.permission_mode.state = .value;
+        try command.configuration.permission_mode.value.set("bypass");
+        const configured = try storage.configure(&command, .{});
+        try std.testing.expect(configured == .accepted);
+        const session = configured.accepted.session;
+        try store_module.testingSubmitMessage(&storage, &tmp, "bash-spill-message", "bash-spill-message", session.slice(), "run");
+        const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        const arguments = "{\"description\":\"Write both streams\",\"cmd\":\"printf '%024000d' 0; printf '%024000d' 0 >&2\",\"timeout_ms\":10000}";
+        const encoded = try std.json.Stringify.valueAlloc(std.testing.allocator, arguments, .{});
+        defer std.testing.allocator.free(encoded);
+        try store_module.settleCallsForTesting(&storage, &tmp, model, "bash-spill-calls", &.{.{
+            .item_id = "item-1",
+            .name = "bash",
+            .encoded_call_id = "call-1",
+            .decoded_call_id = "call-1",
+            .encoded_arguments = encoded[1 .. encoded.len - 1],
+            .decoded_arguments = arguments,
+        }});
+        var admission = (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 10_000, .{})).?;
+        var records: [1]execution.CustodyRecord = @splat(.{});
+        var lease: platform.StoreLease = undefined;
+        lease.paths = .{};
+        try lease.paths.scratch.set(root);
+        var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = &lease, .store = &storage, .custody = execution.CustodyPool.initialize(&records) };
+        var entries: [2]output_retention.Entry = @splat(.{});
+        var retention = output_retention.Queue.initialize(std.testing.io, root, .{ .used = &host.scratch_used, .limit = 1024 * 1024 }, &entries);
+        defer retention.cleanupAll();
+        host.retention = &retention;
+        const token = host.custody.reserve().?;
+        var slot: ExecutionSlot = .free;
+        const binding = try attachSlot(&host, &slot, token, &admission.permit);
+        var input: store_module.ActionExecutionInput = undefined;
+        try storage.readActionExecutionInput(.bash, binding, &input);
+        const arguments_location = try storage.openContent(input.arguments);
+        const scratch = bashScratch(&host);
+        const work = try pages.Mapped(struct { preparation: bash.Preparation, prepared: bash.Prepared }).map();
+        defer work.unmap();
+        const preparation = &work.value.preparation;
+        if (preparation.start(scratch, std.testing.allocator, arguments_location, &input, root, default_bash_path, binding.action_id, .{})) |initial| {
+            var failure = initial;
+            try failure.cleanup.cleanup(scratch);
+            return failure.cause;
+        }
+        var preparation_owned = true;
+        defer if (preparation_owned) {
+            var cleanup = preparation.cancel();
+            cleanup.cleanup(scratch) catch unreachable;
+        };
+        const prepared = &work.value.prepared;
+        while (true) {
+            var progress = preparation.advance(prepared);
+            switch (progress) {
+                .pending => {},
+                .prepared => {
+                    preparation_owned = false;
+                    break;
+                },
+                .failed => |*failure| {
+                    preparation_owned = false;
+                    try failure.cleanup.cleanup(scratch);
+                    return failure.cause;
+                },
+            }
+        }
+        defer prepared.cleanup() catch unreachable;
+        var refused: bash.ArgumentSizes = .{};
+        var bash_execution = try prepared.launch(bash.default_facts, null, null, &refused);
+        moveSlot(&host, &slot, .bash, .{ .token = token, .binding = binding, .execution = &bash_execution });
+        var window: [bash.copy_window_bytes]u8 = undefined;
+        const service = .{ .execution = &bash_execution, .scratch = scratch, .window = &window };
+        defer if (slot == .bash) {
+            bash_execution.requestInfrastructureShutdown(.now(std.testing.io, .awake));
+            test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(5)), service, bash_service.retired) catch unreachable;
+            bash_execution.reclaim(scratch, &retention) catch unreachable;
+        };
+        try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), service, bash_service.retired);
+        try bash_execution.checkRetired();
+        try std.testing.expectEqual(store_module.ActionResolutionCode.succeeded, bash_execution.resultCode(scratch));
+        const stdout_name = bash_execution.stdout_capture.name;
+        const stderr_name = bash_execution.stderr_capture.name;
+        const bytes = try std.testing.allocator.alloc(u8, 24_000);
+        defer std.testing.allocator.free(bytes);
+        for ([_]protocol.Bounded(96){ stdout_name, stderr_name }) |name| {
+            const file = try tmp.dir.openFile(std.testing.io, name.slice(), .{});
+            defer file.close(std.testing.io);
+            try std.testing.expectEqual(@as(usize, 24_000), try file.readPositionalAll(std.testing.io, bytes, 0));
+            for (bytes) |byte| try std.testing.expectEqual(@as(u8, '0'), byte);
+        }
+        try std.testing.expectEqual(@as(u64, 48_000), host.scratch_used.load(.acquire));
+        if (outcome == .lost) {
+            try std.testing.expectEqual(tool_settle.Delivered.delivered, tool_settle.fixed(&host, .{ .token = token, .binding = binding, .publication_phase = "prior result" }, .succeeded, "prior result"));
+        } else host.hooks.failures.insert(.result_before_commit);
+
+        var boundary: Boundary = .{ .queue = &retention, .used = &host.scratch_used, .directory = tmp.dir, .stdout_name = stdout_name, .stderr_name = stderr_name };
+        var vtable = std.testing.io.vtable.*;
+        vtable.now = Boundary.now;
+        host.io = .{ .userdata = &boundary, .vtable = &vtable };
+        host.hooks.phase_trace = true;
+        var gate_path: [platform.max_scratch_path_bytes]u8 = undefined;
+        host.hooks.transition = .{ .transition = .action_result_ready, .path = try std.fmt.bufPrint(&gate_path, "{s}/absent-result-gate", .{root}) };
+        completeBash(&host, &slot);
+        host.io = std.testing.io;
+        try std.testing.expect(boundary.saw_spills);
+        try std.testing.expect(slot == .bash and slot.bash.delivery == .closed);
+        try host.custody.checkDetached(token, .{ .action = binding });
+        try std.testing.expectEqual(outcome == .lost, host.launchAllowed());
+        try std.testing.expectEqual(@as(usize, 0), retention.occupied());
+        try std.testing.expectEqual(@as(u64, 0), host.scratch_used.load(.acquire));
+        try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, stdout_name.slice(), .{}));
+        try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, stderr_name.slice(), .{}));
+        try std.testing.expect(reclaimBash(&host, &slot, .now(std.testing.io, .awake)));
+        try std.testing.expect(slot == .free);
+        try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
+        try storage.close();
+        try store_module.testingStoreWith(&.{ .engine = .sqlite }, &storage, &tmp, std.testing.io, .{});
+        const resolved = try store_module.testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND resolution_code='succeeded'", .{binding.action_id});
+        try std.testing.expectEqual(@as(u64, if (outcome == .lost) 1 else 0), resolved);
+        const unresolved = try store_module.testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND resolution_code IS NULL", .{binding.action_id});
+        try std.testing.expectEqual(@as(u64, if (outcome == .fenced) 1 else 0), unresolved);
+        if (outcome == .lost) {
+            const report = try store_module.testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, .full);
+            defer std.testing.allocator.free(report);
+            try std.testing.expect(std.mem.indexOf(u8, report, "prior result") != null);
+        }
+    }
 }
 
 test "named scratch retry releases custody through the shutdown owner path" {

@@ -417,8 +417,8 @@ test "Full reports every closed Action resolution without fencing" {
             try storage.readActionExecutionInput(.bash, action_binding, &input);
             try std.testing.expectEqual(@as(u64, 1234), input.timeout_ms);
             try std.testing.expectEqual(
-                ActionSettlement.effect,
-                try storage.settleActionAttempt(action_binding, .infrastructure_shutdown, "Host shutdown.", .{}),
+                ActionSettlement.Outcome.effect,
+                (try storage.settleActionAttempt(action_binding, .infrastructure_shutdown, "Host shutdown.", .{})).outcome,
             );
 
             const report_bytes = try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, .full);

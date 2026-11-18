@@ -349,7 +349,8 @@ pub const Runner = enum {
             .bash => .{ .excerpt_bytes = max_result_excerpt_bytes, .retain = true },
             .mcp => .{ .excerpt_bytes = 10_000, .retain = bash_offered },
             .read_image => .{ .excerpt_bytes = 0, .retain = false },
-            .core, .provider => unreachable,
+            .core => .{ .excerpt_bytes = 0, .retain = false }, // Core pagers own their already-shaped windows.
+            .provider => unreachable,
         };
     }
 
@@ -537,14 +538,15 @@ test "result profiles follow runner and frozen Bash offer" {
         try std.testing.expectEqualDeep(Profile{ .excerpt_bytes = 20_000, .retain = true }, Runner.bash.resultProfile(offer));
         try std.testing.expectEqualDeep(Profile{ .excerpt_bytes = 10_000, .retain = offer }, Runner.mcp.resultProfile(offer));
         try std.testing.expectEqualDeep(Profile{ .excerpt_bytes = 0, .retain = false }, Runner.read_image.resultProfile(offer));
+        try std.testing.expectEqualDeep(Profile{ .excerpt_bytes = 0, .retain = false }, Runner.core.resultProfile(offer));
     }
 }
 
 test "all result profiles fit the shared excerpt maximum" {
     inline for (std.meta.tags(Runner)) |runner| {
         switch (runner) {
-            .core, .provider => {}, // These do not use the Result route.
-            .bash, .mcp, .read_image => {
+            .provider => {}, // Provider calls do not use the Result route.
+            .bash, .mcp, .read_image, .core => {
                 for ([_]bool{ false, true }) |offer| {
                     try std.testing.expect(runner.resultProfile(offer).excerpt_bytes <= max_result_excerpt_bytes);
                 }

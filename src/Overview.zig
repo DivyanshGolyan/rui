@@ -1137,13 +1137,10 @@ fn signedIn(raw: *anyopaque, ctx: *vxfw.EventContext, activation: SignIn.Activat
     try self.appNext(ctx, try self.event(.{ .defaults_saved = saved }));
     self.state.login_at = self.realMs() / 1000;
     self.state.next_list_ms = 0;
-    const warning = if (activation.launch) |*launch| launch.warning else null;
-    if (activation.default_failed or warning != null) {
+    if (activation.default_failed) {
         var notice: view.Notice = .{ .colour = .failure };
         var writer = std.Io.Writer.fixed(&notice.bytes);
-        if (warning != null) {
-            try @import("host_launch.zig").writeSignIn(&writer, .{ .ready = warning }, activation.default_failed, false);
-        } else try writer.writeAll("Sign-in saved; couldn't save default");
+        try writer.writeAll("Sign-in saved; couldn't save default");
         notice.len = writer.buffered().len;
         self.state.notice = notice;
     }
@@ -1409,7 +1406,7 @@ fn deliver(self: *Self, outcome: anyerror!void) !?Next {
             const launch = answer.start_host.launch;
             const next = try self.takeHostRead(answer.start_host.read);
             self.host_launch = switch (launch) {
-                .ready => |warning| if (warning == null) null else launch,
+                .ready => null,
                 .failed => if (self.host_observation == .ready) null else launch,
             };
             return next;
@@ -3265,7 +3262,6 @@ const HostRecovery = struct {
     var last_stop: platform.StoreLease.LastStop = .asked;
     var starts: usize = 0;
     var fail_start: bool = false;
-    var start_warning: ?HostLaunch.Warning = null;
     var forced_start: ?HostLaunch = null;
     var after_start: ?Availability = null;
     var worker_id: ?std.Thread.Id = null;
@@ -3277,7 +3273,6 @@ const HostRecovery = struct {
         last_stop = .asked;
         starts = 0;
         fail_start = false;
-        start_warning = null;
         forced_start = null;
         after_start = null;
         worker_id = null;
@@ -3307,7 +3302,7 @@ const HostRecovery = struct {
         }
         if (fail_start) return .{ .failed = .{ .kind = .child_refused, .err = error.HostStartupFailed } };
         availability = .ready;
-        return .{ .ready = start_warning };
+        return .{ .ready = {} };
     }
     fn scratch(init: std.process.Init) !std.Io.File {
         files += 1;
@@ -3806,8 +3801,7 @@ test "Host recovery derives launch progress from job custody without copying rea
 test "Host recovery renders the launch result cause without confusing failure and reachability" {
     const Case = struct { launch: HostLaunch, words: []const u8, retry: bool = false };
     const cases = [_]Case{
-        .{ .launch = .{ .ready = null }, .words = "" },
-        .{ .launch = .{ .ready = .invalid_openai_base_url }, .words = "OpenAI URL invalid" },
+        .{ .launch = .{ .ready = {} }, .words = "" },
         .{ .launch = .{ .failed = .{ .kind = .os_launch, .err = error.HostLaunchFailed } }, .words = "could not start", .retry = true },
         .{ .launch = .{ .failed = .{ .kind = .child_refused, .err = error.HostStartupFailed } }, .words = "refused to start", .retry = true },
         .{ .launch = .{ .failed = .{ .kind = .readiness_timeout, .err = error.HostReadinessUnconfirmed } }, .words = "start timed out", .retry = true },
@@ -6270,13 +6264,12 @@ test "Overview mouse Host start and retry hover preserve foreground selection an
 }
 
 test "Overview mouse Host line without a start or retry has no hover or click action" {
-    const Case = enum { paused, stopping, upgrading, starting, incompatible, store_identity, ready_warning };
+    const Case = enum { paused, stopping, upgrading, starting, incompatible, store_identity };
     for (std.enums.values(Case)) |case| {
         const ops = HostRecovery.operations();
         HostRecovery.availability = switch (case) {
             .paused => .paused,
             .stopping => .stopping,
-            .ready_warning => .ready,
             else => .stopped,
         };
         var cancellation: client.Cancellation = .{};
@@ -6290,7 +6283,6 @@ test "Overview mouse Host line without a start or retry has no hover or click ac
             .starting => overview.queue(.start_host),
             .incompatible => overview.host_launch = .{ .failed = .{ .kind = .incompatible, .err = error.IncompatibleHost } },
             .store_identity => overview.host_launch = .{ .failed = .{ .kind = .store_identity, .err = error.StoreIdentityMismatch } },
-            .ready_warning => overview.host_launch = .{ .ready = .invalid_openai_base_url },
             else => {},
         }
         try std.testing.expectEqual(null, overview.hostNext());
@@ -6392,7 +6384,7 @@ test "App settings Sign-in Enter and click use the Overview owner and return to 
 }
 
 test "Sign-in completion applies the core default and restores only a visible focus target" {
-    for ([_]bool{ false, true }) |session_open| for ([_]bool{ false, true }) |warning| for ([_]bool{ false, true }) |default_failed| {
+    for ([_]bool{ false, true }) |session_open| for ([_]bool{ false, true }) |default_failed| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
         var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -6414,13 +6406,11 @@ test "Sign-in completion applies the core default and restores only a visible fo
         try activation.binding.model.set(@import("product_defaults.zig").recommended_model);
         try activation.store.set("/store");
         activation.default_failed = default_failed;
-        if (warning) activation.launch = .{ .outcome = .{ .ready = .{ .facts = .{ .store = activation.store, .instance = @splat(1), .active_capacity = 4, .started_at = 1, .custody_occupied = 0, .paused = false, .capabilities = .{ .bash = true, .providers = .{ .codex = .chatgpt_device, .openai = .unserved, .chatgpt = .unserved } } } } }, .warning = .invalid_openai_base_url };
         try signedIn(overview, &ctx, activation);
-        if (warning or default_failed) {
+        if (default_failed) {
             try std.testing.expectEqual(true, overview.state.notice != null);
             const text = overview.state.notice.?.text();
-            try std.testing.expectEqual(warning, std.mem.indexOf(u8, text, "OpenAI URL invalid") != null);
-            try std.testing.expectEqual(default_failed, std.mem.indexOf(u8, text, if (warning) "default not saved" else "couldn't save default") != null);
+            try std.testing.expect(std.mem.indexOf(u8, text, "couldn't save default") != null);
             try std.testing.expect(std.mem.indexOfAny(u8, text, "\r\n\x1b") == null);
         }
         try std.testing.expectEqual(protocol.Provider.openai, overview.state.default.?.provider);
