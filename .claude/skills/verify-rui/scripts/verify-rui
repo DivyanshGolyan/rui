@@ -3319,7 +3319,8 @@ def frame_failure_settled(terminal, before):
                   "failed Upgrade reread the open conversation")
 
 
-def frame_drive_upgrade(run, terminal, state, fixture):
+def frame_drive_upgrade(run, terminal, state, fixture, steps=None):
+    steps = steps or frame_steps
     if fixture is None:
         return
     releases, gate, version = fixture
@@ -3331,7 +3332,7 @@ def frame_drive_upgrade(run, terminal, state, fixture):
             return
         terminal.wait(lambda _c: f"/releases/tag/v{releases.version}" in releases.requests, "release discovery HTTP response")
         return
-    frame_steps(run, terminal, [{"mouse": {"at": "Settings", "do": "click"}}, {"wait": "Notifications"},
+    steps(run, terminal, [{"mouse": {"at": "Settings", "do": "click"}}, {"wait": "Notifications"},
                                 {"keys": ["Down"] * 5 + ["Enter"]}])
     if gate is not None:
         frame_wait(run, terminal, " · publishing", timeout=40)
@@ -3348,7 +3349,7 @@ def frame_drive_upgrade(run, terminal, state, fixture):
         if status["instance"] == run.meta["upgrade_previous_instance"]:
             raise FrameFailure("Upgrade did not replace the original Host instance")
         return
-    frame_steps(run, terminal, [{"keys": ["Esc"]}, {"gone": "Notifications"}])
+    steps(run, terminal, [{"keys": ["Esc"]}, {"gone": "Notifications"}])
     if gate is not None and not before:
         selected = run.home / ".local/bin/rui"
         terminal.wait(lambda c: selected.resolve() != run.home / ".local/lib/rui/old/bin/rui"

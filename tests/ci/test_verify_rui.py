@@ -3222,9 +3222,8 @@ class UpgradeFramesTest(unittest.TestCase):
                 state = {"upgrade": "chat", "open": marker, "comparison_side": "before" if before else "after"}
                 os_semantics = types.SimpleNamespace(process_executable=lambda _pid: selected.resolve())
                 with self.subTest(before=before), patch.dict(sys.modules, {"os_semantics": os_semantics}), \
-                        patch.dict(drive.__globals__, {"frame_wait": lambda *_a, **_k: None,
-                                                       "frame_steps": lambda *_a, **_k: None}):
-                    drive(run, terminal, state, (None, None, version))
+                        patch.dict(drive.__globals__, {"frame_wait": lambda *_a, **_k: None}):
+                    drive(run, terminal, state, (None, None, version), steps=lambda *_a, **_k: None)
                 self.assertEqual(observed, [0, 1, 2, 3])
 
     def test_upgrade_and_failure_predicates_cover_layouts_and_drafts(self):
@@ -3254,8 +3253,8 @@ class UpgradeFramesTest(unittest.TestCase):
                                 rui_cmd=lambda *_args: types.SimpleNamespace(returncode=0, stderr="", stdout='{"instance":"new"}'))
                             state = {"upgrade": "chat", "open": "Upgrade witness", "comparison_side": "before" if before else "after"}
                             with patch.dict(sys.modules, {"os_semantics": types.SimpleNamespace(process_executable=lambda _pid: selected.resolve())}), \
-                                 patch.dict(drive.__globals__, {"frame_wait": lambda *_a, **_k: None, "frame_steps": lambda *_a, **_k: None}):
-                                drive(run, terminal, state, (None, None, "0.78.10000"))
+                                 patch.dict(drive.__globals__, {"frame_wait": lambda *_a, **_k: None}):
+                                drive(run, terminal, state, (None, None, "0.78.10000"), steps=lambda *_a, **_k: None)
                             self.assertTrue(results[-1])
 
     def test_upgrade_driving_accepts_old_and_new_empty_composers_on_both_sides(self):
@@ -3276,8 +3275,7 @@ class UpgradeFramesTest(unittest.TestCase):
                         releases = types.SimpleNamespace(version="0.78.10000", requests=["/releases/tag/v0.78.10000"])
                         state = {"upgrade": upgrade, "comparison_side": side}
                         gate = object() if upgrade == "updating" else None
-                        with patch.dict(drive.__globals__, {"frame_steps": lambda *_a, **_kw: None}):
-                            drive(run, terminal, state, (releases, gate, "0.78.10000"))
+                        drive(run, terminal, state, (releases, gate, "0.78.10000"), steps=lambda *_a, **_kw: None)
                         self.assertTrue(any("What shall we work on?" in name for name in seen))
                         if upgrade == "failure":
                             self.assertTrue(any("failed Upgrade" in name for name in seen))
