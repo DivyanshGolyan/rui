@@ -196,7 +196,7 @@ pub fn decode(comptime protocol: type, comptime command_reply: type, allocator: 
                             if (T == protocol.MessageInputJson) return InputWire;
                             return T;
                         }
-                    }, DecodePolicy(kind, accepted));
+                    }, DecodePolicy(kind));
                     const partial = Parser.parsePartial(allocator, body) catch |err| {
                         if (err == error.RequestBindingMismatch) return error.RequestBindingMismatch;
                         break :candidate;
@@ -217,7 +217,7 @@ pub fn decode(comptime protocol: type, comptime command_reply: type, allocator: 
 
 // These compatibility rules retain the base reader's semantic boundaries:
 // refusal prose is diagnostic, and Message execution may carry a reason.
-fn DecodePolicy(comptime kind: CommandKind, comptime accepted: bool) type {
+fn DecodePolicy(comptime kind: CommandKind) type {
     return struct {
         pub fn ignored(comptime path: []const u8) bool {
             return std.mem.eql(u8, path, ".answer.message");
@@ -231,7 +231,7 @@ fn DecodePolicy(comptime kind: CommandKind, comptime accepted: bool) type {
             if (std.mem.eql(u8, path, ".answer.action_selection.kind")) return wire_field.JsonEnum(@FieldType(@import("action_control.zig").Selection, "kind"));
             if (std.mem.eql(u8, path, ".answer.replayed") or std.mem.eql(u8, path, ".answer.created")) return bool;
             if (std.mem.eql(u8, path, ".answer.code")) return wire_field.JsonString(max_code_bytes);
-            if (kind == .message and !accepted and std.mem.eql(u8, path, ".input")) return InputWire;
+            if (kind == .message and std.mem.eql(u8, path, ".input")) return InputWire;
             if (std.mem.eql(u8, path, ".execution.reason")) return wire_field.JsonString(64);
             inline for (.{ ".answer.status", ".queue.status", ".execution.status", ".completion.status" }) |field| {
                 if (std.mem.eql(u8, path, field)) return wire_field.JsonString(16);
