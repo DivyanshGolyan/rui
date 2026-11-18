@@ -11,4 +11,4 @@ First drafts, written from the README and the contracts and checked against fixe
 | [Conversation, settings and model requests](conversation-model.md) | 32 |
 | [CLI, inspection, local protocol and the TypeScript client](cli-inspection.md) | 33 |
 | [Session UI and diagnostics](session-ui.md) | 38 |
-| [CI tooling and policy checks](ci-tooling.md) | 65 |
+| [CI tooling and policy checks](ci-tooling.md) | 64 |
