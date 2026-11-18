@@ -70,7 +70,10 @@ def preferences_bridge(binary, root, store_settings, env):
                 host_process.wait_for(lambda: bool(select.select([host.stdout], [], [], 0)[0]),
                                       "new Host readiness line", timeout=20)
                 line = host.stdout.readline().decode()
-                assert line.startswith("ready instance="), (line, host.poll())
+                if not line.startswith("ready instance="):
+                    status = host.poll()
+                    stderr = host.stderr.read().decode(errors="replace") if status is not None else ""
+                    raise AssertionError((line, status, stderr))
                 instance = line.split()[1].split("=", 1)[1]
                 settings_fixture.wait_for_host(sock, "", host)
                 assert settings_fixture.host_info(sock, "")["instance"] == instance, line
@@ -83,7 +86,7 @@ def preferences_bridge(binary, root, store_settings, env):
                 finally:
                     host_process.stop_process(host)
 
-            seed = launch("--test-models-dev-url", f"https://localhost:{endpoint.server_address[1]}/api.json")
+            seed = launch("--set", f"models.catalogUrl=https://localhost:{endpoint.server_address[1]}/api.json")
             try:
                 store = settings_fixture.host_info(sock, "")["store"]
                 def catalog_ready():
