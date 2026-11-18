@@ -393,9 +393,20 @@ fn Once(comptime text: []const u8) type {
 fn prepareQuery(comptime text: []const u8) []const u8 {
     comptime {
         @setEvalBranchQuota(10 * text.len + 1000);
-        var quoted: []const u8 = "";
-        for (text) |byte| quoted = quoted ++ (if (byte == '\'') "''" else &[_]u8{byte});
-        return "PREPARE rui_dialect_check FROM '" ++ quoted ++ "';DEALLOCATE PREPARE rui_dialect_check";
+        // Fill a buffer sized from the text: appending a byte at a time with
+        // `++` copies the whole prefix on every byte.
+        var quoted: [text.len + std.mem.countScalar(u8, text, '\'')]u8 = undefined;
+        var at: usize = 0;
+        for (text) |byte| {
+            quoted[at] = byte;
+            at += 1;
+            if (byte == '\'') {
+                quoted[at] = byte;
+                at += 1;
+            }
+        }
+        const final = quoted;
+        return "PREPARE rui_dialect_check FROM '" ++ &final ++ "';DEALLOCATE PREPARE rui_dialect_check";
     }
 }
 
@@ -423,6 +434,29 @@ fn piece(comptime text: []const u8) []const []const u8 {
 test "each text has its own checked flag" {
     try std.testing.expect(&Once("SELECT 1").done != &Once("SELECT 2").done);
     try std.testing.expect(&Once("SELECT 1").done == &Once("SELECT 1").done);
+}
+
+test "SH-91 a PREPARE quotes the statement's text whole, doubling each quote" {
+    const repeat = struct {
+        fn of(comptime text: []const u8, comptime times: usize) []const u8 {
+            comptime {
+                var out: [text.len * times]u8 = undefined;
+                for (0..times) |index| @memcpy(out[index * text.len ..][0..text.len], text);
+                const final = out;
+                return &final;
+            }
+        }
+    }.of;
+    const head = "PREPARE rui_dialect_check FROM '";
+    const tail = "';DEALLOCATE PREPARE rui_dialect_check";
+    const cases = [_]struct { prepared: []const u8, want: []const u8 }{
+        .{ .prepared = comptime prepareQuery(""), .want = head ++ tail },
+        .{ .prepared = comptime prepareQuery("SELECT 1"), .want = head ++ "SELECT 1" ++ tail },
+        .{ .prepared = comptime prepareQuery("SELECT 'a'"), .want = head ++ "SELECT ''a''" ++ tail },
+        .{ .prepared = comptime prepareQuery("'''x''y'"), .want = head ++ "''''''x''''y''" ++ tail },
+        .{ .prepared = comptime prepareQuery("SELECT " ++ repeat("'ab',", 220) ++ "1"), .want = head ++ "SELECT " ++ comptime repeat("''ab'',", 220) ++ "1" ++ tail },
+    };
+    for (cases) |case| try std.testing.expectEqualStrings(case.want, case.prepared);
 }
 
 test "fixture text splits at semicolons outside string literals, and PREPARE quotes it whole" {
@@ -1210,6 +1244,9 @@ test "schema 75 MySQL pin migration refuses absent and ambiguous kind checks bef
 }
 
 test "obligation projection MySQL row counts match SQLite for null changed unchanged missing and refused values" {
+    // The cases below format their expected text at comptime, and a statement served from the table spends none
+    // of this function's branches, so the test sets what its own formatting needs.
+    @setEvalBranchQuota(100_000);
     const Projection = rsql.ObligationProjection(.{
         .sql = "SELECT session_ref,obligation_since AS saved_since,?2 AS owed_since FROM session WHERE session_ref=?1 UNION ALL " ++
             "SELECT session_ref,obligation_since AS saved_since,?3 AS owed_since FROM session WHERE session_ref=?1",
