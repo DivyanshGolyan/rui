@@ -449,7 +449,7 @@ class ProcessCensusTest(unittest.TestCase):
         child = self.ready_child()
         try:
             self.assertFalse(self.semantics.process_state(child.pid).startswith("Z"))
-            child.stdin.close()
+            HOST.close_stdin(child)
             HOST.wait_for(lambda: self.semantics.process_state(child.pid).startswith("Z"), "the exited child's zombie entry")
         finally:
             child.kill()
