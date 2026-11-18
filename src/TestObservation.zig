@@ -203,12 +203,7 @@ fn selected(self: *Self, phase: []const u8, subject: ?[]const u8) bool {
             std.mem.eql(u8, phase, "control_store_complete");
     }
     if (self.plan == .interrupt) return std.mem.eql(u8, phase, "effect_stop_requested");
-    if (self.plan == .recovery) {
-        inline for (.{ "prepared_before_handoff", "action_attempt_admitted", "action_result_ready", "action_result_committed" }) |name| {
-            if (std.mem.eql(u8, phase, name)) return true;
-        }
-        return false;
-    }
+    if (self.plan == .recovery) return std.mem.eql(u8, phase, "prepared_before_handoff");
     if (self.plan == .managed) {
         inline for (.{ "preparation_completed", "prepared_before_handoff", "codex_transfer" }) |name| {
             if (std.mem.eql(u8, phase, name)) return true;
@@ -231,7 +226,6 @@ fn selected(self: *Self, phase: []const u8, subject: ?[]const u8) bool {
     if (std.mem.eql(u8, phase, "lifecycle_boundary"))
         return self.plan != .stop and self.lifecycle_due.swap(false, .acq_rel);
     if (self.plan == .status) return connection or
-        std.mem.eql(u8, phase, "action_attempt_admitted") or
         std.mem.eql(u8, phase, "ordinary_classification_released") or
         std.mem.eql(u8, phase, "connection_place_released");
     if (self.plan == .stop) {
@@ -386,7 +380,7 @@ test "private owner observations preserve selected custody through SIGKILL" {
             .bash_pipes => "bash_leader_observed_with_open_pipes",
             .dispatch => "control_store_queued",
             .interrupt => "effect_stop_requested",
-            .recovery => "action_attempt_admitted",
+            .recovery => "prepared_before_handoff",
             .managed => "codex_transfer",
             .execution => "settlement_complete",
             .sqlite => "sqlite_diagnostic",
@@ -454,7 +448,7 @@ test "private owner observations seal admission without forgiving held or late p
             .bash_pipes => "bash_leader_observed_with_open_pipes",
             .dispatch => "control_store_queued",
             .interrupt => "effect_stop_requested",
-            .recovery => "action_attempt_admitted",
+            .recovery => "prepared_before_handoff",
             .managed => "codex_transfer",
             .execution => "settlement_complete",
             .sqlite => "sqlite_diagnostic",

@@ -232,6 +232,7 @@ pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pin
         .filters = test_filters,
         .test_runner = filtered_runner,
     });
+    product.configurePauses(b, logic_tests, false);
     product.configureTerminalEditor(b, logic_tests);
     logic_tests.root_module.addImport("url", product.addUrl(b));
     const run_logic_tests = ci.run(logic_tests);

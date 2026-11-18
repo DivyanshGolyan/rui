@@ -39,7 +39,7 @@ def cases():
             [None, "on", "off"], [False, True], [False, True], range(len(states))):
         event = {"pull_request": {"head": {"repo": {"full_name": REPO if same_repo else "NimishGolyan/rui"}},
                                   "user": {"login": author}}}
-        eligible = (switch != "off" and not promotion and not compile_only
+        eligible = (switch != "off" and not compile_only
                     and actor == TRUSTED and trigger == TRUSTED
                     and (event_name == "workflow_dispatch"
                          or (event_name == "pull_request" and same_repo and author == TRUSTED)))
@@ -77,7 +77,6 @@ class DecisionTest(unittest.TestCase):
             ('_object(pr.get("user")).get("login") not in allowlist', 'False'),
             ('actor not in allowlist', 'False'),
             ('triggering_actor not in allowlist', 'False'),
-            ('_enabled(inputs.get("promotion"))', 'False'),
             ('_enabled(inputs.get("compile_only"))', 'False'),
             ('runner.get("status") == "online"', 'True'),
             ('runner.get("busy") is False', 'True'),
@@ -219,6 +218,19 @@ class AdapterTest(unittest.TestCase):
                     self.assertEqual((temp / "mac-runners.json").exists(), result == 0)
                 else:
                     self.assertFalse((temp / "args").exists())
+
+    def test_promotion_passes_only_the_status_token_to_its_routing(self):
+        check = (ROOT / ".github/workflows/check.yml").read_text()
+        call = check.split("  workflow_call:\n", 1)[1].split("\npermissions:", 1)[0]
+        self.assertIn("    secrets:\n", call)
+        self.assertRegex(call, r"(?m)^      MAC_RUNNER_STATUS_TOKEN:\n        required: false$")
+        promote = (ROOT / ".github/workflows/promote.yml").read_text()
+        selected = re.search(r"(?ms)^  selected:\n(.*?)(?=^  [a-z_]+:|\Z)", promote)[1]
+        self.assertIn("uses: ./.github/workflows/check.yml", selected)
+        secrets = selected.split("    secrets:\n", 1)[1]
+        self.assertEqual([line.strip() for line in secrets.splitlines() if line.strip()],
+                         ["MAC_RUNNER_STATUS_TOKEN: ${{ secrets.MAC_RUNNER_STATUS_TOKEN }}"],
+                         "promotion passes the status token alone, never inherit")
 
     def test_allowlist_cli(self):
         result = subprocess.run([sys.executable, str(ROOT / "tests/ci/mac_runner.py"), "allowlist"],

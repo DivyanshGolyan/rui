@@ -87,6 +87,13 @@ runs:
         cc -O2 -Wall -Wextra -Werror tests/ci/zig_cache_restat.c -o "$RUNNER_TEMP/zig-cache-restat"
         "$RUNNER_TEMP/zig-cache-restat" .zig-cache/h "$HOME/.cache/zig/h" -- \
           "$PWD" "$RUNNER_TEMP/rui-zig/lib" "$PWD/.zig-cache" "$HOME/.cache/zig"
+    # Main's Linux publisher then saves only the linked outputs its own build
+    # read (tests/ci/cache_snapshot.py), so PRs restore one generation, not all.
+    # Restat reads every manifest, so the mark must follow it.
+    - name: Mark restored manifests unread for publication
+      if: ${{ inputs.cold != 'true' && inputs.compiled != 'true' && inputs.publish-caches == 'true' && inputs.check-part == 'compiled' && runner.os == 'Linux' }}
+      shell: bash
+      run: python3 -B tests/ci/cache_snapshot.py --mark
     - name: Select empty caches for scheduled acceptance
       if: ${{ inputs.cold == 'true' }}
       shell: bash
