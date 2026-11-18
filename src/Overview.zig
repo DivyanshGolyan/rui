@@ -1938,15 +1938,15 @@ const Seen = struct {
 };
 
 fn fixtureWork(value: protocol.session_work.Work) protocol.session_work.Work {
-    var work = value;
-    work.served_attention = protocol.session_work.attention(work);
-    work.served_group = protocol.session_work.group(work);
-    work.actions.stop = switch (work.served_group.?) {
-        .needs_you, .working, .queued => true,
+    var served = value;
+    served.served_attention = protocol.session_work.attention(served);
+    served.served_group = protocol.session_work.group(served);
+    served.actions.stop = switch (served.served_group.?) {
+        .needs_you, .serveding, .queued => true,
         .done => false,
     };
-    work.actions.decide = if (work.served_group.? == .needs_you) work.first_action else null;
-    return work;
+    served.actions.decide = if (served.served_group.? == .needs_you) served.first_action else null;
+    return served;
 }
 
 fn fixtureSessionWork(value: protocol.session_work.Work) protocol.SessionWork {
@@ -2918,7 +2918,7 @@ test "while a conversation holds the terminal its stop goes first, the listing g
     overview.opened = "k7m2qx".*;
     try overview.dispatch(.lent);
     try std.testing.expectEqual(Job.list, std.meta.activeTag(overview.job));
-    _ = try conversed(overview, .working, .stop);
+    _ = try conversed(overview, .working, .{ .stop = true });
     try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(2)), overview, Lent.answered);
     try std.testing.expectEqual(Job.stop, std.meta.activeTag(overview.job));
     try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(2)), overview, Lent.answered);
