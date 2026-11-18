@@ -203,7 +203,7 @@ pub fn build(b: *std.Build) void {
 
     const h2_integration = b.addSystemCommand(&.{"python3"});
     h2_integration.addFileArg(b.path("tests/integration/transport_h2_integration.py"));
-    h2_integration.addFileArg(ci.path(release_safe));
+    h2_integration.addFileArg(ci.path(pause_rui));
     const h2_oracle_tests = b.addSystemCommand(&.{"python3"});
     h2_oracle_tests.addFileArg(b.path("tests/integration/transport_h2_integration_test.py"));
     h2_oracle_tests.addFileArg(ci.path(release_safe));

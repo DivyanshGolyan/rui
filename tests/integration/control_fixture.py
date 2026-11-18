@@ -130,7 +130,7 @@ def command(*args, expect=0, timeout=15, input=None):
     return json.loads(completed.stdout)
 
 
-def start_host(store, endpoint=None, *extra, active_capacity=2, observations=None):
+def start_host(store, endpoint=None, *extra, active_capacity=2, observations=None, pause=None):
     args = [
         str(RUI),
         "host", "serve",
@@ -145,7 +145,7 @@ def start_host(store, endpoint=None, *extra, active_capacity=2, observations=Non
     args += extra
     if observations is not None and "--test-phase-trace" not in args:
         args.append("--test-phase-trace")
-    return start_ready_process(args, required_fields=required,
+    return start_ready_process(args, required_fields=required, pause=pause,
                                observations=observations or ("control" if "--test-phase-trace" in extra else None))
 
 

@@ -2607,6 +2607,12 @@ noinline fn completeSuccessfulTransfer(host: *Host, workspace: *Workspace, activ
     };
     const validated = &accepted.output;
     traceOperation(host, "validation_completed", owner.binding);
+    if (comptime test_pause.enabled) if (host.pause_owner) |controller| {
+        _ = controller.reach(.model_result_ready, .{
+            .operation = owner.binding.operation_id,
+            .attempt = owner.binding.attempt_ordinal,
+        }) catch {};
+    };
     pause(host, .{ .model_result = owner.binding });
     if (!host.custody.claimTerminalDelivery(owner.token)) return .cleanup;
     var settlement_trace = SettlementTrace.init(host, owner.binding);
