@@ -20,6 +20,15 @@ class FlakeSourcesTest(unittest.TestCase):
             with self.subTest(rule=rule, path=path, text=text):
                 self.assertEqual(flake.inventory(text, path).get(rule, 0), expected)
 
+    def test_downloaded_packages_are_not_repository_sources(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            sleeping = 'test "x" { std.Thread.sleep(1); }\n'
+            for path in ('zig-pkg/dep/src/a.zig', 'screen-emulator/zig-pkg/dep/src/b.zig', 'src/own.zig'):
+                (root / path).parent.mkdir(parents=True, exist_ok=True)
+                (root / path).write_text(sleeping)
+            self.assertEqual(set(flake.read_sources(root)), {'src/own.zig'})
+
     def test_fixed_sleep(self):
         self.assert_rule_table('fixed_sleep', [
             ('tests/x.py', 'time.sleep(1)\nasyncio.sleep(1)', 2),

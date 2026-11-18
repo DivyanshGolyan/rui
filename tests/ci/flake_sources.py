@@ -195,7 +195,7 @@ def trusted_sources(root, base):
 
 def read_sources(root=ROOT):
     root = Path(root)
-    excluded = {'.git', '.zig-cache', 'zig-cache', 'zig-out', 'node_modules', '__pycache__', '.venv'}
+    excluded = {'.git', '.zig-cache', 'zig-cache', 'zig-out', 'zig-pkg', 'node_modules', '__pycache__', '.venv'}
     return {path.relative_to(root).as_posix(): path.read_text()
             for path in root.rglob('*')
             if path.is_file() and not excluded.intersection(path.relative_to(root).parts)
