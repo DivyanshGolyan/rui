@@ -7161,6 +7161,20 @@ test "SUI-17 fresh conversation scroll keeps each Message once in order" {
             try std.testing.expect(std.mem.indexOf(u8, shown, "Earlier messages unavailable") == null);
         }
     }
+    const empty = try FeedFixture.create();
+    defer empty.destroy();
+    try empty.page(.opening, &.{}, true, true);
+    const opened = try empty.held.shown();
+    for ([_][]const u8{ "\x1b[1;2A", "\x1b[5~" }) |key| {
+        try empty.held.keys(key);
+        try empty.held.keys("x");
+        const typed = try empty.held.shown();
+        try std.testing.expectEqualStrings("x", empty.held.self.input.composition().bytes);
+        try std.testing.expect(std.mem.indexOf(u8, typed, "↓") == null);
+        try std.testing.expect(std.mem.indexOf(u8, typed, "Start of conversation") == null);
+        try empty.held.keys("\x15");
+        try std.testing.expectEqualStrings(opened, try empty.held.shown());
+    }
 }
 
 test "SessionFrontend feed opens full bottom aligned and page round trip is an identical frame" {
@@ -7178,6 +7192,47 @@ test "SessionFrontend feed opens full bottom aligned and page round trip is an i
     for (0..3) |_| try held.keys("\x1b[6~");
     try std.testing.expect(held.screen.anchor.following());
     try std.testing.expectEqualStrings(initial, try held.shown());
+
+    try held.keys("keep");
+    const live = try held.shown();
+    const feed_height = held.screen.height;
+    for ([_]struct { up: []const u8, back: []const u8 }{
+        .{ .up = "\x1b[1;2A", .back = "\x1b[1;5F" },
+        .{ .up = "\x1b[5~", .back = "\x1b" },
+    }) |keys| {
+        try held.keys(keys.up);
+        const scrolled = try held.shown();
+        try std.testing.expect(!held.screen.anchor.following());
+        try std.testing.expectEqualStrings("keep", held.self.input.composition().bytes);
+        try std.testing.expect(std.mem.indexOf(u8, scrolled, "↓") != null);
+        try std.testing.expect(std.mem.indexOf(u8, scrolled, "Browsing") == null);
+        try std.testing.expectEqualStrings("", held.self.chrome.status.bar.left);
+        try std.testing.expect(held.self.chrome.status.bar.notice == null);
+        try std.testing.expect(std.mem.indexOf(u8, scrolled, "entry 115 line 7") == null);
+        try std.testing.expectEqual(feed_height, held.screen.height);
+        var before = std.mem.splitScalar(u8, firstRows(live, feed_height), '\n');
+        var before_row: usize = 0;
+        var matched: usize = 0;
+        while (before.next()) |line| : (before_row += 1) {
+            if (std.mem.indexOf(u8, line, "entry ") == null) continue;
+            var after = std.mem.splitScalar(u8, firstRows(scrolled, feed_height), '\n');
+            var after_row: usize = 0;
+            while (after.next()) |candidate| : (after_row += 1) {
+                if (!std.mem.eql(u8, line, candidate)) continue;
+                try std.testing.expectEqual(before_row + feed_height / 2, after_row);
+                matched += 1;
+            }
+        }
+        try std.testing.expect(matched > 0);
+        try held.keys("\x1b[F");
+        const end_key = try held.shown();
+        try std.testing.expect(!held.screen.anchor.following());
+        try std.testing.expectEqualStrings(firstRows(scrolled, feed_height), firstRows(end_key, feed_height));
+        try std.testing.expectEqualStrings("keep", held.self.input.composition().bytes);
+        try held.keys(keys.back);
+        try std.testing.expect(held.screen.anchor.following());
+        try std.testing.expectEqualStrings(live, try held.shown());
+    }
 }
 
 fn heldScrollArrivals() !void {
@@ -7199,12 +7254,16 @@ fn heldScrollArrivals() !void {
     try std.testing.expectEqualStrings(held_frame, try held.shown());
     const before = try held.shown();
     const anchor = held.screen.anchor.anchor;
+    const feed_height = held.screen.height;
     try fixture.page(.scan, &.{ .{ .key = 116, .text = "new settled row\n" }, .{ .key = 117, .text = "another settled row\n" } }, false, true);
     try std.testing.expectEqualDeep(anchor, held.screen.anchor.anchor);
     try std.testing.expectEqual(@as(usize, 2), held.self.new_below);
     const after = try held.shown();
-    try std.testing.expectEqualStrings(firstRows(before, held.screen.height), firstRows(after, held.screen.height));
+    try std.testing.expectEqual(feed_height, held.screen.height);
+    try std.testing.expectEqualStrings(firstRows(before, feed_height), firstRows(after, feed_height));
     try std.testing.expect(std.mem.indexOf(u8, after, "↓ 2 new") != null);
+    try std.testing.expect(std.mem.indexOf(u8, firstRows(after, feed_height), "new settled row") == null);
+    try std.testing.expectEqualStrings("", held.self.input.composition().bytes);
 }
 
 test "SessionFrontend feed jump after high eviction keeps old rows until the opening lands" {
@@ -9673,6 +9732,53 @@ test "App Session palette total budget stays between input rules and reserves fe
             return null;
         }
     };
+    for ([_]struct { width: u16, height: u16, more: []const u8 }{
+        .{ .width = 140, .height = 40, .more = "3 more" },
+        .{ .width = 46, .height = 30, .more = "6 more" },
+    }) |case| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        held.size = .{ .width = case.width, .height = case.height };
+        const before = try held.draw();
+        const input_before = Find.widget(before, held.self.app_input.widget()).?;
+        try held.keys("/");
+        const opened = try held.draw();
+        const input_open = Find.widget(opened, held.self.app_input.widget()).?;
+        const panel = Find.widget(opened, held.self.app_palette.widget()).?;
+        try std.testing.expect(input_open.origin.row < input_before.origin.row);
+        try std.testing.expectEqual(input_before.origin.row + input_before.surface.size.height, input_open.origin.row + input_open.surface.size.height);
+        const text = try held.shown();
+        try std.testing.expect(std.mem.indexOf(u8, text, "/new") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "type to narrow") == null);
+
+        var rendered: vaxis.Screen = try .init(held.arena.allocator(), .{ .rows = case.height, .cols = case.width, .x_pixel = 0, .y_pixel = 0 });
+        try opened.render(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = case.width, .height = case.height, .screen = &rendered }, held.self.app_input.composer.widget());
+        const ground = rendered.readCell(case.width - 1, case.height - 3).?.style.bg;
+        const selected = style.of(held.self.app_caps, .{ .background = .selection });
+        var last: std.Io.Writer.Allocating = .init(held.arena.allocator());
+        for (0..panel.surface.size.height) |row| for (0..panel.surface.size.width) |col| {
+            const cell = panel.surface.readCell(@intCast(col), @intCast(row));
+            if (row == panel.surface.size.height - 1) try last.writer.writeAll(cell.char.grapheme);
+            if (row == 0) {
+                try std.testing.expectEqual(selected.bg, cell.style.bg);
+                try std.testing.expectEqual(selected.reverse, cell.style.reverse);
+            } else {
+                try std.testing.expectEqual(ground, cell.style.bg);
+                try std.testing.expect(!cell.style.reverse);
+            }
+            for ([_][]const u8{ "┌", "┐", "└", "┘", "│" }) |border|
+                try std.testing.expect(!std.mem.eql(u8, border, cell.char.grapheme));
+        };
+        try std.testing.expectEqualStrings(case.more, std.mem.trim(u8, last.written(), " "));
+        try held.keys("\x7f");
+        const closed = try held.draw();
+        const input_closed = Find.widget(closed, held.self.app_input.widget()).?;
+        try std.testing.expectEqual(input_before.origin.row, input_closed.origin.row);
+        try std.testing.expectEqual(input_before.surface.size.height, input_closed.surface.size.height);
+        try std.testing.expect(Find.widget(closed, held.self.app_palette.widget()) == null);
+        try std.testing.expectEqualStrings("", held.self.input.composition().bytes);
+        try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "/new") == null);
+    }
     const held = try HeldFrontend.create();
     defer held.destroy();
     const before = try held.draw();
