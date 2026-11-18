@@ -211,7 +211,7 @@ fn run(case: Case) !void {
             stop.session = session;
             try expectHere(@src(), storage.stopSession(&stop, .{}) == .accepted);
             // Model a completed image arriving just after the stop committed.
-            try std.testing.expectEqual(store.ActionSettlement.session_stop, try settleImageParts(storage, &tmp, stopped_binding));
+            try std.testing.expectEqual(store.ActionSettlement.Outcome.session_stop, (try settleImageParts(storage, &tmp, stopped_binding)).outcome);
             _ = host.advance(.stopping);
             active.shutdown(host);
             try std.testing.expectEqual(@as(u64, 1), try store.testing.sqlite_only.queryU64(storage, "SELECT count(*) FROM action_operation WHERE resolution_code='succeeded'", .{}));

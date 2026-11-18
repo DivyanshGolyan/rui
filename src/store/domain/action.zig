@@ -407,7 +407,12 @@ pub const ActionResolutionCode = enum {
 
 pub const max_action_resolution_code_bytes = sqlite.maxEnumTagBytes(ActionResolutionCode);
 
-pub const ActionSettlement = enum { effect, session_stop };
+pub const ActionSettlement = struct {
+    pub const Outcome = enum { effect, session_stop };
+
+    outcome: Outcome,
+    kept: bool,
+};
 
 pub const ActionDispatchPermit = attempt.ActionDispatchPermit;
 
@@ -725,6 +730,7 @@ pub const SettleAttempt = struct {
     facts: settle_facts.Result = undefined,
     code: ActionResolutionCode = undefined,
     completion: turn_domain.stopped_turn.Result = null,
+    kept: bool = true,
 
     pub fn step(t: *SettleAttempt, r: *transition.Round(SettleAttempt), ran: ?rounds.At) !transition.Next(SettleAttempt) {
         const binding = t.input.binding;
@@ -740,6 +746,7 @@ pub const SettleAttempt = struct {
                 const stopped = found.direct_stop or (found.stopped and found.runner != .mcp);
                 t.code = if (stopped) .cancelled else t.input.code;
                 if (stopped) {
+                    t.kept = false;
                     const text = if (found.direct_stop) "Action was stopped." else found.runner.stoppedText(t.input.code, t.input.result);
                     t.input.saving.* = try .init(.{ .text = .{ .slice = text } });
                 }
@@ -772,7 +779,7 @@ pub const SettleAttempt = struct {
     }
 
     pub fn committed(t: *const SettleAttempt) Result {
-        return if (t.facts.?.stopped) .session_stop else .effect;
+        return .{ .outcome = if (t.facts.?.stopped) .session_stop else .effect, .kept = t.kept };
     }
 };
 

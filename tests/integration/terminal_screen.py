@@ -8,6 +8,41 @@ import unicodedata
 import weakref
 
 
+HORIZONTAL_RULE = "┄"
+VERTICAL_DIVIDER = "┆"
+RULE_GLYPHS = (HORIZONTAL_RULE, "─", "-")
+DIVIDER_GLYPHS = (VERTICAL_DIVIDER, "│", "|")
+RULE_PATTERN = "[" + re.escape("".join(RULE_GLYPHS)) + "]"
+DIVIDER_PATTERN = "[" + re.escape("".join(DIVIDER_GLYPHS)) + "]"
+
+def split_pane_row(row, column=None):
+    if column is not None:
+        offset = 0
+        for index, char in enumerate(row):
+            if offset == column and char in DIVIDER_GLYPHS + ("┼", "┤", "+"):
+                return row[:index], char, row[index + 1:]
+            offset += 0 if unicodedata.combining(char) else 2 if unicodedata.east_asian_width(char) in ("W", "F") else 1
+            if offset > column:
+                break
+        return "", "", row
+    if row.startswith((" ›", " >")):
+        return "", "", row
+    rule = re.match(rf"^({RULE_PATTERN}{{2,}})([┼┤+])", row)
+    if rule:
+        return rule.group(1), rule.group(2), row[rule.end():]
+    divider = min((index for glyph in DIVIDER_GLYPHS[:2] if (index := row.find(glyph)) >= 0), default=-1)
+    column = 0
+    for index, char in enumerate(row):
+        if char == "|" and column == 40 and (divider < 0 or index < divider):
+            divider = index
+            break
+        column += 0 if unicodedata.combining(char) else 2 if unicodedata.east_asian_width(char) in ("W", "F") else 1
+    if divider >= 0:
+        return row[:divider], row[divider], row[divider + 1:]
+    return "", "", row
+
+
+
 LIMIT = 1024 * 1024
 RESIZE_RESET = b"\x1b[H\x1b[m\x1b[J\x1b[?25l"
 BOUNDARY = re.compile(rb"\x1b\[\?2026([hl])|" + re.escape(RESIZE_RESET))
@@ -442,7 +477,6 @@ class ScreenCapture:
             return False
         cursor = self.screen.cursor
         cells = self.completed_cells[cursor.y]
-        from human_cli_fixture import split_pane_row
         row = "".join(cell.data for cell in cells[:cursor.x])
         sidebar, divider, _ = split_pane_row(row)
         remaining = len(sidebar) + len(divider)

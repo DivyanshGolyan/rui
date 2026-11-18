@@ -1,3 +1,4 @@
+from terminal_screen import RULE_GLYPHS
 from contextlib import contextmanager
 import json
 import os
@@ -71,7 +72,7 @@ def pinned_settings():
         rows = frame.splitlines()
         settings = next(i for i, line in enumerate(rows) if "Settings" in line)
         assert settings == len(rows) - 1, frame
-        assert set(rows[settings - 1].strip()) <= {"─", "-"} and rows[settings - 1].strip(), frame
+        assert set(rows[settings - 1].strip()) <= set(RULE_GLYPHS) and rows[settings - 1].strip(), frame
         assert not re.search(r"0\.\d+\.\d+|unreleased", frame), frame
         assert "rui " not in rows[settings] and "tools " not in rows[settings], frame
         assert "enter open" not in frame, frame

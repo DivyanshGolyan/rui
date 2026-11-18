@@ -172,22 +172,25 @@ def leader_for(terminal, gone=None):
 
 
 class LeaderGone(Exception):
-    """A leader ended through hangup before it read a request.
-
-    A dying process closes its descriptors before it can be reaped, so for a
-    moment its PTY's device number can name a new PTY while `poll()` still
-    finds the old leader running. The request never started anything."""
+    """A leader ended through hangup before it read a request."""
 
 
 class Leader:
 
     def __init__(self, terminal):
         ours, theirs = socket.socketpair()
-        self.process = subprocess.Popen([sys.executable, "-I", "-S", "-c",
-            "import sys; sys.path.insert(0, sys.argv[1]); import terminal_leader; "
-            "sys.exit(terminal_leader.lead(int(sys.argv[2])))",
-            os.path.dirname(os.path.abspath(__file__)), str(theirs.fileno())],
-            stdin=terminal, stdout=subprocess.DEVNULL, start_new_session=True, pass_fds=(theirs.fileno(),))
+        self.terminal = os.dup(terminal)
+        try:
+            self.process = subprocess.Popen([sys.executable, "-I", "-S", "-c",
+                "import sys; sys.path.insert(0, sys.argv[1]); import terminal_leader; "
+                "sys.exit(terminal_leader.lead(int(sys.argv[2])))",
+                os.path.dirname(os.path.abspath(__file__)), str(theirs.fileno())],
+                stdin=terminal, stdout=subprocess.DEVNULL, start_new_session=True, pass_fds=(theirs.fileno(),))
+        except BaseException:
+            os.close(self.terminal)
+            ours.close()
+            theirs.close()
+            raise
         theirs.close()
         self.channel = ours
         self.buffer = b""
@@ -203,6 +206,7 @@ class Leader:
         except BaseException:
             self.channel.close()
             self.process.wait()
+            os.close(self.terminal)
             raise
 
     def pump(self, deadline):
@@ -266,6 +270,7 @@ class Leader:
         while not self.ended:
             self.pump(None)
         self.channel.close()
+        os.close(self.terminal)
 
 
 class TerminalProcess:

@@ -1,3 +1,4 @@
+from terminal_screen import VERTICAL_DIVIDER
 import json
 import os
 import pathlib
@@ -386,7 +387,7 @@ def assert_plain_panel(master, screen, *, left=None):
     assert frame.text == screen, (frame.text, screen)
     def pane_cells(index):
         cells = frame.cells[index]
-        divider = next((column for column, cell in enumerate(cells) if cell.data == "│"), None)
+        divider = next((column for column, cell in enumerate(cells) if cell.data == VERTICAL_DIVIDER), None)
         return cells[divider + 1:] if divider is not None else cells
 
     bounds = composer_bounds(screen)
@@ -403,7 +404,7 @@ def assert_plain_panel(master, screen, *, left=None):
     backgrounds = set()
     for index in range(bounds[0] + 1, prompt):
         line = composer_line(screen, index)
-        assert not any(char in line for char in "┌┐└┘│"), screen
+        assert not any(char in line for char in ("┌┐└┘" + VERTICAL_DIVIDER)), screen
         for cell in pane_cells(index):
             backgrounds.add(frame.colors(cell)[1])
     assert plain in backgrounds and len(backgrounds) <= 2, ("plain panel plus selection bar", backgrounds, screen)
@@ -428,6 +429,23 @@ def command_panel_case():
             assert composer_bounds(closed)[0] > bounds[0], (opened, closed)
             chrome.leave(master, caller)
     print("session chrome: command list lifts the input rule at both frame sizes, stays plain, omits redundant descriptions, and shows only N more", flush=True)
+
+
+def command_escape_case():
+    with Chrome("rui-chrome-command-escape.", []) as chrome:
+        session = chrome.session()
+        for width, height in ((140, 40), (46, 30)):
+            master, caller, _ = chrome.open(session, lambda screen: True, columns=width, height=height)
+            opened = chrome.frame(master, b"/ne", lambda screen: "/new" in screen and "› /ne" in screen)
+            assert composer_bounds(opened) is not None, opened
+            closed = chrome.frame(master, b"\x1b", lambda screen: composing(screen, "") and "/new" not in screen)
+            assert composing(closed, ""), closed
+            settled = settle_screen(master)
+            assert composing(settled, "") and "/new" not in settled, settled
+            overview = chrome.frame(master, b"\x1b", lambda screen: composer_bounds(screen) is None and "Settings" in screen)
+            assert composer_bounds(overview) is None, overview
+            chrome.leave(master, caller)
+    print("session chrome: lone Escape closes a drawn command list before leaving chat at both sizes", flush=True)
 
 
 def pages_case():
@@ -740,6 +758,7 @@ def notice_case():
 
 def main():
     command_panel_case()
+    command_escape_case()
     send_state_case()
     send_recovery_case()
     activity_case()

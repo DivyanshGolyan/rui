@@ -274,7 +274,7 @@ noinline fn complete(host: *Host, active: *Active, ended: @import("mcp/result_te
     const finished = result.finish();
     switch (finished) {
         .failed => |failed| settleFailure(host, active, failed.failure, failed.seal),
-        .value => |value| if (tool_settle.result(host, active.slot(), active.profile, resolution, value) == .delivered) result.keep(),
+        .value => |value| _ = tool_settle.result(host, active.slot(), active.profile, resolution, value, result),
     }
 }
 
@@ -738,7 +738,14 @@ test "MCP Result reports retention refusal without changing success" {
         const scratch_root = if (reason == .missing) try std.fmt.bufPrint(&missing_buffer, "{s}/missing", .{root}) else root;
         var queue = adapter_test_retention.Queue.initialize(std.testing.io, scratch_root, .{ .used = &used, .limit = if (reason == .budget) 1 else Running.max_answer_bytes }, if (reason == .capacity) &.{} else &entries);
         defer queue.cleanupAll();
-        if (reason == .reserved) _ = try queue.reservePair("protected-out", 0, "protected-err", 0);
+        var protected_out: ?adapter_test_retention.Spill = null;
+        var protected_err: ?adapter_test_retention.Spill = null;
+        if (reason == .reserved) {
+            protected_out = adapter_test_retention.Spill.open(&queue, "protected-out") orelse return error.TestUnexpectedResult;
+            protected_err = adapter_test_retention.Spill.open(&queue, "protected-err") orelse return error.TestUnexpectedResult;
+        }
+        defer if (protected_out) |*spill| spill.release();
+        defer if (protected_err) |*spill| spill.release();
         if (reason == .sequence) queue.next_sequence = std.math.maxInt(u64);
         if (reason == .create) try tmp.dir.createDir(std.testing.io, "mcp-output-17-1.tmp", .default_dir);
         defer if (reason == .create) tmp.dir.deleteDir(std.testing.io, "mcp-output-17-1.tmp") catch {};
@@ -889,5 +896,118 @@ test "MCP image part limit accounts for empty text tails" {
         };
         try std.testing.expectEqual(case.images, image_count);
         try std.testing.expectEqual(@as(usize, @intFromBool(case.text != null)), text_count);
+    }
+}
+
+// Exercise the adapter after its response has arrived, with control changes
+// committed immediately before delivery. Calls.service normally checks control
+// before polling, so this is the narrow race between that check and complete.
+test "MCP retained response follows the actual delivery outcome" {
+    const testing = store.testing;
+    const tools = @import("tools.zig");
+    const retention = @import("output_retention.zig");
+    const allocator = std.testing.allocator;
+    const records = comptime testing.hostToolRecordsWith(&.{.{ .name = "fetch_page", .owner = .mcp, .server = "docs", .description = "Fetch a page.", .input_schema = "{\"type\":\"object\"}" }});
+    var digests: [records.len][32]u8 = undefined;
+    for (&records, &digests) |*record, *digest| digest.* = tools.recordDigest(record);
+    const tool_set: tools.HostToolSet = .{ .records = &records, .digests = &digests };
+    const text = try allocator.alloc(u8, @import("mcp/result_text.zig").excerpt_bytes + 37);
+    defer allocator.free(text);
+    @memset(text, 'x');
+    const content = try std.fmt.allocPrint(allocator, "[{{\"type\":\"text\",\"text\":\"{s}\"}}]", .{text});
+    defer allocator.free(content);
+    const ended: @import("mcp/result_text.zig").Ended = .{ .server_name = "docs", .ended = .{ .outcome = .{ .result = .{ .is_error = false, .content = content, .structured = null } } } };
+    const Case = enum { normal, direct_stop, session_stop, lost, fenced };
+    for (std.enums.values(Case)) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const storage = try allocator.create(store.Store);
+        defer allocator.destroy(storage);
+        try testing.testingStoreWith(&.{ .engine = .sqlite }, storage, &tmp, std.testing.io, .{ .host_tool_set = &tool_set });
+        defer storage.close() catch unreachable;
+        const workspace_buffer = try allocator.create([protocol.max_workspace_bytes]u8);
+        defer allocator.destroy(workspace_buffer);
+        const configure = try allocator.create(@import("wire_request.zig").ConfigureCommand);
+        defer allocator.destroy(configure);
+        configure.* = try testing.completeConfiguration("mcp-spill-config", "", try store.testingCanonicalCwd(std.testing.io, workspace_buffer), "model-a");
+        configure.configuration.tools = try .of(&.{ "bash", "fetch_page", "read_action", "stop_action" });
+        configure.configuration.permission_mode.state = .value;
+        try configure.configuration.permission_mode.value.set("bypass");
+        const session = (try storage.configure(configure, .{})).accepted.session;
+        try testing.submitTestMessage(storage, &tmp, "task", "mcp-spill-task", session.slice(), "fetch");
+        const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        const calls = [_]store.TestingCall{
+            .{ .item_id = "target", .name = "fetch_page", .encoded_call_id = "target", .decoded_call_id = "target", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+            .{ .item_id = "stop", .name = "stop_action", .encoded_call_id = "stop", .decoded_call_id = "stop", .encoded_arguments = "{\\\"action\\\":\\\"1\\\"}", .decoded_arguments = "{\"action\":\"1\"}" },
+        };
+        try store.settleCallsForTesting(storage, &tmp, model, "mcp-spill-calls", calls[0..if (case == .direct_stop) 2 else 1]);
+        const selected = (try storage.nextAction(.mcp, .fromFree(2, true))).?;
+        var admission = (try storage.admitActionAttempt(selected, 30_000, .{})).?;
+        const root_buffer = try allocator.create([protocol.max_store_bytes]u8);
+        defer allocator.destroy(root_buffer);
+        const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, root_buffer)];
+        var used: std.atomic.Value(u64) = .init(0);
+        var entries: [2]retention.Entry = @splat(.{});
+        var queue = retention.Queue.initialize(std.testing.io, root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, &entries);
+        defer queue.cleanupAll();
+        var custody_records: [1]execution.CustodyRecord = @splat(.{});
+        const host = try allocator.create(Host);
+        defer allocator.destroy(host);
+        host.* = .{ .io = std.testing.io, .allocator = allocator, .lease = undefined, .store = storage, .custody = execution.CustodyPool.initialize(&custody_records), .retention = &queue };
+        const token = host.custody.reserve().?;
+        const binding = try host.custody.attach(token, &admission.permit);
+        defer {
+            host.custody.detach(token) catch unreachable;
+            host.custody.cleanupComplete(token) catch unreachable;
+        }
+        var active: Active = .{ .token = token, .binding = binding, .arena = .init(allocator), .profile = @import("tool_record.zig").Runner.mcp.resultProfile(true) };
+        defer active.arena.deinit();
+        switch (case) {
+            .direct_stop => {
+                const source = (try storage.nextCoreWork(.fromFree(2, true))).?.action;
+                try std.testing.expect(try storage.stopAction(source.binding, selected.action_id, .{}) == .selected);
+            },
+            .session_stop => {
+                var stop: protocol.SessionStopCommand = .{};
+                try stop.key.set("mcp-spill-stop");
+                stop.session = session;
+                try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+            },
+            .lost => try std.testing.expect(host.custody.claimTerminalDelivery(token)),
+            .fenced => host.hooks.failures.insert(.result_before_commit),
+            .normal => {},
+        }
+        complete(host, &active, ended);
+        var filename_buffer: [128]u8 = undefined;
+        const filename = try std.fmt.bufPrint(&filename_buffer, "mcp-output-{d}-1.tmp", .{selected.action_id});
+        const kept = case == .normal or case == .session_stop;
+        try std.testing.expectEqual(@as(usize, @intFromBool(kept)), queue.occupied());
+        if (kept) {
+            const contents = try tmp.dir.readFileAlloc(std.testing.io, filename, allocator, .limited(1024 * 1024));
+            defer allocator.free(contents);
+            try std.testing.expectEqualStrings(text, contents);
+            try std.testing.expectEqual(@as(u64, @intCast(contents.len)), used.load(.acquire));
+        } else {
+            try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, filename, .{}));
+            try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+        }
+        try std.testing.expectEqual(case == .fenced, storage.isFenced());
+        if (case == .normal or case == .session_stop or case == .direct_stop) {
+            const resolution = if (case == .direct_stop) "cancelled" else "succeeded";
+            try std.testing.expectEqual(@as(u64, 1), try testing.queryU64(storage, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND resolution_code=?2", .{ selected.action_id, resolution }));
+            const report = try store.testingSessionReportWithProfile(storage, &tmp, session.slice(), 128 * 1024, .full);
+            defer allocator.free(report);
+            if (case == .direct_stop) {
+                try std.testing.expect(std.mem.indexOf(u8, report, "Action was stopped.") != null);
+                try std.testing.expect(std.mem.indexOf(u8, report, "Full output:") == null);
+            } else try std.testing.expect(std.mem.indexOf(u8, report, "Full output:") != null);
+        } else {
+            if (case == .fenced) {
+                try storage.close();
+                try testing.testingStoreWith(&.{ .engine = .sqlite }, storage, &tmp, std.testing.io, .{ .host_tool_set = &tool_set });
+            }
+            try std.testing.expect(try storage.recoverOneUncertainAction(.empty()));
+            try std.testing.expectEqual(@as(u64, 1), try testing.queryU64(storage, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND resolution_code='indeterminate'", .{selected.action_id}));
+        }
     }
 }
