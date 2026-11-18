@@ -145,10 +145,10 @@ const indexed = blk: {
     for (std.enums.values(Mode)) |mode| {
         const table = tables.getPtr(mode);
         for (std.enums.values(Background)) |ground| {
-            table.backgrounds.set(ground, nearestIndex(background(mode, .direct, ground).direct));
+            table.backgrounds.set(ground, if (mode == .dark and ground == .selection) 238 else nearestIndex(background(mode, .direct, ground).direct));
             var colours = std.enums.EnumArray(Text, u8).initUndefined();
             for (std.enums.values(Text)) |role| {
-                colours.set(role, if (mode == .light and role == .attention) 58 else nearestIndex(text(mode, .direct, role, ground).direct));
+                colours.set(role, if (mode == .light and role == .attention) 58 else if (mode == .dark and ground == .selection and role == .quiet) 249 else nearestIndex(text(mode, .direct, role, ground).direct));
             }
             table.texts.set(ground, colours);
         }
@@ -172,7 +172,7 @@ pub fn wordmark(utf8: bool, xtversion: ?[]const u8, term_program: ?[]const u8) [
     return "rui";
 }
 
-test "wordmark requires a known terminal and UTF-8" {
+test "THM-5 wordmark requires a known terminal and UTF-8" {
     const cases = [_]struct { version: ?[]const u8, program: ?[]const u8, expected: []const u8 }{
         .{ .version = "kitty(0.35)", .program = null, .expected = "रुई rui" },
         .{ .version = "Ghostty 1.0", .program = null, .expected = "रुई rui" },
@@ -194,65 +194,63 @@ test "wordmark requires a known terminal and UTF-8" {
     }
 }
 
-test "indigo cloth palette and day surfaces" {
-    try std.testing.expectEqual(Rgb{ 0x1b, 0x21, 0x36 }, background(.dark, .direct, .ground).direct);
-    try std.testing.expectEqual(Rgb{ 0x24, 0x2b, 0x45 }, background(.dark, .direct, .selvedge).direct);
-    try std.testing.expectEqual(Rgb{ 0xea, 0xe2, 0xcf }, background(.light, .direct, .selvedge).direct);
-    try std.testing.expectEqual(Rgb{ 0x4b, 0x53, 0x75 }, thread(.dark, .direct).direct);
-    try std.testing.expectEqual(Rgb{ 0xc4, 0xb8, 0x9c }, thread(.light, .direct).direct);
-    const roles = [_]Text{ .strong, .body, .quiet, .indigo, .attention, .failure };
-    const colors = [_]Rgb{
-        .{ 0xf4, 0xed, 0xdc }, .{ 0xdd, 0xd5, 0xc3 }, .{ 0xa8, 0x9f, 0x8c },
-        .{ 0xb7, 0xc2, 0xe8 }, .{ 0xe6, 0xb8, 0x4a }, .{ 0xe0, 0x8a, 0x72 },
+test "THM-1 palette roles retain their cloth colours" {
+    const cases = [_]struct { mode: Mode, backgrounds: [3]Rgb, texts: [6]Rgb, rule: Rgb }{
+        .{ .mode = .dark, .backgrounds = .{ .{ 0x1b, 0x21, 0x36 }, .{ 0x24, 0x2b, 0x45 }, .{ 0x30, 0x37, 0x4f } }, .texts = .{ .{ 0xf4, 0xed, 0xdc }, .{ 0xdd, 0xd5, 0xc3 }, .{ 0xb7, 0xc2, 0xe8 }, .{ 0xa8, 0x9f, 0x8c }, .{ 0xe6, 0xb8, 0x4a }, .{ 0xe0, 0x8a, 0x72 } }, .rule = .{ 0x4b, 0x53, 0x75 } },
+        .{ .mode = .light, .backgrounds = .{ .{ 0xf3, 0xee, 0xe2 }, .{ 0xea, 0xe2, 0xcf }, .{ 0xe2, 0xd7, 0xbd } }, .texts = .{ .{ 0x1a, 0x18, 0x14 }, .{ 0x2f, 0x2b, 0x25 }, .{ 0x1f, 0x2d, 0x6b }, .{ 0x6a, 0x62, 0x53 }, .{ 0x7a, 0x52, 0x00 }, .{ 0x9e, 0x2b, 0x25 } }, .rule = .{ 0xc4, 0xb8, 0x9c } },
     };
-    for (roles, colors) |role, color| {
-        for ([_]Background{ .ground, .selvedge }) |bg| try std.testing.expectEqual(color, text(.dark, .direct, role, bg).direct);
+    for (cases) |case| {
+        for ([_]Background{ .ground, .selvedge, .selection }, case.backgrounds) |role, expected| try std.testing.expectEqual(expected, background(case.mode, .direct, role).direct);
+        for (std.enums.values(Background)) |bg| {
+            for ([_]Text{ .strong, .body, .indigo, .quiet, .attention, .failure }, case.texts) |role, base| {
+                const expected = if (case.mode == .light and role == .quiet and (bg == .selvedge or bg == .selection or bg == .hover))
+                    Rgb{ 0x62, 0x5a, 0x4c }
+                else if (case.mode == .dark and role == .quiet and bg == .selection)
+                    Rgb{ 0xaa, 0xa1, 0x8e }
+                else if (case.mode == .dark and role == .failure and (bg == .selection or bg == .hover))
+                    Rgb{ 0xeb, 0x9c, 0x84 }
+                else
+                    base;
+                try std.testing.expectEqual(expected, text(case.mode, .direct, role, bg).direct);
+            }
+            try std.testing.expectEqual(Rgb{ 0x14, 0x14, 0x14 }, text(case.mode, .direct, .on_alert, bg).direct);
+        }
+        try std.testing.expectEqual(case.rule, thread(case.mode, .direct).direct);
+        try std.testing.expectEqual(Rgb{ 0xe9, 0xb1, 0x30 }, background(case.mode, .direct, .alert).direct);
     }
 }
 
-test "selection uses ink wash and hover derives from its neighbouring surfaces" {
-    try std.testing.expectEqual(Rgb{ 0xe2, 0xd7, 0xbd }, background(.light, .direct, .selection).direct);
-    try std.testing.expectEqual(Rgb{ 0x30, 0x37, 0x4f }, background(.dark, .direct, .selection).direct);
-    for (std.enums.values(Mode)) |mode| {
-        const bar = background(mode, .direct, .selvedge).direct;
-        const selection = background(mode, .direct, .selection).direct;
-        const hover = background(mode, .direct, .hover).direct;
-        for (bar, selection, hover) |a, b, actual| try std.testing.expectEqual(@as(u8, @intCast((@as(u16, a) + b) / 2)), actual);
-    }
-}
-
-test "decided indexed pins" {
-    try std.testing.expectEqual(@as(u8, 58), text(.light, .indexed, .attention, .ground).indexed);
-    try std.testing.expectEqual(@as(u8, 58), text(.light, .indexed, .attention, .selvedge).indexed);
-    try std.testing.expectEqual(@as(u8, 187), background(.light, .indexed, .selection).indexed);
-    try std.testing.expectEqual(@as(u8, 237), background(.dark, .indexed, .selection).indexed);
-    try std.testing.expectEqual(@as(u8, 235), background(.dark, .indexed, .ground).indexed);
-    try std.testing.expectEqual(@as(u8, 237), background(.dark, .indexed, .hover).indexed);
-    try std.testing.expectEqual(@as(u8, 188), background(.light, .indexed, .hover).indexed);
-    try std.testing.expectEqual(Rgb{ 0x62, 0x5a, 0x4c }, text(.light, .direct, .quiet, .selvedge).direct);
-    try std.testing.expectEqual(Rgb{ 0x62, 0x5a, 0x4c }, text(.light, .direct, .quiet, .hover).direct);
-}
-
-test "indexed colors follow direct colors except the light attention pin" {
+test "THM-2 indexed colours use nearest xterm entries with accessible distinct surfaces" {
     for (std.enums.values(Mode)) |mode| {
         for (std.enums.values(Background)) |bg| {
-            try std.testing.expectEqual(nearestIndex(background(mode, .direct, bg).direct), background(mode, .indexed, bg).indexed);
+            const expected: u8 = if (mode == .dark and bg == .selection) 238 else nearestIndex(background(mode, .direct, bg).direct);
+            try std.testing.expectEqual(expected, background(mode, .indexed, bg).indexed);
             for (std.enums.values(Text)) |fg| {
-                const expected: u8 = if (mode == .light and fg == .attention) 58 else nearestIndex(text(mode, .direct, fg, bg).direct);
-                try std.testing.expectEqual(expected, text(mode, .indexed, fg, bg).indexed);
+                const ink: u8 = if (mode == .light and fg == .attention) 58 else if (mode == .dark and bg == .selection and fg == .quiet) 249 else nearestIndex(text(mode, .direct, fg, bg).direct);
+                try std.testing.expectEqual(ink, text(mode, .indexed, fg, bg).indexed);
             }
         }
         try std.testing.expectEqual(nearestIndex(thread(mode, .direct).direct), thread(mode, .indexed).indexed);
     }
+    for (16..256) |i| try std.testing.expectEqual(@as(u8, @intCast(i)), nearestIndex(xtermRgb(@intCast(i))));
 }
 
-test "nearest xterm index excludes terminal-defined entries" {
-    try std.testing.expectEqual(@as(u8, 16), nearestIndex(.{ 0, 0, 0 }));
-    try std.testing.expectEqual(@as(u8, 231), nearestIndex(.{ 255, 255, 255 }));
-    try std.testing.expectEqual(@as(u8, 214), nearestIndex(.{ 0xf2, 0xc2, 0x00 }));
+test "THM-3 surfaces preserve action distinction and message tint" {
+    for (std.enums.values(Mode)) |mode| for (std.enums.values(Depth)) |depth| {
+        const roles = [_]Background{ .ground, .selvedge, .selection, .hover };
+        for (roles, 0..) |role, i| for (roles[i + 1 ..]) |other| try std.testing.expect(!std.meta.eql(background(mode, depth, role), background(mode, depth, other)));
+        try std.testing.expect(!std.meta.eql(background(mode, depth, .ground), background(mode, depth, .user_message)));
+        const ground = background(mode, .direct, .ground).direct;
+        const tint = background(mode, .direct, .selvedge).direct;
+        const selection = background(mode, .direct, .selection).direct;
+        const message = background(mode, .direct, .user_message).direct;
+        const hover = background(mode, .direct, .hover).direct;
+        for (ground, tint, message) |a, b, actual| try std.testing.expectEqual(@as(u8, @intCast((@as(u16, a) + b) / 2)), actual);
+        for (tint, selection, hover) |a, b, actual| try std.testing.expectEqual(@as(u8, @intCast((@as(u16, a) + b) / 2)), actual);
+    };
 }
 
-test "readable text meets WCAG contrast on its layout backgrounds" {
+test "THM-4 readable text meets WCAG contrast on its layout backgrounds" {
     const Check = struct {
         fn rgb(color: Color) Rgb {
             return switch (color) {
@@ -275,15 +273,5 @@ test "readable text meets WCAG contrast on its layout backgrounds" {
             }
         }
         try std.testing.expect(Check.contrast(text(mode, depth, .on_alert, .alert), background(mode, depth, .alert)) >= 4.5);
-    };
-}
-
-test "user message tint is faint cloth distinct from ground in both themes and depths" {
-    try std.testing.expectEqual(Rgb{ 0xee, 0xe8, 0xd8 }, background(.light, .direct, .user_message).direct);
-    try std.testing.expectEqual(Rgb{ 0x1f, 0x26, 0x3d }, background(.dark, .direct, .user_message).direct);
-    try std.testing.expectEqual(@as(u8, 254), background(.light, .indexed, .user_message).indexed);
-    try std.testing.expectEqual(@as(u8, 236), background(.dark, .indexed, .user_message).indexed);
-    for (std.enums.values(Mode)) |mode| for (std.enums.values(Depth)) |depth| {
-        try std.testing.expect(!std.meta.eql(background(mode, depth, .ground), background(mode, depth, .user_message)));
     };
 }

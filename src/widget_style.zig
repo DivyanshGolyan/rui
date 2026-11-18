@@ -127,7 +127,7 @@ test "widget styles resolve theme colours and preserve NO_COLOR" {
         try std.testing.expect(!of(.{ .depth = depth }, .{}).dim);
     }
     const selected = of(.{ .depth = .indexed }, .{ .background = .selection });
-    try std.testing.expectEqual(vaxis.Color{ .index = 237 }, selected.bg);
+    try std.testing.expectEqual(vaxis.Color{ .index = 238 }, selected.bg);
     for (std.enums.values(view.Colour)) |colour| for (std.enums.values(view.Background)) |background| {
         for ([_]bool{ false, true }) |bold| for ([_]bool{ false, true }) |reverse| for ([_]bool{ false, true }) |dim| {
             const plain = of(.{ .depth = .none }, .{ .colour = colour, .background = background, .bold = bold, .reverse = reverse, .dim = dim });
@@ -141,7 +141,7 @@ test "widget styles resolve theme colours and preserve NO_COLOR" {
     };
 }
 
-test "hover surface maps distinctly except for the nearest indexed night selection" {
+test "hover differs from the ground, bar and selection it sits beside in every skin and depth" {
     for ([_]?view.Rgb{ .{ 255, 255, 255 }, null }) |terminal| {
         for ([_]view.Caps.Depth{ .direct, .indexed, .none }) |depth| {
             const caps: view.Caps = .{ .depth = depth, .background = terminal };
@@ -154,13 +154,7 @@ test "hover surface maps distinctly except for the nearest indexed night selecti
             }
             try std.testing.expectEqual(vaxis.Style.Underline.off, hover.ul_style);
             for ([_]view.Background{ .ground, .bar, .input_surface, .selection }) |surface| {
-                const actual = of(caps, .{ .background = surface }).bg;
-                if (depth == .indexed and terminal == null and surface == .selection) {
-                    try std.testing.expectEqual(vaxis.Color{ .index = 237 }, hover.bg);
-                    try std.testing.expectEqual(actual, hover.bg);
-                } else {
-                    try std.testing.expect(!std.meta.eql(actual, hover.bg));
-                }
+                try std.testing.expect(!std.meta.eql(of(caps, .{ .background = surface }).bg, hover.bg));
             }
         }
     }
@@ -205,8 +199,8 @@ test "widget indexed colours use nearest xterm entries and decided pins" {
             const role: view.Style = .{ .colour = colour, .background = ground };
             const direct = of(.{ .background = terminal }, role);
             const indexed = of(.{ .depth = .indexed, .background = terminal }, role);
-            const expected_fg: u8 = if (terminal != null and colour == .attention) 58 else Check.nearest(direct.fg.rgb);
-            const expected_bg = Check.nearest(direct.bg.rgb);
+            const expected_fg: u8 = if (terminal != null and colour == .attention) 58 else if (terminal == null and ground == .selection and (colour == .quiet or colour == .mark)) 249 else Check.nearest(direct.fg.rgb);
+            const expected_bg: u8 = if (terminal == null and ground == .selection) 238 else Check.nearest(direct.bg.rgb);
             try std.testing.expectEqual(vaxis.Color{ .index = expected_fg }, indexed.fg);
             try std.testing.expectEqual(vaxis.Color{ .index = expected_bg }, indexed.bg);
         };
