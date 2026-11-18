@@ -105,11 +105,11 @@ func TestRequestHistoryOracleRejectsMissingPriorTurnAndWrongCurrentInput(t *test
 	}
 	for name, mutate := range map[string]func(map[string]any){
 		"parallel calls disabled": func(body map[string]any) { body["parallel_tool_calls"] = false },
-		"parallel calls string":  func(body map[string]any) { body["parallel_tool_calls"] = "true" },
-		"wrong catalog effort":   func(body map[string]any) { body["reasoning"].(map[string]any)["effort"] = "low" },
-		"missing effort":         func(body map[string]any) { delete(body["reasoning"].(map[string]any), "effort") },
-		"null effort":            func(body map[string]any) { body["reasoning"].(map[string]any)["effort"] = nil },
-		"reasoning scalar":       func(body map[string]any) { body["reasoning"] = "medium" },
+		"parallel calls string":   func(body map[string]any) { body["parallel_tool_calls"] = "true" },
+		"wrong catalog effort":    func(body map[string]any) { body["reasoning"].(map[string]any)["effort"] = "low" },
+		"missing effort":          func(body map[string]any) { delete(body["reasoning"].(map[string]any), "effort") },
+		"null effort":             func(body map[string]any) { body["reasoning"].(map[string]any)["effort"] = nil },
+		"reasoning scalar":        func(body map[string]any) { body["reasoning"] = "medium" },
 		"wrong verbosity": func(body map[string]any) {
 			body["text"].(map[string]any)["verbosity"] = "medium"
 		},
@@ -968,5 +968,32 @@ func TestCompleteOfferMayOutliveNominalCadence(t *testing.T) {
 	_, summary := fixture.factsSnapshot()
 	if summary.ValidOfferStreams != 0 || summary.TimingInvalidStreams != 1 || summary.EarliestFinalCompletionUnixNS != completions[99].UnixNano() || summary.LatestFinalCompletionUnixNS != completions[99].UnixNano() {
 		t.Fatalf("jitter discarded actual completion evidence: %+v", summary)
+	}
+}
+
+func TestRequestHistoryOracleAcceptsDeveloperBaseline(t *testing.T) {
+	session := "k7m2qx"
+	var body map[string]any
+	original := testRequestEnvelope(session) + `"input":[{"role":"user","content":[{"type":"input_text","text":"capacity-2-round-1-0"}]}]}`
+	if err := json.Unmarshal([]byte(original), &body); err != nil {
+		t.Fatal(err)
+	}
+	prompt := body["instructions"]
+	delete(body, "instructions")
+	body["input"] = append([]any{map[string]any{"role": "developer", "content": []any{map[string]any{"type": "input_text", "text": prompt}}}}, body["input"].([]any)...)
+	encoded, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !requestHistoryValid(encoded, "capacity-2-round-1-0", "/workspace", session) {
+		t.Fatal("developer baseline rejected")
+	}
+	body["input"].([]any)[0].(map[string]any)["extra"] = true
+	encoded, err = json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requestHistoryValid(encoded, "capacity-2-round-1-0", "/workspace", session) {
+		t.Fatal("extra baseline field accepted")
 	}
 }

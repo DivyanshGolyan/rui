@@ -789,3 +789,20 @@ func TestHostArgumentsUseOrderedSettingsAndExactProviders(t *testing.T) {
 		}
 	}
 }
+
+func TestRequestSystemPrompt(t *testing.T) {
+	for _, tc := range []struct {
+		body, want string
+		valid      bool
+	}{
+		{`{"instructions":"baseline","input":[]}`, "baseline", true},
+		{`{"input":[{"role":"developer","content":[{"type":"input_text","text":"baseline"}]}]}`, "baseline", true},
+		{`{"input":[{"role":"user","content":[{"text":"x"}]}]}`, "", false},
+		{`{"instructions":null,"input":[]}`, "", false},
+	} {
+		got, err := RequestSystemPrompt([]byte(tc.body))
+		if (err == nil) != tc.valid || got != tc.want {
+			t.Fatalf("%s: got %q, %v", tc.body, got, err)
+		}
+	}
+}

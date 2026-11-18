@@ -49,6 +49,36 @@ func JSONString(value string) string {
 	return out.String()
 }
 
+// RequestSystemPrompt reads the baseline from any supported Responses codec.
+func RequestSystemPrompt(body []byte) (string, error) {
+	var request struct {
+		Instructions json.RawMessage `json:"instructions"`
+		Input        []struct {
+			Role    string `json:"role"`
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"input"`
+	}
+	if err := json.Unmarshal(body, &request); err != nil {
+		return "", err
+	}
+	if request.Instructions != nil {
+		var instructions string
+		if string(request.Instructions) == "null" {
+			return "", errors.New("invalid instructions")
+		}
+		if err := json.Unmarshal(request.Instructions, &instructions); err != nil {
+			return "", err
+		}
+		return instructions, nil
+	}
+	if len(request.Input) == 0 || request.Input[0].Role != "developer" || len(request.Input[0].Content) == 0 {
+		return "", errors.New("missing developer prompt")
+	}
+	return request.Input[0].Content[0].Text, nil
+}
+
 func CanonicalStore(store string) (string, error) {
 	absolute, err := filepath.Abs(store)
 	if err != nil {
