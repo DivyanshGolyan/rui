@@ -1837,7 +1837,7 @@ pub fn openActivityContent(a: *ReadAccess, request: *const activity_read.ReadAct
     var item: activity_facts.Item = undefined;
     var located: ?Located = null;
     readItems(1, a, request.session.slice(), std.math.maxInt(i64), &.{.{ .position = request.position, .ordinal = request.ordinal }}, (&item)[0..1], null, &located) catch |err| switch (err) {
-        error.ContentNotFound => return err,
+        error.ContentNotFound, error.InputPartsNotSupported => return err,
         else => return store_core.fence(a.store, err),
     };
     const content = located orelse return error.ContentNotFound;
