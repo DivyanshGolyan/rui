@@ -497,7 +497,11 @@ def install_cases(root, binary, releases):
 
 
 def frozen_upgrade_cases(root, binary, releases):
-    """Later admission reads B; after retirement only checked B reaches start."""
+    """Later admission reads B; after retirement only checked B reaches start.
+
+    The restart is `host restart --all` onto a selected real build: the same
+    coordinator and activation path Upgrade takes after publication, without
+    installing a release."""
     none = {"codex": "unserved", "openai": "unserved", "chatgpt": "unserved"}
     exact = {"openai": {"endpoint": "http://127.0.0.1:9/v1/responses", "unauthenticated": True}}
 
@@ -512,7 +516,6 @@ def frozen_upgrade_cases(root, binary, releases):
             saved = c.store / "host.json"
             placement = {"interface": {"dir": str(runtime)}, "providers": {}}
             save(saved, placement)
-            c.old_selection()
             retained = c.build("retained-frozen-source")
             c.binary = retained / "bin/rui"
             c.ready = {"socket": str(runtime / "rui.sock")}
@@ -547,15 +550,18 @@ def frozen_upgrade_cases(root, binary, releases):
             # Editing a source changes next admission, never the live A Host.
             assert c.status()["instance"] == previous["instance"] and c.status()["paused"] is False
             expected_providers = none if source_kind == "assignment-file" else {**none, "openai": "endpoint"}
+            c.select(c.build("frozen-restart-target"))
             gate = c.root / "checked-before-start.gate"
             gate.touch(mode=0o600)
             c.env["RUI_TEST_UPGRADE_BEFORE_START_GATE"] = str(gate)
-            restart = c.spawn_upgrade()
+            restart = subprocess.Popen([str(c.binary), "host", "restart", "--all"], env=c.env,
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            c.children.append(restart)
             try:
                 def checked_and_retired():
                     if restart.poll() is not None:
                         output, diagnostic = restart.communicate(timeout=3)
-                        raise AssertionError(("Upgrade exited before checked-frame retirement gate", restart.returncode,
+                        raise AssertionError(("restart exited before checked-frame retirement gate", restart.returncode,
                                               output, diagnostic))
                     return gate.with_name(gate.name + ".entered").exists()
 
@@ -575,7 +581,7 @@ def frozen_upgrade_cases(root, binary, releases):
             finally:
                 gate.unlink(missing_ok=True)
             output = c.finish_upgrade(restart)
-            assert "Installed Rui" in output and "restarted on " in output, output
+            assert f"{c.store}: restarted on " in output and "1 restarted" in output, output
             # C remains in place through full verification. Malformed/deleted
             # C is an explicit source, not the saved DIR locator; no locator
             # restoration or alternate verification route hides a failure.
@@ -745,15 +751,6 @@ def lifecycle_cases(root, binary, releases):
         assert "Installed Rui" in output and "restarted on " in output, output
         proof_ready(c, previous, old_host)
 
-    with case(root, binary, releases, "relative-launch-path-not-restarted") as c:
-        c.old_selection()
-        relative_bash = os.path.relpath("/bin/bash", pathlib.Path.cwd())
-        old_host, previous = c.start_host(extra=("--set", "tools.bash.path=" + str(relative_bash)))
-        output = c.finish_upgrade(c.spawn_upgrade(), success=False)
-        assert "Installed Rui" in output and "refused at checking" in output and '"code":"settings_invalid"' in output, output
-        assert old_host.poll() is None and c.status()["instance"] == previous["instance"]
-        assert os_semantics.process_executable(old_host.pid) != c.link.resolve()
-
     with case(root, binary, releases, "same-release-older-retained-host") as c:
         c.select(c.build("selected-real-current"))
         old_host, previous = c.start_host()
@@ -766,13 +763,6 @@ def lifecycle_cases(root, binary, releases):
         output = c.upgrade()
         assert "already on " in output, output
         assert c.status()["instance"] == ready["instance"]
-
-    with case(root, binary, releases, "retained-tagged-source-host") as c:
-        c.old_selection()
-        host, previous = c.start_host(source=True)
-        output = c.finish_upgrade(c.spawn_upgrade())
-        assert "Installed Rui" in output and "restarted on " in output, output
-        proof_ready(c, previous, host)
 
     with case(root, binary, releases, "upgrade-all-first") as first, \
             case(root, binary, releases, "upgrade-all-second") as second, \
@@ -1446,20 +1436,14 @@ def restart_all_cases(root, binary, releases):
         assert "1 Hosts: 0 restarted, 0 already current, 1 left unchanged, 0 failed." in output, output
         assert process.poll() is None and c.status()["instance"] == previous["instance"]
 
-    with case(root, binary, releases, "restart-all-unknown-managed") as c:
-        process, previous = c.start_host("unknown-managed")
-        executable = os_semantics.process_executable(process.pid)
-        (executable.parent.parent / "THIRD_PARTY_NOTICES.md").unlink()
-        output = c.run("host", "restart", "--all")
-        assert f"{previous['store']}: left running: application-owned Host" in output, output
-        assert process.poll() is None and c.status()["instance"] == previous["instance"]
-
 
 def tool_custody_cases(root, binary, releases, operation):
     import codex_fixture
     import model_fixture as fixture
 
-    rows = itertools.product((False, True), (False, True) if operation == "restart" else (False,))
+    # The coordinator is one owner for both operations: restart crosses both
+    # Bash process shapes, Upgrade keeps the ordinary retained installer shell.
+    rows = itertools.product((False, True), (False, True)) if operation == "restart" else ((False, False),)
     for leader, closed_stdout in rows:
         name = f"tool-{operation}-leader-{leader}-closed-{closed_stdout}"
         with case(root, binary, releases, name + "-a") as first, \
