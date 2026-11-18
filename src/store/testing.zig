@@ -495,6 +495,12 @@ fn dropCompoundContentUpgradeShape(storage: *Store) !void {
 }
 
 fn dropFinalInputUpgradeShape(storage: *Store) !void {
+    try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM action_value", .{}));
+    if (storage.engine == .mysql) {
+        try mysql_testing.rawExec(storage, "DROP TABLE action_value");
+    } else {
+        try sqlite.exec(storage.sqliteDatabase(), "DROP TABLE action_value");
+    }
     try dropCompoundContentUpgradeShape(storage);
     @setEvalBranchQuota(200_000);
     const Native = struct {

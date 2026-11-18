@@ -327,7 +327,7 @@ test "start_agent narrows configured tool names including unloaded MCP members" 
 test "session message writer covers peer message_agent start_agent and ending with wake and refusal" {
     const owner = @embedFile("../domain/sourced_input.zig");
     const callers = @embedFile("../domain/command.zig");
-    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, owner, "a.write(admit_message,"));
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, owner, "a.write(admit_message,"));
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, owner, "a.write(admit_sent_message,"));
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, owner, "a.identity(.admission_id)"));
     try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, callers, "INSERT INTO message_admission"));

@@ -645,6 +645,7 @@ test "schema 82 MySQL migration backfills input sources and preserves admissions
     try std.testing.expectEqualStrings("\n 1:3", kinds.written());
     const refusal = (try run("UPDATE message_admission SET source_kind=1 WHERE admission_id=1")) orelse return error.MissingSourceKindRefusal;
     try std.testing.expectEqual(@as(u16, 3819), refusal.code);
+    try load(migrated_database_sql, schema.mysqlMigrationFrom(82).?, false);
     try expectCatalog(migrated_database_sql);
     done.migrations += 1;
     writeRecord();
