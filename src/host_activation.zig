@@ -478,7 +478,7 @@ test "SH-69 every outcome counts once and only the client's own Store decides it
         };
     }
 
-    // Whole batches, from `upgrade.zig` "upgrade restart results retain unknown
+    // Whole batches, moved from the former `upgrade.zig` test "upgrade restart results retain unknown
     // failures and other Store guidance without borrowing compatibility".
     const ready: Outcome = .{ .ready = .{ .instance = @splat(1), .pid = 42 } };
     const Batch = struct { lines: []const Line, failure: ?BatchFailure = null, restarted: usize = 0, current: usize = 0, skipped: usize = 0, failed: usize = 0, guidance: bool, own: Outcome, safe: bool };

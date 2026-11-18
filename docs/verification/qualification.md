@@ -131,13 +131,11 @@ Measure the Rui CLI and helpers separately from the Host target.
 ## Release demonstrations
 
 `upgrade-integration` builds `rui-upgrade-release-fixture` from the current production sources with a synthetic release version and the actual source revision.
-Its focused `download` selector checks IPv4 recovery at release discovery, checksum retrieval, and archive download with a PATH-local curl fixture.
-Successful attempts use real curl against the loopback release server. Failed attempts inject exit codes without changing DNS settings.
-The cases check one retry, the final diagnostic after both attempts fail, IPv4 reuse within an upgrade, normal selection on the next run, and unchanged installations after failure.
-HTTP, certificate, connection-refusal, file-write, and signal failures do not retry. A partial archive from the first attempt must not corrupt the verified replacement.
+Its focused `download` selector runs the terminal recovery case with a PATH-local curl fixture: successful attempts use real curl against the loopback release server, and a failed attempt injects an exit code without changing DNS settings.
 The terminal recovery case activates the Settings Version row, waits at archive preparation, then checks native Host restart and unchanged credentials.
 Deliberate PATH guidance retains the old terminal client. The case checks its success status, terminal restoration, and final installation receipt rather than assuming no other same-user Hosts exist.
-`download_policy.zig` tests every exit code and both address-family modes around the minimum remaining budget.
+The discovery cases keep one real curl 403 at release discovery, reported as `upgrade_download_failed` with curl's own last line.
+`download_policy.zig` owns the rest at the Module level: curl's confined argument list for every request kind, fixture origin and address family (SH-61); one IPv4 retry only for exit 6 or 28 with the connection budget left, over every exit code, a signal and both families, and the attempt sequence of a whole run across discovery, checksums and archive, including IPv4 reuse within a run and normal selection on the next (SH-44); and the final diagnostic, which is only the last line of the last attempt (SH-62).
 `upgrade_process.zig` native tests check a decreasing budget across attempts, no retry after a transfer deadline, and no child after cancellation or an expired deadline.
 
 The historical Host-info profiles include wire 17, wire 16 (v0.72.0), wire 15 (v0.71.0) and wire 14 (v0.70.0), with all provider routes required. Parser, framing, discovery and exact-instance lifecycle tests exercise them alongside wires 13 and 9; ordinary readiness remains current-wire only.

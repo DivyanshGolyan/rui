@@ -176,6 +176,25 @@ class PlanTest(unittest.TestCase):
                     self.assertFalse(result['native'])
                     self.assertEqual(source['targets'], targets)
 
+    def test_only_a_store_schema_edit_compiles_every_unit_partition_on_the_pr_tier(self):
+        # CI-4: of these diffs only the Store schema edit widens the ready compile; promotion compiles all.
+        import build_files
+        from select_tests import select
+        available = set(build_files.steps())
+        for paths, ready_compile in (
+                (['src/store/schema.zig'], ['test', 'test-native', 'test-store']),
+                (['src/request_encoding.zig'], ['test-logic', 'test-native']),
+                (['README.md', 'src/request_encoding.zig'], ['test-logic', 'test-native'])):
+            with self.subTest(paths=paths):
+                selected = select(paths, 'review', available)
+                self.assertEqual(selected['unit_compile_required'], paths == ['src/store/schema.zig'])
+                ready = plan(selected, event_name='pull_request', draft=False, promotion=False,
+                             change_kind=ChangeKind.NORMAL).outputs
+                self.assertEqual(ready['linux_compile_targets'], ready_compile)
+                promoted = plan(selected, event_name='workflow_dispatch', draft=False, promotion=True,
+                                change_kind=ChangeKind.NORMAL).outputs
+                self.assertIn('check-full', promoted['linux_compile_targets'], 'promotion compiles every partition')
+
     def test_macos_matrix_and_split_use_the_final_native_selection(self):
         for native, split in ((['check'], True), (['test'], False), (['check-full'], True), (['test-logic'], False)):
             with self.subTest(native=native):
