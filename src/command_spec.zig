@@ -50,9 +50,9 @@ pub const Spec = struct {
     pub fn observationDecoderShapes(comptime self: Spec, comptime Wire: type) type {
         @setEvalBranchQuota(2_000_000);
         const o = Wire.command_observation_reply;
-        const kind = kindFor(self);
-        const accepted_head = o.statusHead(kind, .accepted);
-        const rejected_head = o.statusHead(kind, .rejected);
+        const head = o.head(kindFor(self));
+        const accepted_head = .{ head[0], head[1], head[2], head[3], head[4] ++ "accepted" ++ head[6], head[7] };
+        const rejected_head = .{ head[0], head[1], head[2], head[3], head[4] ++ "rejected" ++ head[6], head[7] };
         return Shapes(
             observationPayloadShapes(self.Observation.accepted(Wire).values, 0, accepted_head, o.tail, Wire).values ++
                 observationPayloadShapes(self.Observation.rejected(Wire).values, 0, rejected_head, o.code ++ o.tail, Wire).values,
