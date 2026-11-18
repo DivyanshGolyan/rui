@@ -166,7 +166,7 @@ On Host threads:
 ## Review
 
 Codex is the code review; request `@codex review for duplicated authority and braided concerns, and against the PR's Summary shape and against the linked issue's goal; group symptoms by owner` when production or operational changes invalidate the previous review.
-[Landing](docs/agents/landing.md#publish-and-merge) owns ready publication, clean review evidence and its reuse exceptions.
+[Landing](docs/agents/landing.md#publish-and-merge) owns draft-first publication, clean review evidence and its reuse exceptions.
 The [Code Review Rules](AGENTS.md#code-review-rules) own how it groups and orders its findings; the rules it applies stay here.
 The author's own reviews are design reviews of the approved design, and a redesign when fixes keep producing new findings.
 Reviewers apply the rules below and the [product tenets](docs/verification/gates.md#product-tenets).

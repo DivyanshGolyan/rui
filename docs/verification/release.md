@@ -5,7 +5,7 @@
 ## Landing cadence
 
 `main` is the integration branch; `stable` and the latest release are what users run.
-PRs open ready so selected CI and Codex review overlap; a manual promotion runs the expensive tier on a batch of merged commits before it reaches users.
+PRs open as drafts and become ready once Codex is clean, so selected CI runs once per reviewed head; a manual promotion runs the expensive tier on a batch of merged commits before it reaches users.
 GitHub must require pull requests and the GitHub Actions `admission` check on `main`, with no bypass; it does not require an up-to-date base.
 Use squash merges under linear history.
 A PR's checks qualify its merge with the base they ran on, so a green PR merges without rerunning after `main` moves.
