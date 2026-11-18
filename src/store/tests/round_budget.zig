@@ -69,6 +69,7 @@ test "every function that enters the Store has a round budget" {
         @embedFile("../domain/action_control.zig"),
         @embedFile("../domain/action_stop.zig"),
         @embedFile("../domain/action_read.zig"),
+        @embedFile("../domain/action_value.zig"),
         @embedFile("../domain/forward.zig"),
         @embedFile("../domain/command.zig"),
         @embedFile("../domain/configuration.zig"),
@@ -688,6 +689,9 @@ test "each Store entry point takes its round budget on its common path" {
             meter.start();
             try storage.readActionExecutionInput(.bash, action, &input);
             meter.stop(.readBashExecutionInput);
+            meter.start();
+            try std.testing.expect((try storage.publishActionValue(input.sender_handle.slice(), "budget-value", "value")) == .accepted);
+            meter.stop(.publishActionValue);
             meter.start();
             try storage.withActionDispatchHandoff(action, {}, Launch.run);
             meter.stop(.withActionDispatchHandoff);

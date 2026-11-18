@@ -948,6 +948,15 @@ test "compound Message retains ordered input across replay and saved refusal" {
             try std.testing.expect(replayed_single == .accepted and replayed_single.accepted.replayed);
             const single_id = try store_testing.queryU64(&storage, "SELECT primary_content_id FROM core_command WHERE command_key='single-text-key'", .{});
             try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT form FROM content WHERE content_id=?1", .{single_id}));
+
+            // Published Action values are byte content; a compound reference is corrupt.
+            const action_binding = (try storage.admitNextActionAttempt(.fromFree(2, true), 30_000, .{})).?.permit.binding;
+            var action_input: ActionExecutionInput = undefined;
+            try storage.readActionExecutionInput(.bash, action_binding, &action_input);
+            const handle = action_input.sender_handle.slice();
+            try std.testing.expect((try storage.publishActionValue(handle, "compound-guard", "ordinary text")) == .accepted);
+            try store_testing.exec(&storage, "UPDATE action_value SET content_id=?1 WHERE action_id=?2 AND publication_key=?3", .{ id, background_action, "compound-guard" });
+            try std.testing.expectError(error.CorruptStore, storage.publishActionValue(handle, "compound-guard", "ordinary text"));
         }
     }.run);
 }

@@ -1332,6 +1332,7 @@ class SelectionTest(unittest.TestCase):
         cases = {
             "src/new_session_selection.zig": {"admission-debug-integration", "human-cli-integration", "test-logic"},
             "src/preference_values.zig": {"admission-debug-integration", "admission-integration", "test-logic"},
+            "src/preference_document.zig": {"admission-debug-integration", "test-logic"},
             "src/provider_selection.zig": {"admission-debug-integration", "test-logic"},
             "src/model_capability.zig": {"dispatch-integration", "test", "test-logic", "transport-h2-integration"},
         }
