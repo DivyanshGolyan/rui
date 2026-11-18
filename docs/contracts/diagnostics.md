@@ -82,6 +82,8 @@ No age-based expiry, compression or separate diagnostic DB.
 Restart preserves records, drops incomplete tail, and prunes reduced caps before growth.
 Per-record fsync is unnecessary.
 Failed write/deletion stops or drops diagnostic writes with bounded notice, never semantic failure, false reclaimed space or a RAM backlog.
+After readiness the Host keeps this writer open, because a detached Host's stderr is discarded.
+The call that moves dispatch to `fenced` or `stopping` appends one record classified by that phase, naming the failing phase and error, under the lock that orders the transition; repeated fences and fences before readiness add none.
 
 Raw provider bytes of failed model Attempts are kept as separate private **failed-response records**, not as chunks in these files.
 Before it settles a failure and disposes the capture, the execution owner copies the same capture it classified into `diagnostics/failed-responses/` (directory `0700`, files `0600`).
@@ -161,6 +163,7 @@ Derive source-handle population from the writer and current bounded export reads
 | Contract | Canonical checks | Limits and exceptions |
 | --- | --- | --- |
 | [Records](#diagnostic-records-and-export): 128 MiB, 16 files, 4 KiB | `'startup diagnostics rotate'` | Reduced cap only |
+| [Fence records](#diagnostic-records-and-export): one record per dispatch transition after readiness | `'SH-52 a dispatch fence records'` | In-process Host; detached launch is not exercised |
 | [Failed-response records](#diagnostic-records-and-export): exact bytes, association, status, 16 MiB, 64 MiB, 256 records, private modes | `'failed response'` tests; `dispatch-integration` invalid-output, transient HTTP, stall and concurrent-retention cases | Truncation, eviction and omitted bodies use reduced caps or an unreadable capture in unit tests. The integration fault is an undeletable record entry, not disk exhaustion |
 | Failed-response export through authenticated `session inspect`: exact body and stored metadata, Session/Operation/Attempt binding, read-only snapshots, binary windows, partial and omitted bodies, missing/ambiguous/corrupt records, symlink rejection, clean stdout and fd256 caller. Mandatory scratch unlink failure fences dispatch, preserves the original failure and recovers on startup | `dispatch_integration.py failed-response-export` in `dispatch-integration` | Real fixture-produced `IncompleteProviderOutput` and binary HTTP 400 survive Host restart. Partial/omitted export negatives perturb that real record; retention creation has separate owner tests. Canonical values and retained bytes/write timestamps are compared, not filesystem atime or WAL housekeeping. No live provider or automatic upload |
 | General bounded rotated-log export | none located | Unimplemented |
