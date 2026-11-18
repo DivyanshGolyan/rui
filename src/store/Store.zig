@@ -629,12 +629,29 @@ pub const Store = struct {
     }
 
     pub fn submitMessageParts(self: *Store, command: *const content_custody.MessageCommand, loan: @import("../InputCapture.zig").Loan, committed: ?MessageCommitted, faults: Faults) !MessageReply {
-        var saving = try content_parts.Saving.init(.{ .captured = loan });
-        return self.queue().write(submitMessageWithModelHeld, .{ self, command, committed, @as(?*const skills_domain.Initial, null), @as(?*const skills_domain.MessageCapture, null), @as(?*content_parts.Saving, &saving), faults });
+        return self.submitMessagePartsCapturedSkills(command, loan, committed, null, null, faults);
     }
 
-    /// Fixture adapter for a compound Message and its captured skills. Both
-    /// enter the same canonical admission transition as ordinary Messages.
+    pub fn submitMessagePartsCapturedSkills(
+        self: *Store,
+        command: *const content_custody.MessageCommand,
+        loan: @import("../InputCapture.zig").Loan,
+        committed: ?MessageCommitted,
+        initial_skills: ?*const skills_domain.Initial,
+        captured_skill: ?*const skills_domain.MessageCapture,
+        faults: Faults,
+    ) !MessageReply {
+        var saving = try content_parts.Saving.init(.{ .captured = loan });
+        var reply = self.queue().write(submitMessageWithModelHeld, .{ self, command, committed, initial_skills, captured_skill, @as(?*content_parts.Saving, &saving), faults });
+        switch (reply) {
+            .accepted => |*value| value.form = std.meta.activeTag(saving.reference),
+            .rejected => |*value| value.form = std.meta.activeTag(saving.reference),
+            else => {},
+        }
+        return reply;
+    }
+
+    /// Fixture adapter for a compound Message and its captured skills.
     pub fn submitMessagePartsCapturedSkillsForTesting(
         self: *Store,
         command: *const content_custody.MessageCommand,
@@ -643,8 +660,7 @@ pub const Store = struct {
         captured_skill: ?*const skills_domain.MessageCapture,
     ) !MessageReply {
         if (!@import("builtin").is_test) @compileError("test-only compound Message fixture");
-        var saving = try content_parts.Saving.init(.{ .captured = loan });
-        return self.queue().write(submitMessageWithModelHeld, .{ self, command, @as(?MessageCommitted, null), initial_skills, captured_skill, @as(?*content_parts.Saving, &saving), Faults{} });
+        return self.submitMessagePartsCapturedSkills(command, loan, null, initial_skills, captured_skill, .{});
     }
 
     fn submitMessageWithModelHeld(
@@ -815,10 +831,17 @@ pub const Store = struct {
             out.* = .{ .not_modified = token };
             return;
         }
-        return self.queue().run(observeCommandHeld, .{ self, key, since, out });
+        var pending: ?content_domain.Value = null;
+        try self.queue().run(observeCommandHeld, .{ self, key, since, out, &pending });
+        if (pending) |value| {
+            const mapped = try @import("../os/pages.zig").Mapped(content_parts.Cursor).map();
+            defer mapped.unmap();
+            mapped.value.init(value);
+            while (try self.observeCommandPart(mapped.value)) {}
+        }
     }
 
-    fn observeCommandHeld(self: *Store, key: []const u8, since: ?change_ring.SessionToken, out: *Observed) !void {
+    fn observeCommandHeld(self: *Store, key: []const u8, since: ?change_ring.SessionToken, out: *Observed, pending: *?content_domain.Value) !void {
         const entry = try enter(self, .none);
         defer entry.release();
         const generation = self.commitGeneration();
@@ -829,11 +852,38 @@ pub const Store = struct {
         out.* = .{ .full = .{ .token = null } };
         var access: ReadAccess = .open(&entry);
         defer access.deinit();
-        try entry.finish(error{InputPartsNotSupported}, command_domain.observeCommand(&access, key, &out.full.observation));
+        try entry.finish(Ordinary.none, command_domain.observeCommand(&access, key, &out.full.observation, pending));
         const observation = &out.full.observation;
         if (observation.status != .absent and session_id.valid(observation.target.slice())) {
             out.full.token = .{ .instance = self.instance, .generation = generation, .session = observation.target.slice()[0..session_id.bytes].* };
         }
+    }
+
+    pub fn observeCommandPart(self: *Store, cursor: *content_parts.Cursor) !bool {
+        return self.queue().run(observeCommandPartHeld, .{ self, cursor });
+    }
+
+    fn observeCommandPartHeld(self: *Store, cursor: *content_parts.Cursor) !bool {
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: ReadAccess = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.none, observeCommandPartStep(&access, cursor));
+    }
+
+    fn observeCommandPartStep(access: *ReadAccess, cursor: *content_parts.Cursor) !bool {
+        const progress = try cursor.step(access);
+        // The first pass certifies the complete manifest and index. The cursor's
+        // second pass is for callers that export each part, not observation.
+        if (cursor.certified) return false;
+        return switch (progress) {
+            .raw, .part => true,
+            .rows => blk: {
+                try store_access.runAs(access, error.CorruptStore);
+                break :blk true;
+            },
+            .certified, .done => false,
+        };
     }
 
     pub fn commandResult(self: *Store, key: []const u8) !ContentReference {

@@ -6108,6 +6108,52 @@
         ],
         "additionalProperties": false
       },
+      "InputPartSchema": {
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "const": "text"
+              },
+              "text": {
+                "type": "string",
+                "description": "Text of any length, saved as content."
+              }
+            },
+            "required": [
+              "type",
+              "text"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "const": "image"
+              },
+              "mime": {
+                "type": "string",
+                "enum": [
+                  "image/png",
+                  "image/jpeg"
+                ]
+              },
+              "data": {
+                "type": "string",
+                "contentEncoding": "base64"
+              }
+            },
+            "required": [
+              "type",
+              "mime",
+              "data"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      },
       "InspectSessionReply": {
         "anyOf": [
           {
@@ -6995,6 +7041,101 @@
                 "type": "object",
                 "properties": {
                   "status": {
+                    "const": "accepted"
+                  },
+                  "replayed": {
+                    "type": "boolean"
+                  },
+                  "session": {
+                    "type": "string",
+                    "maxLength": 128,
+                    "x-rui-max-bytes": 128
+                  },
+                  "admission": {
+                    "$ref": "#/components/schemas/Decimal"
+                  }
+                },
+                "required": [
+                  "status",
+                  "replayed",
+                  "session",
+                  "admission"
+                ],
+                "additionalProperties": false
+              },
+              "input": {
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "const": "parts"
+                  },
+                  "bytes": {
+                    "$ref": "#/components/schemas/Decimal"
+                  },
+                  "sha256": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  }
+                },
+                "required": [
+                  "type",
+                  "bytes",
+                  "sha256"
+                ],
+                "additionalProperties": false
+              },
+              "queue": {
+                "type": "object",
+                "properties": {
+                  "status": {
+                    "const": "queued"
+                  },
+                  "admission": {
+                    "$ref": "#/components/schemas/Decimal"
+                  }
+                },
+                "required": [
+                  "status",
+                  "admission"
+                ],
+                "additionalProperties": false
+              },
+              "execution": {
+                "type": "object",
+                "properties": {
+                  "status": {
+                    "const": "queued"
+                  }
+                },
+                "required": [
+                  "status"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "version",
+              "type",
+              "answer",
+              "input",
+              "queue",
+              "execution"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "version": {
+                "const": "21"
+              },
+              "type": {
+                "const": "message_reply"
+              },
+              "answer": {
+                "type": "object",
+                "properties": {
+                  "status": {
                     "const": "rejected"
                   },
                   "replayed": {
@@ -7110,107 +7251,330 @@
               "execution"
             ],
             "additionalProperties": false
-          }
-        ]
-      },
-      "MessageRequest": {
-        "type": "object",
-        "properties": {
-          "version": {
-            "const": "21"
           },
-          "kind": {
-            "const": "message"
-          },
-          "store": {
-            "type": "string",
-            "maxLength": 492,
-            "x-rui-max-bytes": 492
-          },
-          "key": {
-            "type": "string",
-            "maxLength": 128,
-            "x-rui-max-bytes": 128
-          },
-          "session": {
-            "type": "string",
-            "maxLength": 128,
-            "x-rui-max-bytes": 128
-          },
-          "sender": {
-            "anyOf": [
-              {
+          {
+            "type": "object",
+            "properties": {
+              "version": {
+                "const": "21"
+              },
+              "type": {
+                "const": "message_reply"
+              },
+              "answer": {
                 "type": "object",
                 "properties": {
-                  "store": {
-                    "type": "string",
-                    "maxLength": 492,
-                    "x-rui-max-bytes": 492
+                  "status": {
+                    "const": "rejected"
+                  },
+                  "replayed": {
+                    "type": "boolean"
                   },
                   "session": {
                     "type": "string",
                     "maxLength": 128,
                     "x-rui-max-bytes": 128
+                  },
+                  "code": {
+                    "type": "string",
+                    "enum": [
+                      "session_archiving",
+                      "invalid_session_reference",
+                      "unknown_session",
+                      "invalid_sender_handle",
+                      "unsupported_permission_mode",
+                      "unsupported_provider",
+                      "invalid_model",
+                      "model_capability_unavailable",
+                      "invalid_output_schema",
+                      "invalid_compaction_trigger",
+                      "compact_at_too_large",
+                      "invalid_output_reservation",
+                      "unsupported_reasoning_effort",
+                      "unknown_tool",
+                      "mcp_server_unavailable",
+                      "provider_tool_missing",
+                      "loaded_tools_not_in_tools",
+                      "loaded_tools_unreachable",
+                      "invalid_label",
+                      "incomplete_initial_configuration",
+                      "unknown_preset",
+                      "preset_on_update",
+                      "parent_on_update",
+                      "parent_provider_forbidden",
+                      "parent_workspace_forbidden",
+                      "tools_not_in_parent",
+                      "permission_mode_wider_than_parent",
+                      "invalid_workspace",
+                      "workspace_is_immutable",
+                      "provider_is_immutable",
+                      "model_is_immutable",
+                      "revision_exhausted",
+                      "skills_unavailable",
+                      "skill_file_unavailable",
+                      "skill_file_too_large",
+                      "skill_text_invalid"
+                    ]
+                  },
+                  "message": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "maxLength": 768,
+                        "x-rui-max-bytes": 768
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 "required": [
-                  "store",
-                  "session"
+                  "status",
+                  "replayed",
+                  "session",
+                  "code",
+                  "message"
                 ],
                 "additionalProperties": false
               },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "sender_handle": {
-            "anyOf": [
-              {
-                "type": "string",
-                "maxLength": 32,
-                "x-rui-max-bytes": 32
+              "input": {
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "const": "parts"
+                  },
+                  "bytes": {
+                    "$ref": "#/components/schemas/Decimal"
+                  },
+                  "sha256": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  }
+                },
+                "required": [
+                  "type",
+                  "bytes",
+                  "sha256"
+                ],
+                "additionalProperties": false
               },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "configuration": {
-            "$ref": "#/components/schemas/Configuration"
-          },
-          "text": {
-            "type": "object",
-            "properties": {
-              "state": {
-                "const": "value"
-              },
-              "value": {
-                "type": "string",
-                "description": "Text of any length, saved as content."
+              "execution": {
+                "type": "object",
+                "properties": {
+                  "status": {
+                    "const": "queued"
+                  }
+                },
+                "required": [
+                  "status"
+                ],
+                "additionalProperties": false
               }
             },
             "required": [
-              "state",
-              "value"
+              "version",
+              "type",
+              "answer",
+              "input",
+              "execution"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      },
+      "MessageRequest": {
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "version": {
+                "const": "21"
+              },
+              "kind": {
+                "const": "message"
+              },
+              "store": {
+                "type": "string",
+                "maxLength": 492,
+                "x-rui-max-bytes": 492
+              },
+              "key": {
+                "type": "string",
+                "maxLength": 128,
+                "x-rui-max-bytes": 128
+              },
+              "session": {
+                "type": "string",
+                "maxLength": 128,
+                "x-rui-max-bytes": 128
+              },
+              "sender": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "store": {
+                        "type": "string",
+                        "maxLength": 492,
+                        "x-rui-max-bytes": 492
+                      },
+                      "session": {
+                        "type": "string",
+                        "maxLength": 128,
+                        "x-rui-max-bytes": 128
+                      }
+                    },
+                    "required": [
+                      "store",
+                      "session"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "sender_handle": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "maxLength": 32,
+                    "x-rui-max-bytes": 32
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "configuration": {
+                "$ref": "#/components/schemas/Configuration"
+              },
+              "text": {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "const": "value"
+                  },
+                  "value": {
+                    "type": "string",
+                    "description": "Text of any length, saved as content."
+                  }
+                },
+                "required": [
+                  "state",
+                  "value"
+                ],
+                "additionalProperties": false
+              },
+              "require_model": {
+                "const": true
+              }
+            },
+            "required": [
+              "version",
+              "kind",
+              "store",
+              "key",
+              "session",
+              "sender",
+              "sender_handle",
+              "text"
             ],
             "additionalProperties": false
           },
-          "require_model": {
-            "const": true
+          {
+            "type": "object",
+            "properties": {
+              "version": {
+                "const": "21"
+              },
+              "kind": {
+                "const": "message"
+              },
+              "store": {
+                "type": "string",
+                "maxLength": 492,
+                "x-rui-max-bytes": 492
+              },
+              "key": {
+                "type": "string",
+                "maxLength": 128,
+                "x-rui-max-bytes": 128
+              },
+              "session": {
+                "type": "string",
+                "maxLength": 128,
+                "x-rui-max-bytes": 128
+              },
+              "sender": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "store": {
+                        "type": "string",
+                        "maxLength": 492,
+                        "x-rui-max-bytes": 492
+                      },
+                      "session": {
+                        "type": "string",
+                        "maxLength": 128,
+                        "x-rui-max-bytes": 128
+                      }
+                    },
+                    "required": [
+                      "store",
+                      "session"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "sender_handle": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "maxLength": 32,
+                    "x-rui-max-bytes": 32
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "configuration": {
+                "$ref": "#/components/schemas/Configuration"
+              },
+              "parts": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/InputPartSchema"
+                },
+                "minItems": 1,
+                "maxItems": 1500
+              },
+              "require_model": {
+                "const": true
+              }
+            },
+            "required": [
+              "version",
+              "kind",
+              "store",
+              "key",
+              "session",
+              "sender",
+              "sender_handle",
+              "parts"
+            ],
+            "additionalProperties": false
           }
-        },
-        "required": [
-          "version",
-          "kind",
-          "store",
-          "key",
-          "session",
-          "sender",
-          "sender_handle",
-          "text"
-        ],
-        "additionalProperties": false
+        ]
       },
       "ModelInterruptionConflictReply": {
         "type": "object",
@@ -8028,6 +8392,118 @@
                         "x-rui-max-bytes": 128
                       },
                       "state": {
+                        "const": "rejected"
+                      },
+                      "input": {
+                        "type": "object",
+                        "properties": {
+                          "type": {
+                            "const": "parts"
+                          },
+                          "bytes": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "sha256": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$"
+                          }
+                        },
+                        "required": [
+                          "type",
+                          "bytes",
+                          "sha256"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "required": [
+                      "status",
+                      "kind",
+                      "target",
+                      "state",
+                      "input"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "status": {
+                        "type": "string",
+                        "enum": [
+                          "absent",
+                          "accepted",
+                          "rejected"
+                        ]
+                      },
+                      "kind": {
+                        "const": "message"
+                      },
+                      "target": {
+                        "type": "string",
+                        "maxLength": 128,
+                        "x-rui-max-bytes": 128
+                      },
+                      "code": {
+                        "type": "string",
+                        "maxLength": 96,
+                        "x-rui-max-bytes": 96
+                      },
+                      "state": {
+                        "const": "rejected"
+                      },
+                      "input": {
+                        "type": "object",
+                        "properties": {
+                          "type": {
+                            "const": "parts"
+                          },
+                          "bytes": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "sha256": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$"
+                          }
+                        },
+                        "required": [
+                          "type",
+                          "bytes",
+                          "sha256"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "required": [
+                      "status",
+                      "kind",
+                      "target",
+                      "code",
+                      "state",
+                      "input"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "status": {
+                        "type": "string",
+                        "enum": [
+                          "absent",
+                          "accepted",
+                          "rejected"
+                        ]
+                      },
+                      "kind": {
+                        "const": "message"
+                      },
+                      "target": {
+                        "type": "string",
+                        "maxLength": 128,
+                        "x-rui-max-bytes": 128
+                      },
+                      "state": {
                         "const": "queued"
                       },
                       "input": {
@@ -11274,6 +11750,3360 @@
                         "properties": {
                           "type": {
                             "const": "text"
+                          },
+                          "bytes": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "sha256": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$"
+                          }
+                        },
+                        "required": [
+                          "type",
+                          "bytes",
+                          "sha256"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "queue": {
+                        "type": "object",
+                        "properties": {
+                          "admission": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "admitted_at": {
+                            "$ref": "#/components/schemas/Decimal"
+                          }
+                        },
+                        "required": [
+                          "admission",
+                          "admitted_at"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "binding": {
+                        "type": "object",
+                        "properties": {
+                          "turn": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "operation": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "attempt": {
+                            "$ref": "#/components/schemas/Decimal"
+                          }
+                        },
+                        "required": [
+                          "turn",
+                          "operation",
+                          "attempt"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "result": {
+                        "type": "object",
+                        "properties": {
+                          "status": {
+                            "const": "failed"
+                          },
+                          "code": {
+                            "type": "string",
+                            "maxLength": 96,
+                            "x-rui-max-bytes": 96
+                          }
+                        },
+                        "required": [
+                          "status",
+                          "code"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "recovery": {
+                        "$ref": "#/components/schemas/MessageRecoveryJson"
+                      }
+                    },
+                    "required": [
+                      "status",
+                      "kind",
+                      "target",
+                      "code",
+                      "state",
+                      "input",
+                      "queue",
+                      "binding",
+                      "result",
+                      "recovery"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "status": {
+                        "type": "string",
+                        "enum": [
+                          "absent",
+                          "accepted",
+                          "rejected"
+                        ]
+                      },
+                      "kind": {
+                        "const": "message"
+                      },
+                      "target": {
+                        "type": "string",
+                        "maxLength": 128,
+                        "x-rui-max-bytes": 128
+                      },
+                      "state": {
+                        "const": "queued"
+                      },
+                      "input": {
+                        "type": "object",
+                        "properties": {
+                          "type": {
+                            "const": "parts"
+                          },
+                          "bytes": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "sha256": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$"
+                          }
+                        },
+                        "required": [
+                          "type",
+                          "bytes",
+                          "sha256"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "queue": {
+                        "type": "object",
+                        "properties": {
+                          "admission": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "admitted_at": {
+                            "$ref": "#/components/schemas/Decimal"
+                          }
+                        },
+                        "required": [
+                          "admission",
+                          "admitted_at"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "work": {
+                        "type": "object",
+                        "properties": {
+                          "state": {
+                            "$ref": "#/components/schemas/WorkStateJson"
+                          },
+                          "first_action": {
+                            "anyOf": [
+                              {
+                                "$ref": "#/components/schemas/Decimal"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "attention": {
+                            "anyOf": [
+                              {
+                                "$ref": "#/components/schemas/WorkAttentionJson"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "group": {
+                            "type": "string",
+                            "enum": [
+                              "needs_you",
+                              "working",
+                              "queued",
+                              "done"
+                            ]
+                          },
+                          "actions": {
+                            "$ref": "#/components/schemas/WorkActionsJson"
+                          }
+                        },
+                        "required": [
+                          "state",
+                          "first_action",
+                          "attention",
+                          "group",
+                          "actions"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "required": [
+                      "status",
+                      "kind",
+                      "target",
+                      "state",
+                      "input",
+                      "queue",
+                      "work"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "status": {
+                        "type": "string",
+                        "enum": [
+                          "absent",
+                          "accepted",
+                          "rejected"
+                        ]
+                      },
+                      "kind": {
+                        "const": "message"
+                      },
+                      "target": {
+                        "type": "string",
+                        "maxLength": 128,
+                        "x-rui-max-bytes": 128
+                      },
+                      "code": {
+                        "type": "string",
+                        "maxLength": 96,
+                        "x-rui-max-bytes": 96
+                      },
+                      "state": {
+                        "const": "queued"
+                      },
+                      "input": {
+                        "type": "object",
+                        "properties": {
+                          "type": {
+                            "const": "parts"
+                          },
+                          "bytes": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "sha256": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$"
+                          }
+                        },
+                        "required": [
+                          "type",
+                          "bytes",
+                          "sha256"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "queue": {
+                        "type": "object",
+                        "properties": {
+                          "admission": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "admitted_at": {
+                            "$ref": "#/components/schemas/Decimal"
+                          }
+                        },
+                        "required": [
+                          "admission",
+                          "admitted_at"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "work": {
+                        "type": "object",
+                        "properties": {
+                          "state": {
+                            "$ref": "#/components/schemas/WorkStateJson"
+                          },
+                          "first_action": {
+                            "anyOf": [
+                              {
+                                "$ref": "#/components/schemas/Decimal"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "attention": {
+                            "anyOf": [
+                              {
+                                "$ref": "#/components/schemas/WorkAttentionJson"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "group": {
+                            "type": "string",
+                            "enum": [
+                              "needs_you",
+                              "working",
+                              "queued",
+                              "done"
+                            ]
+                          },
+                          "actions": {
+                            "$ref": "#/components/schemas/WorkActionsJson"
+                          }
+                        },
+                        "required": [
+                          "state",
+                          "first_action",
+                          "attention",
+                          "group",
+                          "actions"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "required": [
+                      "status",
+                      "kind",
+                      "target",
+                      "code",
+                      "state",
+                      "input",
+                      "queue",
+                      "work"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "status": {
+                        "type": "string",
+                        "enum": [
+                          "absent",
+                          "accepted",
+                          "rejected"
+                        ]
+                      },
+                      "kind": {
+                        "const": "message"
+                      },
+                      "target": {
+                        "type": "string",
+                        "maxLength": 128,
+                        "x-rui-max-bytes": 128
+                      },
+                      "state": {
+                        "const": "processing"
+                      },
+                      "input": {
+                        "type": "object",
+                        "properties": {
+                          "type": {
+                            "const": "parts"
+                          },
+                          "bytes": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "sha256": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$"
+                          }
+                        },
+                        "required": [
+                          "type",
+                          "bytes",
+                          "sha256"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "queue": {
+                        "type": "object",
+                        "properties": {
+                          "admission": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "admitted_at": {
+                            "$ref": "#/components/schemas/Decimal"
+                          }
+                        },
+                        "required": [
+                          "admission",
+                          "admitted_at"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "binding": {
+                        "type": "object",
+                        "properties": {
+                          "turn": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "operation": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "attempt": {
+                            "$ref": "#/components/schemas/Decimal"
+                          }
+                        },
+                        "required": [
+                          "turn",
+                          "operation",
+                          "attempt"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "work": {
+                        "type": "object",
+                        "properties": {
+                          "state": {
+                            "$ref": "#/components/schemas/WorkStateJson"
+                          },
+                          "first_action": {
+                            "anyOf": [
+                              {
+                                "$ref": "#/components/schemas/Decimal"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "attention": {
+                            "anyOf": [
+                              {
+                                "$ref": "#/components/schemas/WorkAttentionJson"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "group": {
+                            "type": "string",
+                            "enum": [
+                              "needs_you",
+                              "working",
+                              "queued",
+                              "done"
+                            ]
+                          },
+                          "actions": {
+                            "$ref": "#/components/schemas/WorkActionsJson"
+                          }
+                        },
+                        "required": [
+                          "state",
+                          "first_action",
+                          "attention",
+                          "group",
+                          "actions"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "required": [
+                      "status",
+                      "kind",
+                      "target",
+                      "state",
+                      "input",
+                      "queue",
+                      "binding",
+                      "work"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "status": {
+                        "type": "string",
+                        "enum": [
+                          "absent",
+                          "accepted",
+                          "rejected"
+                        ]
+                      },
+                      "kind": {
+                        "const": "message"
+                      },
+                      "target": {
+                        "type": "string",
+                        "maxLength": 128,
+                        "x-rui-max-bytes": 128
+                      },
+                      "code": {
+                        "type": "string",
+                        "maxLength": 96,
+                        "x-rui-max-bytes": 96
+                      },
+                      "state": {
+                        "const": "processing"
+                      },
+                      "input": {
+                        "type": "object",
+                        "properties": {
+                          "type": {
+                            "const": "parts"
+                          },
+                          "bytes": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "sha256": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$"
+                          }
+                        },
+                        "required": [
+                          "type",
+                          "bytes",
+                          "sha256"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "queue": {
+                        "type": "object",
+                        "properties": {
+                          "admission": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "admitted_at": {
+                            "$ref": "#/components/schemas/Decimal"
+                          }
+                        },
+                        "required": [
+                          "admission",
+                          "admitted_at"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "binding": {
+                        "type": "object",
+                        "properties": {
+                          "turn": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "operation": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "attempt": {
+                            "$ref": "#/components/schemas/Decimal"
+                          }
+                        },
+                        "required": [
+                          "turn",
+                          "operation",
+                          "attempt"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "work": {
+                        "type": "object",
+                        "properties": {
+                          "state": {
+                            "$ref": "#/components/schemas/WorkStateJson"
+                          },
+                          "first_action": {
+                            "anyOf": [
+                              {
+                                "$ref": "#/components/schemas/Decimal"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "attention": {
+                            "anyOf": [
+                              {
+                                "$ref": "#/components/schemas/WorkAttentionJson"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "group": {
+                            "type": "string",
+                            "enum": [
+                              "needs_you",
+                              "working",
+                              "queued",
+                              "done"
+                            ]
+                          },
+                          "actions": {
+                            "$ref": "#/components/schemas/WorkActionsJson"
+                          }
+                        },
+                        "required": [
+                          "state",
+                          "first_action",
+                          "attention",
+                          "group",
+                          "actions"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "required": [
+                      "status",
+                      "kind",
+                      "target",
+                      "code",
+                      "state",
+                      "input",
+                      "queue",
+                      "binding",
+                      "work"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "status": {
+                        "type": "string",
+                        "enum": [
+                          "absent",
+                          "accepted",
+                          "rejected"
+                        ]
+                      },
+                      "kind": {
+                        "const": "message"
+                      },
+                      "target": {
+                        "type": "string",
+                        "maxLength": 128,
+                        "x-rui-max-bytes": 128
+                      },
+                      "state": {
+                        "const": "processing"
+                      },
+                      "input": {
+                        "type": "object",
+                        "properties": {
+                          "type": {
+                            "const": "parts"
+                          },
+                          "bytes": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "sha256": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$"
+                          }
+                        },
+                        "required": [
+                          "type",
+                          "bytes",
+                          "sha256"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "queue": {
+                        "type": "object",
+                        "properties": {
+                          "admission": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "admitted_at": {
+                            "$ref": "#/components/schemas/Decimal"
+                          }
+                        },
+                        "required": [
+                          "admission",
+                          "admitted_at"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "binding": {
+                        "type": "object",
+                        "properties": {
+                          "turn": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "operation": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "attempt": {
+                            "$ref": "#/components/schemas/Decimal"
+                          }
+                        },
+                        "required": [
+                          "turn",
+                          "operation",
+                          "attempt"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "work": {
+                        "type": "object",
+                        "properties": {
+                          "state": {
+                            "$ref": "#/components/schemas/WorkStateJson"
+                          },
+                          "first_action": {
+                            "anyOf": [
+                              {
+                                "$ref": "#/components/schemas/Decimal"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "attention": {
+                            "anyOf": [
+                              {
+                                "$ref": "#/components/schemas/WorkAttentionJson"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "group": {
+                            "type": "string",
+                            "enum": [
+                              "needs_you",
+                              "working",
+                              "queued",
+                              "done"
+                            ]
+                          },
+                          "actions": {
+                            "$ref": "#/components/schemas/WorkActionsJson"
+                          }
+                        },
+                        "required": [
+                          "state",
+                          "first_action",
+                          "attention",
+                          "group",
+                          "actions"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "recovery": {
+                        "$ref": "#/components/schemas/MessageRecoveryJson"
+                      }
+                    },
+                    "required": [
+                      "status",
+                      "kind",
+                      "target",
+                      "state",
+                      "input",
+                      "queue",
+                      "binding",
+                      "work",
+                      "recovery"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "status": {
+                        "type": "string",
+                        "enum": [
+                          "absent",
+                          "accepted",
+                          "rejected"
+                        ]
+                      },
+                      "kind": {
+                        "const": "message"
+                      },
+                      "target": {
+                        "type": "string",
+                        "maxLength": 128,
+                        "x-rui-max-bytes": 128
+                      },
+                      "code": {
+                        "type": "string",
+                        "maxLength": 96,
+                        "x-rui-max-bytes": 96
+                      },
+                      "state": {
+                        "const": "processing"
+                      },
+                      "input": {
+                        "type": "object",
+                        "properties": {
+                          "type": {
+                            "const": "parts"
+                          },
+                          "bytes": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "sha256": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$"
+                          }
+                        },
+                        "required": [
+                          "type",
+                          "bytes",
+                          "sha256"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "queue": {
+                        "type": "object",
+                        "properties": {
+                          "admission": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "admitted_at": {
+                            "$ref": "#/components/schemas/Decimal"
+                          }
+                        },
+                        "required": [
+                          "admission",
+                          "admitted_at"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "binding": {
+                        "type": "object",
+                        "properties": {
+                          "turn": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "operation": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "attempt": {
+                            "$ref": "#/components/schemas/Decimal"
+                          }
+                        },
+                        "required": [
+                          "turn",
+                          "operation",
+                          "attempt"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "work": {
+                        "type": "object",
+                        "properties": {
+                          "state": {
+                            "$ref": "#/components/schemas/WorkStateJson"
+                          },
+                          "first_action": {
+                            "anyOf": [
+                              {
+                                "$ref": "#/components/schemas/Decimal"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "attention": {
+                            "anyOf": [
+                              {
+                                "$ref": "#/components/schemas/WorkAttentionJson"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "group": {
+                            "type": "string",
+                            "enum": [
+                              "needs_you",
+                              "working",
+                              "queued",
+                              "done"
+                            ]
+                          },
+                          "actions": {
+                            "$ref": "#/components/schemas/WorkActionsJson"
+                          }
+                        },
+                        "required": [
+                          "state",
+                          "first_action",
+                          "attention",
+                          "group",
+                          "actions"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "recovery": {
+                        "$ref": "#/components/schemas/MessageRecoveryJson"
+                      }
+                    },
+                    "required": [
+                      "status",
+                      "kind",
+                      "target",
+                      "code",
+                      "state",
+                      "input",
+                      "queue",
+                      "binding",
+                      "work",
+                      "recovery"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "status": {
+                        "type": "string",
+                        "enum": [
+                          "absent",
+                          "accepted",
+                          "rejected"
+                        ]
+                      },
+                      "kind": {
+                        "const": "message"
+                      },
+                      "target": {
+                        "type": "string",
+                        "maxLength": 128,
+                        "x-rui-max-bytes": 128
+                      },
+                      "state": {
+                        "const": "waiting_for_permission"
+                      },
+                      "input": {
+                        "type": "object",
+                        "properties": {
+                          "type": {
+                            "const": "parts"
+                          },
+                          "bytes": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "sha256": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$"
+                          }
+                        },
+                        "required": [
+                          "type",
+                          "bytes",
+                          "sha256"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "queue": {
+                        "type": "object",
+                        "properties": {
+                          "admission": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "admitted_at": {
+                            "$ref": "#/components/schemas/Decimal"
+                          }
+                        },
+                        "required": [
+                          "admission",
+                          "admitted_at"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "work": {
+                        "type": "object",
+                        "properties": {
+                          "state": {
+                            "type": "object",
+                            "properties": {
+                              "kind": {
+                                "const": "approval"
+                              },
+                              "since": {
+                                "$ref": "#/components/schemas/Decimal"
+                              }
+                            },
+                            "required": [
+                              "kind",
+                              "since"
+                            ],
+                            "additionalProperties": false
+                          },
+                          "first_action": {
+                            "anyOf": [
+                              {
+                                "$ref": "#/components/schemas/Decimal"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "attention": {
+                            "anyOf": [
+                              {
+                                "$ref": "#/components/schemas/WorkAttentionJson"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "group": {
+                            "type": "string",
+                            "enum": [
+                              "needs_you",
+                              "working",
+                              "queued",
+                              "done"
+                            ]
+                          },
+                          "actions": {
+                            "$ref": "#/components/schemas/WorkActionsJson"
+                          }
+                        },
+                        "required": [
+                          "state",
+                          "first_action",
+                          "attention",
+                          "group",
+                          "actions"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "required": [
+                      "status",
+                      "kind",
+                      "target",
+                      "state",
+                      "input",
+                      "queue",
+                      "work"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "status": {
+                        "type": "string",
+                        "enum": [
+                          "absent",
+                          "accepted",
+                          "rejected"
+                        ]
+                      },
+                      "kind": {
+                        "const": "message"
+                      },
+                      "target": {
+                        "type": "string",
+                        "maxLength": 128,
+                        "x-rui-max-bytes": 128
+                      },
+                      "code": {
+                        "type": "string",
+                        "maxLength": 96,
+                        "x-rui-max-bytes": 96
+                      },
+                      "state": {
+                        "const": "waiting_for_permission"
+                      },
+                      "input": {
+                        "type": "object",
+                        "properties": {
+                          "type": {
+                            "const": "parts"
+                          },
+                          "bytes": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "sha256": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$"
+                          }
+                        },
+                        "required": [
+                          "type",
+                          "bytes",
+                          "sha256"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "queue": {
+                        "type": "object",
+                        "properties": {
+                          "admission": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "admitted_at": {
+                            "$ref": "#/components/schemas/Decimal"
+                          }
+                        },
+                        "required": [
+                          "admission",
+                          "admitted_at"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "work": {
+                        "type": "object",
+                        "properties": {
+                          "state": {
+                            "type": "object",
+                            "properties": {
+                              "kind": {
+                                "const": "approval"
+                              },
+                              "since": {
+                                "$ref": "#/components/schemas/Decimal"
+                              }
+                            },
+                            "required": [
+                              "kind",
+                              "since"
+                            ],
+                            "additionalProperties": false
+                          },
+                          "first_action": {
+                            "anyOf": [
+                              {
+                                "$ref": "#/components/schemas/Decimal"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "attention": {
+                            "anyOf": [
+                              {
+                                "$ref": "#/components/schemas/WorkAttentionJson"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "group": {
+                            "type": "string",
+                            "enum": [
+                              "needs_you",
+                              "working",
+                              "queued",
+                              "done"
+                            ]
+                          },
+                          "actions": {
+                            "$ref": "#/components/schemas/WorkActionsJson"
+                          }
+                        },
+                        "required": [
+                          "state",
+                          "first_action",
+                          "attention",
+                          "group",
+                          "actions"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "required": [
+                      "status",
+                      "kind",
+                      "target",
+                      "code",
+                      "state",
+                      "input",
+                      "queue",
+                      "work"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "status": {
+                        "type": "string",
+                        "enum": [
+                          "absent",
+                          "accepted",
+                          "rejected"
+                        ]
+                      },
+                      "kind": {
+                        "const": "message"
+                      },
+                      "target": {
+                        "type": "string",
+                        "maxLength": 128,
+                        "x-rui-max-bytes": 128
+                      },
+                      "state": {
+                        "const": "waiting_for_permission"
+                      },
+                      "input": {
+                        "type": "object",
+                        "properties": {
+                          "type": {
+                            "const": "parts"
+                          },
+                          "bytes": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "sha256": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$"
+                          }
+                        },
+                        "required": [
+                          "type",
+                          "bytes",
+                          "sha256"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "queue": {
+                        "type": "object",
+                        "properties": {
+                          "admission": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "admitted_at": {
+                            "$ref": "#/components/schemas/Decimal"
+                          }
+                        },
+                        "required": [
+                          "admission",
+                          "admitted_at"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "binding": {
+                        "type": "object",
+                        "properties": {
+                          "turn": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "operation": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "attempt": {
+                            "$ref": "#/components/schemas/Decimal"
+                          }
+                        },
+                        "required": [
+                          "turn",
+                          "operation",
+                          "attempt"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "work": {
+                        "type": "object",
+                        "properties": {
+                          "state": {
+                            "type": "object",
+                            "properties": {
+                              "kind": {
+                                "const": "approval"
+                              },
+                              "since": {
+                                "$ref": "#/components/schemas/Decimal"
+                              }
+                            },
+                            "required": [
+                              "kind",
+                              "since"
+                            ],
+                            "additionalProperties": false
+                          },
+                          "first_action": {
+                            "anyOf": [
+                              {
+                                "$ref": "#/components/schemas/Decimal"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "attention": {
+                            "anyOf": [
+                              {
+                                "$ref": "#/components/schemas/WorkAttentionJson"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "group": {
+                            "type": "string",
+                            "enum": [
+                              "needs_you",
+                              "working",
+                              "queued",
+                              "done"
+                            ]
+                          },
+                          "actions": {
+                            "$ref": "#/components/schemas/WorkActionsJson"
+                          }
+                        },
+                        "required": [
+                          "state",
+                          "first_action",
+                          "attention",
+                          "group",
+                          "actions"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "required": [
+                      "status",
+                      "kind",
+                      "target",
+                      "state",
+                      "input",
+                      "queue",
+                      "binding",
+                      "work"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "status": {
+                        "type": "string",
+                        "enum": [
+                          "absent",
+                          "accepted",
+                          "rejected"
+                        ]
+                      },
+                      "kind": {
+                        "const": "message"
+                      },
+                      "target": {
+                        "type": "string",
+                        "maxLength": 128,
+                        "x-rui-max-bytes": 128
+                      },
+                      "code": {
+                        "type": "string",
+                        "maxLength": 96,
+                        "x-rui-max-bytes": 96
+                      },
+                      "state": {
+                        "const": "waiting_for_permission"
+                      },
+                      "input": {
+                        "type": "object",
+                        "properties": {
+                          "type": {
+                            "const": "parts"
+                          },
+                          "bytes": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "sha256": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$"
+                          }
+                        },
+                        "required": [
+                          "type",
+                          "bytes",
+                          "sha256"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "queue": {
+                        "type": "object",
+                        "properties": {
+                          "admission": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "admitted_at": {
+                            "$ref": "#/components/schemas/Decimal"
+                          }
+                        },
+                        "required": [
+                          "admission",
+                          "admitted_at"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "binding": {
+                        "type": "object",
+                        "properties": {
+                          "turn": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "operation": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "attempt": {
+                            "$ref": "#/components/schemas/Decimal"
+                          }
+                        },
+                        "required": [
+                          "turn",
+                          "operation",
+                          "attempt"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "work": {
+                        "type": "object",
+                        "properties": {
+                          "state": {
+                            "type": "object",
+                            "properties": {
+                              "kind": {
+                                "const": "approval"
+                              },
+                              "since": {
+                                "$ref": "#/components/schemas/Decimal"
+                              }
+                            },
+                            "required": [
+                              "kind",
+                              "since"
+                            ],
+                            "additionalProperties": false
+                          },
+                          "first_action": {
+                            "anyOf": [
+                              {
+                                "$ref": "#/components/schemas/Decimal"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "attention": {
+                            "anyOf": [
+                              {
+                                "$ref": "#/components/schemas/WorkAttentionJson"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "group": {
+                            "type": "string",
+                            "enum": [
+                              "needs_you",
+                              "working",
+                              "queued",
+                              "done"
+                            ]
+                          },
+                          "actions": {
+                            "$ref": "#/components/schemas/WorkActionsJson"
+                          }
+                        },
+                        "required": [
+                          "state",
+                          "first_action",
+                          "attention",
+                          "group",
+                          "actions"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "required": [
+                      "status",
+                      "kind",
+                      "target",
+                      "code",
+                      "state",
+                      "input",
+                      "queue",
+                      "binding",
+                      "work"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "status": {
+                        "type": "string",
+                        "enum": [
+                          "absent",
+                          "accepted",
+                          "rejected"
+                        ]
+                      },
+                      "kind": {
+                        "const": "message"
+                      },
+                      "target": {
+                        "type": "string",
+                        "maxLength": 128,
+                        "x-rui-max-bytes": 128
+                      },
+                      "state": {
+                        "const": "waiting_for_permission"
+                      },
+                      "input": {
+                        "type": "object",
+                        "properties": {
+                          "type": {
+                            "const": "parts"
+                          },
+                          "bytes": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "sha256": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$"
+                          }
+                        },
+                        "required": [
+                          "type",
+                          "bytes",
+                          "sha256"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "queue": {
+                        "type": "object",
+                        "properties": {
+                          "admission": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "admitted_at": {
+                            "$ref": "#/components/schemas/Decimal"
+                          }
+                        },
+                        "required": [
+                          "admission",
+                          "admitted_at"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "binding": {
+                        "type": "object",
+                        "properties": {
+                          "turn": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "operation": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "attempt": {
+                            "$ref": "#/components/schemas/Decimal"
+                          }
+                        },
+                        "required": [
+                          "turn",
+                          "operation",
+                          "attempt"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "work": {
+                        "type": "object",
+                        "properties": {
+                          "state": {
+                            "type": "object",
+                            "properties": {
+                              "kind": {
+                                "const": "approval"
+                              },
+                              "since": {
+                                "$ref": "#/components/schemas/Decimal"
+                              }
+                            },
+                            "required": [
+                              "kind",
+                              "since"
+                            ],
+                            "additionalProperties": false
+                          },
+                          "first_action": {
+                            "anyOf": [
+                              {
+                                "$ref": "#/components/schemas/Decimal"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "attention": {
+                            "anyOf": [
+                              {
+                                "$ref": "#/components/schemas/WorkAttentionJson"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "group": {
+                            "type": "string",
+                            "enum": [
+                              "needs_you",
+                              "working",
+                              "queued",
+                              "done"
+                            ]
+                          },
+                          "actions": {
+                            "$ref": "#/components/schemas/WorkActionsJson"
+                          }
+                        },
+                        "required": [
+                          "state",
+                          "first_action",
+                          "attention",
+                          "group",
+                          "actions"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "recovery": {
+                        "$ref": "#/components/schemas/MessageRecoveryJson"
+                      }
+                    },
+                    "required": [
+                      "status",
+                      "kind",
+                      "target",
+                      "state",
+                      "input",
+                      "queue",
+                      "binding",
+                      "work",
+                      "recovery"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "status": {
+                        "type": "string",
+                        "enum": [
+                          "absent",
+                          "accepted",
+                          "rejected"
+                        ]
+                      },
+                      "kind": {
+                        "const": "message"
+                      },
+                      "target": {
+                        "type": "string",
+                        "maxLength": 128,
+                        "x-rui-max-bytes": 128
+                      },
+                      "code": {
+                        "type": "string",
+                        "maxLength": 96,
+                        "x-rui-max-bytes": 96
+                      },
+                      "state": {
+                        "const": "waiting_for_permission"
+                      },
+                      "input": {
+                        "type": "object",
+                        "properties": {
+                          "type": {
+                            "const": "parts"
+                          },
+                          "bytes": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "sha256": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$"
+                          }
+                        },
+                        "required": [
+                          "type",
+                          "bytes",
+                          "sha256"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "queue": {
+                        "type": "object",
+                        "properties": {
+                          "admission": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "admitted_at": {
+                            "$ref": "#/components/schemas/Decimal"
+                          }
+                        },
+                        "required": [
+                          "admission",
+                          "admitted_at"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "binding": {
+                        "type": "object",
+                        "properties": {
+                          "turn": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "operation": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "attempt": {
+                            "$ref": "#/components/schemas/Decimal"
+                          }
+                        },
+                        "required": [
+                          "turn",
+                          "operation",
+                          "attempt"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "work": {
+                        "type": "object",
+                        "properties": {
+                          "state": {
+                            "type": "object",
+                            "properties": {
+                              "kind": {
+                                "const": "approval"
+                              },
+                              "since": {
+                                "$ref": "#/components/schemas/Decimal"
+                              }
+                            },
+                            "required": [
+                              "kind",
+                              "since"
+                            ],
+                            "additionalProperties": false
+                          },
+                          "first_action": {
+                            "anyOf": [
+                              {
+                                "$ref": "#/components/schemas/Decimal"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "attention": {
+                            "anyOf": [
+                              {
+                                "$ref": "#/components/schemas/WorkAttentionJson"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "group": {
+                            "type": "string",
+                            "enum": [
+                              "needs_you",
+                              "working",
+                              "queued",
+                              "done"
+                            ]
+                          },
+                          "actions": {
+                            "$ref": "#/components/schemas/WorkActionsJson"
+                          }
+                        },
+                        "required": [
+                          "state",
+                          "first_action",
+                          "attention",
+                          "group",
+                          "actions"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "recovery": {
+                        "$ref": "#/components/schemas/MessageRecoveryJson"
+                      }
+                    },
+                    "required": [
+                      "status",
+                      "kind",
+                      "target",
+                      "code",
+                      "state",
+                      "input",
+                      "queue",
+                      "binding",
+                      "work",
+                      "recovery"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "status": {
+                        "type": "string",
+                        "enum": [
+                          "absent",
+                          "accepted",
+                          "rejected"
+                        ]
+                      },
+                      "kind": {
+                        "const": "message"
+                      },
+                      "target": {
+                        "type": "string",
+                        "maxLength": 128,
+                        "x-rui-max-bytes": 128
+                      },
+                      "state": {
+                        "const": "cancelled"
+                      },
+                      "input": {
+                        "type": "object",
+                        "properties": {
+                          "type": {
+                            "const": "parts"
+                          },
+                          "bytes": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "sha256": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$"
+                          }
+                        },
+                        "required": [
+                          "type",
+                          "bytes",
+                          "sha256"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "queue": {
+                        "type": "object",
+                        "properties": {
+                          "admission": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "admitted_at": {
+                            "$ref": "#/components/schemas/Decimal"
+                          }
+                        },
+                        "required": [
+                          "admission",
+                          "admitted_at"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "result": {
+                        "type": "object",
+                        "properties": {
+                          "status": {
+                            "const": "cancelled"
+                          },
+                          "code": {
+                            "type": "string",
+                            "maxLength": 96,
+                            "x-rui-max-bytes": 96
+                          }
+                        },
+                        "required": [
+                          "status",
+                          "code"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "required": [
+                      "status",
+                      "kind",
+                      "target",
+                      "state",
+                      "input",
+                      "queue",
+                      "result"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "status": {
+                        "type": "string",
+                        "enum": [
+                          "absent",
+                          "accepted",
+                          "rejected"
+                        ]
+                      },
+                      "kind": {
+                        "const": "message"
+                      },
+                      "target": {
+                        "type": "string",
+                        "maxLength": 128,
+                        "x-rui-max-bytes": 128
+                      },
+                      "code": {
+                        "type": "string",
+                        "maxLength": 96,
+                        "x-rui-max-bytes": 96
+                      },
+                      "state": {
+                        "const": "cancelled"
+                      },
+                      "input": {
+                        "type": "object",
+                        "properties": {
+                          "type": {
+                            "const": "parts"
+                          },
+                          "bytes": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "sha256": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$"
+                          }
+                        },
+                        "required": [
+                          "type",
+                          "bytes",
+                          "sha256"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "queue": {
+                        "type": "object",
+                        "properties": {
+                          "admission": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "admitted_at": {
+                            "$ref": "#/components/schemas/Decimal"
+                          }
+                        },
+                        "required": [
+                          "admission",
+                          "admitted_at"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "result": {
+                        "type": "object",
+                        "properties": {
+                          "status": {
+                            "const": "cancelled"
+                          },
+                          "code": {
+                            "type": "string",
+                            "maxLength": 96,
+                            "x-rui-max-bytes": 96
+                          }
+                        },
+                        "required": [
+                          "status",
+                          "code"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "required": [
+                      "status",
+                      "kind",
+                      "target",
+                      "code",
+                      "state",
+                      "input",
+                      "queue",
+                      "result"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "status": {
+                        "type": "string",
+                        "enum": [
+                          "absent",
+                          "accepted",
+                          "rejected"
+                        ]
+                      },
+                      "kind": {
+                        "const": "message"
+                      },
+                      "target": {
+                        "type": "string",
+                        "maxLength": 128,
+                        "x-rui-max-bytes": 128
+                      },
+                      "state": {
+                        "const": "completed"
+                      },
+                      "input": {
+                        "type": "object",
+                        "properties": {
+                          "type": {
+                            "const": "parts"
+                          },
+                          "bytes": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "sha256": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$"
+                          }
+                        },
+                        "required": [
+                          "type",
+                          "bytes",
+                          "sha256"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "queue": {
+                        "type": "object",
+                        "properties": {
+                          "admission": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "admitted_at": {
+                            "$ref": "#/components/schemas/Decimal"
+                          }
+                        },
+                        "required": [
+                          "admission",
+                          "admitted_at"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "binding": {
+                        "type": "object",
+                        "properties": {
+                          "turn": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "operation": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "attempt": {
+                            "$ref": "#/components/schemas/Decimal"
+                          }
+                        },
+                        "required": [
+                          "turn",
+                          "operation",
+                          "attempt"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "result": {
+                        "type": "object",
+                        "properties": {
+                          "status": {
+                            "const": "completed"
+                          },
+                          "text": {
+                            "type": "object",
+                            "properties": {
+                              "type": {
+                                "const": "text"
+                              },
+                              "bytes": {
+                                "$ref": "#/components/schemas/Decimal"
+                              },
+                              "sha256": {
+                                "type": "string",
+                                "pattern": "^[0-9a-f]{64}$"
+                              }
+                            },
+                            "required": [
+                              "type",
+                              "bytes",
+                              "sha256"
+                            ],
+                            "additionalProperties": false
+                          }
+                        },
+                        "required": [
+                          "status",
+                          "text"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "required": [
+                      "status",
+                      "kind",
+                      "target",
+                      "state",
+                      "input",
+                      "queue",
+                      "binding",
+                      "result"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "status": {
+                        "type": "string",
+                        "enum": [
+                          "absent",
+                          "accepted",
+                          "rejected"
+                        ]
+                      },
+                      "kind": {
+                        "const": "message"
+                      },
+                      "target": {
+                        "type": "string",
+                        "maxLength": 128,
+                        "x-rui-max-bytes": 128
+                      },
+                      "code": {
+                        "type": "string",
+                        "maxLength": 96,
+                        "x-rui-max-bytes": 96
+                      },
+                      "state": {
+                        "const": "completed"
+                      },
+                      "input": {
+                        "type": "object",
+                        "properties": {
+                          "type": {
+                            "const": "parts"
+                          },
+                          "bytes": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "sha256": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$"
+                          }
+                        },
+                        "required": [
+                          "type",
+                          "bytes",
+                          "sha256"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "queue": {
+                        "type": "object",
+                        "properties": {
+                          "admission": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "admitted_at": {
+                            "$ref": "#/components/schemas/Decimal"
+                          }
+                        },
+                        "required": [
+                          "admission",
+                          "admitted_at"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "binding": {
+                        "type": "object",
+                        "properties": {
+                          "turn": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "operation": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "attempt": {
+                            "$ref": "#/components/schemas/Decimal"
+                          }
+                        },
+                        "required": [
+                          "turn",
+                          "operation",
+                          "attempt"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "result": {
+                        "type": "object",
+                        "properties": {
+                          "status": {
+                            "const": "completed"
+                          },
+                          "text": {
+                            "type": "object",
+                            "properties": {
+                              "type": {
+                                "const": "text"
+                              },
+                              "bytes": {
+                                "$ref": "#/components/schemas/Decimal"
+                              },
+                              "sha256": {
+                                "type": "string",
+                                "pattern": "^[0-9a-f]{64}$"
+                              }
+                            },
+                            "required": [
+                              "type",
+                              "bytes",
+                              "sha256"
+                            ],
+                            "additionalProperties": false
+                          }
+                        },
+                        "required": [
+                          "status",
+                          "text"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "required": [
+                      "status",
+                      "kind",
+                      "target",
+                      "code",
+                      "state",
+                      "input",
+                      "queue",
+                      "binding",
+                      "result"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "status": {
+                        "type": "string",
+                        "enum": [
+                          "absent",
+                          "accepted",
+                          "rejected"
+                        ]
+                      },
+                      "kind": {
+                        "const": "message"
+                      },
+                      "target": {
+                        "type": "string",
+                        "maxLength": 128,
+                        "x-rui-max-bytes": 128
+                      },
+                      "state": {
+                        "const": "completed"
+                      },
+                      "input": {
+                        "type": "object",
+                        "properties": {
+                          "type": {
+                            "const": "parts"
+                          },
+                          "bytes": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "sha256": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$"
+                          }
+                        },
+                        "required": [
+                          "type",
+                          "bytes",
+                          "sha256"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "queue": {
+                        "type": "object",
+                        "properties": {
+                          "admission": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "admitted_at": {
+                            "$ref": "#/components/schemas/Decimal"
+                          }
+                        },
+                        "required": [
+                          "admission",
+                          "admitted_at"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "binding": {
+                        "type": "object",
+                        "properties": {
+                          "turn": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "operation": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "attempt": {
+                            "$ref": "#/components/schemas/Decimal"
+                          }
+                        },
+                        "required": [
+                          "turn",
+                          "operation",
+                          "attempt"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "result": {
+                        "type": "object",
+                        "properties": {
+                          "status": {
+                            "const": "completed"
+                          },
+                          "text": {
+                            "type": "object",
+                            "properties": {
+                              "type": {
+                                "const": "text"
+                              },
+                              "bytes": {
+                                "$ref": "#/components/schemas/Decimal"
+                              },
+                              "sha256": {
+                                "type": "string",
+                                "pattern": "^[0-9a-f]{64}$"
+                              }
+                            },
+                            "required": [
+                              "type",
+                              "bytes",
+                              "sha256"
+                            ],
+                            "additionalProperties": false
+                          }
+                        },
+                        "required": [
+                          "status",
+                          "text"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "recovery": {
+                        "$ref": "#/components/schemas/MessageRecoveryJson"
+                      }
+                    },
+                    "required": [
+                      "status",
+                      "kind",
+                      "target",
+                      "state",
+                      "input",
+                      "queue",
+                      "binding",
+                      "result",
+                      "recovery"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "status": {
+                        "type": "string",
+                        "enum": [
+                          "absent",
+                          "accepted",
+                          "rejected"
+                        ]
+                      },
+                      "kind": {
+                        "const": "message"
+                      },
+                      "target": {
+                        "type": "string",
+                        "maxLength": 128,
+                        "x-rui-max-bytes": 128
+                      },
+                      "code": {
+                        "type": "string",
+                        "maxLength": 96,
+                        "x-rui-max-bytes": 96
+                      },
+                      "state": {
+                        "const": "completed"
+                      },
+                      "input": {
+                        "type": "object",
+                        "properties": {
+                          "type": {
+                            "const": "parts"
+                          },
+                          "bytes": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "sha256": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$"
+                          }
+                        },
+                        "required": [
+                          "type",
+                          "bytes",
+                          "sha256"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "queue": {
+                        "type": "object",
+                        "properties": {
+                          "admission": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "admitted_at": {
+                            "$ref": "#/components/schemas/Decimal"
+                          }
+                        },
+                        "required": [
+                          "admission",
+                          "admitted_at"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "binding": {
+                        "type": "object",
+                        "properties": {
+                          "turn": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "operation": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "attempt": {
+                            "$ref": "#/components/schemas/Decimal"
+                          }
+                        },
+                        "required": [
+                          "turn",
+                          "operation",
+                          "attempt"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "result": {
+                        "type": "object",
+                        "properties": {
+                          "status": {
+                            "const": "completed"
+                          },
+                          "text": {
+                            "type": "object",
+                            "properties": {
+                              "type": {
+                                "const": "text"
+                              },
+                              "bytes": {
+                                "$ref": "#/components/schemas/Decimal"
+                              },
+                              "sha256": {
+                                "type": "string",
+                                "pattern": "^[0-9a-f]{64}$"
+                              }
+                            },
+                            "required": [
+                              "type",
+                              "bytes",
+                              "sha256"
+                            ],
+                            "additionalProperties": false
+                          }
+                        },
+                        "required": [
+                          "status",
+                          "text"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "recovery": {
+                        "$ref": "#/components/schemas/MessageRecoveryJson"
+                      }
+                    },
+                    "required": [
+                      "status",
+                      "kind",
+                      "target",
+                      "code",
+                      "state",
+                      "input",
+                      "queue",
+                      "binding",
+                      "result",
+                      "recovery"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "status": {
+                        "type": "string",
+                        "enum": [
+                          "absent",
+                          "accepted",
+                          "rejected"
+                        ]
+                      },
+                      "kind": {
+                        "const": "message"
+                      },
+                      "target": {
+                        "type": "string",
+                        "maxLength": 128,
+                        "x-rui-max-bytes": 128
+                      },
+                      "state": {
+                        "const": "cancelled"
+                      },
+                      "input": {
+                        "type": "object",
+                        "properties": {
+                          "type": {
+                            "const": "parts"
+                          },
+                          "bytes": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "sha256": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$"
+                          }
+                        },
+                        "required": [
+                          "type",
+                          "bytes",
+                          "sha256"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "queue": {
+                        "type": "object",
+                        "properties": {
+                          "admission": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "admitted_at": {
+                            "$ref": "#/components/schemas/Decimal"
+                          }
+                        },
+                        "required": [
+                          "admission",
+                          "admitted_at"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "binding": {
+                        "type": "object",
+                        "properties": {
+                          "turn": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "operation": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "attempt": {
+                            "$ref": "#/components/schemas/Decimal"
+                          }
+                        },
+                        "required": [
+                          "turn",
+                          "operation",
+                          "attempt"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "result": {
+                        "type": "object",
+                        "properties": {
+                          "status": {
+                            "const": "cancelled"
+                          },
+                          "code": {
+                            "type": "string",
+                            "maxLength": 96,
+                            "x-rui-max-bytes": 96
+                          }
+                        },
+                        "required": [
+                          "status",
+                          "code"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "required": [
+                      "status",
+                      "kind",
+                      "target",
+                      "state",
+                      "input",
+                      "queue",
+                      "binding",
+                      "result"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "status": {
+                        "type": "string",
+                        "enum": [
+                          "absent",
+                          "accepted",
+                          "rejected"
+                        ]
+                      },
+                      "kind": {
+                        "const": "message"
+                      },
+                      "target": {
+                        "type": "string",
+                        "maxLength": 128,
+                        "x-rui-max-bytes": 128
+                      },
+                      "code": {
+                        "type": "string",
+                        "maxLength": 96,
+                        "x-rui-max-bytes": 96
+                      },
+                      "state": {
+                        "const": "cancelled"
+                      },
+                      "input": {
+                        "type": "object",
+                        "properties": {
+                          "type": {
+                            "const": "parts"
+                          },
+                          "bytes": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "sha256": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$"
+                          }
+                        },
+                        "required": [
+                          "type",
+                          "bytes",
+                          "sha256"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "queue": {
+                        "type": "object",
+                        "properties": {
+                          "admission": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "admitted_at": {
+                            "$ref": "#/components/schemas/Decimal"
+                          }
+                        },
+                        "required": [
+                          "admission",
+                          "admitted_at"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "binding": {
+                        "type": "object",
+                        "properties": {
+                          "turn": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "operation": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "attempt": {
+                            "$ref": "#/components/schemas/Decimal"
+                          }
+                        },
+                        "required": [
+                          "turn",
+                          "operation",
+                          "attempt"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "result": {
+                        "type": "object",
+                        "properties": {
+                          "status": {
+                            "const": "cancelled"
+                          },
+                          "code": {
+                            "type": "string",
+                            "maxLength": 96,
+                            "x-rui-max-bytes": 96
+                          }
+                        },
+                        "required": [
+                          "status",
+                          "code"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "required": [
+                      "status",
+                      "kind",
+                      "target",
+                      "code",
+                      "state",
+                      "input",
+                      "queue",
+                      "binding",
+                      "result"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "status": {
+                        "type": "string",
+                        "enum": [
+                          "absent",
+                          "accepted",
+                          "rejected"
+                        ]
+                      },
+                      "kind": {
+                        "const": "message"
+                      },
+                      "target": {
+                        "type": "string",
+                        "maxLength": 128,
+                        "x-rui-max-bytes": 128
+                      },
+                      "state": {
+                        "const": "cancelled"
+                      },
+                      "input": {
+                        "type": "object",
+                        "properties": {
+                          "type": {
+                            "const": "parts"
+                          },
+                          "bytes": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "sha256": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$"
+                          }
+                        },
+                        "required": [
+                          "type",
+                          "bytes",
+                          "sha256"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "queue": {
+                        "type": "object",
+                        "properties": {
+                          "admission": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "admitted_at": {
+                            "$ref": "#/components/schemas/Decimal"
+                          }
+                        },
+                        "required": [
+                          "admission",
+                          "admitted_at"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "binding": {
+                        "type": "object",
+                        "properties": {
+                          "turn": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "operation": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "attempt": {
+                            "$ref": "#/components/schemas/Decimal"
+                          }
+                        },
+                        "required": [
+                          "turn",
+                          "operation",
+                          "attempt"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "result": {
+                        "type": "object",
+                        "properties": {
+                          "status": {
+                            "const": "cancelled"
+                          },
+                          "code": {
+                            "type": "string",
+                            "maxLength": 96,
+                            "x-rui-max-bytes": 96
+                          }
+                        },
+                        "required": [
+                          "status",
+                          "code"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "recovery": {
+                        "$ref": "#/components/schemas/MessageRecoveryJson"
+                      }
+                    },
+                    "required": [
+                      "status",
+                      "kind",
+                      "target",
+                      "state",
+                      "input",
+                      "queue",
+                      "binding",
+                      "result",
+                      "recovery"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "status": {
+                        "type": "string",
+                        "enum": [
+                          "absent",
+                          "accepted",
+                          "rejected"
+                        ]
+                      },
+                      "kind": {
+                        "const": "message"
+                      },
+                      "target": {
+                        "type": "string",
+                        "maxLength": 128,
+                        "x-rui-max-bytes": 128
+                      },
+                      "code": {
+                        "type": "string",
+                        "maxLength": 96,
+                        "x-rui-max-bytes": 96
+                      },
+                      "state": {
+                        "const": "cancelled"
+                      },
+                      "input": {
+                        "type": "object",
+                        "properties": {
+                          "type": {
+                            "const": "parts"
+                          },
+                          "bytes": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "sha256": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$"
+                          }
+                        },
+                        "required": [
+                          "type",
+                          "bytes",
+                          "sha256"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "queue": {
+                        "type": "object",
+                        "properties": {
+                          "admission": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "admitted_at": {
+                            "$ref": "#/components/schemas/Decimal"
+                          }
+                        },
+                        "required": [
+                          "admission",
+                          "admitted_at"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "binding": {
+                        "type": "object",
+                        "properties": {
+                          "turn": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "operation": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "attempt": {
+                            "$ref": "#/components/schemas/Decimal"
+                          }
+                        },
+                        "required": [
+                          "turn",
+                          "operation",
+                          "attempt"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "result": {
+                        "type": "object",
+                        "properties": {
+                          "status": {
+                            "const": "cancelled"
+                          },
+                          "code": {
+                            "type": "string",
+                            "maxLength": 96,
+                            "x-rui-max-bytes": 96
+                          }
+                        },
+                        "required": [
+                          "status",
+                          "code"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "recovery": {
+                        "$ref": "#/components/schemas/MessageRecoveryJson"
+                      }
+                    },
+                    "required": [
+                      "status",
+                      "kind",
+                      "target",
+                      "code",
+                      "state",
+                      "input",
+                      "queue",
+                      "binding",
+                      "result",
+                      "recovery"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "status": {
+                        "type": "string",
+                        "enum": [
+                          "absent",
+                          "accepted",
+                          "rejected"
+                        ]
+                      },
+                      "kind": {
+                        "const": "message"
+                      },
+                      "target": {
+                        "type": "string",
+                        "maxLength": 128,
+                        "x-rui-max-bytes": 128
+                      },
+                      "state": {
+                        "const": "failed"
+                      },
+                      "input": {
+                        "type": "object",
+                        "properties": {
+                          "type": {
+                            "const": "parts"
+                          },
+                          "bytes": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "sha256": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$"
+                          }
+                        },
+                        "required": [
+                          "type",
+                          "bytes",
+                          "sha256"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "queue": {
+                        "type": "object",
+                        "properties": {
+                          "admission": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "admitted_at": {
+                            "$ref": "#/components/schemas/Decimal"
+                          }
+                        },
+                        "required": [
+                          "admission",
+                          "admitted_at"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "binding": {
+                        "type": "object",
+                        "properties": {
+                          "turn": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "operation": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "attempt": {
+                            "$ref": "#/components/schemas/Decimal"
+                          }
+                        },
+                        "required": [
+                          "turn",
+                          "operation",
+                          "attempt"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "result": {
+                        "type": "object",
+                        "properties": {
+                          "status": {
+                            "const": "failed"
+                          },
+                          "code": {
+                            "type": "string",
+                            "maxLength": 96,
+                            "x-rui-max-bytes": 96
+                          }
+                        },
+                        "required": [
+                          "status",
+                          "code"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "required": [
+                      "status",
+                      "kind",
+                      "target",
+                      "state",
+                      "input",
+                      "queue",
+                      "binding",
+                      "result"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "status": {
+                        "type": "string",
+                        "enum": [
+                          "absent",
+                          "accepted",
+                          "rejected"
+                        ]
+                      },
+                      "kind": {
+                        "const": "message"
+                      },
+                      "target": {
+                        "type": "string",
+                        "maxLength": 128,
+                        "x-rui-max-bytes": 128
+                      },
+                      "code": {
+                        "type": "string",
+                        "maxLength": 96,
+                        "x-rui-max-bytes": 96
+                      },
+                      "state": {
+                        "const": "failed"
+                      },
+                      "input": {
+                        "type": "object",
+                        "properties": {
+                          "type": {
+                            "const": "parts"
+                          },
+                          "bytes": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "sha256": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$"
+                          }
+                        },
+                        "required": [
+                          "type",
+                          "bytes",
+                          "sha256"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "queue": {
+                        "type": "object",
+                        "properties": {
+                          "admission": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "admitted_at": {
+                            "$ref": "#/components/schemas/Decimal"
+                          }
+                        },
+                        "required": [
+                          "admission",
+                          "admitted_at"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "binding": {
+                        "type": "object",
+                        "properties": {
+                          "turn": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "operation": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "attempt": {
+                            "$ref": "#/components/schemas/Decimal"
+                          }
+                        },
+                        "required": [
+                          "turn",
+                          "operation",
+                          "attempt"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "result": {
+                        "type": "object",
+                        "properties": {
+                          "status": {
+                            "const": "failed"
+                          },
+                          "code": {
+                            "type": "string",
+                            "maxLength": 96,
+                            "x-rui-max-bytes": 96
+                          }
+                        },
+                        "required": [
+                          "status",
+                          "code"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "required": [
+                      "status",
+                      "kind",
+                      "target",
+                      "code",
+                      "state",
+                      "input",
+                      "queue",
+                      "binding",
+                      "result"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "status": {
+                        "type": "string",
+                        "enum": [
+                          "absent",
+                          "accepted",
+                          "rejected"
+                        ]
+                      },
+                      "kind": {
+                        "const": "message"
+                      },
+                      "target": {
+                        "type": "string",
+                        "maxLength": 128,
+                        "x-rui-max-bytes": 128
+                      },
+                      "state": {
+                        "const": "failed"
+                      },
+                      "input": {
+                        "type": "object",
+                        "properties": {
+                          "type": {
+                            "const": "parts"
+                          },
+                          "bytes": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "sha256": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$"
+                          }
+                        },
+                        "required": [
+                          "type",
+                          "bytes",
+                          "sha256"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "queue": {
+                        "type": "object",
+                        "properties": {
+                          "admission": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "admitted_at": {
+                            "$ref": "#/components/schemas/Decimal"
+                          }
+                        },
+                        "required": [
+                          "admission",
+                          "admitted_at"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "binding": {
+                        "type": "object",
+                        "properties": {
+                          "turn": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "operation": {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          "attempt": {
+                            "$ref": "#/components/schemas/Decimal"
+                          }
+                        },
+                        "required": [
+                          "turn",
+                          "operation",
+                          "attempt"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "result": {
+                        "type": "object",
+                        "properties": {
+                          "status": {
+                            "const": "failed"
+                          },
+                          "code": {
+                            "type": "string",
+                            "maxLength": 96,
+                            "x-rui-max-bytes": 96
+                          }
+                        },
+                        "required": [
+                          "status",
+                          "code"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "recovery": {
+                        "$ref": "#/components/schemas/MessageRecoveryJson"
+                      }
+                    },
+                    "required": [
+                      "status",
+                      "kind",
+                      "target",
+                      "state",
+                      "input",
+                      "queue",
+                      "binding",
+                      "result",
+                      "recovery"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "status": {
+                        "type": "string",
+                        "enum": [
+                          "absent",
+                          "accepted",
+                          "rejected"
+                        ]
+                      },
+                      "kind": {
+                        "const": "message"
+                      },
+                      "target": {
+                        "type": "string",
+                        "maxLength": 128,
+                        "x-rui-max-bytes": 128
+                      },
+                      "code": {
+                        "type": "string",
+                        "maxLength": 96,
+                        "x-rui-max-bytes": 96
+                      },
+                      "state": {
+                        "const": "failed"
+                      },
+                      "input": {
+                        "type": "object",
+                        "properties": {
+                          "type": {
+                            "const": "parts"
                           },
                           "bytes": {
                             "$ref": "#/components/schemas/Decimal"

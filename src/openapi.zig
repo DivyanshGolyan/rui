@@ -67,6 +67,7 @@ const CommandSchema = struct {
     pub const Configuration = configurationShape("Configuration");
     pub const Sender = SenderSchema;
     pub const Content = ContentSchema;
+    pub const Parts = PartsSchema;
     pub const Optional = optionalMember;
 };
 
@@ -76,7 +77,10 @@ fn commandRoute(comptime kind: protocol.CommandKind) Route {
         .path = facts.route,
         .kind = @field(protocol.Kind, @tagName(kind)),
         .summary = facts.summary,
-        .variants = &.{variant(facts.Request.schema(CommandSchema).shape, facts.Request.examples)},
+        .variants = if (comptime kind == .message)
+            &.{ variant(facts.Request.schema(CommandSchema).shape, facts.Request.examples), variant(facts.Request.partsSchema(CommandSchema).shape, facts.Request.examples) }
+        else
+            &.{variant(facts.Request.schema(CommandSchema).shape, facts.Request.examples)},
         .reply = jsonReply(facts.replyShapes(protocol).values),
         .conflict = jsonReply(.{facts.Reply(protocol).conflict}),
     };
@@ -319,6 +323,37 @@ fn BoundedListOf(comptime item: anytype, comptime capacity: usize, comptime uniq
         }
     };
 }
+
+const PartMimeSchema = struct {
+    pub fn openapi_inline(d: *Document) !Value {
+        var names: std.json.Array = .init(d.arena);
+        try names.append(.{ .string = "image/png" });
+        try names.append(.{ .string = "image/jpeg" });
+        return d.object(.{ .type = Value{ .string = "string" }, .@"enum" = Value{ .array = names } });
+    }
+};
+
+const ImageDataSchema = struct {
+    pub fn openapi_inline(d: *Document) !Value {
+        return d.object(.{ .type = Value{ .string = "string" }, .contentEncoding = Value{ .string = "base64" } });
+    }
+};
+
+const InputPartSchema = struct {
+    pub const openapi_shapes = .{
+        .{ "{\"type\":\"text\",\"text\":", ContentSchema, "}" },
+        .{ "{\"type\":\"image\",\"mime\":", PartMimeSchema, ",\"data\":", ImageDataSchema, "}" },
+    };
+};
+
+const PartsSchema = struct {
+    pub fn openapi_inline(d: *Document) !Value {
+        return d.object(.{ .type = Value{ .string = "array" }, .items = try d.typeRef(InputPartSchema), .minItems = Value{ .integer = 1 }, .maxItems = Value{ .integer = @import("input_parts.zig").max_parts } });
+    }
+    pub fn openapi_example(out: *std.Io.Writer) !void {
+        try out.writeAll("[{\"type\":\"text\",\"text\":\"x\"}]");
+    }
+};
 
 const ContentSchema = struct {
     pub fn openapi_inline(d: *Document) !Value {
@@ -1247,7 +1282,14 @@ test "Full frozen offers have their own limits while Current and revision settin
     }
 }
 
-test "openapi requests use one object except exclusive targets" {
+test "WIR-4 published_wire_shapes" {
+    try publishedRequestSchemas();
+    try publishedRequestExamples();
+    try publishedReplyExamples();
+    try publishedResponseRoutes();
+}
+
+fn publishedRequestSchemas() !void {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var document: Document = .init(arena.allocator());
@@ -1256,7 +1298,7 @@ test "openapi requests use one object except exclusive targets" {
         const name = try std.fmt.allocPrint(arena.allocator(), "{s}Request", .{try pascal(arena.allocator(), @tagName(route.kind))});
         const schema = document.schemas.get(name).?.object;
         switch (route.kind) {
-            .inspect_session, .skill_suggestions => try std.testing.expect(schema.contains("anyOf")),
+            .inspect_session, .skill_suggestions, .message => try std.testing.expect(schema.contains("anyOf")),
             else => {
                 try std.testing.expectEqual(@as(usize, 1), route.variants.len);
                 try std.testing.expectEqualStrings("object", schema.get("type").?.string);
@@ -1271,7 +1313,7 @@ test "openapi requests use one object except exclusive targets" {
     }
 }
 
-test "openapi requests parse with all or no optional members in any order" {
+fn publishedRequestExamples() !void {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1622,7 +1664,7 @@ fn matches(pattern: []const u8, text: []const u8) bool {
     return true;
 }
 
-test "WIR-4 published_wire_shapes: replies the Host renders conform to their schemas" {
+fn publishedReplyExamples() !void {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var document: Document = .init(arena.allocator());
@@ -1673,10 +1715,19 @@ test "WIR-4 published_wire_shapes: replies the Host renders conform to their sch
     try host_reply.renderConfigureReply(.{ .writer = &out.writer }, "", configured);
     try Case.check(schemas, "ConfigureReply", out.written(), a);
     out.clearRetainingCapacity();
-    const message: reply.MessageReply = .{ .rejected = .{ .replayed = false, .code = .mcp_server_unavailable, .message = configured.rejected.message, .content = .{ .length = 4, .digest = protocol.contentDigest("task") } } };
-    try host_reply.renderMessageReply(.{ .writer = &out.writer }, "", message);
-    try Case.check(schemas, "MessageReply", out.written(), a);
-    out.clearRetainingCapacity();
+    var message_session: @FieldType(reply.AcceptedMessage, "session") = .{};
+    try message_session.set("k7m2qx");
+    const message_content: reply.ContentReference = .{ .length = 4, .digest = protocol.contentDigest("task") };
+    for ([_]@import("input_parts.zig").Form{ .bytes, .parts }) |form| {
+        for ([_]reply.MessageReply{
+            .{ .accepted = .{ .form = form, .replayed = false, .session = message_session, .admission_id = 1, .content = message_content } },
+            .{ .rejected = .{ .form = form, .replayed = false, .code = .mcp_server_unavailable, .message = configured.rejected.message, .content = message_content } },
+        }) |message| {
+            try host_reply.renderMessageReply(.{ .writer = &out.writer }, message_session.slice(), message);
+            try Case.check(schemas, "MessageReply", out.written(), a);
+            out.clearRetainingCapacity();
+        }
+    }
 
     const ids = "gpt-6.1-sol\nmy\"model\n";
     try out.writer.writeAll(protocol.model_list_reply.head);
@@ -1818,7 +1869,7 @@ test "Message observation schema requires Host state and bounds recovery" {
     try std.testing.expect(!conforms(schemas, recovery_schema, value));
 }
 
-test "statuses, media types and required headers match what the Host sends" {
+fn publishedResponseRoutes() !void {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var document: Document = .init(arena.allocator());
