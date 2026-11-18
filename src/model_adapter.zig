@@ -6532,3 +6532,52 @@ test "canonical ordered Action Resolution background final prefixes the same par
         try std.testing.expectEqual(@as(usize, 1), results);
     }
 }
+
+test "old text request retries unchanged across later image message and final action on every codec" {
+    const saved_mcp_json = "{\"content\":[{\"type\":\"image\",\"data\":\"iVBORw0KGgo=\",\"mimeType\":\"image/png\"}],\"isError\":false}";
+    for (std.enums.values(protocol.Codec)) |codec| {
+        var setup: PreparationTestSetup = undefined;
+        try setup.init();
+        defer setup.close();
+        const session = try setup.configure("replay-wire-config");
+        try store.testing.exec(&setup.storage, "UPDATE session SET codec=?1 WHERE session_ref=?2", .{ @tagName(codec), session.slice() });
+        try setup.submit("replay-wire-seed", "replay-wire-seed", session.slice(), "old text input");
+        const first = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+        try proposeOrderedActionsForTesting(&setup, first, &.{ .{ .item_id = "legacy-item", .call_id = "legacy-call" }, .{ .item_id = "background-item", .call_id = "background-call" } });
+        const legacy_action = (try setup.storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
+        try settleOrderedForTesting(&setup, legacy_action, &.{.{ .bytes = saved_mcp_json }});
+        const selected = (try setup.storage.nextAction(.bash, .fromFree(2, true))).?;
+        const background_binding = (try setup.storage.admitActionAttempt(selected, 30_000, .{})).?.permit.binding;
+        var promotion: @import("command_input.zig").ActionBackgroundCommand = .{ .session = session, .action_id = selected.action_id };
+        try promotion.key.set("replay-wire-promote");
+        try std.testing.expect(setup.storage.backgroundAction(.{ .command = &promotion }, .{}) == .accepted);
+        const original = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+        const before = try prepareMemoForTesting(&setup, original, null, .{});
+        defer std.testing.allocator.free(before.bytes);
+        const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, before.bytes, .{});
+        defer parsed.deinit();
+        var saved_found = false;
+        for (parsed.value.object.get("input").?.array.items) |item| {
+            const kind = item.object.get("type") orelse continue;
+            if (!std.mem.eql(u8, kind.string, "function_call_output")) continue;
+            if (!std.mem.eql(u8, item.object.get("call_id").?.string, "legacy-call")) continue;
+            try std.testing.expectEqualStrings(saved_mcp_json, item.object.get("output").?.string);
+            saved_found = true;
+        }
+        try std.testing.expect(saved_found);
+        try setup.storage.settleModelAttemptFailure(original, .{ .uncorrelated = "temporary" }, .{ .retryable = .{ .waits_ms = .{ 1, 1, 1 } } }, .{});
+        try submitOrderedForTesting(&setup, session.slice(), "replay-wire-later", &.{.{ .bytes = image_test_png, .kind = .{ .image = .{} } }}, null, null);
+        try settleOrderedForTesting(&setup, background_binding, &.{ .{ .bytes = "late result" }, .{ .bytes = image_test_png, .kind = .{ .image = .{} } } });
+        var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+        const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{setup.root});
+        try setup.storage.close();
+        try setup.storage.open(std.testing.io, database, setup.root);
+        const retry = (try @import("store/tests.zig").admitRetryForTesting(&setup.storage)).?.permit.binding;
+        try std.testing.expectEqual(original.operation_id, retry.operation_id);
+        const after = try prepareMemoForTesting(&setup, retry, null, .{});
+        defer std.testing.allocator.free(after.bytes);
+        try std.testing.expectEqualStrings(before.bytes, after.bytes);
+        try std.testing.expect(std.mem.indexOf(u8, after.bytes, "input_image") == null);
+        try std.testing.expect(std.mem.indexOf(u8, after.bytes, "late result") == null);
+    }
+}
