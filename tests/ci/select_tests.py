@@ -463,6 +463,7 @@ RULES = (
      "Shared model context prose: fixture consumers and Go request oracles"),
     (("src/server*.zig", "src/cli.zig", "src/cli_args.zig", *CLI_GRAMMAR, "src/client.zig", "src/caller_*.zig", "src/cli_value.zig",
       "src/slash_commands.zig", "src/protocol_reply.zig", "src/ResponseTiming.zig", "src/preferences.zig", "src/preference_document.zig",
+      "src/defaults_report.zig",
       "src/provider_selection.zig", "src/client_defaults.zig", "src/configure_input.zig", "src/new_session_selection.zig",
       "src/preference_values.zig", "src/product_defaults.zig", "tests/integration/product_defaults.py"),
      ("admission-debug-integration",), ("admission-debug-integration",),
