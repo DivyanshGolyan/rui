@@ -101,6 +101,12 @@ An empty or one-window canonical failure returns an error before successful head
 A later fault fences the Host and closes an incomplete advertised body without another HTTP response; a caller must not treat that prefix as a complete value.
 Sequential decoded work avoids repeated prefix positioning, but does not guarantee traversal time or a measured speedup.
 
+### Typed Message and Action Resolution parts
+
+`session inspect-part --session ID --admission ID --ordinal N` and `action inspect-part --session ID --action ID --ordinal N` read one zero-based part's typed metadata as JSON. The Message selector names a saved admission in that Session, including one that has not been applied; the Action selector names its saved Resolution. Text metadata contains its exact byte length and the [Store content digest](store.md#sqlite-and-representation); Image metadata also contains its MIME type. The `sha256` field is SHA-256 over the eight-byte big-endian length of `rui/content/v1`, followed by that domain and the part bytes; it is not the raw bytes' SHA-256. A missing ordinal returns `part:null`. Parts are ordered by ordinal, and a single Text value is ordinal zero.
+
+`session read-image-part` and `action read-image-part` use the same selectors to stream the exact image bytes. A missing or non-image part fails. The Host resolves the selected public owner rather than accepting a content identity from the caller. The Store certifies a compound manifest and its ordered index before returning a part, advancing a bounded cursor between Store entries so other work can proceed. The existing public text readers retain their refusal of compound values.
+
 ### Tool Call proposals
 
 A proposal is an accepted Tool Call in the model's output: Activity pages list each one as a call row, and Action inspection and replay read its fields.
@@ -566,6 +572,7 @@ Restart never imports leftover ingress.
 
 | Contract | Canonical checks | Limits and exceptions |
 | --- | --- | --- |
+| [Typed Message and Action Resolution parts](#typed-message-and-action-resolution-parts) | `public-parts-integration` seeds Messages and Action Resolutions through the Store, then inspects all parts and exports PNG and JPEG bytes through the native CLI; `read-image-integration` checks a real `read_image` Action; `store/tests/action_parts.zig` checks ordering, metadata and byte reads, and the Store round-budget test checks each cursor step | The binary selector accepts images only. Existing text readers retain their compound-value refusal. |
 | [Request and adapter waits](#work-state-and-wait-conditions) | `request_wait_integration.py`: completion and ask-mode permission return exit 0; timeout returns exit 5 with the latest observation; unknown key returns exit 4; Host stopped mid-wait returns the keyed read-error envelope and its status; restart mid-Bash exposes `recovery`; a Host-side count or lossless test observation proves a tier-2 `not_modified` hit while a sibling Session commits. Focused client tests pin poll schedule and state-to-exit mapping without sleeps; CLI argument tests pin the 300-second default and positive 86400-second bound. | Waits never start, resume or retarget work, or hold capture/Host resources between polls. Permission returns do not replace exact-target validation. Timing alone is not evidence of a token-tier hit |
 | Current selection, pending count, ten recent Messages | `'Current facts'`, `current-facts-integration`, `store/sqlite_tests/` `'Current selects active then queued'` | Suppressing callbacks beyond 128 rows must fail the complete count. Fixed storage is not process memory or Mac evidence |
 | [Per-key outcomes as data](#outcomes-and-observation-errors) | `human_cli_integration.py`, `store/tests/` `'Current reports progress alongside'` | Composed reads may span commits. A timeout proves neither rejection nor work failure |

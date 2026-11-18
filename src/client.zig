@@ -348,6 +348,37 @@ pub const Requests = struct {
         return page;
     }
 
+    pub fn readPublicPart(self: Requests, store_path: []const u8, session: []const u8, target: protocol.PublicPartTarget, ordinal: u64, sink: anytype, reply_buffer: *ReplyBuffer) !protocol_reply.ReportReply {
+        reply_buffer.len = 0;
+        try self.check();
+        try protocol_reply.validateIdentityInputs("", session);
+        const id = switch (target) {
+            inline else => |value| value,
+        };
+        if (id == 0 or id > std.math.maxInt(i64) or ordinal > @import("input_parts.zig").max_parts) return error.InvalidTarget;
+        const paths = try resolveClientPaths(self.io, store_path);
+        var body: protocol.RequestBuffer = .{};
+        try body.appendShape(protocol.public_part_request, .{ paths.store_identity.slice(), session, id, ordinal, std.meta.activeTag(target) });
+        const fd = try openRead(self, &paths, "/v1/public-part", body.slice());
+        defer closeSocket(self.io, fd);
+        return readReportResponse(self, fd, sink, reply_buffer);
+    }
+
+    pub fn readPublicPartBytes(self: Requests, store_path: []const u8, session: []const u8, target: protocol.PublicPartTarget, ordinal: u64, sink: anytype) !?protocol_reply.ReadFailure {
+        try self.check();
+        try protocol_reply.validateIdentityInputs("", session);
+        const id = switch (target) {
+            inline else => |value| value,
+        };
+        if (id == 0 or id > std.math.maxInt(i64) or ordinal > @import("input_parts.zig").max_parts) return error.InvalidTarget;
+        const paths = try resolveClientPaths(self.io, store_path);
+        var body: protocol.RequestBuffer = .{};
+        try body.appendShape(protocol.public_part_bytes_request, .{ paths.store_identity.slice(), session, id, ordinal, std.meta.activeTag(target) });
+        const fd = try openRead(self, &paths, "/v1/public-part-bytes", body.slice());
+        defer closeSocket(self.io, fd);
+        return readPublicContentResponse(self, fd, null, sink);
+    }
+
     pub fn readActivityContent(self: Requests, store_path: []const u8, session: []const u8, position: u64, ordinal: u64, expected: ?protocol_reply.CommandObservation.ContentReference, sink: anytype) !?protocol_reply.ReadFailure {
         try self.check();
         try protocol_reply.validateIdentityInputs("", session);

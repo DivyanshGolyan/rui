@@ -194,6 +194,20 @@ pub const routes = [_]Route{
         .reply = .bytes,
     },
     .{
+        .path = "/v1/public-part",
+        .kind = .public_part,
+        .summary = "Typed metadata for an ordered Message or Action Resolution part.",
+        .variants = &.{variant(protocol.public_part_request, .{})},
+        .reply = jsonReply(.{ protocol.public_part_reply.head ++ protocol.public_part_reply.missing, protocol.public_part_reply.head ++ protocol.public_part_reply.text, protocol.public_part_reply.head ++ protocol.public_part_reply.image }),
+    },
+    .{
+        .path = "/v1/public-part-bytes",
+        .kind = .public_part_bytes,
+        .summary = "Exact bytes of one image part.",
+        .variants = &.{variant(protocol.public_part_bytes_request, .{})},
+        .reply = .bytes,
+    },
+    .{
         .path = "/v1/activity-search",
         .kind = .activity_search,
         .summary = "Search public Session activity newest first with bounded snippets.",

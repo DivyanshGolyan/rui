@@ -1239,10 +1239,7 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
                 .sessions => try selectView(state, .active, &effects),
                 .archived => try selectView(state, .archived, &effects),
                 .update => |target| if (input.upgrade_admitted and std.meta.eql(target, upgrade_status.Target{ .available = state.upgrade.available, .run = state.upgrade.run }) and !state.upgrading()) startUpgrade(state),
-                .settings => {
-                    state.selected = .settings;
-                    effects.add(.open_settings);
-                },
+                .settings => effects.add(.open_settings),
             };
         },
         .unconfirmed => |left| {
@@ -1476,9 +1473,9 @@ pub fn writeDeparture(state: *const State, _: ?ReasoningEffort, writer: *std.Io.
         const text = request.text.slice();
         switch (request.kind) {
             .create => switch (request.status) {
-                .pending => try writer.writeAll("rui: The new Session was not created.\n"),
-                .failed => try writer.print("rui: The new Session was not created ({s}); try again from the overview.\n", .{text}),
-                .unknown => try writer.print("rui: Not sure the new Session was created. Check with: rui request recover {s}\n", .{text}),
+                .pending => try writer.writeAll("rui: The new chat was not created.\n"),
+                .failed => try writer.print("rui: The new chat was not created ({s}); try again from the overview.\n", .{text}),
+                .unknown => try writer.print("rui: Not sure the new chat was created. Check with: rui request recover {s}\n", .{text}),
                 .done => try writer.print("rui: Created {s}.\n", .{&request.session.?}),
             },
             .archive, .unarchive => switch (request.status) {
@@ -2117,7 +2114,7 @@ fn changeArchiveView(state: *State, filter: ArchiveFilter, effects: *Effects) er
     if (!state.listing) try tick(state, state.now_ms, effects);
 }
 
-const no_selection = "! Select a Session first.";
+const no_selection = "! Select a chat first.";
 
 fn move(state: *State, action: Action) void {
     const order = state.order.items;
@@ -2523,11 +2520,11 @@ fn emptyLine(built: *Spans, state: *const State) error{OutOfMemory}![]const Span
     const text = if (state.listed_at_ms == null)
         try std.fmt.allocPrint(built.arena, "Loading{s}", .{built.glyphs.ellipsis})
     else if (state.archive == .archived)
-        "No archived Sessions."
+        "No archived chats."
     else if (state.archive == .all)
-        "No Sessions yet."
+        "No chats yet."
     else
-        "No unarchived Sessions.";
+        "No chats yet.";
     _ = try built.put(1, text, built.width -| 2, .{ .colour = .quiet });
     return built.finish();
 }
@@ -2566,7 +2563,7 @@ fn providerBand(built: *Spans, trouble: Band, now_ms: u64) error{OutOfMemory}![]
             }
             break :quota used;
         },
-        .rate_limit => try std.fmt.allocPrint(built.arena, "Rate limited. {d} Session{s} will retry.", .{ trouble.sessions, if (trouble.sessions == 1) "" else "s" }),
+        .rate_limit => try std.fmt.allocPrint(built.arena, "Rate limited. {d} chat{s} will retry.", .{ trouble.sessions, if (trouble.sessions == 1) "" else "s" }),
     });
 }
 
@@ -2617,7 +2614,7 @@ pub fn nextRedrawAt(state: *const State, drawn: Drawn, caps: Caps, awake_ms: u64
     return next;
 }
 
-const new_session_name = "New Session";
+const new_session_name = "New chat";
 
 pub const Target = Click;
 
@@ -2799,8 +2796,8 @@ pub fn controls(arena: Allocator, state: *const State, width: u16, caps: Caps) e
     built.begin();
     var regions: [2]Region = undefined;
     var region_count: usize = 0;
-    inline for (.{ .{ "Sessions", Selection.sessions, ArchiveFilter.active, Click.sessions }, .{ "Archived", Selection.archived, ArchiveFilter.archived, Click.archived } }, 0..) |tab, index| {
-        const start = text_column + index * 10;
+    inline for (.{ .{ "Chats", Selection.sessions, ArchiveFilter.active, Click.sessions }, .{ "Archived", Selection.archived, ArchiveFilter.archived, Click.archived } }, 0..) |tab, index| {
+        const start = text_column + index * ("Chats".len + 2);
         const active = state.archive == tab[2];
         const focused = state.selected == tab[1];
         const cells = try built.put(start, tab[0], width -| 1 -| start, .{
@@ -3216,7 +3213,7 @@ test "overview rows draw a flat order without headings" {
     const text = try screenText(&state, 80, 40, .{});
     defer std.testing.allocator.free(text);
     inline for (.{ " Needs you ·", " Yours ·", " Active ·", " Idle ·", " Finished ·", " Stopped or failed ·", " more" }) |heading| try std.testing.expect(std.mem.indexOf(u8, text, heading) == null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "+ New Session") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "+ New chat") != null);
     try std.testing.expectEqual(mixed.len, Lines.count(&state));
 }
 
@@ -3907,12 +3904,12 @@ test "Host facts change only the counts line, and a row from before a restart st
     defer state.deinit();
     const before = try screenText(&state, 80, 24, .{});
     defer std.testing.allocator.free(before);
-    try expectScreenLine(&state, 0, " + New Session");
+    try expectScreenLine(&state, 0, " + New chat");
     _ = try step(&state, .{ .host = .{ .started_at = test_now_s - 20, .slots = 2, .slots_in_use = 2 } });
-    try expectScreenLine(&state, 0, " + New Session");
+    try expectScreenLine(&state, 0, " + New chat");
     const after = try screenText(&state, 80, 24, .{});
     defer std.testing.allocator.free(after);
-    try std.testing.expectEqualStrings(before[std.mem.indexOf(u8, before, " + New Session").?..], after[std.mem.indexOf(u8, after, " + New Session").?..]);
+    try std.testing.expectEqualStrings(before[std.mem.indexOf(u8, before, " + New chat").?..], after[std.mem.indexOf(u8, after, " + New chat").?..]);
     try std.testing.expect(std.mem.indexOf(u8, after, " ◝ Admitted before the restart") != null);
 }
 
@@ -4186,13 +4183,13 @@ test "the overview lists once a second, one listing at a time" {
     try expectEffects(&.{}, try step(&state, .{ .list = .failed }));
     try expectEffects(&.{.{ .list = testToken(1) }}, try step(&state, .{ .tick = start + 3 * list_interval_ms }));
     try expectEffects(&.{}, try step(&state, .{ .list = .failed }));
-    try expectScreenLine(&state, 0, " + New Session");
+    try expectScreenLine(&state, 0, " + New chat");
     var screen = try Frame.of(&state, 80, 24, .{}, 0);
     defer screen.deinit();
     try expectScreenLine(&state, 2, " ● Review PR 412                                                             3m");
     try std.testing.expectEqual(Colour.attention, screen.styleAt(2, 1).?.colour);
     _ = try refresh(&state, .not_modified, testToken(1), &.{});
-    try expectScreenLine(&state, 0, " + New Session");
+    try expectScreenLine(&state, 0, " + New chat");
 }
 
 test "a tick moves a retry that fell due to pending" {
@@ -4336,7 +4333,7 @@ test "the overview's rows draw each band" {
         if (segments.len == 0) continue;
         const text = try screenText(&state, 80, 24, .{});
         defer std.testing.allocator.free(text);
-        try std.testing.expect(std.mem.indexOf(u8, text, " + New Session") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, " + New chat") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, "Host stopped") == null);
         try std.testing.expectEqual(Background.band, segments[0].style.background);
     }
@@ -4348,7 +4345,7 @@ test "the overview's rows draw an empty Store" {
     for ([_]u16{ 40, 80, 200 }) |width| {
         const text = try screenText(&state, width, 24, .{});
         defer std.testing.allocator.free(text);
-        try std.testing.expect(std.mem.startsWith(u8, text, " + New Session") and std.mem.indexOf(u8, text, "Archived\n") != null);
+        try std.testing.expect(std.mem.startsWith(u8, text, " + New chat") and std.mem.indexOf(u8, text, "Archived\n") != null);
         try std.testing.expectEqualStrings("", footerRight(&state));
         try std.testing.expect(std.mem.indexOf(u8, text, "new Session ·") == null);
     }
@@ -4478,7 +4475,7 @@ test "the status bar says the Upgrade at work, else the newest notice, else an U
     try expectStatus(&state, "Checking for updates…", .normal);
     _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .host = .none } } } });
     try expectStatus(&state, "Preparing Upgrade · no Hosts running · esc cancels", .normal);
-    state.say(.attention, "! Select a Session first.", .{});
+    state.say(.attention, "! Select a chat first.", .{});
     try expectStatus(&state, "Preparing Upgrade · no Hosts running · esc cancels", .normal);
     _ = try press(&state, .next);
     _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = .{ .upgraded = .{ .version = .{ .schema = 60, .patch = 0 }, .restarted = false } }, .outcome = .compatible } } });
@@ -5499,9 +5496,9 @@ test "Enter opens the selected Session and Settings rather than creating" {
 
 test "empty overview rows state only the empty archive filter without removed input or commands" {
     const cases = [_]struct { filter: ArchiveFilter, text: []const u8 }{
-        .{ .filter = .active, .text = "No unarchived Sessions." },
-        .{ .filter = .archived, .text = "No archived Sessions." },
-        .{ .filter = .all, .text = "No Sessions yet." },
+        .{ .filter = .active, .text = "No chats yet." },
+        .{ .filter = .archived, .text = "No archived chats." },
+        .{ .filter = .all, .text = "No chats yet." },
     };
     for (cases) |case| {
         var state = try opened(&.{});
@@ -5512,7 +5509,7 @@ test "empty overview rows state only the empty archive filter without removed in
         const row = (try Lines.at(arena.allocator(), &state, 0, 80, .{}, 0)).?;
         const text = try segmentText(arena.allocator(), row.segments);
         try std.testing.expectEqualStrings(case.text, std.mem.trim(u8, text, " "));
-        try std.testing.expect(std.mem.indexOf(u8, text, "Type a task") == null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "What shall we work on?") == null);
         try std.testing.expect(std.mem.indexOf(u8, text, "/sessions") == null);
     }
 }
@@ -5668,7 +5665,7 @@ test "empty chat name and selection agree across listing arrival orders and firs
         for ([_]Selection{ .new_session, .settings, .{ .session = "other1".* } }) |navigation| {
             state.selected = navigation;
             try std.testing.expectEqual(@as(?usize, 0), Lines.named(&state));
-            try std.testing.expectEqualStrings("New Session", title(&state, &state.rows.items[state.order.items[0]]).text);
+            try std.testing.expectEqualStrings("New chat", title(&state, &state.rows.items[state.order.items[0]]).text);
             for ([_]u16{ 46, 140 }) |width| {
                 var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
                 defer arena.deinit();
@@ -5676,7 +5673,7 @@ test "empty chat name and selection agree across listing arrival orders and firs
                 var name_found = false;
                 for (built.segments) |segment| {
                     try std.testing.expect(std.mem.indexOf(u8, segment.text, &empty.reference) == null);
-                    if (std.mem.indexOf(u8, segment.text, "New Session") != null) {
+                    if (std.mem.indexOf(u8, segment.text, "New chat") != null) {
                         name_found = true;
                         try std.testing.expect(segment.style.bold);
                         try std.testing.expectEqual(Colour.strong, segment.style.colour);
@@ -6255,8 +6252,8 @@ test "OVM-1 overview marks and ages across states and spinner frames" {
                 const text = try screenText(&state, 80, 24, caps);
                 defer std.testing.allocator.free(text);
                 var lines = std.mem.splitScalar(u8, text, '\n');
-                try std.testing.expectEqualStrings(" + New Session", lines.next().?);
-                try std.testing.expectEqualStrings("   Sessions  Archived", lines.next().?);
+                try std.testing.expectEqualStrings(" + New chat", lines.next().?);
+                try std.testing.expectEqualStrings("   Chats  Archived", lines.next().?);
                 try std.testing.expectEqualStrings(expected, lines.next().?);
             }
             state.selected = .new_session;
@@ -6410,8 +6407,8 @@ test "OVM-1 overview marks and ages across states and spinner frames" {
         try std.testing.expect(std.mem.indexOf(u8, text, "✓") == null);
         try std.testing.expectEqual(@as(usize, width), measured(caps, unicode_glyphs, text));
         const action = try segmentText(arena.allocator(), ((try controls(arena.allocator(), &state, width, caps))[0]).segments);
-        try std.testing.expect(std.mem.startsWith(u8, action, " + New Session"));
-        try std.testing.expectEqual(@as(usize, text_column), std.mem.indexOf(u8, action, "New Session").?);
+        try std.testing.expect(std.mem.startsWith(u8, action, " + New chat"));
+        try std.testing.expectEqual(@as(usize, text_column), std.mem.indexOf(u8, action, "New chat").?);
     };
 }
 
@@ -6555,7 +6552,7 @@ test "initial presentation core releases for live answer deadline failure and Ho
                 const text = try screenText(&state, width, 30, .{});
                 defer std.testing.allocator.free(text);
                 try std.testing.expect(std.mem.indexOf(u8, text, "Loading") == null);
-                try std.testing.expect(std.mem.indexOf(u8, text, if (outcome == .empty) "No unarchived Sessions." else "Live Session") != null);
+                try std.testing.expect(std.mem.indexOf(u8, text, if (outcome == .empty) "No chats yet." else "Live Session") != null);
             },
             .late => {
                 const deadline = try step(&state, .{ .presentation_tick = .{ .now_ms = 1150, .list_visible = true, .host_unavailable = false } });
@@ -7032,7 +7029,7 @@ test "OVM-3 overview lines preserve navigation targets and presentation across l
                         try std.testing.expectEqual(entry.listed.pin_order == null, alternate.pin.pinned);
                         try std.testing.expectEqual(entry.spins and !stale and caps.unicode and caps.depth != .none, row.spins);
                         try std.testing.expectEqual(entry.spins and !stale and caps.unicode and caps.depth != .none, Lines.spins(&state, index, caps));
-                        const name = if (entry.listed.first == null) "New Session" else entry.listed.label.?;
+                        const name = if (entry.listed.first == null) "New chat" else entry.listed.label.?;
                         try std.testing.expectEqual(D.same(bold_ref, entry.listed.reference), (try styleOf(row.segments, name)).bold);
                         const text = try segmentText(arena.allocator(), row.segments);
                         const marker = if (caps.unicode) " · archived" else " . archived";
@@ -7050,9 +7047,9 @@ test "OVM-3 overview lines preserve navigation targets and presentation across l
                             try std.testing.expectEqualStrings("", std.mem.trim(u8, text, " "));
                         } else {
                             try std.testing.expect(std.mem.indexOf(u8, text, switch (filter) {
-                                .active => "No unarchived Sessions",
-                                .archived => "No archived Sessions",
-                                .all => "No Sessions",
+                                .active => "No chats yet",
+                                .archived => "No archived chats",
+                                .all => "No chats",
                             }) != null);
                         }
                     }
@@ -7099,6 +7096,6 @@ test "OVM-3 overview lines preserve navigation targets and presentation across l
         try std.testing.expect(state.selected == .new_session);
     };
     try D.checkBoundaries();
-    // The recorded domain includes the shared status marks and spinner frame.
-    try std.testing.expectEqual(@as(u64, 0xcab0da6d038a025e), bytes_and_styles);
+    // Recorded by running this same fixture domain against base 03aa26d0.
+    try std.testing.expectEqual(@as(u64, 0x2dfe218fa12da814), bytes_and_styles);
 }

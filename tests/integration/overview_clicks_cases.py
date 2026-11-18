@@ -66,7 +66,7 @@ def click_label(screen, frame, label):
 
 
 def is_overview(frame):
-    return "+ New Session" in frame and "Settings" in frame and "enter open" not in frame and "Type a task" not in frame and not any(line.startswith(" ‹ ") for line in frame.split("\n"))
+    return "+ New chat" in frame and "Settings" in frame and "enter open" not in frame and "What shall we work on?" not in frame and not any(line.startswith(" ‹ ") for line in frame.split("\n"))
 
 
 def conversation_of(label):
@@ -154,8 +154,8 @@ def flat_list():
             assert any(re.fullmatch(r"     (?:lead|peer-[0-6]) +(?:now|\d+[mhd])", line) for line in lines), listed
             assert not any(re.fullmatch(r"   \S.* · \d+", line) for line in lines), listed
             assert " more" not in listed, listed
-            screen.click(4, line_of(listed, lambda line: "+ New Session" in line, "New Session"))
-            screen.wait(lambda frame: "Type a task" in frame and not is_overview(frame), "New Session opens chat")
+            screen.click(4, line_of(listed, lambda line: "+ New chat" in line, "New chat"))
+            screen.wait(lambda frame: "What shall we work on?" in frame and not is_overview(frame), "New Session opens chat")
             listed = back_to_overview(screen, *peers_by_label)
             lines = listed.split("\n")
             label = lines[max(row_of(listed, peer) for peer in peers_by_label) - 1].split()[0]
@@ -169,19 +169,19 @@ def flat_list():
 def empty_list():
     for columns in (46, 140):
         with world("clicks-empty", {"first task": answer("new", "first task answered")}) as w, w.overview(columns=columns, rows=30) as screen:
-            frame = screen.wait(lambda frame: "+ New Session" in frame and "No unarchived Sessions." in frame,
+            frame = screen.wait(lambda frame: "+ New chat" in frame and "No chats yet." in frame,
                                 "listed empty view")
-            assert "Type a task" not in frame, frame
+            assert "What shall we work on?" not in frame, frame
             known = {row["reference"] for row in json.loads(w.run("session", "list", "--store", w.store, "--all"))["sessions"]}
             assert len(known) == (1 if columns >= 100 else 0), known
             abandoned = set(known)
             for gesture in ("click", "Enter"):
                 before = set((w.home / ".config/rui/requests").glob("*.json"))
                 if gesture == "click":
-                    screen.click(4, line_of(frame, lambda line: "+ New Session" in line, "New Session"))
+                    screen.click(4, line_of(frame, lambda line: "+ New chat" in line, "New Session"))
                 else:
                     screen.keys(b"\x1b[H\r")
-                chat = screen.wait(lambda frame: "Type a task" in frame and not is_overview(frame), f"{gesture} opens an empty chat")
+                chat = screen.wait(lambda frame: "What shall we work on?" in frame and not is_overview(frame), f"{gesture} opens an empty chat")
                 sessions = json.loads(w.run("session", "list", "--store", w.store, "--all"))["sessions"]
                 current = {row["reference"] for row in sessions}
                 created, = current - known
@@ -245,7 +245,7 @@ def narrow_launch_resize():
         screen.resize(140, 30)
         frame = screen.wait(lambda frame: is_overview(frame) and any(len(line) >= 140 for line in frame.split("\n")),
                             "widening retains the full overview")
-        assert "Type a task" not in frame, frame
+        assert "What shall we work on?" not in frame, frame
         rows = json.loads(w.run("session", "list", "--store", w.store, "--all"))["sessions"]
         assert not rows, rows
     print("narrow launch: widening leaves the overview open", flush=True)
@@ -278,7 +278,7 @@ def new_chat_aliases():
                 screen.contains("! Usage:")
                 assert_inspection_unchanged(before, settled_inspection(w, old))
                 screen.keys(alias + "\r")
-                screen.wait(lambda frame: not is_overview(frame) and "Type a task" in frame
+                screen.wait(lambda frame: not is_overview(frame) and "What shall we work on?" in frame
                             and "Old unchanged" not in frame, "alias opens a new empty chat")
                 assert_inspection_unchanged(before, settled_inspection(w, old))
                 listed = back_to_overview(screen, "Old unchanged")

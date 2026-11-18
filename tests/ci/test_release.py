@@ -357,7 +357,7 @@ class InstallerTemplateTest(unittest.TestCase):
 
     def test_publication_binds_installer_source_to_artifact_target(self):
         publication = (ROOT / ".github/workflows/release.yml").read_text().split("  publish:", 1)[1]
-        self.assertIn("ref: ${{ needs.plan.outputs.sha }}\n          path: .release-source", publication)
+        self.assertIn("ref: ${{ inputs.sha }}\n          path: .release-source", publication)
         self.assertIn('dist/install.sh --source-root .release-source', publication)
 
     def test_template_refuses_to_install(self):

@@ -1161,8 +1161,8 @@ fn serveOpened(
         };
         socket_owned = false;
         _ = host.advance(.draining);
-        if (comptime test_pause.enabled) pause_owner.close();
         execution_thread.join();
+        if (comptime test_pause.enabled) pause_owner.close();
     }
     try writeReadiness(&lease.paths, host.instance, active_capacity, intake_capacity, descriptor_requirement, descriptor_limit_text, retention_entries.len, served.any());
     stderr.release();
@@ -1172,8 +1172,7 @@ fn serveOpened(
     if (diagnostics.*) |*writer| {
         if (writer.failure != null) writer.reportFailure();
         writer.record("ready", "serving");
-        writer.close();
-        diagnostics.* = null;
+        host.attachDiagnostics(writer);
     }
 
     return intake.run(&listener, &listener_open, &socket_owned);
@@ -1506,6 +1505,8 @@ const Route = enum {
     activity_page,
     activity_search,
     activity_content,
+    public_part,
+    public_part_bytes,
     skill_suggestions,
     model_list,
     unsupported_control,
@@ -1905,6 +1906,8 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             };
             try fd.json(200, activity_reply.max_search_bytes, host_reply.renderActivitySearch, .{page});
         },
+        .public_part => |*command| try preparePublicPart(host, fd, command, false),
+        .public_part_bytes => |*command| try preparePublicPart(host, fd, command, true),
         .activity_content => |*command| {
             const location = host.store.openActivityContent(command) catch |err| switch (err) {
                 error.ContentNotFound => return respondStatic(fd, 409, .activity_unavailable, @errorName(err)),
@@ -2037,6 +2040,45 @@ fn createUnfilled(allocator: std.mem.Allocator, comptime T: type) error{OutOfMem
     return @ptrCast(@alignCast(bytes));
 }
 
+fn renderPublicPart(out: protocol.JsonOut, selected: ?store_module.PublicParts.Part) !void {
+    const shape = protocol.public_part_reply;
+    try out.appendShape(shape.head, .{});
+    if (selected) |part| {
+        switch (part.kind) {
+            .text => try out.appendShape(shape.text, .{ part.ordinal, part.location.reference.length, part.location.reference.digest }),
+            .image => |image| try out.appendShape(shape.image, .{ part.ordinal, image.media.format.mime(), part.location.reference.length, part.location.reference.digest }),
+        }
+    } else try out.appendShape(shape.missing, .{});
+}
+
+fn preparePublicPart(host: *Host, fd: *Reply, command: *const protocol.PublicPart, comptime bytes: bool) !void {
+    var reader = try store_module.PublicParts.Reader.init(command.session, switch (command.target) {
+        .message => |id| .{ .message = id },
+        .action => |id| .{ .action = id },
+    });
+    defer reader.deinit();
+    const selected: ?store_module.PublicParts.Part = while (true) {
+        const progress = host.store.readPublicParts(&reader) catch |err| switch (err) {
+            error.ContentNotFound => return respondStatic(fd, 409, .conversation_unavailable, @errorName(err)),
+            else => {
+                fenceDispatch(host, "public parts", err);
+                return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
+            },
+        };
+        switch (progress) {
+            .pending => {},
+            .done => break null,
+            .part => |part| if (part.ordinal == command.ordinal) break part,
+        }
+    };
+    if (bytes) {
+        const part = selected orelse return respondStatic(fd, 409, .conversation_unavailable, "part_not_found");
+        if (part.kind != .image) return respondStatic(fd, 409, .conversation_unavailable, "part_not_image");
+        return deliverPublicContent(host, fd, part.location, 0, true);
+    }
+    try fd.json(200, protocol.public_part_reply.max_bytes, renderPublicPart, .{selected});
+}
+
 fn deliverConversationContent(host: *Host, fd: std.posix.fd_t, command: protocol.ConversationContent) !void {
     var reply = Reply{ .io = host.io, .allocator = host.allocator };
     defer reply.deinit();
@@ -2130,6 +2172,10 @@ const HeaderReader = struct {
             .activity_page
         else if (std.mem.eql(u8, path, "/v1/activity-content"))
             .activity_content
+        else if (std.mem.eql(u8, path, "/v1/public-part"))
+            .public_part
+        else if (std.mem.eql(u8, path, "/v1/public-part-bytes"))
+            .public_part_bytes
         else if (std.mem.eql(u8, path, "/v1/skill-suggestions"))
             .skill_suggestions
         else if (std.mem.eql(u8, path, "/v1/model-list"))
@@ -4779,6 +4825,38 @@ test "SH-51 a read the Store refuses without fencing leaves the Host serving" {
     try std.testing.expect(storage.isFenced() and !host.launchAllowed());
 }
 
+test "SH-53 a dispatch fence records its reason in the Host diagnostics file" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var writer = try HostDiagnostics.open(io, tmp.dir, HostDiagnostics.default_cap_bytes);
+    defer writer.close();
+
+    var unattached = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined };
+    fenceDispatch(&unattached, "before readiness", error.Unattached);
+    try std.testing.expect(unattached.stopping());
+
+    var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined };
+    writer.record("ready", "serving");
+    host.attachDiagnostics(&writer);
+    server_host.retainDispatchFence(&host, "retained cleanup", error.Retained);
+    server_host.retainDispatchFence(&host, "retained again", error.RetainedAgain);
+    fenceDispatch(&host, "Action status observation", error.InputPartsNotSupported);
+    fenceDispatch(&host, "second fence", error.Later);
+    try std.testing.expect(host.stopping());
+
+    var buffer: [4096]u8 = undefined;
+    const bytes = try tmp.dir.readFile(io, "diagnostics/host-1.jsonl", &buffer);
+    var lines = std.mem.splitScalar(u8, std.mem.trimEnd(u8, bytes, "\n"), '\n');
+    const expected = [_][]const u8{
+        "\"classification\":\"startup\",\"phase\":\"ready\",\"detail\":\"serving\"}",
+        "\"classification\":\"fenced\",\"phase\":\"retained cleanup\",\"detail\":\"Retained\"}",
+        "\"classification\":\"stopping\",\"phase\":\"Action status observation\",\"detail\":\"InputPartsNotSupported\"}",
+    };
+    for (expected) |suffix| try std.testing.expect(std.mem.endsWith(u8, lines.next() orelse "", suffix));
+    try std.testing.expectEqual(null, lines.next());
+}
+
 test "Host startup reports MCP tool collision and excess tools as owned failures" {
     const Script = @import("mcp/test_server.zig");
     for ([_]bool{ false, true }) |too_many| {
@@ -5103,6 +5181,15 @@ const MutationWitness = struct {
         }
     }
 
+    // The frozen producer-byte oracle was captured at the released wire version. Verify the
+    // actual version first, then retain those captured bytes in the digest.
+    fn hashResponse(hash: *Hash, body: []const u8) !void {
+        const current = "{\"version\":\"" ++ protocol.wire_version ++ "\",";
+        try std.testing.expect(std.mem.startsWith(u8, body, current));
+        hash.update("{\"version\":\"" ++ protocol.previous_wire_version ++ "\",");
+        hash.update(body[current.len..]);
+    }
+
     fn observe(hash: *Hash, body: []const u8, status: u16, supplied_session: []const u8, binding: reply.MutationTarget) !void {
         const decoded = reply.decodeMutationReply(.{ .status = status, .body = body }, supplied_session, binding);
         if (decoded.answer) |answer| {
@@ -5211,6 +5298,13 @@ const MutationWitness = struct {
 };
 
 test "mutation decoder preserves base bytes and the entire command domain" {
+    // Only the version is normalized; an incorrect actual version is refused.
+    var version_probe = MutationWitness.Hash.init(.{});
+    try std.testing.expectError(error.TestUnexpectedResult, MutationWitness.hashResponse(&version_probe, "{\"version\":\"" ++ protocol.next_wire_version ++ "\",\"type\":\"configuration_reply\"}"));
+    try MutationWitness.hashResponse(&version_probe, "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"configuration_reply\"}");
+    var frozen_probe = MutationWitness.Hash.init(.{});
+    frozen_probe.update("{\"version\":\"" ++ protocol.previous_wire_version ++ "\",\"type\":\"configuration_reply\"}");
+    try std.testing.expectEqualSlices(u8, &frozen_probe.finalResult(), &version_probe.finalResult());
     var covered: u16 = 0;
     inline for (comptime std.meta.tags(command_spec.CommandKind)) |kind| {
         if (comptime kind == .action_stop) continue;
@@ -5238,7 +5332,7 @@ test "mutation decoder preserves base bytes and the entire command domain" {
                     .conflict => 409,
                     .infrastructure_failure => 500,
                 };
-                hash.update(response.slice());
+                try MutationWitness.hashResponse(&hash, response.slice());
                 hash.update("\x00");
                 for ([_]bool{ false, true }) |wrong_session| {
                     for ([_]bool{ false, true }) |wrong_target| {
@@ -5264,7 +5358,7 @@ test "mutation decoder preserves base bytes and the entire command domain" {
         }
         var response: protocol.ResponseBuffer = .{};
         try response.render(render, .{ MutationWitness.subject(kind), alternate });
-        hash.update(response.slice());
+        try MutationWitness.hashResponse(&hash, response.slice());
         var binding = MutationWitness.target(kind, false);
         if (kind == .session_archive) binding.session_archive.archived = false;
         if (kind == .session_pin) binding.session_pin.pinned = true;
@@ -5276,7 +5370,7 @@ test "mutation decoder preserves base bytes and the entire command domain" {
             response = .{};
             try response.render(render, .{ @as([]const u8, ""), initial });
             try std.testing.expectError(error.InvalidResponse, MutationWitness.reply.decodeMutationReply(.{ .status = 200, .body = response.slice() }, "", binding).answer);
-            hash.update(response.slice());
+            try MutationWitness.hashResponse(&hash, response.slice());
             try MutationWitness.observe(&hash, response.slice(), 200, "", binding);
             // Creation now requires a resolved receipt. Keep the legacy missing
             // receipt probe above and witness a valid creation independently.
@@ -5308,19 +5402,19 @@ test "mutation decoder preserves base bytes and the entire command domain" {
             try std.testing.expectEqualStrings("gpt-6.1-sol", resolved.model.slice());
             try std.testing.expectEqualStrings("/workspace", resolved.workspace.slice());
             try std.testing.expectEqual(protocol.ReasoningEffort.low, resolved.reasoning_effort.?);
-            hash.update(response.slice());
+            try MutationWitness.hashResponse(&hash, response.slice());
             try MutationWitness.observe(&hash, response.slice(), 200, "", binding);
         }
         const expected = switch (kind) {
             .action_stop => continue,
             .configure => "b9f94c52d2de846f027e169eb0d7e8f4365f01cc153151c8307e48d05f306c31",
             .message => "b3f30c9a293b421daa933574dc68692b79d382e297435d72012ca7092db29ee1",
-            .session_stop => "9bfdb63b3bf3151df509c74b4a10b8b11602ad278ec52045ba787ffcbc5a04ef",
-            .session_archive => "07d1d0a652b3c9a2e3f1fcc60590922505703857013aa7cbd77ba081d29d0476",
-            .model_interruption => "c96d8d53234d3fdb70777eb3eec0cb820eca9a30de2c377656d02a21626ee1ee",
-            .permission_decision => "c75c2b8de8393a6fd06dd8951ae7a0dffd09172069f06c9e739f8d3247fd3c37",
-            .session_pin => "829a95280d7c0dca204a4c41420c5ab9c4f8fd1b915bc55252b0dd43eaf22ab3",
-            .action_background => "b82bacc6fe2ae3da6cf22ed6da809f288de0182c341528239ac7cdff27b54312",
+            .session_stop => "a98107ee7efe29d5c2480097568daa514649c76e9c7c1cc740ed5fbc697cbc90",
+            .session_archive => "91da63974ced68e1596b479409b543ae90ec8161c1612840b3e26a0eca02acb3",
+            .model_interruption => "54ed6236f058bb77a9b8039bb9a2bc144a5066bf742084c9ceb7ff7e73f890e1",
+            .permission_decision => "f66bb4623f2b0d67ae3ddafb8ead166b83daf53877ab965918108eceac49a3e8",
+            .session_pin => "aa74b927c4314f8576e070e3c2cff253fa4c6aeb1de6a93410f535fd255d1230",
+            .action_background => "36da16c3d5ecd7bb88bdb3612c921f3dfc3eb2114fa974f9274e957356061b7f",
         };
         const actual = std.fmt.bytesToHex(hash.finalResult(), .lower);
         std.testing.expectEqualStrings(expected, &actual) catch |err| {

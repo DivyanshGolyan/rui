@@ -215,8 +215,6 @@ def red_command(job, cause, available, *, compile_targets=(), graph=None):
         if not compile_targets or not set(compile_targets) <= available:
             return Skipped("producer's selected compile targets are unavailable in this checkout")
         return [*build_artifact.compile_command(compile_targets, jobs=1), "--summary", "line"]
-    if name == "linux_codegen":
-        return STACK_FRAMES
     selected = matrix_targets(name.partition("(")[2].removesuffix(")"))
     targets = [target for target, _ in selected]
     if cause.zig_test:

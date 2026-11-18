@@ -4071,3 +4071,33 @@ test "derived observation payloads cover caller fields" {
         }
     }
 }
+
+test "WIR-5 released_host_info_profiles" {
+    const Case = struct { wire: []const u8, chatgpt: bool };
+    for ([_]Case{
+        .{ .wire = "9", .chatgpt = false },
+        .{ .wire = "13", .chatgpt = false },
+        .{ .wire = "13", .chatgpt = true },
+        .{ .wire = "14", .chatgpt = true },
+        .{ .wire = "15", .chatgpt = true },
+        .{ .wire = "16", .chatgpt = true },
+        .{ .wire = "17", .chatgpt = true },
+        .{ .wire = "18", .chatgpt = true },
+        .{ .wire = "20", .chatgpt = true },
+    }) |case| {
+        var selected: ?HostInfoProfile = null;
+        for (std.enums.values(HostInfoProfile)) |profile| {
+            if (profile.historical() and std.mem.eql(u8, profile.wire(), case.wire)) selected = profile;
+        }
+        const profile = selected orelse return error.MissingReleasedProfile;
+        const body = try std.fmt.allocPrint(std.testing.allocator, "{{\"version\":\"{s}\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"17\",\"intake_capacity\":\"10\",\"descriptor_limit\":\"256\",\"started_at\":\"1792918800\",\"custody_occupied\":\"3\",\"paused\":true,\"capabilities\":{{\"bash\":true,\"providers\":{{\"codex\":\"endpoint\",\"openai\":\"unserved\"{s}}}}}}}", .{ case.wire, if (case.chatgpt) ",\"chatgpt\":\"unserved\"" else "" });
+        defer std.testing.allocator.free(body);
+        const facts = try parseHostInfoForProfile(body, "/one", profile);
+        try std.testing.expectEqual(@as(usize, 17), facts.active_capacity);
+        try std.testing.expect(facts.store.eql("/one"));
+        try std.testing.expectError(error.InvalidHostInfo, parseHostInfoForProfile(body, "/other", profile));
+        const incomplete = try std.mem.replaceOwned(u8, std.testing.allocator, body, "\"paused\":true,", "");
+        defer std.testing.allocator.free(incomplete);
+        try std.testing.expectError(error.MissingField, parseHostInfoForProfile(incomplete, "/one", profile));
+    }
+}

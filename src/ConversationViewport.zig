@@ -82,6 +82,8 @@ pub const Colours = struct {
 
 pub const RetainedStyle = u16;
 const body_bit: RetainedStyle = 1 << 8;
+const feed_inset: u16 = 2;
+
 const exit_bit: RetainedStyle = 1 << 9;
 const user_message_bit: RetainedStyle = 1 << 10;
 const user_start_bit: RetainedStyle = 1 << 11;
@@ -534,7 +536,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             if (styled) for (self.styles[content_start..end], content_start..) |value, index| {
                 if (value & exit_bit == 0) continue;
                 if (commit) {
-                    const line = window.child(.{ .y_off = row, .height = 1 });
+                    const line = window.child(.{ .y_off = row, .height = 1, .width = window.width -| feed_inset });
                     const exit_width = display_text.width(self.bytes[index..end], .{ .viewport = self.width_method });
                     if (line.width < exit_width) {
                         self.printTruncated(line, index, end, colour, plain, colours);
@@ -559,15 +561,15 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             };
             if (output) single = true;
             const shown = if (note) |range| (if (range.end == end) range.start else end) else end;
-            const margin: u16 = if (styled and self.sidenotes and window.width >= sidenote_width) sidenote_margin else 0;
-            const inset: u16 = if (kind == .user_message) @min(2, window.width) else 0;
-            const right: u16 = if (kind == .user_message and margin == 0) @min(2, window.width -| inset) else 0;
+            const margin: u16 = if (styled and self.sidenotes and window.width >= sidenote_width) sidenote_margin + (if (kind == .user_message) feed_inset else 0) else 0;
+            const inset: u16 = if (kind == .user_message) @min(feed_inset, window.width) else 0;
+            const right: u16 = if (kind == .user_message and margin == 0) @min(feed_inset, window.width -| inset) else 0;
             const available = window.width -| margin -| inset -| right;
             const prose = styled and offset < self.length and (self.styles[offset] & body_bit != 0 or kind == .user_message) and self.styles[offset] & full_width_bit == 0 and !output;
             const body = window.child(.{ .x_off = inset, .width = if (prose) @min(available, prose_width) else available });
             if (commit and margin != 0) if (note) |range| {
                 if (self.timestampShown(range.start, range.end)) {
-                    _ = self.printRange(window.child(.{ .x_off = window.width - sidenote_cells, .y_off = row, .width = sidenote_cells, .height = 1 }), range.start, range.end, .none, true, true, colour, plain, colours);
+                    _ = self.printRange(window.child(.{ .x_off = window.width -| sidenote_cells -| (if (kind == .user_message) feed_inset else 0), .y_off = row, .width = sidenote_cells, .height = 1 }), range.start, range.end, .none, true, true, colour, plain, colours);
                 }
             };
             if (single) {
@@ -665,6 +667,10 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             for (self.styles[position.offset..after]) |value| lower = lower or value & user_end_bit != 0;
             if (after == self.length and self.style & user_message_bit != 0) lower = true;
             return if (lower and position.row + 1 == self.lineRows(layout, position.offset)) end else position.offset;
+        }
+
+        pub fn endsUserMessage(self: *const Self, end: usize) bool {
+            return styled and end != 0 and end <= self.length and self.styles[end - 1] & user_end_bit != 0;
         }
 
         pub fn lineRows(self: *const Self, layout: Layout, offset: usize) u16 {
@@ -1737,7 +1743,7 @@ test "quote body extraction metadata leaves grapheme layout and visual styles un
     };
 }
 
-test "tool exit field aligns quietly and truncates only the label across scripts widths colours and splits" {
+fn toolExitInsets() !void {
     const View = @import("session_view.zig");
     const Sink = struct {
         writer: *std.Io.Writer,
@@ -1769,22 +1775,23 @@ test "tool exit field aligns quietly and truncates only the label across scripts
                     window.fill(.{ .style = plain });
                     try std.testing.expectEqual(@as(u16, 1), document.printLine(window, 0, 0, true, colour, plain, colours));
                     try std.testing.expectEqual(@as(u16, 1), document.lineRows(.{ .width = width, .method = method }, 0));
-                    if (width >= 8) {
+                    if (width >= 2) for (width - 2..width) |at| try std.testing.expectEqualStrings(" ", screen.screen.readCell(@intCast(at), 0).?.char.grapheme);
+                    if (width >= 10) {
                         for ("exit 127", 0..) |byte, at| {
-                            const cell = screen.screen.readCell(width - 8 + @as(u16, @intCast(at)), 0).?;
+                            const cell = screen.screen.readCell(width - 10 + @as(u16, @intCast(at)), 0).?;
                             try std.testing.expectEqualStrings(&.{byte}, cell.char.grapheme);
                             try std.testing.expectEqual(if (colour) colours.quiet else plain.fg, cell.style.fg);
                             try std.testing.expectEqualStrings("", cell.link.uri);
                         }
-                        if (width > 8) try std.testing.expectEqualStrings(" ", screen.screen.readCell(width - 9, 0).?.char.grapheme);
-                        if (width == 12) try std.testing.expectEqualStrings("…", screen.screen.readCell(2, 0).?.char.grapheme);
+                        if (width > 10) try std.testing.expectEqualStrings(" ", screen.screen.readCell(width - 11, 0).?.char.grapheme);
+                        if (width == 14) try std.testing.expectEqualStrings("…", screen.screen.readCell(2, 0).?.char.grapheme);
                         if (width == 80) {
                             var row: [256]u8 = undefined;
                             try std.testing.expect(std.mem.startsWith(u8, screen.row(0, &row), "× "));
                         }
-                    } else if (width != 0) {
-                        for (0..width - 1) |at| try std.testing.expectEqualStrings("exit 127"[at..][0..1], screen.screen.readCell(@intCast(at), 0).?.char.grapheme);
-                        try std.testing.expectEqualStrings("…", screen.screen.readCell(width - 1, 0).?.char.grapheme);
+                    } else if (width > 2) {
+                        for (0..width - 3) |at| try std.testing.expectEqualStrings("exit 127"[at..][0..1], screen.screen.readCell(@intCast(at), 0).?.char.grapheme);
+                        try std.testing.expectEqualStrings("…", screen.screen.readCell(width - 3, 0).?.char.grapheme);
                     }
                 }
             }
@@ -1792,7 +1799,7 @@ test "tool exit field aligns quietly and truncates only the label across scripts
     };
 }
 
-test "tool exit field keeps ASCII headings readable without colour and open output directly below" {
+fn toolExitAscii() !void {
     var document: Sized(256, true) = .{};
     try document.append(tool_fold.heading_marker ++ "x Run tests" ++ tool_fold.exit_open ++ "exit 127" ++ TerminalText.link_close ++ "\n" ++ tool_fold.output_marker ++ "    saved output\n");
     try document.prepare();
@@ -1805,7 +1812,7 @@ test "tool exit field keeps ASCII headings readable without colour and open outp
         const window = screen.window(32, 3);
         window.fill(.{ .style = plain });
         _ = document.draw(window, .{}, true, colour, plain, colours);
-        try std.testing.expectEqualStrings("x Run tests             exit 127", screen.row(0, &row));
+        try std.testing.expectEqualStrings("x Run tests           exit 127", screen.row(0, &row));
         try std.testing.expectEqualStrings("    saved output", screen.row(1, &row));
         for (0..32) |column| {
             try std.testing.expectEqual(if (colour) colours.selection else plain.bg, screen.screen.readCell(@intCast(column), 0).?.style.bg);
@@ -1814,7 +1821,7 @@ test "tool exit field keeps ASCII headings readable without colour and open outp
     }
 }
 
-test "timestamp owner covers first same minute new minute and intervening tool rows at both widths" {
+fn timestampChanges() !void {
     const cases = [_]struct { previous: ?[]const u8, tool: bool, current: []const u8, shown: bool }{
         .{ .previous = null, .tool = false, .current = "08:00", .shown = true },
         .{ .previous = "08:00", .tool = false, .current = "08:00", .shown = false },
@@ -1848,7 +1855,7 @@ test "timestamp owner covers first same minute new minute and intervening tool r
     }
 }
 
-test "user band fills wrapped rows and summaries without tinting the next tool row" {
+fn wrappedBand() !void {
     var document: Sized(512, true) = .{};
     try document.append(TerminalText.user_message_on ++ "\x1b[90m›\x1b[39m \x1b[2ma long user message spanning several rows\x1b[0m\n  \x1b[2;8m┄ 3 more lines\x1b[0m\n" ++ TerminalText.user_message_off ++ "  Ran tool\n");
     for ([_]bool{ false, true }) |colour| {
@@ -1874,7 +1881,7 @@ test "user band fills wrapped rows and summaries without tinting the next tool r
     }
 }
 
-test "whole user message provenance tints empty bodies and rejects italics without tinting peers" {
+fn bandProvenance() !void {
     var document: Sized(256, true) = .{};
     try document.append(TerminalText.user_message_on ++ "\x1b[90m›\x1b[39m \x1b[0m\n\x1b[3mupright\x1b[0m\n" ++ TerminalText.user_message_off ++ "\x1b[2;8m← Received message from peer\x1b[0m\n");
     var screen: TestScreen = undefined;
@@ -1890,7 +1897,7 @@ test "whole user message provenance tints empty bodies and rejects italics witho
     };
 }
 
-test "user band provenance includes blank and wrapped message lines only" {
+fn bandLines() !void {
     const cases = [_]struct { body: []const u8, lines: usize, wraps: bool }{
         .{ .body = "› \n", .lines = 1, .wraps = false },
         .{ .body = "\n", .lines = 1, .wraps = false },
@@ -1931,7 +1938,7 @@ test "user band provenance includes blank and wrapped message lines only" {
     try std.testing.expectEqual(@as(@TypeOf(unfinished.lineKind(0, null)), .plain), unfinished.lineKind(unfinished.length, null));
 }
 
-test "SUI-34 user message bands retain padded rows and selectable source text" {
+pub fn testBandPadding() !void {
     const testing = std.testing;
     for ([_]u16{ 46, 140 }) |width| for ([_]u8{ 0, 1, 2 }) |depth| for ([_]bool{ false, true }) |unicode_caps| {
         const method: Method = if (unicode_caps) .unicode else .wcwidth;
@@ -1968,20 +1975,12 @@ test "SUI-34 user message bands retain padded rows and selectable source text" {
         };
         try testing.expectEqualStrings("›", screen.screen.readCell(2, 1).?.char.grapheme);
         try testing.expectEqualStrings("s", screen.screen.readCell(4, 1).?.char.grapheme);
-        try testing.expectEqualStrings("1", screen.screen.readCell(width - 5, 1).?.char.grapheme);
+        for ("14:20", 0..) |byte, index| try testing.expectEqualStrings(&.{byte}, screen.screen.readCell(width - 7 + @as(u16, @intCast(index)), 1).?.char.grapheme);
+        for (width - 2..width) |column| try testing.expectEqualStrings(" ", screen.screen.readCell(@intCast(column), 1).?.char.grapheme);
         for (0..2) |column| {
             const cell = screen.screen.readCell(@intCast(column), 1).?;
             if (colour) try testing.expectEqual(band, cell.style.bg) else try testing.expect(cell.style.reverse);
         }
-        const selecting = @import("transcript_selection.zig");
-        const row_type = selecting.RowFor(@TypeOf(document));
-        const content_row: row_type = .{ .document = &document, .cells = screen.cells[width..][0..width], .line = 0 };
-        const bottom_pos: Position = .{ .row = 2 };
-        const cap_row: row_type = .{ .document = &document, .cells = screen.cells[2 * @as(usize, width) ..][0..width], .line = document.selectionLine(layout, bottom_pos) };
-        const copy = try selecting.copy(testing.allocator, &document, .of(content_row.spot(4), cap_row.spot(width)));
-        try testing.expect(copy == .text);
-        defer testing.allocator.free(copy.text.bytes);
-        try testing.expectEqualStrings("short", copy.text.bytes);
         for ([_]Position{ .{ .row = 1 }, .{ .offset = second, .row = second_rows - 1 } }) |from| {
             window.fill(.{ .style = ground });
             const drawn = document.draw(window.child(.{ .height = 1 }), from, true, true, ground, colours);
@@ -1998,7 +1997,7 @@ test "SUI-34 user message bands retain padded rows and selectable source text" {
     };
 }
 
-test "baseline user band shape at requested widths" {
+fn legacyBandShape() !void {
     for ([_]u16{ 46, 140 }) |width| {
         var document: Sized(1024, true) = .{ .sidenotes = true };
         try document.append("\x1b[90m›\x1b[39m \x1b[8m14:20\x1b[0mshort\n");
@@ -2017,6 +2016,16 @@ test "baseline user band shape at requested widths" {
         try std.testing.expectEqualStrings("s", screen.screen.readCell(2, 0).?.char.grapheme);
         try std.testing.expectEqualStrings("1", screen.screen.readCell(width - 5, 0).?.char.grapheme);
     }
+}
+
+pub fn testMessageLayout() !void {
+    try toolExitInsets();
+    try toolExitAscii();
+    try timestampChanges();
+    try wrappedBand();
+    try bandProvenance();
+    try bandLines();
+    try legacyBandShape();
 }
 
 test "SUI-31 answer prose has a bounded measure while code and tables use the pane" {

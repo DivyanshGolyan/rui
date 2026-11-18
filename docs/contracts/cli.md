@@ -22,9 +22,9 @@ The CLI uses shallow resource-first commands with one canonical spelling per ope
 
 | Resource | Operations |
 | --- | --- |
-| `session` | `start`, `configure`, `send`, `inspect`, `list`, `stop`, `interrupt-model`, `read-conversation`, human `resume` |
+| `session` | `start`, `configure`, `send`, `inspect`, `list`, `stop`, `interrupt-model`, `read-conversation`, `inspect-part`, `read-image-part`, human `resume` |
 | `request` | `inspect`, `wait`, `recover`, `read-result`, `list` |
-| `action` | `inspect`, `allow`, `deny`, `background`, `stop`, explicit saved-content reads |
+| `action` | `inspect`, `allow`, `deny`, `background`, `stop`, `inspect-part`, `read-image-part`, explicit saved-content reads |
 | `host` | `start`, `stop`, `status`, `serve` |
 | `defaults` | `inspect`, `configure` |
 | `auth` | explicit operator `login` |
