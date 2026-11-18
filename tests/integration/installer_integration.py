@@ -23,6 +23,7 @@ import release
 
 TEMPLATE = (ROOT / "release/install.sh").read_text()
 PUBLISH = (ROOT / "release/publish.sh").read_text()
+POLICY = release.download_policy((ROOT / "src/download_policy.zig").read_text())
 PLATFORM = os_semantics.native_release_target()
 
 
@@ -167,7 +168,7 @@ shutil.copyfile(source, args[args.index("-o") + 1])
         digests = {name: "0" * 64 for name in release.PLATFORMS}
         digests[PLATFORM] = digest or self.archive(version)
         script = self.root / f"install-{version}.sh"
-        script.write_text(release.installer(TEMPLATE, version, digests, PUBLISH))
+        script.write_text(release.installer(TEMPLATE, version, digests, PUBLISH, POLICY))
         return subprocess.run(["sh", str(script), *args], cwd=self.root, env={**self.environment, **environment},
                               capture_output=True, text=True, timeout=30)
 
@@ -581,7 +582,7 @@ shutil.copyfile(source, args[args.index("-o") + 1])
                 digests = {name: "0" * 64 for name in release.PLATFORMS}
                 digests[PLATFORM] = self.archive(version)
                 installer = self.root / "served-installer.sh"
-                installer.write_text(release.installer(TEMPLATE, version, digests, PUBLISH))
+                installer.write_text(release.installer(TEMPLATE, version, digests, PUBLISH, POLICY))
                 env = {**self.environment, "TEST_INSTALLER": str(installer), "TEST_CURL_CODES": "[0, 6, 0]",
                        "TMPDIR": str(self.root)}
                 result = subprocess.run(["sh", "-c", recovery], cwd=self.root, env=env,
