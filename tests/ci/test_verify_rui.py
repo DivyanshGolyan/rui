@@ -1375,13 +1375,13 @@ while True:
     def test_default_frames_use_plain_endings_and_active_tool_marks(self):
         scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
         states = {state["name"]: state for state in scenario["states"]}
-        for name, words in (("stopped", "■ Stopped"),
+        for name, words in (("stopped", "▪ Stopped"),
                             ("chat-failed", "× Model reply unreadable · ctrl+r retries")):
             with self.subTest(state=name):
                 self.assertEqual(states[name]["steps"], [{"wait": words}])
                 self.assertEqual(states[name]["expect"], [words])
         self.assertEqual(states["tools-running"]["expect"],
-                         ["⠹ Build the docs", "Run the slow tests", "ctrl+x stop"])
+                         ["◝ Build the docs", "Run the slow tests", "ctrl+x stop"])
 
     def test_default_frames_cover_inline_tool_folds(self):
         scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
@@ -1533,12 +1533,12 @@ while True:
         self.assertEqual(state["sizes"], [(140, 40)])
         self.assertEqual(state["steps"], [
             {"send": {"to": state["open"], "text": "long bash", "wait": False}},
-            {"wait": "⠹ Sleep eight seconds"}, {"keys": ["C-x"]},
-            {"wait": "■ Stopped", "timeout": 60},
+            {"wait": "◝ Sleep eight seconds"}, {"keys": ["C-x"]},
+            {"wait": "▪ Stopped", "timeout": 60},
         ])
-        self.assertEqual(state["expect"], ["■ Stopped", "   Stopped"])
+        self.assertEqual(state["expect"], ["▪ Stopped", "   Stopped"])
         self.assertTrue(state["first_frame"])
-        self.assertEqual(state["expect_next"], {"■ Stop the slow job": "   Stopped"})
+        self.assertEqual(state["expect_next"], {"▪ Stop the slow job": "   Stopped"})
         narrow = states["stop-narrow"]
         self.assertEqual(narrow["sizes"], [(46, 30)])
         self.assertNotEqual(narrow["open"], state["open"])
@@ -1546,7 +1546,7 @@ while True:
         self.assertEqual(narrow["cast"][0]["messages"], ["Ready."])
         self.assertEqual(narrow["steps"][0], {"send": {"to": narrow["open"], "text": "long bash", "wait": False}})
         self.assertEqual(narrow["steps"][1:], state["steps"][1:])
-        self.assertEqual(narrow["expect"], ["■ Stopped"])
+        self.assertEqual(narrow["expect"], ["▪ Stopped"])
         self.assertIn("ctrl+x stop", narrow["absent"])
         self.assertEqual(state["absent"], ["Stopping"])
         stopped = states["stopped"]
@@ -2231,10 +2231,10 @@ while True:
     def test_capture_expectations_over_sizes_and_state_transitions(self):
         capture = self.helper["frame_capture"]
         cases = [
-            ("stop-clean", {"steps": [{"wait": "■ Stopped"}], "absent": ["Stopping"]},
-             ["■ Stopped", "■ Stopped"], [None, None]),
-            ("stop-stale", {"steps": [{"wait": "■ Stopped"}], "absent": ["Stopping"]},
-             ["■ Stopped  Stopping…", "■ Stopped  Stopping…"],
+            ("stop-clean", {"steps": [{"wait": "▪ Stopped"}], "absent": ["Stopping"]},
+             ["▪ Stopped", "▪ Stopped"], [None, None]),
+            ("stop-stale", {"steps": [{"wait": "▪ Stopped"}], "absent": ["Stopping"]},
+             ["▪ Stopped  Stopping…", "▪ Stopped  Stopping…"],
              ["unexpected on screen: Stopping", "unexpected on screen: Stopping"]),
             ("raw-archive-id", {"steps": [], "absent": ["{session:Archive audit}"]},
              ["Archived tz05sr", "Archived Archive audit"],
@@ -2280,14 +2280,14 @@ while True:
     def test_delayed_stop_ending_with_stale_stopping_fails_saved_captures(self):
         state = next(state for state in self.helper["load_scenario"](SCRIPT.with_name("frames.json"))["states"]
                      if state["name"] == "stop")
-        stale = "■ Stopped\n   Stopped\n   Stopping…\n"
+        stale = "▪ Stopped\n   Stopped\n   Stopping…\n"
         run = types.SimpleNamespace(meta={"sha": "a" * 40}, store="/unused/store", sid=lambda _label: "session",
                                     rui_cmd=lambda *_args, **_kw: types.SimpleNamespace(returncode=0))
         terminal = types.SimpleNamespace(frame=committed(stale))
         ready = self.helper["frame_ready"]
         def wait(predicate, *_args, **_kwargs):
             self.assertFalse(predicate(types.SimpleNamespace(completed=stale)))
-            self.assertTrue(predicate(types.SimpleNamespace(completed="■ Stopped\n   Stopped")))
+            self.assertTrue(predicate(types.SimpleNamespace(completed="▪ Stopped\n   Stopped")))
         terminal.wait = wait
         ready(terminal, {**state, "first_frame": False, "expect_next": {}})
         with tempfile.TemporaryDirectory() as temp:
@@ -2306,7 +2306,7 @@ while True:
         self.helper["frame_ready"](terminal, state)
         terminal.wait.assert_not_called()
         failure = self.helper["frame_row_failure"]
-        wrong = "■ Stop the slow job  now\n   Old completed answer\n■ Another Session\n   Stopped\n■ Stopped"
+        wrong = "▪ Stop the slow job  now\n   Old completed answer\n▪ Another Session\n   Stopped\n▪ Stopped"
         self.assertIsNotNone(failure(state, wrong))
         self.assertIsNone(failure(state, wrong.replace("Old completed answer", "Stopped")))
 
