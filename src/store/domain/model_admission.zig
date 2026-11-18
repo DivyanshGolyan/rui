@@ -686,7 +686,7 @@ pub const PartsPressure = struct {
             }
             const cursor = self.cursor.?.value;
             switch (try cursor.step(a)) {
-                .raw => {},
+                .raw, .certified => {},
                 .rows => try store_access.runAs(a, error.CorruptStore),
                 .part, .done => unreachable, // Stop after complete certification.
             }

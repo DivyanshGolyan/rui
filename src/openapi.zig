@@ -194,17 +194,17 @@ pub const routes = [_]Route{
         .reply = .bytes,
     },
     .{
-        .path = "/v1/public-part",
-        .kind = .public_part,
-        .summary = "Typed metadata for an ordered Message or Action Resolution part.",
-        .variants = &.{variant(protocol.public_part_request, .{})},
-        .reply = jsonReply(.{ protocol.public_part_reply.head ++ protocol.public_part_reply.missing, protocol.public_part_reply.head ++ protocol.public_part_reply.text, protocol.public_part_reply.head ++ protocol.public_part_reply.image }),
+        .path = "/v1/public-parts",
+        .kind = .public_parts,
+        .summary = "The complete certified, ordered part list of a Message or Action Resolution parts value, addressed by its owner in the Session.",
+        .variants = &.{variant(protocol.public_parts_request, .{.{ 2, "{\"message\":\"1\"}" }})},
+        .reply = jsonReply(.{protocol.public_parts_reply.head ++ .{ListOf(PublicPart)} ++ protocol.public_parts_reply.tail}),
     },
     .{
-        .path = "/v1/public-part-bytes",
-        .kind = .public_part_bytes,
-        .summary = "Exact bytes of one image part.",
-        .variants = &.{variant(protocol.public_part_bytes_request, .{})},
+        .path = "/v1/public-part-content",
+        .kind = .public_part_content,
+        .summary = "The exact bytes of one part of an owner's parts value, framed as conversation content.",
+        .variants = &.{variant(protocol.public_part_content_request.head ++ .{Optional(protocol.public_part_content_request.stream)} ++ protocol.public_part_content_request.tail, .{ .{ 2, "{\"action\":\"1\"}" }, .{ 4, "0" } })},
         .reply = .bytes,
     },
     .{
@@ -282,6 +282,12 @@ const SenderSchema = struct {
     pub fn openapi_example(out: *std.Io.Writer) !void {
         try out.writeAll("null");
     }
+};
+
+/// One certified part in a `public_parts` reply: Text or Image metadata and its Store content identity.
+const PublicPart = struct {
+    pub const openapi_name = "PublicPart";
+    pub const openapi_shapes = .{ protocol.public_parts_reply.text, protocol.public_parts_reply.image };
 };
 
 fn ListOf(comptime item: anytype) type {
@@ -1609,7 +1615,7 @@ fn matches(pattern: []const u8, text: []const u8) bool {
     return true;
 }
 
-test "replies the Host renders conform to their schemas" {
+test "WIR-4 published_wire_shapes: replies the Host renders conform to their schemas" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var document: Document = .init(arena.allocator());
@@ -1688,6 +1694,23 @@ test "replies the Host renders conform to their schemas" {
     try row.writeJson(&out.writer);
     try protocol.writeShape(&out.writer, protocol.session_list_reply.last_tail, .{ protocol.ListDelta.full, "x" });
     try Case.check(schemas, "ListSessionsReply", out.written(), a);
+
+    // A parts list for each owner: text and image parts, an image with and without a name.
+    const parts_reply = protocol.public_parts_reply;
+    for ([_]protocol.content_value.Owner{ .{ .message = 1 }, .{ .action = std.math.maxInt(i64) } }) |owner| {
+        out.clearRetainingCapacity();
+        try protocol.writeShape(&out.writer, parts_reply.head, .{ "k7m2qx", protocol.ContentValueJson{ .value = .{ .parts = .{ .identity = .{ .length = 99, .digest = @splat(2) }, .owner = owner } } } });
+        try protocol.writeShape(&out.writer, parts_reply.text, .{ @as(u64, 0), @as(u64, 0), @as([32]u8, @splat(3)) });
+        try out.writer.writeAll(",");
+        try protocol.writeShape(&out.writer, parts_reply.image, .{ @as(u64, 1), "image/png", @as(u64, 1), @as(u64, 1), @as(?[]const u8, "cat \"雪\".png"), @as(u64, 67), @as([32]u8, @splat(4)) });
+        try out.writer.writeAll(",");
+        try protocol.writeShape(&out.writer, parts_reply.image, .{ @as(u64, 2), "image/jpeg", @as(u64, std.math.maxInt(u32)), @as(u64, 2), @as(?[]const u8, null), @as(u64, 5), @as([32]u8, @splat(5)) });
+        try protocol.writeShape(&out.writer, parts_reply.tail, .{});
+        try Case.check(schemas, "PublicPartsReply", out.written(), a);
+    }
+    // The schema refuses a list that names an unknown part type.
+    const unknown = try std.mem.replaceOwned(u8, a, out.written(), "\"type\":\"text\"", "\"type\":\"audio\"");
+    try std.testing.expect(!conforms(schemas, schemas.get("PublicPartsReply").?, try std.json.parseFromSliceLeaky(Value, a, unknown, .{})));
 
     try store.checkSessionReportsForTesting(Case{ .schemas = schemas, .allocator = a });
 }

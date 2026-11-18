@@ -3,6 +3,7 @@ const utf8_validation = @import("utf8_validation.zig");
 const socket_os = @import("os/socket.zig");
 const platform = @import("platform.zig");
 const protocol = @import("protocol.zig");
+const content_value = @import("content_value.zig");
 pub const activity_reply = @import("activity_reply.zig");
 const configure_input = @import("configure_input.zig");
 const ConfigureInput = configure_input.ConfigureInput;
@@ -348,35 +349,32 @@ pub const Requests = struct {
         return page;
     }
 
-    pub fn readPublicPart(self: Requests, store_path: []const u8, session: []const u8, target: protocol.PublicPartTarget, ordinal: u64, sink: anytype, reply_buffer: *ReplyBuffer) !protocol_reply.ReportReply {
+    /// The owner's whole certified part list, streamed into `sink` (a report scratch file);
+    /// decode it with `protocol_reply.PublicPartsReply`.
+    pub fn readPublicParts(self: Requests, store_path: []const u8, session: []const u8, owner: content_value.Owner, sink: anytype, reply_buffer: *ReplyBuffer) !protocol_reply.ReportReply {
         reply_buffer.len = 0;
         try self.check();
         try protocol_reply.validateIdentityInputs("", session);
-        const id = switch (target) {
-            inline else => |value| value,
-        };
-        if (id == 0 or id > std.math.maxInt(i64) or ordinal > @import("input_parts.zig").max_parts) return error.InvalidTarget;
+        if (owner.id() == 0 or owner.id() > std.math.maxInt(i64)) return error.InvalidTarget;
         const paths = try resolveClientPaths(self.io, store_path);
         var body: protocol.RequestBuffer = .{};
-        try body.appendShape(protocol.public_part_request, .{ paths.store_identity.slice(), session, id, ordinal, std.meta.activeTag(target) });
-        const fd = try openRead(self, &paths, "/v1/public-part", body.slice());
+        try body.appendShape(protocol.public_parts_request, .{ paths.store_identity.slice(), session, protocol.OwnerJson{ .owner = owner } });
+        const fd = try openRead(self, &paths, "/v1/public-parts", body.slice());
         defer closeSocket(self.io, fd);
         return readReportResponse(self, fd, sink, reply_buffer);
     }
 
-    pub fn readPublicPartBytes(self: Requests, store_path: []const u8, session: []const u8, target: protocol.PublicPartTarget, ordinal: u64, sink: anytype) !?protocol_reply.ReadFailure {
+    /// One part's whole stream; its length and digest must match the certified `part`.
+    pub fn readPublicPartContent(self: Requests, store_path: []const u8, session: []const u8, owner: content_value.Owner, part: content_value.Part, sink: anytype) !?protocol_reply.ReadFailure {
         try self.check();
         try protocol_reply.validateIdentityInputs("", session);
-        const id = switch (target) {
-            inline else => |value| value,
-        };
-        if (id == 0 or id > std.math.maxInt(i64) or ordinal > @import("input_parts.zig").max_parts) return error.InvalidTarget;
+        if (owner.id() == 0 or owner.id() > std.math.maxInt(i64) or part.ordinal >= @import("input_parts.zig").max_parts) return error.InvalidTarget;
         const paths = try resolveClientPaths(self.io, store_path);
         var body: protocol.RequestBuffer = .{};
-        try body.appendShape(protocol.public_part_bytes_request, .{ paths.store_identity.slice(), session, id, ordinal, std.meta.activeTag(target) });
-        const fd = try openRead(self, &paths, "/v1/public-part-bytes", body.slice());
+        try body.appendShape(protocol.public_part_content_request.all, .{ paths.store_identity.slice(), session, protocol.OwnerJson{ .owner = owner }, part.ordinal, 0 });
+        const fd = try openRead(self, &paths, "/v1/public-part-content", body.slice());
         defer closeSocket(self.io, fd);
-        return readPublicContentResponse(self, fd, null, sink);
+        return readPublicContentResponse(self, fd, .{ .bytes = part.reference.length, .digest = part.reference.digest }, sink);
     }
 
     pub fn readActivityContent(self: Requests, store_path: []const u8, session: []const u8, position: u64, ordinal: u64, expected: ?protocol_reply.CommandObservation.ContentReference, sink: anytype) !?protocol_reply.ReadFailure {

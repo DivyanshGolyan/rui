@@ -144,6 +144,7 @@ test "Store entry points queue and fence only through canonical access" {
         @embedFile("obligation.zig"),
         @embedFile("observation.zig"),
         @embedFile("preset.zig"),
+        @embedFile("public_parts.zig"),
         @embedFile("report.zig"),
         @embedFile("retry.zig"),
         @embedFile("round_budget.zig"),
