@@ -373,6 +373,11 @@ pub fn next(self: *Retry, now: i64) ?u64 {
 
 See the [retry policy notes](https://example.com/docs/retry-policy).
 """
+    if "local link answer" in text:
+        return """The deadline check lives in [retry.zig](~/code/rui/src/retry.zig:42), and the caller is [fetch.zig](/srv/rui/src/fetch.zig).
+
+See the [retry policy notes](https://example.com/docs/retry-policy) for the reasoning.
+"""
     if "rich answer" in text:
         return """The retry loop sleeps before it checks the deadline, so a request that is already late still waits one more backoff.
 
@@ -455,6 +460,7 @@ def fixture_main(args):
       * text containing "invalid output": a stream that is not JSON, so the Turn fails
       * text containing "rate limit": HTTP 429 with Retry-After 8 the first time, then the echo answer
       * text containing "rich answer": markdown with a heading, list, code, table and link
+      * text containing "local link answer": Markdown links to local files with a line suffix
       * text containing "long answer": a fourteen-step answer
       * otherwise: "Fixture answer N: received <json of the exact text>" (echo), or realistic prose
     Unbounded: it never exhausts, so extra submissions stay visible instead of failing.
