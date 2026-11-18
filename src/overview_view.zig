@@ -679,7 +679,7 @@ pub const State = struct {
     sidebar_rule: ?u16 = null,
     launch: enum { sizing, waiting, creating, done } = .done,
     presentation: union(enum) { done, holding: u64, released } = .done,
-    presentation_deadline_elapsed: bool = false,
+    presentation_fell_back: bool = false,
 
     host_line: bool = false,
 
@@ -806,7 +806,7 @@ pub const State = struct {
     }
 
     pub fn hidesOverview(self: *const State) bool {
-        return !self.presentation_deadline_elapsed and (self.launch == .waiting or self.launch == .creating);
+        return !self.presentation_fell_back and (self.launch == .waiting or self.launch == .creating);
     }
 
     pub fn creating(self: *const State) bool {
@@ -1353,7 +1353,7 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
         .presentation_tick => |frame| if (state.presentation == .holding) {
             const deadline = state.presentation.holding;
             if (frame.now_ms >= deadline or frame.host_unavailable or frame.list_visible == false) {
-                state.presentation_deadline_elapsed = frame.now_ms >= deadline;
+                state.presentation_fell_back = true;
                 releaseInitialPresentation(state, &effects);
             }
         },
@@ -6536,6 +6536,7 @@ test "initial presentation core releases for live answer deadline failure and Ho
                 const lost = try step(&state, .{ .presentation_tick = .{ .now_ms = 1001, .list_visible = true, .host_unavailable = true } });
                 try std.testing.expect(lost.redraw);
                 try std.testing.expect(if (width >= 100) state.launch == .waiting else state.launch == .done);
+                try std.testing.expect(!state.hidesOverview());
             },
         }
         try std.testing.expect(state.initialPresentation(true) != .holding);
