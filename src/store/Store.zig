@@ -780,6 +780,18 @@ pub const Store = struct {
         return self.noteControl(transition.apply(self, command_domain.DecidePermission, .{ .command = command, .denial_reason = "declined: a new message arrived; ask again if still needed" }, faults) catch .infrastructure_failure);
     }
 
+    pub fn publishActionValue(self: *Store, handle: []const u8, key: []const u8, payload: []const u8) !@import("domain/action_value.zig").Result {
+        return self.queue().write(publishActionValueHeld, .{ self, handle, key, payload, Faults{} });
+    }
+
+    pub fn publishActionValueForTesting(self: *Store, handle: []const u8, key: []const u8, payload: []const u8, faults: Faults) !@import("domain/action_value.zig").Result {
+        return self.queue().write(publishActionValueHeld, .{ self, handle, key, payload, faults });
+    }
+
+    fn publishActionValueHeld(self: *Store, handle: []const u8, key: []const u8, payload: []const u8, faults: Faults) !@import("domain/action_value.zig").Result {
+        return transition.apply(self, @import("domain/action_value.zig").Publish, .{ .handle = handle, .key = key, .bytes = payload }, faults);
+    }
+
     pub fn backgroundAction(self: *Store, source: action_control_domain.Control.Source, faults: Faults) @import("../action_control.zig").Reply {
         EntryTrace.fromControl(faults.control_trace).mark(.requested);
         return self.queue().write(backgroundActionHeld, .{ self, source, faults });
@@ -2122,30 +2134,68 @@ fn batchControl(self: *Store, control: write_batch.Control) !void {
     }
 }
 
-pub fn begin(self: *Store) !void {
-    if (self.batch == .none or self.batch == .ready)
-        std.debug.assert(self.identities().taken.count() == 0 and self.identities().second == 0);
-    const step = write_batch.begin(batchState(self));
-    if (step.control) |control| try batchControl(self, control);
-    switch (self.batch) {
-        .ready => self.batch = step.then.phase,
-        .open => self.savepoint = step.then.savepoint,
-        else => {},
+const BatchExecutor = struct {
+    store: *Store,
+
+    pub fn currentState(executor: *BatchExecutor) write_batch.State {
+        return batchState(executor.store);
     }
+
+    pub fn apply(executor: *BatchExecutor, state: write_batch.State) void {
+        write_batch.apply(&executor.store.batch, &executor.store.savepoint, state);
+    }
+
+    pub fn verifyIdentities(executor: *BatchExecutor) void {
+        const values = executor.store.identities();
+        std.debug.assert(values.taken.count() == 0 and values.second == 0);
+    }
+
+    pub fn resetIdentities(executor: *BatchExecutor) void {
+        const values = executor.store.identities();
+        values.taken = .empty;
+        values.second = 0;
+    }
+
+    pub fn control(executor: *BatchExecutor, which: write_batch.Control) !void {
+        try batchControl(executor.store, which);
+    }
+
+    pub fn inTransaction(executor: *BatchExecutor) bool {
+        return executor.store.engine.inTransaction();
+    }
+
+    pub fn resetSecond(executor: *BatchExecutor) void {
+        executor.store.identities().second = 0;
+    }
+
+    pub fn reload(executor: *BatchExecutor) !void {
+        const store = executor.store;
+        try loadIdentities(store, store.identities().taken);
+    }
+
+    pub fn finishCommit(executor: *BatchExecutor) !void {
+        try executor.store.engine.control(.commit);
+    }
+
+    pub fn finishFailure(executor: *BatchExecutor, err: anyerror) void {
+        _ = @errorName(fence(executor.store, err));
+        stderr.print("rui: Store batch commit failed: {s}\n", .{@errorName(err)});
+    }
+
+    pub fn announce(executor: *BatchExecutor) void {
+        const values = executor.store.identities();
+        for (values.admitted[0..values.admitted_len]) |*admission| admission.tell();
+    }
+};
+
+pub fn begin(self: *Store) !void {
+    var executor: BatchExecutor = .{ .store = self };
+    try write_batch.executeBegin(&executor, batchState(self));
 }
 
 pub fn commit(self: *Store) !void {
-    const step = write_batch.commit(batchState(self), if (self.batch == .first) self.engine.inTransaction() else false);
-    if (step.control) |control| try batchControl(self, control);
-    switch (self.batch) {
-        .first => self.batch = step.then.phase,
-        .open => self.savepoint = step.then.savepoint,
-        else => {},
-    }
-    if (self.batch == .none) {
-        self.identities().taken = .empty;
-        self.identities().second = 0;
-    }
+    var executor: BatchExecutor = .{ .store = self };
+    try write_batch.executeCommit(&executor, batchState(self));
 }
 
 pub fn commitsWithWrites(self: *Store) bool {
@@ -2198,14 +2248,15 @@ fn batchClosed(context: *anyopaque) bool {
 
 fn startBatch(context: *anyopaque) void {
     const self: *Store = @ptrCast(@alignCast(context));
-    self.batch = write_batch.start(batchState(self)).phase;
+    var executor: BatchExecutor = .{ .store = self };
+    write_batch.executeStart(&executor, batchState(self)) catch unreachable;
 }
 
 fn finishBatch(context: *anyopaque) bool {
     const self: *Store = @ptrCast(@alignCast(context));
     std.debug.assert(!self.savepoint);
+    const plan = write_batch.finish(batchState(self));
     defer {
-        self.batch = .none;
         self.identities().taken = .empty;
         self.identities().second = 0;
         self.identities().admitted_len = 0;
@@ -2214,13 +2265,8 @@ fn finishBatch(context: *anyopaque) bool {
             self.engine.releaseUnusedMemory(model_facts_domain.save_statements);
         }
     }
-    commitBatch(self) catch |err| {
-        stderr.print("rui: Store batch commit failed: {s}\n", .{@errorName(err)});
-        return false;
-    };
-    const values = self.identities();
-    for (values.admitted[0..values.admitted_len]) |*admission| admission.tell();
-    return true;
+    var executor: BatchExecutor = .{ .store = self };
+    return write_batch.executeFinish(&executor, plan);
 }
 
 pub fn admitted(self: *Store, callback: Store.MessageCommitted, admission: Store.MessageAdmission) void {
@@ -2281,14 +2327,6 @@ fn recoverRerun(context: *anyopaque) bool {
         _ = @errorName(fence(self, err));
     };
     return false;
-}
-
-fn commitBatch(self: *Store) !void {
-    switch (write_batch.finish(batchState(self))) {
-        .nothing => {},
-        .commit => self.engine.control(.commit) catch |err| return fence(self, err),
-        .rollback_failed => return fence(self, error.CanonicalRollbackFailed),
-    }
 }
 
 pub fn transactionSecond(self: *Store) error{ClockReadFailed}!i64 {
@@ -2474,23 +2512,8 @@ fn loadIdentities(self: *Store, columns: std.EnumSet(Identity)) !void {
 
 pub fn rollbackAfterError(self: *Store, faults: Faults) !void {
     self.touched.everything = true;
-    const state = batchState(self);
-    if (state.phase == .open) self.savepoint = false;
-    const plan = write_batch.rollback(state, if (state.phase == .lost) false else self.engine.inTransaction()) catch |err| {
-        if (state.phase == .open) self.batch = .lost;
-        return err;
-    };
-    errdefer if (state.phase == .first or state.phase == .open) {
-        self.batch = plan.failed.phase;
-    };
-    for (plan.controls) |maybe_control| if (maybe_control) |control| {
-        if (faults.rollback_failure) return error.CanonicalRollbackFailed;
-        batchControl(self, control) catch return error.CanonicalRollbackFailed;
-    };
-    if (plan.must_leave_transaction and self.engine.inTransaction()) return error.CanonicalRollbackFailed;
-    if (state.phase != .open) self.identities().second = 0;
-    if (plan.reload_identities) loadIdentities(self, self.identities().taken) catch return error.CanonicalRollbackFailed;
-    if (state.phase == .first) self.batch = plan.ok.phase;
+    var executor: BatchExecutor = .{ .store = self };
+    try write_batch.executeRollback(&executor, batchState(self), faults.rollback_failure);
 }
 
 pub fn readUnixMilliseconds(io: std.Io) !i64 {

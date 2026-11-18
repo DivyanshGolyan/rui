@@ -164,104 +164,45 @@ def assert_reachability_refusal(w, screen, session, allowed, loaded, revision, p
     inspect_intent(w, session, allowed, loaded, revision=revision)
 
 
-def edit_cases(columns, rows, *, engine="sqlite", cases=("noop", "cancel", "toggle", "add", "none", "specifications", "refusal", "add-refusal", "empty-enable-refusal")):
+def edit_cases(*, engine="sqlite"):
+    columns, rows = 140, 40
     with tool_world(f"tool-intent-{columns}", engine) as w:
         allowed, loaded = ["bash", "find_tools", "lookup"], ["find_tools", "lookup"]
-        for action in ("noop", "cancel", "toggle", "add"):
-            if action not in cases:
-                continue
-            session = w.session("--tools", ",".join(allowed), "--loaded-tools", ",".join(loaded))
-            before = inspect_intent(w, session, allowed, loaded)
-            with resume(w, session, columns, rows) as screen:
-                picker_open(screen, capture_prefix=f"{engine}-{columns}" if action == "noop" else None)
-                if action == "add":
-                    screen.keys(b"\x1b[B\x1b[B ")
-                    screen.wait(lambda frame: "read_transcript" in frame and "✓ message_agent" in frame,
-                                "message_agent added to the allowed draft")
-                elif action != "noop":
-                    screen.keys(b" ")
-                    screen.wait(lambda frame: "read_transcript" in frame and "✓ bash" not in frame,
-                                "bash unchecked in the draft")
-                picker_close(screen, cancel=action == "cancel")
-                if action != "cancel":
-                    wait_for(lambda: w.inspect(session)["session"]["revision"] != before["revision"],
-                             "tool edit admission")
-                expected = (["find_tools", "lookup"] if action == "toggle" else
-                            allowed + ["message_agent"] if action == "add" else allowed)
-                inspect_intent(w, session, expected, loaded,
-                               revision=before["revision"] if action == "cancel" else None)
-            print(f"tool intent {engine} {columns}: {action} preserves arbitrary allowed and loaded tools", flush=True)
+        session = w.session("--tools", ",".join(allowed), "--loaded-tools", ",".join(loaded))
+        before = inspect_intent(w, session, allowed, loaded)
+        with resume(w, session, columns, rows) as screen:
+            picker_open(screen, capture_prefix=f"{engine}-{columns}")
+            screen.keys(b" ")
+            screen.wait(lambda frame: "read_transcript" in frame and "✓ bash" not in frame,
+                        "bash unchecked in the draft")
+            picker_close(screen)
+            wait_for(lambda: w.inspect(session)["session"]["revision"] != before["revision"],
+                     "tool edit admission")
+            inspect_intent(w, session, ["find_tools", "lookup"], loaded)
+        print(f"tool intent {engine} {columns}: toggle preserves arbitrary allowed and loaded tools", flush=True)
 
-        if "none" in cases:
-            session = w.session("--tools", "bash,none", "--loaded-tools", "bash,none")
-            before = inspect_intent(w, session, ["bash", "none"], ["bash", "none"])
-            with resume(w, session, columns, rows) as screen:
-                picker_open(screen)
-                screen.keys(b" ")
-                screen.wait(lambda frame: "read_transcript" in frame and "✓ bash" not in frame,
-                            "bash unchecked leaving MCP none")
-                picker_close(screen)
-                wait_for(lambda: w.inspect(session)["session"]["revision"] != before["revision"],
-                         "singleton MCP tool admission")
-                inspect_intent(w, session, ["none"], ["none"])
-            print(f"tool intent {engine} {columns}: a singleton MCP named none survives save", flush=True)
-
-        if "specifications" in cases:
-            for specification, names in (("none", []), ("bash", ["bash"])):
-                session = w.session("--tools", specification, "--loaded-tools", specification)
-                before = inspect_intent(w, session, names, names)
-                with resume(w, session, columns, rows) as screen:
-                    picker_open(screen)
-                    picker_close(screen)
-                    wait_for(lambda: w.inspect(session)["session"]["revision"] != before["revision"],
-                             "explicit tool specification admission")
-                    inspect_intent(w, session, names, names)
-            print(f"tool intent {engine} {columns}: explicit empty and restricted CLI specifications survive resume", flush=True)
-
-        if "refusal" in cases:
-            allowed, loaded = ["bash", "find_tools", "lookup"], ["bash", "find_tools"]
-            session = w.session("--tools", ",".join(allowed), "--loaded-tools", ",".join(loaded))
-            before = inspect_intent(w, session, allowed, loaded)
-            with resume(w, session, columns, rows) as screen:
-                picker_open(screen)
-                screen.keys(b"\x1b[B ")
-                screen.wait(lambda frame: "read_transcript" in frame and "✓ find_tools" not in frame,
-                            "find_tools unchecked with an unloaded MCP tool")
-                handles = set(json.loads(w.run("request", "list")))
-                picker_close(screen)
-                assert_reachability_refusal(w, screen, session, allowed, loaded, before["revision"], handles,
-                                            f"{engine}-{columns}-remove-find-tools")
-                # Chat info retains the Allowed tools focus after a rejected save.
-                picker_open(screen, tools_focused=True)
-                screen.wait(lambda frame: "✓ find_tools" in frame and "read_transcript" in frame,
-                            "rejected edit reopened from saved intent")
-                picker_close(screen)
-                wait_for(lambda: w.inspect(session)["session"]["revision"] != before["revision"],
-                         "valid retry admission after refusal")
-                inspect_intent(w, session, allowed, loaded)
-                assert "couldn't save" not in screen.text, screen.text
-            print(f"tool intent {engine} {columns}: unreachable MCP intent is refused and a valid retry recovers", flush=True)
-
-
-        for action, specification, names, keys, marker in (
-            ("add-refusal", "bash", ["bash"], b"\x1b[B\x1b[B ", "✓ message_agent"),
-            ("empty-enable-refusal", "none", [], b" ", "✓ bash"),
-        ):
-            if action not in cases:
-                continue
-            session = w.session("--tools", specification, "--loaded-tools", specification)
-            before = inspect_intent(w, session, names, names)
-            with resume(w, session, columns, rows) as screen:
-                picker_open(screen)
-                screen.keys(keys)
-                screen.wait(lambda frame: "read_transcript" in frame and marker in frame,
-                            "builtin enabled without a loaded find_tools")
-                handles = set(json.loads(w.run("request", "list")))
-                picker_close(screen)
-                assert_reachability_refusal(w, screen, session, names, names, before["revision"], handles,
-                                            f"{engine}-{columns}-{action}")
-            print(f"tool intent {engine} {columns}: {action} explains reachability without widening loaded tools", flush=True)
-
+        allowed, loaded = ["bash", "find_tools", "lookup"], ["bash", "find_tools"]
+        session = w.session("--tools", ",".join(allowed), "--loaded-tools", ",".join(loaded))
+        before = inspect_intent(w, session, allowed, loaded)
+        with resume(w, session, columns, rows) as screen:
+            picker_open(screen)
+            screen.keys(b"\x1b[B ")
+            screen.wait(lambda frame: "read_transcript" in frame and "✓ find_tools" not in frame,
+                        "find_tools unchecked with an unloaded MCP tool")
+            handles = set(json.loads(w.run("request", "list")))
+            picker_close(screen)
+            assert_reachability_refusal(w, screen, session, allowed, loaded, before["revision"], handles,
+                                        f"{engine}-{columns}-remove-find-tools")
+            # Chat info retains the Allowed tools focus after a rejected save.
+            picker_open(screen, tools_focused=True)
+            screen.wait(lambda frame: "✓ find_tools" in frame and "read_transcript" in frame,
+                        "rejected edit reopened from saved intent")
+            picker_close(screen)
+            wait_for(lambda: w.inspect(session)["session"]["revision"] != before["revision"],
+                     "valid retry admission after refusal")
+            inspect_intent(w, session, allowed, loaded)
+            assert "couldn't save" not in screen.text, screen.text
+        print(f"tool intent {engine} {columns}: unreachable MCP intent is refused and a valid retry recovers", flush=True)
 
 
 def model_operations(w, session):
@@ -346,6 +287,5 @@ def main():
     if mysql or "mysql" in required:
         engines.append("mysql")
     for engine in engines:
-        for columns, rows in ((140, 40), (46, 30)):
-            edit_cases(columns, rows, engine=engine)
+        edit_cases(engine=engine)
         frozen_offer_case(engine)

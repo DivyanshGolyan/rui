@@ -119,6 +119,13 @@ pub const routes = [_]Route{
     commandRoute(.action_background),
     commandRoute(.action_stop),
     .{
+        .path = "/v1/action-publish",
+        .kind = .action_publish,
+        .summary = "Publishes one value from the running Action identified by its sender handle.",
+        .variants = &.{variant(protocol.action_publish_request, .{})},
+        .reply = jsonReply(.{protocol.action_publish_reply}),
+    },
+    .{
         .path = "/v1/read-action",
         .kind = .read_action,
         .summary = "Reads one Session-owned Action's status and one bounded final-result window without waiting or consuming it.",
