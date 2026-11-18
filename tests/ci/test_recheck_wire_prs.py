@@ -611,13 +611,13 @@ class AdapterTest(unittest.TestCase):
         root = Path(__file__).resolve().parents[2]
         workflow = (root / ".github/workflows/release.yml").read_text()
         job_body = workflow_job(workflow, "recheck_wire_prs")
-        self.assertIn("needs: [plan, publish]", job_body)
-        self.assertIn("if: ${{ needs.plan.outputs.version != '' && needs.publish.result == 'success' }}", job_body)
+        self.assertIn("needs: publish", job_body)
+        self.assertIn("if: ${{ inputs.version != '' && needs.publish.result == 'success' }}", job_body)
         self.assertEqual(permissions(job_body), {"actions": "write", "pull-requests": "read", "contents": "read"})
         self.assertIn("ref: ${{ github.sha }}", job_body)
         self.assertIn("persist-credentials: false", job_body)
         self.assertIn("GH_TOKEN: ${{ github.token }}", job_body)
-        self.assertIn("VERSION: ${{ needs.plan.outputs.version }}", job_body)
+        self.assertIn("VERSION: ${{ inputs.version }}", job_body)
         self.assertIn('RELEASE_PUBLISHED_AT=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/v$VERSION" --jq .published_at)',
                       job_body)
         self.assertIn("export RELEASE_PUBLISHED_AT", job_body)

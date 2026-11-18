@@ -1928,7 +1928,7 @@ test "relaunch replacement failure retains departure and deletes the handoff wit
     var bytes: [4096]u8 = undefined;
     const text = bytes[0..try output.readPositionalAll(io, &bytes, 0)];
     try std.testing.expect(std.mem.startsWith(u8, text, request.receipt));
-    try std.testing.expect(std.mem.indexOf(u8, text, "Detached. Host work continues.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Your chats keep working while you are away.") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "k7m2qx") != null);
     try std.testing.expect(std.mem.endsWith(u8, text, "rui: The new Rui could not be started.\n"));
 }

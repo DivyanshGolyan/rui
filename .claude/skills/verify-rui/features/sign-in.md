@@ -1,6 +1,6 @@
 # Sign-in and first run
 
-**Sign in to Rui** asks you to choose **ChatGPT** or **API key**. ChatGPT offers browser and device-code methods. API key opens editable **Base URL**, masked **API key** and **Model ID** fields.
+**Welcome to Rui** asks you to choose **ChatGPT** or **API key**. ChatGPT offers browser and device-code methods. API key opens editable **Base URL**, masked **API key** and **Model ID** fields.
 
 ## Sub-features
 
