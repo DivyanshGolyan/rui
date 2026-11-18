@@ -6,9 +6,9 @@ First drafts, written from the README and the contracts and checked against fixe
 | Area | Invariants |
 | --- | --- |
 | [Admission and Session stops](admission-sessions.md) | 42 |
-| [Store, Host lifetime, install and upgrade](store-host.md) | 48 |
+| [Store, Host lifetime, install and upgrade](store-host.md) | 46 |
 | [Tools, execution, recovery and resources](execution-resources.md) | 44 |
-| [Conversation, settings and model requests](conversation-model.md) | 37 |
-| [CLI, inspection, local protocol and the TypeScript client](cli-inspection.md) | 35 |
+| [Conversation, settings and model requests](conversation-model.md) | 32 |
+| [CLI, inspection, local protocol and the TypeScript client](cli-inspection.md) | 33 |
 | [Session UI and diagnostics](session-ui.md) | 38 |
-| [CI tooling and policy checks](ci-tooling.md) | 29 |
+| [CI tooling and policy checks](ci-tooling.md) | 65 |
