@@ -76,6 +76,17 @@ test "a policy argument resets with default and keeps any other spelling" {
     try std.testing.expectEqualStrings("Default", policy("Default").value.?);
 }
 
+fn expectPolicy(expected: OptionalPolicy, actual: OptionalPolicy) !void {
+    try std.testing.expectEqual(expected.present, actual.present);
+    try std.testing.expectEqual(expected.value != null, actual.value != null);
+    if (expected.value) |value| try std.testing.expectEqualStrings(value, actual.value.?);
+}
+
+fn expectNames(expected: []const []const u8, actual: []const []const u8) !void {
+    try std.testing.expectEqual(expected.len, actual.len);
+    for (expected, actual) |want, got| try std.testing.expectEqualStrings(want, got);
+}
+
 fn checkCreationCombinations() !void {
     // Independent oracle: an omitted member stays omitted, explicit empty tool
     // lists stay empty, and null policy resets stay null. Only saved choices fill.
@@ -110,10 +121,10 @@ fn checkCreationCombinations() !void {
                         try std.testing.expectEqual(mask & 2 != 0, input.loaded_tools != null);
                         if (input.loaded_tools) |tools| try std.testing.expectEqualStrings("none", tools.names[0]);
                         try std.testing.expectEqual(mask & 4 != 0, input.permission_mode.present);
-                        try std.testing.expectEqualDeep(effort, input.reasoning_effort);
+                        try expectPolicy(effort, input.reasoning_effort);
                         try std.testing.expectEqual(saved_effort, input.preferences.reasoning_effort);
                         try std.testing.expectEqual(saved_permission, input.preferences.permission_mode);
-                        try std.testing.expectEqualDeep(compact, input.compaction_trigger);
+                        try expectPolicy(compact, input.compaction_trigger);
                         try std.testing.expect(!input.provider.present and !input.model.present and !input.workspace.present);
                         try std.testing.expectEqual(mask & 8 != 0, input.parent.present);
                     }
@@ -163,8 +174,8 @@ fn checkToolIntent() !void {
     for ([_][]const []const u8{ &.{}, &.{"none"}, &.{ "bash", "mcp/arbitrary" } }) |names| {
         var input: ConfigureInput = .{ .store = "", .session = .create, .tools = .{ .names = names }, .loaded_tools = .{ .names = names } };
         input.applySavedCreation(null, null);
-        try std.testing.expectEqualDeep(names, input.tools.?.names);
-        try std.testing.expectEqualDeep(names, input.loaded_tools.?.names);
+        try expectNames(names, input.tools.?.names);
+        try expectNames(names, input.loaded_tools.?.names);
     }
     var loaded_only: ConfigureInput = .{ .store = "", .session = .create, .loaded_tools = .{ .cli = "find_tools" } };
     loaded_only.applySavedCreation(null, null);
@@ -182,8 +193,8 @@ fn checkImageToolIntent() !void {
                 .loaded_tools = if (loaded) |names| .{ .names = names } else null,
             };
             input.applySavedCreation(.max, .ask);
-            try std.testing.expectEqualDeep(allowed, input.tools.?.names);
-            if (loaded) |names| try std.testing.expectEqualDeep(names, input.loaded_tools.?.names) else try std.testing.expect(input.loaded_tools == null);
+            try expectNames(allowed, input.tools.?.names);
+            if (loaded) |names| try expectNames(names, input.loaded_tools.?.names) else try std.testing.expect(input.loaded_tools == null);
             try std.testing.expectEqual(@as(?ReasoningEffort, .max), input.preferences.reasoning_effort);
             try std.testing.expectEqual(@as(?PermissionMode, .ask), input.preferences.permission_mode);
         }
