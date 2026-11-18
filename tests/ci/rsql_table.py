@@ -1,7 +1,7 @@
 """Generate or check the Store statement table, src/store/rsql_table.zig.
 
     python3 tests/ci/rsql_table.py generate   rewrite the table from a collect build
-    python3 tests/ci/rsql_table.py check      fail when the checked-in table differs from a collect build
+    python3 tests/ci/rsql_table.py check      compare statements exactly and matching fixtures with a collect build
     python3 tests/ci/rsql_table.py fingerprint  fail when the table records other inputs than the files hold (cheap; policy)
     (either takes --zig PATH, the compiler to build with; default zig on PATH)
 
@@ -156,6 +156,40 @@ def render(records):
     return "\n".join(lines) + "\n", len(statements), len(fixtures)
 
 
+def table_error(checked_in: str, rendered: str) -> tuple[str | None, int, int]:
+    """Compare the table outside fixtures exactly, and fixtures by declaration name."""
+    error = f"src/store/rsql_table.zig differs from what the comptime path renders; run `{REGENERATE}` and commit it"
+    block_pattern = re.compile(r"^pub const fixtures = struct (?:\{\};|\{\n(?:    .*\n)*\};)$", re.M)
+    line_pattern = re.compile(r'^    pub const @("(?:[^"\\]|\\.)*"): rsql\.Template = .*;$')
+
+    def split(text):
+        matches = list(block_pattern.finditer(text))
+        if len(matches) != 1:
+            return None
+        match = matches[0]
+        lines = match.group().splitlines()[1:-1]
+        fixtures = {}
+        for line in lines:
+            declaration = line_pattern.fullmatch(line)
+            if declaration is None or declaration[1] in fixtures:
+                return None
+            fixtures[declaration[1]] = line
+        return text[:match.start()] + text[match.end():], fixtures
+
+    checked = split(checked_in)
+    fresh = split(rendered)
+    if checked is None or fresh is None:
+        return error, 0, 0
+    checked_rest, checked_fixtures = checked
+    fresh_rest, fresh_fixtures = fresh
+    missing = len(fresh_fixtures.keys() - checked_fixtures.keys())
+    unused = len(checked_fixtures.keys() - fresh_fixtures.keys())
+    if checked_rest != fresh_rest or any(checked_fixtures[name] != fresh_fixtures[name]
+                                         for name in checked_fixtures.keys() & fresh_fixtures.keys()):
+        return error, missing, unused
+    return None, missing, unused
+
+
 def collect(zig):
     with tempfile.TemporaryDirectory(prefix="rsql-table-") as prefix:
         command = [zig, "build", "ci-build", "-Dpr-ci=true", "-Drsql-collect=true", f"-Dci-targets={TARGETS}",
@@ -185,11 +219,12 @@ def main(argv):
         TABLE.write_text(text)
         print(f"{TABLE.relative_to(ROOT)}: {count} statements, {fixtures} fixture texts")
         return 0
-    if TABLE.read_text() != text:
-        print(f"{TABLE.relative_to(ROOT)} differs from what the comptime path renders; run `{REGENERATE}` and commit it",
-              file=sys.stderr)
+    error, missing, unused = table_error(TABLE.read_text(), text)
+    if error:
+        print(error, file=sys.stderr)
         return 1
-    print(f"{TABLE.relative_to(ROOT)}: {count} statements and {fixtures} fixture texts, as the comptime path renders them")
+    print(f"{TABLE.relative_to(ROOT)}: {count} statements, {fixtures} fixture texts "
+          f"({missing} missing, {unused} unused)")
     return 0
 
 
