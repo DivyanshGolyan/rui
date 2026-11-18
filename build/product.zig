@@ -5,7 +5,37 @@ const darwin = @import("darwin.zig");
 pub fn configurePauses(b: *std.Build, compile: *std.Build.Step.Compile, enabled: bool) void {
     const options = b.addOptions();
     options.addOption(bool, "test_pauses", enabled);
+    const statements = rsqlTable(b);
+    options.addOption([]const u8, "rsql_inputs", statements.inputs);
+    options.addOption(bool, "rsql_collect", statements.collect);
     compile.root_module.addOptions("build_options", options);
+}
+
+/// The files src/store/rsql.zig's comptime check and render read. Their contents fingerprint the
+/// generated statement table (src/store/rsql_table.zig): an edit to any of them makes every entry
+/// miss until tests/ci/rsql_table.py regenerates it.
+pub const rsql_table_inputs = [_][]const u8{ "src/store/rsql.zig", "src/store/schema.zig", "src/provider_name.zig", "src/change_ring.zig" };
+
+const RsqlTable = struct { inputs: []const u8, collect: bool };
+var rsql_table: ?RsqlTable = null;
+
+fn rsqlTable(b: *std.Build) RsqlTable {
+    if (rsql_table) |known| return known;
+    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    for (rsql_table_inputs) |path| {
+        const contents = b.root.root_dir.handle.readFileAlloc(b.graph.io, b.pathJoin(&.{ b.root.sub_path, path }), b.allocator, .limited(64 * 1024 * 1024)) catch
+            std.debug.panic("cannot read statement table input {s}", .{path});
+        hash.update(path);
+        hash.update(&.{0});
+        hash.update(contents);
+        hash.update(&.{0});
+    }
+    const digest = hash.finalResult();
+    rsql_table = .{
+        .inputs = b.fmt("{x}", .{digest[0..16]}),
+        .collect = b.option(bool, "rsql-collect", "Build Store statements on the comptime path and export them for tests/ci/rsql_table.py") orelse false,
+    };
+    return rsql_table.?;
 }
 
 pub fn configureUnitRoot(b: *std.Build, compile: *std.Build.Step.Compile, target: std.Build.ResolvedTarget, pinned: ?PinnedTransport) void {
