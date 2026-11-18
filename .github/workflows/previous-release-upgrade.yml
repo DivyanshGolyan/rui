@@ -90,8 +90,14 @@ jobs:
       - name: Seed the previous release's packages from the candidate's
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/previous-release/zig-pkg"
-          cp -Rn zig-pkg/. "$RUNNER_TEMP/previous-release/zig-pkg/"
+          previous="$RUNNER_TEMP/previous-release/zig-pkg"
+          mkdir -p "$previous"
+          # macOS cp -n exits 1 when it skips a file the restore already
+          # placed, so copy only the packages the restore did not bring.
+          for package in zig-pkg/*; do
+            [ -e "$package" ] || continue
+            [ -e "$previous/${package##*/}" ] || cp -R "$package" "$previous/"
+          done
       - name: Reuse the restored previous-release compilation at new inodes
         run: |
           set -euo pipefail
