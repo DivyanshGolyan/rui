@@ -2780,7 +2780,8 @@ fn yours(row: *const Row) bool {
 }
 
 fn needsPerson(state: *const State, row: *const Row) bool {
-    return ordering(state, row) == .needs_you or row.state == .failed;
+    _ = state;
+    return row.group == .needs_you or row.state == .failed;
 }
 
 fn rowQuiet(state: *const State, row: *const Row) bool {
@@ -2947,7 +2948,7 @@ const TestSession = struct {
 };
 
 fn session(ref: *const [6]u8, state: WorkState, options: TestSession) Listed {
-    const work: session_work.Work = .{ .state = state, .turn = options.turn, .first_action = options.first_action };
+    const work: session_work.Work = .{ .state = state.asOf(test_now_s * 1000), .turn = options.turn, .first_action = options.first_action };
     return .{
         .reference = ref.*,
         .read_version = options.read_version,
@@ -4410,6 +4411,10 @@ test "an observed retry's own deadline updates row order counts and wake through
         try std.testing.expectEqualStrings(&ref, &state.rows.items[state.order.items[0]].reference);
         _ = try step(&state, .{ .tick = (test_now_s + delay) * 1000 });
         try std.testing.expectEqual(Kind.pending, shownKind(&state, state.find(ref).?));
+        // Group changes only when the next Host observation serves the due retry.
+        try std.testing.expectEqual(@as(u32, 1), state.summary.counts.working);
+        try std.testing.expectEqualStrings(&ref, &state.rows.items[state.order.items[0]].reference);
+        _ = try step(&state, .{ .observed = .{ .read_version = testToken(3), .reference = ref, .work = fixtureWork(.{ .state = retry.state.asOf(state.now_ms) }), .opening = false } });
         try std.testing.expectEqual(@as(u32, 1), state.summary.counts.queued);
         try std.testing.expectEqualStrings("bbbbbb", &state.rows.items[state.order.items[0]].reference);
         _ = try step(&state, .{ .conversation = null });

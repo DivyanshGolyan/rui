@@ -4346,6 +4346,7 @@ test "overview archive effects preserve server filter, pending visibility, and r
                     .archiving => .{ .stopping = .{ .since = test_now_s } },
                     .archived => .{ .stopped = .{ .since = test_now_s, .cause = .stop } },
                 };
+                row.work = fixtureSessionWork(row.work.core());
             }
             return null;
         }
@@ -8035,6 +8036,7 @@ test "overview redraw deadline includes quota header with failed row off screen"
             const row = &page.rows[page.count - 1];
             row.work.state = .{ .failed = .{ .since = test_now_s, .code = .{}, .resets_at = test_now_s + 200 } };
             try row.work.state.failed.code.set("provider_quota");
+            row.work = fixtureSessionWork(row.work.core());
             row.provider = .codex;
             return failure;
         }
@@ -8505,6 +8507,7 @@ test "narrow empty chat exit retains every list row through spinner repaints and
                     2 => .{ .approval = .{ .since = since } },
                     else => .{ .failed = .{ .since = since, .code = .{}, .resets_at = null } },
                 };
+                row.work = fixtureSessionWork(row.work.core());
             }
             return failure;
         }
