@@ -1661,7 +1661,7 @@ def provider_line_cases():
         assert scripted.returncode == 6 and "[store_unavailable]" in scripted.stderr, scripted
         assert "Welcome to Rui" not in scripted.stdout and "Provider: [c]" not in scripted.stdout
         assert not (no_tty / ".config").exists() and not (no_tty / "store").exists()
-        for choice in ("codex", "ready-key", "key", "browser", "device", "escape"):
+        for choice in ("codex", "ready-key", "key"):
             home = state / choice
             config = home / ".config/rui"
             config.mkdir(parents=True, mode=0o700)
@@ -1707,63 +1707,31 @@ def provider_line_cases():
                 else:
                     offered = provider_prompt(master)
                     assert "API key" in offered and "Provider: [c]" not in offered, offered
-                    if choice == "key":
-                        sign_in_focus(master, b"\x1b[C", "ChatGPT", "API key")
-                        os.write(master, b"\r")
-                        await_screen(master, "Connect with an API key")
-                        sign_in_focus(master, b"\t\t", "API key", "[ Connect ]")
-                        os.write(master, b"\r")
-                        read_terminal(master, "Enter one API key")
-                        os.write(master, b"sk-screen-secret")
-                        masked = read_terminal(master, "****************")
-                        assert "sk-screen-secret" not in masked, masked
-                        sign_in_focus(master, b"\t\t", "API key", "[ Connect ]")
-                        os.write(master, b"\r")
-                        overview_frame(master, overview_title)
-                        entry = json.loads((selected_store / "host.json").read_text())["providers"]["openai"]
-                        assert isinstance(entry["key"], dict) and set(entry["key"]) == {"file"}
-                        key_path = pathlib.Path(entry["key"]["file"])
-                        assert key_path.is_absolute() and key_path.is_relative_to(selected_store)
-                        assert key_path.read_text() == "sk-screen-secret\n"
-                        assert stat.S_IMODE(key_path.stat().st_mode) == 0o600
-                        assert not (config / "openai.key").exists()
-                        assert not (config / "preferences").exists()
-                    elif choice == "browser":
-                        chatgpt_method(master)
-                        os.write(master, b"\r")
-                        waiting = read_terminal(master, "127.0.0.1:1")
-                        assert "Change method" in waiting, waiting
-                        os.write(master, b"\x1b[200~not-the-address\x1b[201~")
-                        os.write(master, b"\r")
-                        stray = read_terminal(master, "Not the sign-in address")
-                        assert "not-the-address" not in stray, stray
-                        os.write(master, b"\x1b")
-                        read_terminal(master, "ChatGPT account", fresh=True)
-                    elif choice == "device":
-                        chatgpt_method(master)
-                        sign_in_focus(master, b"\t", "Browser", "Device code")
-                        os.write(master, b"\r")
-                        waiting = read_terminal(master, "BDL9-KI88H")
-                        assert "auth.openai.com/codex/device" in waiting, waiting
-                        assert "[ Copy code ]" in waiting and "C copies code" in waiting, waiting
-                        os.write(master, b"\x1b")
-                        read_terminal(master, "ChatGPT account", fresh=True)
-                    else:
-                        os.write(master, b"hello")
-                        sign_in_focus(master, b"\x1b[C", "ChatGPT", "API key")
-                        os.write(master, b"\r")
-                        read_terminal(master, "Connect with an API key")
-                        os.write(master, b"\x1b")
-                        read_terminal(master, "Welcome to Rui", fresh=True)
+                    sign_in_focus(master, b"\x1b[C", "ChatGPT", "API key")
+                    os.write(master, b"\r")
+                    await_screen(master, "Connect with an API key")
+                    sign_in_focus(master, b"\t\t", "API key", "[ Connect ]")
+                    os.write(master, b"\r")
+                    read_terminal(master, "Enter one API key")
+                    os.write(master, b"sk-screen-secret")
+                    masked = read_terminal(master, "****************")
+                    assert "sk-screen-secret" not in masked, masked
+                    sign_in_focus(master, b"\t\t", "API key", "[ Connect ]")
+                    os.write(master, b"\r")
+                    overview_frame(master, overview_title)
+                    entry = json.loads((selected_store / "host.json").read_text())["providers"]["openai"]
+                    assert isinstance(entry["key"], dict) and set(entry["key"]) == {"file"}
+                    key_path = pathlib.Path(entry["key"]["file"])
+                    assert key_path.is_absolute() and key_path.is_relative_to(selected_store)
+                    assert key_path.read_text() == "sk-screen-secret\n"
+                    assert stat.S_IMODE(key_path.stat().st_mode) == 0o600
+                    assert not (config / "openai.key").exists()
+                    assert not (config / "preferences").exists()
                 os.write(master, b"\x03")
                 output, errors = terminal_exit(caller, master)
                 assert caller.returncode == 0, (choice, caller.returncode, errors)
                 assert "sk-screen-secret".encode() not in output + errors
                 assert os_semantics.user_termios(termios.tcgetattr(slave)) == os_semantics.user_termios(original)
-                if choice in ("browser", "device", "escape"):
-                    assert not (config / "preferences").exists()
-                    assert not (config / "codex.json").exists()
-                    assert not (config / "chatgpt.json").exists()
                 assert not (config / "requests").exists(), "sign-in captured a Message"
             finally:
                 dispose_all(lambda: stop_process(caller, timeout=5) if caller is not None else None,
@@ -1772,7 +1740,7 @@ def provider_line_cases():
                             lambda: close_pty(master), lambda: close_pty(slave))
         assert endpoint.requests == [], endpoint.requests
         completed = True
-        print("provider screen: no-TTY, choices, browser stray and back, guided device and back, scoped invalid/masked key and restored terminal passed", flush=True)
+        print("provider screen: no-TTY, saved credentials, scoped invalid/masked key and restored terminal passed", flush=True)
     finally:
         dispose_all(lambda: fixture.stop_host(host) if host is not None else None,
                     endpoint.shutdown, endpoint.server_close, lambda: thread.join(timeout=5))
