@@ -311,7 +311,7 @@ pub const Lender = struct {
     context: *anyopaque,
     step: *const fn (context: *anyopaque, work: protocol.session_work.Kind, input: overview_view.ConversationInput) anyerror!overview_view.IntentAdmission,
     service: *const fn (context: *anyopaque) anyerror!bool,
-    line: *const fn (context: *anyopaque, work: protocol.session_work.Kind) Said,
+    line: *const fn (context: *anyopaque, can_stop: bool) Said,
     observed: *const fn (context: *anyopaque, snapshot: session_list.Snapshot, opening: bool) anyerror!void,
 
     upgrade: *const fn (context: *anyopaque) session_upgrade.Upgrade,
@@ -1043,8 +1043,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
         palette = self.app_palette.widget();
     };
     const now_ms = self.nowMs();
-    const work = self.live.work.state.asOf(now_ms);
-    const said = self.lender.line(self.lender.context, work);
+    const said = self.lender.line(self.lender.context, self.live.work.actions.stop);
     const browsing = screen.view != .feed or !screen.anchor.following();
     if (screen.anchor.following()) self.new_below = 0;
     const chrome = &self.chrome;
@@ -2492,7 +2491,7 @@ fn perform(self: *Self, action: ConversationAction) !void {
         .recover => try self.recover(null),
         .stop => if (self.reading.opening) {
             self.notice = "Session is opening.";
-        } else try self.converse(.stop),
+        } else try self.converse(.{ .stop = self.live.work.actions.stop }),
         .archive => _ = try self.archive(),
     }
     self.dirty = true;
@@ -4471,7 +4470,7 @@ const quiet_overview: Lender = .{ .context = undefined, .step = struct {
         return false;
     }
 }.service, .line = struct {
-    fn line(_: *anyopaque, _: protocol.session_work.Kind) Lender.Said {
+    fn line(_: *anyopaque, _: bool) Lender.Said {
         return .{};
     }
 }.line, .observed = struct {
@@ -4508,9 +4507,9 @@ const FakeOverview = struct {
         return false;
     }
 
-    fn line(raw: *anyopaque, work: protocol.session_work.Kind) Lender.Said {
+    fn line(raw: *anyopaque, can_stop: bool) Lender.Said {
         const fake: *FakeOverview = @ptrCast(@alignCast(raw));
-        return .{ .text = fake.notice, .stoppable = work == .working and !fake.stopping };
+        return .{ .text = fake.notice, .stoppable = can_stop and !fake.stopping };
     }
 
     fn lender(fake: *FakeOverview) Lender {
@@ -4776,7 +4775,7 @@ test "app settings starts the overview's run and keeps the original submission; 
         try std.testing.expectEqualStrings("", self.input.composition().bytes);
         try std.testing.expect(self.input.queuedCommand() == null);
         try std.testing.expectEqual(session_upgrade.Phase.quiescing, self.upgradePhase());
-        const said = self.lender.line(self.lender.context, .idle);
+        const said = self.lender.line(self.lender.context, false);
         try std.testing.expect(said.text == null and said.notice == null);
         _ = try overview_view.step(&overview.state, .start_upgrade);
         try std.testing.expect(overview.state.upgrade.run.? == .checking);
@@ -4966,9 +4965,9 @@ const ArchiveOverview = struct {
         return effects.intent_admission;
     }
 
-    fn line(raw: *anyopaque, work: protocol.session_work.Kind) Lender.Said {
+    fn line(raw: *anyopaque, can_stop: bool) Lender.Said {
         const self: *ArchiveOverview = @ptrCast(@alignCast(raw));
-        const said = overview_view.conversation(&self.state, "k7m2qx".*, work);
+        const said = overview_view.conversation(&self.state, "k7m2qx".*, can_stop);
         return .{ .text = said.text, .notice = said.notice, .stoppable = said.stoppable };
     }
 
@@ -5033,7 +5032,7 @@ test "one settled stop read updates the chat and its list row without a listing"
     const row = overview.state.find(ref).?;
     try std.testing.expectEqualDeep(stopped.state, overview.state.workOf(row).state);
     try std.testing.expectEqual(stopped.turn, overview.state.workOf(row).turn);
-    try std.testing.expect(!ArchiveOverview.line(&overview, .stopped).stoppable);
+    try std.testing.expect(!ArchiveOverview.line(&overview, false).stoppable);
     try std.testing.expectEqual(@as(usize, 0), overview.state.summary.counts.working);
 }
 
@@ -5197,7 +5196,7 @@ test "conversation slash archive errors propagate and consume only the submitted
 }
 
 test "upgrade holds classify every lender intent before forwarding and allow local cancellation" {
-    const inputs: []const overview_view.ConversationInput = &.{ .stop, .{ .archive = .active }, .unarchive };
+    const inputs: []const overview_view.ConversationInput = &.{ .{ .stop = true }, .{ .archive = .active }, .unarchive };
     for (0..3) |hold| for (inputs) |input| {
         const held = try HeldFrontend.create();
         defer held.destroy();
@@ -5812,8 +5811,8 @@ const ChromeFixture = struct {
         const page = fixture.page;
         var lender = quiet_overview;
         lender.line = struct {
-            fn line(_: *anyopaque, kind: protocol.session_work.Kind) Lender.Said {
-                return .{ .notice = ChromeFixture.overview_says, .stoppable = kind == .working };
+            fn line(_: *anyopaque, can_stop: bool) Lender.Said {
+                return .{ .notice = ChromeFixture.overview_says, .stoppable = can_stop };
             }
         }.line;
         fixture.self.begin(init_, "unused", "k7m2qx", "unused", .{ .scratch = page, .action = page, .inspection = page, .details = page, .actions = .{ page, page } }, undefined, undefined, undefined, fixture.screen, &fixture.interrupted, lender);

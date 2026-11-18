@@ -2,33 +2,16 @@ const std = @import("std");
 const session_line = @import("session_line.zig");
 const session_work = @import("session_work.zig");
 
-pub const Kind = enum { approval, failed, finished };
+pub const Attention = session_work.Attention;
+pub const Kind = @FieldType(Attention, "kind");
 
-pub const Attention = struct {
-    kind: Kind,
-    turn: u64,
-    step: u64,
-
-    pub fn of(work: session_work.Work) ?Attention {
-        const turn = work.turn orelse 0;
-        const wait: Attention = .{ .kind = .approval, .turn = turn, .step = work.first_action orelse 0 };
-        return switch (work.state) {
-            .approval => wait,
-            .bash => |bash| if (bash.approvals != 0) wait else null,
-            .failed => .{ .kind = .failed, .turn = turn, .step = std.math.maxInt(u64) },
-            .finished => .{ .kind = .finished, .turn = turn, .step = std.math.maxInt(u64) },
-            else => null,
-        };
-    }
-
-    fn after(self: Attention, other: Attention) bool {
-        return self.turn > other.turn or (self.turn == other.turn and self.step > other.step);
-    }
-};
+fn attentionAfter(self: Attention, other: Attention) bool {
+    return self.turn > other.turn or (self.turn == other.turn and self.step > other.step);
+}
 
 pub fn observe(seen: *?Attention, work: session_work.Work) ?Kind {
-    const now = Attention.of(work) orelse return null;
-    if (seen.*) |held| if (!now.after(held)) return null;
+    const now = work.served_attention orelse return null;
+    if (seen.*) |held| if (!attentionAfter(now, held)) return null;
     seen.* = now;
     return now.kind;
 }
@@ -43,14 +26,7 @@ pub const Status = enum {
     failed,
 
     pub fn of(work: session_work.Work) Status {
-        return switch (work.state) {
-            .idle, .stopped => .idle,
-            .pending, .working, .retrying, .stopping => .working,
-            .bash => |bash| if (bash.approvals != 0) .blocked else .working,
-            .approval => .blocked,
-            .finished => .done,
-            .failed => .failed,
-        };
+        return statusFromServed(work.served_group.?, work.served_attention);
     }
 
     pub fn next(held: ?Status, was: ?Reading, now: Reading, opening: bool) ?Status {
@@ -66,21 +42,33 @@ pub const Status = enum {
     }
 };
 
+fn statusFromServed(group: session_work.Group, served: ?Attention) Status {
+    return switch (group) {
+        .needs_you => .blocked,
+        .working, .queued => .working,
+        .done => if (served) |value| switch (value.kind) {
+            .failed => .failed,
+            .finished => .done,
+            .approval => .idle,
+        } else .idle,
+    };
+}
+
 pub const Reading = struct {
     status: Status,
     attention: ?Attention,
 
     pub fn of(work: session_work.Work, acknowledged: ?Attention) Reading {
         const status: Status = .of(work);
-        const now: ?Attention = .of(work);
-        const seen = if (now) |reached| if (acknowledged) |opened| !reached.after(opened) else false else false;
+        const now = work.served_attention;
+        const seen = if (now) |reached| if (acknowledged) |opened| !attentionAfter(reached, opened) else false else false;
         return .{ .status = if (seen and (status == .done or status == .failed)) .idle else status, .attention = now };
     }
 
     pub fn after(self: Reading, before: Reading) bool {
         const now = self.attention orelse return false;
         const held = before.attention orelse return true;
-        return now.after(held);
+        return attentionAfter(now, held);
     }
 };
 
@@ -133,10 +121,17 @@ fn printable(buffer: []u8, bytes: []const u8) []const u8 {
 
 const Work = session_work.Work;
 
-fn news(before: ?Work, after: Work) ?Kind {
+fn fixture(work: Work) Work {
+    var result = work;
+    result.served_attention = session_work.attention(work);
+    result.served_group = session_work.group(work);
+    return result;
+}
+
+fn news(before: ?Work, next: Work) ?Kind {
     var seen: ?Attention = null;
-    if (before) |read| _ = observe(&seen, read);
-    return observe(&seen, after);
+    if (before) |read| _ = observe(&seen, fixture(read));
+    return observe(&seen, fixture(next));
 }
 
 test "each finish, failure and approval is news once, and stopping or working is none" {
@@ -158,21 +153,21 @@ test "each finish, failure and approval is news once, and stopping or working is
     try std.testing.expectEqual(Kind.approval, news(.{ .state = .{ .approval = .{ .since = 6 } }, .first_action = 7 }, .{ .state = .{ .approval = .{ .since = 6 } }, .first_action = 8 }).?);
     try std.testing.expectEqual(Kind.approval, news(beside, .{ .state = .{ .approval = .{ .since = 9 } }, .first_action = 8 }).?);
     var seen: ?Attention = null;
-    try std.testing.expectEqual(Kind.finished, observe(&seen, finished).?);
-    try std.testing.expectEqual(@as(?Kind, null), observe(&seen, .{ .state = .{ .working = .{ .since = 5 } }, .turn = 1 }));
-    try std.testing.expectEqual(@as(?Kind, null), observe(&seen, finished));
+    try std.testing.expectEqual(Kind.finished, observe(&seen, fixture(finished)).?);
+    try std.testing.expectEqual(@as(?Kind, null), observe(&seen, fixture(.{ .state = .{ .working = .{ .since = 5 } }, .turn = 1 })));
+    try std.testing.expectEqual(@as(?Kind, null), observe(&seen, fixture(finished)));
 }
 
 test "a delayed read of an earlier wait neither notifies nor makes the finish after it news again" {
     const waiting: Work = .{ .state = .{ .approval = .{ .since = 4 } }, .turn = 3, .first_action = 7 };
     const finished: Work = .{ .state = .{ .finished = .{ .since = 9 } }, .turn = 3 };
     var seen: ?Attention = null;
-    try std.testing.expectEqual(Kind.approval, observe(&seen, waiting).?);
-    try std.testing.expectEqual(Kind.finished, observe(&seen, finished).?);
-    try std.testing.expectEqual(@as(?Kind, null), observe(&seen, waiting));
-    try std.testing.expectEqual(@as(?Kind, null), observe(&seen, finished));
-    try std.testing.expectEqual(@as(?Kind, null), observe(&seen, .{ .state = .{ .failed = .{ .since = 2, .code = .{}, .resets_at = null } }, .turn = 2 }));
-    try std.testing.expectEqual(Kind.approval, observe(&seen, .{ .state = .{ .approval = .{ .since = 10 } }, .turn = 4, .first_action = 9 }).?);
+    try std.testing.expectEqual(Kind.approval, observe(&seen, fixture(waiting)).?);
+    try std.testing.expectEqual(Kind.finished, observe(&seen, fixture(finished)).?);
+    try std.testing.expectEqual(@as(?Kind, null), observe(&seen, fixture(waiting)));
+    try std.testing.expectEqual(@as(?Kind, null), observe(&seen, fixture(finished)));
+    try std.testing.expectEqual(@as(?Kind, null), observe(&seen, fixture(.{ .state = .{ .failed = .{ .since = 2, .code = .{}, .resets_at = null } }, .turn = 2 })));
+    try std.testing.expectEqual(Kind.approval, observe(&seen, fixture(.{ .state = .{ .approval = .{ .since = 10 } }, .turn = 4, .first_action = 9 })).?);
 }
 
 test "of every work state, only a finish, a failure and an Action awaiting approval want the person" {
@@ -203,15 +198,15 @@ test "of every work state, only a finish, a failure and an Action awaiting appro
 }
 
 test "a Session's program status follows its work, and a record begins only with news" {
-    const working: Reading = .of(.{ .state = .{ .working = .{ .since = 1 } }, .turn = 1 }, null);
-    const finished: Reading = .of(.{ .state = .{ .finished = .{ .since = 2 } }, .turn = 1 }, null);
-    const failed: Reading = .of(.{ .state = .{ .failed = .{ .since = 2, .code = .{}, .resets_at = null } }, .turn = 1 }, null);
-    const waiting: Reading = .of(.{ .state = .{ .approval = .{ .since = 2 } }, .turn = 1, .first_action = 4 }, null);
-    const beside: Reading = .of(.{ .state = .{ .bash = .{ .since = 2, .call = 0, .description = null, .running = 1, .approvals = 1 } }, .turn = 1, .first_action = 4 }, null);
-    const stopped: Reading = .of(.{ .state = .{ .stopped = .{ .since = 3, .cause = .stop } }, .turn = 1 }, null);
-    const idle: Reading = .of(.{ .state = .{ .idle = .{ .since = 1 } } }, null);
-    const next_turn: Reading = .of(.{ .state = .{ .finished = .{ .since = 2 } }, .turn = 2 }, null);
-    const next_wait: Reading = .of(.{ .state = .{ .approval = .{ .since = 2 } }, .turn = 1, .first_action = 5 }, null);
+    const working: Reading = .of(fixture(.{ .state = .{ .working = .{ .since = 1 } }, .turn = 1 }), null);
+    const finished: Reading = .of(fixture(.{ .state = .{ .finished = .{ .since = 2 } }, .turn = 1 }), null);
+    const failed: Reading = .of(fixture(.{ .state = .{ .failed = .{ .since = 2, .code = .{}, .resets_at = null } }, .turn = 1 }), null);
+    const waiting: Reading = .of(fixture(.{ .state = .{ .approval = .{ .since = 2 } }, .turn = 1, .first_action = 4 }), null);
+    const beside: Reading = .of(fixture(.{ .state = .{ .bash = .{ .since = 2, .call = 0, .description = null, .running = 1, .approvals = 1 } }, .turn = 1, .first_action = 4 }), null);
+    const stopped: Reading = .of(fixture(.{ .state = .{ .stopped = .{ .since = 3, .cause = .stop } }, .turn = 1 }), null);
+    const idle: Reading = .of(fixture(.{ .state = .{ .idle = .{ .since = 1 } } }), null);
+    const next_turn: Reading = .of(fixture(.{ .state = .{ .finished = .{ .since = 2 } }, .turn = 2 }), null);
+    const next_wait: Reading = .of(fixture(.{ .state = .{ .approval = .{ .since = 2 } }, .turn = 1, .first_action = 5 }), null);
     try std.testing.expectEqual(Status.working, Status.next(null, null, working, true).?);
     try std.testing.expectEqual(Status.blocked, Status.next(null, null, waiting, true).?);
     try std.testing.expectEqual(Status.blocked, Status.next(null, null, beside, true).?);
@@ -229,7 +224,7 @@ test "a Session's program status follows its work, and a record begins only with
     try std.testing.expectEqual(Status.done, Status.next(null, finished, next_turn, false).?);
     try std.testing.expectEqual(Status.blocked, Status.next(.blocked, waiting, next_wait, false).?);
     const opened_on: Attention = .{ .kind = .finished, .turn = 1, .step = std.math.maxInt(u64) };
-    const seen_finish: Reading = .of(.{ .state = .{ .finished = .{ .since = 2 } }, .turn = 1 }, opened_on);
+    const seen_finish: Reading = .of(fixture(.{ .state = .{ .finished = .{ .since = 2 } }, .turn = 1 }), opened_on);
     try std.testing.expectEqual(Status.idle, Status.next(.working, working, seen_finish, false).?);
     try std.testing.expectEqual(Status.idle, Status.next(.idle, seen_finish, seen_finish, false).?);
     try std.testing.expectEqual(Status.done, Status.next(.idle, seen_finish, .of(.{ .state = .{ .finished = .{ .since = 2 } }, .turn = 2 }, opened_on), false).?);

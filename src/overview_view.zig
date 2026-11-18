@@ -71,21 +71,19 @@ pub const Rule = struct {
     spins: bool = false,
 
     cause: bool = false,
-
-    stoppable: bool,
 };
 
 pub const rules = std.enums.EnumArray(Kind, Rule).init(.{
-    .idle = .{ .mark = .waiting, .colour = .normal, .word = "idle", .stoppable = false },
-    .pending = .{ .mark = .queued, .colour = .quiet, .stoppable = true },
-    .working = .{ .mark = .active, .colour = .ink, .spins = true, .stoppable = true },
-    .retrying = .{ .mark = .active, .colour = .ink, .says = true, .stoppable = true },
-    .bash = .{ .mark = .active, .colour = .ink, .says = true, .spins = true, .stoppable = true },
-    .approval = .{ .mark = .needs_you, .colour = .attention, .stoppable = true },
-    .stopping = .{ .mark = .active, .colour = .ink, .says = true, .stoppable = false },
-    .finished = .{ .mark = .none, .colour = .mark, .word = "finished", .stoppable = false },
-    .failed = .{ .mark = .failed, .colour = .failure, .word = "failed", .cause = true, .stoppable = false },
-    .stopped = .{ .mark = .stopped, .colour = .normal, .word = "stopped", .stoppable = false },
+    .idle = .{ .mark = .waiting, .colour = .normal, .word = "idle" },
+    .pending = .{ .mark = .queued, .colour = .quiet },
+    .working = .{ .mark = .active, .colour = .ink, .spins = true },
+    .retrying = .{ .mark = .active, .colour = .ink, .says = true },
+    .bash = .{ .mark = .active, .colour = .ink, .says = true, .spins = true },
+    .approval = .{ .mark = .needs_you, .colour = .attention },
+    .stopping = .{ .mark = .active, .colour = .ink, .says = true },
+    .finished = .{ .mark = .none, .colour = .mark, .word = "finished" },
+    .failed = .{ .mark = .failed, .colour = .failure, .word = "failed", .cause = true },
+    .stopped = .{ .mark = .stopped, .colour = .normal, .word = "stopped" },
 });
 
 pub const marks = state_marks.marks;
@@ -187,7 +185,7 @@ pub const Listed = struct {
 
     first_action: ?u64 = null,
     attention: ?session_work.Attention = null,
-    group: ?session_work.Group = null,
+    group: session_work.Group = .done,
     actions: session_work.Actions = .{},
     first: ?First = null,
 
@@ -472,7 +470,7 @@ pub const Observed = struct { read_version: Token, reference: Reference, work: s
 
 pub const ConversationInput = union(enum) {
     other,
-    stop,
+    stop: bool,
     archive: ArchiveState,
     unarchive,
     pin: bool,
@@ -565,8 +563,8 @@ pub const Said = struct {
     stoppable: bool,
 };
 
-pub fn conversation(state: *const State, ref: Reference, work: Kind) Said {
-    return .{ .text = null, .notice = footerNotice(state), .stoppable = stoppable(state, ref, work) };
+pub fn conversation(state: *const State, ref: Reference, can_stop: bool) Said {
+    return .{ .text = null, .notice = footerNotice(state), .stoppable = can_stop and state.openStop(ref) == null };
 }
 
 fn statusSaid(state: *const State, caps: Caps, buffer: *[upgrade_status.max_line_bytes]u8) ?StatusLine {
@@ -618,7 +616,7 @@ pub const Row = struct {
 
     first_action: ?u64,
     attention: ?session_work.Attention = null,
-    group: ?session_work.Group = null,
+    group: session_work.Group = .done,
     actions: session_work.Actions = .{},
     first: ?First,
     from_person_at: ?u64,
@@ -629,14 +627,6 @@ pub const Row = struct {
         return .{ .state = self.state, .turn = self.turn, .operation = self.operation, .first_action = self.first_action, .served_attention = self.attention, .served_group = self.group, .actions = self.actions };
     }
 };
-
-fn needsDecision(work: *const WorkState) bool {
-    return switch (work.*) {
-        .approval => true,
-        .bash => |bash| bash.approvals != 0,
-        else => false,
-    };
-}
 
 pub const State = struct {
     gpa: Allocator,
@@ -875,6 +865,7 @@ pub const State = struct {
                     .workspace = self.cwd,
                     .label = null,
                     .state = .{ .idle = .{ .since = 0 } },
+                    .group = .done,
                     .turn = null,
                     .first_action = null,
                     .first = null,
@@ -889,7 +880,7 @@ pub const State = struct {
             if (visible(self, row) and !before.eql(&after)) self.presentation_revision +%= 1;
             try arrange(self);
         };
-        if (!read.opening or attention.Attention.of(read.work) == null) return;
+        if (!read.opening or read.work.served_attention == null) return;
         _ = attention.observe(&(try self.record(read.reference)).acknowledged, read.work);
     }
 
@@ -1256,7 +1247,7 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
         .conversed => |input| {
             switch (input.input) {
                 .other => state.notice = null,
-                .stop => stopKey(state, .{ .reference = input.reference, .work = input.work }, &effects),
+                .stop => |can_stop| stopKey(state, .{ .reference = input.reference, .work = input.work, .can_stop = can_stop }, &effects),
                 .archive => |archive| archiveIntent(state, .{ .ask = .{ .reference = input.reference, .work = input.work, .archive = archive } }, &effects),
                 .unarchive => archiveIntent(state, .{ .restore = input.reference }, &effects),
                 .pin => |pinned| pinIntent(state, .{ .reference = input.reference, .pinned = pinned }, &effects),
@@ -1694,7 +1685,7 @@ fn settleRow(state: *const State, row: *Row, read: session_list.Snapshot) void {
     row.operation = read.work.operation;
     row.first_action = read.work.first_action;
     row.attention = read.work.served_attention;
-    row.group = read.work.served_group;
+    row.group = read.work.served_group.?;
     row.actions = read.work.actions;
     row.last_line = read.last_line;
 }
@@ -1771,7 +1762,7 @@ fn arrange(state: *State) error{OutOfMemory}!void {
         const queued = shownKind(state, row) == .pending;
         const since = @min(shownSince(state, row), latest);
         const age: u128 = if (queued) since else latest - since;
-        state.sort_keys.appendAssumeCapacity(.{ .pin_order = row.pin_order, .key = @as(u128, @backingInt(orderClass(state, row))) << 82 | age << 48 | referenceKey(row.reference), .index = @intCast(at) });
+        state.sort_keys.appendAssumeCapacity(.{ .pin_order = row.pin_order, .key = @as(u128, @backingInt(ordering(state, row))) << 82 | age << 48 | referenceKey(row.reference), .index = @intCast(at) });
     }
     std.mem.sortUnstable(SortKey, state.sort_keys.items, {}, struct {
         fn less(_: void, a: SortKey, b: SortKey) bool {
@@ -1797,13 +1788,14 @@ fn counts(state: *const State) Counts {
     return result;
 }
 
-fn orderClass(state: *const State, row: *const Row) OrderClass {
-    if (needsDecision((&row.state))) return .needs_you;
-    return switch (shownKind(state, row)) {
-        .approval => .needs_you,
-        .working, .bash, .retrying, .stopping => .working,
-        .finished, .failed, .stopped, .idle => .done,
-        .pending => .queued,
+// Only this viewer's unanswered stop overlays the Host's group.
+fn ordering(state: *const State, row: *const Row) OrderClass {
+    const group = if (state.openStop(row.reference) != null) session_work.Group.working else row.group;
+    return switch (group) {
+        .needs_you => .needs_you,
+        .working => .working,
+        .queued => .queued,
+        .done => .done,
     };
 }
 
@@ -1848,18 +1840,18 @@ fn firstLine(state: *State, result: FirstLine) error{OutOfMemory}!void {
     if (visible(state, row) and !before.eql(&after)) state.presentation_revision +%= 1;
 }
 
-const StopTarget = struct { reference: Reference, work: Kind };
+const StopTarget = struct { reference: Reference, work: Kind, can_stop: bool };
 
 fn stopKey(state: *State, exact: ?StopTarget, effects: *Effects) void {
     if (!admitHostRequest(state)) return;
     state.notice = null;
     const target = exact orelse selected: {
         const row = state.selectedRow() orelse return state.say(.attention, no_selection, .{});
-        break :selected StopTarget{ .reference = row.reference, .work = (&row.state).asOf(state.now_ms) };
+        break :selected StopTarget{ .reference = row.reference, .work = (&row.state).asOf(state.now_ms), .can_stop = row.actions.stop };
     };
     const ref = target.reference;
     const kind = kindShown(state, ref, target.work);
-    if (!rules.get(kind).stoppable) return refuseStop(state, ref, kind);
+    if (!target.can_stop or state.openStop(ref) != null) return refuseStop(state, ref, kind);
     if (state.request(.stop, ref)) effects.add(.{ .stop = ref });
 }
 
@@ -1867,20 +1859,16 @@ fn refuseStop(state: *State, ref: Reference, kind: Kind) void {
     if (state.openStop(ref)) |held| if (held.status == .unknown)
         return state.say(.attention, "! {s} stop unsure; details on exit", .{&ref});
     if (rules.get(kind).word) |word_| return state.say(.quiet, "{s} is already {s}.", .{ &ref, word_ });
-    std.debug.assert(kind == .stopping);
-    state.say(.quiet, "{s}: {s}", .{ &ref, work_line.stopping.words });
+    if (kind == .stopping) return state.say(.quiet, "{s}: {s}", .{ &ref, work_line.stopping.words });
+    state.say(.quiet, "{s} cannot be stopped now.", .{&ref});
 }
 
 fn kindShown(state: *const State, ref: Reference, work: Kind) Kind {
     return if (state.openStop(ref) != null) .stopping else work;
 }
 
-fn stoppable(state: *const State, ref: Reference, work: Kind) bool {
-    return rules.get(kindShown(state, ref, work)).stoppable;
-}
-
 fn shownKind(state: *const State, row: *const Row) Kind {
-    if (state.openStop(row.reference) == null and needsDecision((&row.state))) return .approval;
+    if (state.openStop(row.reference) == null and row.actions.decide != null) return .approval;
     return kindShown(state, row.reference, (&row.state).asOf(state.now_ms));
 }
 
@@ -2784,7 +2772,7 @@ fn yours(row: *const Row) bool {
 }
 
 fn needsPerson(state: *const State, row: *const Row) bool {
-    return orderClass(state, row) == .needs_you or row.state == .failed;
+    return ordering(state, row) == .needs_you or row.state == .failed;
 }
 
 fn rowQuiet(state: *const State, row: *const Row) bool {
@@ -2951,6 +2939,7 @@ const TestSession = struct {
 };
 
 fn session(ref: *const [6]u8, state: WorkState, options: TestSession) Listed {
+    const work: session_work.Work = .{ .state = state, .turn = options.turn, .first_action = options.first_action };
     return .{
         .reference = ref.*,
         .read_version = options.read_version,
@@ -2962,9 +2951,27 @@ fn session(ref: *const [6]u8, state: WorkState, options: TestSession) Listed {
         .state = state,
         .turn = options.turn,
         .first_action = options.first_action,
+        .attention = session_work.attention(work),
+        .group = session_work.group(work),
+        .actions = .{ .stop = switch (std.meta.activeTag(state)) {
+            .pending, .working, .retrying, .bash, .approval => true,
+            else => false,
+        }, .decide = if (session_work.group(work) == .needs_you) options.first_action orelse 1 else null },
         .first = options.first,
         .from_person_at = if (options.yours) test_now_s - 3600 else null,
     };
+}
+
+fn fixtureWork(value: session_work.Work) session_work.Work {
+    var work = value;
+    work.served_attention = session_work.attention(work);
+    work.served_group = session_work.group(work);
+    work.actions.stop = switch (std.meta.activeTag(work.state)) {
+        .pending, .working, .retrying, .bash, .approval => true,
+        else => false,
+    };
+    work.actions.decide = if (work.served_group == .needs_you) work.first_action orelse 1 else null;
+    return work;
 }
 
 fn ago(seconds: u64) WorkState.Since {
@@ -3208,7 +3215,7 @@ test "every work state follows the rules table, in Unicode and ASCII" {
         var state = try opened(&.{session("k7m2qx", case.state, .{ .label = "Write the notes" })});
         defer state.deinit();
         const rule = rules.get(kind);
-        try std.testing.expectEqual(case.stoppable, rule.stoppable);
+
         try std.testing.expectEqual(case.state.progress() == null, rule.word != null);
         for ([_]Caps{ .{}, .{ .unicode = false } }, [_][]const u8{ case.unicode, case.ascii }) |caps, expected| {
             const text = try screenText(&state, 80, 24, caps);
@@ -3581,7 +3588,7 @@ test "conversation footer domain carries chat notices but never upgrade status" 
         state.upgrade.run = run;
         state.notice = null;
         if (notice) state.say(.normal, "Copied 3 lines", .{});
-        const said = conversation(&state, "k7m2qx".*, .working);
+        const said = conversation(&state, "k7m2qx".*, true);
         try std.testing.expect(said.text == null);
         try std.testing.expectEqualStrings(if (notice) "Copied 3 lines" else "", said.notice orelse "");
     };
@@ -3589,7 +3596,7 @@ test "conversation footer domain carries chat notices but never upgrade status" 
         state.notice = null;
         state.upgrade.run = .checking;
         _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = how, .outcome = outcome } } });
-        const said = conversation(&state, "k7m2qx".*, .finished);
+        const said = conversation(&state, "k7m2qx".*, false);
         try std.testing.expect(said.text == null);
         try std.testing.expect(said.notice == null);
         try std.testing.expect(!said.stoppable);
@@ -3600,19 +3607,19 @@ test "ctrl-x in a conversation stops its Session as on its row, listed or not" {
     var state = try testState();
     defer state.deinit();
     const ref = "k7m2qx".*;
-    const ctrl_x: Conversed = .{ .reference = ref, .work = .working, .input = .stop };
-    try expectSaid(null, true, conversation(&state, ref, .working));
+    const ctrl_x: Conversed = .{ .reference = ref, .work = .working, .input = .{ .stop = true } };
+    try expectSaid(null, true, conversation(&state, ref, true));
     try expectEffects(&.{.{ .stop = ref }}, try step(&state, .{ .conversed = ctrl_x }));
-    try std.testing.expect(!conversation(&state, ref, .working).stoppable);
+    try std.testing.expect(!conversation(&state, ref, true).stoppable);
     try expectEffects(&.{}, try step(&state, .{ .conversed = ctrl_x }));
     try expectNotice(&state, "k7m2qx: Stopping");
-    try expectSaid("k7m2qx: Stopping", false, conversation(&state, ref, .working));
+    try expectSaid("k7m2qx: Stopping", false, conversation(&state, ref, true));
     try expectEffects(&.{}, try step(&state, .{ .conversed = .{ .reference = ref, .work = .working, .input = .other } }));
-    try std.testing.expectEqual(@as(?[]const u8, null), conversation(&state, ref, .working).text);
+    try std.testing.expectEqual(@as(?[]const u8, null), conversation(&state, ref, true).text);
     try expectEffects(&.{}, try step(&state, .{ .stop = .{ .reference = ref, .outcome = .{ .failed = "session_not_found" } } }));
     try expectNotice(&state, "! k7m2qx not stopped: session_not_found");
-    try std.testing.expect(conversation(&state, ref, .working).stoppable and !conversation(&state, ref, .finished).stoppable);
-    try expectEffects(&.{}, try step(&state, .{ .conversed = .{ .reference = ref, .work = .finished, .input = .stop } }));
+    try std.testing.expect(conversation(&state, ref, true).stoppable and !conversation(&state, ref, false).stoppable);
+    try expectEffects(&.{}, try step(&state, .{ .conversed = .{ .reference = ref, .work = .finished, .input = .{ .stop = false } } }));
     try expectNotice(&state, "k7m2qx is already finished.");
 }
 
@@ -3644,7 +3651,7 @@ test "listing and activity settle one row by source revision in every state and 
         const observed: Observed = .{
             .read_version = testToken(if (activity_newer) 3 else 2),
             .reference = ref,
-            .work = .{ .state = if (activity_newer) latest else older, .turn = if (activity_newer) 3 else 2, .operation = if (activity_newer) 3 else 2 },
+            .work = fixtureWork(.{ .state = if (activity_newer) latest else older, .turn = if (activity_newer) 3 else 2, .operation = if (activity_newer) 3 else 2 }),
             .last_line = .{ .position = if (activity_newer) 3 else 2, .text = bounded(session_list.max_last_line_bytes, if (activity_newer) "Newest answer" else "Older answer") },
             .opening = false,
         };
@@ -3680,7 +3687,7 @@ test "older and newer activity reads settle by revision in either order before d
             _ = try step(&state, .{ .observed = .{
                 .read_version = testToken(if (is_newer) 3 else 2),
                 .reference = ref,
-                .work = .{ .state = if (is_newer) latest else older },
+                .work = fixtureWork(.{ .state = if (is_newer) latest else older }),
                 .last_line = .{ .position = if (is_newer) 3 else 2, .text = bounded(session_list.max_last_line_bytes, if (is_newer) "Newest answer" else "Older answer") },
                 .opening = false,
             } });
@@ -3702,7 +3709,7 @@ test "leaving before a stale full or changed listing never undoes a settled stop
         defer state.deinit();
         _ = try step(&state, .{ .conversation = ref });
         _ = try step(&state, .{ .tick = state.now_ms + list_interval_ms });
-        const stopped: session_work.Work = .{ .state = .{ .stopped = .{ .since = test_now_s, .cause = .stop } }, .turn = 7 };
+        const stopped: session_work.Work = fixtureWork(.{ .state = .{ .stopped = .{ .since = test_now_s, .cause = .stop } }, .turn = 7 });
         _ = try step(&state, .{ .observed = .{ .read_version = testToken(3), .reference = ref, .work = stopped, .last_line = .{ .position = 4 }, .opening = false } });
         _ = try step(&state, .{ .conversation = null });
         _ = try respond(&state, delta, testToken(2), &.{old});
@@ -3733,7 +3740,7 @@ test "snapshot and listing rows render identical stopped failed and done endings
         _ = try step(&state, .{ .conversation = ref });
         _ = try step(&state, .{ .tick = state.now_ms + list_interval_ms });
         const line: session_list.SavedLastLine = .{ .position = 4, .text = if (case.text) |text| bounded(session_list.max_last_line_bytes, text) else null };
-        _ = try step(&state, .{ .observed = .{ .read_version = testToken(2), .reference = ref, .work = .{ .state = case.state, .turn = 8 }, .last_line = line, .opening = false } });
+        _ = try step(&state, .{ .observed = .{ .read_version = testToken(2), .reference = ref, .work = fixtureWork(.{ .state = case.state, .turn = 8 }), .last_line = line, .opening = false } });
         try std.testing.expectEqualDeep(case.state, state.find(ref).?.state);
         const snapshot = try screenText(&state, 80, 24, .{});
         defer std.testing.allocator.free(snapshot);
@@ -3759,7 +3766,7 @@ test "same revision retry reads cannot regress elapsed work or age" {
         _ = try step(&state, .{ .conversation = ref });
         _ = try step(&state, .{ .tick = (test_now_s + 5) * 1000 });
         try std.testing.expectEqual(Kind.pending, shownKind(&state, state.find(ref).?));
-        _ = try step(&state, .{ .observed = .{ .read_version = testToken(1), .reference = ref, .work = .{ .state = retry.state }, .opening = false } });
+        _ = try step(&state, .{ .observed = .{ .read_version = testToken(1), .reference = ref, .work = fixtureWork(.{ .state = retry.state }), .opening = false } });
         _ = try respond(&state, delta, testToken(1), &.{retry});
         _ = try step(&state, .{ .conversation = null });
         try std.testing.expectEqual(Kind.pending, shownKind(&state, state.find(ref).?));
@@ -3772,7 +3779,7 @@ test "activity before metadata and an omitted open row use the same bounded row 
     var state = try testState();
     defer state.deinit();
     _ = try step(&state, .{ .conversation = ref });
-    const settled: Observed = .{ .read_version = testToken(3), .reference = ref, .work = .{ .state = .{ .stopped = .{ .since = test_now_s, .cause = .stop } } }, .last_line = .{ .position = 4 }, .opening = false };
+    const settled: Observed = .{ .read_version = testToken(3), .reference = ref, .work = fixtureWork(.{ .state = .{ .stopped = .{ .since = test_now_s, .cause = .stop } } }), .last_line = .{ .position = 4 }, .opening = false };
     _ = try step(&state, .{ .observed = settled });
     try std.testing.expectEqual(@as(usize, 1), state.rows.items.len);
     try std.testing.expectEqual(@as(usize, 0), state.order.items.len);
@@ -3804,7 +3811,7 @@ test "full and changed metadata supply every provider without replacing newer ac
         const latest: Observed = .{
             .reference = ref,
             .read_version = testToken(3),
-            .work = .{ .state = .{ .failed = .{ .since = test_now_s, .code = bounded(session_work.max_code_bytes, "provider_http_401"), .resets_at = null } }, .turn = 8 },
+            .work = fixtureWork(.{ .state = .{ .failed = .{ .since = test_now_s, .code = bounded(session_work.max_code_bytes, "provider_http_401"), .resets_at = null } }, .turn = 8 }),
             .last_line = .{ .position = 9 },
             .opening = false,
         };
@@ -3837,7 +3844,7 @@ test "only a Host handshake rebases read revisions and rejects old traversals an
     var state = try opened(&.{session(&ref, .{ .stopping = ago(10) }, .{})});
     defer state.deinit();
     _ = try step(&state, .{ .conversation = ref });
-    const stopped: session_work.Work = .{ .state = .{ .stopped = .{ .since = test_now_s, .cause = .stop } } };
+    const stopped: session_work.Work = fixtureWork(.{ .state = .{ .stopped = .{ .since = test_now_s, .cause = .stop } } });
     _ = try step(&state, .{ .observed = .{ .read_version = testToken(100), .reference = ref, .work = stopped, .opening = false } });
     _ = try step(&state, .{ .tick = state.now_ms + list_interval_ms });
     const old_page = [_]Listed{session(&ref, .{ .stopping = ago(10) }, .{})};
@@ -3849,7 +3856,7 @@ test "only a Host handshake rebases read revisions and rejects old traversals an
     _ = try respond(&state, .full, testToken(101), &.{});
     try std.testing.expectEqualDeep(stopped, state.workOf(state.find(ref).?));
     try std.testing.expect(state.token == null);
-    const finished: session_work.Work = .{ .state = .{ .finished = ago(0) } };
+    const finished: session_work.Work = fixtureWork(.{ .state = .{ .finished = ago(0) } });
     _ = try step(&state, .{ .observed = .{ .read_version = next, .reference = ref, .work = finished, .last_line = .{ .position = 5, .text = bounded(session_list.max_last_line_bytes, "New Host answer") }, .opening = false } });
     _ = try step(&state, .{ .observed = .{ .read_version = testToken(200), .reference = ref, .work = stopped, .opening = false } });
     _ = try respond(&state, .not_modified, testToken(200), &.{});
@@ -4068,7 +4075,7 @@ test "the selection stays on its Session when it moves from active to finished" 
     try expectSelected(&state, "e5f6g7");
     _ = try refresh(&state, .changed, testToken(2), &.{session("e5f6g7", .{ .finished = ago(0) }, .{ .label = "List unused build steps" })});
     try expectSelected(&state, "e5f6g7");
-    try std.testing.expectEqual(OrderClass.done, orderClass(&state, state.find("e5f6g7".*).?));
+    try std.testing.expectEqual(OrderClass.done, ordering(&state, state.find("e5f6g7".*).?));
     try expectEffects(&.{ .{ .open = "e5f6g7".* }, .list_models }, try submit(&state));
     const text = try screenText(&state, 80, 24, .{});
     defer std.testing.allocator.free(text);
@@ -4366,14 +4373,14 @@ test "provider bands derive from the same conversation work as rows" {
         var revision: u64 = 1;
         for ([_]WorkState{ .{ .stopped = .{ .since = test_now_s, .cause = .stop } }, .{ .finished = ago(0) } }) |settled| {
             revision += 1;
-            _ = try step(&state, .{ .observed = .{ .read_version = testToken(revision), .reference = ref, .work = .{ .state = settled }, .opening = false } });
+            _ = try step(&state, .{ .observed = .{ .read_version = testToken(revision), .reference = ref, .work = fixtureWork(.{ .state = settled }), .opening = false } });
             try std.testing.expectEqual(@as(?Band, null), band(&state));
             try std.testing.expectEqual(@as(?u64, null), state.wakeAt());
         }
         for ([_][]const u8{ "provider_quota", "provider_http_401" }) |code| {
             const failed = failedRow(&ref, 0, code, test_now_s + 120);
             revision += 1;
-            _ = try step(&state, .{ .observed = .{ .read_version = testToken(revision), .reference = ref, .work = .{ .state = failed.state }, .opening = false } });
+            _ = try step(&state, .{ .observed = .{ .read_version = testToken(revision), .reference = ref, .work = fixtureWork(.{ .state = failed.state }), .opening = false } });
             try std.testing.expect(band(&state) != null);
             try std.testing.expectEqual(@as(?u64, (test_now_s + 120) * 1000), state.wakeAt());
         }
@@ -4390,7 +4397,7 @@ test "an observed retry's own deadline updates row order counts and wake through
         _ = try step(&state, .{ .conversation = ref });
         _ = try step(&state, .{ .tick = state.now_ms + list_interval_ms });
         const retry = retryRow(&ref, "provider_temporary_http_429", delay);
-        _ = try step(&state, .{ .observed = .{ .read_version = testToken(2), .reference = ref, .work = .{ .state = retry.state }, .opening = false } });
+        _ = try step(&state, .{ .observed = .{ .read_version = testToken(2), .reference = ref, .work = fixtureWork(.{ .state = retry.state }), .opening = false } });
         try std.testing.expectEqual(@as(?u64, (test_now_s + delay) * 1000), state.wakeAt());
         try std.testing.expectEqualStrings(&ref, &state.rows.items[state.order.items[0]].reference);
         _ = try step(&state, .{ .tick = (test_now_s + delay) * 1000 });
@@ -4957,6 +4964,9 @@ test "overview order covers every Kind sender age queue and reference tie" {
     for (expected, state.order.items) |ref, at| try std.testing.expectEqualStrings(ref, &state.rows.items[at].reference);
     var waiting = rows[8];
     waiting.state.bash.approvals = 1;
+    waiting.group = .needs_you;
+    waiting.actions.decide = 1;
+    waiting.attention = session_work.attention(.{ .state = waiting.state, .turn = waiting.turn, .first_action = 1 });
     _ = try refresh(&state, .changed, testToken(2), &.{waiting});
     try std.testing.expectEqualStrings("k40000", &state.rows.items[state.order.items[0]].reference);
 }
@@ -4987,6 +4997,20 @@ test "overview refresh removes selection to next row else New Session and preser
     var empty = try opened(&.{});
     defer empty.deinit();
     try std.testing.expectEqual(Selection.new_session, empty.selected);
+}
+
+test "overview ordering and stop use served facts for superseded approvals" {
+    var listed = session("asking", .{ .approval = ago(1) }, .{ .first_action = 7 });
+    listed.group = .working;
+    listed.attention = null;
+    listed.actions = .{ .stop = false, .decide = null };
+    var state = try opened(&.{listed});
+    defer state.deinit();
+    const row = state.find("asking".*).?;
+    try std.testing.expectEqual(OrderClass.working, ordering(&state, row));
+    state.selected = .{ .session = row.reference };
+    try expectEffects(&.{}, try step(&state, .{ .input = .{ .key = .{ .action = .stop } } }));
+    try std.testing.expect(!conversation(&state, row.reference, row.actions.stop).stoppable);
 }
 
 test "overview retains served work facts from list and session observation" {
@@ -5051,7 +5075,10 @@ test "overview quiet rows: a chat never written in recedes unless it needs you, 
         const listed = session("k7m2qx", case[0], .{ .label = "Quiet row", .yours = wrote });
         var state = try opened(&.{listed});
         defer state.deinit();
-        const stoppable_kind = rules.get(std.meta.activeTag(case[0])).stoppable;
+        const stoppable_kind = switch (std.meta.activeTag(case[0])) {
+            .pending, .working, .retrying, .bash, .approval => true,
+            else => false,
+        };
         if (stop != .none) {
             if (!stoppable_kind) continue;
             state.selected = .{ .session = listed.reference };
@@ -5399,7 +5426,7 @@ test "upgrade holds share stop admission for both screens, and the stop goes onc
     const ref = "aaaaaa".*;
     const events = [_]Event{
         .{ .input = .{ .key = .{ .action = .stop } } },
-        .{ .conversed = .{ .reference = ref, .work = .working, .input = .stop } },
+        .{ .conversed = .{ .reference = ref, .work = .working, .input = .{ .stop = true } } },
     };
     for ([_]bool{ false, true }) |blocked| {
         for (events) |event| {
@@ -5758,7 +5785,7 @@ test "empty Session projection promotes listing metadata without rolling newer o
     var state = try opened(&.{empty});
     defer state.deinit();
     _ = try step(&state, .{ .conversation = empty.reference });
-    const newest: session_work.Work = .{ .state = .{ .working = ago(1) }, .turn = 7 };
+    const newest: session_work.Work = fixtureWork(.{ .state = .{ .working = ago(1) }, .turn = 7 });
     _ = try step(&state, .{ .observed = .{ .reference = empty.reference, .read_version = testToken(4), .work = newest, .opening = false } });
     _ = try step(&state, .{ .conversation = null });
     try std.testing.expectEqual(@as(usize, 0), state.order.items.len);
@@ -5804,7 +5831,7 @@ test "empty chat name and selection agree across listing arrival orders and firs
         if (!listed_first) {
             try std.testing.expectEqual(@as(usize, 0), state.order.items.len);
             try std.testing.expect(Lines.named(&state) == null);
-            _ = try step(&state, .{ .observed = .{ .reference = empty.reference, .read_version = testToken(2), .work = .{ .state = failedRow("empty1", 1, "provider_http_401", null).state }, .opening = false } });
+            _ = try step(&state, .{ .observed = .{ .reference = empty.reference, .read_version = testToken(2), .work = fixtureWork(.{ .state = failedRow("empty1", 1, "provider_http_401", null).state }), .opening = false } });
             try std.testing.expectEqual(@as(usize, 1), state.rows.items.len);
             try std.testing.expectEqual(@as(usize, 0), state.order.items.len);
             try std.testing.expect(band(&state) == null);
@@ -6342,7 +6369,7 @@ test "session list state ages are compact stable against redraw and reset on sta
         try std.testing.expect(std.mem.endsWith(u8, again, if (rules.get(work).mark == .active) " " else case[1] ++ " "));
         const now = state.now_ms;
         _ = try step(&state, .{ .conversation = "aaaaaa".* });
-        _ = try step(&state, .{ .observed = .{ .reference = "aaaaaa".*, .read_version = testToken(2), .work = .{ .state = .{ .finished = .{ .since = test_now_s - 1 } } }, .opening = false } });
+        _ = try step(&state, .{ .observed = .{ .reference = "aaaaaa".*, .read_version = testToken(2), .work = fixtureWork(.{ .state = .{ .finished = .{ .since = test_now_s - 1 } } }), .opening = false } });
         const changed = try segmentText(arena.allocator(), (try Lines.at(arena.allocator(), &state, Lines.lineOf(&state, 0), 46, .{}, 0)).?.segments);
         try std.testing.expectEqualStrings("now ", changed[changed.len - 4 ..]);
         try std.testing.expectEqual(now, state.now_ms);
@@ -6362,6 +6389,8 @@ test "approval rows require no command reads across waiting Action and conversat
         var waiting = session("asking", work, .{ .label = "Waiting", .first_action = 41 });
         try expectEffects(&.{}, try respond(&state, .full, testToken(1), &.{waiting}));
         waiting.first_action = 42;
+        waiting.actions.decide = 42;
+        waiting.attention = session_work.attention(.{ .state = waiting.state, .turn = waiting.turn, .first_action = 42 });
         try expectEffects(&.{}, try refresh(&state, .changed, testToken(2), &.{waiting}));
         state.conversing = null;
         try expectEffects(&.{}, try refresh(&state, .not_modified, testToken(2), &.{}));

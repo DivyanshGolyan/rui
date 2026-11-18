@@ -1589,9 +1589,9 @@ fn upgradeValue(raw: *anyopaque) session_upgrade.Upgrade {
     return self.state.upgrade;
 }
 
-fn conversationLine(raw: *anyopaque, kind: view.Kind) SessionFrontend.Lender.Said {
+fn conversationLine(raw: *anyopaque, can_stop: bool) SessionFrontend.Lender.Said {
     const self: *Self = @ptrCast(@alignCast(raw));
-    const said = view.conversation(&self.state, self.opened, kind);
+    const said = view.conversation(&self.state, self.opened, can_stop);
     return .{ .text = said.text, .notice = said.notice, .stoppable = said.stoppable };
 }
 
