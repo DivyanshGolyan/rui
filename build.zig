@@ -112,8 +112,7 @@ pub fn build(b: *std.Build) void {
     const production_safe = product.addRui(b, target, .ReleaseSafe, "rui-release-safe-check", pinned_transport);
     const release_safe = if (pr_ci) product.addIntegrationRui(b, target, "rui-pr-check", pinned_transport, pr_ci, product.buildIdentity(b)) else production_safe;
     const debug = product.addRui(b, target, .Debug, "rui-debug-check", pinned_transport);
-    const pause_rui = product.addPauseRui(b, target, .ReleaseSafe, "rui-pause-check", pinned_transport);
-    if (pr_ci) pause_rui.use_llvm = false;
+    const pause_rui = product.addPauseIntegrationRui(b, target, "rui-pause-check", pinned_transport, pr_ci);
     const pause_fixture = b.addExecutable(.{
         .name = "pause-socket-fixture",
         .root_module = b.createModule(.{
