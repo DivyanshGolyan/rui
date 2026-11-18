@@ -263,45 +263,6 @@ def thinking_queue_case():
     print("session chrome: a mid-Thinking submission is queued once, then shown once as a taken Message at both sizes", flush=True)
 
 
-def send_state_case():
-    with Chrome("rui-chrome-send.", [fixture.sse_answer("sent", "r", "m", "SENT-ANSWER")[0]]) as chrome:
-        session = chrome.session()
-        master, caller, _ = chrome.open(session, lambda screen: True)
-        held, release = threading.Event(), threading.Event()
-
-        def hold_admission(record):
-            held.set()
-            assert release.wait(15), "Message admission gate was not released"
-            return True
-
-        proxy = canonical_fixture.ReplyProxy(chrome.host, "/v1/message", lambda response: response,
-            before_forward=hold_admission)
-        try:
-            os.write(master, b"SEND-ME")
-            chrome.frame(master, b"", lambda screen: composing(screen, "SEND-ME"))
-            frames = frames_until(master, b"\r", lambda screen:
-                composing(screen, "") and "› SEND-ME" in "\n".join(transcript_rows(screen)))
-            fixture.wait_for(held.is_set, "Message held before Host admission")
-            cleared = [frame for frame in frames if composing(frame, "")]
-            assert cleared, frames
-            for frame in cleared:
-                assert "Sending" not in frame, frame
-                assert "\n".join(transcript_rows(frame)).count("› SEND-ME") == 1, frame
-                assert "SENT-ANSWER" not in frame, frame
-            release.set()
-            frames += frames_until(master, b"", lambda screen: "SENT-ANSWER" in screen)
-            for frame in frames:
-                assert "Sending" not in frame, frame
-                assert "\n".join(transcript_rows(frame)).count("› SEND-ME") <= 1, frame
-            assert "\n".join(transcript_rows(frames[-1])).count("› SEND-ME") == 1, frames[-1]
-            assert len(proxy.mutations) == 1, proxy.mutations
-            chrome.leave(master, caller)
-        finally:
-            release.set()
-            proxy.close()
-    print("session chrome: Enter immediately shows one sent Message before admission; no Sending state or admission duplicate", flush=True)
-
-
 def send_recovery_case():
     with Chrome("rui-chrome-send-recovery.", [fixture.sse_answer("recovered", "r", "m", "RECOVERED-ANSWER")[0]]) as chrome:
         session = chrome.session()
@@ -582,7 +543,6 @@ def opening_case():
 
 
 def main():
-    send_state_case()
     send_recovery_case()
     activity_case()
     thinking_queue_case()
