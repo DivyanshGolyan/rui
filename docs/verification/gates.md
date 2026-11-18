@@ -263,19 +263,21 @@ Warm compilation snapshots are not test acceptance. Cleanup waits for all mainte
 Maintenance also builds the pinned previous release per platform for the read-only upgrade check.
 The API-only cleanup job runs trusted main code with cache-deletion permission and consumes no producer code, caches or artifacts.
 
-CI uses standard `ubuntu-24.04` and Apple Silicon `macos-15` runners, plus `ubuntu-24.04-arm` for the Linux arm64 release build and the optional [self-hosted Mac runner](#self-hosted-mac-runner) for eligible Selected checks, with no paid host or storage expansion.
+CI uses standard `ubuntu-24.04` and Apple Silicon `macos-15` runners, plus `ubuntu-24.04-arm` for the Linux arm64 release build and the optional [self-hosted Mac runner](#self-hosted-mac-runner) for eligible Selected checks, including promotion's, with no paid host or storage expansion.
 Free eligibility does not prove capacity; report the actual runner outcome and do not raise paid spend silently.
 Apart from the shard rerun above and a [listed flake](#listed-flakes)'s rerun, test execution has no automatic retry.
-Infrastructure failures are not test execution: [Retry infrastructure failures](../../.github/workflows/infra-retry.yml) reruns a PR run's failed jobs once when every failure was infrastructure (no runner took or kept the job, or a step that only fetches, installs or starts services failed with a network error such as GitHub's 504) and the run still tests the PR's head.
-A build or test step's failure, a later attempt or any check failure in the run never reruns, and a rerun job's tests had not run.
+Infrastructure failures are not test execution: [Retry infrastructure failures](../../.github/workflows/infra-retry.yml) reruns a PR run's or a Promote run's failed jobs once when every failure was infrastructure (no runner took or kept the job, or a step that only fetches, installs or starts services failed with a network error such as GitHub's 504) and the PR run still tests the PR's head, or no later Promote run was dispatched.
+A build or test step's failure, a later attempt, any check failure in the run or a failed job routed to `rui-mac` (whose hook rejects the bot that triggers the rerun) never reruns, and a rerun job's tests had not run.
+A promotion's rerun also reruns `qualified` and Release, so publication still requires every tier, and Release resumes an interrupted publication rather than publishing twice ([Release publication](release.md#release-publication)).
 
 ## Self-hosted Mac runner
 
-Selected checks decides once per run whether to send `macos_build`, `macos_build_unit` and `macos_suites` to `["self-hosted", "macOS", "ARM64", "rui-mac"]`.
+Selected checks decides once per run, promotion included, whether to send `macos_build`, `macos_build_unit` and `macos_suites` to `["self-hosted", "macOS", "ARM64", "rui-mac"]`.
 Only same-repository pull requests authored by DivyanshGolyan, with both actor and triggering actor allowlisted, and manual dispatches by those actors are eligible.
 The allowlist lives in [mac_runner.py](../../tests/ci/mac_runner.py).
 Fork PRs, including NimishGolyan/rui, stay hosted.
-Promotion, compile-only main builds, macOS qualification and the existing cache-execution checks keep their hosted runners; hosted-VM measurements therefore remain comparable.
+A promotion dispatched by an allowlisted actor routes by the same rule, so hosted macOS capacity no longer gates a release; its Mac suite jobs then share the one runner, and their measurements are not comparable with hosted VMs.
+Compile-only main builds (which publish main's caches), the promotion's previous-release upgrade and cache-execution checks, and the Release builds (cold, released bytes) keep their hosted runners.
 The routing job reads `GET /repos/{repo}/actions/runners` with the repository secret `MAC_RUNNER_STATUS_TOKEN`, a fine-grained PAT limited to this repository with Administration: read.
 An online `rui-mac` selects the Mac when idle or when its queued jobs are fewer than hosted queued jobs plus one if at least five hosted jobs are running; ties select `macos-15`. If queue data is unavailable, only an idle Mac is selected; unavailable runner status, an offline runner or `RUI_MAC_RUNNER=off` selects hosted macOS.
 This is a snapshot, not a reservation: after choosing the Mac, jobs queue for its one runner process; a later disconnect does not reroute that run.

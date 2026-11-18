@@ -39,7 +39,7 @@ def cases():
             [None, "on", "off"], [False, True], [False, True], range(len(states))):
         event = {"pull_request": {"head": {"repo": {"full_name": REPO if same_repo else "NimishGolyan/rui"}},
                                   "user": {"login": author}}}
-        eligible = (switch != "off" and not promotion and not compile_only
+        eligible = (switch != "off" and not compile_only
                     and actor == TRUSTED and trigger == TRUSTED
                     and (event_name == "workflow_dispatch"
                          or (event_name == "pull_request" and same_repo and author == TRUSTED)))
@@ -77,7 +77,6 @@ class DecisionTest(unittest.TestCase):
             ('_object(pr.get("user")).get("login") not in allowlist', 'False'),
             ('actor not in allowlist', 'False'),
             ('triggering_actor not in allowlist', 'False'),
-            ('_enabled(inputs.get("promotion"))', 'False'),
             ('_enabled(inputs.get("compile_only"))', 'False'),
             ('runner.get("status") == "online"', 'True'),
             ('runner.get("busy") is False', 'True'),
