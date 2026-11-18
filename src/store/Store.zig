@@ -42,6 +42,7 @@ const session_list_read = @import("domain/session_list_read.zig");
 const session_report_read = @import("domain/session_report_read.zig");
 const rsql = @import("rsql.zig");
 const store_access = @import("access.zig");
+const write_batch = @import("write_batch.zig");
 const transition = @import("transition.zig");
 const Access = store_access.Access;
 const ReadAccess = reads_domain.ReadAccess;
@@ -101,7 +102,7 @@ pub const Store = struct {
     instance: [16]u8 = undefined,
     served: provider_route.Routes = provider_route.all(.unserved),
     scratch_use: ScratchUse = .none,
-    batch: enum(u8) { none, ready, first, open, saved, lost } = .none,
+    batch: write_batch.Phase = .none,
     savepoint: bool = false,
     release_bulk_memory: bool = false,
     testing_content_work: if (@import("builtin").is_test) TestingContentWork else void = if (@import("builtin").is_test) .{} else {},
@@ -2093,7 +2094,7 @@ pub const Entry = struct {
 };
 
 pub fn enter(self: *Store, trace: EntryTrace) error{StoreFenced}!Entry {
-    if (self.isFenced() or self.batch == .lost) return error.StoreFenced;
+    if (self.isFenced() or !write_batch.admits(batchState(self))) return error.StoreFenced;
     const borrowed = if (@import("builtin").is_test) borrowed: {
         const off = !self.queue().owned();
         if (off) self.queue().borrow();
@@ -2110,48 +2111,44 @@ pub fn enter(self: *Store, trace: EntryTrace) error{StoreFenced}!Entry {
     return entry;
 }
 
-pub fn begin(self: *Store) !void {
-    switch (self.batch) {
-        .none => {
-            std.debug.assert(self.identities().taken.count() == 0 and self.identities().second == 0);
-            try self.engine.control(.begin);
-            return;
-        },
-        .ready => {
-            std.debug.assert(self.identities().taken.count() == 0 and self.identities().second == 0);
-            try self.engine.control(.begin);
-            self.batch = .first;
-            return;
-        },
-        .open => {},
-        .first, .saved, .lost => unreachable,
+fn batchState(self: *const Store) write_batch.State {
+    return .{ .phase = self.batch, .savepoint = self.savepoint };
+}
+
+fn setBatchState(self: *Store, state: write_batch.State) void {
+    self.batch = state.phase;
+    self.savepoint = state.savepoint;
+}
+
+fn batchControl(self: *Store, control: write_batch.Control) !void {
+    switch (control) {
+        inline else => |which| try self.engine.control(which),
     }
-    std.debug.assert(!self.savepoint);
-    try self.engine.control(.savepoint);
-    self.savepoint = true;
+}
+
+pub fn begin(self: *Store) !void {
+    if (self.batch == .none or self.batch == .ready)
+        std.debug.assert(self.identities().taken.count() == 0 and self.identities().second == 0);
+    const step = write_batch.begin(batchState(self));
+    if (step.control) |control| try batchControl(self, control);
+    setBatchState(self, step.then);
 }
 
 pub fn commit(self: *Store) !void {
-    switch (self.batch) {
-        .first => {
-            self.batch = if (self.engine.inTransaction()) .open else .saved;
-            return;
-        },
-        .open => {
-            try self.engine.control(.release);
-            self.savepoint = false;
-            return;
-        },
-        .none => {},
-        .ready, .saved, .lost => unreachable,
+    const step = write_batch.commit(batchState(self), if (self.batch == .first) self.engine.inTransaction() else false);
+    if (step.control) |control| try batchControl(self, control);
+    setBatchState(self, step.then);
+    if (self.batch == .none) {
+        self.identities().taken = .empty;
+        self.identities().second = 0;
     }
-    try self.engine.control(.commit);
-    self.identities().taken = .empty;
-    self.identities().second = 0;
 }
 
 pub fn commitsWithWrites(self: *Store) bool {
-    return self.engine.commitArmed() and self.batch == .first and !self.queue().writeWaiting();
+    const state = batchState(self);
+    const armed = self.engine.commitArmed();
+    if (!write_batch.commitsWithWrites(state, armed, false)) return false;
+    return write_batch.commitsWithWrites(state, armed, self.queue().writeWaiting());
 }
 
 pub noinline fn commitWithSurvey(self: *Store, writer: anytype, follow: anytype) void {
@@ -2192,13 +2189,12 @@ pub noinline fn commitWithSurvey(self: *Store, writer: anytype, follow: anytype)
 
 fn batchClosed(context: *anyopaque) bool {
     const self: *Store = @ptrCast(@alignCast(context));
-    return self.batch == .saved;
+    return write_batch.closed(batchState(self));
 }
 
 fn startBatch(context: *anyopaque) void {
     const self: *Store = @ptrCast(@alignCast(context));
-    std.debug.assert(self.batch == .none and !self.savepoint);
-    self.batch = .ready;
+    setBatchState(self, write_batch.start(batchState(self)));
 }
 
 fn finishBatch(context: *anyopaque) bool {
@@ -2224,7 +2220,7 @@ fn finishBatch(context: *anyopaque) bool {
 }
 
 pub fn admitted(self: *Store, callback: Store.MessageCommitted, admission: Store.MessageAdmission) void {
-    if (self.batch == .none) return callback.call(callback.context, admission);
+    if (!write_batch.defersAnnouncement(batchState(self))) return callback.call(callback.context, admission);
     const values = self.identities();
     values.admitted[values.admitted_len] = .{
         .callback = .{ .message = callback },
@@ -2236,7 +2232,7 @@ pub fn admitted(self: *Store, callback: Store.MessageCommitted, admission: Store
 }
 
 pub fn created(self: *Store, callback: Store.CreationCommitted, session: []const u8) void {
-    if (self.batch == .none) return callback.call(callback.context, session);
+    if (!write_batch.defersAnnouncement(batchState(self))) return callback.call(callback.context, session);
     const values = self.identities();
     values.admitted[values.admitted_len] = .{
         .callback = .{ .creation = callback },
@@ -2284,11 +2280,10 @@ fn recoverRerun(context: *anyopaque) bool {
 }
 
 fn commitBatch(self: *Store) !void {
-    switch (self.batch) {
-        .ready, .saved => {},
-        .open => self.engine.control(.commit) catch |err| return fence(self, err),
-        .lost => return fence(self, error.CanonicalRollbackFailed),
-        .none, .first => unreachable,
+    switch (write_batch.finish(batchState(self))) {
+        .nothing => {},
+        .commit => self.engine.control(.commit) catch |err| return fence(self, err),
+        .rollback_failed => return fence(self, error.CanonicalRollbackFailed),
     }
 }
 
@@ -2475,42 +2470,22 @@ fn loadIdentities(self: *Store, columns: std.EnumSet(Identity)) !void {
 
 pub fn rollbackAfterError(self: *Store, faults: Faults) !void {
     self.touched.everything = true;
-    switch (self.batch) {
-        .open => {
-            // Back to the write's savepoint; the batch's earlier writes
-            // stay. A transaction SQLite rolled back whole took them with
-            // it, so the batch is lost.
-            const savepoint = self.savepoint;
-            self.savepoint = false;
-            errdefer self.batch = .lost;
-            if (!self.engine.inTransaction()) return error.CanonicalRollbackFailed;
-            if (savepoint) {
-                if (faults.rollback_failure) return error.CanonicalRollbackFailed;
-                self.engine.control(.rollback_to) catch return error.CanonicalRollbackFailed;
-                self.engine.control(.release) catch return error.CanonicalRollbackFailed;
-            }
-            loadIdentities(self, self.identities().taken) catch return error.CanonicalRollbackFailed;
-            return;
-        },
-        .first => {
-            errdefer self.batch = .lost;
-            try rollbackTransaction(self, faults);
-            self.batch = .ready;
-            return;
-        },
-        .none, .ready, .saved => return rollbackTransaction(self, faults),
-        .lost => return error.CanonicalRollbackFailed,
-    }
-}
-
-fn rollbackTransaction(self: *Store, faults: Faults) error{CanonicalRollbackFailed}!void {
-    if (self.engine.inTransaction()) {
+    const state = batchState(self);
+    const plan = write_batch.rollback(state, self.engine.inTransaction()) catch |err| {
+        if (state.phase == .open) setBatchState(self, .{ .phase = .lost });
+        return err;
+    };
+    // The old open-batch path clears this before either control is attempted.
+    if (state.phase == .open) self.savepoint = false;
+    errdefer setBatchState(self, plan.failed);
+    for (plan.controls) |maybe_control| if (maybe_control) |control| {
         if (faults.rollback_failure) return error.CanonicalRollbackFailed;
-        self.engine.control(.rollback) catch return error.CanonicalRollbackFailed;
-        if (self.engine.inTransaction()) return error.CanonicalRollbackFailed;
-    }
-    self.identities().second = 0;
-    loadIdentities(self, self.identities().taken) catch return error.CanonicalRollbackFailed;
+        batchControl(self, control) catch return error.CanonicalRollbackFailed;
+    };
+    if (plan.must_leave_transaction and self.engine.inTransaction()) return error.CanonicalRollbackFailed;
+    if (state.phase != .open) self.identities().second = 0;
+    if (plan.reload_identities) loadIdentities(self, self.identities().taken) catch return error.CanonicalRollbackFailed;
+    setBatchState(self, plan.ok);
 }
 
 pub fn readUnixMilliseconds(io: std.Io) !i64 {
