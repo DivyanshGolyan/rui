@@ -72,6 +72,8 @@ CI policy is a caller-facing interface to contributors and release operators; ch
 | CI-63 | Module | Concurrent failure retention respects its per-root and job-wide file and byte limits. | Failure retention API over concurrent temporary fixture roots | `FailureArtifactsTest.test_diagnostic_bounds_hold_across_concurrent_roots` in `tests/ci/test_failure_artifacts.py`; migrate concurrency to a deterministic seam. | docs/verification/gates.md:252-253 |
 | CI-64 | Module | A failed promotion bisects each failed step across its batch and identifies its first failing commit when reproducible. | Promotion bisect API over synthetic commit results | `PromotionBisectTest.test_names_the_first_failing_commit_at_every_position` in `tests/ci/test_promotion.py`; extend across multiple failures and unreproducible results. | docs/verification/gates.md:92 |
 | CI-65 | Module | Local feedback selects the feature map policy check for verify-rui feature and map changes. | Pre-push planner over changed paths | `PrepushTest.test_verify_rui_map_inputs_select_the_map_test` in `tests/ci/test_prepush.py`. | docs/verification/gates.md:102 |
+| CI-66 | Module | Invariant IDs are unique across the catalog. | Catalog policy over repository invariant files | `InvariantCatalogTest.test_catalog_ids_are_unique` in `tests/ci/test_invariant_catalog.py`. | docs/verification/testing.md#invariant-catalogs |
+| CI-67 | Module | Every ID-prefixed migrated catalog owner resolves to exactly one source test. | Catalog policy over repository invariant files and tests | `InvariantCatalogTest.test_named_migrated_owners_exist_once` in `tests/ci/test_invariant_catalog.py`. | docs/verification/testing.md#invariant-catalogs |
 
 Owned elsewhere: SH-21 (installer archive and version validation).
 
