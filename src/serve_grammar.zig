@@ -152,6 +152,10 @@ const serve_test = &[_]Option{
     hiddenFlag("test-retention-removal-failure"),
     hiddenNumber("test-provider-inactivity-seconds", 1, std.math.maxInt(i64) / 1_000_000_000),
     hiddenValue("test-retry-waits-ms"),
+    // Integration fixtures order handoff through the model.before_handoff and
+    // action.before_handoff pause points; only the model-retry qualification
+    // runner, which measures the release product, still separates admission
+    // from launch with this delay.
     hiddenNumber("test-before-launch-delay-ms", 0, 10_000),
     hiddenNumber("test-before-result-delay-ms", 0, 10_000),
     hiddenValue("test-retry-recovery-gate-path"),

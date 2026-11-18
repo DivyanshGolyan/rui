@@ -16,7 +16,7 @@ import threading
 import time
 
 import host_process
-from host_process import HostDiagnostics, PeerCensus, ReleaseGate, canonical_fixture_root, dispose_all, preserve_failure_metadata, retain_failure_state, stop_process, wait_for_execution_release
+from host_process import HostDiagnostics, PauseGate, PeerCensus, ReleaseGate, canonical_fixture_root, dispose_all, preserve_failure_metadata, retain_failure_state, stop_process, wait_for_execution_release
 from product_defaults import DEFAULTS, compaction_trigger, start_effort
 from model_fixture import (
     ROOT, RUI, FailureEndpoint, ResponseSpec, SuccessEndpoint,
@@ -1795,34 +1795,29 @@ def main(mode="all", correlation_case="all"):
         assert continuation_before_admission_crash["returncode"] == -signal.SIGKILL
         with sqlite3.connect(continuation_store / "rui.sqlite3") as database:
             assert database.execute("SELECT count(*) FROM model_operation").fetchone() == (1,)
+        # EXR-58
+        continuation_handoff = PauseGate("model.before_handoff")
+        releases.append(continuation_handoff.close)
         continuation_host = start_host(
             continuation_store,
             f"http://127.0.0.1:{continuation_endpoint.server_port}/responses",
-            "--test-before-launch-delay-ms",
-            "5000",
+            pause=continuation_handoff,
         )
         processes.append(continuation_host)
         continuation_diagnostics = HostDiagnostics(continuation_host)
-        continuation_deadline = time.monotonic() + 8
-
-        def continuation_successor_admitted():
-            value = observe(continuation_store, "continuation-first", deadline=continuation_deadline)
-            return (
-                value
-                if value.get("state") == "processing"
-                and value.get("binding") == {
-                    "turn": continuation_first_processing["turn"], "operation": "2", "attempt": "1",
-                }
-                else None
-            )
-
-        wait_for(continuation_successor_admitted, "tool-result successor admission", deadline=continuation_deadline)
+        held = continuation_handoff.wait(operation=2)
+        assert held["context"]["attempt"] == 1, held
+        successor = observe(continuation_store, "continuation-first")
+        assert successor.get("state") == "processing" and successor.get("binding") == {
+            "turn": continuation_first_processing["turn"], "operation": "2", "attempt": "1",
+        }, successor
         assert len(continuation_endpoint.requests) == 1, continuation_endpoint.requests
         continuation_after_admission_crash = crash_host(
             continuation_host, state, "continuation-after-admission-crash", diagnostics=continuation_diagnostics
         )
         continuation_diagnostics = None
         processes.remove(continuation_host)
+        continuation_handoff.close()
         assert continuation_after_admission_crash["returncode"] == -signal.SIGKILL
         with sqlite3.connect(continuation_store / "rui.sqlite3") as database:
             assert database.execute(
@@ -3806,11 +3801,13 @@ def main(mode="all", correlation_case="all"):
         endpoints[prelaunch_endpoint] = prelaunch_thread
         prelaunch_thread.start()
         prelaunch_store = state / "crash-prelaunch-store"
+        # EXR-57
+        prelaunch_handoff = PauseGate("model.before_handoff")
+        releases.append(prelaunch_handoff.close)
         prelaunch_host = start_host(
             prelaunch_store,
             f"http://127.0.0.1:{prelaunch_endpoint.server_port}/responses",
-            "--test-before-launch-delay-ms",
-            "5000",
+            pause=prelaunch_handoff,
         )
         processes.append(prelaunch_host)
         prelaunch_session = configure(
@@ -3824,22 +3821,16 @@ def main(mode="all", correlation_case="all"):
             "crash before launch",
         )
 
-        def prelaunch_attempt_one():
-            observation = observe(prelaunch_store, "prelaunch-message")
-            return (
-                observation
-                if observation.get("binding", {}).get("attempt") == "1"
-                else None
-            )
-
-        prelaunch_observation = wait_for(
-            prelaunch_attempt_one,
-            "publicly observed prelaunch Attempt 1",
-        )
-        assert prelaunch_observation["state"] == "processing"
+        held = prelaunch_handoff.wait()
+        assert held["context"]["attempt"] == 1, held
+        prelaunch_observation = observe(prelaunch_store, "prelaunch-message")
+        assert prelaunch_observation["state"] == "processing", prelaunch_observation
+        assert prelaunch_observation["binding"]["operation"] == str(held["context"]["operation"]), prelaunch_observation
+        assert prelaunch_observation["binding"]["attempt"] == "1", prelaunch_observation
         assert prelaunch_endpoint.requests == []
         prelaunch_crash = crash_host(prelaunch_host, state, "prelaunch-crash")
         processes.remove(prelaunch_host)
+        prelaunch_handoff.close()
         assert prelaunch_crash["returncode"] == -signal.SIGKILL, {
             "crash": prelaunch_crash,
             "endpoint_requests": prelaunch_endpoint.requests,
@@ -4428,8 +4419,6 @@ def main(mode="all", correlation_case="all"):
             "--set", 'execution.activeCapacity=101',
             "--test-retry-recovery-gate-path",
             str(recovery_gate.path),
-            "--test-before-launch-delay-ms",
-            "100",
             "--test-retry-waits-ms",
             "60000,60000,60000",
         )
@@ -5391,13 +5380,14 @@ def main(mode="all", correlation_case="all"):
         )
         database.commit()
         database.close()
-        host = start_host(race_store, url, "--test-before-launch-delay-ms", "1500")
+        # EXR-59
+        race_handoff = PauseGate("model.before_handoff")
+        releases.append(race_handoff.close)
+        host = start_host(race_store, url, pause=race_handoff)
         processes.append(host)
         message(state, race_store, "race-message", race_session, "race")
-        wait_for(
-            lambda: observe(race_store, "race-message")["state"] == "processing",
-            "admitted request before launch",
-        )
+        race_handoff.wait()
+        assert observe(race_store, "race-message")["state"] == "processing"
         canonical_read = subprocess.run(
             [str(RUI), "session", "inspect", "--store", str(race_store), "--session", other_session],
             text=True,
@@ -5405,10 +5395,12 @@ def main(mode="all", correlation_case="all"):
             timeout=10,
         )
         assert canonical_read.returncode != 0
+        race_handoff.release()
         wait_for(lambda: host.poll() is not None, "effect-aware Host shutdown", timeout=5)
         assert host.returncode != 0
         stop_host(host)
         processes.remove(host)
+        race_handoff.close()
         assert endpoint.requests == []
         database = sqlite3.connect(race_store / "rui.sqlite3")
         uncertain = database.execute(

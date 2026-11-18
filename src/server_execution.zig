@@ -83,6 +83,12 @@ fn reachAction(host: *Host, point: test_pause.Point, binding: store_module.Actio
     };
 }
 
+fn reachModel(host: *Host, point: test_pause.Point, binding: store_module.AttemptBinding) void {
+    if (comptime test_pause.enabled) if (host.pause_owner) |owner| {
+        _ = owner.reach(point, .{ .operation = binding.operation_id, .attempt = binding.attempt_ordinal }) catch {};
+    };
+}
+
 const AttemptOwner = struct {
     token: execution.CustodyToken = undefined,
     binding: store_module.AttemptBinding = undefined,
@@ -2340,6 +2346,8 @@ fn launchPreparedRequest(
         return;
     };
     host.hook_progress.response_write_once_spent = host.hooks.fails(.response_write_once);
+    // This blocking pause holds the shared execution loop until release.
+    if (comptime test_pause.enabled) reachModel(host, .model_before_handoff, binding);
     pause(host, .{ .model_launch = binding });
     host.custody.consumeLaunchAuthority(token, .{ .model = binding }, std.Io.Clock.Timestamp.now(host.io, .awake)) catch |err| {
         active.transfer.deinit();
@@ -2619,12 +2627,7 @@ noinline fn completeSuccessfulTransfer(host: *Host, workspace: *Workspace, activ
     };
     const validated = &accepted.output;
     traceOperation(host, "validation_completed", owner.binding);
-    if (comptime test_pause.enabled) if (host.pause_owner) |controller| {
-        _ = controller.reach(.model_result_ready, .{
-            .operation = owner.binding.operation_id,
-            .attempt = owner.binding.attempt_ordinal,
-        }) catch {};
-    };
+    if (comptime test_pause.enabled) reachModel(host, .model_result_ready, owner.binding);
     pause(host, .{ .model_result = owner.binding });
     if (!host.custody.claimTerminalDelivery(owner.token)) return .cleanup;
     var settlement_trace = SettlementTrace.init(host, owner.binding);
