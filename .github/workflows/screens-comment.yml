@@ -10,6 +10,10 @@ on:
         description: Captured pull request head SHA
         required: true
         type: string
+      gen:
+        description: Publication generation
+        required: true
+        type: string
   pull_request_target:
     types: [closed]
 
@@ -23,6 +27,10 @@ jobs:
   comment:
     if: ${{ github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-24.04
+    concurrency:
+      group: screens-comment-${{ inputs.pr }}
+      queue: max
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -35,16 +43,18 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ inputs.pr }}
           HEAD_SHA: ${{ inputs.head }}
+          GEN: ${{ inputs.gen }}
         run: |
           set -euo pipefail
           [[ "$PR" =~ ^[1-9][0-9]*$ ]]
           [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$GEN" =~ ^[0-9]{1,20}$ ]]
           gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" > "$RUNNER_TEMP/current-pr.json"
           jq -e --arg repo "$GITHUB_REPOSITORY" --arg head "$HEAD_SHA" \
             '.state == "open" and .head.repo.full_name == $repo and .head.sha == $head' "$RUNNER_TEMP/current-pr.json" > /dev/null
           git fetch --no-tags origin refs/heads/pr-screens
           for manifest in shots.json diff.json shots-meta.json; do
-            git show "FETCH_HEAD:pr-$PR/$HEAD_SHA/$manifest" > "$RUNNER_TEMP/$manifest"
+            git show "FETCH_HEAD:pr-$PR/$HEAD_SHA/$GEN/$manifest" > "$RUNNER_TEMP/$manifest"
           done
           jq -e --arg head "$HEAD_SHA" '.head == $head and (.base == null or (.base | type == "string" and test("^[0-9a-f]{40}$")))' "$RUNNER_TEMP/shots-meta.json" > /dev/null
           base=$(jq -r '.base // "unavailable"' "$RUNNER_TEMP/shots-meta.json")
@@ -55,8 +65,9 @@ jobs:
           PR: ${{ inputs.pr }}
           HEAD_SHA: ${{ inputs.head }}
           BASE: ${{ steps.manifests.outputs.base }}
+          GEN: ${{ inputs.gen }}
         run: |
-          python3 tests/ci/screens_comment.py --diff "$RUNNER_TEMP/diff.json" --shots "$RUNNER_TEMP/shots.json" --repo "$GITHUB_REPOSITORY" --pr "$PR" --head "$HEAD_SHA" --base "$BASE"
+          python3 tests/ci/screens_comment.py --diff "$RUNNER_TEMP/diff.json" --shots "$RUNNER_TEMP/shots.json" --repo "$GITHUB_REPOSITORY" --pr "$PR" --head "$HEAD_SHA" --gen "$GEN" --base "$BASE"
       - name: Rerun latest failed admission job
         continue-on-error: true
         env:

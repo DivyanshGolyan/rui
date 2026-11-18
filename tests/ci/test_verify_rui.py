@@ -2707,7 +2707,10 @@ os.execv(os.environ['REAL_GIT'], [os.environ['REAL_GIT'], *args])
             remote, log, env = self.publish_fixture(root)
             result = self.publish_run(out, env)
             self.assertEqual(result.returncode, 0, result.stderr)
-            prefix = f"pr-1549/{self.head}"
+            calls = [json.loads(line) for line in log.read_text().splitlines()]
+            gen = calls[-1][-1].removeprefix("inputs[gen]=")
+            self.assertRegex(gen, r"^[0-9]{1,20}$")
+            prefix = f"pr-1549/{self.head}/{gen}"
             def show(name):
                 return subprocess.check_output(["git", "--git-dir", str(remote), "show", f"pr-screens:{prefix}/{name}"], text=True)
             files = subprocess.check_output(["git", "--git-dir", str(remote), "ls-tree", "-r", "--name-only", "pr-screens"], text=True)
@@ -2720,18 +2723,38 @@ os.execv(os.environ['REAL_GIT'], [os.environ['REAL_GIT'], *args])
             self.assertEqual([r["name"] for r in json.loads(show("diff.json"))["changed"]], ["changed"])
             self.assertEqual(json.loads(show("shots-meta.json")), {"head": self.head, "base": self.base})
             calls = [json.loads(line) for line in log.read_text().splitlines()]
-            self.assertEqual(calls[-1], ["api", "--method", "POST", "repos/DivyanshGolyan/rui/actions/workflows/screens-comment.yml/dispatches", "-f", "ref=main", "-f", "inputs[pr]=1549", "-f", f"inputs[head]={self.head}"])
+            self.assertEqual(calls[-1], ["api", "--method", "POST", "repos/DivyanshGolyan/rui/actions/workflows/screens-comment.yml/dispatches", "-f", "ref=main", "-f", "inputs[pr]=1549", "-f", f"inputs[head]={self.head}", "-f", f"inputs[gen]={gen}"])
             self.assertIn("actions/workflows/screens-comment.yml", result.stdout)
+
+    def test_publish_repeated_preserves_generations(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            out = root / "frames"
+            self.comparison(out)
+            remote, log, env = self.publish_fixture(root)
+            for args in ((), ("--all",)):
+                result = self.publish_run(out, env, *args)
+                self.assertEqual(result.returncode, 0, result.stderr)
+            dispatches = [json.loads(line) for line in log.read_text().splitlines() if "--method" in line]
+            gens = [call[-1].removeprefix("inputs[gen]=") for call in dispatches]
+            self.assertEqual(len(set(gens)), 2)
+            self.assertLess(int(gens[0]), int(gens[1]))
+            for gen, count in zip(gens, (0, 1)):
+                prefix = f"pr-screens:pr-1549/{self.head}/{gen}"
+                data = subprocess.check_output(["git", "--git-dir", str(remote), "show", prefix + "/diff.json"], text=True)
+                self.assertEqual(json.loads(data)["same_count"], count)
+                subprocess.check_output(["git", "--git-dir", str(remote), "show", prefix + "/after/changed@140x40.png"])
 
     def test_publish_all_includes_unchanged_pairs(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             out = root / "frames"
             self.comparison(out)
-            remote, _, env = self.publish_fixture(root)
+            remote, log, env = self.publish_fixture(root)
             result = self.publish_run(out, env, "--all")
             self.assertEqual(result.returncode, 0, result.stderr)
-            name = f"pr-screens:pr-1549/{self.head}/diff.json"
+            gen = json.loads(log.read_text().splitlines()[-1])[-1].removeprefix("inputs[gen]=")
+            name = f"pr-screens:pr-1549/{self.head}/{gen}/diff.json"
             diff = json.loads(subprocess.check_output(["git", "--git-dir", str(remote), "show", name], text=True))
             self.assertEqual(diff["same_count"], 1)
             self.assertEqual([row["name"] for row in diff["same"]], ["same"])
@@ -2763,7 +2786,8 @@ os.execv(os.environ['REAL_GIT'], [os.environ['REAL_GIT'], *args])
             self.assertEqual(result.returncode, 0, result.stderr)
             files = subprocess.check_output(["git", "--git-dir", str(remote), "ls-tree", "-r", "--name-only", "pr-screens"], text=True)
             self.assertIn("other", files)
-            self.assertIn(f"pr-1549/{self.head}/diff.json", files)
+            gen = json.loads(log.read_text().splitlines()[-1])[-1].removeprefix("inputs[gen]=")
+            self.assertIn(f"pr-1549/{self.head}/{gen}/diff.json", files)
             self.assertTrue((root / "raced").exists())
 
     def test_publish_refuses_mismatched_head_and_oversize(self):

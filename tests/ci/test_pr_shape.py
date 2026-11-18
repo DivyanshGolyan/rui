@@ -337,7 +337,7 @@ class PrShapeMainTest(unittest.TestCase):
         pair = {"name": "overview", "size": "140x40", "before": None,
                 "after": {"files": {"png": "overview.png"}}}
         diff = {"changed": [], "new": [pair], "removed": [], "failed": [], "same_count": 0}
-        body = screens_comment.render(diff, "o/r", 42, head, "base")
+        body = screens_comment.render(diff, "o/r", 42, head, "123", "base")
 
         def api(method, path):
             if "/pulls/" in path:

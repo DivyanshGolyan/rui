@@ -4185,6 +4185,8 @@ def cmd_publish(args):
         if pr["head"]["sha"] != head:
             raise ValueError("capture HEAD does not match PR head")
 
+        gen = str(time.time_ns())
+
         # The comment workflow consumes the same manifest shape as shots-merge.
         diff = {"changed": [], "new": [], "removed": [], "same_count": 0, "same": [], "failed": []}
         def published_record(record):
@@ -4225,10 +4227,8 @@ def cmd_publish(args):
                     git("checkout", "-q", "--detach", remote)
                 else:
                     git("checkout", "-q", "--orphan", "publish")
-                target = work / f"pr-{args.pr}" / head
-                if target.exists():
-                    shutil.rmtree(target)
-                target.mkdir(parents=True)
+                target = work / f"pr-{args.pr}" / head / gen
+                target.mkdir(parents=True, exist_ok=False)
                 for name, source in files.items():
                     dest = target / name
                     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -4246,7 +4246,7 @@ def cmd_publish(args):
                     raise ValueError(f"git push failed: {pushed.stderr.strip()}")
                 remote = updated
             gh("api", "--method", "POST", f"repos/{repository}/actions/workflows/screens-comment.yml/dispatches",
-               "-f", "ref=main", "-f", f"inputs[pr]={args.pr}", "-f", f"inputs[head]={head}", cwd=repo)
+               "-f", "ref=main", "-f", f"inputs[pr]={args.pr}", "-f", f"inputs[head]={head}", "-f", f"inputs[gen]={gen}", cwd=repo)
         print(f"https://github.com/{repository}/actions/workflows/screens-comment.yml")
     except (OSError, ValueError, KeyError, subprocess.CalledProcessError) as error:
         die(f"publish failed: {error}")
