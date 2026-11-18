@@ -24,11 +24,17 @@ const metadata = rsql.Read(.{
 });
 
 const next_value = rsql.Read(.{
-    .sql = "SELECT v.ordinal,v.publication_key,v.content_id,c.byte_length,c.digest,c.private,c.form FROM action_value v JOIN content c ON c.content_id=v.content_id WHERE v.action_id=?1 AND v.ordinal>?2 ORDER BY v.ordinal",
+    .sql = "SELECT v.ordinal,v.publication_key,v.content_id,c.byte_length,c.digest,c.private,c.form FROM action_value v JOIN content c ON c.content_id=v.content_id WHERE v.action_id=?1 AND v.ordinal>?2 ORDER BY v.ordinal" ++ std.fmt.comptimePrint(" LIMIT {d}", .{read.page_items + 1}),
     .Args = struct { action_id: u64, after: u64 },
     .Row = struct { ordinal: rsql.Positive, publication_key: Bounded(128), content_id: rsql.Positive, byte_length: u64, digest: [32]u8, private: bool, form: u8 },
     .cardinality = .each,
 });
+
+test "published value page queries limit rows in SQLite and MySQL" {
+    const limit = std.fmt.comptimePrint(" LIMIT {d}", .{read.page_items + 1});
+    try std.testing.expect(std.mem.endsWith(u8, next_value.sql, limit));
+    try std.testing.expect(std.mem.endsWith(u8, comptime next_value.mysql.prepared(), limit));
+}
 
 const ValueRows = struct {
     rows: [read.page_items + 1]next_value.Row = undefined,
