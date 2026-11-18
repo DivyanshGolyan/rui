@@ -434,7 +434,9 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const note_height: u16 = if (pending_note) |document| @intCast(document.measure(self.layout(), .{}, std.math.maxInt(u16)).rows) else 0;
     const pending_height = @as(u32, body_height) + note_height;
     const tail = if (self.tail) |child| try child.draw(ctx.withConstraints(.{}, ctx.max)) else null;
-    const gap: u16 = if (pending != null and tail != null and tail.?.size.height != 0) 1 else 0;
+    const last = if (self.window.count == 0) null else self.window.entries[self.window.count - 1];
+    const canonical_message = if (last) |entry| self.window.document.endsUserMessage(entry.offset + entry.length) else false;
+    const gap: u16 = if ((pending != null or canonical_message) and tail != null and tail.?.size.height != 0) 1 else 0;
     self.window.tail_rows = @as(u32, pending_height) + gap + (if (tail) |child| child.size.height else 0);
     const entries = self.window.layoutEntriesWith(self.layout(), self.presentation());
     const visible = self.anchor.visible(entries, self.size.height);
@@ -1369,5 +1371,39 @@ test "FeedView separates consecutive padded messages on the chat ground" {
                 if (colour) try std.testing.expectEqual(view.colours.user_band, padding.style.bg) else try std.testing.expect(padding.style.reverse);
             }
         }
+    };
+}
+
+test "FeedView activity gap follows pending and canonical user bands" {
+    for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |colour| for ([_]u8{ 0, 1, 2, 3, 4 }) |kind| {
+        const window = try testWindow();
+        defer std.testing.allocator.destroy(window);
+        if (kind == 1 or kind == 2 or kind == 4) {
+            var document: viewport.Sized(128, true) = .{};
+            try document.append(if (kind == 1 or kind == 4) PendingText.user_message_on ++ "› hello\n" ++ PendingText.user_message_off else "assistant\n");
+            try document.prepare();
+            try window.append(&.{.{ .key = .{ .position = 1 }, .text = resident.Text.fromDocument(&document) }});
+        }
+        const activity: vxfw.Text = .{ .text = "Thinking" };
+        var anchor: Feed = .{};
+        var view: Self = .{ .window = window, .anchor = &anchor, .colour = colour, .style = .{ .bg = .{ .index = 8 } }, .colours = .{ .user_band = .{ .index = 10 } }, .tail = if (kind >= 3) null else activity.widget(), .pending = if (kind == 0) .{ .text = "hello" } else null };
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const frame = try testFrame(&view, arena.allocator(), width, 8);
+        const gap: u32 = if (kind == 0 or kind == 1) 1 else 0;
+        try std.testing.expectEqual(@as(u32, if (kind == 0) 3 else 0) + gap + @as(u32, if (kind >= 3) 0 else 1), window.tail_rows);
+        if (gap != 0) {
+            try std.testing.expectEqual(@as(usize, 1), frame.children.len);
+            const row: usize = @intCast(frame.children[0].origin.row - 1);
+            const cap = frame.readCell(0, row - 1);
+            if (colour) try std.testing.expectEqual(view.colours.user_band, cap.style.bg) else try std.testing.expect(cap.style.reverse);
+            for (0..width) |column| {
+                const cell = frame.readCell(column, row);
+                try std.testing.expectEqualStrings(" ", cell.char.grapheme);
+                try std.testing.expectEqual(view.style.bg, cell.style.bg);
+                try std.testing.expect(!cell.style.reverse);
+            }
+        }
+        _ = try testFrame(&view, arena.allocator(), width, 2);
     };
 }

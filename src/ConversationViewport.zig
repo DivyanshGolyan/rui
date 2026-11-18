@@ -79,6 +79,8 @@ pub const Colours = struct {
 
 pub const RetainedStyle = u16;
 const body_bit: RetainedStyle = 1 << 8;
+const feed_inset: u16 = 2;
+
 const exit_bit: RetainedStyle = 1 << 9;
 const user_message_bit: RetainedStyle = 1 << 10;
 const user_start_bit: RetainedStyle = 1 << 11;
@@ -530,7 +532,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             if (styled) for (self.styles[content_start..end], content_start..) |value, index| {
                 if (value & exit_bit == 0) continue;
                 if (commit) {
-                    const line = window.child(.{ .y_off = row, .height = 1 });
+                    const line = window.child(.{ .y_off = row, .height = 1, .width = window.width -| feed_inset });
                     const exit_width = display_text.width(self.bytes[index..end], .{ .viewport = self.width_method });
                     if (line.width < exit_width) {
                         self.printTruncated(line, index, end, colour, plain, colours);
@@ -555,13 +557,13 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             };
             if (output) single = true;
             const shown = if (note) |range| (if (range.end == end) range.start else end) else end;
-            const margin: u16 = if (styled and self.sidenotes and window.width >= sidenote_width) sidenote_margin else 0;
-            const inset: u16 = if (kind == .user_message) @min(2, window.width) else 0;
-            const right: u16 = if (kind == .user_message and margin == 0) @min(2, window.width -| inset) else 0;
+            const margin: u16 = if (styled and self.sidenotes and window.width >= sidenote_width) sidenote_margin + (if (kind == .user_message) feed_inset else 0) else 0;
+            const inset: u16 = if (kind == .user_message) @min(feed_inset, window.width) else 0;
+            const right: u16 = if (kind == .user_message and margin == 0) @min(feed_inset, window.width -| inset) else 0;
             const body = window.child(.{ .x_off = inset, .width = window.width -| margin -| inset -| right });
             if (commit and margin != 0) if (note) |range| {
                 if (self.timestampShown(range.start, range.end)) {
-                    _ = self.printRange(window.child(.{ .x_off = window.width - sidenote_cells, .y_off = row, .width = sidenote_cells, .height = 1 }), range.start, range.end, .none, true, true, colour, plain, colours);
+                    _ = self.printRange(window.child(.{ .x_off = window.width -| sidenote_cells -| (if (kind == .user_message) feed_inset else 0), .y_off = row, .width = sidenote_cells, .height = 1 }), range.start, range.end, .none, true, true, colour, plain, colours);
                 }
             };
             if (single) {
@@ -659,6 +661,10 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             for (self.styles[position.offset..after]) |value| lower = lower or value & user_end_bit != 0;
             if (after == self.length and self.style & user_message_bit != 0) lower = true;
             return if (lower and position.row + 1 == self.lineRows(layout, position.offset)) end else position.offset;
+        }
+
+        pub fn endsUserMessage(self: *const Self, end: usize) bool {
+            return styled and end != 0 and end <= self.length and self.styles[end - 1] & user_end_bit != 0;
         }
 
         pub fn lineRows(self: *const Self, layout: Layout, offset: usize) u16 {
@@ -1742,22 +1748,23 @@ test "tool exit field aligns quietly and truncates only the label across scripts
                     window.fill(.{ .style = plain });
                     try std.testing.expectEqual(@as(u16, 1), document.printLine(window, 0, 0, true, colour, plain, colours));
                     try std.testing.expectEqual(@as(u16, 1), document.lineRows(.{ .width = width, .method = method }, 0));
-                    if (width >= 8) {
+                    if (width >= 2) for (width - 2..width) |at| try std.testing.expectEqualStrings(" ", screen.screen.readCell(@intCast(at), 0).?.char.grapheme);
+                    if (width >= 10) {
                         for ("exit 127", 0..) |byte, at| {
-                            const cell = screen.screen.readCell(width - 8 + @as(u16, @intCast(at)), 0).?;
+                            const cell = screen.screen.readCell(width - 10 + @as(u16, @intCast(at)), 0).?;
                             try std.testing.expectEqualStrings(&.{byte}, cell.char.grapheme);
                             try std.testing.expectEqual(if (colour) colours.quiet else plain.fg, cell.style.fg);
                             try std.testing.expectEqualStrings("", cell.link.uri);
                         }
-                        if (width > 8) try std.testing.expectEqualStrings(" ", screen.screen.readCell(width - 9, 0).?.char.grapheme);
-                        if (width == 12) try std.testing.expectEqualStrings("…", screen.screen.readCell(2, 0).?.char.grapheme);
+                        if (width > 10) try std.testing.expectEqualStrings(" ", screen.screen.readCell(width - 11, 0).?.char.grapheme);
+                        if (width == 14) try std.testing.expectEqualStrings("…", screen.screen.readCell(2, 0).?.char.grapheme);
                         if (width == 80) {
                             var row: [256]u8 = undefined;
                             try std.testing.expect(std.mem.startsWith(u8, screen.row(0, &row), "× "));
                         }
-                    } else if (width != 0) {
-                        for (0..width - 1) |at| try std.testing.expectEqualStrings("exit 127"[at..][0..1], screen.screen.readCell(@intCast(at), 0).?.char.grapheme);
-                        try std.testing.expectEqualStrings("…", screen.screen.readCell(width - 1, 0).?.char.grapheme);
+                    } else if (width > 2) {
+                        for (0..width - 3) |at| try std.testing.expectEqualStrings("exit 127"[at..][0..1], screen.screen.readCell(@intCast(at), 0).?.char.grapheme);
+                        try std.testing.expectEqualStrings("…", screen.screen.readCell(width - 3, 0).?.char.grapheme);
                     }
                 }
             }
@@ -1778,7 +1785,7 @@ test "tool exit field keeps ASCII headings readable without colour and open outp
         const window = screen.window(32, 3);
         window.fill(.{ .style = plain });
         _ = document.draw(window, .{}, true, colour, plain, colours);
-        try std.testing.expectEqualStrings("x Run tests             exit 127", screen.row(0, &row));
+        try std.testing.expectEqualStrings("x Run tests           exit 127", screen.row(0, &row));
         try std.testing.expectEqualStrings("    saved output", screen.row(1, &row));
         for (0..32) |column| {
             try std.testing.expectEqual(if (colour) colours.selection else plain.bg, screen.screen.readCell(@intCast(column), 0).?.style.bg);
@@ -1941,7 +1948,8 @@ test "user band padding domain retains rows and source text" {
         };
         try testing.expectEqualStrings("›", screen.screen.readCell(2, 1).?.char.grapheme);
         try testing.expectEqualStrings("s", screen.screen.readCell(4, 1).?.char.grapheme);
-        try testing.expectEqualStrings("1", screen.screen.readCell(width - 5, 1).?.char.grapheme);
+        for ("14:20", 0..) |byte, index| try testing.expectEqualStrings(&.{byte}, screen.screen.readCell(width - 7 + @as(u16, @intCast(index)), 1).?.char.grapheme);
+        for (width - 2..width) |column| try testing.expectEqualStrings(" ", screen.screen.readCell(@intCast(column), 1).?.char.grapheme);
         for (0..2) |column| {
             const cell = screen.screen.readCell(@intCast(column), 1).?;
             if (colour) try testing.expectEqual(band, cell.style.bg) else try testing.expect(cell.style.reverse);
