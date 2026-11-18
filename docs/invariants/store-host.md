@@ -54,6 +54,7 @@
 | SH-49 | Module | Upgrade ownership checks identify the observation that prevents confirming the running Host. | lifecycle ownership decision | `SH-49 ownership checks identify the refused observation` | src/HostLifecycle.zig |
 | SH-50 | Surface | Restart all prints one line per Host naming its activation outcome or limitation and counts it in the matching exit category. | restart-all report writer | `SH-50 restart all reports every activation outcome and limitation with exit truth` | src/host_restart_all.zig |
 | SH-48 | Product | A detached Host inherits only its intended launch descriptors and retains a useful startup failure diagnostic. | detached launch and inherited descriptor fixtures | `detached_descriptor_custody`: vary open descriptors and startup failures and inspect child descriptors and caller diagnostic. | src/host_launch.c |
+| SH-51 | Host | A public read the Store refuses as ordinary answers the caller and leaves the Host serving; only a Store that fenced itself fences dispatch. | Host wire, in process | `SH-51 a read the Store refuses without fencing leaves the Host serving`: read every route that meets a parts Message or Action Resolution, then make the Store fail one read. | docs/contracts/store.md:25 |
 
 Owned elsewhere: ADM-14 (atomic admission acknowledgment), CLI-16 (client discovery classification), CM-36 (configured endpoint binding), EXR-30 (owned scratch cleanup and preservation of unrelated entries).
 

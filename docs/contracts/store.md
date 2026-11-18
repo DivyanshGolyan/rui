@@ -23,6 +23,8 @@ Every Store entry point runs its locked body through one canonical access that d
 The Store returns ordinary outcomes unchanged and fences itself on every other error from the body, including a failed SQLite step, before the caller sees it.
 Argument checks before the lock return without fencing.
 A caller may still escalate an ordinary outcome, such as a stale settlement, to a dispatch fence.
+A public read never escalates.
+It answers its ordinary refusal, such as `InputPartsNotSupported`, to the caller, and dispatch fences only when the Store has fenced itself.
 
 ### Store format and upgrades
 
