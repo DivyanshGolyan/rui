@@ -40,6 +40,9 @@
 | CLI-16 | Module | Host discovery classifies absent, stopping, incompatible and indeterminate Hosts only from sufficient socket and lock evidence. | client discovery API with scripted probes | `host_discovery_evidence`: table socket, version and lock outcomes including incompatible Hosts; compare classification and version-matched remedy without asserting absence on ambiguous errors. | docs/contracts/cli.md:88 |
 | CLI-15 | Surface | An explicit retained-content read emits the selected saved bytes exactly or fails without a payload. | CLI saved-content reader | `saved_content_selection`: table binary and empty values, missing and invalid identities; compare exact stdout or diagnostic and empty stdout. | docs/contracts/diagnostics.md:102 |
 
+| CLI-17 | Surface | A Host settings refusal writes its typed JSON and an escaped sentence naming the attempted operation even if either stream fails. | Host refusal writer with injected output sinks | `CLI-17 Host refusal presentation`: table every code, attempt, escaped message and output failure; compare both streams. | src/host_start.zig:report; docs/contracts/host.md |
+| CLI-18 | Product | A detached Host refusal preserves the child's typed receipt and reports the child sentence once while refused saved edits leave the file unchanged. | CLI and owned Host process | `host_refusal_receipts`: compare executed child and parent receipts and unchanged saved bytes for refused edits. | src/cli.zig:reportHostLaunch; docs/contracts/host.md |
+
 Owned elsewhere: ADM-16 (captured-request recovery), ADM-20 (keyed-observation validation), SH-42 (protected control availability under saturation).
 
 ## Seams the harness must provide
