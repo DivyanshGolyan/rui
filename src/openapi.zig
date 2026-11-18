@@ -1736,9 +1736,9 @@ test "Message observation schema requires Host state and bounds recovery" {
     const recovery = ",\"recovery\":{\"unknown_outcomes\":[{\"action\":\"5\",\"operation\":\"4\",\"call\":\"0\",\"description\":null,\"at\":\"6\"}],\"more\":false}";
     const cases = .{
         prefix ++ "\"status\":\"rejected\",\"kind\":\"message\",\"target\":\"k7m2qx\",\"code\":\"unknown_session\",\"state\":\"rejected\"}}",
-        head ++ "\"state\":\"queued\"," ++ input ++ ",\"work\":{\"state\":{\"kind\":\"pending\",\"since\":\"2\"},\"first_action\":null}}}",
-        head ++ "\"state\":\"waiting_for_permission\"," ++ input ++ ",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"2\"},\"first_action\":\"5\"}}}",
-        head ++ "\"state\":\"processing\"," ++ input ++ binding ++ ",\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"2\"},\"first_action\":null}" ++ recovery ++ "}}",
+        head ++ "\"state\":\"queued\"," ++ input ++ ",\"work\":{\"state\":{\"kind\":\"pending\",\"since\":\"2\"},\"first_action\":null,\"attention\":null,\"group\":\"queued\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null}}}}",
+        head ++ "\"state\":\"waiting_for_permission\"," ++ input ++ ",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"2\"},\"first_action\":\"5\",\"attention\":{\"kind\":\"approval\",\"turn\":\"3\",\"step\":\"5\"},\"group\":\"needs_you\",\"actions\":{\"stop\":true,\"interrupt\":null,\"decide\":\"5\"}}}}",
+        head ++ "\"state\":\"processing\"," ++ input ++ binding ++ ",\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"2\"},\"first_action\":null,\"attention\":null,\"group\":\"working\",\"actions\":{\"stop\":true,\"interrupt\":null,\"decide\":null}}" ++ recovery ++ "}}",
         head ++ "\"state\":\"completed\"," ++ input ++ binding ++ ",\"result\":{\"status\":\"completed\",\"text\":{\"type\":\"text\",\"bytes\":\"0\",\"sha256\":\"" ++ "0000000000000000000000000000000000000000000000000000000000000000" ++ "\"}}" ++ recovery ++ "}}",
         head ++ "\"state\":\"failed\"," ++ input ++ binding ++ ",\"result\":{\"status\":\"failed\",\"code\":\"failed\"}" ++ recovery ++ "}}",
         head ++ "\"state\":\"cancelled\"," ++ input ++ binding ++ ",\"result\":{\"status\":\"cancelled\",\"code\":\"cancelled\"}" ++ recovery ++ "}}",
@@ -1747,6 +1747,18 @@ test "Message observation schema requires Host state and bounds recovery" {
         const value = try std.json.parseFromSliceLeaky(Value, allocator, text, .{});
         try std.testing.expect(conforms(schemas, schema, value));
     }
+    for ([_][]const u8{ "attention", "group", "actions" }) |name| {
+        var missing = try std.json.parseFromSliceLeaky(Value, allocator, cases[1], .{});
+        const work = &missing.object.getPtr("observation").?.object.getPtr("work").?.object;
+        _ = work.orderedRemove(name);
+        try std.testing.expect(!conforms(schemas, schema, missing));
+    }
+    var bad_group = try std.json.parseFromSliceLeaky(Value, allocator, cases[1], .{});
+    try bad_group.object.getPtr("observation").?.object.getPtr("work").?.object.put(allocator, "group", .{ .string = "invented" });
+    try std.testing.expect(!conforms(schemas, schema, bad_group));
+    var bad_attention = try std.json.parseFromSliceLeaky(Value, allocator, cases[2], .{});
+    try bad_attention.object.getPtr("observation").?.object.getPtr("work").?.object.getPtr("attention").?.object.put(allocator, "kind", .{ .string = "invented" });
+    try std.testing.expect(!conforms(schemas, schema, bad_attention));
     const missing_state = try std.json.parseFromSliceLeaky(Value, allocator, prefix ++ "\"status\":\"rejected\",\"kind\":\"message\",\"target\":\"k7m2qx\"}}", .{});
     try std.testing.expect(!conforms(schemas, schema, missing_state));
 

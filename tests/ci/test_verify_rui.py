@@ -1856,6 +1856,60 @@ while True:
             records = json.loads((root / "out/frames.json").read_text())
         return calls, records
 
+    def test_shot_settle_tracks_commits_and_caps_continuous_repaints(self):
+        terminal_type = self.helper["FrameTerminal"]
+        settle = terminal_type.settle_shot
+        commit = terminal_type._committed
+        for offsets, expected in (([], 300_000_000),
+                                  ([100_000_000, 250_000_000], 550_000_000),
+                                  (list(range(100_000_000, 5_100_000_000, 100_000_000)), 5_000_000_000)):
+            with self.subTest(offsets=len(offsets)), tempfile.TemporaryDirectory() as temp:
+                clock = [0]
+                pending = list(offsets)
+                frame = types.SimpleNamespace(cursor=(0, 0), visible=True, columns=80, lines=24)
+                capture = types.SimpleNamespace(frame=frame, generation=1)
+                terminal = types.SimpleNamespace(capture=capture, last_commit_ns=0, status=None,
+                    process=types.SimpleNamespace(output=types.SimpleNamespace(check=lambda: None)), log=Path(temp))
+                class Condition:
+                    def __enter__(self): return self
+                    def __exit__(self, *_args): pass
+                    def notify_all(self): pass
+                    def wait(self, seconds):
+                        end = clock[0] + round(seconds * 1_000_000_000)
+                        if pending and pending[0] <= end:
+                            clock[0] = pending.pop(0)
+                            capture.generation += 1
+                            commit(terminal, None, 0, 0)
+                        else:
+                            clock[0] = end
+                terminal.condition = Condition()
+                with patch.dict(settle.__globals__, {"now_ns": lambda: clock[0]}):
+                    selected = settle(terminal)
+                self.assertIs(selected, capture.frame)
+                self.assertEqual(clock[0], expected)
+                self.assertEqual(terminal.last_commit_ns, offsets[-1] if offsets else 0)
+                if offsets:
+                    events = [json.loads(line) for line in (terminal.log / "frames.jsonl").read_text().splitlines()]
+                    self.assertEqual([event["generation"] for event in events], list(range(2, len(offsets) + 2)))
+
+    def test_shot_settle_respects_exit_and_requires_a_committed_frame(self):
+        settle = self.helper["FrameTerminal"].settle_shot
+        condition = contextlib.nullcontext()
+        terminal = types.SimpleNamespace(condition=condition, status=0, last_commit_ns=None,
+            capture=types.SimpleNamespace(frame=None),
+            process=types.SimpleNamespace(output=types.SimpleNamespace(check=lambda: None)))
+        with self.assertRaisesRegex(self.helper["FrameFailure"], "exited"):
+            settle(terminal)
+        with self.assertRaisesRegex(self.helper["FrameFailure"], "no committed frame"):
+            settle(terminal, allow_exit=True)
+
+    def test_ordinary_first_frame_does_not_settle_after_transition(self):
+        scenario = {"sizes": ["100x30"], "states": [{"name": "first", "open": "overview",
+                    "steps": [], "first_frame": True, "expect": []}]}
+        calls, records = self.run_frames_scenario(scenario)
+        self.assertTrue(records[0]["ok"])
+        self.assertLess(calls.index(("steps",)), calls.index(("capture", (100, 30))))
+
     def test_initial_readiness_waits_for_opening_read_before_driving_steps(self):
         cases = [
             (["› Opening…", "›"], None, False, 2),
@@ -3317,6 +3371,141 @@ class UpgradeFramesTest(unittest.TestCase):
                 self.assertEqual(events[1][:2], ("host", "pause"))
                 self.assertEqual(len(events), 2 if retirement == "unconfirmed" else 3)
 
+    def test_shots_upgrade_stages_cast_before_clean_restartable_host(self):
+        import upgrade_fixture
+        frame_run = self.helper["frame_upgrade_run"]
+        class Releases:
+            origin = "http://127.0.0.1:1"
+            def __init__(self, _actor, _version):
+                self.status = {}
+                self.requests = []
+            def close(self):
+                pass
+        for has_cast, refused in ((False, False), (True, False), (True, True)):
+            with self.subTest(has_cast=has_cast, refused=refused), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / "evidence").mkdir()
+                (root / "home/.config/rui").mkdir(parents=True)
+                project = root / "home/code/rui"
+                project.mkdir(parents=True)
+                (root / "scratch").mkdir()
+                actor = root / "actor"
+                actor.write_bytes(b"actor")
+                meta = {"scratch": str(root / "scratch"), "home": str(root / "home"),
+                        "store": str(root / "store"), "binary": str(actor), "project": str(project),
+                        "sessions": {}, "frame_env": {"LD_PRELOAD": "/fixture.so"}}
+                (root / "run.json").write_text(json.dumps(meta))
+                run = self.helper["Run"](root)
+                events = []
+                run._shot_clock = types.SimpleNamespace(reset=lambda: events.append("reset"))
+                build = {"sha": "a" * 40, "tree": "tree", "upgrade_actor": {
+                    "binary": str(actor), "sha256": self.helper["sha256"](actor),
+                    "sha": "a" * 40, "tree": "tree"}}
+                cast = [{"label": "fixture"}] if has_cast else []
+                def launch(isolated, *, restartable, without_preload=False):
+                    events.append(("launch", without_preload))
+                    self.assertTrue(restartable)
+                    self.assertEqual(isolated.meta["frame_env"]["LD_PRELOAD"], "/fixture.so")
+                    return types.SimpleNamespace(stdout='{"instance":"clean"}')
+                def seed(_run, entries, *, ordered):
+                    self.assertEqual(entries, cast)
+                    self.assertTrue(ordered)
+                    events.append("seed")
+                def pause(_run):
+                    events.append("retire")
+                    if refused:
+                        raise self.helper["FrameFailure"]("retirement unconfirmed")
+                with patch.object(upgrade_fixture, "Releases", Releases), \
+                     patch("subprocess.check_output", return_value="rui 0.70.10000 (fixture)"), \
+                     patch("subprocess.run", return_value=types.SimpleNamespace(returncode=0, stdout="", stderr="")), \
+                     patch.dict(frame_run.__wrapped__.__globals__, {"launch_host": launch, "seed_cast": seed,
+                                                                    "frame_pause_owned_host": pause}):
+                    expectation = self.assertRaises(self.helper["FrameFailure"]) if refused else contextlib.nullcontext()
+                    with expectation:
+                        with frame_run(run, {"name": "chat", "upgrade": "chat", "cast": cast}, build) as (isolated, _, _fixture):
+                            self.assertFalse(refused)
+                            self.assertEqual(isolated.meta["upgrade_previous_instance"], "clean")
+                            self.assertEqual(getattr(isolated, "_upgrade_seeded", False), has_cast)
+                expected = [("launch", False), "seed", "reset", "retire"] if has_cast else []
+                self.assertEqual(events, expected + ([] if refused else [("launch", True)]))
+
+    def test_upgrade_host_launch_removes_preload_only_from_host_environment(self):
+        launch = self.helper["launch_host"]
+        for clean in (False, True):
+            with self.subTest(clean=clean), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                env = {"LD_PRELOAD": "/fixture.so", "FAKETIME_TIMESTAMP_FILE": "/clock"}
+                run = types.SimpleNamespace(meta={"host_options": {"active_capacity": 2, "host_setenv": []},
+                                                  "fixture_url": "http://fixture"},
+                    rui=root / "rui", store=root / "store", project=root, evidence=root,
+                    env=lambda: env.copy(), own=lambda *_a, **_k: None,
+                    rui_cmd=lambda *_a, **_k: types.SimpleNamespace(returncode=0, stdout='{"status":"ready"}', stderr=""))
+                seen = []
+                def spawn(_argv, **kwargs):
+                    seen.append(kwargs["env"])
+                    kwargs["stdout"].close()
+                    kwargs["stderr"].close()
+                    return types.SimpleNamespace(pid=123)
+                with patch("subprocess.Popen", side_effect=spawn):
+                    launch(run, restartable=True, without_preload=clean)
+                self.assertEqual("LD_PRELOAD" in seen[0], not clean)
+                self.assertEqual(seen[0]["FAKETIME_TIMESTAMP_FILE"], "/clock")
+                self.assertEqual(env["LD_PRELOAD"], "/fixture.so")
+
+    def test_upgrade_host_uses_a_populated_isolated_project(self):
+        import upgrade_fixture
+        frame_run = self.helper["frame_upgrade_run"]
+        class Releases:
+            origin = "http://127.0.0.1:1"
+            def __init__(self, _binary, _version):
+                self.status = {}
+                self.requests = []
+                self.closed = False
+            def close(self):
+                self.closed = True
+        for mode in ("current", "available", "updating", "failure", "chat"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / "evidence").mkdir()
+                (root / "home/.config/rui").mkdir(parents=True)
+                project = root / "home/code/rui"
+                (project / "src").mkdir(parents=True)
+                (project / "README.md").write_text("parent readme\n")
+                (project / "src/example.txt").write_text("parent source\n")
+                (root / "scratch").mkdir()
+                actor = root / "actor"
+                actor.write_bytes(b"actor")
+                meta = {"scratch": str(root / "scratch"), "home": str(root / "home"),
+                        "store": str(root / "store"), "binary": str(actor), "project": str(project),
+                        "sessions": {"original": "abc123"}}
+                (root / "run.json").write_text(json.dumps(meta))
+                run = self.helper["Run"](root)
+                build = {"sha": "a" * 40, "tree": "tree", "upgrade_actor": {
+                    "binary": str(actor), "sha256": self.helper["sha256"](actor),
+                    "sha": "a" * 40, "tree": "tree"}}
+                launched = []
+                def launch(isolated, *, restartable):
+                    self.assertTrue(restartable)
+                    self.assertEqual(isolated.project, isolated.home / "code/rui")
+                    self.assertEqual(isolated.meta["project"], str(isolated.project))
+                    self.assertEqual((isolated.project / "README.md").read_text(), "parent readme\n")
+                    self.assertEqual((isolated.project / "src/example.txt").read_text(), "parent source\n")
+                    (isolated.project / "src/example.txt").write_text("isolated source\n")
+                    self.assertEqual((project / "src/example.txt").read_text(), "parent source\n")
+                    launched.append(isolated.project)
+                    return types.SimpleNamespace(stdout='{"instance":"fixture-host"}')
+                with patch.object(upgrade_fixture, "Releases", Releases), \
+                     patch("subprocess.check_output", return_value="rui 0.70.10000 (fixture)"), \
+                     patch("subprocess.run", return_value=types.SimpleNamespace(returncode=0, stdout="", stderr="")), \
+                     patch.dict(frame_run.__wrapped__.__globals__, {"launch_host": launch}):
+                    with frame_run(run, {"name": mode, "upgrade": mode}, build) as (isolated, _state, fixture):
+                        self.assertEqual(launched, [isolated.home / "code/rui"])
+                        self.assertEqual(isolated.project, Path(isolated.meta["project"]))
+                        self.assertNotEqual(isolated.project, run.project)
+                        releases = fixture[0]
+                    self.assertTrue(releases.closed)
+                self.assertEqual(json.loads((root / "run.json").read_text()), meta)
+
     def test_upgrade_setup_failure_retires_server_and_preserves_primary(self):
         self.upgrade_cleanup_case(setup_failure=True)
 
@@ -3340,11 +3529,15 @@ class UpgradeFramesTest(unittest.TestCase):
             root = Path(directory)
             (root / "evidence").mkdir()
             (root / "home/.config/rui").mkdir(parents=True)
+            project = root / "home/code/rui"
+            (project / "src").mkdir(parents=True)
+            (project / "README.md").write_text("project fixture\n")
+            (project / "src/example.txt").write_text("source fixture\n")
             (root / "scratch").mkdir()
             actor = root / "actor"
             actor.write_bytes(b"actor")
             meta = {"scratch": str(root / "scratch"), "home": str(root / "home"),
-                    "store": str(root / "store"), "binary": str(actor), "project": str(root),
+                    "store": str(root / "store"), "binary": str(actor), "project": str(project),
                     "sessions": {"original": "abc123"}}
             (root / "run.json").write_text(json.dumps(meta))
             run = self.helper["Run"](root)
@@ -3352,6 +3545,12 @@ class UpgradeFramesTest(unittest.TestCase):
                 "binary": str(actor), "sha256": self.helper["sha256"](actor), "sha": "a" * 40, "tree": "tree"}}
             def launch(isolated, *, restartable=False):
                 self.assertTrue(restartable)
+                self.assertEqual(isolated.project, isolated.home / "code/rui")
+                self.assertEqual(Path(isolated.meta["project"]), isolated.project)
+                self.assertEqual((isolated.project / "README.md").read_text(), "project fixture\n")
+                self.assertEqual((isolated.project / "src/example.txt").read_text(), "source fixture\n")
+                (isolated.project / "src/example.txt").write_text("isolated change\n")
+                self.assertEqual((project / "src/example.txt").read_text(), "source fixture\n")
                 isolated.store.mkdir()
                 events.append("host started")
                 return types.SimpleNamespace(stdout='{"instance":"old-instance"}')

@@ -365,6 +365,7 @@ interrupted: *client.Cancellation,
 worker: ClientTask = .{},
 upgrade_job: UpgradeJob = .{},
 host_process: ?struct { started_at: u64, pid: i32 } = null,
+memory_override: ?view.Memory,
 host_observation: HostObservation = .unread,
 host_launch: ?HostLaunch = null,
 restart_allowance: host_restart.Allowance = .unspent,
@@ -1071,6 +1072,7 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
     errdefer init.gpa.destroy(self);
     self.* = .{
         .init = init,
+        .memory_override = process_memory.testOverride(init.environ_map.get("RUI_TEST_MEMORY_BYTES")),
         .options = options,
         .hooks = hooks,
         .ops = ops,
@@ -1810,6 +1812,7 @@ fn hostFacts(self: *Self) HostRead {
 }
 
 fn liveMemory(self: *Self, host_started_at: ?u64) view.Memory {
+    if (self.memory_override) |memory| return memory;
     if (host_started_at) |started_at| {
         if (self.host_process == null or self.host_process.?.started_at != started_at) {
             self.host_process = if (client.observeHostProcess(self.init.io, self.options.store, null)) |process|
@@ -4535,6 +4538,20 @@ test "Esc while Upgrade waits for a held archive keeps the cancel: nothing check
     var cancellation_line: [upgrade_status.max_line_bytes]u8 = undefined;
     try std.testing.expectEqualStrings("Upgrade cancelled; nothing changed", upgrade_status.line(overview.state.upgrade.run.?, &cancellation_line, .unicode).text);
     try std.testing.expect(overview.upgrade_report == null);
+}
+
+test "displayed memory override is captured at Overview initialization" {
+    var cancellation: client.Cancellation = .{};
+    const options: Options = .{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" };
+    const rig = try Rig.open(options, fake_operations, &cancellation);
+    defer rig.close();
+    try rig.environ.put("RUI_TEST_MEMORY_BYTES", "12345");
+    const overview = try create(rig.init, options, undefined, fake_operations, &cancellation);
+    defer overview.destroy();
+    try rig.environ.put("RUI_TEST_MEMORY_BYTES", "67890");
+    try std.testing.expectEqual(view.Memory{ .rui = 12345, .tools = null }, overview.liveMemory(null));
+    try std.testing.expectEqual(view.Memory{ .rui = 12345, .tools = null }, overview.liveMemory(null));
+    try std.testing.expect(rig.overview.memory_override == null);
 }
 
 test "memory counts this TUI alone while no Host runs, at open and after a Host it sampled is gone" {
@@ -8166,6 +8183,94 @@ test "upgrade attempt presentation domain ends synthetic pause and publishing wi
             }
         }
     };
+}
+
+test "wide launch draws late listing after presentation deadline without flashing a fast listing" {
+    const Scratch = struct {
+        var dir: std.Io.Dir = undefined;
+        var files: u8 = 0;
+        fn scratch(init: std.process.Init) !std.Io.File {
+            files += 1;
+            return dir.createFile(init.io, &.{'a' + files}, .{ .read = true });
+        }
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const home = home_buffer[0..try tmp.dir.realPath(std.testing.io, &home_buffer)];
+    Scratch.dir = tmp.dir;
+    Scratch.files = 0;
+    for ([_]bool{ false, true }) |fast| {
+        var ops = fake_operations;
+        ops.open = openSession;
+        var cancellation: client.Cancellation = .{};
+        const rig = try Rig.open(.{ .store = home, .workspace = "/work", .home = home, .directory = home, .provider = "codex", .model = "gpt-6-luna" }, ops, &cancellation);
+        defer rig.close();
+        const overview = rig.overview;
+        overview.hooks.scratch = Scratch.scratch;
+        defer {
+            if (overview.app_session) |left| {
+                left.frontend.?.stop();
+                overview.disposeSession(left);
+                overview.app_session = null;
+            }
+            for (overview.retired.items) |retired| overview.disposeSession(retired.left);
+            overview.retired.deinit(std.testing.allocator);
+        }
+        _ = try overview.event(.{ .launch_start = .{ .explicit_session = false, .restoring = false } });
+        _ = try overview.event(.{ .presentation_start = 1000 });
+        {
+            var frame = try rig.shown(140, 40);
+            defer frame.deinit();
+            try std.testing.expect(std.mem.indexOf(u8, try frame.text(), "+ New Session") == null);
+        }
+        if (fast) {
+            Seen.now.listed = 1;
+            _ = try overview.event(.{ .tick = test_now_s * 1000 });
+            try std.testing.expect(try rig.settle() == null);
+            var frame = try rig.shown(140, 40);
+            defer frame.deinit();
+            try std.testing.expect(std.mem.indexOf(u8, try frame.text(), "+ New Session") == null);
+        } else {
+            _ = try overview.event(.{ .presentation_tick = .{ .now_ms = 1149, .list_visible = true, .host_unavailable = false } });
+            {
+                var frame = try rig.shown(140, 40);
+                defer frame.deinit();
+                try std.testing.expect(std.mem.indexOf(u8, try frame.text(), "+ New Session") == null);
+            }
+            _ = try overview.event(.{ .presentation_tick = .{ .now_ms = 1150, .list_visible = true, .host_unavailable = false } });
+            {
+                var frame = try rig.shown(140, 40);
+                defer frame.deinit();
+                try std.testing.expect(std.mem.indexOf(u8, try frame.text(), "+ New Session") != null);
+            }
+            _ = try overview.event(.presentation_presented);
+            Seen.now.listed = 1;
+            _ = try overview.event(.{ .tick = test_now_s * 1000 });
+            try std.testing.expect(try rig.settle() == null);
+            var frame = try rig.shown(140, 40);
+            defer frame.deinit();
+            try std.testing.expect(std.mem.indexOf(u8, try frame.text(), "+ New Session") != null);
+        }
+        try std.testing.expect(try rig.next(try overview.event(.launch_poll)) == null);
+        try std.testing.expect(overview.state.launch == .creating);
+        {
+            var pending = try rig.shown(140, 40);
+            defer pending.deinit();
+            try std.testing.expectEqual(!fast, std.mem.indexOf(u8, try pending.text(), "+ New Session") != null);
+        }
+        try std.testing.expect(try rig.settle() == null);
+        try std.testing.expectEqual(@as(usize, 1), Seen.now.creates);
+        const frontend = overview.app_session.?.frontend.?;
+        try std.testing.expect(overview.root.session.?.eql(frontend.widget()));
+        try std.testing.expect(overview.root.listVisible());
+        var split = try rig.shown(140, 40);
+        defer split.deinit();
+        const divider = split.screen.readCell(Root.list_width, 0).?.char.grapheme;
+        try std.testing.expect(std.mem.eql(u8, divider, "┆") or std.mem.eql(u8, divider, "|"));
+        try std.testing.expect(std.mem.indexOf(u8, try split.text(), "+ New Session") != null);
+        try std.testing.expect(std.mem.indexOf(u8, try split.text(), "enter open") == null);
+    }
 }
 
 test "wide launch waits for listing and opens the newest empty Session without creation" {

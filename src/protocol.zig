@@ -377,26 +377,64 @@ pub const WorkStateJson = struct {
     }
 };
 
+pub const WorkAttentionJson = struct {
+    value: session_work.Attention,
+    pub const json_shape = .{ "{\"kind\":\"", Hole{ .tag = @FieldType(session_work.Attention, "kind") }, "\",\"turn\":\"", Hole.decimal, "\",\"step\":\"", Hole.decimal, "\"}" };
+    pub const max_json_bytes = shapeBytes(json_shape);
+    pub fn writeJson(self: *const WorkAttentionJson, out: *std.Io.Writer) !void {
+        try writeShape(out, json_shape, .{ self.value.kind, self.value.turn, self.value.step });
+    }
+};
+
+pub const WorkInterruptJson = struct {
+    turn: u64,
+    operation: u64,
+    pub const json_shape = .{ "{\"turn\":\"", Hole.decimal, "\",\"operation\":\"", Hole.decimal, "\"}" };
+    pub const max_json_bytes = shapeBytes(json_shape);
+    pub fn writeJson(self: *const WorkInterruptJson, out: *std.Io.Writer) !void {
+        try writeShape(out, json_shape, .{ self.turn, self.operation });
+    }
+};
+
+pub const WorkActionsJson = struct {
+    value: session_work.Actions,
+    pub const json_shape = .{ "{\"stop\":", Hole.boolean, ",\"interrupt\":", Hole{ .optional_json = WorkInterruptJson }, ",\"decide\":", Hole.optional_id, "}" };
+    pub const max_json_bytes = shapeBytes(json_shape);
+    pub fn writeJson(self: *const WorkActionsJson, out: *std.Io.Writer) !void {
+        const target: ?WorkInterruptJson = if (self.value.interrupt) |v| .{ .turn = v.turn, .operation = v.operation } else null;
+        try writeShape(out, json_shape, .{ self.value.stop, target, self.value.decide });
+    }
+};
+
 pub const SessionWork = struct {
     state: WorkState = .{ .idle = .{ .since = 0 } },
     turn: ?u64 = null,
     operation: ?u64 = null,
     first_action: ?u64 = null,
+    attention: ?session_work.Attention = null,
+    group: session_work.Group = .done,
+    actions: session_work.Actions = .{},
 
-    pub const fields = .{ "\"state\":", Hole{ .json = WorkStateJson }, ",\"turn\":", Hole.optional_id, ",\"operation\":", Hole.optional_id, ",\"first_action\":", Hole.optional_id };
+    pub const extra_fields = .{ ",\"attention\":", Hole{ .optional_json = WorkAttentionJson }, ",\"group\":\"", Hole{ .tag = session_work.Group }, "\",\"actions\":", Hole{ .json = WorkActionsJson } };
+    pub const fields = .{ "\"state\":", Hole{ .json = WorkStateJson }, ",\"turn\":", Hole.optional_id, ",\"operation\":", Hole.optional_id, ",\"first_action\":", Hole.optional_id } ++ extra_fields;
     pub const json_shape = .{"{"} ++ fields ++ .{"}"};
     pub const max_json_bytes = shapeBytes(json_shape);
 
     pub fn fromCore(work: session_work.Work) SessionWork {
-        return .{ .state = work.state, .turn = work.turn, .operation = work.operation, .first_action = work.first_action };
+        return .{ .state = work.state, .turn = work.turn, .operation = work.operation, .first_action = work.first_action, .attention = if (work.served_group != null) work.served_attention else session_work.attention(work), .group = work.served_group orelse session_work.group(work), .actions = work.actions };
     }
 
     pub fn core(self: SessionWork) session_work.Work {
-        return .{ .state = self.state, .turn = self.turn, .operation = self.operation, .first_action = self.first_action };
+        return .{ .state = self.state, .turn = self.turn, .operation = self.operation, .first_action = self.first_action, .actions = self.actions, .served_attention = self.attention, .served_group = self.group };
     }
 
-    pub fn args(self: *const SessionWork) struct { WorkStateJson, ?u64, ?u64, ?u64 } {
-        return .{ .{ .state = self.state }, self.turn, self.operation, self.first_action };
+    pub fn extraArgs(self: *const SessionWork) struct { ?WorkAttentionJson, session_work.Group, WorkActionsJson } {
+        return .{ if (self.attention) |value| .{ .value = value } else null, self.group, .{ .value = self.actions } };
+    }
+
+    pub fn args(self: *const SessionWork) struct { WorkStateJson, ?u64, ?u64, ?u64, ?WorkAttentionJson, session_work.Group, WorkActionsJson } {
+        const extra = self.extraArgs();
+        return .{ .{ .state = self.state }, self.turn, self.operation, self.first_action, extra[0], extra[1], extra[2] };
     }
 
     pub fn writeJson(self: *const SessionWork, out: *std.Io.Writer) !void {
@@ -2179,7 +2217,9 @@ pub const command_observation_reply = struct {
     pub const completed = .{",\"result\":{\"status\":\"completed\",\"text\":"} ++ content_reference_shape ++ .{"}"};
     pub const cancelled = .{ ",\"result\":{\"status\":\"cancelled\",\"code\":", Hole{ .string = max_code_bytes }, "}" };
     pub const failed = .{ ",\"result\":{\"status\":\"failed\",\"code\":", Hole{ .string = max_code_bytes }, "}" };
-    pub const work = .{ ",\"work\":{\"state\":", Hole{ .json = WorkStateJson }, ",\"first_action\":", Hole.optional_id, "}" };
+    pub const work_base = .{ ",\"work\":{\"state\":", Hole{ .json = WorkStateJson }, ",\"first_action\":", Hole.optional_id };
+    // The observation reservation adds the exact same bounded derived fields as every work reply.
+    pub const work = work_base ++ SessionWork.extra_fields ++ .{"}"};
     pub const recovery = .{ ",\"recovery\":", Hole{ .json = MessageRecoveryJson } };
 
     const queued_state = .{",\"state\":\"queued\""};
@@ -2189,7 +2229,7 @@ pub const command_observation_reply = struct {
     const completed_state = .{",\"state\":\"completed\""};
     const failed_state = .{",\"state\":\"failed\""};
     const cancelled_state = .{",\"state\":\"cancelled\""};
-    pub const permission_work = .{ ",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"", Hole.decimal, "\"},\"first_action\":", Hole.optional_id, "}" };
+    pub const permission_work = .{ ",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"", Hole.decimal, "\"},\"first_action\":", Hole.optional_id } ++ SessionWork.extra_fields ++ .{"}"};
     pub const message_variants = .{
         rejected_state,
         rejected_state ++ input,
