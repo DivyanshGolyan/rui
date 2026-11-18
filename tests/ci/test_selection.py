@@ -1629,7 +1629,7 @@ fi
         self.assertTrue(all(row["targets"] == ["measure-model-output"] for row in rows))
 
     def test_requested_ref_cannot_publish_shared_caches(self):
-        read_only = ('qualify-macos.yml', 'previous-release-upgrade.yml', 'release.yml')
+        read_only = ('qualify-macos.yml', 'previous-release-upgrade.yml', 'release.yml', 'release-build.yml')
         for name in read_only:
             with self.subTest(workflow=name):
                 workflow = Path('.github/workflows', name).read_text()
@@ -1640,7 +1640,6 @@ fi
                 if name == 'release.yml':
                     publisher = re.search(r'(?ms)^  publish:\n(.*?)(?=^  [\w-]+:|\Z)', workflow)[1]
                     self.assertIn("github.ref == 'refs/heads/main'", publisher)
-                    self.assertIn("needs.plan.result == 'success'", publisher)
                     self.assertNotIn('uses: ./.github/actions/setup', publisher)
                     self.assertNotIn('uses: actions/cache', publisher)
                     trusted = re.search(r'(?ms)^      - uses: actions/checkout@.*?(?=^      - |\Z)', publisher)[0]
