@@ -113,6 +113,64 @@ test "a Workspace's changed page reads only its own Sessions, however many other
     try std.testing.expectEqual(alone, try Page.steps(&storage, &tmp, request, &watched));
 }
 
+test "a fixed creator subtree skips unrelated Sessions in its Workspace" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    _ = try configureTestSession(&storage, "creator-cost-sentinel");
+    const root = try configureTestSession(&storage, "creator-cost-root");
+    const child = try configureTestSession(&storage, "creator-cost-child");
+    const grandchild = try configureTestSession(&storage, "creator-cost-grandchild");
+    try store_testing.sqlite_only.exec(&storage, "UPDATE session SET creator_ref=?1 WHERE session_ref=?2", .{ root.slice(), child.slice() });
+    try store_testing.sqlite_only.exec(&storage, "UPDATE session SET creator_ref=?1 WHERE session_ref=?2", .{ child.slice(), grandchild.slice() });
+    const request: protocol.ListSessions = .{ .after = 1, .ceiling = 4 };
+    const Facts = struct { own: u64, subtree: u64, descendants: u64, needs_you: u64 };
+    const Measure = struct {
+        fn run(store: *Store, dir: *std.testing.TmpDir, list: protocol.ListSessions, ids: [3][]const u8) !struct { steps: u64, facts: [3]Facts } {
+            var used = std.atomic.Value(u64).init(0);
+            std.testing.allocator.free(try testingSessionList(store, dir, list, &used, 101));
+            var counter: TestingSteps = .{};
+            counter.begin(store.sqliteDatabase());
+            const bytes = testingSessionList(store, dir, list, &used, 102) catch |err| {
+                counter.end(store.sqliteDatabase());
+                return err;
+            };
+            counter.end(store.sqliteDatabase());
+            defer std.testing.allocator.free(bytes);
+            var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
+            defer parsed.deinit();
+            const rows = parsed.value.object.get("sessions").?.array.items;
+            try std.testing.expectEqual(@as(usize, 3), rows.len);
+            var facts: [3]Facts = undefined;
+            for (rows, ids, &facts, 0..) |row, id, *fact, index| {
+                try std.testing.expectEqualStrings(id, row.object.get("reference").?.string);
+                fact.* = .{
+                    .own = try std.fmt.parseInt(u64, row.object.get("state_change_at").?.string, 10),
+                    .subtree = try std.fmt.parseInt(u64, row.object.get("subtree_state_change_at").?.string, 10),
+                    .descendants = try std.fmt.parseInt(u64, row.object.get("descendant_count").?.string, 10),
+                    .needs_you = try std.fmt.parseInt(u64, row.object.get("descendant_needs_you_count").?.string, 10),
+                };
+                try std.testing.expect(fact.own > 0 and fact.subtree >= fact.own);
+                try std.testing.expectEqual(@as(u64, 2 - index), fact.descendants);
+                try std.testing.expectEqual(@as(u64, 0), fact.needs_you);
+            }
+            return .{ .steps = counter.steps, .facts = facts };
+        }
+    };
+    const ids = [3][]const u8{ root.slice(), child.slice(), grandchild.slice() };
+    const before = try Measure.run(&storage, &tmp, request, ids);
+    for (0..128) |index| {
+        var key: [48]u8 = undefined;
+        _ = try configureTestSession(&storage, try std.fmt.bufPrint(&key, "creator-cost-peer-{d}", .{index}));
+    }
+    const after = try Measure.run(&storage, &tmp, request, ids);
+    try std.testing.expectEqualDeep(before.facts, after.facts);
+    std.debug.print("fixed creator subtree SQLite VM steps: before={d} after={d} peers=128\n", .{ before.steps, after.steps });
+    try std.testing.expect(after.steps <= before.steps + 100);
+}
+
 test "a list row reads the same steps however long its Session's history" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -408,48 +466,6 @@ test "a list page of mixed work takes its deepest row's rounds, and a pass per r
         };
     try std.testing.expectEqual(9, rounds);
     try std.testing.expectEqual(1 + 1 + 8 + 6 + 6 + 4 + 2 + 2 + 6, a.passes);
-}
-
-test "a stopping Turn with queued work adds no list read rounds or passes" {
-    const Costs = struct {
-        fn read(storage: *Store, tmp: *std.testing.TmpDir) !struct { rounds: u32, passes: usize } {
-            var root: [protocol.max_store_bytes]u8 = undefined;
-            const length = try tmp.dir.realPath(std.testing.io, &root);
-            var used = std.atomic.Value(u64).init(0);
-            var capture: report_domain.SessionReportCapture = .{ .io = std.testing.io, .writer = null, .budget = .{ .used = &used, .limit = 1024 * 1024 } };
-            try capture.create(root[0..length], 1, false);
-            defer capture.deinit();
-            const entry = try store_core.enter(storage, .none);
-            defer entry.release();
-            var a: reads_domain.ReadAccess = .open(&entry);
-            defer a.deinit();
-            const before = storage.testing_content_work.rounds;
-            var reply: session_list_reply.Reply(report_domain.SessionReportCapture) = .{ .capture = &capture };
-            try session_list_read_domain.readSessionList(&a, &.{}, &reply);
-            return .{ .rounds = storage.testing_content_work.rounds - before, .passes = a.passes };
-        }
-    };
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var storage: Store = undefined;
-    try testingStore(&storage, &tmp, std.testing.io);
-    defer storage.close() catch unreachable;
-    const session = try TestingWorkShape.awaiting.make(&storage, &tmp, "stopping-list-cost");
-    const action = try store_testing.queryU64(&storage, "SELECT min(action_id) FROM action_operation WHERE session_ref=?1", .{session.slice()});
-    var allow: protocol.PermissionDecisionCommand = .{ .session = session, .action_id = action, .decision = .allow_once };
-    try allow.key.set("stopping-list-allow");
-    try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
-    _ = (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?;
-    const running = try Costs.read(&storage, &tmp);
-    var stop = try completeSessionStop("stopping-list-stop", session.slice());
-    try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
-    try submitTestMessage(&storage, &tmp, "stopping-list-file", "stopping-list-queued", session.slice(), "new work");
-    const stopping = try Costs.read(&storage, &tmp);
-    try std.testing.expectEqual(running.rounds, stopping.rounds);
-    try std.testing.expectEqual(running.passes, stopping.passes);
-    const request: protocol.ActivityPage = .{ .session = session };
-    const work = (try store_core.activityPageForTesting(&storage, request)).work.work;
-    try std.testing.expect(work.state == .stopping and work.actions.stop);
 }
 
 test "a stopping Turn with queued work adds no list read rounds or passes" {

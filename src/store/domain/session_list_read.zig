@@ -265,7 +265,7 @@ const descendant_page = rsql.Read(.{
     .sql = "WITH RECURSIVE descendants(origin,session_ref,workspace_digest,workspace) AS (" ++
         "SELECT session.session_ref,session.session_ref,session.workspace_digest,session.workspace FROM session " ++
         "WHERE session.session_ref IN (?1,?2,?3,?4,?5,?6,?7,?8) AND (?9 IS NULL OR (session.workspace_digest=?10 AND session.workspace=?9))" ++ archiveFilterSql("?11") ++
-        " UNION SELECT parent.origin,session.session_ref,session.workspace_digest,session.workspace FROM session @index(session_workspace_list) JOIN descendants parent " ++
+        " UNION SELECT parent.origin,session.session_ref,session.workspace_digest,session.workspace FROM session @index(session_creator) JOIN descendants parent " ++
         "ON session.creator_ref=parent.session_ref AND session.workspace_digest=parent.workspace_digest AND session.workspace=parent.workspace " ++
         "WHERE 1=1" ++ archiveFilterSql("?11") ++ ") " ++
         "SELECT member.origin,session.session_ref,session.created_at," ++ clock_columns[0 .. clock_columns.len - 1] ++

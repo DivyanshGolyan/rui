@@ -17,7 +17,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631;
-pub const schema_version: u32 = 82;
+pub const schema_version: u32 = 83;
 
 pub const IdentityMismatch = struct {
     saved_selector: Bounded(store_path.max_bytes) = .{},
@@ -62,6 +62,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 80, .digest = 0xa19f085a8611c762 },
     .{ .schema_version = 81, .digest = 0x3fc38cd4bb9b66b9 },
     .{ .schema_version = 82, .digest = 0x367836567791809e },
+    .{ .schema_version = 83, .digest = 0x3b1876e344996870 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -790,6 +791,11 @@ pub const migrations = [_]Migration{
             "UPDATE message_admission SET source_kind=CASE WHEN sender_session_ref IS NOT NULL THEN 2 WHEN source_action_id IS NOT NULL THEN 3 ELSE 1 END",
             "ALTER TABLE message_admission MODIFY COLUMN source_kind BIGINT NOT NULL, ADD CHECK(source_kind BETWEEN 1 AND 5), ADD CHECK((source_kind=1 AND sender_session_ref IS NULL AND source_action_id IS NULL) OR (source_kind=2 AND sender_session_ref IS NOT NULL) OR (source_kind=3 AND source_action_id IS NOT NULL) OR (source_kind IN (4,5) AND sender_session_ref IS NULL)), MODIFY COLUMN message_admission_person_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN source_kind=1 THEN session_ref END) STORED",
         },
+    },
+    .{
+        .from = 82,
+        .sqlite = &.{"CREATE INDEX session_creator ON session(creator_ref,session_ref)"},
+        .mysql = &.{"CREATE INDEX session_creator ON session(creator_ref,session_ref)"},
     },
 };
 
@@ -1784,6 +1790,7 @@ pub const indexes = [_]Index{
     .{ .name = "session_obligation_parent", .table = "session", .columns = &.{ "parent_ref", "obligation_since", "session_ref" }, .where = "obligation_since IS NOT NULL" },
     .{ .name = "session_forward_owed_message", .table = "session_forward", .columns = &.{ "target_ref", "message_delivered" } },
     .{ .name = "session_workspace_list", .table = "session", .columns = &.{ "workspace_digest", "created_seq" } },
+    .{ .name = "session_creator", .table = "session", .columns = &.{ "creator_ref", "session_ref" } },
     .{ .name = "message_admission_sent", .table = "message_admission", .columns = &.{ "sender_session_ref", "sender_position" }, .unique = true, .where = "sender_session_ref IS NOT NULL" },
     .{ .name = "turn_one_active_per_session", .table = "turn", .columns = &.{"session_ref"}, .unique = true, .where = "outcome_code IS NULL" },
     .{ .name = "turn_tool_continuation", .table = "turn", .columns = &.{"operation_id"}, .where = "outcome_code IS NULL AND continuation_operation_id=operation_id" },
@@ -3500,4 +3507,40 @@ test "schema 82 backfills input sources and preserves admissions" {
         for (migrations[81 - migration_baseline].sqlite) |statement| found = found or std.mem.eql(u8, object.sql, statement);
         try std.testing.expect(found);
     }
+}
+
+test "schema 83 adds a canonical creator index without changing Sessions" {
+    const step = migrations[82 - migration_baseline];
+    try std.testing.expectEqual(@as(u32, 82), step.from);
+    inline for (.{ rsql.Dialect.sqlite, rsql.Dialect.mysql }) |dialect| {
+        const statements = if (dialect == .sqlite) step.sqlite else step.mysql;
+        try std.testing.expectEqual(@as(usize, 1), statements.len);
+        for (comptime objects(dialect)) |object| {
+            if (!std.mem.eql(u8, object.name, "session_creator")) continue;
+            try std.testing.expectEqualStrings(object.sql, statements[0]);
+            break;
+        } else return error.MissingCreatorIndex;
+    }
+    try std.testing.expect(comptime mysqlCanForceIndex("session_creator"));
+    var raw: ?*c.sqlite3 = null;
+    defer _ = c.sqlite3_close(raw);
+    try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_open(":memory:", &raw));
+    const database = raw.?;
+    try sqlite.exec(database, @embedFile("migration_baseline.sqlite.sql"));
+    try sqlite.exec(database, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
+    try sqlite.exec(database, @embedFile("migration_baseline_rows.sql"));
+    for (migrations) |migration| {
+        if (migration.from >= 82) break;
+        for (migration.sqlite) |statement| try sqlite.exec(database, statement);
+    }
+    try sqlite.exec(database, "CREATE TEMP TABLE old_sessions AS SELECT * FROM session");
+    for (step.sqlite) |statement| try sqlite.exec(database, statement);
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM old_sessions EXCEPT SELECT * FROM session)"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM session EXCEPT SELECT * FROM old_sessions)"));
+    const plan = try sqlite.prepare(database, "EXPLAIN QUERY PLAN SELECT session_ref FROM session INDEXED BY session_creator WHERE creator_ref=?1");
+    defer _ = c.sqlite3_finalize(plan);
+    try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(plan));
+    const detail = std.mem.span(c.sqlite3_column_text(plan, 3));
+    try std.testing.expect(std.mem.indexOf(u8, detail, "SEARCH") != null);
+    try std.testing.expect(std.mem.indexOf(u8, detail, "session_creator") != null);
 }
