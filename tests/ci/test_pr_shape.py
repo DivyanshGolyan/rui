@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 import pr_shape
 import select_tests
+import screens_comment
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -305,6 +306,84 @@ class PrShapeMainTest(unittest.TestCase):
                  redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
                 self.assertEqual(pr_shape.main(), expected)
                 changed.assert_not_called()
+
+    def test_screens_mode_accepts_only_current_bot_sticky_images_scr_4(self):
+        # SCR-4: sticky evidence must be from the bot, match HEAD and contain an image.
+        self._screens_mode_accepts_rendered_screenshot_table()
+        self._screens_mode_paginates_comments_and_fails_closed_on_api_error()
+        head = "a" * 40
+        marker = "<!-- rui-screens -->"
+        image = "| Overview | ![After](https://example.com/screen.png) |"
+        cases = (
+            ("github-actions[bot]", f"{marker}\nHead: `{head}`  \n{image}", 0),
+            ("github-actions[bot]", f"{marker}\nHead: `{'b' * 40}`\n{image}", 1),
+            ("other-user", f"{marker}\nHead: `{head}`\n{image}", 1),
+            ("github-actions[bot]", f"{marker}\nHead: `{head}`\nNo images", 1),
+            ("github-actions[bot]", f"Head: `{head}`\n{image}", 1),
+            ("github-actions[bot]", f"{marker}\nHead: `{head}`\n<!-- {image} -->", 1),
+        )
+        for author, comment_body, expected in cases:
+            def api(method, path):
+                if "/pulls/" in path:
+                    return {"body": "", "head": {"sha": head}}
+                return [{"user": {"login": author}, "body": comment_body}]
+
+            with self.subTest(author=author, body=comment_body), \
+                 patch.dict(os.environ, {"PR_NUMBER": "42", "GITHUB_REPOSITORY": "o/r"}, clear=True), \
+                 patch.object(sys, "argv", ["pr_shape.py", "--screens"]), \
+                 patch.object(pr_shape, "github", side_effect=api), \
+                 redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                self.assertEqual(pr_shape.main(), expected)
+
+    def _screens_mode_accepts_rendered_screenshot_table(self):
+        head = "a" * 40
+        pair = {"name": "overview", "size": "140x40", "before": None,
+                "after": {"files": {"png": "overview.png"}}}
+        diff = {"changed": [], "new": [pair], "removed": [], "failed": [], "same_count": 0}
+        body = screens_comment.render(diff, "o/r", 42, head, "123", "base")
+
+        def api(method, path):
+            if "/pulls/" in path:
+                return {"body": "", "head": {"sha": head}}
+            return [{"user": {"login": "github-actions[bot]"}, "body": body}]
+
+        with patch.dict(os.environ, {"PR_NUMBER": "42", "GITHUB_REPOSITORY": "o/r"}, clear=True), \
+             patch.object(sys, "argv", ["pr_shape.py", "--screens"]), \
+             patch.object(pr_shape, "github", side_effect=api), \
+             redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            self.assertEqual(pr_shape.main(), 0)
+
+    def _screens_mode_paginates_comments_and_fails_closed_on_api_error(self):
+        head = "a" * 40
+        comment = {"user": {"login": "github-actions[bot]"}, "body":
+                   f"<!-- rui-screens -->\nHead: `{head}`\n![After](https://example.com/a.png)"}
+        for fail, expected in ((False, 0), (True, 1)):
+            def api(method, path):
+                if "/pulls/" in path:
+                    return {"body": "", "head": {"sha": head}}
+                if path.endswith("&page=1"):
+                    return [{}] * 100
+                if fail:
+                    raise OSError("offline")
+                return [comment]
+
+            with self.subTest(fail=fail), \
+                 patch.dict(os.environ, {"PR_NUMBER": "42", "GITHUB_REPOSITORY": "o/r"}, clear=True), \
+                 patch.object(sys, "argv", ["pr_shape.py", "--screens"]), \
+                 patch.object(pr_shape, "github", side_effect=api) as github, \
+                 redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                self.assertEqual(pr_shape.main(), expected)
+                self.assertTrue(any("page=2" in call.args[1] for call in github.call_args_list))
+
+    def test_screens_mode_body_evidence_needs_no_comment_lookup(self):
+        for body in ("No screen change: unchanged", "![screen](https://github.com/user-attachments/assets/123)"):
+            with self.subTest(body=body), \
+                 patch.dict(os.environ, {"PR_NUMBER": "42", "GITHUB_REPOSITORY": "o/r"}, clear=True), \
+                 patch.object(sys, "argv", ["pr_shape.py", "--screens"]), \
+                 patch.object(pr_shape, "github", return_value={"body": body}) as github, \
+                 redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                self.assertEqual(pr_shape.main(), 0)
+                github.assert_called_once_with("GET", "repos/o/r/pulls/42")
 
     def test_screens_mode_runs_with_only_ci_directory(self):
         with tempfile.TemporaryDirectory() as directory:

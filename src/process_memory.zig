@@ -4,6 +4,21 @@ pub const Memory = struct { rui: u64, tools: ?u64 };
 
 pub const max_tools = 256;
 
+// A deterministic displayed total for screen tests; invalid input leaves sampling live.
+pub fn testOverride(value: ?[]const u8) ?Memory {
+    const text = value orelse return null;
+    if (text.len == 0) return null;
+    for (text) |byte| if (byte < '0' or byte > '9') return null;
+    return .{ .rui = std.fmt.parseInt(u64, text, 10) catch return null, .tools = null };
+}
+
+test "displayed memory override accepts decimal bytes and ignores invalid input" {
+    try std.testing.expectEqual(@as(?Memory, .{ .rui = 0, .tools = null }), testOverride("0"));
+    try std.testing.expectEqual(@as(?Memory, .{ .rui = 18446744073709551615, .tools = null }), testOverride("18446744073709551615"));
+    for ([_]?[]const u8{ null, "", "-1", "+1", " 1", "1x", "18446744073709551616" }) |value|
+        try std.testing.expectEqual(@as(?Memory, null), testOverride(value));
+}
+
 pub fn read(source: anytype, self: i32, host: ?i32) Memory {
     var rui = source.footprint(self) orelse 0;
     const root = host orelse return .{ .rui = rui, .tools = null };

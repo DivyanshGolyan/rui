@@ -315,11 +315,11 @@ jobs:
             ignores=()
             # 1.7.7 predates GitHub's server-enforced cache policy key.
             case "$workflow" in
-              .github/workflows/qualify-macos.yml|.github/workflows/previous-release-upgrade.yml|.github/workflows/release.yml|.github/workflows/screens.yml)
+              .github/workflows/qualify-macos.yml|.github/workflows/previous-release-upgrade.yml|.github/workflows/release.yml)
                 ignores+=(-ignore '^unexpected key "cache-mode" for "workflow" section\.') ;;
             esac
             # 1.7.7 predates GitHub's bounded concurrency queue option.
-            if [ "$workflow" = .github/workflows/screens.yml ]; then
+            if [ "$workflow" = .github/workflows/screens-comment.yml ]; then
               ignores+=(-ignore '^unexpected key "queue" for "concurrency" section\.')
             fi
             actionlint -shellcheck= "${ignores[@]}" "$workflow"

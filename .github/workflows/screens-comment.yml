@@ -1,0 +1,108 @@
+name: Screens comment
+on:
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Same-repository pull request number
+        required: false
+        type: string
+      head:
+        description: Captured pull request head SHA
+        required: false
+        type: string
+      gen:
+        description: Publication generation
+        required: false
+        type: string
+  pull_request_target:
+    types: [closed]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  actions: write
+
+jobs:
+  comment:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.pr != '' }}
+    runs-on: ubuntu-24.04
+    concurrency:
+      group: screens-comment-${{ inputs.pr }}
+      queue: max
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          sparse-checkout: tests/ci
+          persist-credentials: false
+      - name: Verify pull request and read published manifests
+        id: manifests
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ inputs.pr }}
+          HEAD_SHA: ${{ inputs.head }}
+          GEN: ${{ inputs.gen }}
+        run: |
+          set -euo pipefail
+          [[ "$PR" =~ ^[1-9][0-9]*$ ]]
+          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$GEN" =~ ^[0-9]{1,20}$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" > "$RUNNER_TEMP/current-pr.json"
+          jq -e --arg repo "$GITHUB_REPOSITORY" --arg head "$HEAD_SHA" \
+            '.state == "open" and .head.repo.full_name == $repo and .head.sha == $head' "$RUNNER_TEMP/current-pr.json" > /dev/null
+          git fetch --no-tags origin refs/heads/pr-screens
+          for manifest in shots.json diff.json shots-meta.json; do
+            git show "FETCH_HEAD:pr-$PR/$HEAD_SHA/$GEN/$manifest" > "$RUNNER_TEMP/$manifest"
+          done
+          jq -e --arg head "$HEAD_SHA" '.head == $head and (.base == null or (.base | type == "string" and test("^[0-9a-f]{40}$")))' "$RUNNER_TEMP/shots-meta.json" > /dev/null
+          base=$(jq -r '.base // "unavailable"' "$RUNNER_TEMP/shots-meta.json")
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+      - name: Update screenshot comment
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PR: ${{ inputs.pr }}
+          HEAD_SHA: ${{ inputs.head }}
+          BASE: ${{ steps.manifests.outputs.base }}
+          GEN: ${{ inputs.gen }}
+        run: |
+          python3 tests/ci/screens_comment.py --diff "$RUNNER_TEMP/diff.json" --shots "$RUNNER_TEMP/shots.json" --repo "$GITHUB_REPOSITORY" --pr "$PR" --head "$HEAD_SHA" --gen "$GEN" --base "$BASE"
+      - name: Rerun latest failed admission job
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ inputs.head }}
+        run: |
+          set -euo pipefail
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/workflows/check.yml/runs?head_sha=$HEAD_SHA&per_page=100" > "$RUNNER_TEMP/check-runs.json"
+          while IFS= read -r run_id; do
+            job_id=$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/jobs?filter=latest&per_page=100" | jq -r '[.[].jobs[] | select(.name == "admission" and .conclusion == "failure")] | first | .id // empty')
+            if [ -n "$job_id" ]; then
+              gh api --method POST "repos/$GITHUB_REPOSITORY/actions/jobs/$job_id/rerun"
+              break
+            fi
+          done < <(jq -r '[.[].workflow_runs[]] | sort_by(.created_at) | reverse | .[].id' "$RUNNER_TEMP/check-runs.json")
+  cleanup:
+    if: ${{ github.event_name == 'pull_request_target' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-24.04
+    concurrency:
+      group: pr-screens-writer
+      queue: max
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Remove closed PR captures
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0=http.extraheader
+          export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          python3 tests/ci/screens_cleanup.py

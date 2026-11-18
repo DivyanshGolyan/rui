@@ -27,7 +27,8 @@
           "wait": "Optimistic send witness"
         },
         {
-          "host": "suspend"
+          "host": "suspend",
+          "shot_settle_message": true
         },
         {
           "keys": [
@@ -77,7 +78,8 @@
           "wait": "Send failure witness"
         },
         {
-          "host": "suspend"
+          "host": "suspend",
+          "shot_settle_message": true
         },
         {
           "keys": [
@@ -139,7 +141,8 @@
           "wait": "Optimistic send witness"
         },
         {
-          "host": "suspend"
+          "host": "suspend",
+          "shot_settle_message": true
         },
         {
           "keys": [
@@ -189,7 +192,8 @@
           "wait": "Send failure witness"
         },
         {
-          "host": "suspend"
+          "host": "suspend",
+          "shot_settle_message": true
         },
         {
           "keys": [
@@ -6295,7 +6299,8 @@
       "open": "Chatfeed witness",
       "steps": [
         {
-          "sleep": 61
+          "sleep": 61,
+          "shot_clock_advance": 61
         },
         {
           "send": {

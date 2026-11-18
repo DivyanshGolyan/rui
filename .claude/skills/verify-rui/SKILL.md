@@ -71,7 +71,7 @@ With no build identifier, `shots` builds the current checkout, including uncommi
 
 Open `index.html` to review changed and new screens and failures first. `diff.json` lists changed, new and removed entries, the same count and failures. Changes alone succeed; capture failures exit 1. `shots.json` retains each name, size, status, reason, fingerprint and files. The fingerprint covers committed cells, styles, dimensions and terminal colours, excluding cursor and timing.
 
-Full captures include upgrade states and require a dedicated non-root account with `VERIFY_RUI_UPGRADE_FIXTURE_USER` set to its login. Fixture clocks, Session ordering and live memory can vary between runs, so inspect reported differences before attributing them to a build.
+Full captures include upgrade states and require a dedicated non-root account with `VERIFY_RUI_UPGRADE_FIXTURE_USER` set to its login. Shots require Linux libfaketime; install it or set `VERIFY_RUI_FAKETIME_LIB` to its library path. Inspect reported differences and capture failures before attributing them to a build.
 
 For a large preview, use `--shard i/n` to partition states by index modulo n (i is 1-based), then combine the output directories:
 
@@ -103,7 +103,7 @@ V=.claude/skills/verify-rui/scripts/verify-rui
 $V build "$HEAD" --pkg-dir "${ZIG_LOCAL_PKG_DIR:-$PWD/zig-pkg}"
 $V build "$BASE" --pkg-dir "${ZIG_LOCAL_PKG_DIR:-$PWD/zig-pkg}"
 $V frames "$HEAD" --before "$BASE" --only <states for the changed screens> --sizes 140x40,46x30 [--record]
-$V publish DIR --pr N --ssh rui-box
+$V publish DIR --pr N
 ```
 
 Replace the angle-bracket placeholder with comma-separated state names, omit the brackets around optional `--record`, and use the printed frames directory for `DIR`.
@@ -112,13 +112,10 @@ Comparison captures live in `before/` and `after/`; `index.html` and `pairs.json
 Both comparison recipes come from their pinned revisions through one reader (`git show SHA:.claude/skills/verify-rui/scripts/frames.json`), including HEAD. Historical HEAD captures ignore the checkout’s newer or uncommitted recipe, and states added after HEAD are unknown. Explicit `--scenario FILE` uses that recipe on both builds. A selected state absent from BASE is `new` with only an after capture. A failure under BASE’s own recipe still fails the comparison.
 Both builds must already exist; ordinary `frames` without `--before` keeps its single-build flow.
 The publisher selects changed/new pairs by default (`--all` includes same pairs and `--states a,b` filters states).
-`publish DIR --pr N [--ssh HOST]` attaches PNGs/GIFs on separate labelled lines with state/size alt text under `## Screens`, retaining the head/base/sizes/surface facts and other PR sections. It batches at the CLI's 50-file limit, reads the body back after each batch, and refuses missing embeds or partial uploads. Inspect the body before retrying a partial upload.
-The upload machine needs gh **2.104.0+** with `--attach`, a classic PAT or gh OAuth token, and repository push access. Without `--ssh` the same worker runs locally, for example on Divyansh's box.
-Cloud threads use `--ssh rui-box`: set up the alias with `bash /mnt/project-files/rui-dev/rui-box-up.sh THREAD-NAME` if needed. The publisher copies only selected media and its worker to a fresh remote directory, uploads and verifies there, and removes that directory. Credentials stay on the box.
-Cloud GitHub writes filter image embeds, and their proxy blocks the CLI's GraphQL lookup. Once images are present, **every later PR body edit must also run on the box**: copy the body file there, then use `ssh rui-box 'gh pr edit N -R OWNER/REPO --body-file /path/on/box/body.md'`. Container REST, open_pr.py and MCP body writes would break the screenshots again.
-Open the PR to obtain `N`, then publish the frames. Screens are required by `admission` for merge; the build and tests run without them. After publishing, rerun only the failed `admission` job; it reads the current body from GitHub, falling back to the event payload if that read fails. Body edits do not trigger a run.
+`publish DIR --pr N` checks that the captured head matches the PR head, pushes the selected media and manifests to `pr-screens`, and dispatches a workflow that posts the screens in a sticky comment. Captures for closed PRs are swept on close and on every publish. Selected media must total at most 20 MB. The command needs repository push access and permission to dispatch the workflow.
+Open the PR to obtain `N`, then publish the frames. Screens are required by `admission` for merge; the build and tests run without them. The workflow attempts to rerun a failed `admission` job for that head after posting.
 Show the before/after PNGs to the person who requested the work in your own conversation when possible.
-Admission accepts a media line only when, after leading whitespace, it starts with `![`, `<img` or `<video` and contains a `https://github.com/user-attachments/` URL outside fenced code and HTML comments. Inline-code examples, reference images, other image hosts, bare URLs and repository page links do not pass.
+Admission accepts the GitHub Actions sticky screens comment when its head matches the PR head and it contains an image. It also accepts a body media line when, after leading whitespace, it starts with `![`, `<img` or `<video` and contains a `https://github.com/user-attachments/` URL outside fenced code and HTML comments. Inline-code examples, reference images, other image hosts, bare URLs and repository page links do not pass.
 A UI-path change that provably draws nothing different may instead carry a line `No screen change: <nonempty reason>`.
 Humans with browsers may also upload `github.com/user-attachments` images or videos.
 

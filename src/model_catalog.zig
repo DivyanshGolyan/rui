@@ -31,26 +31,59 @@ pub fn builtinInstructions(model: []const u8) BuiltinInstructions {
     return .generic;
 }
 
-// Image input is unsupported for these exact aliases in the GPT-3.5 Turbo
-// model reference, checked 2026-11-17:
-// https://developers.openai.com/api/docs/models/gpt-3.5-turbo
-// Unknown IDs stay eligible; do not infer capabilities from a model-name prefix.
-pub fn acceptsImages(model: []const u8) bool {
-    const unsupported = [_][]const u8{
-        "gpt-3.5-turbo",
-        "gpt-3.5-turbo-0125",
-        "gpt-3.5-turbo-1106",
-        "gpt-3.5-turbo-instruct",
-    };
-    for (unsupported) |id| if (std.mem.eql(u8, model, id)) return false;
-    return true;
+pub const ImageCapability = enum { supported, unsupported, unknown };
+
+// The generated snapshot owns image facts. Saved catalog rows do not carry
+// modalities, so a refresh cannot turn missing evidence into a capability.
+pub fn imageCapability(model: []const u8) ImageCapability {
+    const snapshot = @import("model_catalog_snapshot.zig");
+    if (containsId(&snapshot.image_supported_ids, model)) return .supported;
+    if (containsId(&snapshot.image_unsupported_ids, model)) return .unsupported;
+    return .unknown;
 }
 
-test "model image input excludes only evidenced exact unsupported IDs" {
+fn containsId(ids: []const []const u8, id: []const u8) bool {
+    var start: usize = 0;
+    var end = ids.len;
+    while (start < end) {
+        const mid = start + (end - start) / 2;
+        switch (std.mem.order(u8, id, ids[mid])) {
+            .eq => return true,
+            .lt => end = mid,
+            .gt => start = mid + 1,
+        }
+    }
+    return false;
+}
+
+// OpenAI images and vision guide, checked 2026-11-18:
+// https://developers.openai.com/api/docs/guides/images-vision.md
+// These rules apply to auto detail on the API route only.
+pub const ImageCostRule = enum { astra_auto, gpt41_auto };
+pub fn imageCostRule(provider: @import("provider_name.zig").Provider, model: []const u8) ?ImageCostRule {
+    if (provider != .openai) return null;
+    if (std.mem.eql(u8, model, "gpt-6-astra")) return .astra_auto;
+    if (std.mem.eql(u8, model, "gpt-4.1")) return .gpt41_auto;
+    return null;
+}
+
+test "image cost facts are exact and provider qualified" {
+    try std.testing.expectEqual(ImageCostRule.astra_auto, imageCostRule(.openai, "gpt-6-astra").?);
+    try std.testing.expectEqual(ImageCostRule.gpt41_auto, imageCostRule(.openai, "gpt-4.1").?);
+    for ([_]@import("provider_name.zig").Provider{ .codex, .chatgpt }) |provider| {
+        try std.testing.expect(imageCostRule(provider, "gpt-6-astra") == null);
+        try std.testing.expect(imageCostRule(provider, "gpt-4.1") == null);
+    }
+    try std.testing.expect(imageCostRule(.openai, "gpt-4.1-mini") == null);
+    try std.testing.expect(imageCostRule(.openai, "GPT-6-ASTRA") == null);
+}
+
+test "image capability uses exact sourced facts and preserves unknown" {
+    try std.testing.expectEqual(ImageCapability.supported, imageCapability("gpt-4.1"));
     for ([_][]const u8{ "gpt-3.5-turbo", "gpt-3.5-turbo-0125", "gpt-3.5-turbo-1106", "gpt-3.5-turbo-instruct" }) |id|
-        try std.testing.expect(!acceptsImages(id));
-    for ([_][]const u8{ "gpt-6.1-sol", "gpt-4.1", "future-model", "GPT-3.5-TURBO", "gpt-3.5-turbo-next", "openai/gpt-3.5-turbo" }) |id|
-        try std.testing.expect(acceptsImages(id));
+        try std.testing.expectEqual(ImageCapability.unsupported, imageCapability(id));
+    for ([_][]const u8{ "future-model", "GPT-3.5-TURBO", "gpt-3.5-turbo-next" }) |id|
+        try std.testing.expectEqual(ImageCapability.unknown, imageCapability(id));
 }
 
 pub const max_model_bytes = 256;
