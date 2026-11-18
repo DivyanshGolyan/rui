@@ -22,6 +22,7 @@ def catalog_rows():
 
 class InvariantCatalogTest(unittest.TestCase):
     def test_catalog_ids_are_unique(self):
+        """CI-66: Catalog identities are unique."""
         seen = {}
         for path, number, cells in catalog_rows():
             identity = cells[1]
@@ -29,6 +30,7 @@ class InvariantCatalogTest(unittest.TestCase):
             seen[identity] = f"{path}:{number}"
 
     def test_named_migrated_owners_exist_once(self):
+        """CI-67: Migrated owner names identify one source test."""
         # Unmigrated catalog rows name future owners without an ID prefix.
         # Enforce the ID-prefixed owners that the migration has landed.
         tests = defaultdict(list)
