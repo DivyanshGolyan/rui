@@ -144,8 +144,8 @@ pub const Kind = enum {
     activity_page,
     activity_search,
     activity_content,
-    public_part,
-    public_part_bytes,
+    public_parts,
+    public_part_content,
     skill_suggestions,
     model_list,
 };
@@ -184,14 +184,25 @@ pub const ConversationItemKind = conversation_read.ConversationItemKind;
 
 pub const PermissionDecisionCommand = command_input.PermissionDecisionCommand;
 
-pub const PublicPartTarget = union(enum) { message: u64, action: u64 };
-pub const PublicPartKind = std.meta.Tag(PublicPartTarget);
+pub const content_value = @import("content_value.zig");
 
-pub const PublicPart = struct {
+/// The certified part list of a Session-scoped Message or Action owner.
+pub const PublicParts = struct {
     store: Bounded(max_store_bytes) = .{},
     session: Bounded(max_session_bytes) = .{},
-    target: PublicPartTarget = .{ .message = 0 },
-    ordinal: u64 = 0,
+    owner: content_value.Owner = .{ .message = 0 },
+};
+
+/// One part's exact bytes, framed as conversation content.
+pub const PublicPartContent = struct {
+    store: Bounded(max_store_bytes) = .{},
+    session: Bounded(max_session_bytes) = .{},
+    owner: content_value.Owner = .{ .message = 0 },
+    /// At most `input_parts.max_parts - 1`.
+    part: u32 = 0,
+    start: u64 = 0,
+    /// Requires `start` 0, exactly as conversation content.
+    stream: bool = false,
 };
 
 pub const ReadActionArguments = struct {
@@ -667,8 +678,8 @@ fn RequestOf(comptime Custody: type) type {
         activity_page: ActivityPage,
         activity_search: ActivitySearch,
         activity_content: ReadActivityContent,
-        public_part: PublicPart,
-        public_part_bytes: PublicPart,
+        public_parts: PublicParts,
+        public_part_content: PublicPartContent,
         skill_suggestions: ReadSkillSuggestions,
         model_list: struct { store: Bounded(max_store_bytes) = .{} },
 
@@ -676,7 +687,7 @@ fn RequestOf(comptime Custody: type) type {
             switch (self.*) {
                 .configure => |*command| try command.removeTemporaryContent(io),
                 .message => |*command| try command.removeTemporaryContent(io),
-                .host_info, .host_stop, .host_pause, .session_stop, .session_archive, .session_pin, .model_interruption, .permission_decision, .action_background, .action_stop, .observe_command, .read_result, .read_action, .read_action_call_id, .read_action_arguments, .inspect_session, .list_sessions, .conversation_page, .conversation_content, .activity_page, .activity_search, .activity_content, .public_part, .public_part_bytes, .skill_suggestions, .model_list => {},
+                .host_info, .host_stop, .host_pause, .session_stop, .session_archive, .session_pin, .model_interruption, .permission_decision, .action_background, .action_stop, .observe_command, .read_result, .read_action, .read_action_call_id, .read_action_arguments, .inspect_session, .list_sessions, .conversation_page, .conversation_content, .activity_page, .activity_search, .activity_content, .public_parts, .public_part_content, .skill_suggestions, .model_list => {},
             }
         }
 
@@ -719,6 +730,11 @@ fn ParserOf(comptime Custody: type) type {
         source: *MetadataSource,
         expected_kind: ?Kind = null,
         content_ordinal: u8 = 0,
+        part_ordinal: u32 = 0,
+        part_started: u32 = 0,
+        part_finished: u32 = 0,
+        part_image: bool = false,
+        part_format: ?@import("input_media.zig").Format = null,
         captured: []const ContentField = &.{},
         spec_field: Bounded(32) = .{},
 
@@ -733,6 +749,7 @@ fn ParserOf(comptime Custody: type) type {
             const header = try self.scanHeader();
             self.source.start = start;
             self.content_ordinal = 0;
+            self.part_ordinal = 0;
             try self.expectByte('{');
             var members: Members = .{};
             const store = header.store;
@@ -839,14 +856,13 @@ fn ParserOf(comptime Custody: type) type {
                     out.* = .{ .activity_content = .{ .store = store } };
                     try self.parseActivityContent(&out.activity_content, &members);
                 },
-                .public_part, .public_part_bytes => |kind| {
-                    if (kind == .public_part) {
-                        out.* = .{ .public_part = .{ .store = store } };
-                        try self.parsePublicPart(&out.public_part, &members);
-                    } else {
-                        out.* = .{ .public_part_bytes = .{ .store = store } };
-                        try self.parsePublicPart(&out.public_part_bytes, &members);
-                    }
+                .public_parts => {
+                    out.* = .{ .public_parts = .{ .store = store } };
+                    try self.parsePublicParts(&out.public_parts, &members);
+                },
+                .public_part_content => {
+                    out.* = .{ .public_part_content = .{ .store = store } };
+                    try self.parsePublicPartContent(&out.public_part_content, &members);
                 },
                 .skill_suggestions => {
                     out.* = .{ .skill_suggestions = .{ .store = store } };
@@ -876,7 +892,7 @@ fn ParserOf(comptime Custody: type) type {
         const Header = struct { kind: Kind, store: Bounded(max_store_bytes) };
 
         fn scanHeader(self: *Parser) !Header {
-            const Field = enum { version, kind, store, text, configuration };
+            const Field = enum { version, kind, store, text, parts, configuration };
             try self.expectByte('{');
             var members: Members = .{};
             var seen: std.enums.EnumSet(Field) = .empty;
@@ -910,6 +926,10 @@ fn ParserOf(comptime Custody: type) type {
                         if (kind) |named| if (named != .message) return error.UnexpectedField;
                         try self.scanContentEnvelope(true);
                     },
+                    .parts => {
+                        if (kind) |named| if (named != .message) return error.UnexpectedField;
+                        try self.scanParts();
+                    },
                     .configuration => {
                         if (kind) |named| if (named != .configure and named != .message) return error.UnexpectedField;
                         try self.scanConfiguration();
@@ -918,6 +938,46 @@ fn ParserOf(comptime Custody: type) type {
             }
             if (!seen.contains(.version) or !seen.contains(.store)) return error.MissingField;
             return .{ .kind = kind orelse return error.MissingField, .store = store };
+        }
+
+        fn scanParts(self: *Parser) !void {
+            const Field = enum { type, mime, text, data };
+            try self.expectByte('[');
+            var count: u32 = 0;
+            if (!try self.consumeIf(']')) while (true) {
+                if (self.part_ordinal >= @import("input_parts.zig").max_parts) return error.TooManyInputParts;
+                const ordinal = self.part_ordinal;
+                self.part_ordinal += 1;
+                count += 1;
+                try self.expectByte('{');
+                var members: Members = .{};
+                var seen: std.enums.EnumSet(Field) = .empty;
+                var kind: Bounded(8) = .{};
+                var mime: Bounded(16) = .{};
+                while (try self.nextField(Field, &members, &seen)) |field| switch (field) {
+                    .type => try self.readSmallString(&kind),
+                    .mime => try self.readSmallString(&mime),
+                    .text, .data => {
+                        self.part_image = field == .data;
+                        if (ordinal >= self.part_started) return error.NeedPartStart;
+                        try self.expectByte('"');
+                        if (try self.source.readByte() != '"') return error.InvalidJsonShape;
+                    },
+                };
+                if (!seen.contains(.type)) return error.MissingField;
+                self.part_image = kind.eql("image");
+                if (kind.eql("text")) {
+                    if (!seen.contains(.text) or seen.contains(.data) or seen.contains(.mime)) return error.InvalidMessage;
+                    self.part_format = null;
+                } else if (self.part_image) {
+                    if (!seen.contains(.data) or seen.contains(.text) or !seen.contains(.mime)) return error.InvalidMessage;
+                    self.part_format = if (mime.eql("image/png")) .png else if (mime.eql("image/jpeg")) .jpeg else return error.UnsupportedImage;
+                } else return error.InvalidMessage;
+                if (ordinal >= self.part_finished) return error.NeedPartEnd;
+                if (try self.consumeIf(']')) break;
+                try self.expectByte(',');
+            };
+            if (count == 0) return error.InvalidMessage;
         }
 
         fn scanConfiguration(self: *Parser) !void {
@@ -1147,7 +1207,7 @@ fn ParserOf(comptime Custody: type) type {
         }
 
         fn parseMessage(self: *Parser, out: *MessageCommand, members: *Members) !void {
-            const Field = enum { key, session, sender, sender_handle, configuration, text, require_model };
+            const Field = enum { key, session, sender, sender_handle, configuration, text, parts, require_model };
             var seen: std.enums.EnumSet(Field) = .empty;
             while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
                 .key => try self.readCommandKey(&out.key),
@@ -1166,13 +1226,15 @@ fn ParserOf(comptime Custody: type) type {
                     try self.parseConfiguration(&out.configuration.?);
                 },
                 .text => try self.readContent(&out.text, false, true),
+                .parts => try self.scanParts(),
                 .require_model => out.require_model = try self.readBoolean(),
             };
-            try require(Field, seen, &.{ .key, .session, .sender, .sender_handle, .text });
+            try require(Field, seen, &.{ .key, .session, .sender, .sender_handle });
+            if (seen.contains(.text) == seen.contains(.parts)) return error.InvalidMessage;
             if (out.session.len == 0 and out.configuration == null) return error.MissingField;
             if (out.session.len == 0) try validateCreatingConfiguration(&out.configuration.?);
             if (out.session.len != 0 and out.configuration != null) return error.UnexpectedField;
-            if (out.text.state != .value) return error.InvalidMessage;
+            if (seen.contains(.text) and out.text.state != .value) return error.InvalidMessage;
             if (seen.contains(.require_model) and out.configuration == null) return error.InvalidMessage;
         }
 
@@ -1284,27 +1346,46 @@ fn ParserOf(comptime Custody: type) type {
             try require(Field, seen, &.{ .key, .session, .action });
         }
 
-        fn parsePublicPart(self: *Parser, out: *PublicPart, members: *Members) !void {
-            const Field = enum { session, id, ordinal, target };
+        fn parsePublicParts(self: *Parser, out: *PublicParts, members: *Members) !void {
+            const Field = enum { session, owner };
             var seen: std.enums.EnumSet(Field) = .empty;
-            var id: u64 = 0;
-            var kind: PublicPartKind = .message;
             while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
                 .session => try self.readSmallString(&out.session),
-                .id => id = try self.readCanonicalU64(),
-                .ordinal => out.ordinal = try self.readCanonicalU64(),
-                .target => {
-                    var text: Bounded(8) = .{};
-                    try self.readSmallString(&text);
-                    kind = std.meta.stringToEnum(PublicPartKind, text.slice()) orelse return error.InvalidTarget;
+                .owner => out.owner = try self.readOwner(),
+            };
+            try require(Field, seen, &.{ .session, .owner });
+        }
+
+        fn parsePublicPartContent(self: *Parser, out: *PublicPartContent, members: *Members) !void {
+            const Field = enum { session, owner, part, start, stream };
+            var seen: std.enums.EnumSet(Field) = .empty;
+            var part: u64 = 0;
+            while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
+                .session => try self.readSmallString(&out.session),
+                .owner => out.owner = try self.readOwner(),
+                .part => part = try self.readCanonicalU64(),
+                .start => out.start = try self.readCanonicalU64(),
+                .stream => {
+                    for ("true") |byte| try self.expectByte(byte);
+                    out.stream = true;
                 },
             };
-            try require(Field, seen, &.{ .session, .id, .ordinal, .target });
-            if (id == 0 or id > std.math.maxInt(i64) or out.ordinal > @import("input_parts.zig").max_parts) return error.InvalidCursor;
-            out.target = switch (kind) {
-                .message => .{ .message = id },
-                .action => .{ .action = id },
-            };
+            try require(Field, seen, &.{ .session, .owner, .part, .start });
+            if (part >= @import("input_parts.zig").max_parts or (out.stream and out.start != 0)) return error.InvalidCursor;
+            out.part = @intCast(part);
+        }
+
+        /// `{"message":"ID"}` or `{"action":"ID"}`: exactly one known owner kind and a positive id.
+        fn readOwner(self: *Parser) !content_value.Owner {
+            try self.expectByte('{');
+            var members: Members = .{};
+            var key: Bounded(32) = .{};
+            if (!try members.next(self, &key)) return error.MissingField;
+            const kind = std.meta.stringToEnum(content_value.Owner.Kind, key.slice()) orelse return error.InvalidTarget;
+            const id = try self.readCanonicalU64();
+            if (try members.next(self, &key)) return error.UnexpectedField;
+            if (id == 0 or id > std.math.maxInt(i64)) return error.InvalidTarget;
+            return .of(kind, id);
         }
 
         fn parseReadAction(self: *Parser, out: *@import("action_read.zig").Request, members: *Members) !void {
@@ -2069,14 +2150,93 @@ pub const activity_page_request = struct {
     pub const tail = .{"}"};
     pub const all = head ++ since ++ tail;
 };
-pub const public_part_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"public_part\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"id\":\"", Hole.decimal, "\",\"ordinal\":\"", Hole.decimal, "\",\"target\":\"", Hole{ .tag = PublicPartKind }, "\"}" };
-pub const public_part_bytes_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"public_part_bytes\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"id\":\"", Hole.decimal, "\",\"ordinal\":\"", Hole.decimal, "\",\"target\":\"", Hole{ .tag = PublicPartKind }, "\"}" };
-pub const public_part_reply = struct {
-    pub const head = .{"{\"version\":\"" ++ wire_version ++ "\",\"type\":\"public_part\",\"part\":"};
-    pub const missing = .{"null}"};
-    pub const text = .{ "{\"ordinal\":\"", Hole.decimal, "\",\"type\":\"text\",\"bytes\":\"", Hole.decimal, "\",\"sha256\":\"", Hole{ .hex = 32 }, "\"}}" };
-    pub const image = .{ "{\"ordinal\":\"", Hole.decimal, "\",\"type\":\"image\",\"mime\":", Hole{ .string = 10 }, ",\"bytes\":\"", Hole.decimal, "\",\"sha256\":\"", Hole{ .hex = 32 }, "\"}}" };
-    pub const max_bytes = maxShapeBytes(.{ head ++ missing, head ++ text, head ++ image });
+/// The Message admission or Action that holds a parts value: `{"message":"ID"}` or `{"action":"ID"}`.
+pub const OwnerJson = struct {
+    owner: content_value.Owner,
+
+    pub const openapi_name = "PartOwner";
+    pub const message_shape = .{ "{\"message\":\"", Hole.decimal, "\"}" };
+    pub const action_shape = .{ "{\"action\":\"", Hole.decimal, "\"}" };
+    pub const openapi_shapes = .{ message_shape, action_shape };
+    pub const max_json_bytes = maxShapeBytes(openapi_shapes);
+
+    pub fn writeJson(self: *const OwnerJson, out: *std.Io.Writer) !void {
+        switch (self.owner) {
+            .message => |id| try writeShape(out, message_shape, .{id}),
+            .action => |id| try writeShape(out, action_shape, .{id}),
+        }
+    }
+};
+
+/// One stored Content value: exact text bytes, or a parts manifest with the owner that addresses its parts.
+pub const ContentValueJson = struct {
+    value: content_value.Value,
+
+    pub const openapi_name = "ContentValue";
+    pub const text_shape = .{ "{\"type\":\"text\",\"bytes\":\"", Hole.decimal, "\",\"sha256\":\"", Hole{ .hex = 32 }, "\"}" };
+    pub const parts_shape = .{ "{\"type\":\"parts\",\"bytes\":\"", Hole.decimal, "\",\"sha256\":\"", Hole{ .hex = 32 }, "\",\"owner\":", Hole{ .json = OwnerJson }, "}" };
+    pub const openapi_shapes = .{ text_shape, parts_shape };
+    pub const max_json_bytes = maxShapeBytes(openapi_shapes);
+
+    pub fn writeJson(self: *const ContentValueJson, out: *std.Io.Writer) !void {
+        switch (self.value) {
+            .text => |reference| try writeShape(out, text_shape, .{ reference.length, reference.digest }),
+            .parts => |parts| try writeShape(out, parts_shape, .{ parts.identity.length, parts.identity.digest, OwnerJson{ .owner = parts.owner } }),
+        }
+    }
+};
+
+pub const public_parts_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"public_parts\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"owner\":", Hole{ .json = OwnerJson }, "}" };
+pub const public_part_content_request = struct {
+    pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"public_part_content\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"owner\":", Hole{ .json = OwnerJson }, ",\"part\":\"", Hole.decimal, "\",\"start\":\"", Hole.decimal, "\"" };
+    pub const stream = .{",\"stream\":true"};
+    pub const tail = .{"}"};
+    pub const all = head ++ stream ++ tail;
+};
+
+/// The whole certified part list of one parts value, written into a report capture.
+pub const public_parts_reply = struct {
+    pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"public_parts\",\"session\":", session_hole, ",\"value\":", Hole{ .json = ContentValueJson }, ",\"parts\":[" };
+    pub const text = .{ "{\"ordinal\":\"", Hole.decimal, "\",\"type\":\"text\",\"bytes\":\"", Hole.decimal, "\",\"sha256\":\"", Hole{ .hex = 32 }, "\"}" };
+    pub const image = .{ "{\"ordinal\":\"", Hole.decimal, "\",\"type\":\"image\",\"mime\":", Hole{ .string = 10 }, ",\"width\":\"", Hole.decimal, "\",\"height\":\"", Hole.decimal, "\",\"name\":", Hole{ .optional_string = @import("input_parts.zig").max_name_bytes }, ",\"bytes\":\"", Hole.decimal, "\",\"sha256\":\"", Hole{ .hex = 32 }, "\"}" };
+    pub const tail = .{"]}"};
+    pub const max_part_bytes = maxShapeBytes(.{ text, image });
+    /// The whole reply at its largest: every part an image with the longest name.
+    pub const max_bytes = shapeBytes(head) + @import("input_parts.zig").max_parts * (max_part_bytes + 1) + shapeBytes(tail);
+
+    /// The server's only writer of this reply: `head` once, then each `part`, then `finish`.
+    pub fn Writer(comptime Capture: type) type {
+        return struct {
+            capture: *Capture,
+            session: []const u8,
+            parts: u32 = 0,
+
+            pub fn head(self: *@This(), value: content_value.Value.Parts) !void {
+                try appendCapture(self.capture, public_parts_reply.head, .{ self.session, ContentValueJson{ .value = .{ .parts = value } } });
+            }
+
+            pub fn part(self: *@This(), value: content_value.Part) !void {
+                if (self.parts != 0) try self.capture.append(",");
+                self.parts += 1;
+                switch (value.kind) {
+                    .text => try appendCapture(self.capture, text, .{ value.ordinal, value.reference.length, value.reference.digest }),
+                    .image => |media| try appendCapture(self.capture, image, .{ value.ordinal, media.media.format.mime(), media.media.width, media.media.height, if (media.name) |*name| name.slice() else null, value.reference.length, value.reference.digest }),
+                }
+            }
+
+            pub fn finish(self: *@This()) !void {
+                try appendCapture(self.capture, tail, .{});
+            }
+        };
+    }
+
+    /// Renders one bounded shape on the stack, then hands the bytes to the capture.
+    fn appendCapture(capture: anytype, comptime shape: anytype, args: anytype) !void {
+        var buffer: [@max(shapeBytes(head), max_part_bytes, shapeBytes(tail))]u8 = undefined;
+        var out: std.Io.Writer = .fixed(&buffer);
+        writeShape(&out, shape, args) catch return error.ReplyShapeOverflow;
+        try capture.append(out.buffered());
+    }
 };
 pub const activity_content_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"activity_content\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"position\":\"", Hole.decimal, "\",\"ordinal\":\"", Hole.decimal, "\"}" };
 pub const configure_request = struct {
@@ -2094,6 +2254,7 @@ pub const message_request = struct {
     pub const sender_handle = .{ ",\"sender_handle\":", Hole{ .optional_string = max_sender_handle_bytes } };
     pub const configuration = .{",\"configuration\":"};
     pub const text = .{",\"text\":{\"state\":\"value\",\"value\":"};
+    pub const parts = .{",\"parts\":"};
     pub const text_tail = .{"}"};
     pub const require_model = .{",\"require_model\":true"};
     pub const tail = .{"}"};
@@ -2135,8 +2296,8 @@ pub const max_client_request_bytes = @max(max_inspect_session_request_bytes, max
     read_action_request.all,             read_action_arguments_request, read_action_call_id_request,
     conversation_content_request.all,    conversation_page_request,     activity_search_request.all,
     activity_page_request.all,           activity_content_request,      skill_suggestions_session_request,
-    skill_suggestions_workspace_request, model_list_request,            public_part_request,
-    public_part_bytes_request,
+    skill_suggestions_workspace_request, model_list_request,            public_parts_request,
+    public_part_content_request.all,
 }));
 
 pub fn jsonListBytes(comptime count: usize, comptime item_bytes: usize) usize {
@@ -2144,6 +2305,7 @@ pub fn jsonListBytes(comptime count: usize, comptime item_bytes: usize) usize {
 }
 
 pub const content_reference_shape = .{ "{\"type\":\"text\",\"bytes\":\"", Hole.decimal, "\",\"sha256\":\"", Hole{ .hex = 32 }, "\"}" };
+pub const parts_reference_shape = .{ "{\"type\":\"parts\",\"bytes\":\"", Hole.decimal, "\",\"sha256\":\"", Hole{ .hex = 32 }, "\"}" };
 
 pub const configuration_reply = struct {
     const head = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"" ++ command_spec.spec(.configure).reply_type ++ "\",\"answer\":{\"status\":";
@@ -2160,10 +2322,14 @@ pub const message_reply = struct {
     const execution = ",\"execution\":{\"status\":\"queued\"}}";
     pub const accepted = .{ head ++ "\"accepted\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"admission\":\"", Hole.decimal, "\"},\"input\":" } ++
         content_reference_shape ++ .{ ",\"queue\":{\"status\":\"queued\",\"admission\":\"", Hole.decimal, "\"}" ++ execution };
+    pub const accepted_parts = .{ head ++ "\"accepted\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"admission\":\"", Hole.decimal, "\"},\"input\":" } ++
+        parts_reference_shape ++ .{ ",\"queue\":{\"status\":\"queued\",\"admission\":\"", Hole.decimal, "\"}" ++ execution };
     pub const rejected = .{ head ++ "\"rejected\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"code\":\"", Hole{ .tag = MessageRejection }, "\",\"message\":", Hole{ .optional_string = @import("tool_record.zig").HostToolSet.max_refusal_message_bytes }, "},\"input\":" } ++
         content_reference_shape ++ .{execution};
+    pub const rejected_parts = .{ head ++ "\"rejected\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"code\":\"", Hole{ .tag = MessageRejection }, "\",\"message\":", Hole{ .optional_string = @import("tool_record.zig").HostToolSet.max_refusal_message_bytes }, "},\"input\":" } ++
+        parts_reference_shape ++ .{execution};
     pub const conflict = .{ head ++ "\"conflict\",\"replayed\":false,\"session\":", Hole{ .string = max_session_bytes }, ",\"code\":\"idempotency_key_conflict\"}" ++ execution };
-    pub const max_bytes = maxShapeBytes(.{ accepted, rejected, conflict });
+    pub const max_bytes = maxShapeBytes(.{ accepted, accepted_parts, rejected, rejected_parts, conflict });
 };
 
 pub const session_stop_reply = struct {
@@ -2269,6 +2435,7 @@ pub const command_observation_reply = struct {
     pub const code = .{ ",\"code\":", Hole{ .string = max_code_bytes } };
     pub const revision = .{ ",\"revision\":\"", Hole.decimal, "\",\"created\":", Hole.boolean };
     pub const input = .{",\"input\":"} ++ content_reference_shape;
+    pub const input_parts = .{",\"input\":"} ++ parts_reference_shape;
     pub const state = .{ ",\"state\":\"", Hole{ .tag = MessageRequestState }, "\"" };
     pub const queue = .{ ",\"queue\":{\"admission\":\"", Hole.decimal, "\",\"admitted_at\":\"", Hole.decimal, "\"}" };
     pub const binding = .{ ",\"binding\":{\"turn\":\"", Hole.decimal, "\",\"operation\":\"", Hole.decimal, "\",\"attempt\":\"", Hole.decimal, "\"}" };
@@ -2291,6 +2458,7 @@ pub const command_observation_reply = struct {
     pub const message_variants = .{
         rejected_state,
         rejected_state ++ input,
+        rejected_state ++ input_parts,
         queued_state ++ input ++ queue ++ work,
         processing_state ++ input ++ queue ++ binding ++ work,
         processing_state ++ input ++ queue ++ binding ++ work ++ recovery,
@@ -2304,6 +2472,20 @@ pub const command_observation_reply = struct {
         cancelled_state ++ input ++ queue ++ binding ++ cancelled ++ recovery,
         failed_state ++ input ++ queue ++ binding ++ failed,
         failed_state ++ input ++ queue ++ binding ++ failed ++ recovery,
+    } ++ .{
+        queued_state ++ input_parts ++ queue ++ work,
+        processing_state ++ input_parts ++ queue ++ binding ++ work,
+        processing_state ++ input_parts ++ queue ++ binding ++ work ++ recovery,
+        permission_state ++ input_parts ++ queue ++ permission_work,
+        permission_state ++ input_parts ++ queue ++ binding ++ permission_work,
+        permission_state ++ input_parts ++ queue ++ binding ++ permission_work ++ recovery,
+        cancelled_state ++ input_parts ++ queue ++ cancelled,
+        completed_state ++ input_parts ++ queue ++ binding ++ completed,
+        completed_state ++ input_parts ++ queue ++ binding ++ completed ++ recovery,
+        cancelled_state ++ input_parts ++ queue ++ binding ++ cancelled,
+        cancelled_state ++ input_parts ++ queue ++ binding ++ cancelled ++ recovery,
+        failed_state ++ input_parts ++ queue ++ binding ++ failed,
+        failed_state ++ input_parts ++ queue ++ binding ++ failed ++ recovery,
     };
     pub const session_stop = .{ ",\"selection\":{\"turn\":", Hole.optional_id, ",\"admission_cutoff\":\"", Hole.decimal, "\"},\"completion\":{\"status\":\"", Hole{ .tag = SessionStopCompletion }, "\"}" };
     pub const session_pin = .{ ",\"pinned\":", Hole.boolean };
@@ -2328,7 +2510,7 @@ pub const command_observation_reply = struct {
     };
 };
 
-pub const ErrorType = enum { invocation_error, observation_error, busy, unsupported, host_unavailable, result_unavailable, action_unavailable, conversation_unavailable, activity_unavailable, failed_response_unavailable };
+pub const ErrorType = enum { invocation_error, observation_error, busy, unsupported, host_unavailable, result_unavailable, action_unavailable, conversation_unavailable, activity_unavailable, failed_response_unavailable, parts_unavailable };
 pub const error_reply = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"", Hole{ .tag = ErrorType }, "\",\"code\":", Hole{ .string = max_code_bytes }, "}" };
 pub const max_control_error_response_bytes = shapeBytes(error_reply);
 
@@ -3361,39 +3543,81 @@ test "Action promotion parses one owned target and binds semantic replay" {
     }
 }
 
+/// Owner, part, start and stream grammar of `public_parts` and `public_part_content`.
 fn publicPartSelectorGrammar() !void {
-    const Case = struct { fields: []const u8, failure: ?anyerror = null, id: u64 = 1, ordinal: u64 = 0, action: bool = false };
-    const cases = [_]Case{
-        .{ .fields = "\"session\":\"k7m2qx\",\"id\":\"1\",\"ordinal\":\"0\",\"target\":\"message\"" },
-        .{ .fields = "\"target\":\"action\",\"ordinal\":\"1499\",\"id\":\"4\",\"session\":\"k7m2qx\"", .id = 4, .ordinal = 1499, .action = true },
-        .{ .fields = "\"session\":\"k7m2qx\",\"id\":\"4\",\"ordinal\":\"1500\",\"target\":\"action\"", .id = 4, .ordinal = 1500, .action = true },
-        .{ .fields = "\"session\":\"k7m2qx\",\"id\":\"0\",\"ordinal\":\"0\",\"target\":\"message\"", .failure = error.InvalidCursor },
-        .{ .fields = "\"session\":\"k7m2qx\",\"id\":\"1\",\"ordinal\":\"1501\",\"target\":\"message\"", .failure = error.InvalidCursor },
-        .{ .fields = "\"session\":\"k7m2qx\",\"id\":\"01\",\"ordinal\":\"0\",\"target\":\"message\"", .failure = error.InvalidIdentity },
-        .{ .fields = "\"session\":\"k7m2qx\",\"id\":\"1\",\"ordinal\":\"00\",\"target\":\"message\"", .failure = error.InvalidIdentity },
-        .{ .fields = "\"session\":\"k7m2qx\",\"id\":\"1\",\"ordinal\":\"0\"", .failure = error.MissingField },
-        .{ .fields = "\"session\":\"k7m2qx\",\"id\":\"1\",\"ordinal\":\"0\",\"target\":\"other\"", .failure = error.InvalidTarget },
-        .{ .fields = "\"session\":\"k7m2qx\",\"id\":\"1\",\"ordinal\":\"0\",\"target\":\"message\",\"target\":\"action\"", .failure = error.UnexpectedField },
-        .{ .fields = "\"session\":\"k7m2qx\",\"id\":\"1\",\"ordinal\":\"0\",\"target\":\"message\",\"extra\":true", .failure = error.UnexpectedField },
+    const Owner = content_value.Owner;
+    const owners = [_]struct { json: []const u8, failure: ?anyerror = null, owner: Owner = .{ .message = 1 } }{
+        .{ .json = "{\"message\":\"1\"}" },
+        .{ .json = " { \"action\" : \"9223372036854775807\" } ", .owner = .{ .action = std.math.maxInt(i64) } },
+        .{ .json = "{\"message\":\"0\"}", .failure = error.InvalidTarget },
+        .{ .json = "{\"action\":\"9223372036854775808\"}", .failure = error.InvalidTarget },
+        .{ .json = "{\"message\":\"01\"}", .failure = error.InvalidIdentity },
+        .{ .json = "{\"message\":1}", .failure = error.InvalidJsonShape },
+        .{ .json = "{\"turn\":\"1\"}", .failure = error.InvalidTarget },
+        .{ .json = "{}", .failure = error.MissingField },
+        .{ .json = "{\"message\":\"1\",\"action\":\"2\"}", .failure = error.UnexpectedField },
+        .{ .json = "{\"message\":\"1\",\"message\":\"2\"}", .failure = error.UnexpectedField },
+        .{ .json = "\"message\"", .failure = error.InvalidJsonShape },
+        .{ .json = "null", .failure = error.InvalidJsonShape },
     };
-    inline for (.{ "public_part", "public_part_bytes" }) |kind| for (cases) |case| {
+    const Tail = struct { fields: []const u8, failure: ?anyerror = null, part: u32 = 0, start: u64 = 0, stream: bool = false };
+    const tails = [_]Tail{
+        .{ .fields = ",\"part\":\"0\",\"start\":\"0\"" },
+        .{ .fields = ",\"start\":\"4096\",\"part\":\"1499\"", .part = 1499, .start = 4096 },
+        .{ .fields = ",\"part\":\"2\",\"start\":\"0\",\"stream\":true", .part = 2, .stream = true },
+        .{ .fields = ",\"part\":\"1500\",\"start\":\"0\"", .failure = error.InvalidCursor },
+        .{ .fields = ",\"part\":\"2\",\"start\":\"1\",\"stream\":true", .failure = error.InvalidCursor },
+        .{ .fields = ",\"part\":\"2\",\"start\":\"0\",\"stream\":false", .failure = error.InvalidJsonShape },
+        .{ .fields = ",\"part\":\"00\",\"start\":\"0\"", .failure = error.InvalidIdentity },
+        .{ .fields = ",\"part\":\"0\"", .failure = error.MissingField },
+        .{ .fields = ",\"start\":\"0\"", .failure = error.MissingField },
+        .{ .fields = ",\"part\":\"0\",\"start\":\"0\",\"part\":\"1\"", .failure = error.UnexpectedField },
+        .{ .fields = ",\"part\":\"0\",\"start\":\"0\",\"ordinal\":\"0\"", .failure = error.UnexpectedField },
+    };
+    for (owners) |owner| {
         var buffer: [512]u8 = undefined;
-        const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"" ++ kind ++ "\",\"store\":\"s\",{s}}}", .{case.fields});
-        var source: MetadataSource = .{ .input = json };
-        var parser = Tested.Parser{ .source = &source };
-        if (case.failure) |failure| {
-            try std.testing.expectError(failure, parseForTest(&parser));
-        } else {
-            const parsed = try parseForTest(&parser);
-            const selected = if (comptime std.mem.eql(u8, kind, "public_part")) parsed.public_part else parsed.public_part_bytes;
-            try std.testing.expectEqual(case.ordinal, selected.ordinal);
-            try std.testing.expectEqual(case.action, selected.target == .action);
-            try std.testing.expectEqual(case.id, switch (selected.target) {
-                inline else => |id| id,
-            });
+        // The list takes exactly a session and an owner.
+        for ([_][]const u8{ "", ",\"part\":\"0\"" }, 0..) |extra, index| {
+            const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"public_parts\",\"store\":\"s\",\"owner\":{s},\"session\":\"k7m2qx\"{s}}}", .{ owner.json, extra });
+            var source: MetadataSource = .{ .input = json };
+            var parser = Tested.Parser{ .source = &source };
+            var failure_expected: ?anyerror = owner.failure;
+            if (failure_expected == null and index == 1) failure_expected = error.UnexpectedField;
+            if (failure_expected) |failure| {
+                try std.testing.expectError(failure, parseForTest(&parser));
+                continue;
+            }
+            const parsed = (try parseForTest(&parser)).public_parts;
+            try std.testing.expect(std.meta.eql(owner.owner, parsed.owner));
+            try std.testing.expectEqualStrings("k7m2qx", parsed.session.slice());
             var wrong_source: MetadataSource = .{ .input = json };
-            var wrong_parser = Tested.Parser{ .source = &wrong_source, .expected_kind = if (comptime std.mem.eql(u8, kind, "public_part")) .public_part_bytes else .public_part };
+            var wrong_parser = Tested.Parser{ .source = &wrong_source, .expected_kind = .public_part_content };
             try std.testing.expectError(error.RouteKindMismatch, parseForTest(&wrong_parser));
         }
-    };
+        for (tails) |tail| {
+            const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"public_part_content\",\"store\":\"s\",\"session\":\"k7m2qx\",\"owner\":{s}{s}}}", .{ owner.json, tail.fields });
+            var source: MetadataSource = .{ .input = json };
+            var parser = Tested.Parser{ .source = &source };
+            const failure_expected: ?anyerror = if (owner.failure != null) owner.failure else tail.failure;
+            if (failure_expected) |failure| {
+                try std.testing.expectError(failure, parseForTest(&parser));
+                continue;
+            }
+            const parsed = (try parseForTest(&parser)).public_part_content;
+            try std.testing.expect(std.meta.eql(owner.owner, parsed.owner));
+            try std.testing.expectEqual(tail.part, parsed.part);
+            try std.testing.expectEqual(tail.start, parsed.start);
+            try std.testing.expectEqual(tail.stream, parsed.stream);
+            var wrong_source: MetadataSource = .{ .input = json };
+            var wrong_parser = Tested.Parser{ .source = &wrong_source, .expected_kind = .public_parts };
+            try std.testing.expectError(error.RouteKindMismatch, parseForTest(&wrong_parser));
+        }
+    }
+    // The request writers emit what the parser accepts.
+    var body: RequestBuffer = .{};
+    try body.appendShape(public_part_content_request.all, .{ "s", "k7m2qx", OwnerJson{ .owner = .{ .action = 42 } }, @as(u64, 7), @as(u64, 0) });
+    var source: MetadataSource = .{ .input = body.slice() };
+    var parser = Tested.Parser{ .source = &source };
+    const written = (try parseForTest(&parser)).public_part_content;
+    try std.testing.expect(std.meta.eql(Owner{ .action = 42 }, written.owner) and written.part == 7 and written.stream);
 }

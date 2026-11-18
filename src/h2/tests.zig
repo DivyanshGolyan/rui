@@ -1,4 +1,3 @@
-const builtin = @import("builtin");
 const std = @import("std");
 const h2 = @import("h2.zig");
 const Peer = @import("testing/Peer.zig");
@@ -9,6 +8,7 @@ const Connection = @import("Connection.zig");
 const Resolver = @import("Resolver.zig");
 const c = @import("h2_c");
 const tls_client = @import("tls_client");
+const os = @import("os");
 const openssl = tls_client.c;
 
 const ns_per_ms = std.time.ns_per_ms;
@@ -741,9 +741,7 @@ test "a read cap defers expiry only for streams on that connection" {
     try harness.peer.pump();
     const Busy = struct {
         fn queued(socket: std.posix.fd_t) !bool {
-            var bytes: c_int = 0;
-            const fionread = if (builtin.os.tag.isDarwin()) 0x4004667f else std.os.linux.T.FIONREAD;
-            if (std.c.ioctl(socket, fionread, &bytes) != 0) return error.Unexpected;
+            const bytes = os.socket.unreadBytes(socket) orelse return error.Unexpected;
             return bytes >= h2.read_allowance_bytes;
         }
     };
@@ -952,7 +950,7 @@ const BlackHole = struct {
         if (self.listener < 0) return error.SocketFailed;
         errdefer self.close();
         if (std.c.bind(self.listener, @ptrCast(&self.address.storage), self.address.length) != 0) return error.BindFailed;
-        if (std.c.listen(self.listener, 1) != 0) return error.ListenFailed;
+        if (!os.socket.listen(self.listener, 1)) return error.ListenFailed;
         var length = self.address.length;
         if (std.c.getsockname(self.listener, @ptrCast(&self.address.storage), &length) != 0) return error.SocketFailed;
         for (&self.fillers) |*filler| {
@@ -1117,7 +1115,7 @@ test "https live: system trust refuses broken certificates and unnamed IPs" {
         "https://self-signed.badssl.com/",
         "https://untrusted-root.badssl.com/",
         "https://104.154.89.105/",
-    } ++ if (builtin.os.tag == .macos) [_][]const u8{"https://revoked.badssl.com/"} else [_][]const u8{}) |url| {
+    } ++ if (os.sec_trust) [_][]const u8{"https://revoked.badssl.com/"} else [_][]const u8{}) |url| {
         try std.testing.expectEqual(h2.End{ .cause = .untrusted_peer, .request_sent = false }, try liveEnd(url));
     }
     try std.testing.expectEqual(h2.Cause.complete, (try liveEnd("https://1.1.1.1/")).cause);
@@ -1309,7 +1307,7 @@ fn proxiedExchange(peer: ?*PeerThread, url: []const u8, proxy_url: []const u8, n
 }
 
 test "exchange: on Linux, SSL_CERT_FILE and SSL_CERT_DIR replace the bundle probe" {
-    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    if (os.sec_trust) return error.SkipZigTest;
     var variables = try TrustVariables.isolate();
     defer variables.restore();
     {
@@ -1390,7 +1388,7 @@ test "system trust takes a certificate directory only when it holds a readable s
 }
 
 test "exchange: macOS trusts SecTrust and ignores SSL_CERT_FILE and SSL_CERT_DIR" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    if (!os.sec_trust) return error.SkipZigTest;
     var variables = try TrustVariables.isolate();
     defer variables.restore();
     try TrustVariables.set("SSL_CERT_FILE", "/nonexistent/h2-ca.pem");

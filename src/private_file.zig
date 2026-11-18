@@ -71,7 +71,7 @@ pub fn validateFile(io: std.Io, file: std.Io.File) !void {
 }
 
 fn validateOwner(handle: anytype) !void {
-    if (!@import("os/os.zig").supported) return error.UnsupportedPlatform;
+    if (!@import("os").supported) return error.UnsupportedPlatform;
     var stat: c.struct_stat = undefined;
     if (c.fstat(handle, &stat) != 0) return error.StatFailed;
     if (stat.st_uid != c.geteuid()) return error.NotOwnedByCurrentUser;

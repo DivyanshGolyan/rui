@@ -1,8 +1,8 @@
 const std = @import("std");
 const change_ring = @import("change_ring.zig");
 const activity_reply = @import("activity_reply.zig");
-const os = @import("os/os.zig");
-const socket_os = @import("os/socket.zig");
+const os = @import("os");
+const socket_os = os.socket;
 const pages = @import("os/pages.zig");
 const HostDiagnostics = @import("HostDiagnostics.zig");
 const HostStartupWait = @import("HostStartupWait.zig");
@@ -502,7 +502,7 @@ const Intake = struct {
             defer self.releaseRequest();
             const reply = try self.ensureReply();
             defer self.releaseEnvironment();
-            try prepareReply(self.host, reply, self.fd, self.header, self.number.?, self.accepted_at_ns, self.request.?, if (self.environment) |*offer| offer else null);
+            try prepareReply(self.host, reply, self.fd, self.header, self.number.?, self.accepted_at_ns, self.request.?, if (self.environment) |*offer| offer else null, if (self.ingress) |ingress| ingress.parts_loan else null);
         }
 
         fn work(self: *Exchange) !State {
@@ -1505,8 +1505,8 @@ const Route = enum {
     activity_page,
     activity_search,
     activity_content,
-    public_part,
-    public_part_bytes,
+    public_parts,
+    public_part_content,
     skill_suggestions,
     model_list,
     unsupported_control,
@@ -1575,11 +1575,19 @@ const Header = struct {
 };
 
 noinline fn submitMessage(host: *Host, command: *const wire_request.MessageCommand, offer: *SessionEnvironments.Offer) error{OutOfMemory}!store_module.MessageReply {
+    return submitMessageInput(host, command, offer, null);
+}
+
+fn submitMessageInput(host: *Host, command: *const wire_request.MessageCommand, offer: *SessionEnvironments.Offer, loan: ?@import("InputCapture.zig").Loan) error{OutOfMemory}!store_module.MessageReply {
     std.debug.assert(offer.value() != null);
     defer offer.deinit(host.allocator);
     var memory: std.heap.ArenaAllocator = .init(host.allocator);
     defer memory.deinit();
-    const prepared = @import("session_skills.zig").prepareMessage(memory.allocator(), host.allocator, host.io, host.store, command, host.bash_facts.home) catch |err| {
+    const skill_owner = @import("session_skills.zig");
+    const prepared = (if (loan) |parts|
+        skill_owner.prepareMessageParts(memory.allocator(), host.allocator, host.io, host.store, command, host.bash_facts.home, parts)
+    else
+        skill_owner.prepareMessage(memory.allocator(), host.allocator, host.io, host.store, command, host.bash_facts.home)) catch |err| {
         if (host.store.isFenced()) return .infrastructure_failure;
         return if (err == error.OutOfMemory) error.OutOfMemory else .infrastructure_failure;
     };
@@ -1592,9 +1600,9 @@ noinline fn submitMessage(host: *Host, command: *const wire_request.MessageComma
             return if (err == error.OutOfMemory) error.OutOfMemory else .infrastructure_failure;
         };
         defer inheritance.deinit(host.allocator);
-        return host.store.submitMessageCapturedSkills(command, inheritance.messageCallback(), initial_skills, if (captured_skill) |*value| value else null, faults);
+        return submitMessageInputToStore(host.store, command, loan, inheritance.messageCallback(), initial_skills, if (captured_skill) |*value| value else null, faults);
     };
-    const environments = host.environments orelse return host.store.submitMessageCapturedSkills(command, null, initial_skills, if (captured_skill) |*value| value else null, faults);
+    const environments = host.environments orelse return submitMessageInputToStore(host.store, command, loan, null, initial_skills, if (captured_skill) |*value| value else null, faults);
     const Install = struct {
         environments: *SessionEnvironments,
         offer: *SessionEnvironments.Offer,
@@ -1608,7 +1616,20 @@ noinline fn submitMessage(host: *Host, command: *const wire_request.MessageComma
         }
     };
     var install: Install = .{ .environments = environments, .offer = offer };
-    return host.store.submitMessageCapturedSkills(command, .{ .context = &install, .call = Install.call }, initial_skills, if (captured_skill) |*value| value else null, faults);
+    return submitMessageInputToStore(host.store, command, loan, .{ .context = &install, .call = Install.call }, initial_skills, if (captured_skill) |*value| value else null, faults);
+}
+
+fn submitMessageInputToStore(
+    store: *store_module.Store,
+    command: *const wire_request.MessageCommand,
+    loan: ?@import("InputCapture.zig").Loan,
+    committed: ?store_module.Store.MessageCommitted,
+    initial: ?*const store_module.InitialSkills,
+    captured: ?*const store_module.CapturedMessageSkills,
+    faults: store_module.Faults,
+) store_module.MessageReply {
+    if (loan) |parts| return store.submitMessagePartsCapturedSkills(command, parts, committed, initial, captured, faults) catch .infrastructure_failure;
+    return store.submitMessageCapturedSkills(command, committed, initial, captured, faults);
 }
 
 noinline fn submitConfigure(host: *Host, command: *const wire_request.ConfigureCommand) error{OutOfMemory}!store_module.ConfigureReply {
@@ -1722,7 +1743,7 @@ test "settings readiness discovers the canonical Store only through host info" {
     }
 }
 
-fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header, request_number: u64, accepted_at_ns: u64, request: *wire_request.Request, client_environment: ?*SessionEnvironments.Offer) !void {
+fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header, request_number: u64, accepted_at_ns: u64, request: *wire_request.Request, client_environment: ?*SessionEnvironments.Offer, parts: ?@import("InputCapture.zig").Loan) !void {
     if (!matchesStore(std.meta.activeTag(request.*), request.store(), host.lease.paths.store_identity.slice())) {
         return respondStatic(fd, 409, .invocation_error, "wrong_store_identity");
     }
@@ -1768,7 +1789,8 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             _ = try answerMutation(host, fd, header, .configure, command.session.slice(), try submitConfigure(host, command));
         },
         .message => |*command| {
-            _ = try answerMutation(host, fd, header, .message, command.session.slice(), try submitMessage(host, command, client_environment.?));
+            if ((command.text.state == .value) == (parts != null)) return error.InvalidMessage;
+            _ = try answerMutation(host, fd, header, .message, command.session.slice(), try submitMessageInput(host, command, client_environment.?, parts));
         },
         inline .session_stop, .session_archive, .session_pin, .model_interruption, .permission_decision, .action_background, .action_stop => |*command, tag| {
             const kind = comptime @field(command_spec.CommandKind, @tagName(tag));
@@ -1885,8 +1907,24 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             };
             try fd.json(200, activity_reply.max_search_bytes, host_reply.renderActivitySearch, .{page});
         },
-        .public_part => |*command| try preparePublicPart(host, fd, command, false),
-        .public_part_bytes => |*command| try preparePublicPart(host, fd, command, true),
+        .public_parts => |*command| {
+            const report = capturePublicParts(host, command, request_number) catch |err| switch (err) {
+                error.ContentNotFound, error.ContentIsText => return respondStatic(fd, 409, .parts_unavailable, @errorName(err)),
+                error.ReportScratchCleanupFailed => {
+                    fenceDispatch(host, "public parts scratch cleanup", err);
+                    return respondStatic(fd, 500, .observation_error, "report_scratch_cleanup_failed");
+                },
+                else => return refuseRead(host, fd, "public parts", err),
+            };
+            try fd.setReport(report);
+        },
+        .public_part_content => |*command| {
+            const location = host.store.openPublicPart(command.session.slice(), command.owner, command.part, command.start) catch |err| switch (err) {
+                error.ContentNotFound, error.ContentIsText, error.RangeOutOfBounds => return respondStatic(fd, 409, .parts_unavailable, @errorName(err)),
+                else => return refuseRead(host, fd, "public part content", err),
+            };
+            try deliverPublicContent(host, fd, location, command.start, command.stream);
+        },
         .activity_content => |*command| {
             const location = host.store.openActivityContent(command) catch |err| switch (err) {
                 error.ContentNotFound => return respondStatic(fd, 409, .activity_unavailable, @errorName(err)),
@@ -2019,43 +2057,24 @@ fn createUnfilled(allocator: std.mem.Allocator, comptime T: type) error{OutOfMem
     return @ptrCast(@alignCast(bytes));
 }
 
-fn renderPublicPart(out: protocol.JsonOut, selected: ?store_module.PublicParts.Part) !void {
-    const shape = protocol.public_part_reply;
-    try out.appendShape(shape.head, .{});
-    if (selected) |part| {
-        switch (part.kind) {
-            .text => try out.appendShape(shape.text, .{ part.ordinal, part.location.reference.length, part.location.reference.digest }),
-            .image => |image| try out.appendShape(shape.image, .{ part.ordinal, image.media.format.mime(), part.location.reference.length, part.location.reference.digest }),
-        }
-    } else try out.appendShape(shape.missing, .{});
-}
-
-fn preparePublicPart(host: *Host, fd: *Reply, command: *const protocol.PublicPart, comptime bytes: bool) !void {
-    var reader = try store_module.PublicParts.Reader.init(command.session, switch (command.target) {
-        .message => |id| .{ .message = id },
-        .action => |id| .{ .action = id },
-    });
+/// Certifies the owner's parts once, then captures the whole list into report
+/// scratch under the shared retention budget. A fault mid-walk discards the
+/// capture, so no partial list is ever delivered.
+fn capturePublicParts(host: *Host, command: *const protocol.PublicParts, request_number: u64) !store_module.SessionReport {
+    var capture: store_module.SessionReportCapture = .{ .io = host.io, .writer = null, .budget = host.retention.sharedBudget() };
+    try capture.create(host.lease.paths.scratch.slice(), request_number, host.hooks.fails(.report_unlink));
+    errdefer capture.deinit();
+    var reader = try store_module.PublicParts.Reader.init(command.session, command.owner);
     defer reader.deinit();
-    const selected: ?store_module.PublicParts.Part = while (true) {
-        const progress = host.store.readPublicParts(&reader) catch |err| switch (err) {
-            error.ContentNotFound => return respondStatic(fd, 409, .conversation_unavailable, @errorName(err)),
-            else => {
-                fenceDispatch(host, "public parts", err);
-                return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
-            },
-        };
-        switch (progress) {
-            .pending => {},
-            .done => break null,
-            .part => |part| if (part.ordinal == command.ordinal) break part,
-        }
+    var writer: protocol.public_parts_reply.Writer(store_module.SessionReportCapture) = .{ .capture = &capture, .session = command.session.slice() };
+    while (true) switch (try host.store.readPublicParts(&reader)) {
+        .pending => {},
+        .certified => |value| try writer.head(value),
+        .part => |part| try writer.part(part),
+        .done => break,
     };
-    if (bytes) {
-        const part = selected orelse return respondStatic(fd, 409, .conversation_unavailable, "part_not_found");
-        if (part.kind != .image) return respondStatic(fd, 409, .conversation_unavailable, "part_not_image");
-        return deliverPublicContent(host, fd, part.location, 0, true);
-    }
-    try fd.json(200, protocol.public_part_reply.max_bytes, renderPublicPart, .{selected});
+    try writer.finish();
+    return capture.seal();
 }
 
 fn deliverConversationContent(host: *Host, fd: std.posix.fd_t, command: protocol.ConversationContent) !void {
@@ -2151,10 +2170,10 @@ const HeaderReader = struct {
             .activity_page
         else if (std.mem.eql(u8, path, "/v1/activity-content"))
             .activity_content
-        else if (std.mem.eql(u8, path, "/v1/public-part"))
-            .public_part
-        else if (std.mem.eql(u8, path, "/v1/public-part-bytes"))
-            .public_part_bytes
+        else if (std.mem.eql(u8, path, "/v1/public-parts"))
+            .public_parts
+        else if (std.mem.eql(u8, path, "/v1/public-part-content"))
+            .public_part_content
         else if (std.mem.eql(u8, path, "/v1/skill-suggestions"))
             .skill_suggestions
         else if (std.mem.eql(u8, path, "/v1/model-list"))
@@ -3054,6 +3073,7 @@ test "Message observation work and recovery fit their exchange-owned response bo
     var bash_description: protocol.Bounded(protocol.session_work.max_description_bytes) = .{};
     try bash_description.set(&@as([protocol.session_work.max_description_bytes]u8, @splat(1)));
     var observation = store_module.CommandObservation{ .status = .accepted, .kind = .{ .message = .{
+        .form = .parts,
         .content = .{ .length = max, .digest = @splat(0xff) },
         .queue = .{ .admission_id = max, .state = .{ .processing = .{ .turn_id = max, .operation_id = max, .attempt_ordinal = max } } },
         .admitted_at = max,
@@ -4714,6 +4734,137 @@ test "SH-51 a read the Store refuses without fencing leaves the Host serving" {
     try std.testing.expect(storage.isFenced() and !host.launchAllowed());
 }
 
+test "INS-11 public part content windows" {
+    // A Message holds a 5000-byte Text part and a named PNG part. The Host lists them,
+    // serves each part's exact bytes in windows and streams, and refuses everything else.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var lease: platform.StoreLease = undefined;
+    lease.paths = .{};
+    try lease.paths.scratch.set(root);
+    try lease.paths.store_identity.set("s");
+    var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    var storage: store_module.Store = undefined;
+    try storage.open(std.testing.io, try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite", .{root}), root);
+    defer storage.close() catch unreachable;
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try store_module.testingCanonicalCwd(std.testing.io, &workspace_buffer);
+    var own_configure = try store_module.testingCompleteConfiguration("parts-own", "", workspace, "model-a");
+    const own = (try storage.configure(&own_configure, .{})).accepted.session;
+    var foreign_configure = try store_module.testingCompleteConfiguration("parts-foreign", "", workspace, "model-a");
+    const foreign = (try storage.configure(&foreign_configure, .{})).accepted.session;
+    var text: [5000]u8 = undefined;
+    for (&text, 0..) |*byte, index| byte.* = 'a' + @as(u8, @intCast(index % 26));
+    const png = @embedFile("codecs/fixtures/image-input/pixel.png");
+    var name: @import("input_parts.zig").Name = .{};
+    try name.set("cat \"雪\".png");
+    try store_module.testing.submitTestMessageParts(&storage, &tmp, "parts-mixed", own.slice(), &.{
+        .{ .bytes = &text }, .{ .bytes = png, .kind = .{ .image = .{ .assertion = .png, .name = name } } },
+    });
+    try store_module.testing.submitTestMessageParts(&storage, &tmp, "parts-text", own.slice(), &.{.{ .bytes = "only text" }});
+    const mixed = try store_module.testing.queryU64(&storage, "SELECT admission_id FROM message_admission WHERE command_key=?1", .{"parts-mixed"});
+    const only_text = try store_module.testing.queryU64(&storage, "SELECT admission_id FROM message_admission WHERE command_key=?1", .{"parts-text"});
+    const manifest = manifest: {
+        var reader = try store_module.PublicParts.Reader.init(own, .{ .message = mixed });
+        defer reader.deinit();
+        while (true) switch (try storage.readPublicParts(&reader)) {
+            .certified => |value| break :manifest value.identity,
+            .done => return error.TestUnexpectedResult,
+            .pending, .part => {},
+        };
+    };
+
+    var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = &lease, .store = &storage };
+    var retention = output_retention.Queue.initialize(host.io, root, .{ .used = &host.scratch_used, .limit = 9000 }, &.{});
+    host.retention = &retention;
+
+    const Answer = struct { header: []const u8, body: []const u8 };
+    const exchange = struct {
+        fn run(serving: *Host, allocator: std.mem.Allocator, path: []const u8, body: []const u8) !Answer {
+            var sockets: [2]c_int = undefined;
+            try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets));
+            defer _ = std.c.close(sockets[1]);
+            try setNonblocking(sockets[0]);
+            var header_buffer: [256]u8 = undefined;
+            try writeAll(std.testing.io, sockets[1], try std.fmt.bufPrint(&header_buffer, "POST /v1/{s} HTTP/1.1\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\nContent-Length: {d}\r\n\r\n", .{ path, body.len }));
+            try writeAll(std.testing.io, sockets[1], body);
+            const intake = try std.testing.allocator.create(Intake.Exchange);
+            intake.* = .{ .owner = undefined, .host = serving, .fd = sockets[0], .accepted_at_ns = 0, .deadline = std.math.maxInt(i128) };
+            defer std.debug.assert(intake.destroy());
+            try intake.read();
+            try std.testing.expectEqual(.ready, intake.state);
+            const reply = try intake.ensureReply();
+            intake.prepare() catch |err| intake.fail(err);
+            // Every answer here fits the socket buffer, so delivery completes without a reader.
+            try reply.deliver(sockets[0]);
+            var received: std.ArrayList(u8) = .empty;
+            var chunk: [4096]u8 = undefined;
+            while (true) {
+                const count = std.c.recv(sockets[1], &chunk, chunk.len, std.c.MSG.DONTWAIT);
+                if (count <= 0) break;
+                try received.appendSlice(allocator, chunk[0..@intCast(count)]);
+            }
+            const split = (std.mem.indexOf(u8, received.items, "\r\n\r\n") orelse return error.MissingHeaders) + 4;
+            return .{ .header = received.items[0..split], .body = received.items[split..] };
+        }
+    }.run;
+    const head = "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"";
+
+    // The list: the manifest and every part, certified, in one report.
+    const list = try exchange(&host, arena, "public-parts", try std.fmt.allocPrint(arena, head ++ "public_parts\",\"store\":\"s\",\"session\":\"{s}\",\"owner\":{{\"message\":\"{d}\"}}}}", .{ own.slice(), mixed }));
+    try std.testing.expect(std.mem.startsWith(u8, list.header, "HTTP/1.1 200 "));
+    const expected_list = try std.fmt.allocPrint(arena, "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"public_parts\",\"session\":\"{s}\",\"value\":{{\"type\":\"parts\",\"bytes\":\"{d}\",\"sha256\":\"{s}\",\"owner\":{{\"message\":\"{d}\"}}}},\"parts\":[" ++
+        "{{\"ordinal\":\"0\",\"type\":\"text\",\"bytes\":\"5000\",\"sha256\":\"{s}\"}}," ++
+        "{{\"ordinal\":\"1\",\"type\":\"image\",\"mime\":\"image/png\",\"width\":\"1\",\"height\":\"1\",\"name\":\"cat \\\"雪\\\".png\",\"bytes\":\"{d}\",\"sha256\":\"{s}\"}}]}}", .{
+        own.slice(),                                               manifest.length, std.fmt.bytesToHex(manifest.digest, .lower),             mixed,
+        std.fmt.bytesToHex(protocol.contentDigest(&text), .lower), png.len,         std.fmt.bytesToHex(protocol.contentDigest(png), .lower),
+    });
+    try std.testing.expectEqualStrings(expected_list, list.body);
+
+    const Read = struct { session: []const u8, owner: []const u8, part: u32, start: u64, stream: bool = false, bytes: ?[]const u8 = null, next: u64 = 0, refusal: []const u8 = "" };
+    const message = try std.fmt.allocPrint(arena, "{{\"message\":\"{d}\"}}", .{mixed});
+    const text_message = try std.fmt.allocPrint(arena, "{{\"message\":\"{d}\"}}", .{only_text});
+    const reads = [_]Read{
+        .{ .session = own.slice(), .owner = message, .part = 0, .start = 0, .bytes = text[0..4096], .next = 4096 },
+        .{ .session = own.slice(), .owner = message, .part = 0, .start = 100, .bytes = text[100..4196], .next = 4196 },
+        .{ .session = own.slice(), .owner = message, .part = 0, .start = 4096, .bytes = text[4096..], .next = 5000 },
+        .{ .session = own.slice(), .owner = message, .part = 0, .start = 0, .stream = true, .bytes = &text, .next = 5000 },
+        .{ .session = own.slice(), .owner = message, .part = 0, .start = 5000, .bytes = "", .next = 5000 },
+        .{ .session = own.slice(), .owner = message, .part = 0, .start = 5001, .refusal = "RangeOutOfBounds" },
+        .{ .session = own.slice(), .owner = message, .part = 1, .start = 0, .bytes = png, .next = png.len },
+        .{ .session = own.slice(), .owner = message, .part = 1, .start = 0, .stream = true, .bytes = png, .next = png.len },
+        .{ .session = own.slice(), .owner = message, .part = 2, .start = 0, .refusal = "ContentNotFound" },
+        .{ .session = own.slice(), .owner = text_message, .part = 0, .start = 0, .refusal = "ContentIsText" },
+        .{ .session = foreign.slice(), .owner = message, .part = 0, .start = 0, .refusal = "ContentNotFound" },
+        .{ .session = own.slice(), .owner = "{\"action\":\"1\"}", .part = 0, .start = 0, .refusal = "ContentNotFound" },
+    };
+    for (reads) |read| {
+        const answer = try exchange(&host, arena, "public-part-content", try std.fmt.allocPrint(arena, head ++ "public_part_content\",\"store\":\"s\",\"session\":\"{s}\",\"owner\":{s},\"part\":\"{d}\",\"start\":\"{d}\"{s}}}", .{ read.session, read.owner, read.part, read.start, if (read.stream) ",\"stream\":true" else "" }));
+        if (read.bytes) |bytes| {
+            const total: u64 = if (read.part == 0) text.len else png.len;
+            const headers = try std.fmt.allocPrint(arena, "Content-Length: {d}\r\nX-Rui-Content-Bytes: {d}\r\nX-Rui-Next-Offset: {d}\r\n", .{ bytes.len, total, read.next });
+            try std.testing.expect(std.mem.startsWith(u8, answer.header, "HTTP/1.1 200 "));
+            try std.testing.expect(std.mem.indexOf(u8, answer.header, headers) != null);
+            try std.testing.expectEqualSlices(u8, bytes, answer.body);
+        } else {
+            try std.testing.expect(std.mem.startsWith(u8, answer.header, "HTTP/1.1 409 "));
+            try std.testing.expectEqualStrings(try std.fmt.allocPrint(arena, "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"parts_unavailable\",\"code\":\"{s}\"}}", .{read.refusal}), answer.body);
+        }
+    }
+    // The list refuses the same owners the part read does.
+    for ([_][2][]const u8{ .{ own.slice(), text_message }, .{ foreign.slice(), message } }, [_][]const u8{ "ContentIsText", "ContentNotFound" }) |pair, code| {
+        const answer = try exchange(&host, arena, "public-parts", try std.fmt.allocPrint(arena, head ++ "public_parts\",\"store\":\"s\",\"session\":\"{s}\",\"owner\":{s}}}", .{ pair[0], pair[1] }));
+        try std.testing.expect(std.mem.indexOf(u8, answer.body, code) != null and std.mem.startsWith(u8, answer.header, "HTTP/1.1 409 "));
+    }
+    try std.testing.expect(!storage.isFenced() and host.launchAllowed());
+}
+
 test "SH-53 a dispatch fence records its reason in the Host diagnostics file" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -5084,7 +5235,9 @@ const MutationWitness = struct {
                 .rejected => |code| hash.update(code.slice()),
                 .conflict => {},
             }
-            const input = try std.json.Stringify.valueAlloc(std.testing.allocator, answer.input, .{});
+            // The frozen witness predates input forms; base replies are text-form.
+            if (answer.input) |value| try std.testing.expect(value.form == .text);
+            const input = try std.json.Stringify.valueAlloc(std.testing.allocator, if (answer.input) |value| value.content else null, .{});
             defer std.testing.allocator.free(input);
             hash.update(input);
         } else |err| hash.update(@errorName(err));
@@ -5669,4 +5822,134 @@ test "Action stop mutation and observation preserve the selected Resolution" {
         const decoded = reply.decodeMutationReply(.{ .status = 200, .body = body }, MutationWitness.session, .{ .action_stop = 7 });
         try std.testing.expect(std.meta.isError(decoded.answer));
     }
+}
+
+test "SH-61 Host submits a sealed ordered input through Message admission" {
+    const Capture = @import("InputCapture.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    var storage: store_module.Store = undefined;
+    try storage.open(std.testing.io, try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite", .{root}), root);
+    defer storage.close() catch unreachable;
+    const configure = try store_module.testingCompleteConfiguration("parts-host-config", "", root, "model-a");
+    const configured = try storage.configure(&configure, .{});
+    try std.testing.expect(configured == .accepted);
+    var lease: platform.StoreLease = undefined;
+    lease.paths = .{};
+    try lease.paths.store_identity.set(root);
+    try lease.paths.scratch.set(root);
+    var host: Host = .{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = &lease, .store = &storage };
+    var used: std.atomic.Value(u64) = .init(0);
+    const spool = try tmp.dir.createFile(std.testing.io, "parts-spool", .{ .read = true });
+    const index = try tmp.dir.createFile(std.testing.io, "parts-index", .{ .read = true });
+    var capture: Capture = undefined;
+    capture.init(std.testing.io, spool, index, .{ .used = &used, .limit = 100000 });
+    defer capture.close();
+    const jpeg = @embedFile("testing/fixtures/input-baseline.jpg");
+    for ([_][]const u8{ "before", jpeg, "after" }, 0..) |bytes, ordinal| {
+        try capture.begin(if (ordinal == 1) .{ .image = .{ .assertion = .jpeg } } else .text, bytes.len);
+        var offset: usize = 0;
+        while (offset < bytes.len) {
+            var allowance = bytes.len - offset;
+            offset += try capture.append(bytes[offset..], &allowance, false);
+        }
+        try capture.end();
+    }
+    const loan = try capture.seal();
+    var command: wire_request.MessageCommand = .{ .session = configured.accepted.session };
+    try command.key.set("parts-host-message");
+    var offer = try SessionEnvironments.Offer.init(std.testing.allocator, 0);
+    const result = try submitMessageInput(&host, &command, &offer, loan);
+    try std.testing.expect(result == .accepted);
+    try std.testing.expectEqual(@import("input_parts.zig").Form.parts, result.accepted.form);
+    try std.testing.expectEqualSlices(u8, &loan.digest, &result.accepted.content.digest);
+    var observed: store_module.Observed = undefined;
+    try storage.observeCommand(command.key.slice(), null, &observed);
+    try std.testing.expectEqual(@import("input_parts.zig").Form.parts, observed.full.observation.kind.message.?.form);
+}
+
+test "SH-65 Host wire admits image bytes in order and preserves refusal identity" {
+    const jpeg = @embedFile("testing/fixtures/input-baseline.jpg");
+    var encoded: [std.base64.standard.Encoder.calcSize(jpeg.len)]u8 = undefined;
+    _ = std.base64.standard.Encoder.encode(&encoded, jpeg);
+    const other_jpeg = @embedFile("testing/fixtures/input-progressive.jpg");
+    var other_encoded: [std.base64.standard.Encoder.calcSize(other_jpeg.len)]u8 = undefined;
+    _ = std.base64.standard.Encoder.encode(&other_encoded, other_jpeg);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    var storage: store_module.Store = undefined;
+    try storage.open(std.testing.io, try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite", .{root}), root);
+    defer storage.close() catch unreachable;
+    const configure = try store_module.testingCompleteConfiguration("wire-parts-config", "", root, "model-a");
+    const configured = try storage.configure(&configure, .{});
+    try std.testing.expect(configured == .accepted);
+    var lease: platform.StoreLease = undefined;
+    lease.paths = .{};
+    try lease.paths.scratch.set(root);
+    try lease.paths.store_identity.set("s");
+    var host: Host = .{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = &lease, .store = &storage };
+    const Exercise = struct {
+        fn run(owner: *Host, body: []const u8, expected: []const u8) !void {
+            var retained: ?named_scratch.Owner = null;
+            var ingress: wire_request.Ingress = undefined;
+            ingress.init(std.testing.allocator, .{ .io = std.testing.io, .content_length = body.len, .scratch_path = owner.lease.paths.scratch.slice(), .request_number = 991, .retained_scratch = &retained, .scratch_budget = .{ .used = &owner.scratch_used, .limit = 100000 }, .expected_kind = .message });
+            defer ingress.deinit();
+            try ingress.feed(body);
+            const request = try ingress.finish();
+            defer request.removeTemporaryContent(std.testing.io) catch unreachable;
+            var offer = try SessionEnvironments.Offer.init(std.testing.allocator, 0);
+            defer offer.deinit(std.testing.allocator);
+            var reply: Reply = .{ .io = std.testing.io, .allocator = std.testing.allocator };
+            defer reply.deinit();
+            try prepareReply(owner, &reply, -1, .{ .route = .message, .content_length = body.len }, 991, 0, request, &offer, ingress.parts_loan);
+            try std.testing.expect(reply.body == .json);
+            try std.testing.expect(std.mem.indexOf(u8, reply.body.json, expected) != null);
+        }
+        fn refuseInvalid(owner: *Host, body: []const u8) !void {
+            var retained: ?named_scratch.Owner = null;
+            var ingress: wire_request.Ingress = undefined;
+            ingress.init(std.testing.allocator, .{ .io = std.testing.io, .content_length = body.len, .scratch_path = owner.lease.paths.scratch.slice(), .request_number = 992, .retained_scratch = &retained, .scratch_budget = .{ .used = &owner.scratch_used, .limit = 100000 }, .expected_kind = .message });
+            defer ingress.deinit();
+            try std.testing.expectError(error.InvalidBase64, ingress.feed(body));
+            try std.testing.expect(ingress.parts_loan == null);
+            try std.testing.expect(!try owner.store.commandExists("wire-invalid"));
+        }
+    };
+    const Template = struct {
+        fn body(allocator: std.mem.Allocator, key: []const u8, session: []const u8, image: []const u8, text: []const u8, reversed: bool) ![]const u8 {
+            const parts = if (reversed)
+                try std.fmt.allocPrint(allocator, "{{\"type\":\"image\",\"mime\":\"image/jpeg\",\"data\":\"{s}\"}},{{\"type\":\"text\",\"text\":\"{s}\"}}", .{ image, text })
+            else
+                try std.fmt.allocPrint(allocator, "{{\"type\":\"text\",\"text\":\"{s}\"}},{{\"type\":\"image\",\"mime\":\"image/jpeg\",\"data\":\"{s}\"}}", .{ text, image });
+            defer allocator.free(parts);
+            return std.fmt.allocPrint(allocator, "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"{s}\",\"session\":\"{s}\",\"sender\":null,\"sender_handle\":null,\"parts\":[{s}]}}", .{ key, session, parts });
+        }
+    };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try Exercise.refuseInvalid(&host, try Template.body(a, "wire-invalid", configured.accepted.session.slice(), "!!!!", "before", false));
+    const good = try Template.body(a, "wire-parts", configured.accepted.session.slice(), &encoded, "before", false);
+    try Exercise.run(&host, good, "\"status\":\"accepted\"");
+    try Exercise.run(&host, good, "\"replayed\":true");
+    try Exercise.run(&host, try Template.body(a, "wire-parts", configured.accepted.session.slice(), &encoded, "changed", false), "idempotency_key_conflict");
+    try Exercise.run(&host, try Template.body(a, "wire-parts", configured.accepted.session.slice(), &other_encoded, "before", false), "idempotency_key_conflict");
+    try Exercise.run(&host, try Template.body(a, "wire-parts", configured.accepted.session.slice(), &encoded, "before", true), "idempotency_key_conflict");
+    const refused = try Template.body(a, "wire-refused", "000000", &encoded, "before", false);
+    try Exercise.run(&host, refused, "\"status\":\"rejected\"");
+    try Exercise.run(&host, refused, "\"replayed\":true");
+    try Exercise.run(&host, try Template.body(a, "wire-refused", "000000", &encoded, "changed", false), "idempotency_key_conflict");
+    for ([_][]const u8{ "wire-parts", "wire-refused" }) |key| {
+        const id = try store_module.testing.queryU64(&storage, "SELECT primary_content_id FROM core_command WHERE command_key=?1", .{key});
+        for ([_][]const u8{ "before", jpeg }, 0..) |bytes, ordinal| {
+            try std.testing.expectEqual(@as(u64, 1), try store_module.testing.queryU64(&storage, "SELECT count(*) FROM content_part p JOIN content c ON c.content_id=p.part_content_id WHERE p.content_id=?1 AND p.ordinal=?2 AND c.byte_length=?3 AND c.digest=?4", .{ id, ordinal, bytes.len, store_module.testing.Blob{ .bytes = &protocol.contentDigest(bytes) } }));
+        }
+    }
+    try std.testing.expectEqual(@as(u64, 0), host.scratch_used.load(.acquire));
 }

@@ -316,10 +316,13 @@ test "production turn preserves skipped continuation preference through actual S
                         self.failure = err;
                         return error.Fence;
                     };
-                    return .{ .core = found.core, .mcp = found.mcp, .bash = found.bash, .message = found.message, .tool_continuation = found.tool_continuation, .retry = found.retry };
+                    return .{ .core = found.core, .mcp = found.mcp, .bash = found.bash, .message = found.message, .tool_continuation = found.tool_continuation, .retry = found.retry, .retry_waiting = found.retry_waiting };
                 }
                 pub fn scheduledRetry(_: *const @This()) turn.ScheduledRetry {
                     return .unknown;
+                }
+                pub fn publishRetryCrossings(_: *@This(), _: u64, _: u64) error{Fence}!turn.DeadlineRead {
+                    unreachable;
                 }
                 pub fn unixMilliseconds(_: *const @This()) ?u64 {
                     return null;

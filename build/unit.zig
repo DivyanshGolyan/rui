@@ -130,6 +130,7 @@ pub const Units = struct {
     runs: Runs,
     run_renderer_allocation: *std.Build.Step.Run,
     signal_stack_probe: *std.Build.Step.Run,
+    run_os_tests: *std.Build.Step.Run,
 };
 
 pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pinned_transport: ?product.PinnedTransport, test_filters: []const []const u8, mysql_dialect_check: bool) Units {
@@ -294,17 +295,30 @@ pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pin
     test_step.dependOn(&run_renderer_allocation.step);
     native_step.dependOn(&run_renderer_allocation.step);
 
+    const signal_stack_probe_root = b.createModule(.{
+        .root_source_file = b.path("src/signal_stack_probe.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+    });
+    _ = product.useOs(b, signal_stack_probe_root);
     const signal_stack_probe = ci.run(b.addExecutable(.{
         .name = "rui-signal-stack-probe",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/signal_stack_probe.zig"),
-            .target = target,
-            .optimize = .ReleaseSafe,
-        }),
+        .root_module = signal_stack_probe_root,
     }));
     signal_stack_probe.has_side_effects = true;
     test_step.dependOn(&signal_stack_probe.step);
     native_step.dependOn(&signal_stack_probe.step);
+
+    // The platform owner is a module of its own, so no other root runs its
+    // tests. They take milliseconds, so they run whole under any filter.
+    const run_os_tests = ci.run(b.addTest(.{
+        .name = "unit-os",
+        .use_llvm = if (target.result.cpu.arch == .x86_64) false else null,
+        .root_module = product.addOsRoot(b, target),
+    }));
+    run_os_tests.has_side_effects = true;
+    test_step.dependOn(&run_os_tests.step);
+    native_step.dependOn(&run_os_tests.step);
 
     for ([_]struct { []const u8, *std.Build.Step }{
         .{ root(.native).target, native_step },
@@ -315,7 +329,7 @@ pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pin
         .{ root(.logic).target, logic_only_step },
         .{ root(.parser_llvm).target, parser_fuzz_step },
     }) |entry| attach(entry[0], .all, entry[1], &runs, .runs);
-    return .{ .tests = tests, .native_binaries = native.binaries, .runs = runs, .run_renderer_allocation = run_renderer_allocation, .signal_stack_probe = signal_stack_probe };
+    return .{ .tests = tests, .native_binaries = native.binaries, .runs = runs, .run_renderer_allocation = run_renderer_allocation, .signal_stack_probe = signal_stack_probe, .run_os_tests = run_os_tests };
 }
 
 fn unitFilters(b: *std.Build) [unit_partition.roots.len][]const []const u8 {

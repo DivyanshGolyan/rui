@@ -346,7 +346,6 @@ test {
     _ = policy;
     _ = Record;
     _ = Engine;
-    _ = @import("Waker.zig");
     _ = @import("Resolver.zig");
     _ = @import("proxy.zig");
     _ = @import("tls.zig");

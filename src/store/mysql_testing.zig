@@ -9,7 +9,7 @@ const literal = @import("mysql_literal.zig");
 const rows = @import("mysql_row.zig");
 const rsql = @import("rsql.zig");
 const protocol = @import("../protocol.zig");
-const os = @import("../os/os.zig");
+const os = @import("os");
 const change_ring = @import("../change_ring.zig");
 const dialect = @import("mysql_dialect_check.zig");
 var mutex: std.Io.Mutex = .init;
@@ -1822,7 +1822,7 @@ const LinuxMemory = struct {
     }
 
     fn read() !LinuxMemory {
-        const file = try std.Io.Dir.cwd().openFile(std.testing.io, "/proc/self/smaps_rollup", .{});
+        const file = try std.Io.Dir.cwd().openFile(std.testing.io, os.memory_rollup_path, .{});
         defer file.close(std.testing.io);
         var buffer: [8192]u8 = undefined;
         var filled: usize = 0;

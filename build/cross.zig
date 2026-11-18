@@ -50,6 +50,7 @@ pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, pinned_transport: pr
         });
         product.configureUnitRoot(b, apple_tests, apple, null, true);
         macos_types_step.dependOn(&apple_tests.step);
+        macos_types_step.dependOn(&b.addTest(.{ .name = "test-typecheck-macos-os", .root_module = product.addOsRoot(b, apple) }).step);
     }
     const targets = [_]std.Target.Query{
         .{ .cpu_arch = .aarch64, .os_tag = .macos },
