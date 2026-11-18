@@ -1759,7 +1759,7 @@ fn arrange(state: *State) error{OutOfMemory}!void {
     const latest = std.math.maxInt(u34);
     for (rows, 0..) |*row, at| {
         if (!visible(state, row)) continue;
-        const queued = shownKind(state, row) == .pending;
+        const queued = ordering(state, row) == .queued;
         const since = @min(shownSince(state, row), latest);
         const age: u128 = if (queued) since else latest - since;
         state.sort_keys.appendAssumeCapacity(.{ .pin_order = row.pin_order, .key = @as(u128, @backingInt(ordering(state, row))) << 82 | age << 48 | referenceKey(row.reference), .index = @intCast(at) });
