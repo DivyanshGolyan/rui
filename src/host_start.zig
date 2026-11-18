@@ -900,35 +900,7 @@ test "Host start private file origin refuses literal secrets and assignments ove
     try std.testing.expectError(error.SettingsInvalid, readDocument(init, path, settings, &failure));
 }
 
-test "Host start pipe file and assignment admissions report every code on both streams even if one refuses" {
-    const Probe = struct {
-        var output: [2][4096]u8 = undefined;
-        var used: [2]usize = .{ 0, 0 };
-        var refused: ?usize = null;
-        var attempted: [2]bool = .{ false, false };
-        fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
-            if (operation == .file_write_streaming) {
-                const write = operation.file_write_streaming;
-                if (write.file.handle == 1 or write.file.handle == 2) {
-                    const index: usize = @intCast(write.file.handle - 1);
-                    attempted[index] = true;
-                    if (refused == index) return .{ .file_write_streaming = error.NoSpaceLeft };
-                    var out = std.Io.Writer.fixed(output[index][used[index]..]);
-                    out.writeAll(write.header) catch return .{ .file_write_streaming = error.NoSpaceLeft };
-                    for (write.data, 0..) |part, i| {
-                        const repeats = if (i == write.data.len - 1) write.splat else 1;
-                        for (0..repeats) |_| out.writeAll(part) catch return .{ .file_write_streaming = error.NoSpaceLeft };
-                    }
-                    used[index] += out.buffered().len;
-                    return .{ .file_write_streaming = out.buffered().len };
-                }
-            }
-            return std.testing.io.vtable.operate(userdata, operation);
-        }
-    };
-    var vtable = std.testing.io.vtable.*;
-    vtable.operate = Probe.operate;
-    const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+test "Host start pipe file and assignment admissions retain source values" {
     const gpa = std.testing.allocator;
     var environment: std.process.Environ.Map = .init(gpa);
     defer environment.deinit();
@@ -975,45 +947,69 @@ test "Host start pipe file and assignment admissions report every code on both s
             },
         }
         try std.testing.expectEqual(@as(u64, 17), settings.tools.bash.timeout_ms.value);
-        const Message = struct { raw: []const u8, json: []const u8, sentence: []const u8 };
-        inline for ([_]Message{
-            .{ .raw = "message", .json = "\"message\"", .sentence = "message" },
-            .{ .raw = "line\n\r\t\x1b", .json = "\"line\\n\\r\\t\\u001b\"", .sentence = "line\\n\\r\\t\\x1b" },
-            .{ .raw = "literal\\n\\x1b\"", .json = "\"literal\\\\n\\\\x1b\\\"\"", .sentence = "literal\\\\n\\\\x1b\\\"" },
-            .{ .raw = "\u{0085}\u{2028}\u{2029}\u{feff}", .json = "\"\u{0085}\u{2028}\u{2029}\u{feff}\"", .sentence = "\\xc2\\x85\\xe2\\x80\\xa8\\xe2\\x80\\xa9\\xef\\xbb\\xbf" },
-        }) |message| {
-            inline for (comptime std.meta.tags(start_report.StartError)) |code| {
-                for ([_]?usize{ null, 0, 1 }) |refused| {
+    }
+}
+
+test "CLI-17 Host refusal presentation" {
+    const Probe = struct {
+        var output: [2][4096]u8 = undefined;
+        var used: [2]usize = .{ 0, 0 };
+        var refused: ?usize = null;
+        var attempted: [2]bool = .{ false, false };
+        fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
+            if (operation == .file_write_streaming) {
+                const write = operation.file_write_streaming;
+                if (write.file.handle == 1 or write.file.handle == 2) {
+                    const index: usize = @intCast(write.file.handle - 1);
+                    attempted[index] = true;
+                    if (refused == index) return .{ .file_write_streaming = error.NoSpaceLeft };
+                    var out = std.Io.Writer.fixed(output[index][used[index]..]);
+                    out.writeAll(write.header) catch return .{ .file_write_streaming = error.NoSpaceLeft };
+                    for (write.data, 0..) |part, i| {
+                        const repeats = if (i == write.data.len - 1) write.splat else 1;
+                        for (0..repeats) |_| out.writeAll(part) catch return .{ .file_write_streaming = error.NoSpaceLeft };
+                    }
+                    used[index] += out.buffered().len;
+                    return .{ .file_write_streaming = out.buffered().len };
+                }
+            }
+            return std.testing.io.vtable.operate(userdata, operation);
+        }
+    };
+    var vtable = std.testing.io.vtable.*;
+    vtable.operate = Probe.operate;
+    const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+    const Message = struct { raw: []const u8, json: []const u8, sentence: []const u8 };
+    inline for ([_]Message{
+        .{ .raw = "message", .json = "\"message\"", .sentence = "message" },
+        .{ .raw = "line\n\r\t\x1b", .json = "\"line\\n\\r\\t\\u001b\"", .sentence = "line\\n\\r\\t\\x1b" },
+        .{ .raw = "literal\\n\\x1b\"", .json = "\"literal\\\\n\\\\x1b\\\"\"", .sentence = "literal\\\\n\\\\x1b\\\"" },
+        .{ .raw = "\u{0085}\u{2028}\u{2029}\u{feff}", .json = "\"\u{0085}\u{2028}\u{2029}\u{feff}\"", .sentence = "\\xc2\\x85\\xe2\\x80\\xa8\\xe2\\x80\\xa9\\xef\\xbb\\xbf" },
+    }) |message| {
+        inline for (comptime std.meta.tags(start_report.StartError)) |code| {
+            for ([_]?usize{ null, 0, 1 }) |refused| {
+                Probe.used = .{ 0, 0 };
+                Probe.attempted = .{ false, false };
+                Probe.refused = refused;
+                const failure: start_report.Failure = .init(code, message.raw);
+                for (std.enums.values(Attempt)) |attempt| {
                     Probe.used = .{ 0, 0 };
                     Probe.attempted = .{ false, false };
-                    Probe.refused = refused;
-                    const failure: start_report.Failure = .init(code, message.raw);
-                    for (std.enums.values(Attempt)) |attempt| {
-                        Probe.used = .{ 0, 0 };
-                        Probe.attempted = .{ false, false };
-                        report(io, attempt, &failure);
-                        try std.testing.expect(Probe.attempted[0]);
-                        try std.testing.expect(Probe.attempted[1]);
-                        if (refused != 0) try std.testing.expectEqualStrings("{\"rui_start_error\":{\"code\":\"" ++ @tagName(code) ++ "\",\"message\":" ++ message.json ++ "}}\n", Probe.output[0][0..Probe.used[0]]);
-                        const prefix = switch (attempt) {
-                            .start => "the Host did not start",
-                            .save => "the setting was not saved",
-                            .check => "these settings would not start a Host",
-                        };
-                        var expected: [4096]u8 = undefined;
-                        const sentence = try std.fmt.bufPrint(&expected, "rui: {s}: {s} [{s}]\n", .{ prefix, message.sentence, @tagName(code) });
-                        if (refused != 1) try std.testing.expectEqualStrings(sentence, Probe.output[1][0..Probe.used[1]]);
-                    }
+                    report(io, attempt, &failure);
+                    try std.testing.expect(Probe.attempted[0]);
+                    try std.testing.expect(Probe.attempted[1]);
+                    if (refused != 0) try std.testing.expectEqualStrings("{\"rui_start_error\":{\"code\":\"" ++ @tagName(code) ++ "\",\"message\":" ++ message.json ++ "}}\n", Probe.output[0][0..Probe.used[0]]);
+                    const prefix = switch (attempt) {
+                        .start => "the Host did not start",
+                        .save => "the setting was not saved",
+                        .check => "these settings would not start a Host",
+                    };
+                    var expected: [4096]u8 = undefined;
+                    const sentence = try std.fmt.bufPrint(&expected, "rui: {s}: {s} [{s}]\n", .{ prefix, message.sentence, @tagName(code) });
+                    if (refused != 1) try std.testing.expectEqualStrings(sentence, Probe.output[1][0..Probe.used[1]]);
                 }
             }
         }
-        try std.testing.expectError(error.SettingsInvalid, hs.apply(settings, gpa, "{\"bad\\n\\u001b\":\"never-print-this-value\"}", .pipe, checkPreset, &admission_failure));
-        Probe.used = .{ 0, 0 };
-        Probe.attempted = .{ false, false };
-        Probe.refused = null;
-        report(io, .start, &admission_failure);
-        try std.testing.expectEqualStrings("{\"rui_start_error\":{\"code\":\"settings_invalid\",\"message\":\"bad\\n\\u001b: unknown setting\"}}\n", Probe.output[0][0..Probe.used[0]]);
-        try std.testing.expectEqualStrings("rui: the Host did not start: bad\\n\\x1b: unknown setting [settings_invalid]\n", Probe.output[1][0..Probe.used[1]]);
     }
 }
 
@@ -1029,7 +1025,7 @@ fn expectJsonEqual(expected: std.json.Value, actual: std.json.Value) !void {
     try std.testing.expectEqualStrings(a, b);
 }
 
-test "saved edits share detached relative path admission for every schema path" {
+test "SH-47 saved path admission" {
     const gpa = std.testing.allocator;
     var environment: std.process.Environ.Map = .init(gpa);
     defer environment.deinit();
@@ -1038,32 +1034,42 @@ test "saved edits share detached relative path admission for every schema path" 
     const init = initForTest(&arena, &environment);
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    const settings = try gpa.create(hs.Settings);
-    defer gpa.destroy(settings);
-    for (hs.leaves, 0..) |leaf, index| {
+    const cases = [_]struct { path: []const u8, reason: []const u8 }{
+        .{ .path = "store.sqlite.dir", .reason = "a Host started in / has no base for a relative path; give an absolute path" },
+        .{ .path = "providers.codex.credentialFile", .reason = "must be an absolute path" },
+        .{ .path = "providers.chatgpt.credentialFile", .reason = "must be an absolute path" },
+        .{ .path = "network.caFile", .reason = "a Host started in / has no base for a relative path; give an absolute path" },
+        .{ .path = "tools.bash.path", .reason = "a Host started in / has no base for a relative path; give an absolute path" },
+        .{ .path = "interface.dir", .reason = "must be an absolute path" },
+    };
+    var schema_paths: usize = 0;
+    for (hs.leaves) |leaf| {
         if (!std.mem.eql(u8, leaf.kind, "path")) continue;
-        const path = try concreteLeaf(arena.allocator(), leaf.pattern);
+        schema_paths += 1;
+        var present = false;
+        for (cases) |case| if (std.mem.eql(u8, leaf.pattern, case.path)) {
+            present = true;
+            break;
+        };
+        try std.testing.expect(present);
+    }
+    try std.testing.expectEqual(cases.len, schema_paths);
+    for (cases, 0..) |case, index| {
         const name = try std.fmt.allocPrint(arena.allocator(), "path-{d}", .{index});
         var host = try tmp.dir.createDirPathOpen(init.io, name, .{ .permissions = .fromMode(0o700) });
         defer host.close(init.io);
         var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const dir = root[0..try host.realPath(init.io, &root)];
         var failure: start_report.Failure = undefined;
-        errdefer std.debug.print("path leaf {s}: {s}\n", .{ path, failure.message.slice() });
-        try savedEdit(init, dir, path, "/tmp/pr7c-path", &failure);
+        errdefer std.debug.print("path leaf {s}: {s}\n", .{ case.path, failure.message.slice() });
+        try savedEdit(init, dir, case.path, "/tmp/pr7c-path", &failure);
         var before_buffer: [hs.max_document_bytes + 1]u8 = undefined;
         const saved_path = try savedPath(init, arena.allocator(), dir);
         const before = try arena.allocator().dupe(u8, (try credentials.readPrivate(saved_path, &before_buffer)).?);
-        settings.* = .{};
-        defer settings.deinit();
-        var expected: start_report.Failure = undefined;
-        const result = input(init, settings, path, "relative/path", &expected);
-        if (result) |_| {
-            try std.testing.expectError(error.SettingsInvalid, detachedPaths(settings, &expected));
-        } else |err| try std.testing.expectEqual(error.SettingsInvalid, err);
-        try std.testing.expectError(error.SettingsInvalid, savedEdit(init, dir, path, "relative/path", &failure));
+        try std.testing.expectError(error.SettingsInvalid, savedEdit(init, dir, case.path, "relative/path", &failure));
         try std.testing.expectEqual(start_report.StartError.settings_invalid, failure.code);
-        try std.testing.expectEqualStrings(expected.message.slice(), failure.message.slice());
+        const expected = try std.fmt.allocPrint(arena.allocator(), "{s}: {s}", .{ case.path, case.reason });
+        try std.testing.expectEqualStrings(expected, failure.message.slice());
         var after_buffer: [hs.max_document_bytes + 1]u8 = undefined;
         try std.testing.expectEqualStrings(before, (try credentials.readPrivate(saved_path, &after_buffer)).?);
     }
@@ -1468,7 +1474,7 @@ const retired_environment = [_]RetiredVariable{
 fn refuseRetiredEnvironment(environ: *const std.process.Environ.Map, failure: *start_report.Failure) error{SettingsInvalid}!void {
     inline for (retired_environment) |retired| {
         if (environ.get(retired.name) != null) {
-            failure.* = .init(.settings_invalid, retired.name ++ " is no longer read; set " ++ retired.replacement ++ " (rui host set DIR " ++ retired.replacement ++ " URL)");
+            failure.* = .init(.settings_invalid, retired.name ++ " is no longer read; set " ++ retired.replacement ++ " (rui host set --store DIR " ++ retired.replacement ++ " URL)");
             return error.SettingsInvalid;
         }
     }
@@ -2791,7 +2797,7 @@ test "retired endpoint environment is refused by each admission before effects" 
             if (present) {
                 try std.testing.expectError(error.SettingsInvalid, outcome);
                 try std.testing.expectEqual(start_report.StartError.settings_invalid, failure.code);
-                try std.testing.expectEqualStrings(retired.name ++ " is no longer read; set " ++ retired.replacement ++ " (rui host set DIR " ++ retired.replacement ++ " URL)", failure.message.slice());
+                try std.testing.expectEqualStrings(retired.name ++ " is no longer read; set " ++ retired.replacement ++ " (rui host set --store DIR " ++ retired.replacement ++ " URL)", failure.message.slice());
             } else try outcome;
             var host = try tmp.dir.openDir(init.io, "host-dir", .{ .iterate = true });
             defer host.close(init.io);

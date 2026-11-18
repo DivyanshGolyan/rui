@@ -1442,7 +1442,8 @@ def contended_starters(root, env):
     print("contended starters: delayed ready owner adopted; absent and retired winners preserve typed refusal", flush=True)
 
 
-def saved_path_refusal(root, env):
+def host_refusal_receipts(root, env):
+    # CLI-18
     directory = root / "saved-path-refusal"
     directory.mkdir(mode=0o700)
     saved = directory / "host.json"
@@ -1461,8 +1462,6 @@ def saved_path_refusal(root, env):
     after = run_start(directory, env)
     assert after.returncode == 1 and "tools.bash.path" not in after.stderr, after
 
-
-def typed_child_refusal(root, env):
     directory = root / "typed-child-refusal"
     directory.mkdir(mode=0o700)
     saved = directory / "host.json"
@@ -1503,11 +1502,9 @@ def main():
         credential = root / "credentials" / "missing.json"
         env = environment(home, credential)
         if len(sys.argv) == 3 and sys.argv[2] == "typed-refusal":
-            saved_path_refusal(root, env)
-            typed_child_refusal(root, env)
+            host_refusal_receipts(root, env)
             return
-        saved_path_refusal(root, env)
-        typed_child_refusal(root, env)
+        host_refusal_receipts(root, env)
         check_provider_disposal(dispose_provider_case, stop_endpoint)
         if len(sys.argv) == 3 and sys.argv[2] == "frozen-settings":
             frozen_settings_launches(root, env)
