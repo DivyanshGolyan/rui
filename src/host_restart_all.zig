@@ -381,7 +381,7 @@ fn writeOutcome(writer: *std.Io.Writer, store: []const u8, outcome: HostLifecycl
     return category(outcome);
 }
 
-test "restart all reports every activation outcome and limitation with exit truth" {
+test "SH-50 restart all reports every activation outcome and limitation with exit truth" {
     const identity = .{ .instance = @as([16]u8, @splat(1)), .pid = @as(c_int, 42) };
     const Case = struct { outcome: HostLifecycle.ActivationOutcome, text: []const u8, result: Result };
     const cases = [_]Case{
