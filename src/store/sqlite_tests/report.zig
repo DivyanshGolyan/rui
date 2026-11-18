@@ -324,7 +324,7 @@ test "Current pending count skips excluded Message history by indexed cutoff" {
         }
         try std.testing.expectEqual(@as(u64, 1), counted.row.?.pending);
 
-        const cutoff_statement = try sqlite.prepare(storage.sqliteDatabase(), session_stop_cutoff_sql);
+        const cutoff_statement = try sqlite.prepare(storage.sqliteDatabase(), std.fmt.comptimePrint("{s}", .{session_stop_cutoff_sql}));
         defer _ = c.sqlite3_finalize(cutoff_statement);
         try sqlite.bindText(cutoff_statement, 1, session.slice());
         try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(cutoff_statement));

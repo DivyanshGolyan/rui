@@ -2893,14 +2893,14 @@ test "message observation renders Host state binding live work and persistent re
     } } };
     try observation.target.set("s");
     const message = &observation.kind.message.?;
-    try Expect.rendered(&observation, accepted ++ "queued\"" ++ input ++ queue ++ ",\"work\":{\"state\":{\"kind\":\"pending\",\"since\":\"10\"},\"first_action\":null}}}");
+    try Expect.rendered(&observation, accepted ++ "queued\"" ++ input ++ queue ++ ",\"work\":{\"state\":{\"kind\":\"pending\",\"since\":\"10\"},\"first_action\":null,\"attention\":null,\"group\":\"queued\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null}}}}");
     message.work = .{ .state = .{ .approval = .{ .since = 10 } }, .first_action = 7 };
-    try Expect.rendered(&observation, accepted ++ "waiting_for_permission\"" ++ input ++ queue ++ ",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"10\"},\"first_action\":\"7\"}}}");
+    try Expect.rendered(&observation, accepted ++ "waiting_for_permission\"" ++ input ++ queue ++ ",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"10\"},\"first_action\":\"7\",\"attention\":{\"kind\":\"approval\",\"turn\":\"0\",\"step\":\"7\"},\"group\":\"needs_you\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null}}}}");
     message.queue.?.state = .{ .processing = bound };
     message.work = .{ .state = .{ .working = .{ .since = 10 } } };
     message.recovery.count = 1;
     message.recovery.calls[0] = .{ .action_id = 8, .operation_id = 3, .call = 1, .at = 12 };
-    try Expect.rendered(&observation, accepted ++ "processing\"" ++ input ++ queue ++ binding ++ ",\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"10\"},\"first_action\":null}" ++ recovery ++ "}}");
+    try Expect.rendered(&observation, accepted ++ "processing\"" ++ input ++ queue ++ binding ++ ",\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"10\"},\"first_action\":null,\"attention\":null,\"group\":\"working\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null}}" ++ recovery ++ "}}");
     message.queue.?.state = .{ .completed = .{ .binding = bound, .answer = .{ .length = 6, .digest = @splat(0xff) } } };
     try Expect.rendered(&observation, accepted ++ "completed\"" ++ input ++ queue ++ binding ++ ",\"result\":{\"status\":\"completed\",\"text\":{\"type\":\"text\",\"bytes\":\"6\",\"sha256\":\"" ++ full_digest ++ "\"}}" ++ recovery ++ "}}");
     var code: protocol.Bounded(protocol.max_code_bytes) = .{};
@@ -3012,6 +3012,10 @@ test "command observation full and both unchanged tiers render byte exactly with
 }
 
 test "Message observation work and recovery fit their exchange-owned response bound" {
+    try std.testing.expectEqual(
+        protocol.shapeBytes(protocol.command_observation_reply.work_base) + protocol.shapeBytes(protocol.SessionWork.extra_fields) + "}".len,
+        protocol.shapeBytes(protocol.command_observation_reply.work),
+    );
     const max = std.math.maxInt(u64);
     const escaped_key = @as([protocol.max_key_bytes]u8, @splat(1));
     const escaped_session = @as([protocol.max_session_bytes]u8, @splat(1));
@@ -3023,7 +3027,7 @@ test "Message observation work and recovery fit their exchange-owned response bo
         .content = .{ .length = max, .digest = @splat(0xff) },
         .queue = .{ .admission_id = max, .state = .{ .processing = .{ .turn_id = max, .operation_id = max, .attempt_ordinal = max } } },
         .admitted_at = max,
-        .work = .{ .state = .{ .bash = .{ .since = max, .call = max, .description = bash_description, .running = max, .approvals = max } }, .first_action = max },
+        .work = .{ .state = .{ .bash = .{ .since = max, .call = max, .description = bash_description, .running = max, .approvals = max } }, .first_action = max, .served_attention = .{ .kind = .approval, .turn = max, .step = max }, .served_group = .needs_you, .actions = .{ .stop = false, .interrupt = .{ .turn = max, .operation = max }, .decide = max } },
     } } };
     try observation.target.set(&escaped_session);
     observation.kind.message.?.recovery.count = protocol.message_recovery_limit;
@@ -5290,7 +5294,18 @@ const ReplyDomainWitness = struct {
         return std.json.Stringify.valueAlloc(allocator, parsed.value, .{});
     }
 
-    fn check(lines: *std.mem.SplitIterator(u8, .scalar), label: []const u8, actual: []const u8, fields: []const Field, tighten_pinned: bool) !void {
+    fn legacyWork(body: []const u8) !bool {
+        var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
+        defer parsed.deinit();
+        if (parsed.value != .object) return false;
+        const observed = parsed.value.object.get("observation") orelse return false;
+        if (observed != .object) return false;
+        const work = observed.object.get("work") orelse return false;
+        if (work != .object) return false;
+        return !work.object.contains("attention") or !work.object.contains("group") or !work.object.contains("actions");
+    }
+
+    fn check(lines: *std.mem.SplitIterator(u8, .scalar), label: []const u8, actual: []const u8, fields: []const Field, tighten_pinned: bool, legacy_work: ?[]const bool) !void {
         const line = lines.next() orelse return error.MissingDomainBaseline;
         const split = std.mem.indexOfScalar(u8, line, ' ') orelse return error.InvalidDomainBaseline;
         try std.testing.expectEqualStrings(label, line[0..split]);
@@ -5301,8 +5316,11 @@ const ReplyDomainWitness = struct {
             const edit = if (index == 0) 0 else (index - 1) % 3;
             // Slice 3 intentionally closes the old session_pin rejection/conflict
             // hole: a present pinned value is accepted-only, even for its owner.
+            // An old successful or binding-mismatch Message work reply now needs
+            // the three required Host-derived members before it can be decoded.
+            const missing_work = if (legacy_work) |missing| missing[index] else false;
             const want: u8 = if (tighten_pinned and field != null and edit == 0 and
-                std.mem.eql(u8, field.?.path[field.?.path.len - 1], "pinned")) 'i' else base;
+                std.mem.eql(u8, field.?.path[field.?.path.len - 1], "pinned")) 'i' else if (missing_work and (base == 'a' or base == 'b')) 'o' else base;
             if (want != got) {
                 std.debug.print("domain {s}: field {any}, edit {s}: base={c}, expected={c}, actual={c}\n", .{
                     label, if (field) |value| value.path else @as([]const []const u8, &.{"<unedited>"}),
@@ -5357,7 +5375,7 @@ const ReplyDomainWitness = struct {
                     }
                     var label_buffer: [128]u8 = undefined;
                     const label = try std.fmt.bufPrint(&label_buffer, "mutation/{s}/{s}/{d}", .{ @tagName(kind), @tagName(result), @intFromBool(replayed) });
-                    try check(&lines, label, &actual, &MutationWitness.fields, kind == .session_pin and (result == .rejected or result == .conflict));
+                    try check(&lines, label, &actual, &MutationWitness.fields, kind == .session_pin and (result == .rejected or result == .conflict), null);
                 }
             }
             inline for (.{ false, true }) |accepted| {
@@ -5380,15 +5398,19 @@ const ReplyDomainWitness = struct {
                 };
                 const body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"command_observation\",\"key\":\"k\",\"delta\":\"full\",\"since\":null,\"observation\":{\"kind\":\"" ++ @tagName(kind) ++ "\",\"target\":\"k7m2qx\",\"status\":\"" ++ (if (accepted) "accepted\"" else "rejected\",\"code\":\"unknown_session\"") ++ fields ++ "}}";
                 var actual: [1 + observation_fields.len * 3]u8 = undefined;
+                var legacy: [actual.len]bool = undefined;
                 actual[0] = observation(body);
+                legacy[0] = try legacyWork(body);
                 for (observation_fields, 0..) |field, index| {
                     for (0..3) |edit| {
                         var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
                         defer parsed.deinit();
-                        actual[1 + index * 3 + edit] = observation(try editField(&parsed, field, edit));
+                        const edited = try editField(&parsed, field, edit);
+                        actual[1 + index * 3 + edit] = observation(edited);
+                        legacy[1 + index * 3 + edit] = try legacyWork(edited);
                     }
                 }
-                try check(&lines, "observation/" ++ @tagName(kind) ++ "/" ++ (if (accepted) "accepted" else "rejected"), &actual, &observation_fields, false);
+                try check(&lines, "observation/" ++ @tagName(kind) ++ "/" ++ (if (accepted) "accepted" else "rejected"), &actual, &observation_fields, false, &legacy);
             }
         }
         for (message_edges) |edge| {
@@ -5396,17 +5418,21 @@ const ReplyDomainWitness = struct {
             const body = try std.mem.concat(std.testing.allocator, u8, &.{ prefix, edge.fields, "}}" });
             defer std.testing.allocator.free(body);
             var actual: [1 + message_fields.len * 3]u8 = undefined;
+            var legacy: [actual.len]bool = undefined;
             actual[0] = observation(body);
+            legacy[0] = try legacyWork(body);
             for (message_fields, 0..) |field, index| {
                 for (0..3) |edit| {
                     var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
                     defer parsed.deinit();
-                    actual[1 + index * 3 + edit] = observation(try editField(&parsed, field, edit));
+                    const edited = try editField(&parsed, field, edit);
+                    actual[1 + index * 3 + edit] = observation(edited);
+                    legacy[1 + index * 3 + edit] = try legacyWork(edited);
                 }
             }
             const label = try std.mem.concat(std.testing.allocator, u8, &.{ "message/", edge.name });
             defer std.testing.allocator.free(label);
-            try check(&lines, label, &actual, &message_fields, false);
+            try check(&lines, label, &actual, &message_fields, false, &legacy);
         }
         try std.testing.expectEqualStrings("", lines.rest());
     }
@@ -5414,6 +5440,26 @@ const ReplyDomainWitness = struct {
 
 test "reply decoder frozen field domain from 5472ccf5" {
     try ReplyDomainWitness.run();
+}
+
+test "reply decoder requires the served work fields and closed enums" {
+    const body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"command_observation\",\"key\":\"k\",\"delta\":\"full\",\"since\":null,\"observation\":{\"status\":\"accepted\",\"kind\":\"message\",\"target\":\"k7m2qx\",\"state\":\"queued\",\"input\":{\"type\":\"text\",\"bytes\":\"1\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"},\"queue\":{\"admission\":\"1\",\"admitted_at\":\"2\"},\"work\":{\"state\":{\"kind\":\"pending\",\"since\":\"2\"},\"first_action\":null,\"attention\":null,\"group\":\"queued\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null}}}}";
+    try std.testing.expectEqual(@as(u8, 'a'), ReplyDomainWitness.observation(body));
+    const edits = [_]struct { before: []const u8, after: []const u8 }{
+        .{ .before = "\"attention\":null,", .after = "" },
+        .{ .before = "\"group\":\"queued\",", .after = "" },
+        .{ .before = ",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null}", .after = "" },
+        .{ .before = "\"group\":\"queued\"", .after = "\"group\":\"invented\"" },
+        .{ .before = "\"attention\":null", .after = "\"attention\":{\"kind\":\"invented\",\"turn\":\"1\",\"step\":\"2\"}" },
+        .{ .before = "\"stop\":false,", .after = "" },
+        .{ .before = "\"interrupt\":null,", .after = "" },
+        .{ .before = ",\"decide\":null", .after = "" },
+    };
+    for (edits) |edit| {
+        const changed = try std.mem.replaceOwned(u8, std.testing.allocator, body, edit.before, edit.after);
+        defer std.testing.allocator.free(changed);
+        try std.testing.expect(ReplyDomainWitness.observation(changed) != 'a');
+    }
 }
 
 test "Action stop mutation and observation preserve the selected Resolution" {

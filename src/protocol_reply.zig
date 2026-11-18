@@ -157,7 +157,7 @@ pub const ActivityPage = struct {
         const Items = JsonArray(Item, 16);
         const CallEntry = struct { operation: JsonString(20), ordinal: JsonString(20), presentation: JsonToolPresentation };
         const Calls = JsonArray(CallEntry, 3);
-        const Work = struct { creator: ?JsonString(protocol.session_id_bytes), read_version: JsonString(protocol.SinceToken.max_bytes), state: JsonWorkState, turn: ?JsonString(20), operation: ?JsonString(20), first_action: ?JsonString(20), last_line: ?struct { position: JsonString(20), text: ?JsonString(session_list.max_last_line_bytes) } = null, revision: JsonString(20), workspace: JsonString(protocol.max_workspace_bytes) };
+        const Work = struct { creator: ?JsonString(protocol.session_id_bytes), read_version: JsonString(protocol.SinceToken.max_bytes), state: JsonWorkState, turn: ?JsonString(20), operation: ?JsonString(20), first_action: ?JsonString(20), attention: ?JsonWorkAttention, group: JsonEnum(@import("session_work.zig").Group), actions: JsonWorkActions, last_line: ?struct { position: JsonString(20), text: ?JsonString(session_list.max_last_line_bytes) } = null, revision: JsonString(20), workspace: JsonString(protocol.max_workspace_bytes) };
         const Queued = struct { count: JsonString(20), oldest_position: JsonString(20), newest_admission: JsonString(20), newest_position: JsonString(20) };
         const Wire = struct { version: JsonString(8), type: JsonString(32), delta: JsonEnum(enum { full }), since: ?JsonString(SessionToken.max_bytes), end: JsonString(20), direction: JsonEnum(@FieldType(ActivityCursor, "direction")), items: Items, more: bool, call_activity: struct { total: JsonString(20), entries: Calls }, queued: Queued, work: Work };
         var storage: [2 * activity_reply.max_page_bytes]u8 = undefined;
@@ -292,6 +292,9 @@ pub const ActivityPage = struct {
         const facts = &page.facts.work;
         const work = &facts.work;
         work.state = wire.work.state.value;
+        work.served_attention = try readWorkAttention(wire.work.attention);
+        work.served_group = wire.work.group.value;
+        work.actions = try readWorkActions(wire.work.actions);
         inline for (.{ &work.turn, &work.operation, &work.first_action }, .{ wire.work.turn, wire.work.operation, wire.work.first_action }) |fact, value| {
             fact.* = if (value) |text| try id(text, false) else null;
         }
@@ -936,6 +939,9 @@ pub const Current = struct {
         turn: ?Id,
         operation: ?Id,
         first_action: ?Id,
+        attention: ?JsonWorkAttention,
+        group: JsonEnum(@import("session_work.zig").Group),
+        actions: JsonWorkActions,
         latest_outcome: ?struct { code: JsonString(protocol.max_code_bytes), content: ?Reference },
 
         pub fn jsonStringify(self: Work, jw: anytype) !void {
@@ -1382,7 +1388,7 @@ pub const SessionListPage = struct {
                 end: JsonString(20),
                 first_message: ?JsonFirstMessage,
                 last_line: ?struct { position: JsonString(20), text: ?JsonString(session_list.max_last_line_bytes) },
-                work: struct { state: JsonWorkState, turn: ?JsonString(20), operation: ?JsonString(20), first_action: ?JsonString(20) },
+                work: struct { state: JsonWorkState, turn: ?JsonString(20), operation: ?JsonString(20), first_action: ?JsonString(20), attention: ?JsonWorkAttention, group: JsonEnum(@import("session_work.zig").Group), actions: JsonWorkActions },
                 peers: struct { from_person_at: ?JsonString(20) },
             };
             const wire = try std.json.innerParse(Wire, allocator, source, options);
@@ -1415,6 +1421,9 @@ pub const SessionListPage = struct {
                     .turn = if (wire.work.turn) |turn| try ActivityPage.id(turn, false) else null,
                     .operation = if (wire.work.operation) |operation| try ActivityPage.id(operation, false) else null,
                     .first_action = if (wire.work.first_action) |action| try ActivityPage.id(action, false) else null,
+                    .attention = try readWorkAttention(wire.work.attention),
+                    .group = wire.work.group.value,
+                    .actions = try readWorkActions(wire.work.actions),
                 },
                 .peers = .{ .from_person_at = if (wire.peers.from_person_at) |at| try ActivityPage.id(at, false) else null },
             };
@@ -1555,6 +1564,24 @@ pub const MessageAddress = struct {
     }
 };
 
+const JsonWorkAttention = struct {
+    kind: JsonEnum(@FieldType(@import("session_work.zig").Attention, "kind")),
+    turn: JsonString(20),
+    step: JsonString(20),
+};
+const JsonWorkActions = struct {
+    stop: bool,
+    interrupt: ?struct { turn: JsonString(20), operation: JsonString(20) },
+    decide: ?JsonString(20),
+};
+fn readWorkAttention(value: ?JsonWorkAttention) !?@import("session_work.zig").Attention {
+    const v = value orelse return null;
+    return .{ .kind = v.kind.value, .turn = try ActivityPage.id(v.turn, true), .step = try decimalId(v.step, true) };
+}
+fn readWorkActions(v: JsonWorkActions) !@import("session_work.zig").Actions {
+    return .{ .stop = v.stop, .interrupt = if (v.interrupt) |target| .{ .turn = try ActivityPage.id(target.turn, false), .operation = try ActivityPage.id(target.operation, false) } else null, .decide = if (v.decide) |action| try ActivityPage.id(action, false) else null };
+}
+
 pub const CommandObservation = struct {
     key: protocol.Bounded(protocol.max_key_bytes),
     status: enum { absent, accepted, rejected },
@@ -1568,7 +1595,7 @@ pub const CommandObservation = struct {
     queue: ?struct { admission: u64, admitted_at: u64 } = null,
     binding: ?struct { turn: u64, operation: u64, attempt: u64 } = null,
     result: ?struct { status: enum { completed, failed, cancelled }, code: ?protocol.Bounded(protocol.max_code_bytes), text: ?ContentReference } = null,
-    work: ?struct { state: protocol.WorkState, first_action: ?u64 } = null,
+    work: ?struct { state: protocol.WorkState, first_action: ?u64, attention: ?@import("session_work.zig").Attention, group: @import("session_work.zig").Group, actions: @import("session_work.zig").Actions } = null,
     recovery: ?Recovery = null,
     selection: ?struct { turn: ?u64, admission_cutoff: u64 } = null,
     archived: ?bool = null,
@@ -1634,6 +1661,10 @@ pub const CommandObservation = struct {
             try (protocol.WorkStateJson{ .state = work.state }).writeJson(writer);
             try writer.writeAll(",\"first_action\":");
             if (work.first_action) |action| try writer.print("\"{d}\"", .{action}) else try writer.writeAll("null");
+            try writer.writeAll(",\"attention\":");
+            if (work.attention) |value| try (protocol.WorkAttentionJson{ .value = value }).writeJson(writer) else try writer.writeAll("null");
+            try writer.print(",\"group\":\"{s}\",\"actions\":", .{@tagName(work.group)});
+            try (protocol.WorkActionsJson{ .value = work.actions }).writeJson(writer);
             try writer.writeByte('}');
         }
         if (self.recovery) |*recovery| {
@@ -1687,6 +1718,8 @@ pub const CommandObservation = struct {
         const JsonTypes = struct {
             pub fn Type(comptime T: type) type {
                 if (T == protocol.WorkStateJson) return JsonWorkState;
+                if (T == protocol.WorkAttentionJson) return JsonWorkAttention;
+                if (T == protocol.WorkActionsJson) return JsonWorkActions;
                 if (T == protocol.MessageRecoveryJson) return JsonMessageRecovery;
                 return T;
             }
@@ -1741,7 +1774,7 @@ pub const CommandObservation = struct {
             .code = if (@hasField(@TypeOf(facts.result), "code")) facts.result.code.value else null,
             .text = if (@hasField(@TypeOf(facts.result), "text")) try decodeReference(facts.result.text) else null,
         };
-        if (comptime @hasField(Facts, "work")) observed.work = .{ .state = facts.work.state.value, .first_action = if (facts.work.first_action) |action| try decimalId(action, false) else null };
+        if (comptime @hasField(Facts, "work")) observed.work = .{ .state = facts.work.state.value, .first_action = if (facts.work.first_action) |action| try decimalId(action, false) else null, .attention = try readWorkAttention(facts.work.attention), .group = std.meta.stringToEnum(@import("session_work.zig").Group, facts.work.group.slice()) orelse return error.InvalidObservation, .actions = try readWorkActions(facts.work.actions) };
         if (comptime @hasField(Facts, "recovery")) {
             var recovery: Recovery = .{ .more = facts.recovery.more };
             for (facts.recovery.unknown_outcomes.slice()) |row| {
@@ -1809,7 +1842,7 @@ pub const CommandObservation = struct {
             switch (state) {
                 .queued => if (self.binding != null) return error.InvalidObservation,
                 .processing => if (self.binding == null) return error.InvalidObservation,
-                .waiting_for_permission => if (self.work.?.first_action == null) return error.InvalidObservation,
+                .waiting_for_permission => {},
                 .completed, .failed, .cancelled, .rejected => return error.InvalidObservation,
             }
         }
@@ -2080,6 +2113,8 @@ test "canonical presentation typed ingress owns escaped labels and closed facts"
         .presentation = .{ .description = maximum.value.value.description, .code = .infrastructure_shutdown, .publication_position = std.math.maxInt(i64) },
     };
     facts.work = .{ .read_version = .{ .instance = @splat(0xab), .generation = std.math.maxInt(u64) }, .work = .{ .state = .{ .approval = .{ .since = std.math.maxInt(i64) } }, .turn = std.math.maxInt(i64), .operation = std.math.maxInt(i64) - 1, .first_action = std.math.maxInt(i64) - 2 }, .revision = std.math.maxInt(i64) };
+    facts.work.work.served_attention = @import("session_work.zig").attention(facts.work.work);
+    facts.work.work.served_group = @import("session_work.zig").group(facts.work.work);
     @memset(facts.work.workspace.bytes[0..protocol.max_workspace_bytes], 0x01);
     facts.work.workspace.bytes[0] = '/';
     facts.work.workspace.len = protocol.max_workspace_bytes;
@@ -2104,6 +2139,8 @@ test "activity page preserves the canonical row preview with its work" {
         .work = .{ .state = .{ .finished = .{ .since = 2 } }, .turn = 1, .operation = 1 },
         .last_line = .{ .position = 4, .text = .{} },
     } };
+    facts.work.work.served_attention = @import("session_work.zig").attention(facts.work.work);
+    facts.work.work.served_group = @import("session_work.zig").group(facts.work.work);
     try facts.work.workspace.set("/work");
     try facts.work.last_line.?.text.?.set("New completed answer");
     var buffer: [activity_reply.max_page_bytes]u8 = undefined;
@@ -2705,10 +2742,10 @@ test "canonical failure classifier bounds deep wide and escaped maximum replies"
 const testing_list_facts = "],\"delta\":\"full\",\"since\":\"abababababababababababababababab.42\",\"next\":";
 const testing_row_facts = ",\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"pin_order\":null" ++ testing_row_details;
 const testing_row_details = ",\"parent\":null,\"creator\":null,\"label\":null,\"created_at\":\"1\",\"revision\":\"1\",\"end\":\"0\",\"first_message\":null,\"last_line\":null," ++
-    "\"work\":{\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null},\"peers\":{\"from_person_at\":null}";
+    "\"work\":{\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"attention\":null,\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null}},\"peers\":{\"from_person_at\":null}";
 const testing_started_row_facts = ",\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"pin_order\":null,\"parent\":null,\"creator\":null,\"label\":\"Review PR 412\",\"created_at\":\"1792925000\",\"revision\":\"1\",\"end\":\"9\"," ++
     "\"first_message\":{\"position\":\"1\",\"admission\":\"4\",\"admitted_at\":\"1792925001\",\"sender\":null,\"content\":{\"bytes\":\"5\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"}}," ++
-    "\"last_line\":null,\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"1792925300\"},\"turn\":\"2\",\"operation\":\"6\",\"first_action\":null},\"peers\":{\"from_person_at\":\"1792925001\"}";
+    "\"last_line\":null,\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"1792925300\"},\"turn\":\"2\",\"operation\":\"6\",\"first_action\":null,\"attention\":null,\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null}},\"peers\":{\"from_person_at\":\"1792925001\"}";
 
 test "Session list facts own complete rows and render semantic output after scratch reuse" {
     const io = std.testing.io;
@@ -2719,7 +2756,7 @@ test "Session list facts own complete rows and render semantic output after scra
     const digest = @as([64]u8, @splat('a'));
     const facts = "\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"pin_order\":null,\"parent\":\"p33rs1\",\"creator\":\"cr3at0\",\"label\":\"Review \\u0050R\",\"created_at\":\"1792925000\",\"revision\":\"3\",\"end\":\"9\"," ++
         "\"first_message\":{\"position\":\"1\",\"admission\":\"4\",\"admitted_at\":\"1792925001\",\"sender\":{\"session\":\"p33rs1\"},\"content\":{\"bytes\":\"5\",\"sha256\":\"" ++ digest ++ "\"}}," ++
-        "\"last_line\":{\"position\":\"8\",\"text\":\"Saved preview\"},\"work\":{\"state\":{\"kind\":\"bash\",\"since\":\"1792925300\",\"call\":\"0\",\"description\":\"Run the tests\",\"running\":\"1\",\"approvals\":\"0\"},\"turn\":\"2\",\"operation\":\"6\",\"first_action\":null}," ++
+        "\"last_line\":{\"position\":\"8\",\"text\":\"Saved preview\"},\"work\":{\"state\":{\"kind\":\"bash\",\"since\":\"1792925300\",\"call\":\"0\",\"description\":\"Run the tests\",\"running\":\"1\",\"approvals\":\"0\"},\"turn\":\"2\",\"operation\":\"6\",\"first_action\":null,\"attention\":null,\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null}}," ++
         "\"peers\":{\"from_person_at\":\"1792925200\"}";
     const wire = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[{\"reference\":\"k7m2q\\u0078\",\"workspace\":\"/w\\nµ\",\"provider\":\"codex\",\"model\":\"m\\\"\",\"tools\":[\"bash\"],\"permission_mode\":\"ask\"," ++
         facts ++ ",\"extra\":[null,{\"discard\":true}]}" ++ testing_list_facts ++ "null,\"extra\":1}";
@@ -3151,7 +3188,7 @@ test "Session list facts attain eight maximum escaped rows and bind the continua
 
 const testing_observation_input = ",\"input\":{\"type\":\"text\",\"bytes\":\"11\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"}";
 const testing_observation_queue = ",\"queue\":{\"admission\":\"23\",\"admitted_at\":\"1762329000\"}";
-const testing_observation_work = ",\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"1762329010\"},\"first_action\":null}";
+const testing_observation_work = ",\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"1762329010\"},\"first_action\":null,\"attention\":null,\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null}}";
 const testing_observation_binding = ",\"binding\":{\"turn\":\"37\",\"operation\":\"41\",\"attempt\":\"0\"}";
 const testing_observation_prefix = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"command_observation\",\"key\":\"k\",\"delta\":\"full\",\"since\":null,\"observation\":";
 const testing_observation_message = "{\"status\":\"accepted\",\"kind\":\"message\",\"target\":\"k7m2qx\"";
@@ -3159,10 +3196,11 @@ const testing_observation_message = "{\"status\":\"accepted\",\"kind\":\"message
 test "keyed observation retains Host state independently of admission and binding" {
     const address = try MessageAddress.init("/store", "k7m2qx", "k");
     inline for (.{
-        .{ "queued", "", ",\"work\":{\"state\":{\"kind\":\"pending\",\"since\":\"1762329000\"},\"first_action\":null}" },
-        .{ "processing", testing_observation_binding, ",\"work\":{\"state\":{\"kind\":\"bash\",\"since\":\"1762329010\",\"call\":\"0\",\"description\":\"Run tests\",\"running\":\"1\",\"approvals\":\"0\"},\"first_action\":null}" },
-        .{ "waiting_for_permission", testing_observation_binding, ",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"1762329010\"},\"first_action\":\"57\"}" },
-        .{ "waiting_for_permission", "", ",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"1762329010\"},\"first_action\":\"57\"}" },
+        .{ "queued", "", ",\"work\":{\"state\":{\"kind\":\"pending\",\"since\":\"1762329000\"},\"first_action\":null,\"attention\":null,\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null}}" },
+        .{ "processing", testing_observation_binding, ",\"work\":{\"state\":{\"kind\":\"bash\",\"since\":\"1762329010\",\"call\":\"0\",\"description\":\"Run tests\",\"running\":\"1\",\"approvals\":\"0\"},\"first_action\":null,\"attention\":null,\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null}}" },
+        .{ "waiting_for_permission", testing_observation_binding, ",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"1762329010\"},\"first_action\":\"57\",\"attention\":null,\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null}}" },
+        .{ "waiting_for_permission", "", ",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"1762329010\"},\"first_action\":\"57\",\"attention\":null,\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null}}" },
+        .{ "waiting_for_permission", testing_observation_binding, ",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"1762329010\"},\"first_action\":null,\"attention\":{\"kind\":\"approval\",\"turn\":\"37\",\"step\":\"0\"},\"group\":\"needs_you\",\"actions\":{\"stop\":true,\"interrupt\":null,\"decide\":null}}" },
         .{ "completed", testing_observation_binding, ",\"result\":{\"status\":\"completed\",\"text\":{\"type\":\"text\",\"bytes\":\"11\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"}}" },
         .{ "failed", testing_observation_binding, ",\"result\":{\"status\":\"failed\",\"code\":\"provider_http_422\"}" },
         .{ "cancelled", testing_observation_binding, ",\"result\":{\"status\":\"cancelled\",\"code\":\"cancelled\"}" },
@@ -3348,18 +3386,18 @@ test "keyed observation ignores unrelated root extensions and rejects diagnostic
 test "keyed observation rejects malformed consequential fields before outcome interpretation" {
     const prefix = testing_observation_prefix ++ testing_observation_message ++ ",\"state\":\"queued\"" ++ testing_observation_input ++ testing_observation_queue;
     inline for (.{
-        ",\"binding\":null}}",                                                                         ",\"binding\":{}}}",                                                     ",\"binding\":{\"turn\":7}}}",
-        ",\"result\":{\"status\":\"processing\"}}}",                                                   ",\"result\":{\"status\":\"completed\"}}}",                              ",\"result\":{\"status\":\"failed\",\"code\":17}}}",
-        ",\"result\":{\"status\":\"failed\",\"code\":null}}}",                                         ",\"work\":{\"state\":{\"kind\":\"invented\"},\"first_action\":null}}}", ",\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"1762329000\"}}}}",
-        ",\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"1762329000\"},\"first_action\":17}}}", ",\"revision\":\"1\"}}",                                                 ",\"code\":null}}",
-        ",\"target\":null}}",                                                                          ",\"state\":\"queued\"}}",                                               ",\"state\":null}}",
+        ",\"binding\":null}}",                                                                         ",\"binding\":{}}}",                                                                                                                                                           ",\"binding\":{\"turn\":7}}}",
+        ",\"result\":{\"status\":\"processing\"}}}",                                                   ",\"result\":{\"status\":\"completed\"}}}",                                                                                                                                    ",\"result\":{\"status\":\"failed\",\"code\":17}}}",
+        ",\"result\":{\"status\":\"failed\",\"code\":null}}}",                                         ",\"work\":{\"state\":{\"kind\":\"invented\"},\"first_action\":null,\"attention\":null,\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null}}}}", ",\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"1762329000\"}}}}",
+        ",\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"1762329000\"},\"first_action\":17}}}", ",\"revision\":\"1\"}}",                                                                                                                                                       ",\"code\":null}}",
+        ",\"target\":null}}",                                                                          ",\"state\":\"queued\"}}",                                                                                                                                                     ",\"state\":null}}",
         ",\"queue\":{\"admission\":\"9\",\"admitted_at\":\"1762329000\"}}}",                           ",\"recovery\":{\"unknown_outcomes\":[],\"more\":false}}}",
     }) |suffix| {
         const work = comptime if (std.mem.startsWith(u8, suffix, ",\"work\":")) "" else testing_observation_work;
         try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = prefix ++ work ++ suffix }, "k"));
     }
     inline for (.{ "0", "+7", "07", "18446744073709551616" }) |id|
-        try std.testing.expectError(error.InvalidResponse, CommandObservation.parse(.{ .status = 200, .body = prefix ++ ",\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"1762329000\"},\"first_action\":\"" ++ id ++ "\"}}}" }, "k"));
+        try std.testing.expectError(error.InvalidResponse, CommandObservation.parse(.{ .status = 200, .body = prefix ++ ",\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"1762329000\"},\"first_action\":\"" ++ id ++ "\",\"attention\":null,\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null}}}}" }, "k"));
     inline for (.{ "", ",\"state\":\"queued\"", ",\"state\":\"waiting_for_permission\"", ",\"state\":null", ",\"state\":1", ",\"state\":\"invented\"", ",\"state\":\"processing\"", ",\"state\":\"completed\"", ",\"state\":\"rejected\"" }) |state|
         try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = testing_observation_prefix ++ testing_observation_message ++ state ++ testing_observation_input ++ testing_observation_queue ++ "}}" }, "k"));
     inline for (.{ "{}", "[]", "{\"version\":\"" ++ protocol.next_wire_version ++ "\"}", "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"wrong\"}" }) |body|
@@ -3370,16 +3408,15 @@ test "keyed observation rejects malformed consequential fields before outcome in
 
 test "keyed observation rejects contradictory permission work variants" {
     inline for (.{
-        .{ "waiting_for_permission", "", ",\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"1762329010\"},\"first_action\":\"57\"}" },
-        .{ "waiting_for_permission", "", ",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"1762329010\"},\"first_action\":null}" },
-        .{ "queued", "", ",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"1762329010\"},\"first_action\":\"57\"}" },
-        .{ "processing", testing_observation_binding, ",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"1762329010\"},\"first_action\":\"57\"}" },
+        .{ "waiting_for_permission", "", ",\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"1762329010\"},\"first_action\":\"57\",\"attention\":null,\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null}}" },
+        .{ "queued", "", ",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"1762329010\"},\"first_action\":\"57\",\"attention\":null,\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null}}" },
+        .{ "processing", testing_observation_binding, ",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"1762329010\"},\"first_action\":\"57\",\"attention\":null,\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null}}" },
     }) |case| {
         const body = testing_observation_prefix ++ testing_observation_message ++ ",\"state\":\"" ++ case[0] ++ "\"" ++ testing_observation_input ++ testing_observation_queue ++ case[1] ++ case[2] ++ "}}";
         try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = body }, "k"));
     }
     const body = testing_observation_prefix ++ testing_observation_message ++ ",\"state\":\"processing\"" ++ testing_observation_input ++ testing_observation_queue ++ testing_observation_binding ++
-        ",\"work\":{\"state\":{\"kind\":\"bash\",\"since\":\"1762329010\",\"call\":\"0\",\"description\":\"Run tests\",\"running\":\"1\",\"approvals\":\"1\"},\"first_action\":\"57\"}}}";
+        ",\"work\":{\"state\":{\"kind\":\"bash\",\"since\":\"1762329010\",\"call\":\"0\",\"description\":\"Run tests\",\"running\":\"1\",\"approvals\":\"1\"},\"first_action\":\"57\",\"attention\":null,\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null}}}}";
     const observed = try CommandObservation.parse(.{ .status = 200, .body = body }, "k");
     try std.testing.expectEqual(.processing, observed.state.?);
     try std.testing.expectEqual(@as(?u64, 57), observed.work.?.first_action);
@@ -3501,7 +3538,7 @@ test "Current settings preserve decimal token heuristics in projections" {
     const file = try tmp.dir.createFile(io, "current", .{ .read = true });
     defer file.close(io);
     const wire = "{\"reference\":\"k7m2qx\",\"parent\":null,\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"revision\":\"1\",\"tools\":[],\"loaded_tools\":[],\"permission_mode\":\"ask\",\"instructions\":{\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"},\"output_schema\":null,\"reasoning_effort\":\"high\",\"reasoning_effort_override\":\"high\",\"compaction_trigger\":\"100000\",\"output_reservation\":\"16384\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":null,\"created_at\":\"1\"}";
-    const report = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"delta\":\"full\",\"since\":null,\"profile\":\"current\",\"archive_state\":\"active\",\"session\":" ++ wire ++ ",\"pending_messages\":\"0\",\"work\":{\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"latest_outcome\":null},\"peers\":{\"from_person_at\":null},\"selected_message\":null,\"recent_messages\":[],\"actions\":{\"count\":\"0\",\"unresolved\":[],\"resolved\":[]},\"rejected_calls\":{\"count\":\"0\",\"items\":[]},\"actionable_permissions\":[],\"execution\":{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"0\",\"scratch_used_bytes\":\"0\",\"unavailable\":[\"structured_output\"]}}";
+    const report = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"delta\":\"full\",\"since\":null,\"profile\":\"current\",\"archive_state\":\"active\",\"session\":" ++ wire ++ ",\"pending_messages\":\"0\",\"work\":{\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"attention\":null,\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null},\"latest_outcome\":null},\"peers\":{\"from_person_at\":null},\"selected_message\":null,\"recent_messages\":[],\"actions\":{\"count\":\"0\",\"unresolved\":[],\"resolved\":[]},\"rejected_calls\":{\"count\":\"0\",\"items\":[]},\"actionable_permissions\":[],\"execution\":{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"0\",\"scratch_used_bytes\":\"0\",\"unavailable\":[\"structured_output\"]}}";
     try file.writePositionalAll(io, report, 0);
     const reply = try CurrentReply.decode(io, file, "k7m2qx", .{ .report = .{ .bytes = report.len } });
     try std.testing.expectEqual(@as(u64, 100000), reply.current.settings.compaction_trigger.?.value);
@@ -3635,7 +3672,7 @@ test "Current facts retain settings selected empty key and ten recent bindings" 
     var output = file.writerStreaming(io, &buffer);
     const writer = &output.interface;
     const reference = "{\"bytes\":\"7\",\"sha256\":\"" ++ @as([64]u8, @bitCast(@as([4][16]u8, @splat("0123456789abcdef".*)))) ++ "\"}";
-    try writer.writeAll("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"delta\":\"full\",\"since\":null,\"profile\":\"current\",\"archive_state\":\"active\",\"session\":{\"reference\":\"k7m2qx\",\"parent\":\"p33rs1\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"exact\\u0001model\",\"revision\":\"17\",\"tools\":[],\"loaded_tools\":[],\"permission_mode\":\"ask\",\"instructions\":" ++ reference ++ ",\"output_schema\":null,\"reasoning_effort\":null,\"reasoning_effort_override\":null,\"compaction_trigger\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":\"Review PR 412\",\"created_at\":\"1792925000\"},\"pending_messages\":\"2\",\"work\":{\"state\":{\"kind\":\"pending\",\"since\":\"1792925300\"},\"turn\":\"37\",\"operation\":\"91\",\"first_action\":null,\"latest_outcome\":{\"code\":\"failed_saved\",\"content\":null}},\"peers\":{\"from_person_at\":\"1792925300\"},\"first_message\":{\"position\":\"1\",\"admission\":\"4\",\"admitted_at\":\"1792925001\",\"sender\":null,\"content\":" ++ reference ++ "},\"selected_message\":\"\",\"recent_messages\":[");
+    try writer.writeAll("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"delta\":\"full\",\"since\":null,\"profile\":\"current\",\"archive_state\":\"active\",\"session\":{\"reference\":\"k7m2qx\",\"parent\":\"p33rs1\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"exact\\u0001model\",\"revision\":\"17\",\"tools\":[],\"loaded_tools\":[],\"permission_mode\":\"ask\",\"instructions\":" ++ reference ++ ",\"output_schema\":null,\"reasoning_effort\":null,\"reasoning_effort_override\":null,\"compaction_trigger\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":\"Review PR 412\",\"created_at\":\"1792925000\"},\"pending_messages\":\"2\",\"work\":{\"state\":{\"kind\":\"pending\",\"since\":\"1792925300\"},\"turn\":\"37\",\"operation\":\"91\",\"first_action\":null,\"attention\":null,\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null},\"latest_outcome\":{\"code\":\"failed_saved\",\"content\":null}},\"peers\":{\"from_person_at\":\"1792925300\"},\"first_message\":{\"position\":\"1\",\"admission\":\"4\",\"admitted_at\":\"1792925001\",\"sender\":null,\"content\":" ++ reference ++ "},\"selected_message\":\"\",\"recent_messages\":[");
     for (0..10) |i| {
         if (i != 0) try writer.writeAll(",");
         try writer.print("{{\"turn\":\"{d}\",\"message\":\"key/{d}\",\"outcome\":\"completed\"}}", .{ 30 - i, i });
@@ -3674,141 +3711,6 @@ test "Current facts retain settings selected empty key and ten recent bindings" 
     try file.writePositionalAll(io, "x", 0);
     try std.testing.expectEqualStrings("exact\x01model", facts.settings.model.slice());
     try std.testing.expectEqualStrings("p33rs1", facts.settings.parent.?.slice());
-}
-
-test "Current facts traverse every attention row and preserve metadata with fixed scratch" {
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const file = try tmp.dir.createFile(io, "current", .{ .read = true });
-    defer file.close(io);
-    const rendered = try tmp.dir.createFile(io, "rendered", .{ .read = true });
-    defer rendered.close(io);
-    const reference = "{\"type\":\"text\",\"bytes\":\"13\",\"sha256\":\"" ++ @as([64]u8, @bitCast(@as([32][2]u8, @splat("ab".*)))) ++ "\"}";
-    var buffer: [protocol.content_window_bytes]u8 = undefined;
-    var output = file.writerStreaming(io, &buffer);
-    const writer = &output.interface;
-    try writer.writeAll("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"delta\":\"full\",\"since\":null,\"profile\":\"current\",\"archive_state\":\"active\",\"session\":{\"reference\":\"k7m2qx\",\"parent\":null,\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"revision\":\"17\",\"tools\":[\"bash\"],\"loaded_tools\":[\"bash\"],\"permission_mode\":\"ask\",\"instructions\":{\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"},\"output_schema\":null,\"reasoning_effort\":null,\"reasoning_effort_override\":null,\"compaction_trigger\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":null,\"created_at\":\"1\"},\"pending_messages\":\"0\",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"1792925300\"},\"turn\":\"7\",\"operation\":\"19\",\"first_action\":\"31\",\"latest_outcome\":null},\"peers\":{\"from_person_at\":null},\"selected_message\":\"k\\n\",\"recent_messages\":[],\"actions\":{\"count\":\"515\",\"unresolved\":[");
-    for (0..257) |i| {
-        if (i != 0) try writer.writeAll(",");
-        try writer.print("{{\"action\":\"{d}\",\"parent_operation\":\"19\",\"call_ordinal\":\"{d}\",\"tool\":\"{s}\",{s}\"permission_revision\":\"23\",\"authorization\":\"pending\",\"call_id\":", .{ i + 31, i, if (i == 0) "fetch_page" else "bash", if (i == 0) "\"server\":\"docs\"," else "" });
-        try writer.writeAll(reference ++ ",\"arguments\":" ++ reference ++ ",\"presentation\":{\"description\":\"");
-        try writer.writeAll(if (i == 0) &@as([200]u8, @splat('a')) else "Run parser tests");
-        try writer.writeAll("\",\"code\":\"pending_permission\",\"publication_position\":null}}");
-    }
-    try writer.writeAll("],\"resolved\":[");
-    for (0..257) |i| {
-        if (i != 0) try writer.writeAll(",");
-        try writer.print("{{\"action\":\"{d}\",\"parent_operation\":\"11\",\"call_ordinal\":\"{d}\",\"code\":\"indeterminate\",\"acceptance_position\":\"{d}\",\"result\":", .{ i + 1001, i, i + 71 });
-        try writer.writeAll(reference ++ ",\"presentation\":{\"description\":\"Run parser tests\",\"code\":\"indeterminate\",\"publication_position\":null}}");
-    }
-    try writer.writeAll("]},\"rejected_calls\":{\"count\":\"257\",\"items\":[");
-    for (0..257) |i| {
-        if (i != 0) try writer.writeAll(",");
-        try writer.print("{{\"parent_operation\":\"11\",\"call_ordinal\":\"{d}\",\"code\":\"unknown_tool\",\"acceptance_position\":\"{d}\",\"result\":", .{ i + 1000, i + 5001 });
-        try writer.writeAll(reference ++ ",\"name\":" ++ reference ++ ",\"call_id\":" ++ reference ++ ",\"arguments\":" ++ reference ++ ",\"presentation\":{\"description\":null,\"code\":\"unknown_tool\",\"publication_position\":null}}");
-    }
-    try writer.writeAll("]},\"actionable_permissions\":[");
-    for (0..257) |i| {
-        if (i != 0) try writer.writeAll(",");
-        try writer.print("{{\"action\":\"{d}\",\"permission_revision\":\"23\"}}", .{i + 31});
-    }
-    try writer.writeAll("],\"execution\":{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"3\",\"scratch_used_bytes\":\"987\",\"unavailable\":[\"structured_output\"]},\"extension\":\"");
-    try writer.splatByteAll('x', 20000);
-    try writer.writeAll("\"}");
-    try output.flush();
-    const bytes = try file.length(io);
-    const reply = try CurrentReply.decode(io, file, "k7m2qx", .{ .report = .{ .bytes = bytes } });
-    const facts = &reply.current;
-    try std.testing.expectEqual(@as(u64, 257), facts.actionable_count);
-    try std.testing.expectEqual(@as(u64, 257), facts.indeterminate_count);
-    try std.testing.expectEqual(@as(u64, 1001), facts.first_indeterminate.?);
-    try std.testing.expect(facts.settings.reasoning_effort == null and facts.settings.reasoning_effort_override == null);
-    const Sink = struct {
-        counts: [4]usize = @splat(0),
-        pub fn visit(self: *@This(), attention: Current.Attention) !void {
-            const kind = @backingInt(attention);
-            const i = self.counts[kind];
-            switch (attention) {
-                .unresolved => |row| {
-                    if (i == 0) {
-                        try std.testing.expectEqualStrings("fetch_page", row.tool.slice());
-                        try std.testing.expectEqualStrings("docs", row.server.value.?.slice());
-                    } else try std.testing.expect(row.server.value == null);
-                    try std.testing.expectEqual(@as(u64, 31 + i), row.action.value);
-                    try std.testing.expectEqual(@as(u64, 19), row.parent_operation.value);
-                    try std.testing.expectEqual(@as(u64, i), row.call_ordinal.value);
-                    try std.testing.expectEqual(@as(u64, 13), row.arguments.bytes.value);
-                    try std.testing.expectEqualStrings(&@as([64]u8, @bitCast(@as([32][2]u8, @splat("ab".*)))), row.call_id.sha256.slice());
-                    try std.testing.expectEqualStrings(if (i == 0) &@as([200]u8, @splat('a')) else "Run parser tests", row.presentation.value.description.?.slice());
-                    try std.testing.expectEqual(protocol.ToolPresentation.Code.pending_permission, row.presentation.value.code);
-                },
-                .resolved => |row| {
-                    try std.testing.expectEqual(@as(u64, 1001 + i), row.action.value);
-                    try std.testing.expectEqual(@as(u64, 71 + i), row.acceptance_position.value);
-                    try std.testing.expectEqualStrings("indeterminate", row.code.slice());
-                    try std.testing.expect(row.presentation.value.publication_position == null);
-                },
-                .rejected => |row| {
-                    try std.testing.expectEqual(@as(u64, 1000 + i), row.call_ordinal.value);
-                    try std.testing.expectEqual(@as(u64, 5001 + i), row.acceptance_position.value);
-                    try std.testing.expectEqualStrings("unknown_tool", row.code.slice());
-                    try std.testing.expectEqual(@as(u64, 13), row.name.bytes.value);
-                    try std.testing.expect(row.presentation.value.description == null);
-                },
-                .actionable => |row| {
-                    try std.testing.expectEqual(@as(u64, 31 + i), row.action.value);
-                    try std.testing.expectEqual(@as(u64, 23), row.permission_revision.value);
-                },
-            }
-            self.counts[kind] += 1;
-        }
-    };
-    var sink: Sink = .{};
-    try facts.traverse(io, file, &sink);
-    try std.testing.expectEqual([4]usize{ 257, 257, 257, 257 }, sink.counts);
-    var json = rendered.writerStreaming(io, &buffer);
-    try reply.writeJson(io, file, &json.interface);
-    try json.flush();
-    const roundtrip = try CurrentReply.decode(io, rendered, "k7m2qx", .{ .report = .{ .bytes = try rendered.length(io) } });
-    var again: Sink = .{};
-    try roundtrip.current.traverse(io, rendered, &again);
-    try std.testing.expectEqual(sink.counts, again.counts);
-    const view = @import("session_view.zig");
-    const mcp = (try view.actionToolFromCapture(&roundtrip.current, io, rendered, 31)).?;
-    try std.testing.expectEqualStrings("fetch_page", mcp.name.slice());
-    try std.testing.expectEqualStrings("docs", mcp.server.?.slice());
-    try std.testing.expectEqualStrings(&@as([200]u8, @splat('a')), mcp.description.slice());
-    const bash = (try view.actionToolFromCapture(&roundtrip.current, io, rendered, 32)).?;
-    try std.testing.expectEqualStrings("Run parser tests", bash.description.slice());
-    try std.testing.expectEqual(null, try view.actionToolFromCapture(&roundtrip.current, io, rendered, 1001));
-    const Failing = struct {
-        pub fn visit(_: @This(), _: Current.Attention) !void {
-            return error.SinkFailed;
-        }
-    };
-    try std.testing.expectError(error.SinkFailed, facts.traverse(io, file, Failing{}));
-    try std.testing.expectError(error.InvalidObservation, CurrentReply.decode(io, file, "k7m2qx", .{ .report = .{ .bytes = bytes + 1 } }));
-    var prefix: [2048]u8 = undefined;
-    try std.testing.expectEqual(prefix.len, try file.readPositionalAll(io, &prefix, 0));
-    inline for (.{
-        .{ "\"version\":\"" ++ protocol.wire_version ++ "\"", "\"version\":\"" ++ protocol.next_wire_version ++ "\"" },
-        .{ "\"tools\":[\"bash\"]", "\"tools\":[\"ba.h\"]" },
-        .{ "\"tool\":\"bash\"", "\"tool\":\"ba.h\"" },
-        .{ "\"loaded_tools\":[\"bash\"]", "\"loaded_tools\":[\"ba.h\"]" },
-        .{ "\"turn\":\"7\"", "\"turn\":\"0\"" },
-        .{ "\"operation\":\"19\"", "\"operation\":\"00\"" },
-        .{ "\"selected_message\"", "\"ignored__message\"" },
-        .{ "\"type\":\"text\"", "\"meta\":\"text\"" },
-        .{ &@as([64]u8, @bitCast(@as([32][2]u8, @splat("ab".*)))), &@as([64]u8, @bitCast(@as([32][2]u8, @splat("xz".*)))) },
-    }) |case| {
-        const offset = std.mem.indexOf(u8, &prefix, case[0]).?;
-        try file.writePositionalAll(io, case[1], offset);
-        try std.testing.expectError(error.InvalidObservation, CurrentReply.decode(io, file, "k7m2qx", .{ .report = .{ .bytes = bytes } }));
-        try file.writePositionalAll(io, case[0], offset);
-    }
-    try std.testing.expectEqual(bytes, try file.length(io));
-    std.debug.print("Current facts={d}B, fixed scanner/token/input=16384B, capture={d}B; 4x257 rows, no population allocation\n", .{ @sizeOf(Current), bytes });
 }
 
 test "a hosted call travels as its presentation alone, in the conversation and the activity" {
@@ -4122,6 +4024,8 @@ test "derived observation payloads cover caller fields" {
     const JsonTypes = struct {
         pub fn Type(comptime T: type) type {
             if (T == protocol.WorkStateJson) return JsonWorkState;
+            if (T == protocol.WorkAttentionJson) return JsonWorkAttention;
+            if (T == protocol.WorkActionsJson) return JsonWorkActions;
             if (T == protocol.MessageRecoveryJson) return CommandObservation.JsonMessageRecovery;
             return T;
         }
