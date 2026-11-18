@@ -393,7 +393,7 @@ fn inputs() []const u8 {
 }
 
 /// A collect build (-Drsql-collect=true) serves no entry and exports every statement's values.
-fn collecting() bool {
+pub fn collecting() bool {
     return @import("build_options").rsql_collect;
 }
 
@@ -406,6 +406,27 @@ fn tableHit(comptime table: type, comptime kind: StatementKind, comptime sql: []
             if (std.mem.eql(u8, variant.signature, wanted)) return .{ .sqlite = variant.sqlite, .mysql = entry.mysql, .facts = entry.facts };
         }
         return null;
+    }
+}
+
+/// The schema's generated values (objects, DDL, MySQL migrations, bootstrap digest) while the
+/// table's inputs match the build; null in a collect build or with a stale table.
+pub fn generatedSchema() ?type {
+    return generatedSchemaFrom(statement_table);
+}
+
+fn generatedSchemaFrom(comptime table: type) ?type {
+    if (collecting() or !@hasDecl(table, "schema") or !std.mem.eql(u8, table.inputs, inputs())) return null;
+    return table.schema;
+}
+
+/// In a collect build, exports one of schema.zig's generated values for the table generator.
+pub fn collectSchema(comptime name: []const u8, comptime payload: []const u8) void {
+    if (!collecting()) return;
+    comptime {
+        const record = "schema\x1f" ++ name ++ "\x1f" ++ payload ++ "\x1f" ++ inputs() ++ "\x1c";
+        const bytes: [record.len]u8 = record[0..record.len].*;
+        @export(&bytes, .{ .name = "rsqlstmt_schema_" ++ name });
     }
 }
 
@@ -2935,6 +2956,29 @@ test "SH-92: a statement or fixture serves its table entry only while its text, 
         }
     };
     const current = @import("build_options").rsql_inputs;
+    const Schema = struct {};
+    const schema_tables = .{
+        .{ struct {
+            pub const inputs = current;
+            pub const schema = Schema;
+        }, true },
+        .{ struct {
+            pub const inputs = current ++ "0";
+            pub const schema = Schema;
+        }, false },
+        .{ struct {
+            pub const inputs = current;
+        }, false },
+    };
+    inline for (schema_tables) |case| {
+        const served = comptime generatedSchemaFrom(case[0]);
+        if (case[1]) {
+            try std.testing.expect(served != null);
+            try std.testing.expect(served.? == Schema);
+        } else {
+            try std.testing.expect(served == null);
+        }
+    }
     const cases = .{
         // table, statements served, fixture served (a fixture has no signature: text and inputs decide)
         .{ Table.of(current, "r0:.:next_position,", "w0:H."), true, true },

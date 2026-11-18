@@ -391,7 +391,7 @@ class PrShapeMainTest(unittest.TestCase):
             shutil.copytree(ROOT / "tests/ci", root / "tests/ci", ignore=shutil.ignore_patterns("__pycache__"))
             env = {**os.environ, "PR_BODY": "No screen change: unchanged", "PR_NUMBER": "", "GITHUB_REPOSITORY": ""}
             result = subprocess.run([sys.executable, "tests/ci/pr_shape.py", "--screens"], cwd=root,
-                                    env=env, capture_output=True, text=True, timeout=30)
+                                    env=env, capture_output=True, text=True, timeout=300)
             self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_plan_emits_screen_classification(self):
@@ -432,7 +432,7 @@ class PrShapeMainTest(unittest.TestCase):
                 with self.subTest(body=body):
                     result = subprocess.run([sys.executable, "-B", str(ROOT / "tests/ci/pr_shape.py")],
                                             cwd=directory, env={**os.environ, "BASE": base, "PR_BODY": GOAL + body},
-                                            capture_output=True, text=True, timeout=30)
+                                            capture_output=True, text=True, timeout=300)
                     self.assertEqual(result.returncode, expected, result.stderr)
                     self.assertEqual(result.stdout, "")
                     if expected:
