@@ -36,6 +36,10 @@ on:
         required: false
         default: false
         type: boolean
+    secrets:
+      # Promote passes it so promotion can route to rui-mac; without it routing stays hosted.
+      MAC_RUNNER_STATUS_TOKEN:
+        required: false
 
 permissions:
   contents: read
