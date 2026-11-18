@@ -679,6 +679,7 @@ pub const State = struct {
     sidebar_rule: ?u16 = null,
     launch: enum { sizing, waiting, creating, done } = .done,
     presentation: union(enum) { done, holding: u64, released } = .done,
+    presentation_deadline_elapsed: bool = false,
 
     host_line: bool = false,
 
@@ -805,7 +806,7 @@ pub const State = struct {
     }
 
     pub fn hidesOverview(self: *const State) bool {
-        return self.launch == .waiting or self.launch == .creating;
+        return !self.presentation_deadline_elapsed and (self.launch == .waiting or self.launch == .creating);
     }
 
     pub fn creating(self: *const State) bool {
@@ -1352,6 +1353,7 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
         .presentation_tick => |frame| if (state.presentation == .holding) {
             const deadline = state.presentation.holding;
             if (frame.now_ms >= deadline or frame.host_unavailable or frame.list_visible == false) {
+                state.presentation_deadline_elapsed = frame.now_ms >= deadline;
                 releaseInitialPresentation(state, &effects);
             }
         },

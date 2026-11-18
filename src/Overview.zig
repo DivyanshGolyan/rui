@@ -8178,6 +8178,94 @@ test "upgrade attempt presentation domain ends synthetic pause and publishing wi
     };
 }
 
+test "wide launch draws late listing after presentation deadline without flashing a fast listing" {
+    const Scratch = struct {
+        var dir: std.Io.Dir = undefined;
+        var files: u8 = 0;
+        fn scratch(init: std.process.Init) !std.Io.File {
+            files += 1;
+            return dir.createFile(init.io, &.{'a' + files}, .{ .read = true });
+        }
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const home = home_buffer[0..try tmp.dir.realPath(std.testing.io, &home_buffer)];
+    Scratch.dir = tmp.dir;
+    Scratch.files = 0;
+    for ([_]bool{ false, true }) |fast| {
+        var ops = fake_operations;
+        ops.open = openSession;
+        var cancellation: client.Cancellation = .{};
+        const rig = try Rig.open(.{ .store = home, .workspace = "/work", .home = home, .directory = home, .provider = "codex", .model = "gpt-6-luna" }, ops, &cancellation);
+        defer rig.close();
+        const overview = rig.overview;
+        overview.hooks.scratch = Scratch.scratch;
+        defer {
+            if (overview.app_session) |left| {
+                left.frontend.?.stop();
+                overview.disposeSession(left);
+                overview.app_session = null;
+            }
+            for (overview.retired.items) |retired| overview.disposeSession(retired.left);
+            overview.retired.deinit(std.testing.allocator);
+        }
+        _ = try overview.event(.{ .launch_start = .{ .explicit_session = false, .restoring = false } });
+        _ = try overview.event(.{ .presentation_start = 1000 });
+        {
+            var frame = try rig.shown(140, 40);
+            defer frame.deinit();
+            try std.testing.expect(std.mem.indexOf(u8, try frame.text(), "+ New Session") == null);
+        }
+        if (fast) {
+            Seen.now.listed = 1;
+            _ = try overview.event(.{ .tick = test_now_s * 1000 });
+            try std.testing.expect(try rig.settle() == null);
+            var frame = try rig.shown(140, 40);
+            defer frame.deinit();
+            try std.testing.expect(std.mem.indexOf(u8, try frame.text(), "+ New Session") == null);
+        } else {
+            _ = try overview.event(.{ .presentation_tick = .{ .now_ms = 1149, .list_visible = true, .host_unavailable = false } });
+            {
+                var frame = try rig.shown(140, 40);
+                defer frame.deinit();
+                try std.testing.expect(std.mem.indexOf(u8, try frame.text(), "+ New Session") == null);
+            }
+            _ = try overview.event(.{ .presentation_tick = .{ .now_ms = 1150, .list_visible = true, .host_unavailable = false } });
+            {
+                var frame = try rig.shown(140, 40);
+                defer frame.deinit();
+                try std.testing.expect(std.mem.indexOf(u8, try frame.text(), "+ New Session") != null);
+            }
+            _ = try overview.event(.presentation_presented);
+            Seen.now.listed = 1;
+            _ = try overview.event(.{ .tick = test_now_s * 1000 });
+            try std.testing.expect(try rig.settle() == null);
+            var frame = try rig.shown(140, 40);
+            defer frame.deinit();
+            try std.testing.expect(std.mem.indexOf(u8, try frame.text(), "+ New Session") != null);
+        }
+        try std.testing.expect(try rig.next(try overview.event(.launch_poll)) == null);
+        try std.testing.expect(overview.state.launch == .creating);
+        {
+            var pending = try rig.shown(140, 40);
+            defer pending.deinit();
+            try std.testing.expectEqual(!fast, std.mem.indexOf(u8, try pending.text(), "+ New Session") != null);
+        }
+        try std.testing.expect(try rig.settle() == null);
+        try std.testing.expectEqual(@as(usize, 1), Seen.now.creates);
+        const frontend = overview.app_session.?.frontend.?;
+        try std.testing.expect(overview.root.session.?.eql(frontend.widget()));
+        try std.testing.expect(overview.root.listVisible());
+        var split = try rig.shown(140, 40);
+        defer split.deinit();
+        const divider = split.screen.readCell(Root.list_width, 0).?.char.grapheme;
+        try std.testing.expect(std.mem.eql(u8, divider, "┆") or std.mem.eql(u8, divider, "|"));
+        try std.testing.expect(std.mem.indexOf(u8, try split.text(), "+ New Session") != null);
+        try std.testing.expect(std.mem.indexOf(u8, try split.text(), "enter open") == null);
+    }
+}
+
 test "wide launch waits for listing and opens the newest empty Session without creation" {
     const Listing = struct {
         fn list(_: *Self, _: client.Requests, _: protocol_reply.SessionListCursor, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
