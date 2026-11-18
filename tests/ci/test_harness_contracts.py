@@ -7,7 +7,6 @@ import mmap
 import os
 from pathlib import Path
 import re
-import select
 import site
 import struct
 import subprocess
@@ -398,21 +397,7 @@ class ProcessCensusTest(unittest.TestCase):
                                                env={"PYTHONHOME": sys.base_prefix}, stdin=subprocess.PIPE,
                                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                     children.append(process)
-                    os.set_blocking(process.stdout.fileno(), False)
-                    received = bytearray()
-
-                    def ready():
-                        self.assertIsNone(process.poll(), "actor exited before readiness")
-                        try:
-                            chunk = os.read(process.stdout.fileno(), len(marker) - len(received))
-                        except BlockingIOError:
-                            return False
-                        self.assertTrue(chunk, "actor closed stdout before readiness")
-                        received.extend(chunk)
-                        self.assertEqual(received, marker[:len(received)])
-                        return received == marker
-
-                    HOST.wait_for(ready, f"readiness from {name}")
+                    self.await_marker(process, marker, f"readiness from {name}")
                 owned, named = children
                 for process in children:
                     self.assertIsNone(process.poll(), "actor exited before census")
@@ -426,6 +411,24 @@ class ProcessCensusTest(unittest.TestCase):
                     *(lambda process=process: HOST.close_stdin(process) for process in reversed(children)),
                     *(lambda process=process: HOST.stop_process(process) for process in reversed(children)))
 
+    def await_marker(self, process, marker, label):
+        """Waits, bounded by the shared wait owner, until the child writes exactly marker to stdout."""
+        os.set_blocking(process.stdout.fileno(), False)
+        received = bytearray()
+
+        def ready():
+            self.assertIsNone(process.poll(), "actor exited before readiness")
+            try:
+                chunk = os.read(process.stdout.fileno(), len(marker) - len(received))
+            except BlockingIOError:
+                return False
+            self.assertTrue(chunk, "actor closed stdout before readiness")
+            received.extend(chunk)
+            self.assertEqual(received, marker[:len(received)])
+            return received == marker
+
+        HOST.wait_for(ready, label)
+
     def ready_child(self, *arguments, env=None):
         """Starts a child that announces itself once initialised, then waits on stdin.
 
@@ -433,14 +436,16 @@ class ProcessCensusTest(unittest.TestCase):
         """
         child = subprocess.Popen([sys.executable, "-S", "-c", "import sys; print('ready', flush=True); sys.stdin.read()",
                                   *arguments], env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
-        readable, _, _ = select.select([child.stdout], [], [], 10)
-        if not readable or child.stdout.readline() != b"ready\n":
+        try:
+            self.await_marker(child, b"ready\n", "the census child's readiness")
+        except BaseException:
             child.kill()
             child.communicate(timeout=5)
-            self.fail("the child did not announce readiness within 10 s")
+            raise
         return child
 
     def test_process_state_tells_running_from_zombie_from_reaped(self):
+        # CI-67
         child = self.ready_child()
         try:
             self.assertFalse(self.semantics.process_state(child.pid).startswith("Z"))
@@ -454,11 +459,13 @@ class ProcessCensusTest(unittest.TestCase):
         self.assertIn(str(os.getpid()), listing)
 
     def test_command_census_reads_each_process_argv(self):
+        # CI-68
         census = dict(self.semantics.process_commands())
         self.assertEqual(Path(census[os.getpid()][0]).name, Path(sys.orig_argv[0]).name)
         self.assertEqual(census[os.getpid()][1:], sys.orig_argv[1:])
 
     def test_launch_records_hold_arguments_and_environment_where_the_kernel_shows_them(self):
+        # CI-69
         child = self.ready_child("argument-marker", env={"RUI_LAUNCH_MARKER": "environment-marker"})
         try:
             records = self.semantics.launch_records(child.pid)
@@ -474,6 +481,7 @@ class ProcessCensusTest(unittest.TestCase):
             self.assertIsNone(self.semantics.launch_records(os.getpid()))
 
     def test_resource_readers_observe_a_live_process(self):
+        # CI-70
         child = self.ready_child()
         try:
             names = self.semantics.open_descriptor_names(child.pid)
@@ -495,6 +503,7 @@ class ProcessCensusTest(unittest.TestCase):
         self.assertIsNone(self.semantics.socket_table("rui-no-such-table"))
 
     def test_locks_exclude_other_open_descriptions_until_released(self):
+        # CI-71
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "host.lock"
             path.touch()
