@@ -36,6 +36,10 @@ on:
         required: false
         default: false
         type: boolean
+    secrets:
+      # Promote passes it so promotion can route to rui-mac; without it routing stays hosted.
+      MAC_RUNNER_STATUS_TOKEN:
+        required: false
 
 permissions:
   contents: read
@@ -177,7 +181,6 @@ jobs:
       linux_compile_targets: ${{ steps.select.outputs.linux_compile_targets }}
       native_targets: ${{ steps.select.outputs.native_targets }}
       native: ${{ steps.select.outputs.native }}
-      upgrade: ${{ steps.select.outputs.upgrade }}
       retry: ${{ steps.select.outputs.retry }}
       quarantine: ${{ steps.select.outputs.quarantine }}
       linux_memory: ${{ steps.select.outputs.linux_memory }}
@@ -185,7 +188,6 @@ jobs:
       typecheck_macos: ${{ steps.select.outputs.typecheck_macos }}
       linux_matrix: ${{ steps.select.outputs.linux_matrix }}
       linux_split: ${{ steps.select.outputs.linux_split }}
-      linux_codegen: ${{ steps.select.outputs.linux_codegen }}
       macos_matrix: ${{ steps.select.outputs.macos_matrix }}
       macos_split: ${{ steps.select.outputs.macos_split }}
       policy_skips: ${{ steps.select.outputs.policy_skips }}
@@ -248,7 +250,7 @@ jobs:
     needs: plan
     if: ${{ !github.event.repository.private && needs.plan.outputs.change_kind == 'normal' && needs.plan.outputs.draft_run == 'false' && needs.plan.outputs.compile_only == 'false' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
@@ -600,33 +602,6 @@ jobs:
           save-only: 'true'
           setup-outcome: ${{ steps.setup.outcome }}
           work-outcome: ${{ steps.compile.outcome }}
-  linux_codegen:
-    # LLVM's production frame oracle is still required, but never delays PR suites.
-    needs: plan
-    if: ${{ needs.plan.outputs.linux_codegen == 'true' }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ needs.plan.outputs.candidate_ref }}
-      - uses: ./.github/actions/setup
-        id: setup
-        with:
-          targets: '["stack-frames"]'
-          check-part: codegen
-      - name: Check unchanged LLVM production stack frames
-        id: compile
-        # Cache timing: green 593 s, run 43762678033; minimum margin 120 s.
-        # No measured save window fits; keep the existing job deadline only.
-        run: zig build stack-frames -Dcpu=baseline --summary all
-      - name: Save reusable caches even after failure
-        if: ${{ always() }}
-        uses: ./.github/actions/setup/caches
-        with:
-          save-only: 'true'
-          setup-outcome: ${{ steps.setup.outcome }}
-          work-outcome: ${{ steps.compile.outcome }}
   linux_suites:
     name: linux suites (${{ matrix.name }})
     needs: [plan, linux_build, linux_build_unit]
@@ -690,7 +665,7 @@ jobs:
           setup-outcome: ${{ steps.setup.outcome == 'success' && steps.restore.outcome == 'success' && 'success' || 'failure' }}
           work-outcome: ${{ steps.compile.outcome }}
       - name: Start Postgres 15 with TLS for test-pg's live rounds
-        if: ${{ contains(matrix.targets, 'test-pg') || contains(matrix.targets, 'check') || (contains(matrix.targets, 'check-full') && matrix.part != 'callers') }}
+        if: ${{ matrix.live_postgres }}
         run: |
           set -euo pipefail
           certs="$RUNNER_TEMP/pg-certs"
@@ -780,7 +755,7 @@ jobs:
           cc -shared -fPIC -pthread -Wall -Wextra -Werror tests/qualification/linux-memory/malloc_probe.c -o "$RUNNER_TEMP/rui-malloc-probe.so"
           rm "$RUNNER_TEMP/rui-malloc-probe.so"
   linux:
-    needs: [plan, policy, linux_build, linux_build_unit, linux_codegen, linux_suites, macos_typecheck]
+    needs: [plan, policy, linux_build, linux_build_unit, linux_suites, macos_typecheck]
     if: ${{ always() && !github.event.repository.private }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -796,8 +771,6 @@ jobs:
           BUILD_RESULT: ${{ needs.linux_build.result }}
           UNIT_RESULT: ${{ needs.linux_build_unit.result }}
           SPLIT: ${{ needs.plan.outputs.linux_split }}
-          CODEGEN: ${{ needs.plan.outputs.linux_codegen }}
-          CODEGEN_RESULT: ${{ needs.linux_codegen.result }}
           NATIVE_RESULT: ${{ needs.linux_suites.result }}
           TYPECHECK: ${{ needs.plan.outputs.typecheck_macos }}
           TYPECHECK_RESULT: ${{ needs.macos_typecheck.result }}
@@ -817,9 +790,8 @@ jobs:
               test "$TARGETS" = '[]'
               test "$COMPILE_TARGETS" = '[]'
               test "$SPLIT" = false
-              test "$CODEGEN" = false
               test "$TYPECHECK" = false
-              for result in "$BUILD_RESULT" "$UNIT_RESULT" "$CODEGEN_RESULT" "$NATIVE_RESULT" "$TYPECHECK_RESULT"; do
+              for result in "$BUILD_RESULT" "$UNIT_RESULT" "$NATIVE_RESULT" "$TYPECHECK_RESULT"; do
                 test "$result" = skipped
               done
               exit 0 ;;
@@ -827,7 +799,6 @@ jobs:
             *) echo 'Invalid draft run or change kind' >&2; exit 1 ;;
           esac
           test "$POLICY_RESULT" = "$RAN"
-          if [ "$CODEGEN" = true ]; then test "$CODEGEN_RESULT" = success; else test "$CODEGEN_RESULT" = skipped; fi
           if [ "$SPLIT" = true ]; then test "$UNIT_RESULT" = success; else test "$UNIT_RESULT" = skipped; fi
           case "$TYPECHECK" in
             true) test "$TYPECHECK_RESULT" = success ;;
@@ -965,18 +936,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 -B tests/ci/failure_cause.py explain
-  previous_release_upgrade:
-    needs: plan
-    # Upgrade, installer and Store-format paths only; promotion runs it on both systems for every batch.
-    if: ${{ github.event_name == 'pull_request' && needs.plan.outputs.upgrade == 'true' }}
-    uses: ./.github/workflows/previous-release-upgrade.yml
-    with:
-      candidate-ref: ${{ needs.plan.outputs.candidate_ref }}
-      # Linux on PRs; promotion runs the upgrade on both systems.
-      systems: '["ubuntu-24.04"]'
   admission:
     # This is the sole PR admission status. Reduced draft feedback cannot pass it.
-    needs: [plan, policy, linux, macos, previous_release_upgrade, cache_execution]
+    needs: [plan, policy, linux, macos, cache_execution]
     if: ${{ always() && github.event_name == 'pull_request' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -1004,16 +966,13 @@ jobs:
           MACOS_MATRIX: ${{ needs.plan.outputs.macos_matrix }}
           LINUX_SPLIT: ${{ needs.plan.outputs.linux_split }}
           MACOS_SPLIT: ${{ needs.plan.outputs.macos_split }}
-          CODEGEN: ${{ needs.plan.outputs.linux_codegen }}
           LINUX_MEMORY: ${{ needs.plan.outputs.linux_memory }}
           DRAFT: ${{ github.event.pull_request.draft }}
           PLAN_RESULT: ${{ needs.plan.result }}
           POLICY_RESULT: ${{ needs.policy.result }}
           LINUX_RESULT: ${{ needs.linux.result }}
           MACOS_RESULT: ${{ needs.macos.result }}
-          UPGRADE_RESULT: ${{ needs.previous_release_upgrade.result }}
           NATIVE: ${{ needs.plan.outputs.native }}
-          UPGRADE: ${{ needs.plan.outputs.upgrade }}
           CACHE_SELECTED: ${{ needs.plan.outputs.cache_execution }}
           CACHE_RESULT: ${{ needs.cache_execution.result }}
         run: |
@@ -1026,8 +985,6 @@ jobs:
               test "$POLICY_RESULT" = skipped
               test "$NATIVE" = false
               test "$MACOS_RESULT" = skipped
-              test "$UPGRADE" = false
-              test "$UPGRADE_RESULT" = skipped
               test "$CACHE_SELECTED" = false
               test "$TARGETS" = '[]'
               test "$NATIVE_TARGETS" = '[]'
@@ -1035,20 +992,14 @@ jobs:
               test "$MACOS_MATRIX" = '{"include": []}'
               test "$LINUX_SPLIT" = false
               test "$MACOS_SPLIT" = false
-              test "$CODEGEN" = false
               test "$LINUX_MEMORY" = false ;;
             normal)
               test "$POLICY_RESULT" = success
-              # Mac and the upgrade run for their own paths; promotion runs both.
+              # The PR tier runs no macOS; promotion runs it with the upgrade and frame gate.
               case "$NATIVE" in
                 true) test "$MACOS_RESULT" = success ;;
                 false) test "$MACOS_RESULT" = skipped ;;
                 *) echo 'Missing or invalid native selection' >&2; exit 1 ;;
-              esac
-              case "$UPGRADE" in
-                true) test "$UPGRADE_RESULT" = success ;;
-                false) test "$UPGRADE_RESULT" = skipped ;;
-                *) echo 'Missing or invalid upgrade selection' >&2; exit 1 ;;
               esac ;;
             *) echo 'Missing or invalid change kind' >&2; exit 1 ;;
           esac

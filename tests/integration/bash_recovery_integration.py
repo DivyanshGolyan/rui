@@ -33,16 +33,17 @@ def assert_continuation(endpoint, name, result, stdin="x"):
 
 
 def prove_lost_bash_permit_becomes_indeterminate(state):
+    # EXR-45
     case = start_case(
         state,
         "attempt-before-launch",
-        "action_attempt_admitted",
+        "action.attempt_committed",
         lambda marker: f"cat >> {marker}",
     )
     store, marker, endpoint, thread, keeper, original_host, original_diagnostics, session = case
     recovered_host = None
     try:
-        original_diagnostics.wait("action_attempt_admitted", action="1")
+        keeper.wait(action=1)
         crash = fixture.crash_host(original_host, state, "attempt-before-launch-crash", original_diagnostics)
         assert crash["returncode"] == -signal.SIGKILL and not marker.exists(), crash
         recovered_host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
@@ -56,13 +57,14 @@ def prove_lost_bash_permit_becomes_indeterminate(state):
 
 
 def prove_effect_without_result_becomes_indeterminate(state):
+    # EXR-46
     marker = state / "effect-before-result-effect"
-    case = start_case(state, "effect-before-result", "action_result_ready", f"cat >> {marker}")
+    case = start_case(state, "effect-before-result", "action.result_ready", f"cat >> {marker}")
     store, _, endpoint, thread, keeper, original_host, original_diagnostics, session = case
     recovered_host = None
     continuation_release = threading.Event()
     try:
-        original_diagnostics.wait("action_result_ready", action="1")
+        keeper.wait(action=1)
         assert marker.read_text() == "x"
         crash = fixture.crash_host(original_host, state, "effect-before-result-crash", original_diagnostics)
         assert crash["returncode"] == -signal.SIGKILL, crash
@@ -96,12 +98,13 @@ def prove_effect_without_result_becomes_indeterminate(state):
 
 
 def prove_committed_bash_result_survives_restart(state):
+    # EXR-47
     marker = state / "result-after-commit-effect"
-    case = start_case(state, "result-after-commit", "action_result_committed", f"cat >> {marker}")
+    case = start_case(state, "result-after-commit", "action.result_committed", f"cat >> {marker}")
     store, _, endpoint, thread, keeper, original_host, original_diagnostics, session = case
     recovered_host = None
     try:
-        original_diagnostics.wait("action_result_committed", action="1")
+        keeper.wait(action=1)
         original_result = bash.result_text(store, session)
         assert marker.read_text() == "x" and bash.resolution(store, session) == "succeeded"
         crash = fixture.crash_host(original_host, state, "result-after-commit-crash", original_diagnostics)

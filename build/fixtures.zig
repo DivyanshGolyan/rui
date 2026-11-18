@@ -5,7 +5,7 @@ pub const Fixture = struct {
     step: []const u8,
     description: []const u8,
     script: []const u8,
-    rui: enum { release_safe, debug } = .release_safe,
+    rui: enum { release_safe, debug, pause, pause_socket } = .release_safe,
     screen: bool = false,
     args: []const []const u8 = &.{},
 };
@@ -16,21 +16,22 @@ pub const fixtures = [_]Fixture{
     .{ .step = "skills-integration", .description = "Run isolated native skills capture, replay and creation cases", .script = "tests/integration/skills_integration.py", .screen = true },
     .{ .step = "login-signal-integration", .description = "Run the Linux-only one-shot login signal loader witness", .script = "tests/integration/login_signal_integration.py" },
     .{ .step = "current-facts-integration", .description = "Run the real Current producer/consumer observation oracle", .script = "tests/integration/current_facts_integration.py" },
-    .{ .step = "request-wait-integration", .description = "Run request wait completion, recovery and conditional polling witnesses", .script = "tests/integration/request_wait_integration.py" },
+    .{ .step = "pause-socket-test", .description = "Run cross-process pause socket tests", .script = "tests/integration/pause_socket_test.py", .rui = .pause_socket },
+    .{ .step = "request-wait-integration", .description = "Run request wait completion, recovery and conditional polling witnesses", .script = "tests/integration/request_wait_integration.py", .rui = .pause },
     .{ .step = "canonical-failure-integration", .description = "Run canonical invocation failure at real producer and caller boundaries", .script = "tests/integration/canonical_failure_integration.py", .screen = true },
     .{ .step = "server-delivery-integration", .description = "Run real reply inactivity, connection headroom and Host drain separately from load", .script = "tests/integration/server_delivery_integration.py" },
-    .{ .step = "bash-integration", .description = "Run authorized Bash execution, stop, failure, and recovery cases", .script = "tests/integration/bash_integration.py" },
-    .{ .step = "bash-walkthrough", .description = "Run the narrated public Bash approve-and-recover journey", .script = "tests/integration/bash_integration.py", .args = &.{"--walkthrough"} },
+    .{ .step = "bash-integration", .description = "Run authorized Bash execution, stop, failure, and recovery cases", .script = "tests/integration/bash_integration.py", .rui = .pause },
+    .{ .step = "bash-walkthrough", .description = "Run the narrated public Bash approve-and-recover journey", .script = "tests/integration/bash_integration.py", .args = &.{"--walkthrough"}, .rui = .pause },
     .{ .step = "bash-environment-integration", .description = "Run Bash in the sending terminal's environment across terminals, peers and recovery", .script = "tests/integration/bash_environment_integration.py" },
     .{ .step = "bash-owner-integration", .description = "Run focused Bash owner transition cases", .script = "tests/integration/bash_owner_integration.py" },
     .{ .step = "bash-lifecycle-integration", .description = "Run Bash lifecycle syscall-failure and custody cases", .script = "tests/integration/bash_lifecycle_integration.py" },
-    .{ .step = "bash-recovery-integration", .description = "Run fresh-Host Bash recovery cuts for admitted and committed Actions", .script = "tests/integration/bash_recovery_integration.py", .screen = true },
+    .{ .step = "bash-recovery-integration", .description = "Run fresh-Host Bash recovery cuts for admitted and committed Actions", .script = "tests/integration/bash_recovery_integration.py", .screen = true, .rui = .pause },
     .{ .step = "codex-integration", .description = "Run synthetic managed-route credentials, Bash continuation and fresh-Host caller journey", .script = "tests/integration/codex_integration.py" },
     .{ .step = "chatgpt-plan-integration", .description = "Run a synthetic ChatGPT plan sign-in: bearer only, codec 3, refresh at expiry and on a 401", .script = "tests/integration/chatgpt_plan_integration.py" },
     .{ .step = "chatgpt-login-integration", .description = "Run synthetic ChatGPT plan login by listener and paste, returning login, logout and status", .script = "tests/integration/chatgpt_login_integration.py" },
     .{ .step = "codex-h2-integration", .description = "Run synthetic managed TLS/H2 negotiation and observed sequential reuse (requires h2==4.3.0)", .script = "tests/integration/codex_h2_integration.py" },
-    .{ .step = "control-integration", .description = "Run Session-stop, exact-interruption, and protected-capacity cases", .script = "tests/integration/control_integration.py" },
-    .{ .step = "descriptor-capacity-integration", .description = "Run reduced-limit startup rejection and adequate-limit fill/drain cases", .script = "tests/integration/descriptor_capacity_integration.py" },
+    .{ .step = "control-integration", .description = "Run Session-stop, exact-interruption, and protected-capacity cases", .script = "tests/integration/control_integration.py", .rui = .pause },
+    .{ .step = "descriptor-capacity-integration", .description = "Run reduced-limit startup rejection and adequate-limit fill/drain cases", .script = "tests/integration/descriptor_capacity_integration.py", .rui = .pause },
     .{ .step = "host-launch-integration", .description = "Run detached Host launch, alias convergence and startup-failure cases", .script = "tests/integration/host_launch_integration.py", .screen = true },
     .{ .step = "installer-integration", .description = "Run source and release installer cases through the production publication owner", .script = "tests/integration/installer_integration.py" },
     .{ .step = "dispatch-debug-integration", .description = "Run bounded model failure correlation through SQLite on the Debug artifact", .script = "tests/integration/dispatch_integration.py", .rui = .debug, .args = &.{"failure-correlation"} },
@@ -41,13 +42,15 @@ pub const fixtures = [_]Fixture{
     .{ .step = "host-allocator-integration", .description = "Observe the Host allocator environment before main", .script = "tests/integration/host_allocator_test.py" },
 };
 
-pub fn add(b: *std.Build, screen: std.Build.LazyPath, release_safe: std.Build.LazyPath, debug: std.Build.LazyPath) void {
+pub fn add(b: *std.Build, screen: std.Build.LazyPath, release_safe: std.Build.LazyPath, debug: std.Build.LazyPath, pause: std.Build.LazyPath, pause_socket: std.Build.LazyPath) void {
     for (fixtures) |fixture| {
         const run = if (fixture.screen) screen_module.screenCommand(b, screen, &.{"python3"}) else b.addSystemCommand(&.{"python3"});
         run.addFileArg(b.path(fixture.script));
         run.addFileArg(switch (fixture.rui) {
             .release_safe => release_safe,
             .debug => debug,
+            .pause => pause,
+            .pause_socket => pause_socket,
         });
         run.addArgs(fixture.args);
         b.step(fixture.step, fixture.description).dependOn(&run.step);
