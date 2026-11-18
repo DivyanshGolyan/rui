@@ -11,40 +11,13 @@ const max_file_bytes = 1024;
 pub const Values = @import("preference_values.zig").Values;
 pub const directoryPath = @import("preference_values.zig").directoryPath;
 const validateDirectoryPath = @import("preference_values.zig").validateDirectoryPath;
-const validAbsoluteText = @import("preference_values.zig").validAbsoluteText;
 pub const defaultStore = @import("preference_values.zig").defaultStore;
 
-pub const Change = union(enum) { keep, set: []const u8 };
-
-pub const Edit = struct {
-    store: Change = .keep,
-    provider: Change = .keep,
-    model: union(enum) { keep, set: []const u8, clear } = .keep,
-    notifications: ?bool = null,
-    reasoning_effort: union(enum) { keep, set: model_capability.ReasoningEffort, clear } = .keep,
-    permission_mode: union(enum) { keep, set: PermissionMode, clear } = .keep,
-};
-
-pub fn validate(values: *const Values) !void {
-    if (values.store.len != 0 and !validAbsoluteText(values.store.slice())) return error.InvalidPreferenceStore;
-    for (values.provider.slice()) |byte| {
-        if (!std.ascii.isAlphanumeric(byte) and byte != '-' and byte != '_') return error.InvalidPreferenceProvider;
-    }
-    if (values.model.len != 0 and !model_capability.validModelSyntax(values.model.slice())) return error.InvalidPreferenceModel;
-    if (values.model.len != 0 and values.provider.len == 0) return error.PreferenceProviderRequired;
-}
-
-fn validateSaved(values: *const Values) !void {
-    validate(values) catch |err| return switch (err) {
-        error.InvalidPreferenceStore => error.SavedPreferenceStoreInvalid,
-        error.InvalidPreferenceProvider => error.SavedPreferenceProviderInvalid,
-        error.InvalidPreferenceModel => error.SavedPreferenceModelInvalid,
-        error.PreferenceProviderRequired => error.SavedPreferenceProviderRequired,
-    };
-}
-
-const effort_key = "reasoning_effort=";
-const permission_key = "permission_mode=";
+const document = @import("preference_document.zig");
+pub const Change = document.Change;
+pub const Edit = document.Edit;
+pub const validate = document.validate;
+const validateSaved = document.validateSaved;
 const PermissionMode = @import("cli_value.zig").PermissionMode;
 
 fn read(dir: std.Io.Dir) !Values {
@@ -59,37 +32,7 @@ fn read(dir: std.Io.Dir) !Values {
     var bytes: [max_file_bytes + 1]u8 = undefined;
     const count = try file.readPositionalAll(io, bytes[0..@intCast(stat.size + 1)], 0);
     if (count != stat.size) return error.InvalidPreferences;
-    var lines = std.mem.splitScalar(u8, bytes[0..count], '\n');
-    const version = lines.next() orelse "";
-    const known = [_][]const u8{ "version=1", "version=2", "version=3", "version=4" };
-    const number = for (known, 1..) |name, at| {
-        if (std.mem.eql(u8, version, name)) break at;
-    } else return error.UnsupportedPreferencesVersion;
-    var result: Values = .{};
-    const fields = .{ .{ "store=", &result.store }, .{ "provider=", &result.provider }, .{ "model=", &result.model } };
-    inline for (fields) |field| {
-        const line = lines.next() orelse return error.InvalidPreferences;
-        if (!std.mem.startsWith(u8, line, field[0])) return error.InvalidPreferences;
-        field[1].set(line[field[0].len..]) catch return error.InvalidPreferences;
-    }
-    if (number >= 2) {
-        const line = lines.next() orelse return error.InvalidPreferences;
-        result.notifications = if (std.mem.eql(u8, line, "notifications=on")) true else if (std.mem.eql(u8, line, "notifications=off")) false else return error.InvalidPreferences;
-    }
-    if (number >= 3) {
-        const line = lines.next() orelse return error.InvalidPreferences;
-        if (!std.mem.startsWith(u8, line, effort_key)) return error.InvalidPreferences;
-        const text = line[effort_key.len..];
-        if (number < 4 or text.len != 0) result.reasoning_effort = std.meta.stringToEnum(model_capability.ReasoningEffort, text) orelse return error.InvalidPreferences;
-    }
-    if (number >= 4) {
-        const line = lines.next() orelse return error.InvalidPreferences;
-        if (!std.mem.startsWith(u8, line, permission_key)) return error.InvalidPreferences;
-        result.permission_mode = std.meta.stringToEnum(PermissionMode, line[permission_key.len..]) orelse return error.InvalidPreferences;
-    }
-    if (!std.mem.eql(u8, lines.next() orelse return error.InvalidPreferences, "") or lines.next() != null)
-        return error.InvalidPreferences;
-    return result;
+    return document.decode(bytes[0..count]);
 }
 
 pub fn load(home: []const u8) !Values {
@@ -107,27 +50,8 @@ pub fn load(home: []const u8) !Values {
 
 pub const Readinesses = provider_selection.Readinesses;
 
-pub const Failure = struct {
-    saved: bool = false,
-    reason: ?[]const u8 = null,
-};
-
-pub fn failure(err: anyerror) Failure {
-    return switch (err) {
-        error.PreferenceDirectorySyncFailed => .{ .saved = true, .reason = "durability unconfirmed; inspect HOME/.config/rui/preferences before another update" },
-        error.UnsupportedPreferenceProvider => .{ .reason = "the provider must be " ++ provider_names },
-        error.PreferenceProviderRequired => .{ .reason = "a model needs a provider: " ++ provider_names },
-        error.UnsupportedPreferenceModel, error.InvalidPreferenceModel => .{ .reason = "a model ID is 1–256 printable non-space ASCII bytes" },
-        error.InvalidPreferenceStore, error.FileNotFound => .{ .reason = "the Store must be an existing private, canonicalizable absolute directory" },
-        else => .{},
-    };
-}
-
-const provider_names = blk: {
-    var text: []const u8 = "";
-    for (std.meta.fieldNames(protocol.Provider), 0..) |name, at| text = text ++ (if (at == 0) "" else " or ") ++ name;
-    break :blk text;
-};
+pub const Failure = document.Failure;
+pub const failure = document.failure;
 
 test "a failed save says whether the file holds it, and why, without an error name" {
     try std.testing.expect(failure(error.PreferenceDirectorySyncFailed).saved);
@@ -164,10 +88,7 @@ fn loginMayReplace(saved: []const u8, provider: protocol.Provider) bool {
     return saved.len == 0 or otherWayIn(saved, provider);
 }
 
-fn otherWayIn(saved: []const u8, provider: protocol.Provider) bool {
-    const other = provider.sameAccount() orelse return false;
-    return std.mem.eql(u8, saved, @tagName(other));
-}
+const otherWayIn = document.otherWayIn;
 
 pub fn saveProviderAfterLogin(home: []const u8, provider: protocol.Provider) !void {
     const readiness: Readinesses = .initFill(.configured);
@@ -185,41 +106,9 @@ noinline fn resolveStore(value: []const u8) !@import("host_settings.zig").OsByte
 }
 
 fn apply(saved: Values, edit: Edit, readiness: *const Readinesses) !Values {
-    var values = saved;
-    if (edit.store == .set) {
-        const selector = try resolveStore(edit.store.set);
-        values.store.set(selector.slice()) catch return error.InvalidPreferenceStore;
-    }
-    if (edit.provider == .set) {
-        const chosen = std.meta.stringToEnum(protocol.Provider, edit.provider.set).?;
-        if (!saved.provider.eql(edit.provider.set) and !otherWayIn(saved.provider.slice(), chosen)) values.model = .{};
-        values.provider.set(edit.provider.set) catch unreachable;
-    }
-    if (edit.notifications) |on| values.notifications = on;
-    switch (edit.reasoning_effort) {
-        .keep => {},
-        .set => |effort| values.reasoning_effort = effort,
-        .clear => values.reasoning_effort = null,
-    }
-    switch (edit.permission_mode) {
-        .keep => {},
-        .set => |mode| values.permission_mode = mode,
-        .clear => values.permission_mode = null,
-    }
-    switch (edit.model) {
-        .keep => {},
-        .clear => values.model = .{},
-        .set => |model| {
-            const choice = provider_selection.resolve(&model_capability.capabilities(readiness), null, model, if (values.provider.len != 0) values.provider.slice() else null, null) catch |err| switch (err) {
-                error.UnsupportedSelectionProvider => return error.UnsupportedPreferenceProvider,
-                error.UnsupportedSelectionModel => return error.UnsupportedPreferenceModel,
-            };
-            if (choice == .chooser) return error.PreferenceProviderRequired;
-            values.provider.set(choice.selected.provider) catch unreachable;
-            values.model.set(model) catch unreachable;
-        },
-    }
-    return values;
+    var selector: @import("host_settings.zig").OsBytes(protocol.max_store_bytes) = .{};
+    if (edit.store == .set) selector = try resolveStore(edit.store.set);
+    return document.apply(saved, edit, if (edit.store == .set) selector.slice() else null, readiness);
 }
 
 const Saved = struct { values: Values, login: ?LoginDefault };
@@ -236,18 +125,8 @@ const NativeDirectorySync = struct {
 
 fn saveWithSync(home: []const u8, edit: Edit, readiness: *const Readinesses, login: ?protocol.Provider, directory_sync: anytype) !Saved {
     try validateDirectoryPath(home);
-    if (edit.provider == .set) {
-        if (std.meta.stringToEnum(protocol.Provider, edit.provider.set) == null) return error.UnsupportedPreferenceProvider;
-    }
-    if (edit.model == .set) {
-        if (!model_capability.validModelSyntax(edit.model.set)) return error.InvalidPreferenceModel;
-    }
-    if (edit.store == .set) {
-        const value = edit.store.set;
-        if (!std.fs.path.isAbsolute(value)) return error.InvalidPreferenceStore;
-        for (value) |byte| if (byte < 0x20 or byte == 0x7f) return error.InvalidPreferenceStore;
-        _ = try resolveStore(value);
-    }
+    try document.validateEdit(edit);
+    if (edit.store == .set) _ = try resolveStore(edit.store.set);
     var dir = blk: {
         var home_dir = try std.Io.Dir.openDirAbsolute(io, home, .{ .iterate = true });
         defer home_dir.close(io);
@@ -314,15 +193,7 @@ fn saveWithSync(home: []const u8, edit: Edit, readiness: *const Readinesses, log
             defer file.close(io);
             if (std.c.fchmod(file.handle, 0o600) != 0) return error.PreferencePermissionsFailed;
             var bytes: [max_file_bytes]u8 = undefined;
-            const fields = .{ values.store.slice(), values.provider.slice(), values.model.slice() };
-            const encoded = (if (values.permission_mode) |mode|
-                std.fmt.bufPrint(&bytes, "version=4\nstore={s}\nprovider={s}\nmodel={s}\nnotifications={s}\n" ++ effort_key ++ "{s}\n" ++ permission_key ++ "{s}\n", fields ++ .{ if (values.notifications) "on" else "off", if (values.reasoning_effort) |effort| @tagName(effort) else "", @tagName(mode) })
-            else if (values.reasoning_effort) |effort|
-                std.fmt.bufPrint(&bytes, "version=3\nstore={s}\nprovider={s}\nmodel={s}\nnotifications={s}\n" ++ effort_key ++ "{s}\n", fields ++ .{ if (values.notifications) "on" else "off", @tagName(effort) })
-            else if (values.notifications)
-                std.fmt.bufPrint(&bytes, "version=1\nstore={s}\nprovider={s}\nmodel={s}\n", fields)
-            else
-                std.fmt.bufPrint(&bytes, "version=2\nstore={s}\nprovider={s}\nmodel={s}\nnotifications=off\n", fields)) catch return error.InvalidPreferences;
+            const encoded = try document.encode(&values, &bytes);
             try file.writeStreamingAll(io, encoded);
             try file.sync(io);
         }
@@ -947,5 +818,27 @@ test "saved invalid preference fields are environment failures and never get ove
         }
         var saved: [512]u8 = undefined;
         try std.testing.expectEqualStrings(invalid, try savedFile(config, &saved));
+    }
+}
+
+test "updates publish the expected preference versions to disk" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const home = home_buffer[0..try tmp.dir.realPath(io, &home_buffer)];
+    const readiness: Readinesses = .initFill(.configured);
+    const cases = .{
+        .{ Edit{ .provider = .{ .set = "codex" }, .model = .{ .set = "gpt-6-luna" } }, "version=1\nstore=\nprovider=codex\nmodel=gpt-6-luna\n" },
+        .{ Edit{ .notifications = false }, "version=2\nstore=\nprovider=codex\nmodel=gpt-6-luna\nnotifications=off\n" },
+        .{ Edit{ .reasoning_effort = .{ .set = .high } }, "version=3\nstore=\nprovider=codex\nmodel=gpt-6-luna\nnotifications=off\nreasoning_effort=high\n" },
+        .{ Edit{ .permission_mode = .{ .set = .ask } }, "version=4\nstore=\nprovider=codex\nmodel=gpt-6-luna\nnotifications=off\nreasoning_effort=high\npermission_mode=ask\n" },
+    };
+    inline for (cases) |case| {
+        const written = try update(home, case[0], &readiness);
+        var config = try tmp.dir.openDir(io, ".config/rui", .{});
+        defer config.close(io);
+        var bytes: [1024]u8 = undefined;
+        try std.testing.expectEqualStrings(case[1], try savedFile(config, &bytes));
+        try std.testing.expectEqualDeep(written, try load(home));
     }
 }

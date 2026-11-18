@@ -6,6 +6,8 @@
 
 | id | level | invariant | seam that observes it | owner test | source |
 | --- | --- | --- | --- | --- | --- |
+| CLI-22 | Module | A saved-defaults file decodes to values only when it is one of the four known versions with exactly that version's lines in order; encoding writes the lowest version that holds the values, and every valid value survives encode then decode. | `preference_document.decode`, `encode`, `version` | `CLI-22 a defaults file is the lowest version that holds its values` | docs/contracts/cli.md |
+| CLI-23 | Module | An edit changes only the fields it names; a new provider clears the saved model unless it is another way in to the same one; a model is saved only with a provider that supports it; a refused edit yields no values. | `preference_document.apply` | `CLI-23 an edit changes only what it names` | docs/contracts/cli.md |
 | CLI-19 | Product | Request inspect and wait report the admitted multipart input identity unchanged. | CLI admission and request observation | `cli_image_integration.py:cli_observation` | docs/contracts/inspection.md |
 | CLI-21 | Product | Native Message input refuses ambiguous or empty compositions and preserves scalar stdin bytes and implicit stdin order. | CLI and fake provider | `cli_image_integration.py:cli_rules` | docs/contracts/cli.md |
 | CLI-20 | Surface | Message operand flags retain their order and unknown or incomplete flags are refused. | CLI grammar parser | `CLI-20 preserve interleaving for start and send` | docs/contracts/cli.md |
@@ -48,7 +50,7 @@
 | CLI-17 | Module | Activity replies retain the Host-served attention, group and actions, including distinct interruption eligibility for identical bindings, and reject omitted facts. | public activity page decoder | `CLI-17 activity_served_work`: table interruption targets and omitted served members. | src/protocol_reply.zig |
 | CLI-15 | Surface | An explicit retained-content read emits the selected saved bytes exactly or fails without a payload. | CLI saved-content reader | `saved_content_selection`: table binary and empty values, missing and invalid identities; compare exact stdout or diagnostic and empty stdout. | docs/contracts/diagnostics.md:102 |
 
-| CLI-17 | Surface | A Host settings refusal writes its typed JSON and an escaped sentence naming the attempted operation even if either stream fails. | Host refusal writer with injected output sinks | `CLI-17 Host refusal presentation`: table every code, attempt, escaped message and output failure; compare both streams. | src/host_start.zig:report; docs/contracts/host.md |
+| CLI-26 | Surface | A Host settings refusal writes its typed JSON and an escaped sentence naming the attempted operation even if either stream fails. | Host refusal writer with injected output sinks | `CLI-26 Host refusal presentation`: table every code, attempt, escaped message and output failure; compare both streams. | src/host_start.zig:report; docs/contracts/host.md |
 | CLI-18 | Product | A detached Host refusal preserves the child's typed receipt and reports the child sentence once while refused saved edits leave the file unchanged. | CLI and owned Host process | `host_refusal_receipts`: compare executed child and parent receipts and unchanged saved bytes for refused edits. | src/cli.zig:reportHostLaunch; docs/contracts/host.md |
 
 Owned elsewhere: ADM-16 (captured-request recovery), ADM-20 (keyed-observation validation), SH-42 (protected control availability under saturation).
@@ -61,6 +63,8 @@ Owned elsewhere: ADM-16 (captured-request recovery), ADM-20 (keyed-observation v
 - Injected child, readiness and socket transport for `clients/ts/src/client.ts` and `clients/ts/src/transport.ts`.
 
 ## Legacy tests these replace
+
+- Saved-defaults encoding and edit cases in `tests/integration/human_cli_integration.py:preference_edits`: CLI-22 and CLI-23; conflicting CLI option refusals and the on-disk configure witness remain.
 
 - CLI grammar/help/refusal blocks in `src/cli_args.zig:306` and `src/caller_exit.zig`: CLI-1–CLI-4, CLI-7, CLI-13. Preserve unrelated feature ownership until migrated.
 - Session list cases in `src/protocol_reply.zig:2750`, `tests/integration/session_list_integration.py` and `tests/integration/session_list_facts_integration.py`: CLI-11–CLI-12.
