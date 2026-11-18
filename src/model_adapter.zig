@@ -6581,3 +6581,67 @@ test "old text request retries unchanged across later image message and final ac
         try std.testing.expect(std.mem.indexOf(u8, after.bytes, "late result") == null);
     }
 }
+
+test "Astra image patch limit is enforced for Message and Action inputs on the OpenAI route" {
+    const fixtures = [_]struct { bytes: []const u8, impossible: bool }{
+        .{ .bytes = @embedFile("testing/fixtures/astra-4800x6400.png"), .impossible = false },
+        .{ .bytes = @embedFile("testing/fixtures/astra-4801x6400.png"), .impossible = true },
+    };
+    const routes = [_]struct { provider: []const u8, model: []const u8, guarded: bool }{
+        .{ .provider = "openai", .model = "gpt-6-astra", .guarded = true },
+        .{ .provider = "codex", .model = "gpt-6-astra", .guarded = false },
+        .{ .provider = "openai", .model = "gpt-4.1", .guarded = false },
+    };
+    for (routes) |route| for (fixtures) |fixture| for ([_]bool{ false, true }) |action_input| {
+        var stage: []const u8 = "setup";
+        errdefer std.debug.print("Astra guard fixture failed at {s}: provider={s}, model={s}, impossible={}, action={}\n", .{ stage, route.provider, route.model, fixture.impossible, action_input });
+        var setup: PreparationTestSetup = undefined;
+        try setup.init();
+        defer setup.close();
+        var create: wire_request.ConfigureCommand = .{};
+        try create.key.set("astra-boundary-config");
+        create.configuration.workspace.state = .value;
+        try create.configuration.workspace.value.set(setup.workspace);
+        create.configuration.provider.state = .value;
+        try create.configuration.provider.value.set(route.provider);
+        create.configuration.model.state = .value;
+        try create.configuration.model.value.set(route.model);
+        create.configuration.tools = try .of(&.{ "bash", "web_search" });
+        create.configuration.permission_mode.state = .value;
+        try create.configuration.permission_mode.value.set("bypass");
+        create.configuration.compaction_trigger.state = .value;
+        try create.configuration.compaction_trigger.value.set("115200");
+        if (std.mem.eql(u8, route.model, "gpt-6-astra")) {
+            create.configuration.reasoning_effort.state = .value;
+            try create.configuration.reasoning_effort.value.set("low");
+        } else create.configuration.reasoning_effort.state = .explicit_null;
+        stage = "configure";
+        const configured = try setup.storage.configure(&create, .{});
+        try std.testing.expect(configured == .accepted);
+        const session = configured.accepted.session;
+        const image = OrderedTestPart{ .bytes = fixture.bytes, .kind = .{ .image = .{} } };
+        const text = OrderedTestPart{ .bytes = "inspect image" };
+        stage = "submit";
+        try submitOrderedForTesting(&setup, session.slice(), "astra-boundary-message", if (action_input) &.{text} else &.{image}, null, null);
+        stage = "initial admission";
+        var binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+        if (action_input) {
+            stage = "action setup";
+            try proposeOrderedActionsForTesting(&setup, binding, &.{.{ .item_id = "astra-item", .call_id = "astra-call" }});
+            const result_binding = (try setup.storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
+            try settleOrderedForTesting(&setup, result_binding, &.{image});
+            binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+        }
+        stage = "prepare";
+        if (route.guarded and fixture.impossible) {
+            try std.testing.expectError(error.OrderedInputLimit, prepareMemoWithAllowanceForTesting(&setup, binding, null, .{}, 16384));
+            try std.testing.expectEqualStrings("local_ordered_input_limit", preparationFailureCode(error.OrderedInputLimit));
+        } else {
+            const prepared = try prepareMemoWithAllowanceForTesting(&setup, binding, null, .{}, 16384);
+            defer std.testing.allocator.free(prepared.bytes);
+            try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, prepared.bytes, "\"type\":\"input_image\""));
+            try std.testing.expect(std.mem.indexOf(u8, prepared.bytes, "data:image/png;base64,") != null);
+        }
+        try std.testing.expect(!setup.storage.isFenced());
+    };
+}
