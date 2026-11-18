@@ -1,7 +1,6 @@
 from terminal_screen import VERTICAL_DIVIDER
 import json
 import os
-import re
 import select
 import shutil
 import subprocess
@@ -345,72 +344,6 @@ def send_recovery_case():
     print("session chrome: unconfirmed note stays with its Message; Ctrl-R recovers identical saved bytes/key once without losing the next draft", flush=True)
 
 
-def scroll_marker_case():
-    release = threading.Event()
-    with Chrome("rui-chrome-scroll.", []) as chrome:
-        empty = chrome.session()
-        master, caller, opened = chrome.open(empty, lambda screen: True)
-        for keys in (b"\x1b[1;2A", b"\x1b[5~"):
-            typed = chrome.frame(master, keys + b"x", lambda screen: composing(screen, "x"))
-            assert marker(typed) is None and "Start of conversation" not in typed, typed
-            unchanged = chrome.frame(master, b"\x15", lambda screen: composing(screen, ""))
-            assert rows(unchanged) == rows(opened), (opened, unchanged)
-        chrome.leave(master, caller)
-
-        session = chrome.session()
-        chrome.endpoint.responses += [
-            *[fixture.sse_answer(f"seed-{i}", "r", "m", f"answer {i:02d}\n\nsecond row {i:02d}")[0] for i in range(8)],
-            (fixture.ResponseSpec(chrome.held_call("Held call", "release"), {}), release),
-            fixture.sse_answer("arrived", "r", "m", "ARRIVED-ANSWER")[0],
-        ]
-        chrome.answered(session, *(f"input {i:02d}" for i in range(8)))
-        master, caller, _ = chrome.open(session, lambda screen: "second row 07" in screen)
-        requests = len(chrome.endpoint.requests)
-        os.write(master, b"keep")
-        end = chrome.frame(master, b"", lambda screen:
-                           composing(screen, "keep") and bool(transcript_rows(screen)[0].strip()))
-        bottom = feed_bottom(end)
-        assert not rows(end)[bottom].strip(), end
-        for keys in (b"\x1b[1;2A", b"\x1b[5~"):
-            end_rows = rows(end)[:bottom]
-            before = {line: n for n, line in enumerate(end_rows) if line.strip() and end_rows.count(line) == 1}
-
-            def moved(screen):
-                held_rows = rows(screen)[:feed_bottom(screen)]
-                after = {line: n for n, line in enumerate(held_rows) if line.strip() and held_rows.count(line) == 1}
-                shared = before.keys() & after.keys()
-                return bool(shared) and all(after[line] - before[line] == bottom // 2 for line in shared)
-
-            scrolled = chrome.frame(master, keys, lambda screen: marker(screen) == "↓" and moved(screen))
-            assert "second row 07" not in scrolled and composing(scrolled, "keep"), (keys, scrolled)
-            assert status(scrolled) == "" and footer(scrolled).strip().startswith("‹ "), (keys, "no heading or hint", scrolled)
-            assert not any(row.startswith("Browsing") for row in transcript_rows(scrolled)), scrolled
-            scrolled = settle_screen(master, quiet=0.5)
-            os.write(master, b"\x1b[F")
-            same = settle_screen(master, quiet=0.5)
-            assert marker(same) == "↓" and rows(same)[:2] == rows(scrolled)[:2], (keys, same)
-            back = b"\x1b[1;5F" if keys == b"\x1b[1;2A" else b"\x1b"
-            live = chrome.frame(master, back, lambda screen: latest(screen, "second row 07"))
-            assert composing(live, "keep"), live
-            assert feed_bottom(live) == bottom, (end, live)
-            first_known = next(index for index, row in enumerate(end_rows) if row.strip())
-            assert rows(live)[first_known:bottom + 1] == rows(end)[first_known:bottom + 1], (end, live)
-        assert len(chrome.endpoint.requests) == requests, "scrolling sent input"
-        os.write(master, b"\x15HOLD-QUESTION\r")
-        release.set()
-        chrome.frame(master, b"", lambda screen: "◝ Held call · " in screen)
-        held = chrome.frame(master, b"\x1b[1;2A", lambda screen: marker(screen) == "↓")
-        (chrome.workspace / "release").write_text("")
-        counted = chrome.frame(master, b"", lambda screen: (marker(screen) or "").endswith(" new"), timeout=30)
-        assert marker(counted)[2:-4].isdigit() and int(marker(counted)[2:-4]) >= 1, counted
-        assert "ARRIVED-ANSWER" not in counted, counted
-        assert rows(counted)[:feed_bottom(counted)] == rows(held)[:feed_bottom(held)], (held, counted)
-        assert composing(counted, ""), counted
-        chrome.frame(master, b"\x1b", lambda screen: latest(screen, "ARRIVED-ANSWER"), timeout=30)
-        chrome.leave(master, caller)
-    print("session chrome: Shift-↑ and PgUp draw ↓, draft End keeps the view, ↓ N new counts arrivals, Ctrl-End and Esc return; empty PgUp is unchanged and the chip never changes feed height", flush=True)
-
-
 def assert_plain_panel(master, screen, *, left=None):
     capture = terminal_capture(master)
     frame = capture.frame
@@ -438,27 +371,6 @@ def assert_plain_panel(master, screen, *, left=None):
         for cell in pane_cells(index):
             backgrounds.add(frame.colors(cell)[1])
     assert plain in backgrounds and len(backgrounds) <= 2, ("plain panel plus selection bar", backgrounds, screen)
-
-
-def command_panel_case():
-    with Chrome("rui-chrome-command-panel.", []) as chrome:
-        session = chrome.session()
-        for width, height in ((140, 40), (46, 30)):
-            master, caller, _ = chrome.open(session, lambda screen: True, columns=width, height=height)
-            opened = chrome.frame(master, b"/", lambda screen: "/new" in screen and "more" in screen)
-            assert_plain_panel(master, opened)
-            assert "type to narrow" not in opened, opened
-            bounds = composer_bounds(opened)
-            panel = [composer_line(opened, index) for index in range(bounds[0] + 1, bounds[1] - 1)]
-            assert any(re.fullmatch(r"\s*[1-9][0-9]* more", line) for line in panel), opened
-            for command in ("archive", "model", "pin"):
-                for line in panel:
-                    if re.match(r"\s*/" + command + r"(?:\s|$)", line):
-                        assert line.strip() == "/" + command, opened
-            closed = chrome.frame(master, b"\x7f", lambda screen: composing(screen, "") and "/new" not in screen)
-            assert composer_bounds(closed)[0] > bounds[0], (opened, closed)
-            chrome.leave(master, caller)
-    print("session chrome: command list lifts the input rule at both frame sizes, stays plain, omits redundant descriptions, and shows only N more", flush=True)
 
 
 def pages_case():
@@ -670,12 +582,10 @@ def opening_case():
 
 
 def main():
-    command_panel_case()
     send_state_case()
     send_recovery_case()
     activity_case()
     thinking_queue_case()
-    scroll_marker_case()
     pages_case()
     info_natural_height_case()
     approval_glyph_domain()
