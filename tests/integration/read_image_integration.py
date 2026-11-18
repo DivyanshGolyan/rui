@@ -197,8 +197,8 @@ def prove_case(root, name):
             lambda remaining: fixture.command("session", "inspect", "--store", store, "--session", session,
                                               timeout=remaining)["execution"], deadline)
         if expected == "succeeded":
-            # Byte-only readers refuse parts. The provider proves typed delivery;
-            # inspect the committed Resolution after releasing the Store lease.
+            # The provider proves typed delivery; inspect the committed
+            # Resolution after releasing the Store lease.
             fixture.stop_host(processes.pop())
             saved = rows(store, "SELECT resolution_code,acceptance_position FROM action_operation WHERE session_ref=? AND action_id=?", (session, int(action)))
             assert len(saved) == 1 and saved[0][0] == expected and saved[0][1] > 0, saved

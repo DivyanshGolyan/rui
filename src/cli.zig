@@ -284,6 +284,8 @@ noinline fn clientCommand(init: std.process.Init, command: cli_args.Command, par
         .session_unpin => try pinSession(init, parsed, false),
         .session_interrupt_model => try interruptModel(init, parsed),
         .session_read_conversation => try readConversation(init, parsed),
+        .session_inspect_part => try readPublicPart(init, parsed, false, false),
+        .session_read_image_part => try readPublicPart(init, parsed, false, true),
         .session_resume => try resumeSession(init, parsed),
         .request_inspect => try observe(init, parsed),
         .request_wait => try waitRequest(init, parsed),
@@ -298,6 +300,8 @@ noinline fn clientCommand(init: std.process.Init, command: cli_args.Command, par
         .action_deny => try decideAction(init, parsed, .deny),
         .action_read_call_id => try readActionContent(init, parsed, .call_id),
         .action_read_arguments => try readActionContent(init, parsed, .arguments),
+        .action_inspect_part => try readPublicPart(init, parsed, true, false),
+        .action_read_image_part => try readPublicPart(init, parsed, true, true),
         .store_schema => {
             if (!std.mem.eql(u8, parsed.get("engine").?, "mysql")) return error.InvalidArguments;
             const store_schema = @import("store.zig");
@@ -1924,7 +1928,7 @@ test "relaunch replacement failure retains departure and deletes the handoff wit
     var bytes: [4096]u8 = undefined;
     const text = bytes[0..try output.readPositionalAll(io, &bytes, 0)];
     try std.testing.expect(std.mem.startsWith(u8, text, request.receipt));
-    try std.testing.expect(std.mem.indexOf(u8, text, "Detached. Host work continues.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Your chats keep working while you are away.") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "k7m2qx") != null);
     try std.testing.expect(std.mem.endsWith(u8, text, "rui: The new Rui could not be started.\n"));
 }
@@ -3412,6 +3416,37 @@ fn inspect(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
         },
         .command => |command_reply| {
             try writeCommandReply(io, command_reply, .stdout);
+            return error.HostInvocationFailed;
+        },
+    }
+}
+
+fn readPublicPart(init: std.process.Init, parsed: *const cli_args.Parsed, action: bool, bytes: bool) !void {
+    const session = parsed.get("session").?;
+    const id = if (action) (try parsed.number(u64, "action")).? else (try parsed.number(u64, "admission")).?;
+    const target: protocol.PublicPartTarget = if (action) .{ .action = id } else .{ .message = id };
+    const ordinal = (try parsed.number(u64, "ordinal")).?;
+    var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const store = try selectedStore(init, parsed.get("store"), &selected_buffer);
+    const caller: client.Requests = .{ .io = init.io };
+    if (bytes) {
+        if (caller.readPublicPartBytes(store, session, target, ordinal, std.Io.File.stdout()) catch |err| return readTransportFailure(init.io, store, err)) |failure| {
+            try writeReadFailure(init.io, failure, session, .stderr);
+            return readFailureError(failure);
+        }
+        return;
+    }
+    var reply_buffer: client.ReplyBuffer = .{};
+    var output: JsonOutput = undefined;
+    var sink: JsonOutput.Sink = .{ .writer = output.init(init.io, .stdout) };
+    const reply = caller.readPublicPart(store, session, target, ordinal, &sink, &reply_buffer) catch |err| return readTransportFailure(init.io, store, err);
+    switch (reply) {
+        .report => {
+            try sink.writer.writeByte('\n');
+            try output.finish();
+        },
+        .command => |command| {
+            try writeCommandReply(init.io, command, .stderr);
             return error.HostInvocationFailed;
         },
     }

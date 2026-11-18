@@ -30,7 +30,7 @@ pub const fixtures = [_]Fixture{
     .{ .step = "chatgpt-plan-integration", .description = "Run a synthetic ChatGPT plan sign-in: bearer only, codec 3, refresh at expiry and on a 401", .script = "tests/integration/chatgpt_plan_integration.py" },
     .{ .step = "chatgpt-login-integration", .description = "Run synthetic ChatGPT plan login by listener and paste, returning login, logout and status", .script = "tests/integration/chatgpt_login_integration.py" },
     .{ .step = "codex-h2-integration", .description = "Run synthetic managed TLS/H2 negotiation and observed sequential reuse (requires h2==4.3.0)", .script = "tests/integration/codex_h2_integration.py" },
-    .{ .step = "control-integration", .description = "Run Session-stop, exact-interruption, and protected-capacity cases", .script = "tests/integration/control_integration.py" },
+    .{ .step = "control-integration", .description = "Run Session-stop, exact-interruption, and protected-capacity cases", .script = "tests/integration/control_integration.py", .rui = .pause },
     .{ .step = "descriptor-capacity-integration", .description = "Run reduced-limit startup rejection and adequate-limit fill/drain cases", .script = "tests/integration/descriptor_capacity_integration.py", .rui = .pause },
     .{ .step = "host-launch-integration", .description = "Run detached Host launch, alias convergence and startup-failure cases", .script = "tests/integration/host_launch_integration.py", .screen = true },
     .{ .step = "installer-integration", .description = "Run source and release installer cases through the production publication owner", .script = "tests/integration/installer_integration.py" },
