@@ -2299,8 +2299,8 @@ test "APV-10 public pages omit Action values while preserving other inputs" {
                             .admission, .received, .user => |value| value,
                             else => unreachable,
                         };
-                        try std.testing.expect(!std.mem.eql(u8, &message.content.digest, &protocol.contentDigest("hidden value")));
-                        if (std.mem.eql(u8, &message.content.digest, &protocol.contentDigest("visible person"))) person_count += 1;
+                        try std.testing.expect(!std.mem.eql(u8, &message.content.identity().digest, &protocol.contentDigest("hidden value")));
+                        if (std.mem.eql(u8, &message.content.identity().digest, &protocol.contentDigest("visible person"))) person_count += 1;
                         if (message.sender != null) peer_count += 1;
                         if (message.source_action != null and message.source_action.? == action_id) final_count += 1;
                     }
@@ -2324,8 +2324,8 @@ test "APV-10 public pages omit Action values while preserving other inputs" {
                 const page = try store_core.publicConversationPageForTesting(&storage, conversation);
                 pages += 1;
                 for (page.items[0..page.count]) |item| {
-                    try std.testing.expect(!std.mem.eql(u8, &item.content.digest, &protocol.contentDigest("hidden value")));
-                    if (std.mem.eql(u8, &item.content.digest, &protocol.contentDigest("visible person"))) person_count += 1;
+                    try std.testing.expect(!std.mem.eql(u8, &item.content.identity().digest, &protocol.contentDigest("hidden value")));
+                    if (std.mem.eql(u8, &item.content.identity().digest, &protocol.contentDigest("visible person"))) person_count += 1;
                     if (item.sender != null) peer_count += 1;
                     if (item.source_action != null and item.source_action.? == action_id) final_count += 1;
                 }

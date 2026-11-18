@@ -241,7 +241,7 @@ test "SUI-61 Action-sourced inputs draw nothing in the conversation" {
         pub fn excluding(_: *@This(), _: u64) void {}
     };
     var sink: Sink = .{};
-    const content_ref: protocol.ActivityItem.Content = .{ .length = 5, .digest = @splat(0) };
+    const content_ref: @FieldType(protocol.ActivityItem.Message, "content") = .{ .text = .{ .length = 5, .digest = @splat(0) } };
     for (std.enums.values(@FieldType(protocol.ActivityItem.Message, "state"))) |state| {
         const value: protocol.ActivityItem.Message = .{
             .admission = 1,
@@ -254,7 +254,7 @@ test "SUI-61 Action-sourced inputs draw nothing in the conversation" {
         };
         for ([_]protocol.ActivityItem.Value{ .{ .received = value }, .{ .user = value }, .{ .admission = value } }) |row| {
             const item: protocol.ActivityItem = .{ .position = 1, .at = 1, .value = row };
-            try std.testing.expect(!try View.render(undefined, "unused", "k7m2qx", null, item, .{ .count = 1, .oldest_position = 1, .newest_admission = 1, .newest_position = 1 }, false, &sink, false, "", .{ .viewport = .wcwidth }, .none));
+            try std.testing.expect(!try View.render(undefined, "unused", "k7m2qx", undefined, null, item, .{ .count = 1, .oldest_position = 1, .newest_admission = 1, .newest_position = 1 }, false, &sink, false, "", .{ .viewport = .wcwidth }, .none));
         }
     }
 }
