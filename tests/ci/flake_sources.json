@@ -180,14 +180,7 @@
     "test_double": 3
   },
   "tests/ci/test_selection.py": {
-    "fixed_sleep": {
-      "FullCheckPartitionTest.run_part": [
-        1,
-        "samples for 0.1 s that held authority starts no isolated work"
-      ]
-    },
-    "test_double": 26,
-    "unsignaled_poll": 1
+    "test_double": 26
   },
   "tests/ci/test_settings_fixture.py": {
     "test_double": 6

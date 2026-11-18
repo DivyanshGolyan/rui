@@ -2,7 +2,8 @@
 """Run the CI policy suite, excluding unchanged-input self-checks.
 
 The kept tests run across worker processes. Tasks keep shared module and class
-fixtures together; each task's log prints whole.
+fixtures together; timing-sensitive groups run after the workers finish.
+Each task's log prints whole.
 """
 import argparse
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -18,6 +19,12 @@ import time
 import unittest
 
 
+SERIAL_TESTS = {
+    "test_store_shards.LauncherTest.test_per_test_timeout_is_independent_of_process_deadline": "asserts real per-test timeout timing",
+    "test_store_shards.LauncherTest.test_per_test_deadline_survives_closed_output": "asserts real deadline timing after output closes",
+}
+
+
 def suite(skips: list[str], start: str = "tests/ci") -> unittest.TestSuite:
     """Discover the policy tests and omit the selected module or class prefixes."""
     prefixes = tuple(unit + "." for unit in skips)
@@ -29,7 +36,24 @@ def suite(skips: list[str], start: str = "tests/ci") -> unittest.TestSuite:
             elif not test.id().startswith(prefixes):
                 yield test
 
-    return unittest.TestSuite(kept(unittest.TestLoader().discover(start)))
+    class Loader(unittest.TestLoader):
+        def __init__(self):
+            super().__init__()
+            self.import_cleanups = {}
+
+        def _get_module_from_name(self, name):
+            cleanups = unittest.case._module_cleanups
+            before = len(cleanups)
+            try:
+                return super()._get_module_from_name(name)
+            finally:
+                self.import_cleanups[name] = cleanups[before:]
+                del cleanups[before:]
+
+    loader = Loader()
+    result = unittest.TestSuite(kept(loader.discover(start)))
+    result.import_cleanups = loader.import_cleanups
+    return result
 
 
 def units(tests: unittest.TestSuite) -> list[list[unittest.TestCase]]:
@@ -118,11 +142,12 @@ def run_parallel(tests: unittest.TestSuite, jobs: int, start: str = "tests/ci", 
     local = [test for group in groups if not loadable(group) for test in group]
     if local:
         report(run(local, standins=True))
+    serial = [group for group in groups if loadable(group)
+              and any(test.id() in SERIAL_TESTS for test in group)]
+    parallel = [group for group in groups if loadable(group) and group not in serial]
     with ProcessPoolExecutor(max_workers=jobs, mp_context=multiprocessing.get_context("spawn")) as pool:
         futures = {}
-        for group in groups:
-            if not loadable(group):
-                continue
+        for group in parallel:
             names = [test.id() for test in group]
             try:
                 futures[pool.submit(run_names, start, names)] = names
@@ -138,6 +163,10 @@ def run_parallel(tests: unittest.TestSuite, jobs: int, start: str = "tests/ci", 
                 problems[1] += 1
                 out.write("Worker process died; these tests did not complete: "
                           + ", ".join(futures[future]) + "\n")
+    for group in serial:
+        module = type(group[0]).__module__
+        unittest.case._module_cleanups.extend(getattr(tests, "import_cleanups", {}).pop(module, []))
+        report(run(group))
     failures, errors, unexpected = problems
     out.write("-" * 70 + f"\nRan {total} tests in {time.perf_counter() - started:.3f}s across {jobs} processes\n\n")
     details = [f"{name}={count}" for name, count in
