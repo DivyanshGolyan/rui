@@ -1,0 +1,236 @@
+{
+  "clients/ts/test/feed-host.test.ts": {
+    "test_double": 1
+  },
+  "clients/ts/test/host.test.ts": {
+    "fixed_sleep": 1
+  },
+  "clients/ts/test/sessions.test.ts": {
+    "fixed_sleep": 1
+  },
+  "src/client.zig": {
+    "fixed_sleep": 9
+  },
+  "src/h2/tests.zig": {
+    "fixed_sleep": 1
+  },
+  "src/server.zig": {
+    "fixed_sleep": 1
+  },
+  "src/store/sqlite_tests/retry.zig": {
+    "fixed_sleep": 2
+  },
+  "src/testing/poll.zig": {
+    "fixed_sleep": 1
+  },
+  "tests/ci/renderer_mutation_test.py": {
+    "test_double": 13
+  },
+  "tests/ci/report_issue.py": {
+    "fixed_sleep": 1
+  },
+  "tests/ci/test_build_artifact.py": {
+    "test_double": 22
+  },
+  "tests/ci/test_cache_snapshot.py": {
+    "test_double": 9
+  },
+  "tests/ci/test_cache_snapshot_proof.py": {
+    "test_double": 10
+  },
+  "tests/ci/test_catalog_diagnostics.py": {
+    "test_double": 14
+  },
+  "tests/ci/test_ci_plan.py": {
+    "test_double": 1
+  },
+  "tests/ci/test_conflict_alert.py": {
+    "test_double": 2
+  },
+  "tests/ci/test_control_fixture.py": {
+    "test_double": 1
+  },
+  "tests/ci/test_failure_artifacts.py": {
+    "test_double": 3
+  },
+  "tests/ci/test_fixture_user.py": {
+    "test_double": 16
+  },
+  "tests/ci/test_harness_contracts.py": {
+    "test_double": 2
+  },
+  "tests/ci/test_host_fixture_settings.py": {
+    "test_double": 1
+  },
+  "tests/ci/test_import_architecture.py": {
+    "test_double": 5
+  },
+  "tests/ci/test_installer_boundary.py": {
+    "test_double": 2
+  },
+  "tests/ci/test_live_engines.py": {
+    "test_double": 11
+  },
+  "tests/ci/test_mac_runner.py": {
+    "test_double": 16
+  },
+  "tests/ci/test_main_build.py": {
+    "test_double": 7
+  },
+  "tests/ci/test_model_instruction_fixtures.py": {
+    "test_double": 3
+  },
+  "tests/ci/test_open_pr.py": {
+    "test_double": 39
+  },
+  "tests/ci/test_platform_boundary.py": {
+    "test_double": 2
+  },
+  "tests/ci/test_pr_labels.py": {
+    "test_double": 3
+  },
+  "tests/ci/test_pr_shape.py": {
+    "test_double": 32
+  },
+  "tests/ci/test_pr_timeline.py": {
+    "test_double": 6
+  },
+  "tests/ci/test_prepush.py": {
+    "test_double": 27
+  },
+  "tests/ci/test_prepush_red.py": {
+    "test_double": 29
+  },
+  "tests/ci/test_previous_release_upgrade.py": {
+    "test_double": 21
+  },
+  "tests/ci/test_quarantine.py": {
+    "test_double": 5
+  },
+  "tests/ci/test_recheck_wire_prs.py": {
+    "test_double": 14
+  },
+  "tests/ci/test_release.py": {
+    "test_double": 5
+  },
+  "tests/ci/test_release_publication.py": {
+    "test_double": 10
+  },
+  "tests/ci/test_report_issue.py": {
+    "test_double": 7
+  },
+  "tests/ci/test_screens_cleanup.py": {
+    "test_double": 3
+  },
+  "tests/ci/test_selection.py": {
+    "fixed_sleep": 1,
+    "test_double": 26,
+    "unsignaled_poll": 1
+  },
+  "tests/ci/test_settings_fixture.py": {
+    "test_double": 6
+  },
+  "tests/ci/test_store_shards.py": {
+    "test_double": 17
+  },
+  "tests/ci/test_tool_profile_fixture.py": {
+    "test_double": 21
+  },
+  "tests/ci/test_unit_test_names.py": {
+    "test_double": 5
+  },
+  "tests/ci/test_upgrade_fixture.py": {
+    "test_double": 8
+  },
+  "tests/ci/test_verify_rui.py": {
+    "test_double": 101
+  },
+  "tests/ci/test_verify_rui_seed_fixture.py": {
+    "test_double": 21
+  },
+  "tests/ci/test_verify_rui_shots.py": {
+    "test_double": 20
+  },
+  "tests/integration/canonical_failure_cases.py": {
+    "test_double": 7
+  },
+  "tests/integration/codex_integration.py": {
+    "fixed_sleep": 4
+  },
+  "tests/integration/control_integration.py": {
+    "fixed_sleep": 1,
+    "test_double": 2
+  },
+  "tests/integration/descriptor_capacity_integration.py": {
+    "fixed_sleep": 1
+  },
+  "tests/integration/dispatch_integration.py": {
+    "fixed_sleep": 9,
+    "test_double": 3,
+    "unsignaled_poll": 1
+  },
+  "tests/integration/host_allocator_test.py": {
+    "test_double": 1
+  },
+  "tests/integration/host_launch_exit_test.py": {
+    "test_double": 16
+  },
+  "tests/integration/host_process.py": {
+    "fixed_sleep": 1
+  },
+  "tests/integration/host_process_test.py": {
+    "test_double": 56
+  },
+  "tests/integration/host_status_integration.py": {
+    "fixed_sleep": 1
+  },
+  "tests/integration/host_stop_integration_test.py": {
+    "test_double": 1
+  },
+  "tests/integration/human_cli_integration.py": {
+    "fixed_sleep": 3
+  },
+  "tests/integration/model_fixture.py": {
+    "fixed_sleep": 3
+  },
+  "tests/integration/os_semantics.py": {
+    "test_double": 1
+  },
+  "tests/integration/session_list_release_proof.py": {
+    "test_double": 2
+  },
+  "tests/integration/terminal_process_test.py": {
+    "test_double": 18
+  },
+  "tests/integration/transport_h2_cases.py": {
+    "fixed_sleep": 2
+  },
+  "tests/integration/transport_h2_integration_test.py": {
+    "test_double": 47
+  },
+  "tests/qualification/direct-pty/controls.py": {
+    "fixed_sleep": 1,
+    "test_double": 6,
+    "unsignaled_poll": 1
+  },
+  "tests/qualification/direct-pty/test_driver.py": {
+    "test_double": 19
+  },
+  "tests/qualification/linux-memory/measured_run.py": {
+    "fixed_sleep": 1,
+    "test_double": 2
+  },
+  "tests/qualification/linux-memory/run.py": {
+    "fixed_sleep": 1,
+    "test_double": 2
+  },
+  "tests/qualification/linux-memory/test_run.py": {
+    "test_double": 7
+  },
+  "tests/qualification/transport-topology/measure.py": {
+    "fixed_sleep": 1
+  },
+  "tests/qualification/transport-topology/window-latency.py": {
+    "fixed_sleep": 1
+  }
+}

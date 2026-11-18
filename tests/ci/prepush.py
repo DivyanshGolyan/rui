@@ -391,6 +391,11 @@ def checks(paths, available, base, mode="default", mysql=False):
         yield "zig fmt", ["zig", "fmt", "--check", "--ast-check", *zig]
     if any(inventory_path(path) for path in paths):
         yield "caller errors", [sys.executable, "-B", "tests/ci/caller_errors.py"]
+    if any(path.endswith(".zig")
+           or (path.startswith("tests/") and path.endswith(".py"))
+           or (path.startswith("clients/ts/test/") and path.endswith(".test.ts"))
+           or path == "tests/ci/flake_sources.json" for path in paths):
+        yield "flake sources", [sys.executable, "-B", "tests/ci/flake_sources.py"]
     if any(matches(path, CLIENT_LOCALITY_INPUTS) for path in paths):
         yield "client locality", [sys.executable, "-B", "tests/ci/client_locality.py"]
     if "src/store/schema.zig" in paths:

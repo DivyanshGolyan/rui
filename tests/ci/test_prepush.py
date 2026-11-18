@@ -178,6 +178,17 @@ class PrepushTest(unittest.TestCase):
                 self.assertNotIn("client locality", commands)
                 self.assertNotIn("tests/ci: test_client_locality.py", commands)
 
+    def test_flake_sources_run_for_scanned_inputs_and_deletions(self):
+        for path in ("src/example.zig", "build.zig", "tests/integration/example.py", "clients/ts/test/example.test.ts",
+                     "tests/ci/flake_sources.json", "tests/ci/flake_sources.py"):
+            with self.subTest(path=path):
+                commands = dict(prepush.checks([path], AVAILABLE, "BASE", "quick"))
+                self.assertEqual(commands["flake sources"],
+                                 [sys.executable, "-B", "tests/ci/flake_sources.py"])
+        self.assertNotIn("flake sources", self.commands(["docs/example.md"]))
+        workflow = (Path(__file__).resolve().parents[2] / ".github/workflows/check.yml").read_text()
+        self.assertIn("run: python3 -B tests/ci/flake_sources.py", workflow)
+
     def test_deleted_files_select_owner_checks_not_file_tools(self):
         commands = self.commands(["src/cli_args.zig"], deleted=["src/cli_args.zig"])
         self.assertIn("caller errors", commands)
