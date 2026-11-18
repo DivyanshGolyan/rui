@@ -1,4 +1,5 @@
 const std = @import("std");
+const rsql = @import("../rsql.zig");
 const store_testing = @import("../testing.zig");
 
 test "RUI_TEST_REQUIRE_ENGINES names engines by exact token" {
@@ -22,12 +23,12 @@ test "a required engine these tests do not build fails them" {
 
 test "a fixture's SQL is portable Rui SQL and names no SQLite mechanism" {
     inline for (store_testing.fixture_text_cases) |case| {
-        const message = comptime store_testing.fixtureTextError(case.text);
+        const message = comptime rsql.fixtureTextError(case.text);
         if ((message != null) != case.refused) {
             std.debug.print("fixtureTextError({s}) = {?s}\n", .{ case.text, message });
             return error.FixtureVerdictChanged;
         }
     }
-    try std.testing.expectEqualStrings("fixture: 'pragma' is a SQLite mechanism; write the test under sqlite_tests/", comptime store_testing.fixtureTextError("DELETE FROM turn; pragma ignore_check_constraints=ON").?);
-    try std.testing.expectEqualStrings("rsql: 'INSERT OR' is not portable; read in an earlier round, then guard the write", comptime store_testing.fixtureTextError("INSERT OR IGNORE INTO turn VALUES(1)").?);
+    try std.testing.expectEqualStrings("fixture: 'pragma' is a SQLite mechanism; write the test under sqlite_tests/", comptime rsql.fixtureTextError("DELETE FROM turn; pragma ignore_check_constraints=ON").?);
+    try std.testing.expectEqualStrings("rsql: 'INSERT OR' is not portable; read in an earlier round, then guard the write", comptime rsql.fixtureTextError("INSERT OR IGNORE INTO turn VALUES(1)").?);
 }
