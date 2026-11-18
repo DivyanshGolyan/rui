@@ -26,7 +26,7 @@ MAC_PATHS = (
     "src/os/*", "src/cli.zig", "src/client.zig", "src/platform.zig", "src/HostLifecycle.zig",
     "src/host_coordinator.zig", "src/host_restart_all.zig", "src/host_start.zig", "src/host_identity.zig",
     "src/upgrade.zig", "src/upgrade_process.zig",
-    "tests/integration/upgrade_integration.py", "src/store/mysql_testing.zig",
+    "tests/integration/upgrade_integration.py",
     "tests/integration/activity_integration.py", "tests/integration/bash_fixture.py",
     "tests/integration/codex_credential_integration.py", "tests/integration/codex_integration.py",
     "tests/integration/conversation_page_fixture.py", "tests/integration/host_launch_exit_test.py",

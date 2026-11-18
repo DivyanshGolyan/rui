@@ -62,6 +62,10 @@ pub const glibc_malloc = current.glibc_possible and builtin.link_libc and builti
 /// Darwin has no /proc.
 pub const proc_memory = current.proc_memory;
 
+/// Linux's per-process memory totals (Rss, Pss, Private_Dirty, Anonymous),
+/// readable where `proc_memory` holds.
+pub const memory_rollup_path = "/proc/self/smaps_rollup";
+
 /// Linux queues a connect beyond a full listen backlog until it times out;
 /// Darwin refuses it at once.
 pub const full_backlog_blocks_connect = current.full_backlog_blocks_connect;

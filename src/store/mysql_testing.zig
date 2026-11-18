@@ -1789,7 +1789,7 @@ const LinuxMemory = struct {
     }
 
     fn read() !LinuxMemory {
-        const file = try std.Io.Dir.cwd().openFile(std.testing.io, "/proc/self/smaps_rollup", .{});
+        const file = try std.Io.Dir.cwd().openFile(std.testing.io, os.memory_rollup_path, .{});
         defer file.close(std.testing.io);
         var buffer: [8192]u8 = undefined;
         var filled: usize = 0;
