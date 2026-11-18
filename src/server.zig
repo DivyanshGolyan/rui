@@ -5008,6 +5008,14 @@ const MutationWitness = struct {
         } };
     }
 
+    fn requireFields(comptime T: type, comptime expected: []const []const u8) void {
+        const actual_fields = @typeInfo(T).@"struct".field_names;
+        if (actual_fields.len != expected.len) @compileError("Mutation witness field inventory changed: " ++ @typeName(T));
+        for (actual_fields, expected) |field, name| {
+            if (!std.mem.eql(u8, field, name)) @compileError("Mutation witness field inventory changed: " ++ @typeName(T));
+        }
+    }
+
     fn observe(hash: *Hash, body: []const u8, status: u16, supplied_session: []const u8, binding: reply.MutationTarget) !void {
         const decoded = reply.decodeMutationReply(.{ .status = status, .body = body }, supplied_session, binding);
         if (decoded.answer) |answer| {
@@ -5015,9 +5023,44 @@ const MutationWitness = struct {
             hash.update(&.{@intFromBool(answer.replayed)});
             switch (answer.result) {
                 .accepted => |value| {
-                    const bytes = try std.json.Stringify.valueAlloc(std.testing.allocator, value, .{});
+                    // Preserve the frozen pre-receipt projection for existing
+                    // replies. Hash receipt slices explicitly: Bounded backing
+                    // arrays contain unused bytes and are not stable witnesses.
+                    const OldConfigure = union(enum) { configure: struct { revision: u64, created: bool, skills: ?@import("mutation_answer.zig").SkillsReloadStatus } };
+                    const OldMessage = union(enum) { message: struct { admission: u64 } };
+                    const bytes = switch (value) {
+                        .configure => |item| blk: {
+                            comptime requireFields(@TypeOf(item), &.{ "revision", "created", "skills", "configuration" });
+                            break :blk try std.json.Stringify.valueAlloc(std.testing.allocator, OldConfigure{ .configure = .{ .revision = item.revision, .created = item.created, .skills = item.skills } }, .{});
+                        },
+                        .message => |item| blk: {
+                            comptime requireFields(@TypeOf(item), &.{ "admission", "configuration" });
+                            break :blk try std.json.Stringify.valueAlloc(std.testing.allocator, OldMessage{ .message = .{ .admission = item.admission } }, .{});
+                        },
+                        else => try std.json.Stringify.valueAlloc(std.testing.allocator, value, .{}),
+                    };
                     defer std.testing.allocator.free(bytes);
                     hash.update(bytes);
+                    const configuration = switch (value) {
+                        .configure => |item| item.configuration,
+                        .message => |item| item.configuration,
+                        else => null,
+                    };
+                    if (configuration) |item| {
+                        comptime requireFields(@TypeOf(item), &.{ "provider", "model", "reasoning_effort", "workspace", "tools", "loaded_tools", "permission_mode", "compaction_trigger" });
+                        const receipt = try std.json.Stringify.valueAlloc(std.testing.allocator, .{
+                            .provider = item.provider,
+                            .model = item.model.slice(),
+                            .reasoning_effort = item.reasoning_effort,
+                            .workspace = item.workspace.slice(),
+                            .tools = item.tools.slice(),
+                            .loaded_tools = item.loaded_tools.slice(),
+                            .permission_mode = item.permission_mode,
+                            .compaction_trigger = item.compaction_trigger,
+                        }, .{});
+                        defer std.testing.allocator.free(receipt);
+                        hash.update(receipt);
+                    }
                 },
                 .rejected => |code| hash.update(code.slice()),
                 .conflict => {},
@@ -5145,13 +5188,46 @@ test "mutation decoder preserves base bytes and the entire command domain" {
             if (kind == .message) binding.message.creates_session = true;
             response = .{};
             try response.render(render, .{ @as([]const u8, ""), initial });
+            try std.testing.expectError(error.InvalidResponse, MutationWitness.reply.decodeMutationReply(.{ .status = 200, .body = response.slice() }, "", binding).answer);
+            hash.update(response.slice());
+            try MutationWitness.observe(&hash, response.slice(), 200, "", binding);
+            // Creation now requires a resolved receipt. Keep the legacy missing
+            // receipt probe above and witness a valid creation independently.
+            var configuration: @import("creation_receipt.zig").Configuration = .{
+                .provider = .openai,
+                .model = .{},
+                .reasoning_effort = .low,
+                .workspace = .{},
+                .tools = .{},
+                .loaded_tools = .{},
+                .permission_mode = .ask,
+                .compaction_trigger = 115200,
+            };
+            try configuration.model.set("gpt-6.1-sol");
+            try configuration.workspace.set("/workspace");
+            try configuration.tools.set("bash");
+            try configuration.loaded_tools.set("bash");
+            initial.accepted.configuration = &configuration;
+            response = .{};
+            try response.render(render, .{ @as([]const u8, ""), initial });
+            const config_json = ",\"configuration\":{\"provider\":\"openai\",\"model\":\"gpt-6.1-sol\",\"reasoning_effort\":\"low\",\"workspace\":\"/workspace\",\"tools\":[\"bash\"],\"loaded_tools\":[\"bash\"],\"permission_mode\":\"ask\",\"compaction_trigger\":\"115200\"}";
+            const expected_creation = if (kind == .configure)
+                "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"configuration_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"revision\":\"13\",\"created\":true" ++ config_json ++ "},\"execution\":{\"status\":\"unavailable\",\"reason\":\"direct_reply_does_not_wait_for_model_processing\"}}"
+            else
+                "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"message_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"admission\":\"17\"" ++ config_json ++ "},\"input\":{\"type\":\"text\",\"bytes\":\"9\",\"sha256\":\"c884929eddc94502b8377e333dcd728064dcb2c457e10c4a3cc982dedefdcbcd\"},\"queue\":{\"status\":\"queued\",\"admission\":\"17\"},\"execution\":{\"status\":\"queued\"}}";
+            try std.testing.expectEqualStrings(expected_creation, response.slice());
+            const creation = try MutationWitness.reply.decodeMutationReply(.{ .status = 200, .body = response.slice() }, "", binding).answer;
+            const resolved = if (kind == .configure) creation.result.accepted.configure.configuration.? else creation.result.accepted.message.configuration.?;
+            try std.testing.expectEqualStrings("gpt-6.1-sol", resolved.model.slice());
+            try std.testing.expectEqualStrings("/workspace", resolved.workspace.slice());
+            try std.testing.expectEqual(protocol.ReasoningEffort.low, resolved.reasoning_effort.?);
             hash.update(response.slice());
             try MutationWitness.observe(&hash, response.slice(), 200, "", binding);
         }
         const expected = switch (kind) {
             .action_stop => continue,
-            .configure => "adca102951c1f18dc2ce00f9b558a24b2beaaec0c3e2e863316f44a6efb03321",
-            .message => "3be943056ed34a9f484210e35c3aed5397a28a4fd2f52536d9bab4333101b562",
+            .configure => "23826d5d66fc13cb4c75e15593c84b4591a1baf8ddb99a9cbfabf291b3cec12e",
+            .message => "ef22fa6a7b2086a1cf11913f2670da5c11cc713f84727ca1abbdf9f3d4a4f46f",
             .session_stop => "a98107ee7efe29d5c2480097568daa514649c76e9c7c1cc740ed5fbc697cbc90",
             .session_archive => "91da63974ced68e1596b479409b543ae90ec8161c1612840b3e26a0eca02acb3",
             .model_interruption => "54ed6236f058bb77a9b8039bb9a2bc144a5066bf742084c9ceb7ff7e73f890e1",
