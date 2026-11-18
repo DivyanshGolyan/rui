@@ -280,10 +280,11 @@ def rejected_tool_thinking_queue_case():
                 initial = chrome.frame(master, b"MIDTURN-HI\r", lambda screen:
                     "◌ MIDTURN-HI" in screen and composing(screen, ""))
                 assert initial.count("MIDTURN-HI") == 1 and "› MIDTURN-HI" not in initial, initial
-                stable = chrome.frame(master, b"", lambda screen:
-                    "◌ MIDTURN-HI" in screen and re.search(r"Thinking · [2-9]s", screen), timeout=15)
-                assert "Tool call · rejected" in stable and stable.count("MIDTURN-HI") == 1, stable
-                assert "› MIDTURN-HI" not in stable, stable
+                for keys, draft in ((b"x", "x"), (b"\x7f", ""), (b"y", "y"), (b"\x7f", "")):
+                    stable = chrome.frame(master, keys, lambda screen:
+                        composing(screen, draft) and re.search(r"Thinking · \d+s", screen), timeout=15)
+                    assert "Tool call · rejected" in stable and stable.count("MIDTURN-HI") == 1, stable
+                    assert "◌ MIDTURN-HI" in stable and "› MIDTURN-HI" not in stable, stable
                 next_release.set()
                 taken = chrome.frame(master, b"", lambda screen:
                     "AFTER-REJECTION" in screen and "› MIDTURN-HI" in screen and "Thinking" in screen, timeout=30)
@@ -315,9 +316,11 @@ def rejection_after_queued_send_case():
                 taken = chrome.frame(master, b"", lambda screen:
                     "Tool call · rejected" in screen and "Thinking" in screen and "› MIDTURN-HI" in screen, timeout=30)
                 assert taken.count("MIDTURN-HI") == 1 and "◌ MIDTURN-HI" not in taken, taken
-                stable = chrome.frame(master, b"", lambda screen:
-                    "› MIDTURN-HI" in screen and re.search(r"Thinking · [2-9]s", screen), timeout=15)
-                assert stable.count("MIDTURN-HI") == 1 and "◌ MIDTURN-HI" not in stable, stable
+                for keys, draft in ((b"x", "x"), (b"\x7f", ""), (b"y", "y"), (b"\x7f", "")):
+                    stable = chrome.frame(master, keys, lambda screen:
+                        composing(screen, draft) and re.search(r"Thinking · \d+s", screen), timeout=15)
+                    assert "› MIDTURN-HI" in stable and stable.count("MIDTURN-HI") == 1, stable
+                    assert "◌ MIDTURN-HI" not in stable, stable
                 next_release.set()
                 chrome.frame(master, b"", lambda screen: "FINAL-ANSWER" in screen, timeout=30)
                 chrome.leave(master, caller)

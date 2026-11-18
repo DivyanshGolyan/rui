@@ -326,8 +326,16 @@ test "a Session with no Turn is idle, pending or stopped by its queue" {
     try std.testing.expect(work.turn == null and work.operation == null and work.first_action == null);
 }
 
-test "an active Turn reports its Operation's state from the row that set it" {
+test "SUI-44 active Turn work reflects its Operation and purpose" {
     try expectState(.{ .working = .{ .since = 300 } }, .{ .now_ms = 0, .created_at = 1, .latest = activeTurn(.{ .in_flight = .{ .attempt_at = 300 } }, .{}) });
+    for ([_]bool{ false, true }) |compaction| {
+        var latest = activeTurn(.{ .in_flight = .{ .attempt_at = 123 } }, .{});
+        latest.compaction = compaction;
+        const work = try derive(.{ .now_ms = 124000, .created_at = 1, .latest = latest });
+        try std.testing.expectEqual(compaction, work.state.working.compaction);
+        try std.testing.expectEqual(@as(u64, 123), work.state.working.since);
+        try std.testing.expectEqual(WorkState.Progress.in_flight, work.state.progress().?);
+    }
     const waiting: Inputs.Op = .{ .waiting = .{ .scheduled_at = 310, .due_at_ms = 320_500, .cause = "provider_temporary_http_429", .attempt = 2 } };
     try expectState(.{ .retrying = .{ .since = 310, .due_at_ms = 320_500, .cause = fixed(max_code_bytes, "provider_temporary_http_429"), .attempt = 2 } }, .{
         .now_ms = 320_499,
@@ -680,14 +688,4 @@ test "actions cover proposal and stopping combinations" {
             try std.testing.expectEqual(decision, work.actions.decide);
         }
     }
-}
-
-test "in-flight compaction remains working with its purpose" {
-    var latest = activeTurn(.{ .in_flight = .{ .attempt_at = 123 } }, .{});
-    const normal = try derive(.{ .now_ms = 124000, .created_at = 1, .latest = latest });
-    try std.testing.expect(!normal.state.working.compaction);
-    latest.compaction = true;
-    const compacting = try derive(.{ .now_ms = 124000, .created_at = 1, .latest = latest });
-    try std.testing.expect(compacting.state.working.compaction);
-    try std.testing.expectEqual(WorkState.Progress.in_flight, compacting.state.progress().?);
 }
