@@ -60,3 +60,34 @@ test "Message recovery observation seeks stay bounded as the Turn accumulates re
     }
     try std.testing.expectEqual(costs[0], costs[1]);
 }
+
+test "SH-68 compound observations certify content without holding the queue" {
+    const sqlite = @import("../sqlite.zig");
+    const cases = [_][:0]const u8{
+        "UPDATE content SET digest=zeroblob(32) WHERE content_id=(SELECT content_id FROM message_admission WHERE command_key='observe-parts')",
+        "UPDATE content SET byte_length=byte_length+1 WHERE content_id=(SELECT content_id FROM message_admission WHERE command_key='observe-parts')",
+        "UPDATE content SET private=1 WHERE content_id=(SELECT content_id FROM message_admission WHERE command_key='observe-parts')",
+        "UPDATE content SET form=255 WHERE content_id=(SELECT content_id FROM message_admission WHERE command_key='observe-parts')",
+        "UPDATE core_command SET primary_content_id=(SELECT min(part_content_id) FROM content_part) WHERE command_key='observe-parts'",
+        "UPDATE content_part SET part_content_id=(SELECT content_id FROM content WHERE private=0 AND form=0 ORDER BY content_id LIMIT 1) WHERE content_id=(SELECT content_id FROM message_admission WHERE command_key='observe-parts') AND ordinal=0",
+    };
+    for (cases, 0..) |mutation, index| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try configureTestSession(&storage, "observe-parts-config");
+        try store_testing.submitTestMessageParts(&storage, &tmp, "observe-parts", session.slice(), &.{ .{ .bytes = "first" }, .{ .bytes = "second" } });
+        const before = try store_testing.observeCommandForTesting(&storage, "observe-parts");
+        try std.testing.expectEqual(.parts, before.kind.message.?.form);
+        try sqlite.exec(storage.sqliteDatabase(), "PRAGMA ignore_check_constraints=ON");
+        try sqlite.exec(storage.sqliteDatabase(), mutation);
+        if (index == 1) {
+            try std.testing.expectError(error.ContentReadFailed, store_testing.observeCommandForTesting(&storage, "observe-parts"));
+        } else {
+            try std.testing.expectError(error.CorruptStore, store_testing.observeCommandForTesting(&storage, "observe-parts"));
+        }
+        try std.testing.expectError(error.StoreFenced, store_testing.observeCommandForTesting(&storage, "observe-parts"));
+    }
+}

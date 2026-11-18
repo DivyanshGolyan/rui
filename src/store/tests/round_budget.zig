@@ -277,6 +277,16 @@ test "each Store entry point takes its round budget on its common path" {
         fn compoundTurn(storage: *Store, tmp: *std.testing.TmpDir, meter: *RoundMeter) !void {
             const session = try configureTestSession(storage, "budget-compound");
             try store_testing.submitTestMessageParts(storage, tmp, "budget-compound-message", session.slice(), &.{ .{ .bytes = "first" }, .{ .bytes = "second" } });
+            const observed = try store_testing.observeCommandForTesting(storage, "budget-compound-message");
+            const identity = observed.kind.message.?.content;
+            const content_id = try store_testing.queryU64(storage, "SELECT content_id FROM message_admission WHERE command_key=?1", .{"budget-compound-message"});
+            const cursor_map = try @import("../../os/pages.zig").Mapped(@import("../domain/content_parts.zig").Cursor).map();
+            defer cursor_map.unmap();
+            cursor_map.value.init(try content_domain.Value.of(content_id, 1, identity.length, identity.digest));
+            try std.testing.expect(try storage.observeCommandPart(cursor_map.value)); // bounded raw window
+            meter.start();
+            try std.testing.expect(try storage.observeCommandPart(cursor_map.value)); // bounded index page
+            meter.stop(.observeCommandPart);
             const PressureRead = @import("../domain/model_admission.zig").PartsPressure.Read;
             const pressure_map = try @import("../../os/pages.zig").Mapped(PressureRead).map();
             defer pressure_map.unmap();

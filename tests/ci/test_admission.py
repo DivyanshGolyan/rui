@@ -335,7 +335,7 @@ class AdmissionTest(unittest.TestCase):
         self.assertIn('      run: bash .github/actions/policy/checks.sh\n', POLICY.read_text())
 
     def test_policy_beside_the_compile_keeps_its_status_and_fails_the_job_through_its_final_gate(self):
-        # CI-76: policy {passes, fails, killed by a signal} x compile {passes, fails}, through the real
+        # CI-77: policy {passes, fails, killed by a signal} x compile {passes, fails}, through the real
         # PR job's compile step and final gate. The compile stub blocks on a fifo until the policy stub
         # has written it, so the two run at once; the subprocess timeout is only a watchdog.
         workflow = job(CHECK.read_text(), 'pr_linux')
@@ -393,7 +393,7 @@ class AdmissionTest(unittest.TestCase):
                     self.assertNotEqual(failed.returncode, 0)
 
     def test_every_policy_check_runs_after_another_fails_and_any_failure_fails_the_suite(self):
-        # CI-75: checks.sh over its fake tools, with no check, each check's last call, or every check failing.
+        # CI-76: checks.sh over its fake tools, with no check, each check's last call, or every check failing.
         calls = ['python3 -B tests/ci/caller_errors.py', 'python3 -B tests/ci/flake_sources.py',
                  'python3 -B tests/ci/client_locality.py',
                  'python3 -B tests/ci/policy_suite.py --skips ["test_unchanged"]',
@@ -618,7 +618,8 @@ class CandidatePlanTest(unittest.TestCase):
         'core owning no fixture': (['src/request_encoding.zig'], {'test-logic', 'test-native'}),
         'core owning one fixture': (['src/session_skills.zig'], {'skills-integration', 'test-logic', 'test-native'}),
         'core owning many fixtures (Mac path)': (['src/client.zig'], {
-            'activity-integration', 'admission-integration', 'control-integration', 'conversation-page-integration',
+            'activity-integration', 'admission-integration', 'cli-image-integration', 'control-integration',
+            'conversation-page-integration',
             'host-status-integration', 'host-stop-integration', 'human-cli-integration', 'request-wait-integration',
             'session-list-integration', 'test-logic', 'test-native'}),
     }
