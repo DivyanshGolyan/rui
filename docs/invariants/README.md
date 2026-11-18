@@ -7,7 +7,7 @@ First drafts, written from the README and the contracts and checked against fixe
 | --- | --- |
 | [Admission and Session stops](admission-sessions.md) | 48 |
 | [Store, Host lifetime, install and upgrade](store-host.md) | 75 |
-| [Tools, execution, recovery and resources](execution-resources.md) | 64 |
+| [Tools, execution, recovery and resources](execution-resources.md) | 65 |
 | [Conversation, settings and model requests](conversation-model.md) | 36 |
 | [CLI, inspection, local protocol and the TypeScript client](cli-inspection.md) | 45 |
 | [Session UI and diagnostics](session-ui.md) | 70 |
