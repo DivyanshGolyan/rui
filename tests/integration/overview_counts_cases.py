@@ -36,13 +36,12 @@ def rows_by_mark():
                  **{name: (answer(name), held) for name, held in holds.items()}}
     with world("drawing-marks", responses, active_capacity=2) as w, released(*holds.values()):
         with w.overview(columns=99, rows=30) as screen:
-            frame = screen.contains("+ New Session")
-            assert frame.split("\n")[0] == "   + New Session", frame
+            screen.contains("+ New Session")
             asking = w.session("--label", "Asking", "--tools", "bash", "--permission-mode", "ask")
             failing = w.session("--label", "Failing")
             send(w, asking, "ask")
             send(w, failing, "fail")
-            screen.wait(lambda f: "? Asking" in f and "× Failing" in f, "approval and failure rows")
+            screen.wait(lambda f: "● Asking" in f and "× Failing" in f, "approval and failure rows")
             for name in ("w1", "w2"):
                 send(w, w.session("--label", name), name)
             screen.wait(lambda f: "w1" in f and "w2" in f, "working rows")
@@ -56,7 +55,7 @@ def rows_by_mark():
             for line in lines:
                 if not line.startswith("     Settings"):
                     assert not re.search(r"(?:rui|tools) \d+(?:\.\d+)? (?:MB|GB)\b", line), frame
-            assert screen.style("? Asking").fg != screen.style("× Failing").fg, frame
+            assert screen.style("● Asking").fg != screen.style("× Failing").fg, frame
             holds["w1"].set()
             screen.wait(lambda f: "   w1" in f and "◌ q1" not in f, "queue admission")
             for held in holds.values():

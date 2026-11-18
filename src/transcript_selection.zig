@@ -192,7 +192,7 @@ test "a row's columns map to the clusters they show, indents and wide cells incl
     const document = try std.testing.allocator.create(Document);
     defer std.testing.allocator.destroy(document);
     document.* = .{};
-    try document.append("⠹ 雪 fall fast\n\nend");
+    try document.append("◝ 雪 fall fast\n\nend");
     try document.prepare();
     var cells: [10 * 4]vaxis.Cell = undefined;
     layOut(document, .{}, 10, 4, &cells);
@@ -306,8 +306,8 @@ test "selection contrasts with sent bands and padding at both widths" {
         try document.prepare();
         const layout: viewport.Layout = .{ .width = width, .method = .unicode };
         const height = document.lineRows(layout, 0);
-        try testing.expectEqual(@as(u16, if (wrapped) 5 else 3), height);
-        var cells: [140 * 5]vaxis.Cell = @splat(.{});
+        try testing.expectEqual(@as(u16, if (!wrapped) 3 else if (width == 46) 5 else 6), height);
+        var cells: [140 * 6]vaxis.Cell = @splat(.{});
         var screen: vaxis.Screen = .{ .width = width, .height = height, .width_method = .unicode, .buf = cells[0 .. @as(usize, width) * height] };
         const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = height, .screen = &screen };
         const colours: viewport.Colours = .{ .user_band = .{ .index = 2 }, .no_depth = !colour };

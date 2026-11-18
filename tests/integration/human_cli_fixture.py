@@ -147,7 +147,9 @@ def pane_content(row):
 
 
 def conversation_text(frame):
-    return "\n".join(chat_content_row(pane_content(row)) for row in frame.split("\n"))
+    rows = (split_pane_row(row) for row in frame.split("\n"))
+    return "\n".join(chat_content_row(content.removeprefix(" ") if divider else content)
+                     for _, divider, content in rows)
 
 
 def composer_line(screen, y):
@@ -531,7 +533,7 @@ def return_to_live(master, live, key=b"\x1b", timeout=15):
         lambda screen, x, y: composer_ready(screen, x, y) and live(screen), timeout)
 
 
-LIVE_CLOCK = re.compile(r"^([⠹◌?] .+ · )(?:retry \d+ in )?\d+[hms](?: \d+[ms])?$", re.M)
+LIVE_CLOCK = re.compile(r"^([◝◌●] .+ · )(?:retry \d+ in )?\d+[hms](?: \d+[ms])?$", re.M)
 
 
 def settle_screen(master, quiet=1.0, timeout=15):

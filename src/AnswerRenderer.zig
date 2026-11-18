@@ -76,6 +76,7 @@ pub fn feed(self: *Renderer, bytes: []const u8) !void {
                 self.table_len += 1;
                 continue;
             } else {
+                if (self.destination == .viewport) try self.out.writeAll(TerminalText.full_width_on);
                 try self.literalBlock(self.held[0..self.table_len]);
                 self.table_len = 0;
                 self.table_literal = true;
@@ -83,6 +84,7 @@ pub fn feed(self: *Renderer, bytes: []const u8) !void {
         }
         if (self.table_literal) {
             if (self.line_start and byte != '|') {
+                if (self.destination == .viewport) try self.out.writeAll(TerminalText.full_width_off);
                 self.table_literal = false;
             } else {
                 try self.literalBlock(&.{byte});
@@ -136,6 +138,7 @@ fn markdownByte(self: *Renderer, byte: u8) !void {
 }
 
 pub fn finish(self: *Renderer) !void {
+    if ((self.table_literal or self.fence_literal) and self.destination == .viewport) try self.out.writeAll(TerminalText.full_width_off);
     if (self.table_len != 0) try self.flushTable();
     if (self.line_start and self.prefix_len != 0) {
         if (fenceCandidate(self.prefix[0..self.prefix_len])) self.literal_line = true;
@@ -267,6 +270,7 @@ pub const LastCode = struct {
 
 fn fencedByte(self: *Renderer, byte: u8) !void {
     if (!self.fence_literal and self.fence_len == fence_limit) {
+        if (self.destination == .viewport) try self.out.writeAll(TerminalText.full_width_on);
         try self.literalBlock(self.held[0..self.fence_len]);
         self.fence_literal = true;
         self.fence_closer_possible = true;
@@ -279,6 +283,7 @@ fn fencedByte(self: *Renderer, byte: u8) !void {
         try self.literalBlock(&.{byte});
         if (byte == '\n') {
             if (self.fence_closer_possible and self.fence_closer_ticks == 3) {
+                if (self.destination == .viewport) try self.out.writeAll(TerminalText.full_width_off);
                 self.fence_pending = false;
                 self.fence_literal = false;
                 self.fence_body_start = 0;
@@ -332,6 +337,7 @@ fn flushTable(self: *Renderer) !void {
             widths[column] = @max(widths[column], try self.tableCell(cell, false));
         }
     }
+    if (self.destination == .viewport) try self.out.writeAll(TerminalText.full_width_on);
     var start: usize = 0;
     row = 0;
     while (start < bytes.len) : (row += 1) {
@@ -357,6 +363,7 @@ fn flushTable(self: *Renderer) !void {
         }
         start = end + 1;
     }
+    if (self.destination == .viewport) try self.out.writeAll(TerminalText.full_width_off);
 }
 
 fn replayProse(self: *Renderer, bytes: []const u8) !void {
@@ -493,6 +500,7 @@ const CellWidth = struct {
 
 fn codeBlock(self: *Renderer, bytes: []const u8) !void {
     const band = self.destination == .viewport and self.colour;
+    if (self.destination == .viewport) try self.out.writeAll(TerminalText.full_width_on);
     var start: usize = 0;
     while (start < bytes.len) {
         const end = if (std.mem.indexOfScalarPos(u8, bytes, start, '\n')) |at| at + 1 else bytes.len;
@@ -502,6 +510,7 @@ fn codeBlock(self: *Renderer, bytes: []const u8) !void {
         if (band) try self.out.writeAll("\x1b[0m");
         start = end;
     }
+    if (self.destination == .viewport) try self.out.writeAll(TerminalText.full_width_off);
 }
 
 fn literalBlock(self: *Renderer, bytes: []const u8) !void {
@@ -1150,7 +1159,7 @@ test "chunked subset, malformed markup and terminal controls" {
     for (input) |byte| try renderer.feed(&.{byte});
     try renderer.finish();
     try std.testing.expectEqualStrings("\x1b[1mHeading\x1b[0m\n\x1b[1m-\x1b[0m \x1b[3mitem\x1b[0m and \x1b[94mcode\x1b[0m\n" ++
-        "\x1b[1mbold\x1b[0m\n\x1b[40m  x\t= 1\n\x1b[0munfinished *mark\n\\*literal*\n" ++
+        "\x1b[1mbold\x1b[0m\n" ++ TerminalText.full_width_on ++ "\x1b[40m  x\t= 1\n\x1b[0m" ++ TerminalText.full_width_off ++ "unfinished *mark\n\\*literal*\n" ++
         "bad \\x1b]2;title\\x07 \\x0d \\x7f \\u202e café\n", output.written());
 }
 
@@ -1469,7 +1478,7 @@ test "indented fences render code without marker lines or reverse video" {
     var renderer: Renderer = .{ .destination = .{ .viewport = .wcwidth }, .out = &output.writer };
     for ("   ```sh\n  echo `hello`\n   ```\n`inline`\n") |byte| try renderer.feed(&.{byte});
     try renderer.finish();
-    try std.testing.expectEqualStrings("\x1b[40m  echo `hello`\n\x1b[0m\x1b[94minline\x1b[0m\n", output.written());
+    try std.testing.expectEqualStrings(TerminalText.full_width_on ++ "\x1b[40m  echo `hello`\n\x1b[0m" ++ TerminalText.full_width_off ++ "\x1b[94minline\x1b[0m\n", output.written());
 }
 
 test "closing fence at end of answer needs no final newline" {
@@ -1478,7 +1487,7 @@ test "closing fence at end of answer needs no final newline" {
     var renderer: Renderer = .{ .destination = .{ .viewport = .wcwidth }, .out = &output.writer };
     for ("   ```sh\n  echo hi\n   ```") |byte| try renderer.feed(&.{byte});
     try renderer.finish();
-    try std.testing.expectEqualStrings("\x1b[40m  echo hi\n\x1b[0m", output.written());
+    try std.testing.expectEqualStrings(TerminalText.full_width_on ++ "\x1b[40m  echo hi\n\x1b[0m" ++ TerminalText.full_width_off, output.written());
 }
 
 test "rendered content and unsupported fence syntax stay visible without a gutter" {
@@ -1487,7 +1496,7 @@ test "rendered content and unsupported fence syntax stay visible without a gutte
     var renderer: Renderer = .{ .destination = .{ .viewport = .wcwidth }, .out = &output.writer };
     for ("# Title\n```zig\n  call\n```\n```bad info\ntrailing `open\n") |byte| try renderer.feed(&.{byte});
     try renderer.finish();
-    try std.testing.expectEqualStrings("\x1b[1mTitle\x1b[0m\n\x1b[40m  call\n\x1b[0m```bad info\ntrailing `open\n", output.written());
+    try std.testing.expectEqualStrings("\x1b[1mTitle\x1b[0m\n" ++ TerminalText.full_width_on ++ "\x1b[40m  call\n\x1b[0m" ++ TerminalText.full_width_off ++ "```bad info\ntrailing `open\n", output.written());
 }
 
 test "oversized fence candidate is literal and does not enter code state" {
@@ -1745,7 +1754,7 @@ test "bare local paths are prose tokens not relative paths or Markdown targets" 
         "\\/tmp/a \\~/a",
     }) |input| try expectRenderedHome(input, input, "/home/test");
     try expectRenderedHome("~user/a;/tmp/b //host/~/b /tmp/ok;", "~user/a;/tmp/b //host/~/b " ++ comptime linked("file:///tmp/ok", "/tmp/ok") ++ ";", "/home/test");
-    try expectRenderedHome("`~/a` *~/b* **/tmp/c**\n```\n/tmp/d ~/e\n```\n", "\x1b[94m~/a\x1b[0m \x1b[3m~/b\x1b[0m \x1b[1m/tmp/c\x1b[0m\n\x1b[40m/tmp/d ~/e\n\x1b[0m", "/home/test");
+    try expectRenderedHome("`~/a` *~/b* **/tmp/c**\n```\n/tmp/d ~/e\n```\n", "\x1b[94m~/a\x1b[0m \x1b[3m~/b\x1b[0m \x1b[1m/tmp/c\x1b[0m\n" ++ TerminalText.full_width_on ++ "\x1b[40m/tmp/d ~/e\n\x1b[0m" ++ TerminalText.full_width_off, "/home/test");
     try expectRendered("[a](https://x y)", "[a](" ++ comptime linked("https://x", "https://x") ++ " y)");
 }
 
