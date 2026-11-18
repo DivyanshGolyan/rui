@@ -1524,6 +1524,18 @@ pub const Store = struct {
         return entry.finish(Ordinary.none, historical_domain.messagePartFrom(&access, page));
     }
 
+    pub fn readPublicParts(self: *Store, reader: *@import("domain/public_parts.zig").Reader) !@import("domain/public_parts.zig").Progress {
+        return self.queue().run(readPublicPartsHeld, .{ self, reader });
+    }
+
+    fn readPublicPartsHeld(self: *Store, reader: *@import("domain/public_parts.zig").Reader) !@import("domain/public_parts.zig").Progress {
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: ReadAccess = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.content, @import("domain/public_parts.zig").step(&access, reader));
+    }
+
     pub fn modelOperationKind(self: *Store, binding: AttemptBinding) !ModelOperationKind {
         return model_settlement_domain.checkAttempt(self, binding);
     }

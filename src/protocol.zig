@@ -144,6 +144,8 @@ pub const Kind = enum {
     activity_page,
     activity_search,
     activity_content,
+    public_part,
+    public_part_bytes,
     skill_suggestions,
     model_list,
 };
@@ -181,6 +183,16 @@ pub const MessageProgressStatus = WorkState.Progress;
 pub const ConversationItemKind = conversation_read.ConversationItemKind;
 
 pub const PermissionDecisionCommand = command_input.PermissionDecisionCommand;
+
+pub const PublicPartTarget = union(enum) { message: u64, action: u64 };
+pub const PublicPartKind = std.meta.Tag(PublicPartTarget);
+
+pub const PublicPart = struct {
+    store: Bounded(max_store_bytes) = .{},
+    session: Bounded(max_session_bytes) = .{},
+    target: PublicPartTarget = .{ .message = 0 },
+    ordinal: u64 = 0,
+};
 
 pub const ReadActionArguments = struct {
     store: Bounded(max_store_bytes) = .{},
@@ -655,6 +667,8 @@ fn RequestOf(comptime Custody: type) type {
         activity_page: ActivityPage,
         activity_search: ActivitySearch,
         activity_content: ReadActivityContent,
+        public_part: PublicPart,
+        public_part_bytes: PublicPart,
         skill_suggestions: ReadSkillSuggestions,
         model_list: struct { store: Bounded(max_store_bytes) = .{} },
 
@@ -662,7 +676,7 @@ fn RequestOf(comptime Custody: type) type {
             switch (self.*) {
                 .configure => |*command| try command.removeTemporaryContent(io),
                 .message => |*command| try command.removeTemporaryContent(io),
-                .host_info, .host_stop, .host_pause, .session_stop, .session_archive, .session_pin, .model_interruption, .permission_decision, .action_background, .action_stop, .observe_command, .read_result, .read_action, .read_action_call_id, .read_action_arguments, .inspect_session, .list_sessions, .conversation_page, .conversation_content, .activity_page, .activity_search, .activity_content, .skill_suggestions, .model_list => {},
+                .host_info, .host_stop, .host_pause, .session_stop, .session_archive, .session_pin, .model_interruption, .permission_decision, .action_background, .action_stop, .observe_command, .read_result, .read_action, .read_action_call_id, .read_action_arguments, .inspect_session, .list_sessions, .conversation_page, .conversation_content, .activity_page, .activity_search, .activity_content, .public_part, .public_part_bytes, .skill_suggestions, .model_list => {},
             }
         }
 
@@ -824,6 +838,15 @@ fn ParserOf(comptime Custody: type) type {
                 .activity_content => {
                     out.* = .{ .activity_content = .{ .store = store } };
                     try self.parseActivityContent(&out.activity_content, &members);
+                },
+                .public_part, .public_part_bytes => |kind| {
+                    if (kind == .public_part) {
+                        out.* = .{ .public_part = .{ .store = store } };
+                        try self.parsePublicPart(&out.public_part, &members);
+                    } else {
+                        out.* = .{ .public_part_bytes = .{ .store = store } };
+                        try self.parsePublicPart(&out.public_part_bytes, &members);
+                    }
                 },
                 .skill_suggestions => {
                     out.* = .{ .skill_suggestions = .{ .store = store } };
@@ -1259,6 +1282,29 @@ fn ParserOf(comptime Custody: type) type {
                 .action => out.action_id = try self.readCanonicalU64(),
             };
             try require(Field, seen, &.{ .key, .session, .action });
+        }
+
+        fn parsePublicPart(self: *Parser, out: *PublicPart, members: *Members) !void {
+            const Field = enum { session, id, ordinal, target };
+            var seen: std.enums.EnumSet(Field) = .empty;
+            var id: u64 = 0;
+            var kind: PublicPartKind = .message;
+            while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
+                .session => try self.readSmallString(&out.session),
+                .id => id = try self.readCanonicalU64(),
+                .ordinal => out.ordinal = try self.readCanonicalU64(),
+                .target => {
+                    var text: Bounded(8) = .{};
+                    try self.readSmallString(&text);
+                    kind = std.meta.stringToEnum(PublicPartKind, text.slice()) orelse return error.InvalidTarget;
+                },
+            };
+            try require(Field, seen, &.{ .session, .id, .ordinal, .target });
+            if (id == 0 or id > std.math.maxInt(i64) or out.ordinal > @import("input_parts.zig").max_parts) return error.InvalidCursor;
+            out.target = switch (kind) {
+                .message => .{ .message = id },
+                .action => .{ .action = id },
+            };
         }
 
         fn parseReadAction(self: *Parser, out: *@import("action_read.zig").Request, members: *Members) !void {
@@ -2023,6 +2069,15 @@ pub const activity_page_request = struct {
     pub const tail = .{"}"};
     pub const all = head ++ since ++ tail;
 };
+pub const public_part_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"public_part\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"id\":\"", Hole.decimal, "\",\"ordinal\":\"", Hole.decimal, "\",\"target\":\"", Hole{ .tag = PublicPartKind }, "\"}" };
+pub const public_part_bytes_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"public_part_bytes\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"id\":\"", Hole.decimal, "\",\"ordinal\":\"", Hole.decimal, "\",\"target\":\"", Hole{ .tag = PublicPartKind }, "\"}" };
+pub const public_part_reply = struct {
+    pub const head = .{"{\"version\":\"" ++ wire_version ++ "\",\"type\":\"public_part\",\"part\":"};
+    pub const missing = .{"null}"};
+    pub const text = .{ "{\"ordinal\":\"", Hole.decimal, "\",\"type\":\"text\",\"bytes\":\"", Hole.decimal, "\",\"sha256\":\"", Hole{ .hex = 32 }, "\"}}" };
+    pub const image = .{ "{\"ordinal\":\"", Hole.decimal, "\",\"type\":\"image\",\"mime\":", Hole{ .string = 10 }, ",\"bytes\":\"", Hole.decimal, "\",\"sha256\":\"", Hole{ .hex = 32 }, "\"}}" };
+    pub const max_bytes = maxShapeBytes(.{ head ++ missing, head ++ text, head ++ image });
+};
 pub const activity_content_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"activity_content\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"position\":\"", Hole.decimal, "\",\"ordinal\":\"", Hole.decimal, "\"}" };
 pub const configure_request = struct {
     pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"configure\",\"store\":", store_hole, ",\"key\":", key_hole, ",\"session\":", session_hole, ",\"configuration\":" };
@@ -2080,7 +2135,8 @@ pub const max_client_request_bytes = @max(max_inspect_session_request_bytes, max
     read_action_request.all,             read_action_arguments_request, read_action_call_id_request,
     conversation_content_request.all,    conversation_page_request,     activity_search_request.all,
     activity_page_request.all,           activity_content_request,      skill_suggestions_session_request,
-    skill_suggestions_workspace_request, model_list_request,
+    skill_suggestions_workspace_request, model_list_request,            public_part_request,
+    public_part_bytes_request,
 }));
 
 pub fn jsonListBytes(comptime count: usize, comptime item_bytes: usize) usize {
@@ -2946,7 +3002,7 @@ test "activity search wire validates query and paired backward cursor" {
     }
 }
 
-test "the request parser refuses what each command's grammar forbids" {
+test "WIR-1 wire_object_grammar" {
     const v = "{\"version\":\"" ++ wire_version ++ "\",";
     const message = v ++ "\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"sender\":null,\"sender_handle\":null,";
     const inspect = v ++ "\"kind\":\"inspect_session\",\"store\":\"s\",\"session\":\"peer\",";
@@ -2997,6 +3053,7 @@ test "the request parser refuses what each command's grammar forbids" {
         var parser: Tested.Parser = .{ .source = &source, .expected_kind = case.route, .captured = &.{ .{}, .{}, .{} } };
         if (case.failure) |failure| try std.testing.expectError(failure, parseForTest(&parser)) else _ = try parseForTest(&parser);
     }
+    try publicPartSelectorGrammar();
 }
 
 test "presets allow partial creating configure in either field order" {
@@ -3302,4 +3359,41 @@ test "Action promotion parses one owned target and binds semantic replay" {
         var invalid_parser = Tested.Parser{ .source = &invalid };
         try std.testing.expectError(error.InvalidIdentity, parseForTest(&invalid_parser));
     }
+}
+
+fn publicPartSelectorGrammar() !void {
+    const Case = struct { fields: []const u8, failure: ?anyerror = null, id: u64 = 1, ordinal: u64 = 0, action: bool = false };
+    const cases = [_]Case{
+        .{ .fields = "\"session\":\"k7m2qx\",\"id\":\"1\",\"ordinal\":\"0\",\"target\":\"message\"" },
+        .{ .fields = "\"target\":\"action\",\"ordinal\":\"1499\",\"id\":\"4\",\"session\":\"k7m2qx\"", .id = 4, .ordinal = 1499, .action = true },
+        .{ .fields = "\"session\":\"k7m2qx\",\"id\":\"4\",\"ordinal\":\"1500\",\"target\":\"action\"", .id = 4, .ordinal = 1500, .action = true },
+        .{ .fields = "\"session\":\"k7m2qx\",\"id\":\"0\",\"ordinal\":\"0\",\"target\":\"message\"", .failure = error.InvalidCursor },
+        .{ .fields = "\"session\":\"k7m2qx\",\"id\":\"1\",\"ordinal\":\"1501\",\"target\":\"message\"", .failure = error.InvalidCursor },
+        .{ .fields = "\"session\":\"k7m2qx\",\"id\":\"01\",\"ordinal\":\"0\",\"target\":\"message\"", .failure = error.InvalidIdentity },
+        .{ .fields = "\"session\":\"k7m2qx\",\"id\":\"1\",\"ordinal\":\"00\",\"target\":\"message\"", .failure = error.InvalidIdentity },
+        .{ .fields = "\"session\":\"k7m2qx\",\"id\":\"1\",\"ordinal\":\"0\"", .failure = error.MissingField },
+        .{ .fields = "\"session\":\"k7m2qx\",\"id\":\"1\",\"ordinal\":\"0\",\"target\":\"other\"", .failure = error.InvalidTarget },
+        .{ .fields = "\"session\":\"k7m2qx\",\"id\":\"1\",\"ordinal\":\"0\",\"target\":\"message\",\"target\":\"action\"", .failure = error.UnexpectedField },
+        .{ .fields = "\"session\":\"k7m2qx\",\"id\":\"1\",\"ordinal\":\"0\",\"target\":\"message\",\"extra\":true", .failure = error.UnexpectedField },
+    };
+    inline for (.{ "public_part", "public_part_bytes" }) |kind| for (cases) |case| {
+        var buffer: [512]u8 = undefined;
+        const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"" ++ kind ++ "\",\"store\":\"s\",{s}}}", .{case.fields});
+        var source: MetadataSource = .{ .input = json };
+        var parser = Tested.Parser{ .source = &source };
+        if (case.failure) |failure| {
+            try std.testing.expectError(failure, parseForTest(&parser));
+        } else {
+            const parsed = try parseForTest(&parser);
+            const selected = if (comptime std.mem.eql(u8, kind, "public_part")) parsed.public_part else parsed.public_part_bytes;
+            try std.testing.expectEqual(case.ordinal, selected.ordinal);
+            try std.testing.expectEqual(case.action, selected.target == .action);
+            try std.testing.expectEqual(case.id, switch (selected.target) {
+                inline else => |id| id,
+            });
+            var wrong_source: MetadataSource = .{ .input = json };
+            var wrong_parser = Tested.Parser{ .source = &wrong_source, .expected_kind = if (comptime std.mem.eql(u8, kind, "public_part")) .public_part_bytes else .public_part };
+            try std.testing.expectError(error.RouteKindMismatch, parseForTest(&wrong_parser));
+        }
+    };
 }

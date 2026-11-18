@@ -1214,6 +1214,13 @@ class SelectionTest(unittest.TestCase):
                 self.assertIn(target, result["targets"])
                 self.assertNotIn("human-cli-integration", result["targets"])
 
+    def test_public_parts_owner_selects_image_export_fixture(self):
+        for path in ("src/store/domain/public_parts.zig", "src/store/tests/action_parts.zig",
+                     "src/protocol.zig", "src/cli_args.zig", "src/cli.zig", "src/server.zig"):
+            with self.subTest(path=path):
+                result = select([path], "review", AVAILABLE)
+                self.assertTrue({"public-parts-integration", "check"} & set(result["targets"]))
+
     def test_shared_fixture_helpers_keep_composed_and_separate_consumers(self):
         for name in ("host_process.py",):
             path = f"tests/integration/{name}"

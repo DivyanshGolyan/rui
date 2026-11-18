@@ -361,6 +361,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/public-part": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Typed metadata for an ordered Message or Action Resolution part. */
+        post: operations["publicPart"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/public-part-bytes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Exact bytes of one image part. */
+        post: operations["publicPartBytes"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/activity-search": {
         parameters: {
             query?: never;
@@ -3124,6 +3158,62 @@ export interface components {
             /** @enum {string} */
             decision: "allow_once" | "deny";
         };
+        PublicPartBytesRequest: {
+            /** @constant */
+            version: "21";
+            /** @constant */
+            kind: "public_part_bytes";
+            store: string;
+            session: string;
+            id: components["schemas"]["Decimal"];
+            ordinal: components["schemas"]["Decimal"];
+            /** @enum {string} */
+            target: "message" | "action";
+        };
+        PublicPartReply: {
+            /** @constant */
+            version: "21";
+            /** @constant */
+            type: "public_part";
+            part: null;
+        } | {
+            /** @constant */
+            version: "21";
+            /** @constant */
+            type: "public_part";
+            part: {
+                ordinal: components["schemas"]["Decimal"];
+                /** @constant */
+                type: "text";
+                bytes: components["schemas"]["Decimal"];
+                sha256: string;
+            };
+        } | {
+            /** @constant */
+            version: "21";
+            /** @constant */
+            type: "public_part";
+            part: {
+                ordinal: components["schemas"]["Decimal"];
+                /** @constant */
+                type: "image";
+                mime: string;
+                bytes: components["schemas"]["Decimal"];
+                sha256: string;
+            };
+        };
+        PublicPartRequest: {
+            /** @constant */
+            version: "21";
+            /** @constant */
+            kind: "public_part";
+            store: string;
+            session: string;
+            id: components["schemas"]["Decimal"];
+            ordinal: components["schemas"]["Decimal"];
+            /** @enum {string} */
+            target: "message" | "action";
+        };
         Queued: {
             count: components["schemas"]["Decimal"];
             oldest_position: components["schemas"]["Decimal"];
@@ -4683,6 +4773,82 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["ConversationContentRequest"];
+            };
+        };
+        responses: {
+            /** @description The content bytes, from the requested offset. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/octet-stream": string;
+                };
+            };
+            /** @description A refusal or failure. */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorReply"];
+                };
+            };
+        };
+    };
+    publicPart: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description The wire version this document describes. Any other version is refused. */
+                "X-Rui-Wire-Version": components["parameters"]["WireVersion"];
+                /** @description The Host instance (from host-info) the request is meant for; a different instance refuses it. */
+                "X-Rui-Host-Instance"?: components["parameters"]["HostInstance"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PublicPartRequest"];
+            };
+        };
+        responses: {
+            /** @description The reply. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PublicPartReply"];
+                };
+            };
+            /** @description A refusal or failure. */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorReply"];
+                };
+            };
+        };
+    };
+    publicPartBytes: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description The wire version this document describes. Any other version is refused. */
+                "X-Rui-Wire-Version": components["parameters"]["WireVersion"];
+                /** @description The Host instance (from host-info) the request is meant for; a different instance refuses it. */
+                "X-Rui-Host-Instance"?: components["parameters"]["HostInstance"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PublicPartBytesRequest"];
             };
         };
         responses: {

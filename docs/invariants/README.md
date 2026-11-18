@@ -9,7 +9,7 @@ First drafts, written from the README and the contracts and checked against fixe
 | [Store, Host lifetime, install and upgrade](store-host.md) | 50 |
 | [Tools, execution, recovery and resources](execution-resources.md) | 44 |
 | [Conversation, settings and model requests](conversation-model.md) | 32 |
-| [CLI, inspection, local protocol and the TypeScript client](cli-inspection.md) | 35 |
+| [CLI, inspection, local protocol and the TypeScript client](cli-inspection.md) | 38 |
 | [Session UI and diagnostics](session-ui.md) | 44 |
 | [CI tooling and policy checks](ci-tooling.md) | 64 |
 | [Test pause point owner](pause.md) | 7 |
