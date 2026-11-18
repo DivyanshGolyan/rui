@@ -566,6 +566,8 @@ test "SH-75 a run's ending outcome exit and relaunch follow its facts" {
     };
     const empty = activation.Summary{ .counts = .{}, .guidance = false, .own = .not_needed };
     const restarted = activation.Summary{ .counts = .{ .restarted = 1 }, .guidance = false, .own = .{ .ready = .{ .instance = @splat(0), .pid = 1 } } };
+    const current = activation.Summary{ .counts = .{ .current = 1 }, .guidance = false, .own = .{ .already_ready = .{ .instance = @splat(0), .pid = 1 } } };
+    const failed_other = activation.Summary{ .counts = .{ .failed = 1 }, .guidance = true, .own = .not_needed };
     const unsafe_host = activation.Summary{ .counts = .{ .failed = 1 }, .guidance = true, .own = .{ .unconfirmed = .verifying } };
     const cancelled = activation.Summary{ .counts = .{ .failed = 1 }, .guidance = true, .own = .cancelled };
     // Literal expectations from UpgradeJob before moving these decisions.
@@ -574,18 +576,31 @@ test "SH-75 a run's ending outcome exit and relaunch follow its facts" {
         .{ .changed = false, .hosts = empty, .ended = .{ .superseded = receipt }, .result = .compatible, .relaunch = false, .guidance = false, .exit_class = .done },
         .{ .changed = true, .hosts = restarted, .ended = .{ .upgraded = .{ .version = receipt, .restarted = true } }, .result = .compatible, .relaunch = true, .guidance = false, .exit_class = .done },
         .{ .changed = false, .hosts = restarted, .ended = .{ .upgraded = .{ .version = receipt, .restarted = true } }, .result = .compatible, .relaunch = false, .guidance = false, .exit_class = .done },
+        .{ .changed = true, .hosts = current, .ended = .{ .upgraded = .{ .version = receipt, .restarted = false } }, .result = .compatible, .relaunch = true, .guidance = false, .exit_class = .done },
+        .{ .changed = false, .hosts = current, .ended = .{ .superseded = receipt }, .result = .compatible, .relaunch = false, .guidance = false, .exit_class = .done },
+        .{ .changed = true, .hosts = failed_other, .ended = .{ .upgraded = .{ .version = receipt, .restarted = false } }, .result = .compatible, .relaunch = true, .guidance = true, .exit_class = .restart_failed },
+        .{ .changed = false, .hosts = failed_other, .ended = .{ .superseded = receipt }, .result = .compatible, .relaunch = false, .guidance = true, .exit_class = .restart_failed },
         .{ .changed = true, .hosts = unsafe_host, .ended = .{ .incompatible = receipt }, .result = .incompatible, .relaunch = true, .guidance = true, .exit_class = .restart_failed },
         .{ .changed = false, .hosts = unsafe_host, .ended = .{ .incompatible = receipt }, .result = .incompatible, .relaunch = false, .guidance = true, .exit_class = .restart_failed },
         .{ .changed = true, .hosts = cancelled, .ended = .{ .upgraded = .{ .version = receipt, .restarted = false } }, .result = .compatible, .relaunch = true, .guidance = true, .exit_class = .restart_failed },
         .{ .changed = false, .hosts = cancelled, .ended = .{ .superseded = receipt }, .result = .compatible, .relaunch = false, .guidance = true, .exit_class = .restart_failed },
     };
-    for (rows) |row| for ([_]bool{ false, true }) |stopping| {
-        const f: Facts = .{ .mode = .install, .selection = .{ .ok = .{ .released = receipt } }, .release = .{ .ok = .{ .schema = 60, .patch = 1 } }, .census = .{ .ok = 0 }, .resumed = true, .published = .{ .ok = .{ .changed = row.changed, .selected = receipt } }, .pinned = .{ .ok = {} }, .hosts = .{ .ok = row.hosts } };
-        try std.testing.expectEqualDeep(row.ended, ending(f, stopping));
+    const releases = [_]struct { Version, status.Ended }{
+        .{ .{ .schema = 60, .patch = 1 }, .{ .superseded = receipt } },
+        .{ receipt, .{ .up_to_date = receipt } },
+        .{ .{ .schema = 62, .patch = 0 }, .{ .up_to_date = receipt } },
+    };
+    const selections = [_]Selection{ .absent, .ineligible, .source, .unknown_managed, .{ .released = receipt } };
+    for (rows) |row| for (releases) |release_row| for (selections) |selection| for ([_]bool{ false, true }) |stopping| {
+        const f: Facts = .{ .mode = .install, .selection = .{ .ok = selection }, .release = .{ .ok = release_row[0] }, .census = .{ .ok = 0 }, .resumed = true, .published = .{ .ok = .{ .changed = row.changed, .selected = receipt } }, .pinned = .{ .ok = {} }, .hosts = .{ .ok = row.hosts } };
+        const expected = if (row.ended == .superseded) release_row[1] else row.ended;
+        try std.testing.expectEqualDeep(expected, ending(f, stopping));
         try std.testing.expectEqual(row.result, outcome(f));
         try std.testing.expectEqual(row.relaunch, installed(f));
         try std.testing.expectEqual(row.guidance, guidance(f, false, true));
-        try std.testing.expectEqual(row.exit_class, exit(f));
+        try std.testing.expect(guidance(f, true, true));
+        try std.testing.expect(guidance(f, false, false));
+        try std.testing.expectEqual(if (selection == .released) row.exit_class else Exit.not_installable, exit(f));
     };
     const cases = [_]struct { Selection, status.Refusal }{
         .{ .absent, .first_install }, .{ .source, .source_build }, .{ .unknown_managed, .unknown_build }, .{ .ineligible, .package_managed },
@@ -595,6 +610,30 @@ test "SH-75 a run's ending outcome exit and relaunch follow its facts" {
         try std.testing.expectEqualDeep(status.Ended{ .refused = row[1] }, ending(f, false));
         try std.testing.expectEqual(status.Ended.cancelled, ending(f, true));
         try std.testing.expectEqual(Exit.not_installable, exit(f));
+    }
+    const errors = [_]struct { Cause, status.Failure }{
+        .{ .download, .download }, .{ .release, .release }, .{ .preparation, .release }, .{ .other, .other }, .{ .cancelled, .other },
+    };
+    for (errors) |row| for ([_]bool{ false, true }) |stopping| {
+        var f: Facts = .{ .mode = .install, .selection = .{ .ok = .{ .released = receipt } }, .release = .{ .ok = receipt }, .census = .{ .ok = 0 }, .resumed = true, .published = .{ .failed = row[0] } };
+        try std.testing.expectEqualDeep(if (stopping) status.Ended.cancelled else status.Ended{ .failed = row[1] }, ending(f, stopping));
+        try std.testing.expectEqual(status.Outcome.unchanged, outcome(f));
+        try std.testing.expect(!installed(f));
+        try std.testing.expect(guidance(f, false, true));
+        try std.testing.expectEqual(Exit.install_failed, exit(f));
+        f.selection = .{ .failed = row[0] };
+        try std.testing.expectEqualDeep(if (stopping) status.Ended.cancelled else status.Ended{ .failed = row[1] }, ending(f, stopping));
+        try std.testing.expectEqual(Exit.check_failed, exit(f));
+    };
+    const phases = [_]struct { Phase, status.Step }{
+        .{ .checking, .preparing },   .{ .preparing, .preparing },            .{ .publishing, .publishing },
+        .{ .stopping, .restarting },  .{ .awaiting_retirement, .restarting }, .{ .starting, .restarting },
+        .{ .verifying, .restarting }, .{ .finished, .preparing },
+    };
+    for (phases) |row| {
+        const f: Facts = .{ .mode = .install, .selection = .{ .ok = .{ .released = .{ .schema = 60, .patch = 0 } } }, .release = .{ .ok = receipt }, .census = .{ .ok = 2 }, .resumed = true };
+        try std.testing.expectEqualDeep(status.Run{ .installing = .{ .found = .{ .host = .{ .running = 2 } }, .step = row[1] } }, run(f, false, false, row[0]));
+        try std.testing.expectEqual(status.Run.cancelling, run(f, true, false, row[0]));
     }
     // F2 (#1792): a worker cancellation retains failure guidance.
     const cancelled_before_publication: Facts = .{ .mode = .install, .selection = .{ .ok = .{ .released = receipt } }, .release = .{ .ok = receipt }, .census = .{ .ok = 0 }, .resumed = true, .published = .{ .failed = .cancelled } };

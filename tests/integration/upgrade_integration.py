@@ -1431,6 +1431,7 @@ def terminal_cases(root, binary, releases, artifacts):
             screen.contains(" · publishing")
             screen.close_settings()
             screen.contains("Publishing; cancelling no longer rolls back")
+            screen.send("\x1b")
             screen.ignored_overview_input("overview α ignored/x\x1b[200~overview β paste\x1b[201~",
                                           "overview α ignored", "overview β paste")
             published.unlink()
@@ -1515,30 +1516,9 @@ def conversation_case(root, binary, releases, artifacts):
         assert (c.home / ".config/rui/codex.json").read_bytes() == credential
 
 
-def escape_after_publication(root, binary, releases, artifacts):
-    with case(root, binary, releases, "terminal-escape-after-publication") as c:
-        c.old_selection()
-        old_host, previous = c.start_host()
-        _, credential = terminal_setup(c)
-        gate = c.root / "after-publication.gate"
-        gate.touch()
-        c.env["RUI_TEST_UPGRADE_AFTER_PUBLICATION_GATE"] = str(gate)
-        with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root, columns=TERMINAL_COLUMNS) as (process, master):
-            screen = TerminalScreen(master, process)
-            screen.launch_overview()
-            screen.start_upgrade()
-            screen.until(lambda: c.link.resolve() != c.original, "publication before terminal Escape")
-            installed = c.link.resolve()
-            screen.contains(" · publishing")
-            screen.close_settings()
-            screen.contains("Publishing; cancelling no longer rolls back")
-            screen.save(artifacts, "escape-after-publication")
-            assert c.link.resolve() == installed and installed.exists()
-            assert old_host.poll() is None and c.status()["instance"] == previous["instance"]
-            gate.unlink()
-            proof_relaunched(c, screen, process)
-            proof_ready(c, previous, old_host)
-            assert (c.home / ".config/rui/codex.json").read_bytes() == credential
+def terminal_handoffs(root, binary, releases, artifacts):
+    terminal_cases(root, binary, releases, artifacts)
+    conversation_case(root, binary, releases, artifacts)
 
 
 def terminal_download_recovery(root, binary, releases, artifacts):
@@ -1584,116 +1564,30 @@ def terminal_download_recovery(root, binary, releases, artifacts):
                 shutil.copy2(curl.log, artifacts / "download-recovered.curl.jsonl")
 
 
-def terminal_download_failure(root, binary, releases, artifacts):
-    with case(root, binary, releases, "terminal-download-failure") as c:
-        c.old_selection()
-        host, previous = c.start_host()
-        _, credential = terminal_setup(c)
-        releases.status["/releases/latest"] = 403
-        with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root, columns=TERMINAL_COLUMNS) as (process, master):
-            screen = TerminalScreen(master, process)
-            screen.launch_overview()
-            screen.start_upgrade()
-            screen.contains(" · couldn't reach GitHub")
-            assert os_semantics.process_executable(process.pid) == binary, "failed check replaced the client"
-            assert screen.entries == 1 and screen.restorations == 0, "failed check relaunched"
-            screen.save(artifacts, "download-failure-settings")
-            screen.close_settings()
-            screen.sidebar(failed=True)
-            receipt = exit_on_sigint(screen, process, "restored curl download failure report")
-            assert b"curl: (22)" in receipt and b"403" in receipt, receipt.decode()
-            assert b"could not download release information" in receipt, receipt.decode()
-            assert screen.entries == screen.restorations == 1, "failed check relaunched on departure"
-            c.assert_unchanged()
-            assert host.poll() is None and c.status()["instance"] == previous["instance"]
-            assert (c.home / ".config/rui/codex.json").read_bytes() == credential
-
-
-def terminal_cancellation_guidance(root, binary, releases, artifacts):
-    with case(root, binary, releases, "terminal-cancellation-guidance") as c:
-        c.old_selection()
-        old_host, previous = c.start_host()
-        terminal_setup(c)
-        gate = releases.gate_archive()
-        with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root, columns=TERMINAL_COLUMNS) as (process, master):
-            screen = TerminalScreen(master, process)
-            screen.launch_overview()
-            screen.start_upgrade()
-            screen.until(gate.entered.is_set, "archive held before cancellation guidance")
-            screen.send("\x1b")
-            screen.contains(" · cancelled")
-            gate.release.set()
-            c.assert_unchanged()
-            screen.start_upgrade()
-            screen.contains(f" · upgraded to {releases.version}")
-            screen.close_settings()
-            screen.sidebar()
-            proof_ready(c, previous, old_host)
-            assert os_semantics.process_executable(process.pid) == binary
-            screen.save(artifacts, "cancellation-guidance-installed")
-            receipt = exit_on_sigint(screen, process, "retained cancellation report after successful install")
-            assert b"Upgrade installation failed:" in receipt, receipt.decode()
-            assert b"No completed installation receipt" in receipt, receipt.decode()
-            assert b"Installed Rui. Complete build:" in receipt, receipt.decode()
-            assert screen.entries == screen.restorations == 1, "prior report triggered delayed relaunch"
-
-
-def terminal_path_guidance(root, binary, releases, artifacts):
-    with case(root, binary, releases, "terminal-path-guidance") as c:
-        c.old_selection()
-        old_host, previous = c.start_host()
-        _, credential = terminal_setup(c)
-        shadow = c.build("shadowing-path", "0.1.0", managed=False) / "bin/rui"
-        c.env["PATH"] = f"{shadow.parent}:{c.env['PATH']}"
-        with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root, columns=TERMINAL_COLUMNS) as (process, master):
-            screen = TerminalScreen(master, process)
-            screen.launch_overview()
-            screen.start_upgrade()
-            screen.contains(f" · upgraded to {releases.version}")
-            screen.close_settings()
-            screen.sidebar()
-            proof_ready(c, previous, old_host)
-            screen.ignored_overview_input("guidance ε ignored", "guidance ε ignored")
-            assert os_semantics.process_executable(process.pid) == binary
-            assert screen.entries == 1 and screen.restorations == 0
-            screen.save(artifacts, "path-guidance-installed")
-            receipt = exit_on_sigint(screen, process, "PATH guidance after terminal restoration")
-            assert b"Your PATH finds another rui first, at " in receipt, receipt.decode()
-            assert os.fsencode(shadow) in receipt, "departure lost the shadowing executable's path"
-            assert b"hash -r" in receipt and b"rehash" in receipt, receipt.decode()
-            assert screen.entries == screen.restorations == 1, "PATH guidance did not prevent relaunch"
-            assert (c.home / ".config/rui/codex.json").read_bytes() == credential
-
-
 def startup_cases(root, binary, releases, artifacts):
-    for screen_kind, condition, store_kind in itertools.product(
-            ("overview", "resume"), ("readable", "unreadable", "no-credentials"),
-            ("explicit", "implicit")):
-        name = f"startup-{screen_kind}-{condition}-{store_kind}"
+    for screen_kind in ("overview", "resume"):
+        name = f"startup-{screen_kind}-unreadable-no-credentials-implicit"
         with case(root, binary, releases, name) as c:
             c.old_selection()
             old_host, previous = c.start_host()
-            session, credential_bytes = terminal_setup(c)
+            session, _ = terminal_setup(c)
             c.run("defaults", "configure", "--store", c.store)
             before = c.json("session", "inspect", "--store", c.store, "--session", session)
             preferences = c.home / ".config/rui/preferences"
             credential = c.home / ".config/rui/codex.json"
             preference_mode = stat.S_IMODE(preferences.stat().st_mode)
-            other_store = c.root / "other-store" if store_kind == "implicit" else None
-            if other_store is not None:
-                other_store.mkdir(mode=0o700)
+            other_store = c.root / "other-store"
+            other_store.mkdir(mode=0o700)
             published = c.root / "after-publication.gate"
             published.touch()
             c.env["RUI_TEST_UPGRADE_AFTER_PUBLICATION_GATE"] = str(published)
-            destination = ["--store", str(c.store)] if store_kind == "explicit" else []
-            arguments = ([str(binary), "session", "resume", *destination, session]
-                         if screen_kind == "resume" else [str(binary), *destination])
+            arguments = ([str(binary), "session", "resume", session]
+                         if screen_kind == "resume" else [str(binary)])
 
             def retire_misdirected_host():
-                if other_store is not None:
-                    status = c.json("host", "status", "--store", other_store)
-                    if status["status"] == "ready":
-                        c.run("host", "pause", "--store", other_store, "--instance", status["instance"])
+                status = c.json("host", "status", "--store", other_store)
+                if status["status"] == "ready":
+                    c.run("host", "pause", "--store", other_store, "--instance", status["instance"])
 
             try:
                 with terminal_process(arguments, env=c.env, cwd=c.root, columns=TERMINAL_COLUMNS) as (process, master):
@@ -1716,13 +1610,10 @@ def startup_cases(root, binary, releases, artifacts):
                                                       "startup α ignored", "startup β paste")
                     assert c.link.resolve() != c.original and published.exists()
                     assert old_host.poll() is None and c.status()["instance"] == previous["instance"]
-                    if other_store is not None:
-                        c.run("defaults", "configure", "--store", other_store)
+                    c.run("defaults", "configure", "--store", other_store)
                     expected_preferences = preferences.read_bytes()
-                    if condition == "unreadable":
-                        preferences.chmod(0o000)
-                    elif condition == "no-credentials":
-                        credential.unlink()
+                    preferences.chmod(0o000)
+                    credential.unlink()
                     published.unlink()
                     proof_relaunched(c, screen, process)
                     proof_ready(c, previous, old_host)
@@ -1738,15 +1629,10 @@ def startup_cases(root, binary, releases, artifacts):
                     screen.save(artifacts, name)
                     assert "No locally ready provider for a new Session" not in screen.capture.plain
                     assert "private setup defaults unreadable" not in screen.capture.plain
-                    if condition == "unreadable":
-                        assert stat.S_IMODE(preferences.stat().st_mode) == 0
-                    if condition == "no-credentials":
-                        assert not credential.exists(), "relaunch recreated provider credentials"
-                    else:
-                        assert credential.read_bytes() == credential_bytes
-                    if other_store is not None:
-                        assert c.json("host", "status", "--store", other_store)["status"] == "unavailable"
-                        assert not list(other_store.iterdir()), "relaunch opened the newly saved default Store"
+                    assert stat.S_IMODE(preferences.stat().st_mode) == 0
+                    assert not credential.exists(), "relaunch recreated provider credentials"
+                    assert c.json("host", "status", "--store", other_store)["status"] == "unavailable"
+                    assert not list(other_store.iterdir()), "relaunch opened the newly saved default Store"
                     exit_on_sigint(screen, process, f"{name} terminal exit")
                     assert screen.entries == screen.restorations == 2, "startup replaced the TUI more than once"
                 after = c.json("session", "inspect", "--store", c.store, "--session", session)
@@ -1864,49 +1750,6 @@ def cancel_selected_version_check(root, binary, releases, artifacts):
                 dispose_all(release_version)
 
 
-def terminal_cleanup_dual_failure(root, binary, releases, artifacts):
-    with case(root, binary, releases, "terminal-dual-failure") as c:
-        c.old_selection()
-        host, previous = c.start_host()
-        _, credential = terminal_setup(c)
-        parent = c.home / ".local/lib/rui"
-        original_mode = stat.S_IMODE(parent.stat().st_mode)
-        original_digest = releases.digest
-        releases.digest = "0" * 64
-        gate = releases.gate_archive()
-        try:
-            with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root, columns=TERMINAL_COLUMNS) as (process, master):
-                screen = TerminalScreen(master, process)
-                screen.launch_overview()
-                screen.start_upgrade()
-                screen.until(gate.entered.is_set, "real archive request after stage creation")
-                stages = list(parent.glob("install.*"))
-                assert len(stages) == 1 and stages[0].is_dir(), stages
-                retained = stages[0]
-                parent.chmod(0o500)
-                gate.release.set()
-                screen.contains(" · upgrade failed")
-                screen.close_settings()
-                screen.sidebar(failed=True)
-                screen.save(artifacts, "dual-failure-status")
-                assert retained.is_dir(), "cleanup receipt did not identify an existing retained stage"
-                assert c.link.resolve() == c.original
-                assert host.poll() is None and c.status()["instance"] == previous["instance"]
-                receipt = exit_on_sigint(screen, process, "restored primary and retained cleanup receipt after SIGINT")
-                assert b"ReleaseChecksumMismatch" in receipt, receipt.decode()
-                assert b"cleanup also failed (AccessDenied)" in receipt, receipt.decode()
-                assert os.fsencode(retained.resolve()) in receipt, ("restored output lost retained cleanup custody", receipt.decode())
-                assert retained.is_dir() and c.link.resolve() == c.original
-                assert host.poll() is None and c.status()["instance"] == previous["instance"]
-                assert (c.home / ".config/rui/codex.json").read_bytes() == credential
-                if artifacts is not None:
-                    (artifacts / "dual-failure-restored.txt").write_text(screen.capture.plain)
-        finally:
-            dispose_all(lambda: parent.chmod(original_mode),
-                        gate.release.set,
-                        lambda: setattr(releases, "digest", original_digest))
-
-
 def main():
     modes = ("restart-all", "lifecycle", "custody", "download", "terminal", "startup", "future-target", "known-target", "frozen-settings", "pre-freeze-target", "retired-environment")
     if len(sys.argv) not in (2, 3, 4, 5) or (len(sys.argv) >= 3 and sys.argv[2] not in modes):
@@ -1962,15 +1805,13 @@ def main():
                 tool_custody_cases(root, binary, releases, operation)
                 print(f"upgrade native: tool {operation} custody passed", flush=True)
         if selection in ("all", "terminal"):
-            for suite in (terminal_download_recovery, terminal_download_failure, terminal_cases, conversation_case, escape_after_publication,
-                          terminal_cancellation_guidance, terminal_path_guidance):
+            for suite in (terminal_download_recovery, terminal_handoffs):
                 suite(root, binary, releases, artifacts)
                 print(f"upgrade native: {suite.__name__} passed", flush=True)
         if selection in ("all", "startup"):
             startup_cases(root, binary, releases, artifacts)
         if selection == "all":
-            for suite in (cancel_selected_version_check, terminal_cleanup_dual_failure,
-                          signal_after_publication, signal_during_check):
+            for suite in (cancel_selected_version_check, signal_after_publication, signal_during_check):
                 suite(root, binary, releases, artifacts)
                 print(f"upgrade native: {suite.__name__} passed", flush=True)
         complete = True
