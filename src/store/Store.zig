@@ -43,6 +43,7 @@ const session_report_read = @import("domain/session_report_read.zig");
 const rsql = @import("rsql.zig");
 const store_access = @import("access.zig");
 const write_batch = @import("write_batch.zig");
+const pass_plan = @import("pass_plan.zig");
 const transition = @import("transition.zig");
 const Access = store_access.Access;
 const ReadAccess = reads_domain.ReadAccess;
@@ -2276,7 +2277,7 @@ fn recoverRerun(context: *anyopaque) bool {
         };
         return true;
     }
-    if (mysql.state.failure) |err| if (err == error.StoreConnectionLost or err == error.OwnershipLost or err == error.CommitOutcomeUnknown) {
+    if (mysql.state.failure) |err| if (pass_plan.fences(err)) {
         _ = @errorName(fence(self, err));
     };
     return false;

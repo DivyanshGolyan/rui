@@ -787,11 +787,12 @@ class SelectionTest(unittest.TestCase):
             with self.subTest(core=core):
                 self.assertIn("test-logic", select([f"src/{core}"], "review", AVAILABLE)["targets"])
 
-    def test_batch_core_selects_logic_and_store_roots(self):
-        path = "src/store/write_batch.zig"
-        result = select([path], "review", AVAILABLE)
-        self.assertIn("test-logic", result["targets"])
-        self.assertTrue({"test-logic", "test-store"} <= set(result["fast_targets"]))
+    def test_store_cores_select_logic_and_store_roots(self):
+        for path in ("src/store/write_batch.zig", "src/store/pass_plan.zig", "src/store/round_order.zig"):
+            with self.subTest(path=path):
+                result = select([path], "review", AVAILABLE)
+                self.assertIn("test-logic", result["targets"])
+                self.assertTrue({"test-logic", "test-store"} <= set(result["fast_targets"]))
 
     def test_store_tests_reach_no_store_caller(self):
         graph = tree_graph()
