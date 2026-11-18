@@ -153,10 +153,7 @@ pub const Download = struct {
     family: policy.Family = .automatic,
     stderr: ?[]u8 = null,
 
-    pub const Request = struct {
-        url: []const u8,
-        output: union(enum) { body, effective_url, archive: []const u8 } = .body,
-    };
+    pub const Request = policy.Request;
 
     pub fn deinit(self: *Download, allocator: std.mem.Allocator) void {
         if (self.stderr) |bytes| allocator.free(bytes);
@@ -164,14 +161,7 @@ pub const Download = struct {
     }
 
     pub fn write(self: *const Download, writer: *std.Io.Writer) !void {
-        const bytes = self.stderr orelse return;
-        const trimmed = std.mem.trimEnd(u8, bytes, "\r\n");
-        const start = if (std.mem.lastIndexOfScalar(u8, trimmed, '\n')) |at| at + 1 else 0;
-        if (trimmed.len == start) return;
-        var text: @import("TerminalText.zig") = .{ .mode = .line };
-        try text.feed(writer, trimmed[start..]);
-        try text.finish(writer);
-        try writer.writeAll("\n");
+        try policy.writeDiagnostic(writer, self.stderr orelse return);
     }
 
     pub fn output(self: *Download, allocator: std.mem.Allocator, io: std.Io, request: Request, cancellation: ?*const client.Cancellation, limit: usize) ![]u8 {
@@ -184,59 +174,32 @@ pub const Download = struct {
             try check(cancellation);
             const remaining_ms = deadline.durationFromNow(io).raw.toMilliseconds();
             if (remaining_ms <= 0) return error.Timeout;
-            const milliseconds: u64 = @intCast(remaining_ms);
-            var time_buffer: [32]u8 = undefined;
-            const max_time = try std.fmt.bufPrint(&time_buffer, "{d}.{d:0>3}", .{ milliseconds / 1000, milliseconds % 1000 });
-            var connect_buffer: [16]u8 = undefined;
-            const connect_time = try std.fmt.bufPrint(&connect_buffer, "{d}", .{@as(u64, @intCast(std.Io.Duration.fromNanoseconds(policy.connect_timeout_ns).toSeconds()))});
-            const fixture = std.mem.startsWith(u8, request.url, "http://");
-            const discovery = request.output == .effective_url;
-            const common = [_][]const u8{
-                executable,          "--disable",                        "--fail",        "--silent",                                       "--show-error", "--location",
-                "--connect-timeout", connect_time,                       "--max-time",    max_time,                                         "--max-redirs", if (fixture and !discovery) "0" else "5",
-                "--proto",           if (fixture) "=http" else "=https", "--proto-redir", if (fixture and discovery) "=http" else "=https",
-            };
-            var argv: [common.len + 7][]const u8 = undefined;
-            argv[0..common.len].* = common;
-            var count: usize = common.len;
-            if (family == .ipv4) {
-                argv[count] = "--ipv4";
-                count += 1;
-            }
-            switch (request.output) {
-                .body => {},
-                .effective_url => {
-                    argv[count..][0..4].* = .{ "--output", "/dev/null", "--write-out", "%{url_effective}" };
-                    count += 4;
-                },
-                .archive => |path| {
-                    argv[count..][0..4].* = .{ "--max-filesize", "268435456", "--output", path };
-                    count += 4;
-                },
-            }
-            argv[count..][0..2].* = .{ "--", request.url };
-            count += 2;
-            const result = try runUntil(allocator, io, argv[0..count], cancellation, limit, deadline);
-            if (result.term.success()) {
-                self.family = family;
-                if (self.stderr) |bytes| allocator.free(bytes);
-                self.stderr = null;
-                allocator.free(result.stderr);
-                return result.stdout;
-            }
+            var storage: policy.Arguments = .{};
+            const argv = policy.arguments(&storage, executable, request, family, @intCast(remaining_ms));
+            const result = try runUntil(allocator, io, argv, cancellation, limit, deadline);
             const exit_code: ?u8 = switch (result.term) {
                 .exited => |code| code,
                 else => null,
             };
-            if (policy.retry(family, exit_code, deadline.durationFromNow(io).raw.nanoseconds)) {
-                dispose(allocator, result);
-                family = .ipv4;
-                continue;
+            switch (policy.after(family, exit_code, deadline.durationFromNow(io).raw.nanoseconds)) {
+                .done => |kept| {
+                    self.family = kept;
+                    if (self.stderr) |bytes| allocator.free(bytes);
+                    self.stderr = null;
+                    allocator.free(result.stderr);
+                    return result.stdout;
+                },
+                .retry_ipv4 => {
+                    dispose(allocator, result);
+                    family = .ipv4;
+                },
+                .failed => {
+                    allocator.free(result.stdout);
+                    if (self.stderr) |bytes| allocator.free(bytes);
+                    self.stderr = result.stderr;
+                    return error.ReleaseDownloadFailed;
+                },
             }
-            allocator.free(result.stdout);
-            if (self.stderr) |bytes| allocator.free(bytes);
-            self.stderr = result.stderr;
-            return error.ReleaseDownloadFailed;
         }
     }
 };
@@ -257,38 +220,26 @@ fn downloadFixture(allocator: std.mem.Allocator, script: []const u8, download: *
     return download.outputUntil(allocator, io, .{ .url = "https://fixture.invalid" }, null, 1024, executable, .fromNow(io, .{ .raw = .fromNanoseconds(policy.download_timeout_ns), .clock = .awake }));
 }
 
-test "upgrade process download failure retains only the last diagnostic line for reports" {
+test "upgrade process download failure retains only the last attempt's diagnostic for reports" {
     const allocator = std.testing.allocator;
     var diagnostic: Download = .{};
     defer diagnostic.deinit(allocator);
-    try std.testing.expectError(error.ReleaseDownloadFailed, downloadFixture(allocator, "#!/bin/sh\nprintf 'earlier line\\nlast curl failure\\n' >&2; exit 22\n", &diagnostic));
+    // The first attempt's exit 6 is retried; only the retry's stderr survives.
+    try std.testing.expectError(error.ReleaseDownloadFailed, downloadFixture(allocator,
+        \\#!/bin/sh
+        \\for argument; do [ "$argument" = --ipv4 ] && { printf 'retry earlier line\nretry last failure\n' >&2; exit 28; }; done
+        \\printf 'first attempt failure\n' >&2; exit 6
+        \\
+    , &diagnostic));
+    try std.testing.expectEqualStrings("retry earlier line\nretry last failure\n", diagnostic.stderr.?);
     var buffer: [256]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
     try diagnostic.write(&writer);
-    try std.testing.expectEqualStrings("last curl failure\n", writer.buffered());
-    try std.testing.expectError(error.UpgradeChildFailed, output(allocator, std.testing.io, &.{ "sh", "-c", "exit 1" }, null, 1024));
-}
-
-test "upgrade process download diagnostic handles empty CRLF and hostile terminal bytes" {
-    const allocator = std.testing.allocator;
-    var diagnostic: Download = .{};
-    defer diagnostic.deinit(allocator);
-    for ([_]struct { []const u8, []const u8 }{
-        .{ "", "" },
-        .{ "\r\n", "" },
-        .{ "first\r\nlast\r\n", "last\n" },
-        .{ "curl: \x1b[31m\xff\n", "curl: \\x1b[31m\\xff\n" },
-    }) |case| {
-        diagnostic.deinit(allocator);
-        diagnostic.stderr = try allocator.dupe(u8, case[0]);
-        var buffer: [128]u8 = undefined;
-        var writer = std.Io.Writer.fixed(&buffer);
-        try diagnostic.write(&writer);
-        try std.testing.expectEqualStrings(case[1], writer.buffered());
-    }
+    try std.testing.expectEqualStrings("retry last failure\n", writer.buffered());
     // A later failed download replaces (and frees) the previous capture.
     try std.testing.expectError(error.ReleaseDownloadFailed, downloadFixture(allocator, "#!/bin/sh\nprintf replacement >&2; exit 1\n", &diagnostic));
     try std.testing.expectEqualStrings("replacement", diagnostic.stderr.?);
+    try std.testing.expectError(error.UpgradeChildFailed, output(allocator, std.testing.io, &.{ "sh", "-c", "exit 1" }, null, 1024));
 }
 
 test "upgrade process pre-cancellation starts no child" {
