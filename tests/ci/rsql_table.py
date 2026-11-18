@@ -89,12 +89,25 @@ def slot(text):
 def render(records):
     """The table's source text for a set of records; one line per statement text, sorted."""
     entries = {}
+    schema = {}
+    migrations = {}
     fingerprints = set()
     for record in records:
         if not record.endswith(b"\x1c"):
             raise ValueError(f"unterminated record {record[:80]!r}")
-        _, sql, signature, sqlite, parts, slots, uses_now, shape, inputs = record[:-1].split(b"\x1f")
-        fingerprints.add(inputs)
+        fields = record[:-1].split(b"\x1f")
+        fingerprints.add(fields[-1])
+        if fields[0] == b"schema":
+            _, name, payload, _ = fields
+            name = name.decode()
+            if name.startswith("mysql_migrations_"):
+                index = int(name.removeprefix("mysql_migrations_"))
+                if migrations.setdefault(index, payload) != payload:
+                    raise ValueError(f"MySQL migration text {index} rendered two ways")
+            elif schema.setdefault(name, payload) != payload:
+                raise ValueError(f"the schema value {name} rendered two ways")
+            continue
+        _, sql, signature, sqlite, parts, slots, uses_now, shape, _ = fields
         entry = entries.setdefault(sql, dict(parts=parts, slots=slots, uses_now=uses_now, shape=shape, variants={}))
         if (entry["parts"], entry["slots"], entry["uses_now"], entry["shape"]) != (parts, slots, uses_now, shape):
             raise ValueError(f"one statement text rendered two ways: {sql[:120]!r}")
@@ -129,7 +142,44 @@ def render(records):
         lines += body + ["};"]
     else:
         lines[-1] += "};"
+    if migrations:
+        if set(migrations) != set(range(len(migrations))):
+            raise ValueError("the collect build omitted a MySQL migration text")
+        joined = b"\x1d".join(migrations[index] for index in range(len(migrations)))
+        if schema.setdefault("mysql_migrations", joined) != joined:
+            raise ValueError("MySQL migration texts rendered two ways")
+    lines += schema_lines(schema)
     return "\n".join(lines) + "\n", len(entries)
+
+
+SCHEMA_VALUES = ("sqlite_objects", "mysql_objects", "sqlite_ddl", "mysql_ddl", "mysql_migrations", "digest")
+
+
+def schema_lines(schema):
+    """schema.zig's generated values, which it serves under the same `inputs` as the statements."""
+    if set(schema) != set(SCHEMA_VALUES):
+        raise ValueError(f"the collect build exported schema values {sorted(schema)}, not {sorted(SCHEMA_VALUES)}")
+
+    def objects(payload):
+        items = []
+        for item in payload.split(b"\x1d") if payload else []:
+            kind, name, sql = item.split(b"\x1e")
+            items.append(".{ .kind = .%s, .name = %s, .sql = %s }" % (kind.decode(), literal(name), literal(sql)))
+        return "&.{ " + ", ".join(items) + " }"
+
+    texts = ", ".join(literal(text) for text in schema["mysql_migrations"].split(b"\x1d"))
+    return [
+        "",
+        "pub const schema = struct {",
+        '    const Object = @import("schema.zig").Object;',
+        f"    pub const sqlite_objects: []const Object = {objects(schema['sqlite_objects'])};",
+        f"    pub const mysql_objects: []const Object = {objects(schema['mysql_objects'])};",
+        f"    pub const sqlite_ddl = {literal(schema['sqlite_ddl'])};",
+        f"    pub const mysql_ddl = {literal(schema['mysql_ddl'])};",
+        f"    pub const mysql_migrations = [_][:0]const u8{{ {texts} }};",
+        f"    pub const digest: u64 = {int(schema['digest'])};",
+        "};",
+    ]
 
 
 def collect(zig):

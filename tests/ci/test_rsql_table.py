@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from rsql_table import fingerprint_error
+from rsql_table import fingerprint_error, render
 
 PRODUCT = 'pub const rsql_table_inputs = [_][]const u8{ "a.zig", "b.zig" };\n'
 # sha256(b"a.zig\0one\0b.zig\0two\0")[:16], written out rather than computed by the code under test.
@@ -41,6 +41,26 @@ class RsqlTableTest(unittest.TestCase):
                     self.assertIn("python3 tests/ci/rsql_table.py generate", error)
                 else:
                     self.assertIsNone(error)
+
+
+class SchemaRecordTest(unittest.TestCase):
+    def record(self, name, value):
+        return b"schema\x1f" + name + b"\x1f" + value + b"\x1finputs\x1c"
+
+    def test_split_migration_records_reassemble_in_order(self):
+        common = [self.record(name, value) for name, value in (
+            (b"sqlite_objects", b""), (b"mysql_objects", b""),
+            (b"sqlite_ddl", b""), (b"mysql_ddl", b""), (b"digest", b"0"),
+        )]
+        combined = common + [self.record(b"mysql_migrations", b"first\x1dsecond\x1d")]
+        split = common + [self.record(b"mysql_migrations_2", b""),
+                          self.record(b"mysql_migrations_0", b"first"),
+                          self.record(b"mysql_migrations_1", b"second")]
+        self.assertEqual(render(combined), render(split))
+        with self.assertRaises(ValueError):
+            render(split[:-1])
+        with self.assertRaises(ValueError):
+            render(split + [self.record(b"mysql_migrations_0", b"different")])
 
 
 if __name__ == "__main__":
