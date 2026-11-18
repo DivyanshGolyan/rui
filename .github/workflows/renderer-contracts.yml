@@ -90,7 +90,9 @@ jobs:
           SHA: ${{ inputs.ref }}
         run: |
           set -euo pipefail
-          echo "rui=$(python3 -B tests/ci/release_under_test.py "$VERSION" "$SHA" "$RUNNER_TEMP/release-under-test")" >> "$GITHUB_OUTPUT"
+          # A standalone assignment, so a failed fetch fails this step instead of leaving rui empty.
+          rui=$(python3 -B tests/ci/release_under_test.py "$VERSION" "$SHA" "$RUNNER_TEMP/release-under-test")
+          echo "rui=$rui" >> "$GITHUB_OUTPUT"
       - name: Self-tests, direct-PTY, Ghostty, controls and recovery encodings
         id: compile
         # Cache timing: green 725 s, run 43732653500; minimum margin 120 s.

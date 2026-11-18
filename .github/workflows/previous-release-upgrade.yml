@@ -139,7 +139,9 @@ jobs:
           SHA: ${{ inputs.candidate-ref }}
         run: |
           set -euo pipefail
-          echo "rui=$(python3 -B tests/ci/release_under_test.py "$VERSION" "$SHA" "$RUNNER_TEMP/release-under-test")" >> "$GITHUB_OUTPUT"
+          # A standalone assignment, so a failed fetch fails this step instead of leaving rui empty.
+          rui=$(python3 -B tests/ci/release_under_test.py "$VERSION" "$SHA" "$RUNNER_TEMP/release-under-test")
+          echo "rui=$rui" >> "$GITHUB_OUTPUT"
       - name: Start detached, then install, save real work, reinstall and restart the same Store
         # Each check's only copy; steps.py records the failed ones for a promotion to replay.
         timeout-minutes: 45
