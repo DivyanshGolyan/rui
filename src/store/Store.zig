@@ -2115,11 +2115,6 @@ fn batchState(self: *const Store) write_batch.State {
     return .{ .phase = self.batch, .savepoint = self.savepoint };
 }
 
-fn setBatchState(self: *Store, state: write_batch.State) void {
-    self.batch = state.phase;
-    self.savepoint = state.savepoint;
-}
-
 fn batchControl(self: *Store, control: write_batch.Control) !void {
     switch (control) {
         inline else => |which| try self.engine.control(which),
@@ -2131,13 +2126,21 @@ pub fn begin(self: *Store) !void {
         std.debug.assert(self.identities().taken.count() == 0 and self.identities().second == 0);
     const step = write_batch.begin(batchState(self));
     if (step.control) |control| try batchControl(self, control);
-    setBatchState(self, step.then);
+    switch (self.batch) {
+        .ready => self.batch = step.then.phase,
+        .open => self.savepoint = step.then.savepoint,
+        else => {},
+    }
 }
 
 pub fn commit(self: *Store) !void {
     const step = write_batch.commit(batchState(self), if (self.batch == .first) self.engine.inTransaction() else false);
     if (step.control) |control| try batchControl(self, control);
-    setBatchState(self, step.then);
+    switch (self.batch) {
+        .first => self.batch = step.then.phase,
+        .open => self.savepoint = step.then.savepoint,
+        else => {},
+    }
     if (self.batch == .none) {
         self.identities().taken = .empty;
         self.identities().second = 0;
@@ -2194,7 +2197,7 @@ fn batchClosed(context: *anyopaque) bool {
 
 fn startBatch(context: *anyopaque) void {
     const self: *Store = @ptrCast(@alignCast(context));
-    setBatchState(self, write_batch.start(batchState(self)));
+    self.batch = write_batch.start(batchState(self)).phase;
 }
 
 fn finishBatch(context: *anyopaque) bool {
@@ -2471,13 +2474,14 @@ fn loadIdentities(self: *Store, columns: std.EnumSet(Identity)) !void {
 pub fn rollbackAfterError(self: *Store, faults: Faults) !void {
     self.touched.everything = true;
     const state = batchState(self);
-    const plan = write_batch.rollback(state, self.engine.inTransaction()) catch |err| {
-        if (state.phase == .open) setBatchState(self, .{ .phase = .lost });
+    if (state.phase == .open) self.savepoint = false;
+    const plan = write_batch.rollback(state, if (state.phase == .lost) false else self.engine.inTransaction()) catch |err| {
+        if (state.phase == .open) self.batch = .lost;
         return err;
     };
-    // The old open-batch path clears this before either control is attempted.
-    if (state.phase == .open) self.savepoint = false;
-    errdefer setBatchState(self, plan.failed);
+    errdefer if (state.phase == .first or state.phase == .open) {
+        self.batch = plan.failed.phase;
+    };
     for (plan.controls) |maybe_control| if (maybe_control) |control| {
         if (faults.rollback_failure) return error.CanonicalRollbackFailed;
         batchControl(self, control) catch return error.CanonicalRollbackFailed;
@@ -2485,7 +2489,7 @@ pub fn rollbackAfterError(self: *Store, faults: Faults) !void {
     if (plan.must_leave_transaction and self.engine.inTransaction()) return error.CanonicalRollbackFailed;
     if (state.phase != .open) self.identities().second = 0;
     if (plan.reload_identities) loadIdentities(self, self.identities().taken) catch return error.CanonicalRollbackFailed;
-    setBatchState(self, plan.ok);
+    if (state.phase == .first) self.batch = plan.ok.phase;
 }
 
 pub fn readUnixMilliseconds(io: std.Io) !i64 {
