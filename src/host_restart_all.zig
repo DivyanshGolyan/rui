@@ -102,7 +102,7 @@ pub const Batch = struct {
 
     /// Every entry placed against `store` (none when null) and folded by
     /// `host_activation`; an entry still only observed counts as failed there.
-    fn summary(self: *const Batch, store: ?[]const u8) activation.Summary {
+    pub fn summary(self: *const Batch, store: ?[]const u8) activation.Summary {
         var tally: activation.Tally = .{};
         for (self.entries) |entry| tally.add(.{
             .place = if (entry.directory orelse entry.store) |path|

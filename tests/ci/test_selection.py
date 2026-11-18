@@ -860,6 +860,13 @@ class SelectionTest(unittest.TestCase):
             self.assertNotIn("check", result[family])
         self.assertTrue(result["upgrade_required"])
 
+    def test_upgrade_run_core_selects_logic_and_the_upgrade_fixture(self):
+        result = select(["src/upgrade_run.zig"], "review", AVAILABLE)
+        for family in ("targets", "native_targets"):
+            self.assertTrue({"test-logic", "upgrade-integration"} <= set(result[family]), result[family])
+            self.assertNotIn("check", result[family])
+        self.assertTrue(result["upgrade_required"])
+
     def test_response_timing_keeps_native_timeout_consumers(self):
         result = select(["src/ResponseTiming.zig"], "review", AVAILABLE)
         for family in ("targets", "native_targets"):
