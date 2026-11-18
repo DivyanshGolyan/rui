@@ -1085,7 +1085,7 @@ fn hostSettings(init: std.process.Init, command: cli_args.Command, parsed: *cons
     var failure: start_report.Failure = undefined;
     if (parsed.has(settings_handoff.input_option) or (parsed.has(settings_handoff.check_option) and !parsed.has("check"))) {
         failure = .init(.settings_invalid, "private launch protocol requires its matching check or start entry");
-        return writeRefusal(init.io, &failure, .invalid);
+        return writeAttemptRefusal(init.io, if (command == .host_settings) .check else .save, &failure, .invalid);
     }
     var output: std.Io.File.Writer = .init(.stdout(), init.io, &.{});
     if (command == .host_settings and parsed.has("paths")) return host_start.listPaths(&output.interface);
@@ -1096,14 +1096,14 @@ fn hostSettings(init: std.process.Init, command: cli_args.Command, parsed: *cons
         defer settings.deinit();
         if (parsed.has(settings_handoff.check_option)) {
             var frozen = host_start.freezeStart(init, .{ .dir = selected, .settings_file = parsed.get("settings"), .assignments = parsed.all("set") }, settings, &failure) catch |err| {
-                if (err == error.SettingsInvalid) return writeRefusal(init.io, &failure, .invalid);
+                if (err == error.SettingsInvalid) return writeAttemptRefusal(init.io, .check, &failure, .invalid);
                 return err;
             };
             defer frozen.deinit(init.gpa);
             settings.deinit();
-            _ = try admitHost(init, .{ .frozen = frozen.bytes }, selected, settings, &failure, .detached);
+            _ = try admitHost(init, .{ .frozen = frozen.bytes }, selected, settings, &failure, .detached, .check);
             try std.Io.File.stdout().writeStreamingAll(init.io, frozen.bytes);
-        } else _ = try admitHost(init, .{ .layered = parsed }, selected, settings, &failure, .detached);
+        } else _ = try admitHost(init, .{ .layered = parsed }, selected, settings, &failure, .detached, .check);
         return;
     }
     const result = if (command == .host_settings)
@@ -1111,7 +1111,7 @@ fn hostSettings(init: std.process.Init, command: cli_args.Command, parsed: *cons
     else
         host_start.savedEdit(init, selected, parsed.positional.?, if (command == .host_set) parsed.positional_tail.? else null, &failure);
     result catch |err| {
-        if (err == error.SettingsInvalid) return writeRefusal(init.io, &failure, caller_exit.knownError(err));
+        if (err == error.SettingsInvalid) return writeAttemptRefusal(init.io, if (command == .host_settings) .check else .save, &failure, caller_exit.knownError(err));
         return err;
     };
 }
@@ -2128,8 +2128,8 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
         };
         defer frozen.deinit(init.gpa);
         tuning.admitted_directory = selected;
-        break :frozen try admitHost(init, .{ .frozen = frozen.bytes }, selected, settings, &preparation_failure, .detached);
-    } else try admitHost(init, .{ .layered = parsed }, selected, settings, &preparation_failure, .foreground);
+        break :frozen try admitHost(init, .{ .frozen = frozen.bytes }, selected, settings, &preparation_failure, .detached, .start);
+    } else try admitHost(init, .{ .layered = parsed }, selected, settings, &preparation_failure, .foreground, .start);
     var failure: ?start_report.Failure = null;
     return finishServe(io, host_start.shutdownPolicy(settings), host_start.storeKind(settings), &failure, server.serve(io, std.heap.c_allocator, selected, prepared, tuning, &failure));
 }
@@ -2138,19 +2138,19 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
 /// then Store selection and preparation. Refusals are reported here.
 const HostAdmissionSource = union(enum) { layered: *const cli_args.Parsed, frozen: []const u8 };
 
-fn admitHost(init: std.process.Init, source: HostAdmissionSource, selected: []const u8, settings: *host_settings.Settings, failure: *start_report.Failure, admission: host_start.Admission) !host_settings.Prepared {
+fn admitHost(init: std.process.Init, source: HostAdmissionSource, selected: []const u8, settings: *host_settings.Settings, failure: *start_report.Failure, admission: host_start.Admission, attempt: host_start.Attempt) !host_settings.Prepared {
     const intake = switch (source) {
         .layered => |parsed| host_start.intake(init, parsed, selected, settings, failure, admission),
         .frozen => |bytes| host_start.intakeFrozen(init, bytes, selected, settings, failure),
     };
     intake catch |err| {
-        if (err == error.SettingsInvalid) return writeRefusal(init.io, failure, caller_exit.knownError(err));
+        if (err == error.SettingsInvalid) return writeAttemptRefusal(init.io, attempt, failure, caller_exit.knownError(err));
         return err;
     };
-    return finishHostAdmission(init, selected, settings, failure);
+    return finishHostAdmission(init, selected, settings, failure, attempt);
 }
 
-fn finishHostAdmission(init: std.process.Init, selected: []const u8, settings: *host_settings.Settings, failure: *start_report.Failure) !host_settings.Prepared {
+fn finishHostAdmission(init: std.process.Init, selected: []const u8, settings: *host_settings.Settings, failure: *start_report.Failure, attempt: host_start.Attempt) !host_settings.Prepared {
     const served = providers.fromSettings(settings);
     if (try served.proxyRefusal(std.heap.c_allocator)) |reason| {
         stderr.diagnostic("rui: https_proxy/HTTPS_PROXY {s}; Rui tunnels only through an http:// proxy. The Host did not start.\n", .{reason});
@@ -2158,7 +2158,7 @@ fn finishHostAdmission(init: std.process.Init, selected: []const u8, settings: *
         return error.Reported;
     }
     return host_start.admitSelected(init, selected, settings, failure) catch |err| {
-        if (err == error.SettingsInvalid) return writeRefusal(init.io, failure, caller_exit.knownError(err));
+        if (err == error.SettingsInvalid) return writeAttemptRefusal(init.io, attempt, failure, caller_exit.knownError(err));
         return err;
     };
 }
@@ -2270,8 +2270,12 @@ test "public Host starter preserves every typed refusal before and after waiting
 }
 
 noinline fn writeRefusal(io: std.Io, failure: *const start_report.Failure, status: caller_exit.Status) error{Reported} {
+    return writeAttemptRefusal(io, .start, failure, status);
+}
+
+fn writeAttemptRefusal(io: std.Io, attempt: host_start.Attempt, failure: *const start_report.Failure, status: caller_exit.Status) error{Reported} {
     recordExit(status);
-    host_start.report(io, failure);
+    host_start.report(io, attempt, failure);
     return error.Reported;
 }
 

@@ -569,10 +569,17 @@ fn readExact(io: std.Io, file: std.Io.File, buffer: []u8) !void {
     }
 }
 
-pub noinline fn report(io: std.Io, failure: *const start_report.Failure) void {
+pub const Attempt = enum { start, save, check };
+
+pub noinline fn report(io: std.Io, attempt: Attempt, failure: *const start_report.Failure) void {
     var buffer: [start_report.max_line_bytes]u8 = undefined;
-    std.Io.File.stdout().writeStreamingAll(io, start_report.line(failure, &buffer)) catch {};
-    const sentence = std.fmt.bufPrint(&buffer, "rui: the Host did not start: {f} [{s}]\n", .{ std.zig.fmtString(failure.message.slice()), @tagName(failure.code) }) catch unreachable;
+    if (attempt == .start) std.Io.File.stdout().writeStreamingAll(io, start_report.line(failure, &buffer)) catch {};
+    const prefix = switch (attempt) {
+        .start => "the Host did not start",
+        .save => "the setting was not saved",
+        .check => "these settings would not start a Host",
+    };
+    const sentence = std.fmt.bufPrint(&buffer, "rui: {s}: {f} [{s}]\n", .{ prefix, std.zig.fmtString(failure.message.slice()), @tagName(failure.code) }) catch unreachable;
     std.Io.File.stderr().writeStreamingAll(io, sentence) catch {};
 }
 
@@ -983,10 +990,23 @@ test "Host start pipe file and assignment admissions report every code on both s
                     Probe.attempted = .{ false, false };
                     Probe.refused = refused;
                     const failure: start_report.Failure = .init(code, message.raw);
-                    report(io, &failure);
-                    try std.testing.expect(Probe.attempted[0] and Probe.attempted[1]);
-                    if (refused != 0) try std.testing.expectEqualStrings("{\"rui_start_error\":{\"code\":\"" ++ @tagName(code) ++ "\",\"message\":" ++ message.json ++ "}}\n", Probe.output[0][0..Probe.used[0]]);
-                    if (refused != 1) try std.testing.expectEqualStrings("rui: the Host did not start: " ++ message.sentence ++ " [" ++ @tagName(code) ++ "]\n", Probe.output[1][0..Probe.used[1]]);
+                    for (std.enums.values(Attempt)) |attempt| {
+                        Probe.used = .{ 0, 0 };
+                        Probe.attempted = .{ false, false };
+                        report(io, attempt, &failure);
+                        try std.testing.expectEqual(attempt == .start, Probe.attempted[0]);
+                        try std.testing.expect(Probe.attempted[1]);
+                        if (attempt == .start and refused != 0) try std.testing.expectEqualStrings("{\"rui_start_error\":{\"code\":\"" ++ @tagName(code) ++ "\",\"message\":" ++ message.json ++ "}}\n", Probe.output[0][0..Probe.used[0]]);
+                        if (attempt != .start) try std.testing.expectEqual(@as(usize, 0), Probe.used[0]);
+                        const prefix = switch (attempt) {
+                            .start => "the Host did not start",
+                            .save => "the setting was not saved",
+                            .check => "these settings would not start a Host",
+                        };
+                        var expected: [4096]u8 = undefined;
+                        const sentence = try std.fmt.bufPrint(&expected, "rui: {s}: {s} [{s}]\n", .{ prefix, message.sentence, @tagName(code) });
+                        if (refused != 1) try std.testing.expectEqualStrings(sentence, Probe.output[1][0..Probe.used[1]]);
+                    }
                 }
             }
         }
@@ -994,7 +1014,7 @@ test "Host start pipe file and assignment admissions report every code on both s
         Probe.used = .{ 0, 0 };
         Probe.attempted = .{ false, false };
         Probe.refused = null;
-        report(io, &admission_failure);
+        report(io, .start, &admission_failure);
         try std.testing.expectEqualStrings("{\"rui_start_error\":{\"code\":\"settings_invalid\",\"message\":\"bad\\n\\u001b: unknown setting\"}}\n", Probe.output[0][0..Probe.used[0]]);
         try std.testing.expectEqualStrings("rui: the Host did not start: bad\\n\\x1b: unknown setting [settings_invalid]\n", Probe.output[1][0..Probe.used[1]]);
     }
