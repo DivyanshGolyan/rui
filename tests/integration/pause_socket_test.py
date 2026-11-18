@@ -111,6 +111,36 @@ class SocketTest(unittest.TestCase):
         with self.assertRaises(TimeoutError):
             self.client.wait(POINT)
 
+    def test_pau_13_watchdog_bounds_send_backpressure(self):
+        writer, reader = socket.socketpair()
+        writer.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
+        client = PauseClient(writer, timeout=0.05)
+        try:
+            writer.setblocking(False)
+            try:
+                while True:
+                    writer.send(b"x" * 4096)
+            except BlockingIOError:
+                pass
+            writer.setblocking(True)
+            started = threading.Event()
+            outcome = []
+            def call():
+                started.set()
+                try:
+                    client.arm(POINT, context={"pad": "y" * 65536})
+                except Exception as exc:
+                    outcome.append(exc)
+            thread = threading.Thread(target=call)
+            thread.start()
+            self.assertTrue(started.wait(5))
+            thread.join(timeout=5)
+            self.assertFalse(thread.is_alive())
+            self.assertIsInstance(outcome[0], TimeoutError)
+        finally:
+            client.close()
+            reader.close()
+
     def test_pau_14_independent_eof_is_not_child_exit(self):
         self.client.arm(POINT)
         self.client.start()
