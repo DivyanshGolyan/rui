@@ -4672,25 +4672,43 @@ test "upgrade quiescence cancels read jobs rather than granting them mutation cu
     try std.testing.expectEqual(@as(usize, 0), rig.overview.job_count);
 }
 
-test "overview top space leaves controls and Session clicks aligned at narrow and wide widths" {
-    // UI-1: the blank row and the controls share the drawn layout.
-    for ([_]u16{ 46, 140 }) |width| {
-        const rig = try openListed();
-        defer rig.close();
-        var shown = try rig.shown(width, 30);
-        defer shown.deinit();
-        try std.testing.expectEqualStrings("", std.mem.trim(u8, try shown.line(0), " "));
-        try std.testing.expect(std.mem.indexOf(u8, try shown.line(1), "New Session") != null);
-        try std.testing.expect(try rig.click(3, 0, width, 30) == null);
-        try std.testing.expectEqual(@as(usize, 0), Seen.now.conversations);
-        try std.testing.expect(!rig.overview.state.creating());
-        try std.testing.expect(try rig.click(3, 1, width, 30) == null);
-        try std.testing.expect(rig.overview.state.creating());
+test "UI-1 overview top space and drawn controls accept clicks" {
+    for ([_]u16{ 46, 60, 140 }) |width| {
+        for ([_]enum { new_session, settings }{ .new_session, .settings }) |control| {
+            const rig = try openListed();
+            defer rig.close();
+            var shown = try rig.shown(width, 30);
+            defer shown.deinit();
+            try std.testing.expectEqualStrings("", std.mem.trim(u8, try shown.line(0), " "));
+            try std.testing.expect(try rig.click(3, 0, width, 30) == null);
+            try std.testing.expectEqual(@as(usize, 0), Seen.now.conversations);
+            try std.testing.expect(!rig.overview.state.creating());
+            try std.testing.expect(!rig.overview.root.input.layer.settingsOpen());
+
+            const label = if (control == .new_session) "New Session" else "Settings";
+            var column: u16 = undefined;
+            const row: u16 = for (0..30) |at| {
+                if (std.mem.indexOf(u8, try shown.line(@intCast(at)), label)) |col| {
+                    column = @intCast(col);
+                    break @intCast(at);
+                }
+            } else return error.TestExpectedRow;
+            try std.testing.expect(try rig.click(column, row, width, 30) == null);
+            if (control == .new_session) {
+                try std.testing.expectEqual(view.Selection.new_session, rig.overview.state.selected);
+                try std.testing.expect(rig.overview.state.creating());
+                try std.testing.expect(try rig.settle() == null);
+                try std.testing.expectEqual(@as(usize, 1), Seen.now.creates);
+                try std.testing.expectEqualStrings("n3w5es", &Seen.now.conversed);
+            } else {
+                try std.testing.expect(rig.overview.root.input.layer.settingsOpen());
+                try std.testing.expectEqual(@as(usize, 0), Seen.now.conversations);
+            }
+        }
     }
 }
 
-test "a click on a Session row, as a terminal sends it, opens the row under it after the list scrolls" {
-    // UI-2: the scrolled list uses the same drawn layout for presses.
+test "UI-2 clicking a scrolled Session opens the drawn row" {
     for ([_]u16{ 46, 60, 140 }) |width| {
         const rig = try openListed();
         defer rig.close();
@@ -4705,33 +4723,10 @@ test "a click on a Session row, as a terminal sends it, opens the row under it a
             const line = try shown.line(@intCast(at));
             if (std.mem.indexOf(u8, line, "Click this Session") != null) break @intCast(at);
         } else return error.TestExpectedRow;
-        const quiet_row = view.layout(&rig.overview.state).settings.start + 1;
-        const quiet = try shown.line(quiet_row);
-        try std.testing.expect(std.mem.indexOf(u8, quiet, "Settings") != null);
-        try std.testing.expect(try rig.click(20, quiet_row, width, 13) == null);
-        try std.testing.expect(!rig.overview.root.input.layer.settingsOpen());
-        try std.testing.expectEqual(@as(usize, 0), Seen.now.conversations);
         try std.testing.expect(try rig.click(10, row, width, 13) == null);
         try std.testing.expectEqual(@as(usize, 1), Seen.now.conversations);
         try std.testing.expectEqualStrings(&target, &Seen.now.conversed);
     }
-}
-
-test "a click on New Session queues empty creation" {
-    const rig = try openListed();
-    defer rig.close();
-    var shown = try rig.shown(60, 16);
-    defer shown.deinit();
-    const row: u16 = for (0..16) |at| {
-        if (std.mem.indexOf(u8, try shown.line(@intCast(at)), "+ New Session") != null) break @intCast(at);
-    } else return error.TestUnexpectedResult;
-    try std.testing.expect(try rig.click(3, row, 60, 16) == null);
-    try std.testing.expectEqual(@as(usize, 0), Seen.now.conversations);
-    try std.testing.expectEqual(view.Selection.new_session, rig.overview.state.selected);
-    try std.testing.expect(rig.overview.state.creating());
-    try std.testing.expect(try rig.settle() == null);
-    try std.testing.expectEqual(@as(usize, 1), Seen.now.creates);
-    try std.testing.expectEqualStrings("n3w5es", &Seen.now.conversed);
 }
 
 test "a followed Session link opens the peer, Esc reopens the Session it left, then the overview" {

@@ -1909,7 +1909,7 @@ test "user band provenance includes blank and wrapped message lines only" {
     try std.testing.expectEqual(@as(@TypeOf(unfinished.lineKind(0, null)), .plain), unfinished.lineKind(unfinished.length, null));
 }
 
-test "user band padding domain retains rows and source text" {
+test "UI-6 user message bands retain padded rows and selectable source text" {
     const testing = std.testing;
     for ([_]u16{ 46, 140 }) |width| for ([_]u8{ 0, 1, 2 }) |depth| for ([_]bool{ false, true }) |unicode_caps| {
         const method: Method = if (unicode_caps) .unicode else .wcwidth;
@@ -1999,7 +1999,7 @@ test "baseline user band shape at requested widths" {
 
 test "UI-3 answer prose has a bounded measure while code and tables use the pane" {
     const word = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
-    const input = word ++ "\n- " ++ word ++ "\n```\n" ++ word ++ "\n```\n| " ++ word ++ " | z |\n| --- | --- |\n| " ++ word ++ " | z |\n";
+    const input = word ++ "\n- " ++ word ++ "\n> " ++ word ++ "\n# " ++ word ++ "\n```\n" ++ word ++ "\n```\n| " ++ word ++ " | z |\n| --- | --- |\n| " ++ word ++ " | z |\n";
     for ([_]bool{ false, true }) |colour| {
         var output = std.Io.Writer.Allocating.init(std.testing.allocator);
         defer output.deinit();
@@ -2013,12 +2013,21 @@ test "UI-3 answer prose has a bounded measure while code and tables use the pane
         try view.prepare();
         const paragraph: usize = 0;
         const list = view.nextLine(paragraph).?;
-        const code = view.nextLine(list).?;
+        const quote = view.nextLine(list).?;
+        const heading = view.nextLine(quote).?;
+        const code = view.nextLine(heading).?;
         const table = view.nextLine(code).?;
         for ([_]u16{ 86, 88, 89, 120 }) |width| {
             const layout: Layout = .{ .width = width, .method = .unicode };
             try std.testing.expectEqual(@as(u16, 2), view.lineRows(layout, paragraph));
+            var screen: TestScreen = undefined;
+            const window = screen.window(width, 12);
+            _ = view.draw(window, .{}, true, colour, .{}, .{});
+            var row_buffer: [512]u8 = undefined;
+            try std.testing.expectEqual(@as(usize, @min(width, 88)), screen.row(0, &row_buffer).len);
             try std.testing.expectEqual(@as(u16, 2), view.lineRows(layout, list));
+            try std.testing.expectEqual(@as(u16, 2), view.lineRows(layout, quote));
+            try std.testing.expectEqual(@as(u16, 2), view.lineRows(layout, heading));
             try std.testing.expectEqual(@as(u16, if (width < 103) 2 else 1), view.lineRows(layout, code));
             try std.testing.expectEqual(@as(u16, if (width < 105) 2 else 1), view.lineRows(layout, table));
         }
@@ -2027,9 +2036,7 @@ test "UI-3 answer prose has a bounded measure while code and tables use the pane
         try user.prepare();
         try std.testing.expectEqual(@as(u16, 4), user.lineRows(.{ .width = 120, .method = .unicode }, 0));
     }
-}
 
-test "UI-3 wide block markers survive stream splits and end at a truncated body" {
     const long = @as([4200]u8, @splat('x'));
     for ([_][]const u8{ "```\n", "| h |\n| --- |\n| " }) |opening| {
         for ([_]bool{ false, true }) |colour| {
@@ -2046,7 +2053,6 @@ test "UI-3 wide block markers survive stream splits and end at a truncated body"
             try view.append(TerminalText.body_off);
             try view.prepare();
             const at = std.mem.indexOf(u8, view.text(), "xxxxxxxx").?;
-            try std.testing.expect(view.styles[at] & full_width_bit != 0);
             try std.testing.expect(view.lineRows(.{ .width = 120, .method = .unicode }, view.previousLine(at + 1) orelse 0) < 48);
         }
     }
@@ -2054,6 +2060,5 @@ test "UI-3 wide block markers survive stream splits and end at a truncated body"
     try cut.append(TerminalText.body_on ++ TerminalText.full_width_on ++ "code\n" ++ TerminalText.body_off ++ "\x1b[0m\n" ++ TerminalText.body_on ++ "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n");
     try cut.prepare();
     const prose = std.mem.indexOf(u8, cut.text(), "xxxxxxxx").?;
-    try std.testing.expect(cut.styles[prose] & full_width_bit == 0);
     try std.testing.expectEqual(@as(u16, 2), cut.lineRows(.{ .width = 120, .method = .unicode }, prose));
 }

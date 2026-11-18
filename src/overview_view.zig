@@ -5312,19 +5312,46 @@ test "overview footer slot follows only visible notices and upgrade cancellation
     };
 }
 
-test "overview bottom layout reserves only visible status and footer rows" {
-    var state = try opened(&.{});
-    defer state.deinit();
-    for ([_]u16{ 0, 1, 2, 10, 30, 40 }) |height| {
-        state.size = .{ .width = 46, .height = height };
-        const rows = layout(&state);
-        try std.testing.expectEqual(rows.settings.start, rows.input);
-        try std.testing.expect(rows.list.end <= rows.settings.start);
-        try std.testing.expect(rows.host.end <= rows.settings.start);
-        try std.testing.expect(rows.host.end <= rows.input);
-        if (height >= 4) {
-            try std.testing.expectEqual(@as(u16, height - 2), rows.settings.start);
-            try std.testing.expectEqual(height, rows.settings.end);
+test "UI-8 overview bottom layout reserves visible rows" {
+    for ([_]u16{ 0, 1, 46, 140 }) |width| {
+        for ([_]bool{ false, true }) |notice| {
+            for ([_]bool{ false, true }) |host| for ([_]bool{ false, true }) |upgrading| {
+                var state = try opened(&.{});
+                defer state.deinit();
+                if (notice) state.say(.normal, "Copied 3 lines", .{});
+                if (upgrading) state.upgrade.run = .checking;
+                state.host_line = host;
+                for (0..41) |h| {
+                    const height: u16 = @intCast(h);
+                    state.size = .{ .width = width, .height = height };
+                    const rows = layout(&state);
+                    if (width == 0 or height == 0) {
+                        try std.testing.expectEqual(Layout{}, rows);
+                        continue;
+                    }
+                    const settings: u16 = if (height >= 2) height - 2 else height;
+                    if (width == 1 and upgrading) {
+                        try std.testing.expect(rows.list.start <= rows.list.end);
+                        try std.testing.expectEqual(rows.list.end, rows.host.start);
+                        try std.testing.expectEqual(rows.host.end, rows.input);
+                        try std.testing.expect(rows.input <= settings);
+                        try std.testing.expectEqual(settings, rows.settings.start);
+                        try std.testing.expectEqual(height, rows.settings.end);
+                        continue;
+                    }
+                    const top = @min(@as(u16, 3), settings);
+                    const reserved: u16 = @as(u16, @intFromBool(notice or upgrading)) + @as(u16, @intFromBool(upgrading));
+                    const input = @max(top, settings -| reserved);
+                    const host_start = @max(top, input -| @as(u16, @intFromBool(host)));
+                    try std.testing.expectEqual(settings, rows.settings.start);
+                    try std.testing.expectEqual(height, rows.settings.end);
+                    try std.testing.expectEqual(input, rows.input);
+                    try std.testing.expectEqual(host_start, rows.host.start);
+                    try std.testing.expectEqual(input, rows.host.end);
+                    try std.testing.expectEqual(top, rows.list.start);
+                    try std.testing.expectEqual(host_start, rows.list.end);
+                }
+            };
         }
     }
 }

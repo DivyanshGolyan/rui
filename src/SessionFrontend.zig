@@ -5909,7 +5909,7 @@ const ChromeFixture = struct {
     }
 };
 
-test "App Session shell gutter and back control follow list visibility through resize" {
+test "UI-5 App Session shell gutter and back control follow list visibility through resize" {
     var fixture: ChromeFixture = undefined;
     try fixture.init();
     defer fixture.deinit();

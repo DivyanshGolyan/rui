@@ -124,15 +124,13 @@ class TerminalProcessTest(unittest.TestCase):
         for text in (" › literal │ + ┼ ┤", " > literal │ +", "   + New Session", "plain | text"):
             self.assertEqual(split_pane_row(text), ("", "", text))
 
-    def test_conversation_strips_gutter_and_preserves_message_indent(self):
+    def test_conversation_text_preserves_content_across_panes(self):
+        # UI-9: gutter removal retains indentation and literal divider characters.
         from human_cli_fixture import conversation_text
 
         self.assertEqual(conversation_text("list┆  › line1    01:23\nlist┆    line2\n    ┆  edited 2"),
                          "› line1    01:23\n  line2\nedited 2")
         self.assertEqual(conversation_text(" › narrow\n   continued"), "› narrow\n  continued")
-
-    def test_conversation_keeps_junction_characters_in_chat_text(self):
-        from human_cli_fixture import conversation_text
 
         self.assertEqual(conversation_text("list│  message │ ┼ ┤ +\n › literal │ +"),
                          "message │ ┼ ┤ +\n› literal │ +")
