@@ -1020,6 +1020,14 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     self.app_content.method = self.app_caps.width;
     const original_presentation = session_notice.presentation(self.reading.opening, self.app_consent.request != null, self.heldOriginal());
     const message_note = original_presentation.note;
+    const queued_note: ?[]const u8 = if (message_note) |note| note: {
+        const key = self.submission.messageKey() orelse break :note null;
+        for (screen.feed.entries[0..screen.feed.count]) |entry| {
+            const entry_key = entry.message_key orelse continue;
+            if (entry.length == 0 and std.mem.eql(u8, &entry_key, &key)) break :note note;
+        }
+        break :note null;
+    } else null;
     self.app_content.message_note = if (message_note) |note| .{ .key = self.submission.messageKey().?, .text = note } else null;
     self.app_content.pending = if (self.submission.messageText()) |text|
         (if (!self.submission.messageProjected() and (screen.feed.at_end or (self.reading.opening and screen.anchor.following()))) .{ .text = text, .note = message_note } else null)
@@ -1080,7 +1088,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
         .details = original_presentation.details,
         .repair_details = original_presentation.repair_details,
         .facts = .{ .current = self.footerFacts(), .name = self.session, .archive = self.line.archive_state },
-        .notice = self.shown_notice.current(now_ms) orelse said.notice,
+        .notice = self.shown_notice.current(now_ms) orelse queued_note orelse said.notice,
         .overview = said.text,
 
         .overlay = if (self.app_hooks.root.input.layer.settingsOpen())
@@ -2851,7 +2859,7 @@ fn readInspection(self: *const Self) reader_policy.Inspection {
 
 pub fn queuedRow(self: *const Self) ?struct { newest: u64, waiting: queued_line.Waiting } {
     const queued = self.live.queued;
-    const count = queued.count - @intFromBool(queued.count != 0 and !self.live.work.state.holdsQueue());
+    const count = queued.count;
     if (count == 0) return null;
     const shown = if (self.live.queued_line) |*shown| shown else return null;
     if (shown.admission != queued.newest_admission) return null;
@@ -2901,7 +2909,7 @@ fn showStaged(self: *Self) !void {
             complete = false;
             break;
         }
-        if (entry.text.bytes.len != 0) if (entry.message_key) |key| self.submission.observeMessage(key);
+        if (entry.message_key) |key| self.submission.observeMessage(key);
         inserted += 1;
     }
     if (!complete and inserted == 0) self.reading.fills = self.reading.fills.failed(read, page);
@@ -3157,11 +3165,11 @@ test "the queued row shows what waits until it is taken, whatever the work is do
     for ([_]Case{
         .{ .queued = some, .state = .{ .working = .{ .since = 1 } }, .shown = true },
         .{ .queued = some, .state = .{ .approval = .{ .since = 1 } }, .shown = true },
-        .{ .queued = some, .state = .{ .pending = .{ .since = 1 } }, .count = 1, .shown = true },
-        .{ .queued = some, .state = .{ .idle = .{ .since = 1 } }, .count = 1, .shown = true },
-        .{ .queued = some, .state = .{ .pending = .{ .since = 1 } }, .count = 1, .shown = true },
+        .{ .queued = some, .state = .{ .pending = .{ .since = 1 } }, .shown = true },
+        .{ .queued = some, .state = .{ .idle = .{ .since = 1 } }, .shown = true },
+        .{ .queued = some, .state = .{ .pending = .{ .since = 1 } }, .shown = true },
         .{ .queued = .{}, .state = .{ .working = .{ .since = 1 } }, .shown = false },
-        .{ .queued = .{ .count = 1, .oldest_position = 34, .newest_admission = 9, .newest_position = 34 }, .state = .{ .pending = .{ .since = 1 } }, .shown = false },
+        .{ .queued = .{ .count = 1, .oldest_position = 34, .newest_admission = 9, .newest_position = 34 }, .state = .{ .pending = .{ .since = 1 } }, .count = 1, .shown = true },
         .{ .queued = some, .state = .{ .working = .{ .since = 1 } }, .line = 8, .shown = false },
         .{ .queued = some, .state = .{ .working = .{ .since = 1 } }, .line = null, .shown = false },
     }) |case| {
@@ -6782,6 +6790,62 @@ fn firstRows(text: []const u8, count: usize) []const u8 {
     var end: usize = 0;
     for (0..count) |_| end = 1 + (std.mem.indexOfScalarPos(u8, text, end, '\n') orelse return text);
     return text[0..end];
+}
+
+test "SessionFrontend draws queued input once through admission and turn handoff" {
+    for ([_]u16{ 46, 140 }) |width| {
+        const fixture = try FeedFixture.create();
+        defer fixture.destroy();
+        const self = &fixture.held.self;
+        fixture.held.size.width = width;
+        const ticket = self.input.submitText("waiting one");
+        self.submission.settled_message = .{ .ticket = ticket, .key = @splat('K') };
+        defer self.submission.disposeMessage();
+        try fixture.page(.opening, &.{.{ .key = 10, .text = "", .provisional = true, .message_key = @splat('K') }}, true, true);
+        try std.testing.expect(!self.submission.messageHeld());
+        self.live.work.state = .{ .working = .{ .since = 1 } };
+        self.live.queued = .{ .count = 1, .oldest_position = 10, .newest_admission = 1, .newest_position = 10 };
+        self.live.queued_line = .{ .admission = 1, .line = .{} };
+        try self.live.queued_line.?.line.set("waiting one");
+        const queued = try fixture.held.shown();
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, queued, "waiting one"));
+        try std.testing.expect(std.mem.indexOf(u8, queued, "◌ waiting one") != null);
+        try fixture.page(.scan, &.{.{ .key = 11, .text = "› waiting one\n", .message_key = @splat('K') }}, true, true);
+        self.live.work.state = .{ .working = .{ .since = 1 } };
+        self.live.queued = .{ .count = 1, .oldest_position = 12, .newest_admission = 2, .newest_position = 12 };
+        self.live.queued_line = .{ .admission = 2, .line = .{} };
+        try self.live.queued_line.?.line.set("waiting two");
+        const taken = try fixture.held.shown();
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, taken, "waiting one"));
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, taken, "waiting two"));
+        try std.testing.expect(std.mem.indexOf(u8, taken, "› waiting one") != null);
+        try std.testing.expect(std.mem.indexOf(u8, taken, "◌ waiting two") != null);
+    }
+}
+
+test "SessionFrontend keeps recovery visible beside an invisible queued Admission" {
+    const fixture = try FeedFixture.create();
+    defer fixture.destroy();
+    const self = &fixture.held.self;
+    const ticket = self.input.submitText("uncertain queued input");
+    self.submission.intent = .{ .message = ticket };
+    self.submission.key = @splat('K');
+    self.submission.state = .unconfirmed;
+    self.submission.publication = .published;
+    defer {
+        self.submission.intent = null;
+        self.input.release(ticket) catch unreachable;
+    }
+    try fixture.page(.opening, &.{.{ .key = 10, .text = "", .provisional = true, .message_key = @splat('K') }}, true, true);
+    self.live.work.state = .{ .working = .{ .since = 1 } };
+    self.live.queued = .{ .count = 1, .oldest_position = 10, .newest_admission = 1, .newest_position = 10 };
+    self.live.queued_line = .{ .admission = 1, .line = .{} };
+    try self.live.queued_line.?.line.set("uncertain queued input");
+    const shown = try fixture.held.shown();
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, shown, "uncertain queued input"));
+    try std.testing.expect(std.mem.indexOf(u8, shown, "◌ uncertain queued input") != null);
+    try std.testing.expect(std.mem.indexOf(u8, shown, "Not confirmed") != null);
+    try std.testing.expectEqualStrings("uncertain queued input", self.submission.messageText().?);
 }
 
 test "SessionFrontend canonical insertion retires accepted message custody only for its key" {

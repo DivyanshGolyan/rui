@@ -14559,6 +14559,26 @@
             "type": "object",
             "properties": {
               "kind": {
+                "const": "working"
+              },
+              "since": {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              "compaction": {
+                "const": true
+              }
+            },
+            "required": [
+              "kind",
+              "since",
+              "compaction"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
                 "const": "retrying"
               },
               "since": {

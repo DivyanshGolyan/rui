@@ -1473,24 +1473,6 @@ test "ending tails are quiet and joined in destination then key order" {
     try std.testing.expectEqualStrings("× Cause · Key\n", out.buffered());
 }
 
-pub fn showsAtAdmission(position: u64, value: protocol.ActivityItem.Message, queued: protocol.Queued, held: bool) bool {
-    return value.state == .queued and !held and position == queued.oldest_position;
-}
-
-test "a waiting Message shows at its Admission only when nothing holds it and nothing older waits" {
-    const body: protocol.ActivityItem.Content = .{ .length = 1, .digest = @splat(0) };
-    const waiting: protocol.ActivityItem.Message = .{ .admission = 12, .key = .{}, .turn = null, .state = .queued, .content = body, .admitted_at = 1, .sender = null };
-    const alone: protocol.Queued = .{ .count = 1, .oldest_position = 30, .newest_admission = 12, .newest_position = 30 };
-    try std.testing.expect(showsAtAdmission(30, waiting, alone, false));
-    try std.testing.expect(!showsAtAdmission(30, waiting, alone, true));
-    try std.testing.expect(!showsAtAdmission(34, waiting, .{ .count = 2, .oldest_position = 30, .newest_admission = 12, .newest_position = 34 }, false));
-    var taken = waiting;
-    taken.state = .applied;
-    try std.testing.expect(!showsAtAdmission(30, taken, .{}, false));
-    taken.state = .excluded;
-    try std.testing.expect(!showsAtAdmission(30, taken, alone, false));
-}
-
 pub const Fold = union(enum) { none, closed, open: *tool_fold.Output };
 
 pub fn tight(value: protocol.ActivityItem.Value) bool {
@@ -1510,9 +1492,10 @@ pub fn gap(above: bool, below: bool, tool_pair: bool) bool {
 pub fn render(requests: client.Requests, store: []const u8, session: []const u8, provider: ?protocol.Provider, item: protocol.ActivityItem, queued: protocol.Queued, held: bool, sink: anytype, colour: bool, home: []const u8, destination: Destination, fold: Fold) !bool {
     switch (item.value) {
         .admission => |value| {
-            if (!showsAtAdmission(item.position, value, queued, held)) return false;
-            try message(requests, store, session, item, value, .none, sink, colour);
-            return true;
+            _ = value;
+            _ = queued;
+            _ = held;
+            return false;
         },
         .received => |value| try message(requests, store, session, item, value, .none, sink, colour),
         .user => |value| {

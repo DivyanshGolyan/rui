@@ -28,7 +28,7 @@ pub const WorkState = union(Kind) {
     failed: Failed,
     stopped: Stopped,
 
-    pub const Since = struct { since: u64 };
+    pub const Since = struct { since: u64, compaction: bool = false };
     pub const Retrying = struct { since: u64, due_at_ms: u64, cause: Bounded(max_code_bytes), attempt: u64 };
     pub const Bash = struct { since: u64, call: ?u64, description: ?Bounded(max_description_bytes), running: u64, approvals: u64 };
     pub const Failed = struct { since: u64, code: Bounded(max_code_bytes), resets_at: ?u64 };
@@ -81,6 +81,7 @@ pub const Inputs = struct {
         turn_id: u64,
         operation_id: u64,
         input_cutoff: u64,
+        compaction: bool = false,
         stopped_at: ?u64 = null,
         interruptible: bool = false,
         stop_remaining: bool = false,
@@ -205,7 +206,7 @@ fn deriveOwn(inputs: Inputs) error{CorruptStore}!Work {
         return work;
     }
     work.state = switch (latest.op) {
-        .in_flight => |attempt| .{ .working = .{ .since = attempt.attempt_at } },
+        .in_flight => |attempt| .{ .working = .{ .since = attempt.attempt_at, .compaction = latest.compaction } },
         .waiting => |retry| if (retry.attempt == 0 or retry.attempt > max_retried_attempt) return error.CorruptStore else (WorkState{ .retrying = .{
             .since = retry.scheduled_at,
             .due_at_ms = retry.due_at_ms,
@@ -679,4 +680,14 @@ test "actions cover proposal and stopping combinations" {
             try std.testing.expectEqual(decision, work.actions.decide);
         }
     }
+}
+
+test "in-flight compaction remains working with its purpose" {
+    var latest = activeTurn(.{ .in_flight = .{ .attempt_at = 123 } }, .{});
+    const normal = try derive(.{ .now_ms = 124000, .created_at = 1, .latest = latest });
+    try std.testing.expect(!normal.state.working.compaction);
+    latest.compaction = true;
+    const compacting = try derive(.{ .now_ms = 124000, .created_at = 1, .latest = latest });
+    try std.testing.expect(compacting.state.working.compaction);
+    try std.testing.expectEqual(WorkState.Progress.in_flight, compacting.state.progress().?);
 }

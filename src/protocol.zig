@@ -356,15 +356,17 @@ pub const WorkStateJson = struct {
     state: WorkState,
 
     pub const plain_shape = .{ "{\"kind\":\"", Hole{ .tag = session_work.Kind }, "\",\"since\":\"", Hole.decimal, "\"}" };
+    pub const compacting_shape = .{ "{\"kind\":\"working\",\"since\":\"", Hole.decimal, "\",\"compaction\":true}" };
     pub const retrying_shape = .{ "{\"kind\":\"retrying\",\"since\":\"", Hole.decimal, "\",\"due_at_ms\":\"", Hole.decimal, "\",\"cause\":", Hole{ .string = max_code_bytes }, ",\"attempt\":\"", Hole.decimal, "\"}" };
     pub const older_bash_shape = .{ "{\"kind\":\"bash\",\"since\":\"", Hole.decimal, "\",\"description\":", Hole{ .optional_string = session_work.max_description_bytes }, ",\"running\":\"", Hole.decimal, "\",\"approvals\":\"", Hole.decimal, "\"}" };
     pub const bash_shape = .{ "{\"kind\":\"bash\",\"since\":\"", Hole.decimal, "\",\"call\":\"", Hole.decimal, "\",\"description\":", Hole{ .optional_string = session_work.max_description_bytes }, ",\"running\":\"", Hole.decimal, "\",\"approvals\":\"", Hole.decimal, "\"}" };
     pub const failed_shape = .{ "{\"kind\":\"failed\",\"since\":\"", Hole.decimal, "\",\"code\":", Hole{ .string = max_code_bytes }, ",\"resets_at\":", Hole.optional_id, "}" };
     pub const stopped_shape = .{ "{\"kind\":\"stopped\",\"since\":\"", Hole.decimal, "\",\"cause\":\"", Hole{ .tag = session_work.StopCause }, "\"}" };
-    pub const max_json_bytes = maxShapeBytes(.{ plain_shape, retrying_shape, older_bash_shape, bash_shape, failed_shape, stopped_shape });
+    pub const max_json_bytes = maxShapeBytes(.{ plain_shape, compacting_shape, retrying_shape, older_bash_shape, bash_shape, failed_shape, stopped_shape });
 
     pub fn writeJson(self: *const WorkStateJson, out: *std.Io.Writer) !void {
         switch (self.state) {
+            .working => |value| if (value.compaction) try writeShape(out, compacting_shape, .{value.since}) else try writeShape(out, plain_shape, .{ session_work.Kind.working, value.since }),
             .retrying => |value| try writeShape(out, retrying_shape, .{ value.since, value.due_at_ms, value.cause.slice(), value.attempt }),
             .bash => |value| {
                 const description = if (value.description) |text| text.slice() else null;
@@ -372,7 +374,7 @@ pub const WorkStateJson = struct {
             },
             .failed => |value| try writeShape(out, failed_shape, .{ value.since, value.code.slice(), value.resets_at }),
             .stopped => |value| try writeShape(out, stopped_shape, .{ value.since, value.cause }),
-            inline .idle, .pending, .working, .approval, .stopping, .finished => |value, kind| try writeShape(out, plain_shape, .{ kind, value.since }),
+            inline .idle, .pending, .approval, .stopping, .finished => |value, kind| try writeShape(out, plain_shape, .{ kind, value.since }),
         }
     }
 };

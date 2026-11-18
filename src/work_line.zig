@@ -48,8 +48,9 @@ const looks = std.enums.EnumArray(session_work.Kind, ?Look).init(.{
     .stopped = null,
 });
 const rate_limited = "Rate limited";
+const compacting = "Compacting";
 pub const max_words_bytes = max: {
-    var bytes = @max(TerminalText.max_bytes_per_byte * session_work.max_description_bytes, rate_limited.len);
+    var bytes = @max(TerminalText.max_bytes_per_byte * session_work.max_description_bytes, rate_limited.len, compacting.len);
     for (looks.values) |look| if (look) |shown| {
         bytes = @max(bytes, shown.words.len);
     };
@@ -69,6 +70,7 @@ pub fn of(words: *[max_words_bytes]u8, state: *const WorkState, operation: ?u64,
         .mark = look.mark,
         .tone = look.tone,
         .words = switch (state.*) {
+            .working => |working| if (working.compaction) compacting else look.words,
             .bash => |*bash| if (bash.description) |*text| escaped(words, text.slice()) else look.words,
             .retrying => |*retry| if (failure_class.rateLimited(retry.cause.slice())) rate_limited else look.words,
             else => look.words,
@@ -189,6 +191,7 @@ test "every work state has the approved words on both screens, and ended work ha
         .{ .state = .{ .idle = .{ .since = 1 } }, .conversation = "", .row = "", .ascii = "" },
         .{ .state = .{ .pending = .{ .since = test_now_s - 3 } }, .conversation = "◌ Queued · 3s", .row = "Queued", .ascii = "Queued" },
         .{ .state = .{ .working = .{ .since = test_now_s - 12 } }, .conversation = "⠹ Thinking · 12s", .row = "Thinking", .ascii = "Thinking" },
+        .{ .state = .{ .working = .{ .since = test_now_s - 12, .compaction = true } }, .conversation = "⠹ Compacting · 12s", .row = "Compacting", .ascii = "Compacting" },
         .{ .state = retry, .conversation = "⠹ Rate limited · retry 2 in 18s", .row = "Rate limited · retry in 18s", .ascii = "Rate limited - retry in 18s", .tone = .attention },
         .{ .state = .{ .retrying = .{ .since = test_now_s, .due_at_ms = test_now_ms + 1, .cause = bounded(session_work.max_code_bytes, "provider_temporary_http_503"), .attempt = 1 } }, .conversation = "⠹ Provider error · retry 1 in 1s", .row = "Provider error · retry in 1s", .ascii = "Provider error - retry in 1s", .tone = .attention },
         .{ .state = .{ .bash = .{ .since = test_now_s - 42, .call = 1, .description = bounded(session_work.max_description_bytes, "Run zig build test-store"), .running = 1, .approvals = 0 } }, .conversation = "⠹ Run zig build test-store · 42s", .row = "Run zig build test-store", .ascii = "Run zig build test-store" },

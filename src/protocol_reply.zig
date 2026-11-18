@@ -1949,6 +1949,7 @@ pub const JsonWorkState = struct {
         const Wire = struct {
             kind: JsonEnum(Kind),
             since: JsonString(20),
+            compaction: OmittableJson(bool) = .{},
             due_at_ms: OmittableJson(JsonString(20)) = .{},
             cause: OmittableJson(JsonString(protocol.max_code_bytes)) = .{},
             attempt: OmittableJson(JsonString(20)) = .{},
@@ -1970,9 +1971,11 @@ pub const JsonWorkState = struct {
             .idle, .pending, .working, .approval, .stopping, .finished => @splat(false),
         };
         if (!std.mem.eql(bool, &present, &owned)) return error.InvalidCharacter;
+        if (wire.compaction.isPresent() and kind != .working) return error.InvalidCharacter;
         if (wire.call.isPresent() and kind != .bash) return error.InvalidCharacter;
         const since = number(wire.since, false) catch return error.InvalidCharacter;
         const value: protocol.WorkState = switch (kind) {
+            .working => .{ .working = .{ .since = since, .compaction = wire.compaction.value orelse false } },
             .retrying => .{ .retrying = .{
                 .since = since,
                 .due_at_ms = number(wire.due_at_ms.value.?, false) catch return error.InvalidCharacter,
@@ -2003,7 +2006,7 @@ pub const JsonWorkState = struct {
                 .since = since,
                 .cause = std.meta.stringToEnum(protocol.session_work.StopCause, wire.cause.value.?.slice()) orelse return error.InvalidCharacter,
             } },
-            inline .idle, .pending, .working, .approval, .stopping, .finished => |tag| @unionInit(protocol.WorkState, @tagName(tag), .{ .since = since }),
+            inline .idle, .pending, .approval, .stopping, .finished => |tag| @unionInit(protocol.WorkState, @tagName(tag), .{ .since = since }),
         };
         return .{ .value = value };
     }
@@ -2384,6 +2387,7 @@ test "a work state reads back exactly the facts its kind owns" {
         .{ .idle = .{ .since = 1 } },
         .{ .pending = .{ .since = 2 } },
         .{ .working = .{ .since = 3 } },
+        .{ .working = .{ .since = 3, .compaction = true } },
         .{ .retrying = .{ .since = 4, .due_at_ms = 4_500, .cause = cause, .attempt = 2 } },
         .{ .bash = .{ .since = 5, .call = 0, .description = description, .running = 1, .approvals = 0 } },
         .{ .bash = .{ .since = 5, .call = 3, .description = null, .running = 2, .approvals = 3 } },
@@ -2420,6 +2424,7 @@ test "a work state reads back exactly the facts its kind owns" {
         "{\"kind\":\"retrying\",\"since\":\"4\",\"due_at_ms\":\"4500\",\"cause\":\"c\"}",
         "{\"kind\":\"bash\",\"since\":\"5\",\"running\":\"1\",\"approvals\":\"0\"}",
         "{\"kind\":\"working\",\"since\":\"3\",\"call\":\"0\"}",
+        "{\"kind\":\"pending\",\"since\":\"3\",\"compaction\":true}",
         "{\"kind\":\"failed\",\"since\":\"9\",\"code\":\"c\"}",
         "{\"kind\":\"pending\",\"since\":\"0\"}",
         "{\"kind\":\"pending\",\"since\":2}",

@@ -194,14 +194,18 @@ test "activity queue follows compaction and taken messages" {
             try std.testing.expectEqual(historical_domain.ModelOperationKind.compaction, try storage.modelOperationKind(compact));
             var request: protocol.ActivityPage = .{};
             request.session = session;
-            try std.testing.expectEqual(@as(u64, 1), (try store_core.activityPageForTesting(&storage, request)).queued.count);
+            const compacting = try store_core.activityPageForTesting(&storage, request);
+            try std.testing.expectEqual(@as(u64, 1), compacting.queued.count);
+            try std.testing.expect(compacting.work.work.state == .working and compacting.work.work.state.working.compaction);
             try submitTestMessage(&storage, &tmp, "queue-compact-third", "third", session.slice(), "third");
             const behind = try store_core.activityPageForTesting(&storage, request);
             try std.testing.expectEqual(@as(u64, 2), behind.queued.count);
             try store_testing.settleCompactionForTesting(&storage, &tmp, compact, &.{.compaction});
             const successor = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             try std.testing.expectEqual(historical_domain.ModelOperationKind.assistant_response, try storage.modelOperationKind(successor));
-            try std.testing.expectEqual(@as(u64, 0), (try store_core.activityPageForTesting(&storage, request)).queued.count);
+            const answering = try store_core.activityPageForTesting(&storage, request);
+            try std.testing.expectEqual(@as(u64, 0), answering.queued.count);
+            try std.testing.expect(answering.work.work.state == .working and !answering.work.work.state.working.compaction);
             try submitTestMessage(&storage, &tmp, "queue-compact-fourth", "fourth", session.slice(), "fourth");
             try std.testing.expectEqual(@as(u64, 1), (try store_core.activityPageForTesting(&storage, request)).queued.count);
         }

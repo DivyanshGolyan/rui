@@ -205,8 +205,8 @@ def activity_case():
                 count = f"{index + 1} · " if index else ""
                 waiting = chrome.frame(master, b"", lambda screen, count=count, index=index:
                     f"◌ {count}WAITING-{index}" in screen and composing(screen, "")
-                    and all(screen.count(f"› WAITING-{i}") == 1
-                        and screen.count(f"second line {i}") == 1 for i in range(index + 1)))
+                    and all(f"› WAITING-{i}" not in screen
+                        and f"second line {i}" not in screen for i in range(index + 1)))
                 assert "Sending" not in waiting, waiting
             bottom = feed_bottom(waiting)
             tail = transcript_rows(waiting)[bottom - 2:bottom]
@@ -215,9 +215,9 @@ def activity_case():
             assert transcript_rows(waiting)[bottom - 1] == "◌ 3 · WAITING-2" and not rows(waiting)[bottom].strip(), waiting
             assert "queued" not in waiting.lower(), waiting
             for index in range(3):
-                assert waiting.count(f"› WAITING-{index}") == 1, waiting
-                assert waiting.count(f"second line {index}") == 1, waiting
-            assert waiting.index("› WAITING-0") < waiting.index("› WAITING-1") < waiting.index("› WAITING-2"), waiting
+                assert f"› WAITING-{index}" not in waiting, waiting
+                assert f"second line {index}" not in waiting, waiting
+            assert waiting.count("WAITING-2") == 1, waiting
             assert footer(waiting).endswith("ctrl+x stop"), waiting
             (chrome.workspace / "release").write_text("")
             done = chrome.frame(master, b"", lambda screen: "HELD-DONE" in screen
@@ -231,7 +231,7 @@ def activity_case():
         finally:
             release.set()
             (chrome.workspace / "release").write_text("")
-    print("session chrome: the running call and its clock, ◌ 3 · the newest waiting Message, ctrl+x stop; full waiting Messages stay visible once before and after completion", flush=True)
+    print("session chrome: the running call and its clock, ◌ 3 · the newest waiting Message, ctrl+x stop; waiting Messages appear only in the queue until applied, then once as bands", flush=True)
 
 
 def send_state_case():
