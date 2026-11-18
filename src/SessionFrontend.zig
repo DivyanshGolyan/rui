@@ -6947,6 +6947,86 @@ test "SUI-17 SessionFrontend draws queued and taken Messages once across work" {
         try std.testing.expect(std.mem.indexOf(u8, taken, "› waiting one") != null);
         try std.testing.expect(std.mem.indexOf(u8, taken, "◌ waiting two") != null);
     }
+
+    // The tool may be rejected before the follow-up is sent or after it is queued.
+    // Repainting after draft edits must preserve the one visible representation.
+    const assertFrame = struct {
+        fn check(held: *HeldFrontend, draft: []const u8, queued: bool) !void {
+            const shown = try held.shown();
+            try std.testing.expectEqualStrings(draft, held.self.input.composition().bytes);
+            if (draft.len != 0) {
+                const prompt = try std.fmt.allocPrint(held.arena.allocator(), "› {s}", .{draft});
+                try std.testing.expect(std.mem.indexOf(u8, shown, prompt) != null);
+            }
+            try std.testing.expect(std.mem.indexOf(u8, shown, "Tool call · rejected") != null);
+            try std.testing.expect(std.mem.indexOf(u8, shown, "Thinking") != null);
+            try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, shown, "MIDTURN-HI"));
+            try std.testing.expect((std.mem.indexOf(u8, shown, "◌ MIDTURN-HI") != null) == queued);
+            try std.testing.expect((std.mem.indexOf(u8, shown, "› MIDTURN-HI") != null) == !queued);
+        }
+    }.check;
+    for ([_]u16{ 46, 140 }) |width| for ([_]bool{ true, false }) |rejection_first| {
+        const fixture = try FeedFixture.create();
+        defer fixture.destroy();
+        const held = fixture.held;
+        const self = &held.self;
+        held.size.width = width;
+        held.size.height = if (width == 46) 30 else 40;
+        try fixture.page(.opening, &.{.{ .key = 9, .text = "› FIRST-QUESTION\n" }}, true, true);
+        self.live.work.state = .{ .working = .{ .since = 1 } };
+        if (rejection_first) {
+            try fixture.page(.scan, &.{.{ .key = 10, .text = "× Tool call · rejected\n" }}, true, true);
+            self.live.work.state = .{ .working = .{ .since = 1 } };
+            const rejected = try held.shown();
+            try std.testing.expect(std.mem.indexOf(u8, rejected, "Tool call · rejected") != null);
+            try std.testing.expect(std.mem.indexOf(u8, rejected, "Thinking") != null);
+            try std.testing.expect(std.mem.indexOf(u8, rejected, "MIDTURN-HI") == null);
+        }
+        self.live.queued = .{ .count = 1, .oldest_position = 11, .newest_admission = 1, .newest_position = 11 };
+        self.live.queued_line = .{ .admission = 1, .line = .{} };
+        try self.live.queued_line.?.line.set("MIDTURN-HI");
+        if (rejection_first) {
+            try assertFrame(held, "", true);
+        } else {
+            const queued = try held.shown();
+            try std.testing.expect(std.mem.indexOf(u8, queued, "Thinking") != null);
+            try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, queued, "MIDTURN-HI"));
+            try std.testing.expect(std.mem.indexOf(u8, queued, "◌ MIDTURN-HI") != null);
+            try std.testing.expect(std.mem.indexOf(u8, queued, "› MIDTURN-HI") == null);
+        }
+        if (!rejection_first) {
+            try fixture.page(.scan, &.{
+                .{ .key = 12, .text = "× Tool call · rejected\n" },
+                .{ .key = 13, .text = "› MIDTURN-HI\n" },
+            }, true, true);
+            self.live.queued = .{};
+            self.live.queued_line = null;
+            self.live.work.state = .{ .working = .{ .since = 1 } };
+            try assertFrame(held, "", false);
+        }
+        const edits = [_]struct { keys: []const u8, draft: []const u8 }{
+            .{ .keys = "x", .draft = "x" },
+            .{ .keys = "\x7f", .draft = "" },
+            .{ .keys = "y", .draft = "y" },
+            .{ .keys = "\x7f", .draft = "" },
+        };
+        for (edits) |edit| {
+            try held.keys(edit.keys);
+            try assertFrame(held, edit.draft, rejection_first);
+        }
+        if (rejection_first) {
+            try fixture.page(.scan, &.{
+                .{ .key = 12, .text = "AFTER-REJECTION\n" },
+                .{ .key = 13, .text = "› MIDTURN-HI\n" },
+            }, true, true);
+            self.live.queued = .{};
+            self.live.queued_line = null;
+            self.live.work.state = .{ .working = .{ .since = 1 } };
+            try assertFrame(held, "", false);
+            const taken = try held.shown();
+            try std.testing.expect(std.mem.indexOf(u8, taken, "AFTER-REJECTION") != null);
+        }
+    };
 }
 
 test "SessionFrontend keeps recovery visible beside an invisible queued Admission" {

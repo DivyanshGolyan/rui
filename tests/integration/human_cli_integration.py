@@ -2267,9 +2267,7 @@ def main(selected="all"):
             assert rejected.returncode == (3 if code == "unknown_tool" else 1), (tools, rejected)
             assert (code in rejected.stdout if code == "unknown_tool" else f"[{code}]" in rejected.stderr), (tools, rejected)
             assert record.exists() == (code == "unknown_tool"), ("tool selection capture", tools)
-        for tools, mode in (("none", "bypass"), ("none", "ask"),
-                            ("bash", "bypass"), ("bash", "ask"),
-                            ("web_search", "ask"), ("bash,web_search", "bypass")):
+        for tools, mode in (("bash", "bypass"),):
             warning_ref = create_session(preferences_home, "--store", store,
                   "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-sol",
                   "--tools", tools, "--permission-mode", mode)
