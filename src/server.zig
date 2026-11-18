@@ -4944,12 +4944,12 @@ const MutationWitness = struct {
         } };
     }
 
-    // The frozen producer-byte oracle was captured at wire 20. Verify the
+    // The frozen producer-byte oracle was captured at the released wire version. Verify the
     // actual version first, then retain those captured bytes in the digest.
     fn hashResponse(hash: *Hash, body: []const u8) !void {
         const current = "{\"version\":\"" ++ protocol.wire_version ++ "\",";
         try std.testing.expect(std.mem.startsWith(u8, body, current));
-        hash.update("{\"version\":\"20\",");
+        hash.update("{\"version\":\"" ++ protocol.previous_wire_version ++ "\",");
         hash.update(body[current.len..]);
     }
 
@@ -5031,7 +5031,7 @@ test "mutation decoder preserves base bytes and the entire command domain" {
     try std.testing.expectError(error.TestUnexpectedResult, MutationWitness.hashResponse(&version_probe, "{\"version\":\"" ++ protocol.next_wire_version ++ "\",\"type\":\"configuration_reply\"}"));
     try MutationWitness.hashResponse(&version_probe, "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"configuration_reply\"}");
     var frozen_probe = MutationWitness.Hash.init(.{});
-    frozen_probe.update("{\"version\":\"20\",\"type\":\"configuration_reply\"}");
+    frozen_probe.update("{\"version\":\"" ++ protocol.previous_wire_version ++ "\",\"type\":\"configuration_reply\"}");
     try std.testing.expectEqualSlices(u8, &frozen_probe.finalResult(), &version_probe.finalResult());
     var covered: u16 = 0;
     inline for (comptime std.meta.tags(command_spec.CommandKind)) |kind| {
