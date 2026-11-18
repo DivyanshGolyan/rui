@@ -268,14 +268,6 @@
   "tests/integration/host_stop_integration_test.py": {
     "test_double": 1
   },
-  "tests/integration/human_cli_integration.py": {
-    "fixed_sleep": {
-      "renderer_cases": [
-        1,
-        "settle sleeps before screen and request assertions"
-      ]
-    }
-  },
   "tests/integration/model_fixture.py": {
     "fixed_sleep": {
       "FailureHandler.do_POST": [

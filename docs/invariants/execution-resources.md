@@ -70,6 +70,7 @@
 | EXR-62 | Product | A crash after a model response is validated but before its result settles stores no output, and restart replaces the Attempt once with the next response. | Model result pause, Host crash, Store and fake provider | `dispatch_integration.py:main` crash-sealed case | docs/contracts/model-io.md:27 |
 | EXR-63 | Host | A Session stop committed while a model request is between preparation steps cancels the Operation, sends nothing and releases its custody and scratch without fencing dispatch. | Model preparation pause, Host control, Store and fake provider | `dispatch_integration.py:main` preparation-stop case | docs/contracts/model-io.md:27 |
 | EXR-64 | Product | A Host that stops while a model request is between preparation steps sends nothing and leaves no request scratch, and restart sends the request once as the next Attempt. | Model preparation pause, Host shutdown, Store and fake provider | `dispatch_integration.py:main` preparation-shutdown case | docs/contracts/model-io.md:27 |
+| EXR-65 | Module | Each tool record retains its canonical digest with a correctly generated matching snapshot or when a stale or missing snapshot is recomputed. | Tool record public API | `EXR-65 tool identities survive matching, stale and missing digest snapshots` | src/tool_record.zig |
 
 Owned elsewhere: SH-3 (storage failure fencing).
 
