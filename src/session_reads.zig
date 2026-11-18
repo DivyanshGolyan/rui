@@ -177,6 +177,7 @@ pub const Job = struct {
     session: []const u8 = "",
     files: Files = undefined,
     colour: bool = false,
+    unicode_script: bool = true,
     width_method: Viewport.Method = .wcwidth,
     command: Command = undefined,
     configure: ?Configure = null,
@@ -444,7 +445,7 @@ pub fn permission(raw: *anyopaque, task: *Task) !void {
     if (job.result.work.work.first_action) |action| {
         try job.files.action.setLength(task.io, 0);
         var output: DisplayCapture = .{ .task = task, .file = job.files.action };
-        if (!try View.permission(task.requests(), job.store, job.session, action, job.files.scratch, &output, job.colour)) return;
+        if (!try View.permission(task.requests(), job.store, job.session, action, job.files.scratch, &output, job.colour, job.unicode_script)) return;
         job.result.action = action;
     }
 }
@@ -1411,11 +1412,11 @@ test "session_view Message placement is identical in either direction at every p
                     host.end = stop_at;
                     host.content_texts = texts[0..stop_at];
                     for (0..stop_at) |index| rows[index] = host.item(.{ .position = index + 1 }, stop_at);
-                    expected[1] = .{ .text = try std.fmt.bufPrint(&shown[1], "◌ not sent\n{s}{s}" ++ View.Mark.reset ++ "\n\n■ Stopped\n", .{ prefix, texts[0] }), .lowest = 1 };
+                    expected[1] = .{ .text = try std.fmt.bufPrint(&shown[1], "◌ not sent\n{s}{s}" ++ View.Mark.reset ++ "\n\n▪ Stopped\n", .{ prefix, texts[0] }), .lowest = 1 };
                     var stop_buffer: [8192]u8 = undefined;
                     var stop_out = std.Io.Writer.fixed(&stop_buffer);
                     for (3..excluded + 3) |index| try stop_out.print("{s}◌ not sent\n{s}{s}" ++ View.Mark.reset ++ "\n", .{ if (index == 3) "" else "\n", prefix, texts[index] });
-                    try stop_out.writeAll(if (excluded == 0) "■ Stopped\n" else "\n■ Stopped\n");
+                    try stop_out.writeAll(if (excluded == 0) "▪ Stopped\n" else "\n▪ Stopped\n");
                     expected[stop_at - 1] = .{ .text = stop_out.buffered(), .lowest = if (excluded == 0) null else 4 };
                     try check(root, rows[0..stop_at], expected[0..stop_at], .{}, false);
                 }
@@ -1513,7 +1514,7 @@ test "activity golden stop with interrupted ending draws one line across pages" 
                         _ = try View.render(undefined, "unused", session.slice(), null, item, .{}, false, &sink, colour, "", .{ .viewport = .wcwidth }, .none);
                     }
                 }
-                try std.testing.expectEqualStrings(if (colour) "\x1b[39m■\x1b[39m Stopped\n" else "■ Stopped\n", out.buffered());
+                try std.testing.expectEqualStrings(if (colour) "\x1b[39m▪\x1b[39m Stopped\n" else "▪ Stopped\n", out.buffered());
             }
         }
     }
@@ -1524,7 +1525,7 @@ test "activity golden stop with interrupted ending draws one line across pages" 
     var out = std.Io.Writer.fixed(&buffer);
     var sink: Sink = .{ .out = &out };
     _ = try View.render(undefined, "unused", session.slice(), null, page.facts.items[0], .{}, false, &sink, true, "", .{ .viewport = .wcwidth }, .none);
-    try std.testing.expectEqualStrings("\x1b[39m■\x1b[39m Stopped\n", out.buffered());
+    try std.testing.expectEqualStrings("\x1b[39m▪\x1b[39m Stopped\n", out.buffered());
 }
 
 test "session_reads rendered row kinds keep their own text and feed_window draws the gap from adjacency in every order" {
@@ -1561,7 +1562,7 @@ test "session_reads rendered row kinds keep their own text and feed_window draws
         .{ .value = .{ .hosted_call = .{ .description = search, .code = .succeeded, .publication_position = null } }, .line = "✓ Search", .packed_ = true },
         .{ .value = .{ .hosted_call = .{ .description = find, .code = .failed, .publication_position = null } }, .line = "× Find", .packed_ = false },
         .{ .value = .{ .send_failed = .{ .key = .{}, .target = null, .code = .{} } }, .line = "× Message not delivered", .packed_ = false },
-        .{ .value = .{ .stop = .{ .key = .{}, .turn = null, .cutoff = 0, .completion = .completed } }, .line = "■ Stopped", .packed_ = false },
+        .{ .value = .{ .stop = .{ .key = .{}, .turn = null, .cutoff = 0, .completion = .completed } }, .line = "▪ Stopped", .packed_ = false },
     };
     var documents: [kinds.len]Viewport.Sized(512, true) = undefined;
     var texts: [kinds.len]Text = undefined;

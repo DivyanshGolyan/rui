@@ -65,6 +65,8 @@ No test exists only to replay one bug.
 | Ordering and races | Inject the interleaving through a named pause point; never rely on the scheduler |
 | Platform differences | Platform code sits behind one small seam; only that seam's tests run on both systems |
 
+`tests/ci/flake_sources.py` enforces the flake-source rules with a shrink-only allowance.
+
 A test that is flaky is fixed at its root or deleted.
 
 ## Migration
