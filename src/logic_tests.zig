@@ -64,6 +64,7 @@ const cores = .{
     .{ "find_tools_words.zig", @import("find_tools_words.zig") },
     .{ "hex_value.zig", @import("hex_value.zig") },
     .{ "home_path.zig", @import("home_path.zig") },
+    .{ "host_activation.zig", @import("host_activation.zig") },
     .{ "host_reply.zig", @import("host_reply.zig") },
     .{ "host_restart.zig", @import("host_restart.zig") },
     .{ "host_settings.zig", @import("host_settings.zig") },

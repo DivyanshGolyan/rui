@@ -25,7 +25,7 @@ REPORT = 'from peer/b: 42\nLiteral `touch backtick-evaluated` and $(touch substi
 
 
 def address_of(request):
-    session = fixture.instructions_session(request["instructions"])
+    session = fixture.instructions_session(fixture.request_system_prompt(request))
     assert SESSION_ID.fullmatch(session), session
     return session
 
@@ -343,7 +343,7 @@ def main(report_source):
 
         a_requests = [request for request in endpoint.requests if address_of(request) == session_a]
         assert all(address_of(request) == session_a for request in a_requests)
-        assert a_requests[0]["instructions"] == model_instructions(workspace, session_a)
+        assert fixture.request_system_prompt(a_requests[0]) == model_instructions(workspace, session_a)
         b_first = next(request for request in endpoint.requests if address_of(request) == session_b)
         assert address_of(b_first) == session_b
         assert sender_of(b_first) == session_a
@@ -432,7 +432,7 @@ def main(report_source):
         assert B_LABEL not in json.dumps(b_requests), b_requests
         if report_source == "stdin":
             session_link_journey(installed, store, home, session_a)
-        assert all(request["instructions"] == model_instructions(workspace, session_b) for request in b_requests)
+        assert all(fixture.request_system_prompt(request) == model_instructions(workspace, session_b) for request in b_requests)
         assert run(installed, "host", "status", "--store", store, home=home)["instance"] == instance
         (state / "leak-home").mkdir()
         controls = []
@@ -495,7 +495,7 @@ class CohortModel(TestHTTPServer):
 
     def respond(self, request):
         session = address_of(request)
-        assert request["instructions"] == model_instructions(self.workspace, session), request
+        assert fixture.request_system_prompt(request) == model_instructions(self.workspace, session), request
         if session != self.parent:
             assert sender_of(request) == self.parent, request
             assert last_user_text(request) == f"Report to parent ID {self.parent}", request

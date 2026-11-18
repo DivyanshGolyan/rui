@@ -509,7 +509,7 @@ def main():
         wait_for(lambda: any(CHILD_TASK in messages(request, "user") for request in endpoint.decoded()), "child provider request")
         child_request = next(request for request in endpoint.decoded() if CHILD_TASK in messages(request, "user"))
         assert messages(child_request, "user")[-2:] == [CHILD_TASK, invocation(child_only)], child_request
-        child = fixture.instructions_session(child_request["instructions"])
+        child = fixture.instructions_session(fixture.request_system_prompt(child_request))
         assert child not in (parent, restricted_session), child
         assert metadata(child_request, "Available skills") == [catalog(*updated_catalog["entries"], child_only)], child_request
         assert CHILD_INSTRUCTIONS in json.dumps(child_request), child_request

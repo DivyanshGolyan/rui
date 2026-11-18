@@ -15,8 +15,9 @@ const host_start = @import("host_start.zig");
 const secret_value = @import("secret_value.zig");
 const start_report = @import("start_report.zig");
 const product_defaults = @import("product_defaults.zig");
+const activation = @import("host_activation.zig");
 
-pub const Stage = enum { stopping, awaiting_retirement, starting, verifying };
+pub const Stage = activation.Stage;
 pub const Progress = struct {
     context: *anyopaque,
     report: *const fn (*anyopaque, Stage) void,
@@ -24,18 +25,7 @@ pub const Progress = struct {
         if (self) |value| value.report(value.context, stage);
     }
 };
-pub const Limitation = enum {
-    inaccessible,
-    incompatible,
-    ownership_status,
-    ownership_observation,
-    ownership_directory_unavailable,
-    ownership_directory_mismatch,
-    ownership_confirmation,
-    application_owned,
-    configuration_unavailable,
-    target_capability,
-};
+pub const Limitation = activation.Limitation;
 
 /// Classify the facts acquired at each ownership check without reading a clock.
 /// Deadlines and I/O errors are resolved by the observing client before this call.
@@ -56,21 +46,7 @@ pub fn ownershipLimitation(check: OwnershipCheck) ?Limitation {
         .confirmation => |ok| if (ok) null else .ownership_confirmation,
     };
 }
-pub const ActivationOutcome = union(enum) {
-    not_needed,
-    superseded,
-    already_ready: struct { instance: protocol.InstanceId, pid: c_int },
-    ready: struct { instance: protocol.InstanceId, pid: c_int },
-    /// Target public status, answering peer release and new instance were
-    /// verified; only the calling client's wire is incompatible.
-    client_incompatible: c_int,
-    unsupported: Limitation,
-    replacement_observed,
-    cancelled,
-    refused: struct { stage: enum { checking, starting }, failure: start_report.Failure },
-    failed: Stage,
-    unconfirmed: Stage,
-};
+pub const ActivationOutcome = activation.Outcome;
 
 // The arena's allocator context must not move when an Observation is returned.
 // Its normalized assignments can contain secrets and are wiped on EVERY exit.

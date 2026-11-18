@@ -613,6 +613,7 @@ pub const Preparation = struct {
         history_validation,
         instructions,
         history_start,
+        history_span,
         history,
         input_open,
         input_parts,
@@ -801,9 +802,13 @@ pub const Preparation = struct {
             .instructions => {
                 self.state.stage = .history_start;
                 self.handles[0] = .instructions;
-                return self.loadItemHeader(.instructions, 0b1);
+                return self.loadItemHeader(.{ .message = .instruction }, 0b1);
             },
             .history_start => {
+                self.state.stage = .history_span;
+                return self.loadItemHeader(.history_start, 0);
+            },
+            .history_span => {
                 const next = try self.startSpan();
                 self.state.stage = .history;
                 return next;
@@ -1764,7 +1769,7 @@ test "a peer Message leads with its recorded sender facts apart from its text" {
     defer std.testing.allocator.free(result.bytes);
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, result.bytes, .{});
     defer parsed.deinit();
-    const content = parsed.value.object.get("input").?.array.items[0].object.get("content").?.array.items;
+    const content = requestHistory(parsed.value)[0].object.get("content").?.array.items;
     try std.testing.expectEqual(@as(usize, 2), content.len);
     const text = content[0].object.get("text").?.string;
     const end = std.mem.indexOfScalar(u8, text, '\n').?;
@@ -1871,10 +1876,28 @@ fn requestGolden(workspace: []const u8, session: []const u8, request: []const u8
     const encoded = try std.json.Stringify.valueAlloc(std.testing.allocator, context, .{});
     defer std.testing.allocator.free(encoded);
     const marker = "\"instructions\":\"";
-    const offset = std.mem.indexOf(u8, request, marker).? + marker.len;
-    return std.testing.allocator.print("{s}{s}{s}", .{
-        request[0..offset], encoded[1 .. encoded.len - 1], request[offset..],
+    const start = std.mem.indexOf(u8, request, marker).?;
+    const offset = start + marker.len;
+    const end = offset + std.mem.indexOf(u8, request[offset..], "\",\"input\":[").?;
+    return std.testing.allocator.print("{s}\"input\":[{{\"role\":\"developer\",\"content\":[{{\"type\":\"input_text\",\"text\":\"{s}{s}\"}}]}},{s}", .{
+        request[0..start], encoded[1 .. encoded.len - 1], request[offset..end], request[end + "\",\"input\":[".len ..],
     });
+}
+
+fn requestSystemPrompt(parsed: std.json.Value) []const u8 {
+    if (parsed.object.get("instructions")) |instructions| return instructions.string;
+    const first = parsed.object.get("input").?.array.items[0].object;
+    std.debug.assert(std.mem.eql(u8, first.get("role").?.string, "developer"));
+    return first.get("content").?.array.items[0].object.get("text").?.string;
+}
+
+fn requestHistory(parsed: std.json.Value) []std.json.Value {
+    const input = parsed.object.get("input").?.array.items;
+    return if (parsed.object.get("instructions") != null) input else input[1..];
+}
+
+fn firstUserHistoryOffset(request: []const u8) usize {
+    return std.mem.indexOf(u8, request, "{\"role\":\"user\",\"content\":[").?;
 }
 
 fn preparationTestStepBound(request_bytes: usize) usize {
@@ -2253,7 +2276,7 @@ test "request preparation minimal golden is exact across schedules" {
         defer std.testing.allocator.free(result.bytes);
         const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, result.bytes, .{});
         defer parsed.deinit();
-        const instructions = parsed.value.object.get("instructions").?.string;
+        const instructions = requestSystemPrompt(parsed.value);
         try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, instructions, context_parts[3]));
         const path_start = context_parts[0].len - 1;
         const path_end = std.mem.indexOf(u8, instructions, context_parts[1]).? + 1;
@@ -2389,10 +2412,10 @@ test "request preparation escapes instructions and user content" {
     try std.testing.expect(std.mem.indexOf(u8, first.bytes, instructions_text) == null);
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, first.bytes, .{});
     defer parsed.deinit();
-    const instructions = parsed.value.object.get("instructions").?.string;
+    const instructions = requestSystemPrompt(parsed.value);
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, instructions, context_parts[3]));
     try std.testing.expect(std.mem.endsWith(u8, instructions, context_parts[3] ++ instructions_text));
-    const input = parsed.value.object.get("input").?.array.items;
+    const input = requestHistory(parsed.value);
     try std.testing.expectEqualStrings(user_text, input[0].object.get("content").?.array.items[0].object.get("text").?.string);
 
     _ = (try setup.storage.admitNextModelAttempt(.{}));
@@ -2467,7 +2490,7 @@ test "request preparation frozen selection excludes later messages" {
     defer std.testing.allocator.free(result.bytes);
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, result.bytes, .{});
     defer parsed.deinit();
-    const input = parsed.value.object.get("input").?.array.items;
+    const input = requestHistory(parsed.value);
     try std.testing.expectEqual(@as(usize, 2), input.len);
     try std.testing.expectEqualStrings("first", input[0].object.get("content").?.array.items[0].object.get("text").?.string);
     try std.testing.expectEqualStrings("additional_tools", input[1].object.get("type").?.string);
@@ -2559,7 +2582,7 @@ test "request preparation keeps the starting effort at the top and changes it at
             try std.testing.expectEqualStrings(case.model, request.get("model").?.string);
             try std.testing.expectEqualStrings("low", request.get("text").?.object.get("verbosity").?.string);
             try std.testing.expectEqual(true, request.get("parallel_tool_calls").?.bool);
-            try std.testing.expectEqualStrings("keep this exact input", request.get("input").?.array.items[0].object.get("content").?.array.items[0].object.get("text").?.string);
+            try std.testing.expectEqualStrings("keep this exact input", requestHistory(parsed.value)[0].object.get("content").?.array.items[0].object.get("text").?.string);
             try std.testing.expectEqual(@as(usize, purpose), std.mem.count(u8, bytes, "compaction_trigger"));
             sealed.deinit(std.testing.io, preparation.writer.budget);
             owned = false;
@@ -3288,7 +3311,7 @@ test "every replayed output item parses equal to the item the provider sent" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     const parsed = try std.json.parseFromSliceLeaky(std.json.Value, arena, request.bytes, .{});
-    const input = parsed.object.get("input").?.array.items;
+    const input = requestHistory(parsed);
     try std.testing.expectEqual(cases.len + 3, input.len);
     try std.testing.expectEqualStrings("additional_tools", input[1].object.get("type").?.string);
     for (cases, input[2 .. 2 + cases.len], 0..) |case, actual, index| {
@@ -3469,10 +3492,10 @@ test "compaction preparation appends request only trigger and replays asymmetric
     try std.testing.expectEqual(after_anchor, try expectMemoRebuildEqual(&setup, next_binding, &memos, .{}));
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, request.bytes, .{});
     defer parsed.deinit();
-    const instructions = parsed.value.object.get("instructions").?.string;
+    const instructions = requestSystemPrompt(parsed.value);
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, instructions, context_parts[3]));
     try std.testing.expect(std.mem.endsWith(u8, instructions, context_parts[3]));
-    const input = parsed.value.object.get("input").?.array.items;
+    const input = requestHistory(parsed.value);
     try std.testing.expectEqual(@as(usize, 5), input.len);
     try std.testing.expectEqualStrings("first host input", input[0].object.get("content").?.array.items[0].object.get("text").?.string);
     try std.testing.expectEqualStrings("compaction", input[1].object.get("type").?.string);
@@ -3488,7 +3511,7 @@ test "compaction preparation appends request only trigger and replays asymmetric
 fn inputTextsForTesting(request: []const u8, out: [][]const u8) ![]const []const u8 {
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, request, .{});
     defer parsed.deinit();
-    const input = parsed.value.object.get("input").?.array.items;
+    const input = requestHistory(parsed.value);
     std.debug.assert(input.len <= out.len);
     for (input, 0..) |item, index| {
         const label = if (item.object.get("content")) |content| content.array.items[0].object.get("text").?.string else item.object.get("type").?.string;
@@ -3893,7 +3916,7 @@ test "request N+1 begins with request N's history span" {
         const request = try prepareMemoForTesting(&setup, binding, &table, .{});
         defer std.testing.allocator.free(request.bytes);
         try std.testing.expectEqual(@as(usize, 0), request.copied);
-        const start = std.mem.indexOf(u8, request.bytes, "\"input\":[").? + "\"input\":[".len;
+        const start = firstUserHistoryOffset(request.bytes);
         const span = request.bytes[start..][0..heldMemoLength(&table, session.slice())];
         const after = request.bytes[start + span.len ..];
         const between = after[0 .. std.mem.indexOf(u8, after, "],\"tools\":[") orelse return error.TestUnexpectedResult];
@@ -4344,7 +4367,7 @@ test "a loaded tools revision adds exactly the newly loaded tool without a cache
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, request.bytes, .{});
     defer parsed.deinit();
     var declarations: usize = 0;
-    for (parsed.value.object.get("input").?.array.items) |item| {
+    for (requestHistory(parsed.value)) |item| {
         const kind = item.object.get("type") orelse continue;
         if (!std.mem.eql(u8, kind.string, "additional_tools")) continue;
         const added = item.object.get("tools").?.array.items;
@@ -4394,7 +4417,7 @@ test "find_tools declares a found tool on the next request without losing the me
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, next.bytes, .{});
     defer parsed.deinit();
     var declarations: usize = 0;
-    for (parsed.value.object.get("input").?.array.items) |item| {
+    for (requestHistory(parsed.value)) |item| {
         const kind = item.object.get("type") orelse continue;
         if (!std.mem.eql(u8, kind.string, "additional_tools")) continue;
         const added = item.object.get("tools").?.array.items;
@@ -4429,7 +4452,7 @@ test "read_action uses the frozen configured offer and returns one provider tool
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const request = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), first.bytes, .{});
-    const declaration = request.object.get("input").?.array.items[1].object;
+    const declaration = requestHistory(request)[1].object;
     try std.testing.expectEqualStrings("additional_tools", declaration.get("type").?.string);
     const definitions = declaration.get("tools").?.array.items;
     try std.testing.expectEqual(@as(usize, 2), definitions.len);
@@ -4452,7 +4475,7 @@ test "read_action uses the frozen configured offer and returns one provider tool
     const successor = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), next.bytes, .{});
     try std.testing.expectEqual(@as(usize, 0), successor.object.get("tools").?.array.items.len);
     var outputs: usize = 0;
-    for (successor.object.get("input").?.array.items) |item| {
+    for (requestHistory(successor)) |item| {
         const kind = item.object.get("type") orelse continue;
         if (!std.mem.eql(u8, kind.string, "function_call_output")) continue;
         try std.testing.expectEqualStrings("read-call", item.object.get("call_id").?.string);
@@ -4506,7 +4529,7 @@ test "core reader failures retain exact bytes in provider continuation" {
     defer std.testing.allocator.free(next.bytes);
     const request = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), next.bytes, .{});
     var seen: usize = 0;
-    for (request.object.get("input").?.array.items) |item| {
+    for (requestHistory(request)) |item| {
         const kind = item.object.get("type") orelse continue;
         if (!std.mem.eql(u8, kind.string, "function_call_output")) continue;
         const call_id = item.object.get("call_id").?.string;
@@ -4611,7 +4634,7 @@ test "successful reader pages and final stop preserve bytes in provider continua
     defer std.testing.allocator.free(request.bytes);
     const parsed = try std.json.parseFromSliceLeaky(std.json.Value, arena, request.bytes, .{});
     var seen: [args.len]bool = @splat(false);
-    for (parsed.object.get("input").?.array.items) |item| {
+    for (requestHistory(parsed)) |item| {
         const kind = item.object.get("type") orelse continue;
         if (!std.mem.eql(u8, kind.string, "function_call_output")) continue;
         const id = item.object.get("call_id").?.string;
@@ -4688,7 +4711,7 @@ test "late completion after stop preserves cancelled bytes in provider continuat
     defer std.testing.allocator.free(request.bytes);
     const parsed = try std.json.parseFromSliceLeaky(std.json.Value, arena, request.bytes, .{});
     var count: usize = 0;
-    for (parsed.object.get("input").?.array.items) |item| {
+    for (requestHistory(parsed)) |item| {
         const kind = item.object.get("type") orelse continue;
         if (!std.mem.eql(u8, kind.string, "function_call_output")) continue;
         if (!std.mem.eql(u8, item.object.get("call_id").?.string, "stop-call")) continue;
@@ -5143,9 +5166,9 @@ test "skills native conversation is append-only across invoke reload replay and 
     const first = try prepareMemoWithAllowanceForTesting(&setup, binding, null, .{}, 1024);
     defer std.testing.allocator.free(first.bytes);
     const first_parsed = try std.json.parseFromSlice(std.json.Value, arena, first.bytes, .{});
-    try std.testing.expect(std.mem.indexOf(u8, first_parsed.value.object.get("instructions").?.string, "initial-demo-desc") == null);
+    try std.testing.expect(std.mem.indexOf(u8, requestSystemPrompt(first_parsed.value), "initial-demo-desc") == null);
     var users: std.ArrayList([]const u8) = .empty;
-    for (first_parsed.value.object.get("input").?.array.items) |item| {
+    for (requestHistory(first_parsed.value)) |item| {
         const role = item.object.get("role") orelse continue;
         if (std.mem.eql(u8, role.string, "user")) try users.append(arena, item.object.get("content").?.array.items[0].object.get("text").?.string);
     }
@@ -5175,7 +5198,7 @@ test "skills native conversation is append-only across invoke reload replay and 
     try std.testing.expectStringStartsWith(second.bytes, first.bytes[0..first_end]);
     const second_parsed = try std.json.parseFromSlice(std.json.Value, arena, second.bytes, .{});
     var exact_tool = false;
-    for (second_parsed.value.object.get("input").?.array.items) |item| {
+    for (requestHistory(second_parsed.value)) |item| {
         const kind = item.object.get("type") orelse continue;
         if (std.mem.eql(u8, kind.string, "function_call_output")) exact_tool = std.mem.eql(u8, item.object.get("output").?.string, current.invocation);
     }
@@ -5564,16 +5587,45 @@ test "raw image preparation streams canonical PNG into user and tool arrays" {
         "{\"type\":\"function_call_output\",\"call_id\":\"shot\\\"\",\"output\":[" ++ image_test_part ++
         ",{\"type\":\"input_text\",\"text\":\"observed\"}]}," ++
         "{\"type\":\"function_call_output\",\"call_id\":\"text-only\",\"output\":\"still a string\"}]";
+    const quoted_workspace = try std.json.Stringify.valueAlloc(std.testing.allocator, setup.workspace, .{});
+    defer std.testing.allocator.free(quoted_workspace);
+    const context = try std.fmt.allocPrint(std.testing.allocator, "{s}{s}{s}{s}{s}{s}", .{
+        context_parts[0], quoted_workspace[1 .. quoted_workspace.len - 1], context_parts[1],
+        session.slice(),  context_parts[2],                                context_parts[3],
+    });
+    defer std.testing.allocator.free(context);
+    const encoded_context = try std.json.Stringify.valueAlloc(std.testing.allocator, context, .{});
+    defer std.testing.allocator.free(encoded_context);
     for ([_]protocol.Codec{ .@"openai-responses/1", .@"openai-responses/2", .@"openai-responses/3" }) |codec| {
+        const top = "{\"model\":\"model-a\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"]";
+        const prefix = if (codec == .@"openai-responses/1")
+            try std.fmt.allocPrint(std.testing.allocator, "{s},\"instructions\":{s},\"input\":[", .{ top, encoded_context })
+        else
+            try std.fmt.allocPrint(std.testing.allocator, "{s},\"input\":[{{\"role\":\"developer\",\"content\":[{{\"type\":\"input_text\",\"text\":{s}}}]}},", .{ top, encoded_context });
+        defer std.testing.allocator.free(prefix);
+        const full_expected = try std.mem.concat(std.testing.allocator, u8, &.{ prefix, expected[1..] });
+        defer std.testing.allocator.free(full_expected);
         for ([_]usize{ 1, 2, 3, 5, 17, preparation_byte_allowance }) |allowance| {
             var used: std.atomic.Value(u64) = .init(0);
             var preparation: Preparation = undefined;
-            const content = try openRawImagePreparationWithDigestRecheck(&setup, binding, &preparation, &used, expected.len);
+            const content = try openRawImagePreparationWithDigestRecheck(&setup, binding, &preparation, &used, full_expected.len);
             defer if (preparation.state.active) preparation.cancel();
             preparation.settings.codec = codec;
-            preparation.carry = codecs.initialCarry(codec, null);
+            preparation.carry = codecs.initialCarry(codec, effortOf(preparation.settings.starting_effort));
             preparation.encoder = codecs.resumeFrom(preparation.carry);
-            try preparation.writer.write("[");
+            _ = preparation.loadSettingsItem();
+            try preparation.encodeItem();
+            try drainRawImageItem(&preparation, &setup.storage, preparation_byte_allowance);
+            preparation.state.stage = .instructions;
+            var bytes_left: usize = preparation_byte_allowance;
+            var items_left: usize = preparation_item_allowance;
+            for (0..2) |_| {
+                try std.testing.expect((try preparation.nextItem(&bytes_left, &items_left)) == .item);
+                try preparation.encodeItem();
+                try drainRawImageItem(&preparation, &setup.storage, preparation_byte_allowance);
+            }
+            try std.testing.expect(preparation.state.stage == .history_span);
+            try std.testing.expectEqual(prefix.len, preparation.writer.offset);
             const Item = struct { item: codec_abi.Item, handles: []const Handle = &.{} };
             for ([_]Item{
                 .{ .item = .{ .image_message_open = .user } },
@@ -5596,10 +5648,11 @@ test "raw image preparation streams canonical PNG into user and tool arrays" {
             preparation.state.stage = .end;
             const request = try drainLivePreparation(&preparation, &setup.storage, allowance, 1, 64);
             defer request.deinit(std.testing.io, preparation.writer.budget);
-            var bytes: [expected.len]u8 = undefined;
-            try std.testing.expectEqual(bytes.len, try request.file.readPositionalAll(std.testing.io, &bytes, 0));
-            try std.testing.expectEqualStrings(expected, &bytes);
-            try std.testing.expectEqual(@as(u64, expected.len), used.load(.monotonic));
+            const bytes = try std.testing.allocator.alloc(u8, full_expected.len);
+            defer std.testing.allocator.free(bytes);
+            try std.testing.expectEqual(bytes.len, try request.file.readPositionalAll(std.testing.io, bytes, 0));
+            try std.testing.expectEqualStrings(full_expected, bytes);
+            try std.testing.expectEqual(@as(u64, full_expected.len), used.load(.monotonic));
         }
     }
 }
@@ -5746,7 +5799,7 @@ test "request preparation streams exact built-in instructions across provider ro
         defer std.testing.allocator.free(quoted_workspace);
         const expected = try std.mem.concat(std.testing.allocator, u8, &.{ context_parts[0], quoted_workspace[1 .. quoted_workspace.len - 1], context_parts[1], session.slice(), context_parts[2], body, context_parts[3], baseline });
         defer std.testing.allocator.free(expected);
-        const instructions = parsed.value.object.get("instructions").?.string;
+        const instructions = requestSystemPrompt(parsed.value);
         try std.testing.expectEqualStrings(expected, instructions);
         if (body.len != 0) try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, instructions, body));
         try std.testing.expectEqual(@as(u64, result.bytes.len), result.length);
@@ -5778,9 +5831,9 @@ test "a prepared request's bytes stay as pinned over pages, tool results and pag
     const Scenario = enum { pages, tool_results, bounds };
     const Pinned = struct {
         const digests = std.EnumArray(Scenario, *const [64]u8).init(.{
-            .pages = "8af5e124560dff3ab788bb517b07232ec2354635f7ea91861b39a654478dd34d",
-            .tool_results = "392a416ca9cd01f2398af005493cd555dca5eeb5ce1874f5c90ca1212d89d352",
-            .bounds = "09ce8931ac2932bc4115c9c0da0a9a6febc9931a3476cad84a0b7c005a57d6cc",
+            .pages = "f7827100070720d422de63bbfa64fa2e7322ff73428bb605855755ebd276b035",
+            .tool_results = "e232738ad0194f4409caabeb56053e7a36ae18b17b995e880ef3b0c1df4f44f4",
+            .bounds = "909467844475aac9ba18d00713ec47619b28bf918b4f717db23c451643be34ff",
         });
     };
     const testing = store.testing;
@@ -5980,7 +6033,7 @@ test "canonical ordered Message lowers original PNG JPEG and Text parts on every
             try std.testing.expect(memos.held(session.slice()) == null);
             const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, result.bytes, .{});
             defer parsed.deinit();
-            const content = parsed.value.object.get("input").?.array.items[0].object.get("content").?.array.items;
+            const content = requestHistory(parsed.value)[0].object.get("content").?.array.items;
             try expectOrderedPartsForTesting(content, parts);
             try std.testing.expect(std.mem.indexOf(u8, result.bytes, "outside frozen cutoff") == null);
             try std.testing.expect(!setup.storage.isFenced());
@@ -6010,7 +6063,7 @@ test "canonical ordered Message peer prefix precedes its first image and Text pa
     defer std.testing.allocator.free(result.bytes);
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, result.bytes, .{});
     defer parsed.deinit();
-    const content = parsed.value.object.get("input").?.array.items[0].object.get("content").?.array.items;
+    const content = requestHistory(parsed.value)[0].object.get("content").?.array.items;
     try std.testing.expectEqual(@as(usize, 3), content.len);
     const prefix = try std.fmt.allocPrint(std.testing.allocator, "{s}{s}{s}", .{ peer_parts[0], peer.slice(), peer_parts[1] });
     defer std.testing.allocator.free(prefix);
@@ -6135,7 +6188,7 @@ test "canonical ordered Message bypasses an existing Text memo but retains prefi
     try std.testing.expect(old_memo.length > 0);
     const original_seal = (try setup.storage.prefixSealForTesting(first)).?;
     try std.testing.expectEqual(old_memo.length, original_seal.span_length);
-    const initial_start = std.mem.indexOf(u8, initial.bytes, "\"input\":[").? + "\"input\":[".len;
+    const initial_start = firstUserHistoryOffset(initial.bytes);
     const initial_span = initial.bytes[initial_start..][0..@intCast(original_seal.span_length)];
     var initial_digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(initial_span, &initial_digest, .{});
@@ -6160,7 +6213,7 @@ test "canonical ordered Message bypasses an existing Text memo but retains prefi
     phase = "successor rebuild";
     const full = try prepareMemoForTesting(&setup, binding, null, .{});
     defer std.testing.allocator.free(full.bytes);
-    const successor_start = std.mem.indexOf(u8, full.bytes, "\"input\":[").? + "\"input\":[".len;
+    const successor_start = firstUserHistoryOffset(full.bytes);
     try std.testing.expect(full.bytes.len >= successor_start + initial_span.len);
     try std.testing.expectEqualStrings(initial_span, full.bytes[successor_start..][0..initial_span.len]);
     phase = "successor with memo";
@@ -6345,7 +6398,7 @@ test "canonical ordered Action Resolution lowers Text PNG JPEG and one Text on e
             defer parsed.deinit();
             var seen: usize = 0;
             var messages: usize = 0;
-            for (parsed.value.object.get("input").?.array.items) |item| {
+            for (requestHistory(parsed.value)) |item| {
                 const typ = item.object.get("type") orelse {
                     messages += 1;
                     continue;
@@ -6536,7 +6589,7 @@ test "canonical ordered Action Resolution background final prefixes the same par
         defer std.testing.allocator.free(result.bytes);
         const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, result.bytes, .{});
         defer parsed.deinit();
-        const input = parsed.value.object.get("input").?.array.items;
+        const input = requestHistory(parsed.value);
         const final = input[input.len - 1];
         try std.testing.expectEqualStrings("user", final.object.get("role").?.string);
         const content = final.object.get("content").?.array.items;
@@ -6666,7 +6719,7 @@ test "old text request retries unchanged across later image message and final ac
         const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, before.bytes, .{});
         defer parsed.deinit();
         var saved_found = false;
-        for (parsed.value.object.get("input").?.array.items) |item| {
+        for (requestHistory(parsed.value)) |item| {
             const kind = item.object.get("type") orelse continue;
             if (!std.mem.eql(u8, kind.string, "function_call_output")) continue;
             if (!std.mem.eql(u8, item.object.get("call_id").?.string, "legacy-call")) continue;

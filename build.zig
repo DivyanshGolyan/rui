@@ -492,6 +492,18 @@ pub fn build(b: *std.Build) void {
         stack_frames_step.dependOn(&stack_frames.step);
     }
     if (!pr_ci) check_step.dependOn(stack_frames_step);
+    const rsql_table_step = b.step(
+        "rsql-table",
+        "Fail when src/store/rsql_table.zig differs from what rsql's comptime path renders (Linux only)",
+    );
+    if (target.result.os.tag == .linux) {
+        const rsql_table = b.addSystemCommand(&.{ "python3", "-B" });
+        rsql_table.addFileArg(b.path("tests/ci/rsql_table.py"));
+        rsql_table.addArgs(&.{ "check", "--zig", b.graph.zig_exe });
+        rsql_table.has_side_effects = true;
+        rsql_table_step.dependOn(&rsql_table.step);
+    }
+    if (!pr_ci) check_step.dependOn(rsql_table_step);
 
     const full_check_step = b.step(
         "check-full",

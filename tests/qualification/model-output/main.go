@@ -879,7 +879,7 @@ func expectedCapacityRequests(keys, sessions []string, workspace, store string) 
 	rows := make([]keyedDigest, 0, len(keys))
 	totalBytes := 0
 	for index, key := range keys {
-		body := []byte(`{"model":"gpt-6-luna","parallel_tool_calls":true,"store":false,"stream":true,"include":["reasoning.encrypted_content"],"reasoning":{"effort":"medium"},"instructions":` + measurement.JSONString(measurement.ModelInstructions(workspace, sessions[index], "gpt-6-luna")) + `,"input":[{"role":"user","content":[{"type":"input_text","text":` + measurement.JSONString(key) + `}]}],"tools":[],"text":{"verbosity":"low"}}`)
+		body := []byte(`{"model":"gpt-6-luna","parallel_tool_calls":true,"store":false,"stream":true,"include":["reasoning.encrypted_content"],"reasoning":{"effort":"medium"},"input":[` + measurement.DeveloperInstructionItem(measurement.ModelInstructions(workspace, sessions[index], "gpt-6-luna")) + `,{"role":"user","content":[{"type":"input_text","text":` + measurement.JSONString(key) + `}]}],"tools":[],"text":{"verbosity":"low"}}`)
 		digest := sha256.Sum256(body)
 		rows = append(rows, keyedDigest{key: key, digest: hex.EncodeToString(digest[:])})
 		totalBytes += len(body)
@@ -1254,7 +1254,7 @@ func measureCapacityRound(binary, directory, store, canonicalStore, workspace st
 	sessions := identity.sessions
 	for index := range capacity {
 		if !sameSessions || round == 1 {
-			sessions[index], err = client.Configure(keys[index], "", "--tools", "none")
+			sessions[index], err = client.Configure(keys[index], "", "--tools", "none", "--reasoning-effort", "medium")
 			if err != nil {
 				return nil, err
 			}
@@ -1906,7 +1906,7 @@ func measureSessions(binary, output string, sessions int, hold bool, expectation
 	client := measurement.Client{Binary: binary, Store: store, Artifacts: directory, Deadline: deadline}
 	identity := capacityAuditIdentity(make([]string, sessions), 1)
 	for index := range identity.sessions {
-		identity.sessions[index], err = client.Configure(identity.keys[index], "", "--tools", "none")
+		identity.sessions[index], err = client.Configure(identity.keys[index], "", "--tools", "none", "--reasoning-effort", "medium")
 		if err != nil {
 			return result, err
 		}

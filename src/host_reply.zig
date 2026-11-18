@@ -400,7 +400,7 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     ));
 
     try std.testing.expectEqual(protocol.shapeBytes(protocol.configuration_reply.accepted_create), protocol.configuration_reply.max_bytes);
-    try std.testing.expectEqual(protocol.shapeBytes(protocol.message_reply.accepted_create), protocol.message_reply.max_bytes);
+    try std.testing.expectEqual(protocol.shapeBytes(protocol.message_reply.accepted_parts_create), protocol.message_reply.max_bytes);
 
     try std.testing.expectEqual(protocol.session_stop_reply.max_bytes, try Worst.reply(renderMutationReply(.session_stop), @as([]const u8, &escaped_session), .{
         command_reply.SessionStopReply{ .accepted = .{ .replayed = false, .selection = .{ .selected_turn_id = max, .admission_cutoff = max }, .completion = Worst.tag(protocol.SessionStopCompletion) } },

@@ -112,16 +112,17 @@ FIXTURES = {
     "activity-integration": ((I + "activity_integration.py",), (I + "activity_client.zig",), (CALLER, HOST)),
     "host-status-integration": ((I + "host_status_integration.py",), (I + "host_status_actor.zig",), (CALLER, HOST)),
     "host-stop-integration": ((I + "host_stop_integration.py",), (I + "host_status_actor.zig",),
-                              (CALLER, "src/HostLifecycle.zig", "src/server_host.zig")),
+                              (CALLER, "src/HostLifecycle.zig", "src/host_activation.zig", "src/server_host.zig")),
     "host-launch-integration": ((I + "host_launch_integration.py",), (),
-                                ("src/HostLifecycle.zig", "src/descriptor_capacity.zig", "src/os/descriptor_limit.zig", "src/serve_grammar.zig")),
+                                ("src/HostLifecycle.zig", "src/host_activation.zig", "src/descriptor_capacity.zig", "src/os/descriptor_limit.zig",
+                                 "src/serve_grammar.zig")),
     "descriptor-capacity-integration": ((I + "descriptor_capacity_integration.py",), (),
                                         ("src/descriptor_capacity.zig", "src/os/descriptor_limit.zig")),
     "host-allocator-integration": ((I + "host_allocator_test.py",), (), ("src/os/process.zig",)),
     "host-process-test": ((I + "host_process_test.py",), (), ()),
     "installer-integration": ((I + "installer_integration.py",), (),
                               ("src/Installation.zig", "src/installation_path.zig", "src/release_candidate.zig")),
-    "upgrade-integration": ((I + "upgrade_integration.py",), (), (UPGRADE, "src/HostLifecycle.zig", "src/Installation.zig")),
+    "upgrade-integration": ((I + "upgrade_integration.py",), (), (UPGRADE, "src/HostLifecycle.zig", "src/host_activation.zig", "src/Installation.zig")),
     "terminal-restoration-integration": ((I + "terminal_restoration_integration.py",), ("src/terminal_notice_test.zig",),
                                          ("src/SessionFrontend.zig", "src/TerminalApp.zig", "src/TerminalEditor.zig")),
     "canonical-failure-integration": ((I + "canonical_failure_integration.py",), (),
@@ -327,7 +328,7 @@ def tree_uncommon_texts(candidates):
 CLI_GRAMMAR = ("src/cli_grammar.zig", "src/cli_option_names.zig", "src/serve_grammar.zig")
 
 UPGRADE_PATHS = (UPGRADE, "src/installation_path.zig", "src/TerminalEditor.zig", "src/Installation.zig", "src/release_candidate.zig",
-                 "src/HostLifecycle.zig", "src/host_identity.zig",
+                 "src/HostLifecycle.zig", "src/host_activation.zig", "src/host_identity.zig",
                  "src/host_identity.c", "src/stderr.zig", "src/host_launch.c",
                  "src/cli.zig", "src/cli_args.zig", *CLI_GRAMMAR, "src/client.zig", "src/slash_commands.zig",
                  "src/Overview.zig", "src/overview_view.zig", "src/SessionFrontend.zig",
@@ -341,7 +342,7 @@ INSTALLER_PATHS = ("tests/integration/installer_integration.py", "tests/ci/fake_
                    "src/fetch_dependencies.sh", "release/*", "install.sh", "build.zig", "build.zig.zon")
 
 UPGRADE_CHECK_PATHS = (UPGRADE, "src/Installation.zig", "src/installation_path.zig", "src/release_candidate.zig",
-                       "src/HostLifecycle.zig", "src/host_identity.*", "src/host_launch.c",
+                       "src/HostLifecycle.zig", "src/host_activation.zig", "src/host_identity.*", "src/host_launch.c",
                        "src/store/migration_*", "install.sh", "release/*", "build.zig", "build.zig.zon",
                        "tests/integration/previous_release_upgrade.py", ".github/workflows/previous-release-upgrade.yml")
 
@@ -667,10 +668,10 @@ def live_mysql_suites(targets, mysql_suites):
 def covers(target, targets) -> bool:
     """Whether a selected target executes target's checks.
 
-    check-full deliberately excludes stack-frames; promotion adds it separately.
+    check-full deliberately excludes stack-frames and rsql-table; promotion adds them separately.
     """
     broader = {"test": {"test-native", "test-store"},
-               "check": CHECK_COVERS | {"stack-frames"},
+               "check": CHECK_COVERS | {"stack-frames", "rsql-table"},
                "check-full": CHECK_COVERS | {"check"}, **FIXTURE_COVERS}
     return target in targets or any(target in broader.get(selected, ()) for selected in targets)
 
