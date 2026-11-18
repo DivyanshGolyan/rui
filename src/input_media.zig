@@ -600,3 +600,58 @@ test "progressive JPEG refinement requires adjacent approximation levels" {
         }
     }
 }
+
+// OpenAI image input guide: https://developers.openai.com/api/docs/guides/images-vision
+// The guide leaves integer rounding of the initial dimension cap unspecified.
+// Preserve uncertainty when that cap applies instead of predicting a refusal.
+pub const ImageEstimate = union(enum) { tokens: u64, impossible, unknown };
+
+pub fn astraAuto(width: u32, height: u32) ImageEstimate {
+    if (width == 0 or height == 0) return .unknown;
+    const longest: u64 = @max(width, height);
+    if (longest <= 65535) return patchEstimate(width, height);
+    const w = @as(u64, width) * 65535;
+    const h = @as(u64, height) * 65535;
+    const low = patchEstimate(@max(1, w / longest), @max(1, h / longest));
+    const high = patchEstimate((w + longest - 1) / longest, (h + longest - 1) / longest);
+    return if (std.meta.activeTag(low) == .impossible and std.meta.activeTag(high) == .impossible) .impossible else if (low == .tokens and high == .tokens and low.tokens == high.tokens) low else .unknown;
+}
+
+fn patchEstimate(width: u64, height: u64) ImageEstimate {
+    const patches = ((width + 31) / 32) * ((height + 31) / 32);
+    if (patches > 30000) return .impossible;
+    return .{ .tokens = (patches * 6 + 4) / 5 };
+}
+
+pub fn gpt41Auto(width: u32, height: u32) ImageEstimate {
+    if (width == 0 or height == 0) return .unknown;
+    const longest: u64 = @max(width, height);
+    if (longest <= 2048) return .{ .tokens = tileTokens(width, height) };
+    const w: u64 = @as(u64, width) * 2048;
+    const h: u64 = @as(u64, height) * 2048;
+    const low = tileTokens(@max(1, w / longest), @max(1, h / longest));
+    const high_w = (w + longest - 1) / longest;
+    const high_h = (h + longest - 1) / longest;
+    const low_w = @max(1, w / longest);
+    const low_h = @max(1, h / longest);
+    return if (low == tileTokens(high_w, high_h) and low == tileTokens(low_w, high_h) and low == tileTokens(high_w, low_h)) .{ .tokens = low } else .unknown;
+}
+
+fn tileTokens(width: u64, height: u64) u64 {
+    var w = width;
+    var h = height;
+    const shortest = @min(w, h);
+    if (shortest > 768) {
+        w = @max(1, w * 768 / shortest);
+        h = @max(1, h * 768 / shortest);
+    }
+    return 85 + 170 * ((w + 511) / 512) * ((h + 511) / 512);
+}
+
+test "auto image estimates use model sizing and patch refusal" {
+    try std.testing.expectEqual(ImageEstimate{ .tokens = 1229 }, astraAuto(1024, 1024));
+    try std.testing.expectEqual(ImageEstimate.impossible, astraAuto(65535, 65535));
+    try std.testing.expectEqual(ImageEstimate{ .tokens = 2458 }, astraAuto(65536, 1));
+    try std.testing.expectEqual(ImageEstimate{ .tokens = 765 }, gpt41Auto(1024, 1024));
+    try std.testing.expectEqual(ImageEstimate{ .tokens = 255 }, gpt41Auto(1, 1));
+}

@@ -60,7 +60,7 @@ pub const ConfigureInput = struct {
         self.reasoning_effort = creationEffort(model, self.reasoning_effort, saved_effort);
         if (!self.compaction_trigger.present or self.compaction_trigger.value == null) self.compaction_trigger = .{ .present = true, .value = compactionTrigger(provider.?, model, compaction) };
         if (self.tools == null) {
-            const tool_defaults = product_defaults.creationTools(@import("model_catalog.zig").acceptsImages(model), can_read_images);
+            const tool_defaults = product_defaults.creationTools(@import("model_catalog.zig").imageCapability(model) != .unsupported, can_read_images);
             self.tools = .{ .cli = tool_defaults.allowed };
             if (self.loaded_tools == null) self.loaded_tools = .{ .cli = tool_defaults.loaded };
         }
@@ -363,7 +363,7 @@ test "image defaults preserve semantic tool selections and explicitly loaded nam
                 var compaction: [20]u8 = undefined;
                 var input: ConfigureInput = .{ .store = "", .session = .create, .loaded_tools = .{ .names = names } };
                 input.completeCreation(.codex, model, can_read_images, null, null, &compaction);
-                const defaults = product_defaults.creationTools(@import("model_catalog.zig").acceptsImages(model), can_read_images);
+                const defaults = product_defaults.creationTools(@import("model_catalog.zig").imageCapability(model) != .unsupported, can_read_images);
                 try std.testing.expectEqualStrings(defaults.allowed, input.tools.?.cli);
                 try std.testing.expectEqual(names.len, input.loaded_tools.?.names.len);
                 for (names, input.loaded_tools.?.names) |expected, actual| try std.testing.expectEqualStrings(expected, actual);
@@ -379,6 +379,9 @@ test "fresh Session image tool defaults require model support and an opener with
                 .{ .model = "gpt-6.1-sol", .images = true },
                 .{ .model = "unlisted-model", .images = true },
                 .{ .model = "gpt-3.5-turbo", .images = false },
+                .{ .model = "gpt-3.5-turbo-0125", .images = false },
+                .{ .model = "gpt-3.5-turbo-1106", .images = false },
+                .{ .model = "gpt-3.5-turbo-instruct", .images = false },
             }) |case| {
                 var input: ConfigureInput = .{
                     .store = "",

@@ -191,6 +191,18 @@ pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pin
     runs.set(.native_pair, native.final);
     if (test_filters.len != 0) runs.set(native_group.filtered, native.final);
     const test_step = b.step(root(.filtered).target, "Run unit, Store, and protocol tests");
+    // Compile the same owner with the product option off as a separate root.
+    const pause_product = b.addTest(.{
+        .name = "pause-product-compile-out",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/testing/pause.zig"),
+            .target = target,
+            .optimize = .ReleaseSafe,
+        }),
+        .filters = &.{"pause PAU-1 owner is zero sized when disabled"},
+    });
+    product.configurePauses(b, pause_product, false);
+    test_step.dependOn(&ci.run(pause_product).step);
     const deadline_witness = b.addTest(.{
         .use_llvm = if (target.result.cpu.arch == .x86_64) false else null,
         .name = root(.deadline).name,

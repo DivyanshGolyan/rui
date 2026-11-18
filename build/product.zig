@@ -2,7 +2,14 @@ const std = @import("std");
 const Translator = @import("translate_c").Translator;
 const darwin = @import("darwin.zig");
 
+pub fn configurePauses(b: *std.Build, compile: *std.Build.Step.Compile, enabled: bool) void {
+    const options = b.addOptions();
+    options.addOption(bool, "test_pauses", enabled);
+    compile.root_module.addOptions("build_options", options);
+}
+
 pub fn configureUnitRoot(b: *std.Build, compile: *std.Build.Step.Compile, target: std.Build.ResolvedTarget, pinned: ?PinnedTransport) void {
+    configurePauses(b, compile, true);
     configureSqlite(b, compile);
     configureYaml(b, compile);
     configureBashPlatform(b, compile);
@@ -25,7 +32,11 @@ pub fn addRui(
     name: []const u8,
     pinned_transport: ?PinnedTransport,
 ) *std.Build.Step.Compile {
-    return addRuiWithIdentity(b, target, optimize, name, pinned_transport, buildIdentity(b));
+    return addRuiWithIdentity(b, target, optimize, name, pinned_transport, buildIdentity(b), false);
+}
+
+pub fn addPauseRui(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, name: []const u8, pinned_transport: ?PinnedTransport) *std.Build.Step.Compile {
+    return addRuiWithIdentity(b, target, optimize, name, pinned_transport, buildIdentity(b), true);
 }
 
 /// Integration products share the qualified PR backend; production builds keep Zig's default.
@@ -37,7 +48,7 @@ pub fn addIntegrationRui(
     pr_ci: bool,
     identity: BuildIdentity,
 ) *std.Build.Step.Compile {
-    const executable = addRuiWithIdentity(b, target, .ReleaseSafe, name, pinned_transport, identity);
+    const executable = addRuiWithIdentity(b, target, .ReleaseSafe, name, pinned_transport, identity, false);
     if (pr_ci) executable.use_llvm = false;
     return executable;
 }
@@ -60,6 +71,7 @@ fn addRuiWithIdentity(
     name: []const u8,
     pinned_transport: ?PinnedTransport,
     identity: BuildIdentity,
+    test_pauses: bool,
 ) *std.Build.Step.Compile {
     const executable = b.addExecutable(.{
         .name = name,
@@ -69,6 +81,7 @@ fn addRuiWithIdentity(
             .optimize = optimize,
         }),
     });
+    configurePauses(b, executable, test_pauses);
     executable.root_module.link_libc = true;
     configureSqlite(b, executable);
     configureYaml(b, executable);

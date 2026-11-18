@@ -37,7 +37,7 @@ class TerminalProcessTest(unittest.TestCase):
                 capture.feed(b"\x1b[?1049h\x1b[?2026h\x1b[H Type a task\x1b[?2026l")
                 capture.resize(46, 30)
                 before = capture.reset_generation
-                capture.feed(b"\x1b[?2026h\x1b[4;2H" + "⠙".encode() + b"\x1b[?2026l" + RESIZE_RESET[:split])
+                capture.feed(b"\x1b[?2026h\x1b[4;2H" + "◜".encode() + b"\x1b[?2026l" + RESIZE_RESET[:split])
                 self.assertEqual(capture.frame_reset_generation, before)
                 capture.feed(RESIZE_RESET[split:] + paint[:-1])
                 self.assertGreater(capture.reset_generation, before)
@@ -47,7 +47,7 @@ class TerminalProcessTest(unittest.TestCase):
                 for text in ("New Session", "Working row", "Finished row", "Waiting on you row", "Failed row", "Settings"):
                     self.assertIn(text, capture.completed)
                 for _ in range(10):
-                    capture.feed(b"\x1b[?2026h\x1b[4;2H" + "⠹".encode() + b"\x1b[?2026l")
+                    capture.feed(b"\x1b[?2026h\x1b[4;2H" + "◝".encode() + b"\x1b[?2026l")
                     self.assertEqual(capture.frame_reset_generation, capture.reset_generation)
                     self.assertIn("Working row", capture.completed)
                     self.assertIn("Finished row", capture.completed)
@@ -620,13 +620,13 @@ class TerminalProcessTest(unittest.TestCase):
     def test_approval_title_count_uses_one_committed_frame_not_read_history(self):
         import human_cli_fixture as human
 
-        title = "? Check successful shell exit"
+        title = "● Check successful shell exit"
         for history, expected_titles in ((True, 2), (False, 1)):
             with self.subTest(history=history):
                 master, slave = open_pty()
                 capture = human.terminal_capture(master)
                 capture.feed(("\x1b[?1049h\x1b[?2026h\x1b[H\x1b[2J" + title +
-                              "\r\n? Needs approval\x1b[?2026l").encode())
+                              "\r\n● Needs approval\x1b[?2026l").encode())
                 generation = capture.generation
                 capture.feed(("\x1b[?2026h\x1b[H\x1b[2J  " + title +
                               "\r\n    $ true\r\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\r\n"
