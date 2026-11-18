@@ -14,10 +14,10 @@ Two PRs that pass alone but break `main` together, by compilation or by a test, 
 The owner accepted, on 18 Nov 2026, that the fast PR tier lets more breaks reach `main` and that they are found there within hours.
 A changed head requires current candidate checks before merge.
 
-Before admission, a Store schema edit or a branch that merged main since its merge base compiles every native and Store unit partition unfiltered on the exact candidate.
-The selector checks the published branch's merge history against the candidate's base, excluding the synthetic candidate merge itself.
+Before admission, a Store schema edit compiles every native and Store unit partition unfiltered on the exact candidate.
+A branch that merged main gets only what its candidate's own diff selects; Qualify main and Promote compile every partition on main, so a merge that breaks only a unit partition is found there.
 `ci_plan.py` widens `linux_compile_targets` with `test` only when the selected `test`, `check` or `check-full` closure does not already cover those partitions.
-The existing Linux producers and artifact restore share that compile selection; execution targets, matrices and live-engine obligations stay selected independently.
+The single PR job compiles that selection; execution targets and live-engine obligations stay selected independently.
 This is compilation, not execution of every unit test, and does not add portable `test-logic` unless that root is selected separately.
 Required producers must succeed even when no product execution target was selected.
 

@@ -1679,7 +1679,7 @@ fi
                     self.assertEqual([line.strip() for line in bootstrap.splitlines()
                                       if line.strip() and not line.lstrip().startswith('#')], [
                         '- uses: ./.github/actions/setup',
-                        "if: ${{ steps.caller-bootstrap.outputs.needed == 'true' && inputs.compiler-installed != 'true' }}",
+                        "if: ${{ steps.caller-bootstrap.outputs.needed == 'true' }}",
                         'with:',
                         "targets: '[]'",
                         "compiled: 'true'",
@@ -1803,9 +1803,10 @@ fi
         caches = Path(".github/actions/setup/caches/action.yml").read_text()
         self.assertTrue(cache(".github/actions/setup/caches/action.yml", caches, caches.replace("~/.cache/zig", "~/.cache/zig2", 1)))
         check = Path(".github/workflows/check.yml").read_text()
-        policy = Path(".github/actions/policy/action.yml").read_text()
+        policy = Path(".github/actions/policy/checks.sh").read_text()
         policy_step = "Reject undefined fixture names before native builds"
-        self.assertFalse(cache(".github/actions/policy/action.yml", policy, policy.replace(policy_step, policy_step + " here")))
+        self.assertIn(policy_step, policy)
+        self.assertFalse(cache(".github/actions/policy/checks.sh", policy, policy.replace(policy_step, policy_step + " here")))
         job = re.search(r"(?ms)^  cache_execution:\n.*?timeout-minutes: (\d+)", check)
         edited = check[:job.start(1)] + "21" + check[job.end(1):]
         self.assertNotEqual(edited, check)
