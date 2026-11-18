@@ -98,6 +98,15 @@ pub const Result = struct {
     }
 };
 
+pub fn writeSentence(writer: *std.Io.Writer, attempt: start_report.Attempt, failure: *const start_report.Failure) !void {
+    const prefix = switch (attempt) {
+        .start => "the Host did not start",
+        .save => "the setting was not saved",
+        .check => "these settings would not start a Host",
+    };
+    try writer.print("rui: {s}: {f} [{s}]\n", .{ prefix, std.zig.fmtString(failure.message.slice()), @tagName(failure.code) });
+}
+
 pub const max_report_bytes = 4 * protocol.max_store_bytes + Result.max_startup_bytes + 2048;
 
 pub fn writeDiagnostics(result: *const Result, writer: *std.Io.Writer, shown: usize) !void {
@@ -118,7 +127,7 @@ pub fn writeDiagnostics(result: *const Result, writer: *std.Io.Writer, shown: us
                 try path_text.finish(writer);
                 try writer.writeAll(":\n");
                 try writer.writeAll(result.startup()[shown..]);
-                if (result.startup_len == 0) if (failure.refusal) |*refusal| try @import("host_start.zig").writeSentence(writer, .start, refusal);
+                if (result.startup_len == 0) if (failure.refusal) |*refusal| try writeSentence(writer, .start, refusal);
                 if (failure.cause.kind == .child_closed) try writer.writeAll("Child closed its startup channel before readiness; exit status unavailable.\n");
                 if (failure.cause.kind == .startup_full) try writer.writeAll("Startup output reached 8 KiB; readiness and exit status remain unconfirmed.\n");
             },
