@@ -502,7 +502,7 @@ const Intake = struct {
             defer self.releaseRequest();
             const reply = try self.ensureReply();
             defer self.releaseEnvironment();
-            try prepareReply(self.host, reply, self.fd, self.header, self.number.?, self.accepted_at_ns, self.request.?, if (self.environment) |*offer| offer else null);
+            try prepareReply(self.host, reply, self.fd, self.header, self.number.?, self.accepted_at_ns, self.request.?, if (self.environment) |*offer| offer else null, if (self.ingress) |ingress| ingress.parts_loan else null);
         }
 
         fn work(self: *Exchange) !State {
@@ -1575,11 +1575,19 @@ const Header = struct {
 };
 
 noinline fn submitMessage(host: *Host, command: *const wire_request.MessageCommand, offer: *SessionEnvironments.Offer) error{OutOfMemory}!store_module.MessageReply {
+    return submitMessageInput(host, command, offer, null);
+}
+
+fn submitMessageInput(host: *Host, command: *const wire_request.MessageCommand, offer: *SessionEnvironments.Offer, loan: ?@import("InputCapture.zig").Loan) error{OutOfMemory}!store_module.MessageReply {
     std.debug.assert(offer.value() != null);
     defer offer.deinit(host.allocator);
     var memory: std.heap.ArenaAllocator = .init(host.allocator);
     defer memory.deinit();
-    const prepared = @import("session_skills.zig").prepareMessage(memory.allocator(), host.allocator, host.io, host.store, command, host.bash_facts.home) catch |err| {
+    const skill_owner = @import("session_skills.zig");
+    const prepared = (if (loan) |parts|
+        skill_owner.prepareMessageParts(memory.allocator(), host.allocator, host.io, host.store, command, host.bash_facts.home, parts)
+    else
+        skill_owner.prepareMessage(memory.allocator(), host.allocator, host.io, host.store, command, host.bash_facts.home)) catch |err| {
         if (host.store.isFenced()) return .infrastructure_failure;
         return if (err == error.OutOfMemory) error.OutOfMemory else .infrastructure_failure;
     };
@@ -1592,9 +1600,9 @@ noinline fn submitMessage(host: *Host, command: *const wire_request.MessageComma
             return if (err == error.OutOfMemory) error.OutOfMemory else .infrastructure_failure;
         };
         defer inheritance.deinit(host.allocator);
-        return host.store.submitMessageCapturedSkills(command, inheritance.messageCallback(), initial_skills, if (captured_skill) |*value| value else null, faults);
+        return submitMessageInputToStore(host.store, command, loan, inheritance.messageCallback(), initial_skills, if (captured_skill) |*value| value else null, faults);
     };
-    const environments = host.environments orelse return host.store.submitMessageCapturedSkills(command, null, initial_skills, if (captured_skill) |*value| value else null, faults);
+    const environments = host.environments orelse return submitMessageInputToStore(host.store, command, loan, null, initial_skills, if (captured_skill) |*value| value else null, faults);
     const Install = struct {
         environments: *SessionEnvironments,
         offer: *SessionEnvironments.Offer,
@@ -1608,7 +1616,20 @@ noinline fn submitMessage(host: *Host, command: *const wire_request.MessageComma
         }
     };
     var install: Install = .{ .environments = environments, .offer = offer };
-    return host.store.submitMessageCapturedSkills(command, .{ .context = &install, .call = Install.call }, initial_skills, if (captured_skill) |*value| value else null, faults);
+    return submitMessageInputToStore(host.store, command, loan, .{ .context = &install, .call = Install.call }, initial_skills, if (captured_skill) |*value| value else null, faults);
+}
+
+fn submitMessageInputToStore(
+    store: *store_module.Store,
+    command: *const wire_request.MessageCommand,
+    loan: ?@import("InputCapture.zig").Loan,
+    committed: ?store_module.Store.MessageCommitted,
+    initial: ?*const store_module.InitialSkills,
+    captured: ?*const store_module.CapturedMessageSkills,
+    faults: store_module.Faults,
+) store_module.MessageReply {
+    if (loan) |parts| return store.submitMessagePartsCapturedSkills(command, parts, committed, initial, captured, faults) catch .infrastructure_failure;
+    return store.submitMessageCapturedSkills(command, committed, initial, captured, faults);
 }
 
 noinline fn submitConfigure(host: *Host, command: *const wire_request.ConfigureCommand) error{OutOfMemory}!store_module.ConfigureReply {
@@ -1722,7 +1743,7 @@ test "settings readiness discovers the canonical Store only through host info" {
     }
 }
 
-fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header, request_number: u64, accepted_at_ns: u64, request: *wire_request.Request, client_environment: ?*SessionEnvironments.Offer) !void {
+fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header, request_number: u64, accepted_at_ns: u64, request: *wire_request.Request, client_environment: ?*SessionEnvironments.Offer, parts: ?@import("InputCapture.zig").Loan) !void {
     if (!matchesStore(std.meta.activeTag(request.*), request.store(), host.lease.paths.store_identity.slice())) {
         return respondStatic(fd, 409, .invocation_error, "wrong_store_identity");
     }
@@ -1768,7 +1789,8 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             _ = try answerMutation(host, fd, header, .configure, command.session.slice(), try submitConfigure(host, command));
         },
         .message => |*command| {
-            _ = try answerMutation(host, fd, header, .message, command.session.slice(), try submitMessage(host, command, client_environment.?));
+            if ((command.text.state == .value) == (parts != null)) return error.InvalidMessage;
+            _ = try answerMutation(host, fd, header, .message, command.session.slice(), try submitMessageInput(host, command, client_environment.?, parts));
         },
         inline .session_stop, .session_archive, .session_pin, .model_interruption, .permission_decision, .action_background, .action_stop => |*command, tag| {
             const kind = comptime @field(command_spec.CommandKind, @tagName(tag));
@@ -3051,6 +3073,7 @@ test "Message observation work and recovery fit their exchange-owned response bo
     var bash_description: protocol.Bounded(protocol.session_work.max_description_bytes) = .{};
     try bash_description.set(&@as([protocol.session_work.max_description_bytes]u8, @splat(1)));
     var observation = store_module.CommandObservation{ .status = .accepted, .kind = .{ .message = .{
+        .form = .parts,
         .content = .{ .length = max, .digest = @splat(0xff) },
         .queue = .{ .admission_id = max, .state = .{ .processing = .{ .turn_id = max, .operation_id = max, .attempt_ordinal = max } } },
         .admitted_at = max,
@@ -5212,7 +5235,9 @@ const MutationWitness = struct {
                 .rejected => |code| hash.update(code.slice()),
                 .conflict => {},
             }
-            const input = try std.json.Stringify.valueAlloc(std.testing.allocator, answer.input, .{});
+            // The frozen witness predates input forms; base replies are text-form.
+            if (answer.input) |value| try std.testing.expect(value.form == .text);
+            const input = try std.json.Stringify.valueAlloc(std.testing.allocator, if (answer.input) |value| value.content else null, .{});
             defer std.testing.allocator.free(input);
             hash.update(input);
         } else |err| hash.update(@errorName(err));
@@ -5797,4 +5822,134 @@ test "Action stop mutation and observation preserve the selected Resolution" {
         const decoded = reply.decodeMutationReply(.{ .status = 200, .body = body }, MutationWitness.session, .{ .action_stop = 7 });
         try std.testing.expect(std.meta.isError(decoded.answer));
     }
+}
+
+test "SH-61 Host submits a sealed ordered input through Message admission" {
+    const Capture = @import("InputCapture.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    var storage: store_module.Store = undefined;
+    try storage.open(std.testing.io, try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite", .{root}), root);
+    defer storage.close() catch unreachable;
+    const configure = try store_module.testingCompleteConfiguration("parts-host-config", "", root, "model-a");
+    const configured = try storage.configure(&configure, .{});
+    try std.testing.expect(configured == .accepted);
+    var lease: platform.StoreLease = undefined;
+    lease.paths = .{};
+    try lease.paths.store_identity.set(root);
+    try lease.paths.scratch.set(root);
+    var host: Host = .{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = &lease, .store = &storage };
+    var used: std.atomic.Value(u64) = .init(0);
+    const spool = try tmp.dir.createFile(std.testing.io, "parts-spool", .{ .read = true });
+    const index = try tmp.dir.createFile(std.testing.io, "parts-index", .{ .read = true });
+    var capture: Capture = undefined;
+    capture.init(std.testing.io, spool, index, .{ .used = &used, .limit = 100000 });
+    defer capture.close();
+    const jpeg = @embedFile("testing/fixtures/input-baseline.jpg");
+    for ([_][]const u8{ "before", jpeg, "after" }, 0..) |bytes, ordinal| {
+        try capture.begin(if (ordinal == 1) .{ .image = .{ .assertion = .jpeg } } else .text, bytes.len);
+        var offset: usize = 0;
+        while (offset < bytes.len) {
+            var allowance = bytes.len - offset;
+            offset += try capture.append(bytes[offset..], &allowance, false);
+        }
+        try capture.end();
+    }
+    const loan = try capture.seal();
+    var command: wire_request.MessageCommand = .{ .session = configured.accepted.session };
+    try command.key.set("parts-host-message");
+    var offer = try SessionEnvironments.Offer.init(std.testing.allocator, 0);
+    const result = try submitMessageInput(&host, &command, &offer, loan);
+    try std.testing.expect(result == .accepted);
+    try std.testing.expectEqual(@import("input_parts.zig").Form.parts, result.accepted.form);
+    try std.testing.expectEqualSlices(u8, &loan.digest, &result.accepted.content.digest);
+    var observed: store_module.Observed = undefined;
+    try storage.observeCommand(command.key.slice(), null, &observed);
+    try std.testing.expectEqual(@import("input_parts.zig").Form.parts, observed.full.observation.kind.message.?.form);
+}
+
+test "SH-65 Host wire admits image bytes in order and preserves refusal identity" {
+    const jpeg = @embedFile("testing/fixtures/input-baseline.jpg");
+    var encoded: [std.base64.standard.Encoder.calcSize(jpeg.len)]u8 = undefined;
+    _ = std.base64.standard.Encoder.encode(&encoded, jpeg);
+    const other_jpeg = @embedFile("testing/fixtures/input-progressive.jpg");
+    var other_encoded: [std.base64.standard.Encoder.calcSize(other_jpeg.len)]u8 = undefined;
+    _ = std.base64.standard.Encoder.encode(&other_encoded, other_jpeg);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    var storage: store_module.Store = undefined;
+    try storage.open(std.testing.io, try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite", .{root}), root);
+    defer storage.close() catch unreachable;
+    const configure = try store_module.testingCompleteConfiguration("wire-parts-config", "", root, "model-a");
+    const configured = try storage.configure(&configure, .{});
+    try std.testing.expect(configured == .accepted);
+    var lease: platform.StoreLease = undefined;
+    lease.paths = .{};
+    try lease.paths.scratch.set(root);
+    try lease.paths.store_identity.set("s");
+    var host: Host = .{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = &lease, .store = &storage };
+    const Exercise = struct {
+        fn run(owner: *Host, body: []const u8, expected: []const u8) !void {
+            var retained: ?named_scratch.Owner = null;
+            var ingress: wire_request.Ingress = undefined;
+            ingress.init(std.testing.allocator, .{ .io = std.testing.io, .content_length = body.len, .scratch_path = owner.lease.paths.scratch.slice(), .request_number = 991, .retained_scratch = &retained, .scratch_budget = .{ .used = &owner.scratch_used, .limit = 100000 }, .expected_kind = .message });
+            defer ingress.deinit();
+            try ingress.feed(body);
+            const request = try ingress.finish();
+            defer request.removeTemporaryContent(std.testing.io) catch unreachable;
+            var offer = try SessionEnvironments.Offer.init(std.testing.allocator, 0);
+            defer offer.deinit(std.testing.allocator);
+            var reply: Reply = .{ .io = std.testing.io, .allocator = std.testing.allocator };
+            defer reply.deinit();
+            try prepareReply(owner, &reply, -1, .{ .route = .message, .content_length = body.len }, 991, 0, request, &offer, ingress.parts_loan);
+            try std.testing.expect(reply.body == .json);
+            try std.testing.expect(std.mem.indexOf(u8, reply.body.json, expected) != null);
+        }
+        fn refuseInvalid(owner: *Host, body: []const u8) !void {
+            var retained: ?named_scratch.Owner = null;
+            var ingress: wire_request.Ingress = undefined;
+            ingress.init(std.testing.allocator, .{ .io = std.testing.io, .content_length = body.len, .scratch_path = owner.lease.paths.scratch.slice(), .request_number = 992, .retained_scratch = &retained, .scratch_budget = .{ .used = &owner.scratch_used, .limit = 100000 }, .expected_kind = .message });
+            defer ingress.deinit();
+            try std.testing.expectError(error.InvalidBase64, ingress.feed(body));
+            try std.testing.expect(ingress.parts_loan == null);
+            try std.testing.expect(!try owner.store.commandExists("wire-invalid"));
+        }
+    };
+    const Template = struct {
+        fn body(allocator: std.mem.Allocator, key: []const u8, session: []const u8, image: []const u8, text: []const u8, reversed: bool) ![]const u8 {
+            const parts = if (reversed)
+                try std.fmt.allocPrint(allocator, "{{\"type\":\"image\",\"mime\":\"image/jpeg\",\"data\":\"{s}\"}},{{\"type\":\"text\",\"text\":\"{s}\"}}", .{ image, text })
+            else
+                try std.fmt.allocPrint(allocator, "{{\"type\":\"text\",\"text\":\"{s}\"}},{{\"type\":\"image\",\"mime\":\"image/jpeg\",\"data\":\"{s}\"}}", .{ text, image });
+            defer allocator.free(parts);
+            return std.fmt.allocPrint(allocator, "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"{s}\",\"session\":\"{s}\",\"sender\":null,\"sender_handle\":null,\"parts\":[{s}]}}", .{ key, session, parts });
+        }
+    };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try Exercise.refuseInvalid(&host, try Template.body(a, "wire-invalid", configured.accepted.session.slice(), "!!!!", "before", false));
+    const good = try Template.body(a, "wire-parts", configured.accepted.session.slice(), &encoded, "before", false);
+    try Exercise.run(&host, good, "\"status\":\"accepted\"");
+    try Exercise.run(&host, good, "\"replayed\":true");
+    try Exercise.run(&host, try Template.body(a, "wire-parts", configured.accepted.session.slice(), &encoded, "changed", false), "idempotency_key_conflict");
+    try Exercise.run(&host, try Template.body(a, "wire-parts", configured.accepted.session.slice(), &other_encoded, "before", false), "idempotency_key_conflict");
+    try Exercise.run(&host, try Template.body(a, "wire-parts", configured.accepted.session.slice(), &encoded, "before", true), "idempotency_key_conflict");
+    const refused = try Template.body(a, "wire-refused", "000000", &encoded, "before", false);
+    try Exercise.run(&host, refused, "\"status\":\"rejected\"");
+    try Exercise.run(&host, refused, "\"replayed\":true");
+    try Exercise.run(&host, try Template.body(a, "wire-refused", "000000", &encoded, "changed", false), "idempotency_key_conflict");
+    for ([_][]const u8{ "wire-parts", "wire-refused" }) |key| {
+        const id = try store_module.testing.queryU64(&storage, "SELECT primary_content_id FROM core_command WHERE command_key=?1", .{key});
+        for ([_][]const u8{ "before", jpeg }, 0..) |bytes, ordinal| {
+            try std.testing.expectEqual(@as(u64, 1), try store_module.testing.queryU64(&storage, "SELECT count(*) FROM content_part p JOIN content c ON c.content_id=p.part_content_id WHERE p.content_id=?1 AND p.ordinal=?2 AND c.byte_length=?3 AND c.digest=?4", .{ id, ordinal, bytes.len, store_module.testing.Blob{ .bytes = &protocol.contentDigest(bytes) } }));
+        }
+    }
+    try std.testing.expectEqual(@as(u64, 0), host.scratch_used.load(.acquire));
 }

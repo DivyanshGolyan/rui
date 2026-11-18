@@ -1787,7 +1787,7 @@ pub const CommandObservation = struct {
     code: ?protocol.Bounded(protocol.max_code_bytes) = null,
     revision: ?u64 = null,
     created: ?bool = null,
-    input: ?ContentReference = null,
+    input: ?InputReference = null,
     state: ?protocol.MessageRequestState = null,
     queue: ?struct { admission: u64, admitted_at: u64 } = null,
     binding: ?struct { turn: u64, operation: u64, attempt: u64 } = null,
@@ -1805,6 +1805,7 @@ pub const CommandObservation = struct {
     resolution_position: ?u64 = null,
 
     pub const ContentReference = mutation_answer.ContentReference;
+    pub const InputReference = mutation_answer.InputReference;
 
     pub const Recovery = struct {
         unknown_outcomes: [protocol.message_recovery_limit]protocol.MessageUnknownOutcome = undefined,
@@ -1837,7 +1838,7 @@ pub const CommandObservation = struct {
         if (self.revision) |revision| try writer.print(",\"revision\":\"{d}\",\"created\":{}", .{ revision, self.created.? });
         if (self.input) |input| {
             try writer.writeAll(",\"input\":");
-            try writeContentReference(writer, input);
+            try input.writeJson(writer);
         }
         if (self.queue) |queue| try writer.print(",\"queue\":{{\"admission\":\"{d}\",\"admitted_at\":\"{d}\"}}", .{ queue.admission, queue.admitted_at });
         if (self.binding) |binding| try writer.print(",\"binding\":{{\"turn\":\"{d}\",\"operation\":\"{d}\",\"attempt\":\"{d}\"}}", .{ binding.turn, binding.operation, binding.attempt });
@@ -1849,7 +1850,7 @@ pub const CommandObservation = struct {
             }
             if (result.text) |text| {
                 try writer.writeAll(",\"text\":");
-                try writeContentReference(writer, text);
+                try (InputReference{ .form = .text, .content = text }).writeJson(writer);
             }
             try writer.writeByte('}');
         }
@@ -1892,10 +1893,6 @@ pub const CommandObservation = struct {
         try writer.writeByte('}');
     }
 
-    fn writeContentReference(writer: *std.Io.Writer, reference: ContentReference) !void {
-        try writer.print("{{\"type\":\"text\",\"bytes\":\"{d}\",\"sha256\":\"{s}\"}}", .{ reference.bytes, std.fmt.bytesToHex(reference.digest, .lower) });
-    }
-
     pub fn parse(reply: CommandReply, key: []const u8) !CommandObservation {
         return switch (try parseReply(reply, key)) {
             .observation => |full| full.facts,
@@ -1929,7 +1926,7 @@ pub const CommandObservation = struct {
                 fixed.reset();
                 const Decoder = @import("command_reply.zig").DecoderWithJson(shape, universe, JsonTypes);
                 const wire = Decoder.parse(fixed.allocator(), reply.body) catch break :candidate;
-                return decodeObservation(wire, key);
+                return decodeObservation(wire, key, comptime observationShapeHasParts(shape));
             }
         }
         return error.InvalidObservation;
@@ -1941,7 +1938,16 @@ pub const CommandObservation = struct {
         more: bool,
     };
 
-    fn decodeObservation(wire: anytype, key: []const u8) !ObservationReply {
+    fn observationShapeHasParts(comptime shape: anytype) bool {
+        inline for (shape) |piece| {
+            if (comptime @typeInfo(@TypeOf(piece)) == .pointer) {
+                if (std.mem.eql(u8, piece, protocol.parts_reference_shape[0])) return true;
+            }
+        }
+        return false;
+    }
+
+    fn decodeObservation(wire: anytype, key: []const u8, comptime parts: bool) !ObservationReply {
         if (!wire.key.eql(key)) return error.RequestBindingMismatch;
         const since: ?SessionToken = blk: {
             if (comptime @TypeOf(wire.since) == ?void) break :blk null;
@@ -1962,7 +1968,7 @@ pub const CommandObservation = struct {
             @field(observed, name) = @field(facts, name);
         };
         if (comptime @hasField(Facts, "revision")) observed.revision = try decimalId(facts.revision, false);
-        if (comptime @hasField(Facts, "input")) observed.input = try decodeReference(facts.input);
+        if (comptime @hasField(Facts, "input")) observed.input = .{ .form = if (parts) .parts else .text, .content = try decodeReference(facts.input) };
         if (comptime @hasField(Facts, "state")) observed.state = std.meta.stringToEnum(protocol.MessageRequestState, facts.state.slice()) orelse return error.InvalidObservation;
         if (comptime @hasField(Facts, "queue")) observed.queue = .{ .admission = try decimalId(facts.queue.admission, false), .admitted_at = try decimalId(facts.queue.admitted_at, false) };
         if (comptime @hasField(Facts, "binding")) observed.binding = .{ .turn = try decimalId(facts.binding.turn, false), .operation = try decimalId(facts.binding.operation, false), .attempt = try decimalId(facts.binding.attempt, true) };
@@ -3467,7 +3473,7 @@ const testing_observation_binding = ",\"binding\":{\"turn\":\"37\",\"operation\"
 const testing_observation_prefix = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"command_observation\",\"key\":\"k\",\"delta\":\"full\",\"since\":null,\"observation\":";
 const testing_observation_message = "{\"status\":\"accepted\",\"kind\":\"message\",\"target\":\"k7m2qx\"";
 
-test "keyed observation retains Host state independently of admission and binding" {
+test "ADM-27 keyed observation preserves input identity across states" {
     const address = try MessageAddress.init("/store", "k7m2qx", "k");
     inline for (.{
         .{ "queued", "", ",\"work\":{\"state\":{\"kind\":\"pending\",\"since\":\"1762329000\"},\"first_action\":null,\"attention\":null,\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null}}" },
@@ -3480,17 +3486,30 @@ test "keyed observation retains Host state independently of admission and bindin
         .{ "cancelled", testing_observation_binding, ",\"result\":{\"status\":\"cancelled\",\"code\":\"cancelled\"}" },
         .{ "cancelled", "", ",\"result\":{\"status\":\"cancelled\",\"code\":\"cancelled\"}" },
     }) |case| {
-        const facts = testing_observation_message ++ ",\"state\":\"" ++ case[0] ++ "\"" ++ testing_observation_input ++ testing_observation_queue ++ case[1] ++ case[2] ++ "}";
-        const observed = try (try CommandObservation.parse(.{ .status = 200, .body = testing_observation_prefix ++ facts ++ "}" }, "k")).forMessage(&address);
-        try std.testing.expectEqual(.accepted, observed.status);
-        try std.testing.expectEqualStrings(case[0], @tagName(observed.state.?));
-        try std.testing.expectEqual(@as(u64, 23), observed.queue.?.admission);
-        try std.testing.expectEqual(@as(u64, 1762329000), observed.queue.?.admitted_at);
-        if (observed.binding) |binding| {
-            try std.testing.expectEqual(@as(u64, 37), binding.turn);
-            try std.testing.expectEqual(@as(u64, 41), binding.operation);
-            try std.testing.expectEqual(@as(u64, 0), binding.attempt);
+        inline for (.{ "text", "parts" }) |form| {
+            const input = ",\"input\":{\"type\":\"" ++ form ++ "\",\"bytes\":\"11\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"}";
+            const facts = testing_observation_message ++ ",\"state\":\"" ++ case[0] ++ "\"" ++ input ++ testing_observation_queue ++ case[1] ++ case[2] ++ "}";
+            const observed = try (try CommandObservation.parse(.{ .status = 200, .body = testing_observation_prefix ++ facts ++ "}" }, "k")).forMessage(&address);
+            try std.testing.expectEqual(.accepted, observed.status);
+            try std.testing.expectEqualStrings(form, @tagName(observed.input.?.form));
+            try std.testing.expectEqualStrings(case[0], @tagName(observed.state.?));
+            try std.testing.expectEqual(@as(u64, 23), observed.queue.?.admission);
+            try std.testing.expectEqual(@as(u64, 1762329000), observed.queue.?.admitted_at);
+            if (observed.binding) |binding| {
+                try std.testing.expectEqual(@as(u64, 37), binding.turn);
+                try std.testing.expectEqual(@as(u64, 41), binding.operation);
+                try std.testing.expectEqual(@as(u64, 0), binding.attempt);
+            }
+            var output: [protocol.command_observation_reply.max_bytes]u8 = undefined;
+            var writer = std.Io.Writer.fixed(&output);
+            try observed.writeJson(&writer);
+            try std.testing.expectEqualStrings(facts, writer.buffered());
         }
+    }
+    inline for (.{ "text", "parts" }) |form| {
+        const facts = "{\"status\":\"rejected\",\"kind\":\"message\",\"target\":\"k7m2qx\",\"code\":\"invalid_input\",\"state\":\"rejected\",\"input\":{\"type\":\"" ++ form ++ "\",\"bytes\":\"11\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"}}";
+        const observed = try CommandObservation.parse(.{ .status = 200, .body = testing_observation_prefix ++ facts ++ "}" }, "k");
+        try std.testing.expectEqualStrings(form, @tagName(observed.input.?.form));
         var output: [protocol.command_observation_reply.max_bytes]u8 = undefined;
         var writer = std.Io.Writer.fixed(&output);
         try observed.writeJson(&writer);
