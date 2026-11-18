@@ -337,42 +337,56 @@ class AdmissionTest(unittest.TestCase):
         self.assertIn('bash .github/actions/policy/checks.sh', (ROOT / '.github/actions/policy/background.sh').read_text())
         self.assertIn(' python3 -B tests/ci/client_locality.py\n', POLICY_CHECKS.read_text())
 
-    def test_single_pr_job_runs_policy_beside_compile_and_reports_it_after_the_tests(self):
-        body = job(CHECK.read_text(), 'pr_linux')
-        steps = re.findall(r'(?m)^      - (?:name: (.+)$|uses: (\S+))', body)
-        names = [name or uses.split('@')[0] for name, uses in steps]
-        self.assertEqual(names, [
-            'actions/checkout', './.github/actions/setup',
-            'Install the pinned packages tests/ci imports', 'actions/setup-node', 'actions/cache',
-            'Install the pinned workflow linter',
-            'Start the policy checks beside the compile',
-            'Check formatting',
-            'Compile only the binaries the selected targets need',
-            'Give tests macOS\'s temporary directory shape',
-            'Run selected targets on SQLite, stopping at the first failure',
-            'Retain bounded failed-fixture diagnostics',
-            'Report the policy checks that ran beside the compile',
-            'Fail for the policy or format checks that failed above',
-        ])
-        report = body.split('      - name: Report the policy checks that ran beside the compile\n', 1)[1].split('\n      - ', 1)[0]
-        for line in ('id: policy', "if: ${{ !cancelled() }}", 'continue-on-error: true'):
-            self.assertIn(line, report)
-        start = body.split('      - name: Start the policy checks beside the compile\n', 1)[1].split('\n      - ', 1)[0]
-        self.assertNotIn('continue-on-error', start)
-        self.assertNotIn('if:', start)
-
     def test_single_pr_job_reports_policy_promptly_whatever_policy_and_compile_did(self):
-        text = CHECK.read_text()
-        body = job(text, 'pr_linux')
+        """Walks the single PR job's own steps in order, as the runner does, over policy that passes,
+        fails or loses its launcher, and a compile that passes or fails. The policy launch and report
+        run for real; the compile and tests are simulated outcomes."""
+        body = job(CHECK.read_text(), 'pr_linux')
+        blocks = re.split(r'(?m)^      - ', body.split('\n    steps:\n', 1)[1])[1:]
+        steps = []
+        for block in blocks:
+            name = re.match(r'name: (.+)', block)
+            condition = re.search(r'(?m)^        if: \$\{\{ (.*) \}\}$', block)
+            steps.append(dict(name=name[1] if name else block.split('\n', 1)[0],
+                              condition=condition[1] if condition else 'success()',
+                              id=(re.search(r'(?m)^        id: (\S+)$', block) or [None, None])[1],
+                              tolerated='continue-on-error: true' in block))
         launch = step_script(body, 'Start the policy checks beside the compile')
         report = step_script(body, 'Report the policy checks that ran beside the compile')
-        final = re.search(r"(?m)^        if: \$\{\{ !cancelled\(\) && \((.*)\) \}\}$",
-                          body.split('      - name: Fail for the policy or format checks that failed above\n', 1)[1])[1]
-        self.assertEqual(final, "steps.policy.outcome == 'failure' || steps.format.outcome == 'failure'")
         # GitHub's bash steps run as `bash --noprofile --norc -eo pipefail {0}`.
         shell = ['bash', '--noprofile', '--norc', '-eo', 'pipefail', '-c']
         policies = {'passes': 'exit 0', 'fails': 'exit 3',
                     'dies without a result': 'kill -9 "$PPID"; exit 0'}
+
+        def admitted(condition, failed, outcomes):
+            expression = condition
+            if not re.search(r'always\(\)|failure\(\)|cancelled\(\)', expression) and failed:
+                return False
+            expression = re.sub(r"needs\.plan\.outputs\.[a-z_]+ != '\[\]'", 'True', expression)
+            expression = re.sub(r'steps\.([a-z-]+)\.outcome', lambda m: repr(outcomes.get(m[1], 'success')), expression)
+            expression = (expression.replace('!cancelled()', 'True').replace('success()', str(not failed))
+                          .replace('failure()', str(failed)).replace('&&', ' and ').replace('||', ' or '))
+            return eval(expression, {'__builtins__': {}})
+
+        # Hold orphans as this process's unreaped zombies, as a PID 1 that never reaps does, so a
+        # killed launcher stays visible to kill -0 for the whole report.
+        import ctypes
+        import platform
+        if platform.system() != 'Linux':
+            self.skipTest('the single PR job runs on Linux')
+        libc = ctypes.CDLL(None, use_errno=True)
+        PR_SET_CHILD_SUBREAPER = 36
+        self.assertEqual(libc.prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0), 0)
+
+        def reap():
+            while True:
+                try:
+                    if os.waitpid(-1, os.WNOHANG) == (0, 0):
+                        return
+                except ChildProcessError:
+                    return
+        self.addCleanup(reap)
+        self.addCleanup(libc.prctl, PR_SET_CHILD_SUBREAPER, 0, 0, 0, 0)
         for (policy, checks), compiled in product(policies.items(), (True, False)):
             with self.subTest(policy=policy, compiled=compiled), tempfile.TemporaryDirectory() as root:
                 root = Path(root)
@@ -382,15 +396,33 @@ class AdmissionTest(unittest.TestCase):
                 (root / '.github/actions/policy/checks.sh').write_text(f'echo "policy log line"\nsleep 1\n{checks}\n')
                 (root / 'temp').mkdir()
                 env = dict(os.environ, RUNNER_TEMP=str(root / 'temp'), SKIPS='[]')
-                self.assertEqual(subprocess.run([*shell, launch], cwd=root, env=env, timeout=30).returncode, 0)
-                # The compile and tests run meanwhile; their outcome must not change the report.
-                compile_ok = compiled
-                began = time.monotonic()
-                reported = subprocess.run([*shell, report], cwd=root, env=env, capture_output=True, text=True,
-                                          timeout=60)
-                self.assertLess(time.monotonic() - began, 15, 'the report must not wait out its timeout')
+                failed, outcomes, ran, reported = False, {}, [], None
+                for step in steps:
+                    if not admitted(step['condition'], failed, outcomes):
+                        continue
+                    ran.append(step['name'])
+                    if step['name'] == 'Start the policy checks beside the compile':
+                        ok = subprocess.run([*shell, launch], cwd=root, env=env, timeout=30).returncode == 0
+                    elif step['name'] == 'Compile only the binaries the selected targets need':
+                        ok = compiled
+                    elif step['name'] == 'Report the policy checks that ran beside the compile':
+                        began = time.monotonic()
+                        reported = subprocess.run([*shell, report], cwd=root, env=env, capture_output=True,
+                                                  text=True, timeout=60)
+                        self.assertLess(time.monotonic() - began, 15, 'the report must not wait out its timeout')
+                        ok = reported.returncode == 0
+                    elif step['name'] == 'Fail for the policy or format checks that failed above':
+                        ok = False
+                    else:
+                        ok = True
+                    if step['id']:
+                        outcomes[step['id']] = 'success' if ok else 'failure'
+                    failed |= not ok and not step['tolerated']
+                compile_step = 'Compile only the binaries the selected targets need'
+                self.assertLess(ran.index('Start the policy checks beside the compile'), ran.index(compile_step))
+                self.assertGreater(ran.index('Report the policy checks that ran beside the compile'),
+                                   ran.index(compile_step), 'the report runs after the compile, whatever it did')
                 self.assertIn('policy log line', reported.stdout)
-                self.assertEqual(reported.returncode == 0, policy == 'passes', reported.stdout)
                 if policy == 'dies without a result':
                     self.assertIn('::error::The policy checks stopped without a result', reported.stdout)
                 else:
@@ -398,10 +430,7 @@ class AdmissionTest(unittest.TestCase):
                     self.assertNotIn('stopped without a result', reported.stdout)
                 if policy == 'fails':
                     self.assertIn('::error::Policy checks failed (exit 3)', reported.stdout)
-                policy_outcome = 'success' if reported.returncode == 0 else 'failure'
-                final_fails = policy_outcome == 'failure'
-                job_ok = compile_ok and not final_fails
-                self.assertEqual(job_ok, compiled and policy == 'passes')
+                self.assertEqual(not failed, compiled and policy == 'passes', ran)
 
     def test_policy_checks_all_run_after_a_failure_and_the_script_fails_naming_it(self):
         names = ["Check caller error coverage and shrink-only pending causes",

@@ -23,8 +23,16 @@ case "${1:-}" in
     ;;
   report)
     pid=$(cat "$dir/policy.pid" 2>/dev/null || true)
+    # The launcher outlived the start step's shell, so a PID 1 that does not reap orphans (a
+    # container's init, some runners) can keep it a zombie that kill -0 still finds: read its state.
+    running() {
+      local state
+      kill -0 "$1" 2>/dev/null || return 1
+      state=$(sed 's/.*) //' "/proc/$1/stat" 2>/dev/null | cut -d' ' -f1) || state=
+      [ "$state" != Z ]
+    }
     while [ ! -s "$dir/policy.status" ]; do
-      if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
+      if [ -z "$pid" ] || ! running "$pid"; then
         # The launcher may have written its status just before exiting.
         [ -s "$dir/policy.status" ] && break
         cat "$dir/policy.log" 2>/dev/null || true
