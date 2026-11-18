@@ -187,7 +187,7 @@ const sh60 = struct {
     }
 };
 
-test "SH-60 every outcome counts once and only the client's own Store decides its safety" {
+test "SH-69 every outcome counts once and only the client's own Store decides its safety" {
     var covered: std.EnumSet(std.meta.Tag(Outcome)) = .empty;
     for (sh60.rows) |row| {
         covered.insert(std.meta.activeTag(row.outcome));

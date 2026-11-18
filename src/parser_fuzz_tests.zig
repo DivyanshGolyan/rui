@@ -353,8 +353,8 @@ test "fuzz protocol request metadata parser" {
         seed(v ++ "\"kind\":\"configure\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"configuration\":{\"model\":\"m\",\"instructions\":\"\"}}", &.{}),
         seed(v ++ "\"kind\":\"inspect_session\",\"store\":\"s\",\"session\":\"peer\",\"failed_response\":\"body\",\"operation\":\"1\",\"attempt\":\"1\"}", &.{}),
         seed(v ++ "\"kind\":\"activity_content\",\"store\":\"s\",\"session\":\"peer\",\"position\":\"1\",\"ordinal\":\"0\"}", &.{}),
-        seed(v ++ "\"kind\":\"public_part\",\"store\":\"s\",\"session\":\"peer\",\"id\":\"1\",\"ordinal\":\"0\",\"target\":\"message\"}", &.{}),
-        seed(v ++ "\"kind\":\"public_part_bytes\",\"store\":\"s\",\"session\":\"peer\",\"id\":\"1\",\"ordinal\":\"2\",\"target\":\"action\"}", &.{}),
+        seed(v ++ "\"kind\":\"public_parts\",\"store\":\"s\",\"session\":\"peer\",\"owner\":{\"message\":\"1\"}}", &.{}),
+        seed(v ++ "\"kind\":\"public_part_content\",\"store\":\"s\",\"session\":\"peer\",\"owner\":{\"action\":\"1\"},\"part\":\"2\",\"start\":\"0\",\"stream\":true}", &.{}),
     } });
 }
 

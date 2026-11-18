@@ -34,7 +34,7 @@ FUNCTIONAL_CORES = "src/logic_tests.zig"
 STACK_FRAMES_GATE = "tests/ci/stack_frames.json"
 
 MODULES = {
-    "url": "src/url.zig",
+    "url": "src/url.zig", "os": "src/os/os.zig",
     "test_poll": "src/testing/poll.zig", "h2": "src/h2/h2.zig", "tls_client": "src/tls_client/tls_client.zig", "rui_client": CALLER, "client": CALLER,
     "mysql_connection": "src/store/wire/mysql_connection.zig", "preferences": "src/preferences.zig",
     "codex_credentials": "src/codex_credentials.zig", "AnswerRenderer": "src/AnswerRenderer.zig",
@@ -64,8 +64,10 @@ FIXTURES = {
     "admission-debug-integration": ((I + "admission_integration.sh",), (), ()),
     "dispatch-integration": ((I + "dispatch_integration.py",), (), ("src/model_adapter.zig", *MODEL)),
     "dispatch-debug-integration": ((I + "dispatch_integration.py",), (), ()),
-    "public-parts-integration": ((I + "public_parts_integration.py",), ("src/store/tests/action_parts.zig",),
-                                 ("src/store/domain/public_parts.zig", "src/protocol.zig",
+    "cli-image-integration": ((I + "cli_image_integration.py",), (),
+                              (CALLER, HOST, "src/InputCapture.zig", "src/image_intake.zig")),
+    "public-parts-integration": ((I + "public_parts_integration.py",), ("src/store/tests/public_parts.zig",),
+                                 ("src/store/domain/public_parts.zig", "src/protocol.zig", "src/protocol_reply.zig",
                                   "src/cli_args.zig", RUI, HOST)),
     "read-image-integration": ((I + "read_image_integration.py",), (),
                                ("src/server_read_image.zig", "src/os/read_image_file.zig", "src/input_media.zig")),
@@ -421,7 +423,7 @@ RULES = (
      "Provider model lists: the Host's fetch and the wire reply follow"),
     (RENDERER_HARNESSES, (), (), "Renderer harnesses: only the promotion renderer contracts run them"),
     (("src/openapi*.zig", "openapi.json"), ("test",), ("test",),
-     "The wire contract: openapi.json must equal what the wire types emit"),
+     "WIR-4 published request schemas and generated wire contract"),
     (("clients/ts/*",), ("ts-client",), ("ts-client",), "The TypeScript client and its launch of a real Host"),
     (("tests/integration/mcp_sdk/*",), ("settings-integration", "ts-client"), ("settings-integration", "ts-client"),
      "The MCP SDK servers a settings document starts"),
@@ -487,6 +489,18 @@ RULES = (
     (("release/publish.sh",), ("host-status-integration",), ("host-status-integration",),
      "Installer report reads the CLI's defaults and Host status JSON"),
 )
+
+RULES += ((('src/host_reply.zig', 'src/command_reply.zig', 'src/command_spec.zig',
+            'src/store/domain/command.zig', 'src/session_skills.zig'),
+           ('request-wait-integration', 'skills-integration'), (),
+           'Message input identity and skill binding remain valid through admission and recovery'),)
+
+RULES += ((("src/InputCapture.zig", "src/client.zig", "src/mutation_answer.zig", "src/cli_args.zig", "src/cli_grammar.zig"),
+           ("test-native", "cli-image-integration", "human-cli-integration", "request-wait-integration", "read-image-integration",
+            "session-list-integration", "dispatch-integration", "codex-integration"),
+           ("test-native", "cli-image-integration", "human-cli-integration", "request-wait-integration", "read-image-integration",
+            "session-list-integration", "dispatch-integration", "codex-integration"),
+           "Ordered message capture, recovery and provider delivery invariants"),)
 
 LIVE_MYSQL_DIALECT_TARGETS = frozenset({"test", "test-store", "check", "check-full"})
 LIVE_POSTGRES_TARGETS = frozenset({"test-pg", "check", "check-full"})
