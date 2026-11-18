@@ -778,6 +778,11 @@ class SelectionTest(unittest.TestCase):
                 with self.subTest(path=path, family=family):
                     self.assertIn("measurement-check", result[family])
 
+    def test_cli_invocation_selects_logic_and_human_cli(self):
+        result = select(["src/cli_invocation.zig"], "review", AVAILABLE)
+        self.assertIn("test-logic", result["targets"])
+        self.assertIn("human-cli-integration", result["targets"])
+
     def test_every_functional_core_selects_the_boundary_check(self):
         source = (Path(__file__).resolve().parents[2] / "src" / "logic_tests.zig").read_text()
         listed = source.split("const cores = .{", 1)[1].split("\n};", 1)[0]

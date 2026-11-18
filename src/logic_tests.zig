@@ -32,6 +32,7 @@ const cores = .{
     .{ "chatgpt_plan_wire.zig", @import("chatgpt_plan_wire.zig") },
     .{ "cli_args.zig", @import("cli_args.zig") },
     .{ "cli_grammar.zig", @import("cli_grammar.zig") },
+    .{ "cli_invocation.zig", @import("cli_invocation.zig") },
     .{ "cli_option_names.zig", @import("cli_option_names.zig") },
     .{ "cli_value.zig", @import("cli_value.zig") },
     .{ "client_defaults.zig", @import("client_defaults.zig") },
