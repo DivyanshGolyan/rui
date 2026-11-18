@@ -10,7 +10,7 @@ First drafts, written from the README and the contracts and checked against fixe
 | [Tools, execution, recovery and resources](execution-resources.md) | 64 |
 | [Conversation, settings and model requests](conversation-model.md) | 36 |
 | [CLI, inspection, local protocol and the TypeScript client](cli-inspection.md) | 43 |
-| [Session UI and diagnostics](session-ui.md) | 68 |
+| [Session UI and diagnostics](session-ui.md) | 70 |
 | [CI tooling and policy checks](ci-tooling.md) | 74 |
 | [Test pause point owner](pause.md) | 17 |
 | [Theme palette](theme.md) | 5 |

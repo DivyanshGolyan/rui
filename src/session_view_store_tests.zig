@@ -232,7 +232,7 @@ test "Current facts traverse every attention row and preserve metadata with fixe
     std.debug.print("Current facts={d}B, fixed scanner/token/input=16384B, capture={d}B; 4x257 rows, no population allocation\n", .{ @sizeOf(protocol_reply.Current), bytes });
 }
 
-test "SUI-59 Action-sourced inputs draw nothing in the conversation" {
+test "SUI-61 Action-sourced inputs draw nothing in the conversation" {
     const View = @import("session_view.zig");
     const Sink = struct {
         pub fn feed(_: *@This(), _: []const u8) !void {

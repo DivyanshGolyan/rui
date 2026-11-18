@@ -156,6 +156,7 @@ test {
     _ = @import("SessionScreen.zig");
     _ = @import("session_history.zig");
     _ = @import("session_view.zig");
+    _ = @import("value_reads.zig");
     _ = @import("session_view_store_tests.zig");
     _ = @import("ClientTask.zig");
 }

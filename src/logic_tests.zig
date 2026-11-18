@@ -22,6 +22,7 @@ const cores = .{
     .{ "BashLifecycle.zig", @import("BashLifecycle.zig") },
     .{ "bounded.zig", @import("bounded.zig") },
     .{ "built_in_tool.zig", @import("built_in_tool.zig") },
+    .{ "byte_size.zig", @import("byte_size.zig") },
     .{ "call_classification.zig", @import("call_classification.zig") },
     .{ "caller_error.zig", @import("caller_error.zig") },
     .{ "caller_exit.zig", @import("caller_exit.zig") },
@@ -109,6 +110,7 @@ const cores = .{
     .{ "overview_style.zig", @import("overview_style.zig") },
     // Includes the on-demand Lines projection and its fixture domain.
     .{ "overview_view.zig", @import("overview_view.zig") },
+    .{ "part_text.zig", @import("part_text.zig") },
     .{ "path_list.zig", @import("path_list.zig") },
     .{ "preset_value.zig", @import("preset_value.zig") },
     .{ "process_memory.zig", @import("process_memory.zig") },
