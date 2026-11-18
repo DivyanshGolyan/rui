@@ -311,7 +311,7 @@ pub const Lender = struct {
     context: *anyopaque,
     step: *const fn (context: *anyopaque, work: protocol.session_work.Kind, input: overview_view.ConversationInput) anyerror!overview_view.IntentAdmission,
     service: *const fn (context: *anyopaque) anyerror!bool,
-    line: *const fn (context: *anyopaque, work: protocol.session_work.Kind) Said,
+    line: *const fn (context: *anyopaque, can_stop: bool) Said,
     observed: *const fn (context: *anyopaque, snapshot: session_list.Snapshot, opening: bool) anyerror!void,
 
     upgrade: *const fn (context: *anyopaque) session_upgrade.Upgrade,
@@ -1054,8 +1054,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
         palette = self.app_palette.widget();
     };
     const now_ms = self.nowMs();
-    const work = self.live.work.state.asOf(now_ms);
-    const said = self.lender.line(self.lender.context, work);
+    const said = self.lender.line(self.lender.context, self.live.work.actions.stop);
     const browsing = screen.view != .feed or !screen.anchor.following();
     if (screen.anchor.following()) self.new_below = 0;
     const chrome = &self.chrome;
@@ -2504,7 +2503,7 @@ fn perform(self: *Self, action: ConversationAction) !void {
         .recover => try self.recover(null),
         .stop => if (self.reading.opening) {
             self.notice = "Session is opening.";
-        } else try self.converse(.stop),
+        } else try self.converse(.{ .stop = self.live.work.actions.stop }),
         .archive => _ = try self.archive(),
     }
     self.dirty = true;
@@ -3141,6 +3140,7 @@ test "archive badges follow only completed server snapshots and stay distinct fr
     const self = &held.self;
     self.line = .{ .read = .{ .revision = 1, .end = 1 } };
     self.live.work.state = .{ .working = .{ .since = 1 } };
+    self.live.work.actions.stop = true;
     self.reading.phase = .activity;
     var buffer: [status_capacity]u8 = undefined;
     for ([_]struct { archive: protocol.SessionArchiveState, work: protocol.WorkState, status: []const u8 }{
@@ -4483,7 +4483,7 @@ const quiet_overview: Lender = .{ .context = undefined, .step = struct {
         return false;
     }
 }.service, .line = struct {
-    fn line(_: *anyopaque, _: protocol.session_work.Kind) Lender.Said {
+    fn line(_: *anyopaque, _: bool) Lender.Said {
         return .{};
     }
 }.line, .observed = struct {
@@ -4520,9 +4520,9 @@ const FakeOverview = struct {
         return false;
     }
 
-    fn line(raw: *anyopaque, work: protocol.session_work.Kind) Lender.Said {
+    fn line(raw: *anyopaque, can_stop: bool) Lender.Said {
         const fake: *FakeOverview = @ptrCast(@alignCast(raw));
-        return .{ .text = fake.notice, .stoppable = work == .working and !fake.stopping };
+        return .{ .text = fake.notice, .stoppable = can_stop and !fake.stopping };
     }
 
     fn lender(fake: *FakeOverview) Lender {
@@ -4538,6 +4538,7 @@ test "Ctrl-X stops the open Session through the overview at once, asking nothing
     held.self.line = .{ .read = .{ .revision = 1, .end = 1 } };
     try held.self.line.model.set("gpt-6-sol");
     held.self.live.work.state = .{ .working = .{ .since = 1 } };
+    held.self.live.work.actions.stop = true;
     try sendKeys(&held.self, "x\x18");
     try std.testing.expectEqual(@as(usize, 1), overview.stops);
     try std.testing.expectEqualStrings("x", held.self.input.composition().bytes);
@@ -4788,7 +4789,7 @@ test "app settings starts the overview's run and keeps the original submission; 
         try std.testing.expectEqualStrings("", self.input.composition().bytes);
         try std.testing.expect(self.input.queuedCommand() == null);
         try std.testing.expectEqual(session_upgrade.Phase.quiescing, self.upgradePhase());
-        const said = self.lender.line(self.lender.context, .idle);
+        const said = self.lender.line(self.lender.context, false);
         try std.testing.expect(said.text == null and said.notice == null);
         _ = try overview_view.step(&overview.state, .start_upgrade);
         try std.testing.expect(overview.state.upgrade.run.? == .checking);
@@ -4978,9 +4979,9 @@ const ArchiveOverview = struct {
         return effects.intent_admission;
     }
 
-    fn line(raw: *anyopaque, work: protocol.session_work.Kind) Lender.Said {
+    fn line(raw: *anyopaque, can_stop: bool) Lender.Said {
         const self: *ArchiveOverview = @ptrCast(@alignCast(raw));
-        const said = overview_view.conversation(&self.state, "k7m2qx".*, work);
+        const said = overview_view.conversation(&self.state, "k7m2qx".*, can_stop);
         return .{ .text = said.text, .notice = said.notice, .stoppable = said.stoppable };
     }
 
@@ -5011,10 +5012,10 @@ test "one settled stop read updates the chat and its list row without a listing"
     _ = try overview_view.step(&overview.state, .{ .host = .{ .instance = @splat(0xab), .started_at = 1, .slots = 2, .slots_in_use = 0 } });
     const ref = "k7m2qx".*;
     const stopping: protocol.WorkState = .{ .stopping = .{ .since = 1 } };
-    const stopped: protocol.session_work.Work = .{ .state = .{ .stopped = .{ .since = 2, .cause = .stop } }, .turn = 7 };
+    const stopped: protocol.session_work.Work = .{ .state = .{ .stopped = .{ .since = 2, .cause = .stop } }, .turn = 7, .served_group = .done };
     _ = try overview_view.step(&overview.state, .{ .tick = 1000 });
     _ = try overview_view.step(&overview.state, .{ .list = .{ .page = .{
-        .rows = &.{.{ .read_version = .{ .instance = @splat(0xab), .generation = 1 }, .reference = ref, .workspace = "/work", .provider = .codex, .label = "Stop the slow job", .state = stopping, .turn = 7, .last_line = .{ .position = 1, .text = "Old completed answer" } }},
+        .rows = &.{.{ .read_version = .{ .instance = @splat(0xab), .generation = 1 }, .reference = ref, .workspace = "/work", .provider = .codex, .label = "Stop the slow job", .state = stopping, .turn = 7, .group = .working, .last_line = .{ .position = 1, .text = "Old completed answer" } }},
         .answer = .{ .delta = .full, .since = .{ .instance = @splat(0xab), .generation = 1 } },
     } } });
     _ = try overview_view.step(&overview.state, .{ .conversation = ref });
@@ -5045,7 +5046,7 @@ test "one settled stop read updates the chat and its list row without a listing"
     const row = overview.state.find(ref).?;
     try std.testing.expectEqualDeep(stopped.state, overview.state.workOf(row).state);
     try std.testing.expectEqual(stopped.turn, overview.state.workOf(row).turn);
-    try std.testing.expect(!ArchiveOverview.line(&overview, .stopped).stoppable);
+    try std.testing.expect(!ArchiveOverview.line(&overview, false).stoppable);
     try std.testing.expectEqual(@as(usize, 0), overview.state.summary.counts.working);
 }
 
@@ -5058,6 +5059,7 @@ test "Alt-A archives the open conversation at once without submitting or changin
         defer overview.deinit();
         held.self.lender = overview.lender();
         held.self.live.work.state = .{ .working = .{ .since = 1 } };
+        held.self.live.work.actions.stop = true;
         const ticket: ?Input.Ticket = if (original) held.self.input.submitText("retained original") else null;
         try sendKeys(&held.self, "/rename unfinished\x1b[D\x1b[D");
         const before = held.self.input.composition();
@@ -5118,6 +5120,7 @@ test "conversation slash archive archives a busy Session at once and consumes on
         held.self.command = UnusedArchiveCommand.command;
         UnusedArchiveCommand.calls = 0;
         held.self.live.work.state = .{ .working = .{ .since = 1 } };
+        held.self.live.work.actions.stop = true;
         const original = held.self.input.submitText("retained original");
         for (0..2) |attempt| {
             errdefer std.debug.print("slash archive completion={} attempt={d} draft={s} notice={s}\n", .{ completion, attempt, held.self.input.composition().bytes, held.self.notice orelse "" });
@@ -5179,6 +5182,7 @@ test "Ctrl-X stops at once beside a typed slash archive, and Enter then archives
         defer overview.deinit();
         held.self.lender = overview.lender();
         held.self.live.work.state = .{ .working = .{ .since = 1 } };
+        held.self.live.work.actions.stop = true;
         try sendKeys(&held.self, "/archive\x18");
         try std.testing.expectEqual(@as(usize, 1), overview.stops);
         try std.testing.expectEqual(@as(usize, 0), overview.archives);
@@ -5209,7 +5213,7 @@ test "conversation slash archive errors propagate and consume only the submitted
 }
 
 test "upgrade holds classify every lender intent before forwarding and allow local cancellation" {
-    const inputs: []const overview_view.ConversationInput = &.{ .stop, .{ .archive = .active }, .unarchive };
+    const inputs: []const overview_view.ConversationInput = &.{ .{ .stop = true }, .{ .archive = .active }, .unarchive };
     for (0..3) |hold| for (inputs) |input| {
         const held = try HeldFrontend.create();
         defer held.destroy();
@@ -5824,8 +5828,8 @@ const ChromeFixture = struct {
         const page = fixture.page;
         var lender = quiet_overview;
         lender.line = struct {
-            fn line(_: *anyopaque, kind: protocol.session_work.Kind) Lender.Said {
-                return .{ .notice = ChromeFixture.overview_says, .stoppable = kind == .working };
+            fn line(_: *anyopaque, can_stop: bool) Lender.Said {
+                return .{ .notice = ChromeFixture.overview_says, .stoppable = can_stop };
             }
         }.line;
         fixture.self.begin(init_, "unused", "k7m2qx", "unused", .{ .scratch = page, .action = page, .inspection = page, .details = page, .actions = .{ page, page } }, undefined, undefined, undefined, fixture.screen, &fixture.interrupted, lender);
@@ -5974,6 +5978,7 @@ test "App Session shows running calls in order above the input, with +N more run
     self.live.view.count = 3;
     self.live.view.total = 5;
     self.live.work.state = .{ .working = .{ .since = ChromeFixture.now() / 1000 - 12 } };
+    self.live.work.actions.stop = true;
     const shown = try fixture.rows();
     const first = ChromeFixture.find(&shown, "◝ Read src/overview_view.zig").?;
     try std.testing.expectEqualStrings("◝ Run zig build test", shown[first + 1]);
@@ -5987,6 +5992,7 @@ test "App Session shows running calls in order above the input, with +N more run
     try std.testing.expectEqual(@as(usize, 1), waiting);
     self.live.view = .{};
     self.live.work.state = .{ .idle = .{ .since = 0 } };
+    self.live.work.actions.stop = false;
     const idle = try fixture.rows();
     try std.testing.expect(ChromeFixture.find(&idle, "◝") == null and ChromeFixture.find(&idle, "+") == null);
 }
@@ -5997,6 +6003,7 @@ fn queuedPresentation() !void {
     defer fixture.deinit();
     const self = fixture.self;
     self.live.work.state = .{ .working = .{ .since = ChromeFixture.now() / 1000 } };
+    self.live.work.actions.stop = true;
     self.live.queued = .{ .count = 3, .oldest_position = 50, .newest_admission = 9, .newest_position = 70 };
     self.live.queued_line = .{ .admission = 9, .line = .{} };
     try self.live.queued_line.?.line.set("also update docs/using-rui.md");
@@ -6120,6 +6127,7 @@ test "App Session's status bar never says Sent: an accepted Message's row is its
     try std.testing.expect(ChromeFixture.findEnding(&try fixture.rows(), "Port overview to vxfw finished") != null);
     ChromeFixture.overview_says = null;
     self.live.work.state = .{ .working = .{ .since = ChromeFixture.now() / 1000 } };
+    self.live.work.actions.stop = true;
     self.live.queued = .{ .count = 1, .oldest_position = 70, .newest_admission = 9, .newest_position = 70 };
     self.live.queued_line = .{ .admission = 9, .line = .{} };
     try self.live.queued_line.?.line.set("also update docs/using-rui.md");
@@ -6208,6 +6216,7 @@ test "App Session Footer notice replaces the stop hint without changing stoppabi
     defer fixture.deinit();
     const self = fixture.self;
     self.live.work.state = .{ .working = .{ .since = ChromeFixture.now() / 1000 } };
+    self.live.work.actions.stop = true;
     ChromeFixture.overview_says = "Port overview to vxfw finished";
     defer ChromeFixture.overview_says = null;
     const shown = try fixture.rows();
@@ -6217,6 +6226,7 @@ test "App Session Footer notice replaces the stop hint without changing stoppabi
     try std.testing.expect(std.mem.indexOf(u8, shown[23], "ctrl+x stop") == null);
     try std.testing.expect(self.chrome.stoppable);
     self.live.work.state = .{ .idle = .{ .since = 0 } };
+    self.live.work.actions.stop = false;
     try std.testing.expect(ChromeFixture.findEnding(&try fixture.rows(), "Port overview to vxfw finished") != null);
 }
 
@@ -9063,6 +9073,7 @@ test "chat info retains Session stop and archive bindings in full-page and stand
         defer overview.deinit();
         held.self.lender = overview.lender();
         held.self.live.work.state = .{ .working = .{ .since = 1 } };
+        held.self.live.work.actions.stop = true;
         try captureInfo(held, "Fix retry deadline");
         try held.keys("kept draft");
         if (standalone) {
