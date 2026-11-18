@@ -536,31 +536,6 @@ test "a diagnostic reply confirms nothing, and only an authoritative one names a
     }
 }
 
-test "a reply carrying another mutation's fields, or the wrong version, confirms nothing" {
-    const current = @import("protocol.zig").wire_version;
-    const archive = "{\"version\":\"" ++ current ++ "\",\"type\":\"session_archive_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"archived\":true}";
-    const target: Target = .{ .session_archive = .{ .archived = true } };
-    _ = try decodeForTest(@import("protocol.zig"), @import("command_reply.zig"), 200, archive ++ ",\"completion\":{\"status\":\"completed\"}}", "k7m2qx", target).answer;
-    const stop = "{\"version\":\"" ++ current ++ "\",\"type\":\"session_stop_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"selection\":{\"turn\":null,\"admission_cutoff\":\"0\"}";
-    _ = try decodeForTest(@import("protocol.zig"), @import("command_reply.zig"), 200, stop ++ "},\"completion\":{\"status\":\"pending\"}}", "k7m2qx", .session_stop).answer;
-    for ([_][]const u8{
-        stop ++ ",\"archived\":true},\"completion\":{\"status\":\"pending\"}}",
-        "{\"version\":\"" ++ stale ++ archive["{\"version\":\"".len + current.len ..] ++ ",\"completion\":{\"status\":\"completed\"}}",
-    }, [_]Target{ .session_stop, target }) |invalid, expected|
-        try std.testing.expectError(error.InvalidResponse, decodeForTest(@import("protocol.zig"), @import("command_reply.zig"), 200, invalid, "k7m2qx", expected).answer);
-    const interruption: Target = .{ .model_interruption = .{ .turn = 3, .operation = 4 } };
-    for ([_][]const u8{ "\"3\",\"operation\":\"4\"", "\"3\",\"operation\":\"5\"", "\"2\",\"operation\":\"4\"" }, 0..) |echoed, index| {
-        var buffer: [256]u8 = undefined;
-        const body = try std.fmt.bufPrint(&buffer, "{{\"version\":\"{s}\",\"type\":\"model_interruption_reply\",\"answer\":{{\"status\":\"accepted\",\"replayed\":false,\"target\":{{\"session\":\"k7m2qx\",\"turn\":{s}}}}}}}", .{ current, echoed });
-        const answer = decodeForTest(@import("protocol.zig"), @import("command_reply.zig"), 200, body, "k7m2qx", interruption).answer;
-        if (index == 0) _ = try answer else try std.testing.expectError(error.RequestBindingMismatch, answer);
-    }
-    const conflict = "{\"version\":\"" ++ current ++ "\",\"type\":\"session_stop_reply\",\"answer\":{\"status\":\"conflict\",\"replayed\":";
-    const tail = ",\"session\":\"k7m2qx\",\"code\":\"idempotency_key_conflict\"},\"completion\":{\"status\":\"unavailable\"}}";
-    try std.testing.expect((try decodeForTest(@import("protocol.zig"), @import("command_reply.zig"), 409, conflict ++ "false" ++ tail, "k7m2qx", .session_stop).answer).result == .conflict);
-    try std.testing.expectError(error.InvalidResponse, decodeForTest(@import("protocol.zig"), @import("command_reply.zig"), 409, conflict ++ "true" ++ tail, "k7m2qx", .session_stop).answer);
-}
-
 test "Session pin replies bind desired value and reject unrelated mutation authority" {
     const current = @import("protocol.zig").wire_version;
     const version = current;
@@ -627,6 +602,7 @@ test "ADM-23 multipart mutation reply binds form and manifest identity" {
     }
 }
 
+// Design finding F2: ADM-19 now names this existing decoder owner.
 test "ADM-19 a reply confirms only the captured command" {
     const current = @import("protocol.zig").wire_version;
     const protocol = @import("protocol.zig");
@@ -668,6 +644,10 @@ test "ADM-19 a reply confirms only the captured command" {
             .action_stop => .{ .action_stop = 43 },
         };
         if (changed) |target| try std.testing.expectError(error.RequestBindingMismatch, decodeForTest(protocol, reply, 200, body, "k7m2qx", target).answer);
+        if (case.target == .permission_decision) {
+            const other_decision: PermissionDecision = if (case.target.permission_decision.decision == .deny) .allow_once else .deny;
+            try std.testing.expectError(error.RequestBindingMismatch, decodeForTest(protocol, reply, 200, body, "k7m2qx", .{ .permission_decision = .{ .action = 9, .decision = other_decision } }).answer);
+        }
         try std.testing.expectError(error.InvalidResponse, decodeForTest(protocol, reply, 200, body[0 .. body.len - 1], "k7m2qx", case.target).answer);
         var invalid: [2048]u8 = undefined;
         const wrong_version = try std.fmt.bufPrint(&invalid, "{{\"version\":\"{s}\",\"type\":\"{s}\",\"answer\":{{\"status\":\"accepted\",\"replayed\":false,{s}}}{s}}}", .{ stale, case.kind, case.fields, case.tail });
@@ -676,7 +656,30 @@ test "ADM-19 a reply confirms only the captured command" {
         try std.testing.expectError(error.InvalidResponse, decodeForTest(protocol, reply, 200, duplicate, "k7m2qx", case.target).answer);
         const foreign = try std.fmt.bufPrint(&invalid, "{{\"version\":\"{s}\",\"type\":\"{s}\",\"answer\":{{\"status\":\"accepted\",\"replayed\":false,{s},\"{s}\":true}}{s}}}", .{ current, case.kind, case.fields, if (case.target == .session_pin) "archived" else "pinned", case.tail });
         try std.testing.expectError(error.InvalidResponse, decodeForTest(protocol, reply, 200, foreign, "k7m2qx", case.target).answer);
-        const null_code = try std.fmt.bufPrint(&invalid, "{{\"version\":\"{s}\",\"type\":\"{s}\",\"answer\":{{\"status\":\"accepted\",\"replayed\":false,{s},\"code\":null}}{s}}}", .{ current, case.kind, case.fields, case.tail });
+        const null_code = try std.fmt.bufPrint(&invalid, "{{\"version\":\"{s}\",\"type\":\"{s}\",\"answer\":{{\"status\":\"accepted\",\"replayed\":false,{s}}}{s},\"code\":null}}", .{ current, case.kind, case.fields, case.tail });
         try std.testing.expectError(error.InvalidResponse, decodeForTest(protocol, reply, 200, null_code, "k7m2qx", case.target).answer);
+    }
+    {
+        const archive = "{\"version\":\"" ++ current ++ "\",\"type\":\"session_archive_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"archived\":true}";
+        const target: Target = .{ .session_archive = .{ .archived = true } };
+        _ = try decodeForTest(@import("protocol.zig"), @import("command_reply.zig"), 200, archive ++ ",\"completion\":{\"status\":\"completed\"}}", "k7m2qx", target).answer;
+        const stop = "{\"version\":\"" ++ current ++ "\",\"type\":\"session_stop_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"selection\":{\"turn\":null,\"admission_cutoff\":\"0\"}";
+        _ = try decodeForTest(@import("protocol.zig"), @import("command_reply.zig"), 200, stop ++ "},\"completion\":{\"status\":\"pending\"}}", "k7m2qx", .session_stop).answer;
+        for ([_][]const u8{
+            stop ++ ",\"archived\":true},\"completion\":{\"status\":\"pending\"}}",
+            "{\"version\":\"" ++ stale ++ archive["{\"version\":\"".len + current.len ..] ++ ",\"completion\":{\"status\":\"completed\"}}",
+        }, [_]Target{ .session_stop, target }) |invalid, expected|
+            try std.testing.expectError(error.InvalidResponse, decodeForTest(@import("protocol.zig"), @import("command_reply.zig"), 200, invalid, "k7m2qx", expected).answer);
+        const interruption: Target = .{ .model_interruption = .{ .turn = 3, .operation = 4 } };
+        for ([_][]const u8{ "\"3\",\"operation\":\"4\"", "\"3\",\"operation\":\"5\"", "\"2\",\"operation\":\"4\"" }, 0..) |echoed, index| {
+            var interruption_buffer: [256]u8 = undefined;
+            const body = try std.fmt.bufPrint(&interruption_buffer, "{{\"version\":\"{s}\",\"type\":\"model_interruption_reply\",\"answer\":{{\"status\":\"accepted\",\"replayed\":false,\"target\":{{\"session\":\"k7m2qx\",\"turn\":{s}}}}}}}", .{ current, echoed });
+            const answer = decodeForTest(@import("protocol.zig"), @import("command_reply.zig"), 200, body, "k7m2qx", interruption).answer;
+            if (index == 0) _ = try answer else try std.testing.expectError(error.RequestBindingMismatch, answer);
+        }
+        const conflict = "{\"version\":\"" ++ current ++ "\",\"type\":\"session_stop_reply\",\"answer\":{\"status\":\"conflict\",\"replayed\":";
+        const tail = ",\"session\":\"k7m2qx\",\"code\":\"idempotency_key_conflict\"},\"completion\":{\"status\":\"unavailable\"}}";
+        try std.testing.expect((try decodeForTest(@import("protocol.zig"), @import("command_reply.zig"), 409, conflict ++ "false" ++ tail, "k7m2qx", .session_stop).answer).result == .conflict);
+        try std.testing.expectError(error.InvalidResponse, decodeForTest(@import("protocol.zig"), @import("command_reply.zig"), 409, conflict ++ "true" ++ tail, "k7m2qx", .session_stop).answer);
     }
 }
