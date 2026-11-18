@@ -1,7 +1,10 @@
 import ctypes
+import fcntl
 import os
 import pathlib
 import platform
+import re
+import shlex
 import shutil
 import socket
 import struct
@@ -137,6 +140,152 @@ def process_executable(pid):
     count = library.proc_pidpath(pid, buffer, len(buffer))
     assert count > 0, "native process path unavailable"
     return pathlib.Path(os.fsdecode(buffer.value))
+
+
+# Linux keeps one record per process here; Darwin has none, so every reader
+# below is Linux-only unless it says otherwise.
+PROCESS_RECORDS = pathlib.Path("/proc")
+
+
+def descriptor_links(pid):
+    """One link per descriptor pid holds open, named by its number: os.readlink names the open file.
+    Raises FileNotFoundError once pid has no record."""
+    return list((PROCESS_RECORDS / str(pid) / "fd").iterdir())
+
+
+def descriptor_link(pid, descriptor):
+    return PROCESS_RECORDS / str(pid) / "fd" / str(descriptor)
+
+
+def working_directory_link(pid):
+    return PROCESS_RECORDS / str(pid) / "cwd"
+
+
+def process_memory(pid):
+    """pid's resident and peak resident memory as {"rss_kib", "peak_kib"}, holding only what the kernel
+    reports (an exited, unreaped process reports neither); None where pid has no record (Darwin, or reaped)."""
+    status = PROCESS_RECORDS / str(pid) / "status"
+    if not status.exists():
+        return None
+    fields = {"VmRSS": "rss_kib", "VmHWM": "peak_kib"}
+    memory = {}
+    for line in status.read_text().splitlines():
+        name, _, value = line.partition(":")
+        if name in fields:
+            amount, unit = value.split()
+            assert unit == "kB", line
+            memory[fields[name]] = int(amount)
+    return memory
+
+
+def socket_table(name):
+    """The rows of the kernel's socket table name ("tcp", "tcp6", "unix"), split into fields without the
+    header, or None when this kernel keeps no such table."""
+    table = PROCESS_RECORDS / "net" / name
+    try:
+        return [line.split() for line in table.read_text().splitlines()[1:]]
+    except FileNotFoundError:
+        return None
+
+
+def open_descriptor_names(pid):
+    """One name per descriptor pid holds open: the open file's link target from procfs, or its lsof row on
+    Darwin. A descriptor that closes while it is read is left out."""
+    if _module.PROC_FS:
+        names = []
+        for link in descriptor_links(pid):
+            try:
+                names.append(os.readlink(link))
+            except FileNotFoundError:
+                pass
+        return names
+    rows = subprocess.check_output(["/usr/sbin/lsof", "-n", "-P", "-p", str(pid)], text=True).splitlines()
+    return [row for row in rows[1:] if re.fullmatch(r"\d+[rwu]?", row.split()[3])]
+
+
+def process_cpu_seconds(pid):
+    value = subprocess.check_output(["ps", "-o", "time=", "-p", str(pid)], text=True).strip()
+    return sum(float(part) * 60 ** index for index, part in enumerate(reversed(value.split(":"))))
+
+
+def process_resident_kib(pid):
+    return int(subprocess.check_output(["ps", "-o", "rss=", "-p", str(pid)]))
+
+
+def physical_footprint_peak(pid):
+    """pid's peak physical footprint in bytes where the kernel accounts one (Darwin), otherwise None."""
+    if not _module.FOOTPRINT:
+        return None
+    report = subprocess.run(["/usr/bin/footprint", "-f", "bytes", "-p", str(pid)],
+                            capture_output=True, text=True, check=True, timeout=30).stdout
+    return int(re.search(r"^\s*phys_footprint_peak: (\d+) B$", report, re.M).group(1))
+
+
+def launch_records(pid):
+    """pid's argument and environment records as {"cmdline": bytes, "environ": bytes}, for checking that a
+    secret never reached them; None where the kernel exposes neither to a reader (Darwin)."""
+    if not _module.PROC_FS:
+        return None
+    return {name: (PROCESS_RECORDS / str(pid) / name).read_bytes() for name in ("cmdline", "environ")}
+
+
+def process_commands():
+    """(pid, argv) for every process the census can read. A process that ends while it is read is left
+    out; any other read failure propagates, so a caller never acts on an incomplete census."""
+    candidates = []
+    if _module.PROC_FS:
+        for entry in PROCESS_RECORDS.iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                argv = (entry / "cmdline").read_bytes().split(b"\0")
+                candidates.append((int(entry.name), [part.decode() for part in argv if part]))
+            except (FileNotFoundError, ProcessLookupError, PermissionError, UnicodeDecodeError):
+                continue
+        return candidates
+    listing = subprocess.run(["ps", "-axo", "pid=,command="], capture_output=True, text=True, timeout=5, check=True)
+    for line in listing.stdout.splitlines():
+        try:
+            pid_text, command = line.strip().split(maxsplit=1)
+            candidates.append((int(pid_text), shlex.split(command)))
+        except (ValueError, IndexError):
+            continue
+    return candidates
+
+
+# Rui's Store lease and credential locks are flock locks, whose release on
+# process exit differs across kernels; fixtures contend for them only here.
+def try_lock(file, *, shared=False):
+    """Take file's lock without waiting; False when another open description holds it."""
+    try:
+        fcntl.flock(file, (fcntl.LOCK_SH if shared else fcntl.LOCK_EX) | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return False
+    return True
+
+
+def take_lock(file, *, shared=False):
+    """Take file's lock, waiting for any holder to release it."""
+    fcntl.flock(file, fcntl.LOCK_SH if shared else fcntl.LOCK_EX)
+
+
+def release_lock(file):
+    fcntl.flock(file, fcntl.LOCK_UN)
+
+
+def process_state(pid, *, env=None):
+    """pid's process-table state letters ("S", "Z+", ...), or None once the table has no entry for it."""
+    observed = subprocess.run(["ps", "-p", str(pid), "-o", "stat="], env=env, capture_output=True, text=True, timeout=5)
+    if observed.returncode == 1 and not observed.stdout and not observed.stderr:
+        return None
+    assert observed.returncode == 0 and observed.stdout.strip(), observed
+    return observed.stdout.strip()
+
+
+def describe_processes(pids):
+    """A process-table listing of pids (group, terminal group, state, command) for a failure message."""
+    return subprocess.run(["ps", "-o", "pid,pgid,tpgid,stat,command", "-p", ",".join(map(str, pids))],
+                          capture_output=True, text=True).stdout
 
 
 def process_environment(pid, *, env):

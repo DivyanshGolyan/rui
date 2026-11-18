@@ -17,6 +17,7 @@ import unittest
 from unittest.mock import patch
 
 from host_process import stop_process, wait_for
+import os_semantics
 from terminal_process import (close_pty, CAPTURES, TerminalOutput, answers_to, capture_descriptors, open_pty,
                               register_capture, spawn, terminal_process)
 from terminal_screen import ScreenCapture
@@ -802,9 +803,7 @@ class TerminalProcessTest(unittest.TestCase):
         try:
             interrupted.wait(timeout=5)
         except subprocess.TimeoutExpired:
-            seen = subprocess.run(["ps", "-o", "pid,pgid,tpgid,stat,command", "-p",
-                                   f"{interrupted.pid},{interrupted.leader.process.pid}"],
-                                  capture_output=True, text=True).stdout
+            seen = os_semantics.describe_processes((interrupted.pid, interrupted.leader.process.pid))
             raise AssertionError(("^C did not end the foreground job",
                                   bool(termios.tcgetattr(slave)[3] & termios.ISIG), seen)) from None
         self.assertEqual(interrupted.returncode, -signal.SIGINT)
@@ -988,8 +987,8 @@ def running(pid):
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
-    state = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
-    return not state.startswith("Z")
+    state = os_semantics.process_state(pid)
+    return state is not None and not state.startswith("Z")
 
 
 def close_quietly(fd):
