@@ -188,6 +188,12 @@ test "model catalog shipped facts are sorted unique and valid" {
     try std.testing.expectEqual(Efforts.init(.{ .low = true, .medium = true, .high = true, .xhigh = true, .max = true }), sol.efforts);
     const terra = find(shipped, "gpt-6.1-terra").?;
     try std.testing.expect(terra.efforts.contains(.none));
+    for ([_][]const u8{ "gpt-6.2-sol", "gpt-6.2-astra" }) |id| {
+        const entry = find(shipped, id).?;
+        try std.testing.expect(entry.openai_listed);
+        try std.testing.expectEqual(@as(?u32, 1050000), entry.context_window);
+        try std.testing.expectEqual(Efforts.init(.{ .low = true, .medium = true, .high = true, .xhigh = true, .max = true }), entry.efforts);
+    }
 }
 
 test "model catalog effort bits are part of the Store format" {
