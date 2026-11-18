@@ -103,9 +103,26 @@ Sequential decoded work avoids repeated prefix positioning, but does not guarant
 
 ### Typed Message and Action Resolution parts
 
-`session inspect-part --session ID --admission ID --ordinal N` and `action inspect-part --session ID --action ID --ordinal N` read one zero-based part's typed metadata as JSON. The Message selector names a saved admission in that Session, including one that has not been applied; the Action selector names its saved Resolution. Text metadata contains its exact byte length and the [Store content digest](store.md#sqlite-and-representation); Image metadata also contains its MIME type. The `sha256` field is SHA-256 over the eight-byte big-endian length of `rui/content/v1`, followed by that domain and the part bytes; it is not the raw bytes' SHA-256. A missing ordinal returns `part:null`. Parts are ordered by ordinal, and a single Text value is ordinal zero.
+A Message or Action Resolution whose saved value has parts is addressed by its **owner**: the Message admission, `{"message":"17"}`, or the Action, `{"action":"42"}`.
+The caller passes the owner with the Session it read it from; the Host never accepts a content identity from the caller.
+A Message resolves in the Session that received it and in the Session that sent it, including a saved admission that has not been applied.
+An Action resolves only in its own Session, through its saved public Resolution.
+Content rows are deduplicated across Sessions, so one value can be reachable from several owners; each read is authorized by its owner, never by the value.
 
-`session read-image-part` and `action read-image-part` use the same selectors to stream the exact image bytes. A missing or non-image part fails. The Host resolves the selected public owner rather than accepting a content identity from the caller. The Store certifies a compound manifest and its ordered index before returning a part, advancing a bounded cursor between Store entries so other work can proceed. The existing public text readers retain their refusal of compound values.
+Two routes read a parts value:
+
+- `POST /v1/public-parts {session, owner}` returns the whole part list in one JSON reply: the value, `{"type":"parts","bytes":D,"sha256":H,"owner":…}`, then every part in ordinal order. A Text part carries its exact byte length and digest; an Image part also carries its MIME type (`image/png` or `image/jpeg`), its width and height and its name or `null`. The value's `bytes` and `sha256` identify its manifest, not the sum of its parts.
+- `POST /v1/public-part-content {session, owner, part, start[, stream:true]}` returns one zero-based part's exact bytes with the [conversation-content framing](#public-conversation-pages): one 4 KiB window from `start` with `X-Rui-Content-Bytes` and `X-Rui-Next-Offset`, or, with `stream:true` and `start` 0, the whole part checked against its digest.
+
+Every `sha256` is the [Store content digest](store.md#sqlite-and-representation): SHA-256 over the eight-byte big-endian length of `rui/content/v1`, followed by that domain and the bytes; it is not the raw bytes' SHA-256.
+Both routes answer `409 parts_unavailable` with `ContentNotFound` for an unknown owner, an owner outside the Session or a missing part, and with `ContentIsText` for a value without parts; a part read also answers `RangeOutOfBounds` for a `start` past the part's length.
+
+The Store certifies the manifest digest, its encoding and count, the contiguous ordered index and every part identity before the list yields its first part, advancing a bounded cursor between Store entries so other work can proceed; the Host captures the whole list in report scratch and sends nothing on a fault.
+A part read is indexed: it finds the owner, then the part by ordinal, without re-certifying the manifest, and a whole read authenticates the part's bytes against that part's own identity.
+Damage found by either read fences the Store.
+
+`session list-parts --session ID --admission ID` and `action list-parts --session ID --action ID` print the list reply as one JSON value. `session read-part` and `action read-part` take the same selectors and `--part N` and write the exact bytes of a Text or Image part to stdout, checked against the length and digest the list certified. A missing part, a value without parts, or a foreign or nonpublic selection fails without writing to stdout.
+The public text readers retain their refusal of values with parts.
 
 ### Tool Call proposals
 
@@ -379,7 +396,7 @@ The Host reads a Message's admission, binding/exclusion, outcome and, while pend
 Work and recovery are client-neutral facts, not prompts or authorization instructions.
 This is not a global cross-owner snapshot.
 Current supplies a Session's summary and one-time work selection.
-Repeated observation by the human frontend or caller-owned polling retains no connection between reads.
+Repeated observation by the human frontend or caller-owned polling retains no connection between reads. A compound Message observation binds the content identity to its saved command and admission, then certifies the manifest and ordered index in bounded Store entries before returning it. Other Store work may proceed between entries.
 
 All waits observe work; they do not start or resume it.
 The adapter Session selections are not non-interactive CLI commands:
@@ -468,6 +485,7 @@ Every such JSON value, and each JSON diagnostic, spells DEL and every non-ASCII 
 Explicit content reads stream saved bytes only; a content reader that fails before content writes its typed diagnostic to stderr and leaves stdout empty.
 Stderr carries pre-send recovery notices, including the generated-handle notice, and diagnostics.
 A Message request alone also carries its sender's [environment](execution.md#bash-environment) as a framed prefix of its body; every other exchange's body is the JSON value alone.
+A Message carries either its existing `text` envelope or an ordered `parts` array, never both. Each part is `{"type":"text","text":...}` or `{"type":"image","mime":"image/png"|"image/jpeg","data":...}`, with image data encoded as standard padded base64. The Host validates the decoded bytes and asserted MIME before admission. Message replies and accepted observations identify a compound input as `type:parts`, with the length and digest of its canonical ordered manifest; a single text retains its existing `type:text` identity.
 Compiled public types and exhaustive goldens own fields, unions, omissions and integer encodings; `u64`-class values are JSON strings.
 No handwritten duplicate schema or generic native command/result union is required.
 
@@ -528,8 +546,8 @@ Every valid short control and its complete semantic response fit a field-derived
 Reject oversized discovery before body parsing, and route/kind disagreement as soon as `kind` is read, which is before any content capture when `kind` precedes the content.
 A request's object members may come in any order, as JSON allows, so clients generated from `openapi.json` in any language can build bodies (D212).
 Each member appears at most once, required members must all be present, and unknown members fail.
-The parser takes two passes over the metadata it has so far: the first reads `version`, `kind` and `store` wherever they sit and counts content values as they arrive (`instructions` text and `outputSchema` objects in either spec, plus a Message's `text` value), and the second fills the command, so each content value takes the capture its string arrived in.
-Once `kind` is known, content the kind cannot carry fails before capture; before that, at most three strings are captured, and a fourth fails.
+The parser takes two passes over the metadata it has so far: the first reads `version`, `kind` and `store` wherever they sit and counts content values as they arrive (`instructions` text and `outputSchema` objects in either spec, plus a Message's `text` or ordered `parts`), and the second fills the command, so each content value takes the capture its string arrived in.
+Once `kind` is known, content the kind cannot carry fails before capture. Before `kind`, at most three scalar content strings are captured; an ordered `parts` array instead uses the shared scratch budget and the bounded part and image limits, even when it precedes `kind`.
 Discovery keeps one acceptance-derived ten-second absolute deadline across headers, body and all reply/error writes.
 Progress cannot renew it.
 Mutation-response waiting and transfer inactivity follow [the client transport contract](cli.md#client-transport-and-observations).
@@ -570,7 +588,7 @@ Restart never imports leftover ingress.
 
 | Contract | Canonical checks | Limits and exceptions |
 | --- | --- | --- |
-| [Typed Message and Action Resolution parts](#typed-message-and-action-resolution-parts) | `public-parts-integration` seeds Messages and Action Resolutions through the Store, then inspects all parts and exports PNG and JPEG bytes through the native CLI; `read-image-integration` checks a real `read_image` Action; `store/tests/action_parts.zig` checks ordering, metadata and byte reads, and the Store round-budget test checks each cursor step | The binary selector accepts images only. Existing text readers retain their compound-value refusal. |
+| [Typed Message and Action Resolution parts](#typed-message-and-action-resolution-parts) | `public-parts-integration` (INS-10) seeds Messages and Action Resolutions through the Store, then lists every part and reads Text, PNG and JPEG bytes through the native CLI; `read-image-integration` checks a real `read_image` Action; `store/tests/public_parts.zig` (INS-9) checks owner resolution from the receiving, sending, Action and foreign Sessions, certification before the first part, metadata, indexed byte reads and damage; the Host test INS-11 checks windows, streams and refusals on the wire; the Store round-budget test checks each cursor step and the indexed open | Existing text readers retain their refusal of values with parts. |
 | [Request and adapter waits](#work-state-and-wait-conditions) | `request_wait_integration.py`: completion and ask-mode permission return exit 0; timeout returns exit 5 with the latest observation; unknown key returns exit 4; Host stopped mid-wait returns the keyed read-error envelope and its status; restart mid-Bash exposes `recovery`; a Host-side count or lossless test observation proves a tier-2 `not_modified` hit while a sibling Session commits. Focused client tests pin poll schedule and state-to-exit mapping without sleeps; CLI argument tests pin the 300-second default and positive 86400-second bound. | Waits never start, resume or retarget work, or hold capture/Host resources between polls. Permission returns do not replace exact-target validation. Timing alone is not evidence of a token-tier hit |
 | Current selection, pending count, ten recent Messages | `'Current facts'`, `current-facts-integration`, `store/sqlite_tests/` `'Current selects active then queued'` | Suppressing callbacks beyond 128 rows must fail the complete count. Fixed storage is not process memory or Mac evidence |
 | [Per-key outcomes as data](#outcomes-and-observation-errors) | `human_cli_integration.py`, `store/tests/` `'Current reports progress alongside'` | Composed reads may span commits. A timeout proves neither rejection nor work failure |

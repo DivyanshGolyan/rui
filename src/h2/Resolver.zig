@@ -1,6 +1,6 @@
 const std = @import("std");
 const h2 = @import("h2.zig");
-const Waker = @import("Waker.zig");
+const Waker = @import("os").Waker;
 const job = @import("job.zig");
 const Resolver = @This();
 

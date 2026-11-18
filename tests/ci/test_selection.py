@@ -464,6 +464,15 @@ class BuildModuleTest(unittest.TestCase):
 
 
 class SelectionTest(unittest.TestCase):
+    def test_ordered_message_capture_selects_provider_and_capture_witnesses(self):
+        # CI-75: touched Message capture owners select their real provider witness.
+        for path in ("src/InputCapture.zig", "src/client.zig", "src/mutation_answer.zig",
+                     "src/cli_args.zig", "src/cli_grammar.zig", "tests/integration/cli_image_integration.py"):
+            with self.subTest(path=path):
+                selected = select([path], "review", AVAILABLE)
+                for family in ("targets", "native_targets"):
+                    self.assertIn("cli-image-integration", selected[family])
+
     def test_verify_rui_map_is_never_skipped_for_map_inputs(self):
         for path in (".claude/skills/verify-rui/scripts/frames.json",
                      ".claude/skills/verify-rui/features/README.md",
@@ -1218,9 +1227,9 @@ class SelectionTest(unittest.TestCase):
                 self.assertIn(target, result["targets"])
                 self.assertNotIn("human-cli-integration", result["targets"])
 
-    def test_public_parts_owner_selects_image_export_fixture(self):
-        for path in ("src/store/domain/public_parts.zig", "src/store/tests/action_parts.zig",
-                     "src/protocol.zig", "src/cli_args.zig", "src/cli.zig", "src/server.zig"):
+    def test_public_parts_owner_selects_part_cli_fixture(self):
+        for path in ("src/store/domain/public_parts.zig", "src/store/tests/public_parts.zig",
+                     "src/protocol.zig", "src/protocol_reply.zig", "src/cli_args.zig", "src/cli.zig", "src/server.zig"):
             with self.subTest(path=path):
                 result = select([path], "review", AVAILABLE)
                 self.assertTrue({"public-parts-integration", "check"} & set(result["targets"]))

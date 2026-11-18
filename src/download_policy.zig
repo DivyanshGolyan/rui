@@ -92,7 +92,7 @@ pub fn writeDiagnostic(writer: *std.Io.Writer, stderr: []const u8) !void {
     try writer.writeAll("\n");
 }
 
-/// SH-61's expected lists, typed from the base commit's inline argument
+/// SH-70's expected lists, typed from the base commit's inline argument
 /// table in `upgrade_process.Download.outputUntil` (531600a53), not from
 /// `arguments`. The executable is `curl` and the time left is 299 999 ms.
 const sh61 = struct {
@@ -154,7 +154,7 @@ const sh61 = struct {
     };
 };
 
-test "SH-61 every download attempt confines curl" {
+test "SH-70 every download attempt confines curl" {
     for (sh61.cases) |case| {
         var storage: Arguments = .{};
         const actual = arguments(&storage, "curl", case.request, case.family, 299_999);
@@ -294,7 +294,7 @@ fn traceRun(buffer: []u8, stage: u2, codes: []const ?u8, sticky_latest: bool) ![
     return trace.buffered();
 }
 
-test "SH-62 a failed download reports only its last line" {
+test "SH-71 a failed download reports only its last line" {
     for ([_]struct { []const u8, []const u8 }{
         .{ "", "" },
         .{ "\r\n", "" },

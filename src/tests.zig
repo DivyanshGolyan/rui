@@ -75,10 +75,8 @@ test {
     _ = @import("models_dev.zig");
     _ = @import("descriptor_capacity.zig");
     _ = @import("os/descriptor_limit.zig");
-    _ = @import("os/os.zig");
     _ = @import("os/pages.zig");
     _ = @import("os/process.zig");
-    _ = @import("os/socket.zig");
     _ = @import("os/system_path.zig");
     _ = @import("execution_turn.zig");
     _ = @import("preset_settings_test.zig");
@@ -158,6 +156,7 @@ test {
     _ = @import("SessionScreen.zig");
     _ = @import("session_history.zig");
     _ = @import("session_view.zig");
+    _ = @import("value_reads.zig");
     _ = @import("session_view_store_tests.zig");
     _ = @import("ClientTask.zig");
 }
