@@ -186,7 +186,7 @@ An auto-started Host serves `openai` whenever a key is saved.
 To use an OpenAI-compatible server that speaks the Responses API, such as Azure OpenAI or a company proxy, set `providers.openai.endpoint` to its `https://` Responses URL (for example `https://example.openai.azure.com/openai/v1/responses`) with `rui host set --store DIR providers.openai.endpoint URL`; the key is then sent only to that endpoint and its sibling `/models`.
 A Host with a key reads the key's model list from `/models` as it starts and again each time the model picker asks; if that fails, the picker shows the models Rui knows.
 A Host serving a ChatGPT plan sign-in (`chatgpt`) reads that plan's list the same way, from `https://api.openai.com/v1/models`; without a usable sign-in it does not ask, and the picker shows the models Rui knows.
-An auto-started Host takes it from the command that starts it, and a running Host keeps the URL it started with.
+The endpoint comes from the [Host settings](#save-host-settings); a running Host keeps the URL it started with.
 An invalid one stops a Host explicitly configured to serve `openai`; with automatic provider selection, the Host reports it and starts serving its ChatGPT sign-ins only.
 Sessions of a provider the Host does not serve wait until a Host that serves it starts.
 Without a `providers` setting, every start path uses automatic provider selection: device-code sign-in is served even while signed out, browser sign-in when its credential is usable, and OpenAI when its key is usable. To serve no model providers, pass `--set 'providers={}'`.
