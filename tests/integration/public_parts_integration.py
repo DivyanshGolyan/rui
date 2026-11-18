@@ -15,34 +15,55 @@ import host_process
 import model_fixture as fixture
 
 
-def INS_10_public_part_selection(store, seed, values):
-    # INS-10: selected typed metadata, image bytes, and refusals.
-    for resource, flag, identity in (("session", "--admission", seed["admission"]),
-                                     ("action", "--action", seed["action"])):
+def digest(content):
+    domain = b"rui/content/v1"
+    return hashlib.sha256(len(domain).to_bytes(8, "big") + domain + content).hexdigest()
+
+
+def refused(*arguments):
+    result = subprocess.run([str(fixture.RUI), *arguments], capture_output=True, timeout=15)
+    assert result.returncode != 0 and not result.stdout, (arguments, result.stdout, result.stderr)
+
+
+def INS_10_public_part_cli(store, seed, values):
+    # INS-10: the exact list for each owner, the exact bytes of every part, and refusals without payload.
+    parts = []
+    for ordinal, (kind, content, media) in enumerate(values):
+        part = {"ordinal": str(ordinal), "type": kind}
+        if media:
+            mime, width, height, name = media
+            part.update({"mime": mime, "width": str(width), "height": str(height), "name": name})
+        part.update({"bytes": str(len(content)), "sha256": digest(content)})
+        parts.append(part)
+    identities = set()
+    for resource, flag, owner, identity in (("session", "--admission", "message", seed["admission"]),
+                                            ("action", "--action", "action", seed["action"])):
         base = ["--store", str(store), "--session", seed["session"], flag, identity]
-        for ordinal, (kind, content, mime) in enumerate(values):
-            domain = b"rui/content/v1"
-            digest = hashlib.sha256(len(domain).to_bytes(8, "big") + domain + content).hexdigest()
-            expected = {"ordinal": str(ordinal), "type": kind, "bytes": str(len(content)), "sha256": digest}
-            if mime:
-                expected["mime"] = mime
-            assert fixture.command(resource, "inspect-part", *base, "--ordinal", str(ordinal))["part"] == expected
-            result = subprocess.run([str(fixture.RUI), resource, "read-image-part", *base,
-                                     "--ordinal", str(ordinal)], capture_output=True, timeout=15)
-            if kind == "image":
-                assert result.returncode == 0, (result.stdout, result.stderr)
-                assert result.stdout == content
-            else:
-                assert result.returncode != 0 and not result.stdout, (result.stdout, result.stderr)
-        assert fixture.command(resource, "inspect-part", *base, "--ordinal", "5")["part"] is None
-        for wrong in (["--store", str(store), "--session", seed["session"], flag, identity, "--ordinal", "5"],
-                      ["--store", str(store), "--session", "000000", flag, identity, "--ordinal", "1"]):
-            result = subprocess.run([str(fixture.RUI), resource, "read-image-part", *wrong], capture_output=True, timeout=15)
-            assert result.returncode != 0 and not result.stdout, (result.stdout, result.stderr)
-    result = subprocess.run([str(fixture.RUI), "action", "read", "--store", str(store),
-                             "--session", seed["session"], "--action", seed["action"]],
-                            capture_output=True, timeout=15)
-    assert result.returncode != 0 and not result.stdout, (result.stdout, result.stderr)
+        listed = subprocess.run([str(fixture.RUI), resource, "list-parts", *base], capture_output=True, timeout=15)
+        assert listed.returncode == 0, (listed.stdout, listed.stderr)
+        reply = json.loads(listed.stdout)
+        value = reply.pop("value")
+        assert reply == {"version": host_process.WIRE_VERSION, "type": "public_parts", "session": seed["session"], "parts": parts}, reply
+        assert value["type"] == "parts" and value["owner"] == {owner: identity}, value
+        assert len(value["sha256"]) == 64 and int(value["bytes"]) > 0, value
+        identities.add((value["bytes"], value["sha256"]))
+        for ordinal, (_, content, _) in enumerate(values):
+            result = subprocess.run([str(fixture.RUI), resource, "read-part", *base, "--part", str(ordinal)],
+                                    capture_output=True, timeout=15)
+            assert result.returncode == 0, (ordinal, result.stdout, result.stderr)
+            assert result.stdout == content, (ordinal, len(result.stdout))
+        refused(resource, "read-part", *base, "--part", str(len(values)))
+        for session in (seed["foreign"], "000000"):
+            wrong = ["--store", str(store), "--session", session, flag, identity]
+            refused(resource, "list-parts", *wrong)
+            refused(resource, "read-part", *wrong, "--part", "1")
+    # Both owners hold one deduplicated value.
+    assert len(identities) == 1, identities
+    text = ["--store", str(store), "--session", seed["session"], "--admission", seed["text_admission"]]
+    refused("session", "list-parts", *text)
+    refused("session", "read-part", *text, "--part", "0")
+    # The text-only readers keep refusing values with parts.
+    refused("action", "read", "--store", str(store), "--session", seed["session"], "--action", seed["action"])
     # Keyed observation of a compound Message reports its parts form (CLI-19 owns identity agreement);
     # the Host keeps serving.
     observation = fixture.command("request", "inspect", "--store", str(store),
@@ -64,12 +85,12 @@ def main():
     png = (fixture.ROOT / "src/codecs/fixtures/image-input/pixel.png").read_bytes()
     jpeg = (fixture.ROOT / "src/testing/fixtures/input-baseline.jpg").read_bytes()
     values = [("text", b'before "quoted"\n\xe9\x9b\xaa\0', None),
-              ("image", png, "image/png"), ("text", b"between", None),
-              ("image", jpeg, "image/jpeg"), ("text", b"", None)]
+              ("image", png, ("image/png", 1, 1, "cat 雪.png")), ("text", b"between", None),
+              ("image", jpeg, ("image/jpeg", 3, 2, None)), ("text", b"", None)]
     host = fixture.start_host(store, None)
     try:
-        INS_10_public_part_selection(store, seed, values)
-        print("INS-10: selected Message and Action image bytes and refusals")
+        INS_10_public_part_cli(store, seed, values)
+        print("INS-10: Message and Action part lists, Text and Image bytes, and refusals")
     finally:
         fixture.stop_host(host)
         directory.cleanup()

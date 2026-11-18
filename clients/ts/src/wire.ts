@@ -361,7 +361,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/v1/public-part": {
+    "/v1/public-parts": {
         parameters: {
             query?: never;
             header?: never;
@@ -370,15 +370,15 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Typed metadata for an ordered Message or Action Resolution part. */
-        post: operations["publicPart"];
+        /** The complete certified, ordered part list of a Message or Action Resolution parts value, addressed by its owner in the Session. */
+        post: operations["publicParts"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/v1/public-part-bytes": {
+    "/v1/public-part-content": {
         parameters: {
             query?: never;
             header?: never;
@@ -387,8 +387,8 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Exact bytes of one image part. */
-        post: operations["publicPartBytes"];
+        /** The exact bytes of one part of an owner's parts value, framed as conversation content. */
+        post: operations["publicPartContent"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1042,6 +1042,18 @@ export interface components {
             require_model?: true;
             preset?: string;
         };
+        ContentValue: {
+            /** @constant */
+            type: "text";
+            bytes: components["schemas"]["Decimal"];
+            sha256: string;
+        } | {
+            /** @constant */
+            type: "parts";
+            bytes: components["schemas"]["Decimal"];
+            sha256: string;
+            owner: components["schemas"]["PartOwner"];
+        };
         ConversationContentRequest: {
             /** @constant */
             version: "21";
@@ -1238,7 +1250,7 @@ export interface components {
             /** @constant */
             version: "21";
             /** @enum {string} */
-            type: "invocation_error" | "observation_error" | "busy" | "unsupported" | "host_unavailable" | "result_unavailable" | "action_unavailable" | "conversation_unavailable" | "activity_unavailable" | "failed_response_unavailable";
+            type: "invocation_error" | "observation_error" | "busy" | "unsupported" | "host_unavailable" | "result_unavailable" | "action_unavailable" | "conversation_unavailable" | "activity_unavailable" | "failed_response_unavailable" | "parts_unavailable";
             code: string;
         };
         FirstMessage: {
@@ -4001,6 +4013,11 @@ export interface components {
             revision: components["schemas"]["Decimal"];
             workspace: string;
         };
+        PartOwner: {
+            message: components["schemas"]["Decimal"];
+        } | {
+            action: components["schemas"]["Decimal"];
+        };
         Peer: {
             session: string;
         };
@@ -4068,61 +4085,53 @@ export interface components {
             /** @enum {string} */
             decision: "allow_once" | "deny";
         };
-        PublicPartBytesRequest: {
+        PublicPart: {
+            ordinal: components["schemas"]["Decimal"];
+            /** @constant */
+            type: "text";
+            bytes: components["schemas"]["Decimal"];
+            sha256: string;
+        } | {
+            ordinal: components["schemas"]["Decimal"];
+            /** @constant */
+            type: "image";
+            mime: string;
+            width: components["schemas"]["Decimal"];
+            height: components["schemas"]["Decimal"];
+            name: string | null;
+            bytes: components["schemas"]["Decimal"];
+            sha256: string;
+        };
+        PublicPartContentRequest: {
             /** @constant */
             version: "21";
             /** @constant */
-            kind: "public_part_bytes";
+            kind: "public_part_content";
             store: string;
             session: string;
-            id: components["schemas"]["Decimal"];
-            ordinal: components["schemas"]["Decimal"];
-            /** @enum {string} */
-            target: "message" | "action";
+            owner: components["schemas"]["PartOwner"];
+            part: components["schemas"]["Decimal"];
+            start: components["schemas"]["Decimal"];
+            /** @constant */
+            stream?: true;
         };
-        PublicPartReply: {
+        PublicPartsReply: {
             /** @constant */
             version: "21";
             /** @constant */
-            type: "public_part";
-            part: null;
-        } | {
-            /** @constant */
-            version: "21";
-            /** @constant */
-            type: "public_part";
-            part: {
-                ordinal: components["schemas"]["Decimal"];
-                /** @constant */
-                type: "text";
-                bytes: components["schemas"]["Decimal"];
-                sha256: string;
-            };
-        } | {
-            /** @constant */
-            version: "21";
-            /** @constant */
-            type: "public_part";
-            part: {
-                ordinal: components["schemas"]["Decimal"];
-                /** @constant */
-                type: "image";
-                mime: string;
-                bytes: components["schemas"]["Decimal"];
-                sha256: string;
-            };
+            type: "public_parts";
+            session: string;
+            value: components["schemas"]["ContentValue"];
+            parts: components["schemas"]["PublicPart"][];
         };
-        PublicPartRequest: {
+        PublicPartsRequest: {
             /** @constant */
             version: "21";
             /** @constant */
-            kind: "public_part";
+            kind: "public_parts";
             store: string;
             session: string;
-            id: components["schemas"]["Decimal"];
-            ordinal: components["schemas"]["Decimal"];
-            /** @enum {string} */
-            target: "message" | "action";
+            owner: components["schemas"]["PartOwner"];
         };
         Queued: {
             count: components["schemas"]["Decimal"];
@@ -5706,7 +5715,7 @@ export interface operations {
             };
         };
     };
-    publicPart: {
+    publicParts: {
         parameters: {
             query?: never;
             header: {
@@ -5720,7 +5729,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["PublicPartRequest"];
+                "application/json": components["schemas"]["PublicPartsRequest"];
             };
         };
         responses: {
@@ -5730,7 +5739,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["PublicPartReply"];
+                    "application/json": components["schemas"]["PublicPartsReply"];
                 };
             };
             /** @description A refusal or failure. */
@@ -5744,7 +5753,7 @@ export interface operations {
             };
         };
     };
-    publicPartBytes: {
+    publicPartContent: {
         parameters: {
             query?: never;
             header: {
@@ -5758,7 +5767,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["PublicPartBytesRequest"];
+                "application/json": components["schemas"]["PublicPartContentRequest"];
             };
         };
         responses: {

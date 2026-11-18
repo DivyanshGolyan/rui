@@ -155,6 +155,7 @@ test {
     _ = @import("store/tests/obligation.zig");
     _ = @import("store/tests/observation.zig");
     _ = @import("store/tests/preset.zig");
+    _ = @import("store/tests/public_parts.zig");
     _ = @import("store/tests/report.zig");
     _ = @import("store/tests/retry.zig");
     _ = @import("store/tests/round_budget.zig");

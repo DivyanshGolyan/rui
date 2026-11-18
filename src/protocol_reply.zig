@@ -10,6 +10,8 @@ const model_picker = @import("model_picker.zig");
 const transport_policy = @import("transport_policy.zig");
 const wire_field = @import("wire_field.zig");
 const mutation_answer = @import("mutation_answer.zig");
+const content_value = @import("content_value.zig");
+const input_parts = @import("input_parts.zig");
 comptime {
     std.debug.assert(mutation_answer.max_code_bytes == protocol.max_code_bytes);
     std.debug.assert(mutation_answer.max_session_bytes == protocol.max_session_bytes);
@@ -875,6 +877,190 @@ pub const ReadFailure = struct {
 pub const ReportReply = union(enum) {
     report: struct { bytes: u64 },
     command: CommandReply,
+};
+
+/// A `public_parts` reply captured in a report file. `decode` checks the whole
+/// list once; `PartList.iterator` then re-reads it one bounded entry at a time.
+pub const PublicPartsReply = union(enum) {
+    list: PartList,
+    failure: ReadFailure,
+
+    /// What the caller asked for: the owner always, the manifest identity when it holds one.
+    pub const Expected = struct { session: []const u8, owner: content_value.Owner, identity: ?content_value.Reference = null };
+
+    /// Validates that the head names the requested Session and owner (and identity, when
+    /// given), that ordinals run contiguously from 0, and that kinds and media are known.
+    pub fn decode(io: std.Io, file: std.Io.File, reply: ReportReply, expected: Expected) !PublicPartsReply {
+        const bytes = switch (reply) {
+            .command => |command| return .{ .failure = try decodeReadFailure(command, false) },
+            .report => |report| report.bytes,
+        };
+        if (bytes > protocol.public_parts_reply.max_bytes) return error.InvalidPartList;
+        var walk: PartWalk = undefined;
+        try walk.open(io, file, bytes);
+        const value = try walk.head(expected.session);
+        if (!std.meta.eql(value.owner, expected.owner)) return error.InvalidPartList;
+        if (expected.identity) |identity| if (!std.meta.eql(identity, value.identity)) return error.InvalidPartList;
+        var count: u32 = 0;
+        while (try walk.next(count)) |_| count += 1;
+        if (count == 0) return error.InvalidPartList;
+        try walk.finish();
+        return .{ .list = .{ .io = io, .file = file, .bytes = bytes, .count = count, .value = value, .session = expected.session } };
+    }
+};
+
+pub const PartList = struct {
+    io: std.Io,
+    file: std.Io.File,
+    bytes: u64,
+    count: u32,
+    value: content_value.Value.Parts,
+    session: []const u8,
+
+    /// Restartable: each iterator reads the file from its start.
+    pub fn iterator(self: *const PartList, out: *PartIterator) !void {
+        out.list = self;
+        out.read = 0;
+        try out.walk.open(self.io, self.file, self.bytes);
+        _ = try out.walk.head(self.session);
+    }
+};
+
+pub const PartIterator = struct {
+    list: *const PartList,
+    read: u32,
+    walk: PartWalk,
+
+    pub fn next(self: *PartIterator) !?content_value.Part {
+        const part = try self.walk.next(self.read) orelse {
+            if (self.read != self.list.count) return error.InvalidPartList;
+            return null;
+        };
+        self.read += 1;
+        return part;
+    }
+};
+
+/// One forward pass over a captured `public_parts` reply. Holds pointers into
+/// itself, so it is opened in place and never moved.
+const PartWalk = struct {
+    file_reader: std.Io.File.Reader,
+    input: [protocol.content_window_bytes]u8,
+    body: std.Io.Reader.Limited,
+    reader_storage: [256]u8,
+    reader_fixed: std.heap.FixedBufferAllocator,
+    value_storage: [2048]u8,
+    value_fixed: std.heap.FixedBufferAllocator,
+    json: std.json.Reader,
+
+    const WireOwner = struct { message: ?JsonString(20) = null, action: ?JsonString(20) = null };
+    const WireValue = struct { type: JsonString(8), bytes: JsonString(20), sha256: JsonString(64), owner: WireOwner };
+    const WirePart = struct {
+        ordinal: JsonString(20),
+        type: JsonString(8),
+        bytes: JsonString(20),
+        sha256: JsonString(64),
+        mime: ?JsonString(16) = null,
+        width: ?JsonString(20) = null,
+        height: ?JsonString(20) = null,
+        name: ?JsonString(input_parts.max_name_bytes) = null,
+    };
+
+    fn open(self: *PartWalk, io: std.Io, file: std.Io.File, bytes: u64) !void {
+        self.file_reader = file.reader(io, &.{});
+        self.body = self.file_reader.interface.limited(.limited64(bytes), &self.input);
+        self.reader_fixed = .init(&self.reader_storage);
+        self.value_fixed = .init(&self.value_storage);
+        self.json = std.json.Reader.init(self.reader_fixed.allocator(), &self.body.interface);
+    }
+
+    fn parse(self: *PartWalk, comptime T: type) !T {
+        self.value_fixed.reset();
+        // innerParse, unlike parseFrom*, does not default the member-name bound.
+        return std.json.innerParse(T, self.value_fixed.allocator(), &self.json, .{ .ignore_unknown_fields = false, .max_value_len = input_parts.max_name_bytes }) catch error.InvalidPartList;
+    }
+
+    fn key(self: *PartWalk) ![]const u8 {
+        self.value_fixed.reset();
+        return switch (self.json.nextAlloc(self.value_fixed.allocator(), .alloc_if_needed) catch return error.InvalidPartList) {
+            .string, .allocated_string => |name| name,
+            else => error.InvalidPartList,
+        };
+    }
+
+    /// Reads every head member up to and including `"parts":[`, which comes last.
+    fn head(self: *PartWalk, session: []const u8) !content_value.Value.Parts {
+        if ((self.json.next() catch return error.InvalidPartList) != .object_begin) return error.InvalidPartList;
+        const Field = enum { version, type, session, value, parts };
+        var seen: std.enums.EnumSet(Field) = .empty;
+        var value: ?content_value.Value.Parts = null;
+        while (true) {
+            const field = std.meta.stringToEnum(Field, try self.key()) orelse return error.InvalidPartList;
+            if (seen.contains(field)) return error.InvalidPartList;
+            seen.insert(field);
+            switch (field) {
+                .version => if (!(try self.parse(JsonString(8))).eql(protocol.wire_version)) return error.InvalidPartList,
+                .type => if (!(try self.parse(JsonString(16))).eql("public_parts")) return error.InvalidPartList,
+                .session => if (!(try self.parse(JsonString(protocol.max_session_bytes))).eql(session)) return error.InvalidPartList,
+                .value => value = try decodeValue(try self.parse(WireValue)),
+                .parts => {
+                    if (seen.count() != std.enums.values(Field).len) return error.InvalidPartList;
+                    if ((self.json.next() catch return error.InvalidPartList) != .array_begin) return error.InvalidPartList;
+                    return value.?;
+                },
+            }
+        }
+    }
+
+    /// The next part, which must carry `ordinal`, or null at the end of the list.
+    fn next(self: *PartWalk, ordinal: u32) !?content_value.Part {
+        if ((self.json.peekNextTokenType() catch return error.InvalidPartList) == .array_end) return null;
+        if (ordinal == input_parts.max_parts) return error.InvalidPartList;
+        const wire = try self.parse(WirePart);
+        if (try decimal(wire.ordinal, true) != ordinal) return error.InvalidPartList;
+        const reference: content_value.Reference = .{ .length = try decimal(wire.bytes, true), .digest = try digest(wire.sha256) };
+        if (wire.type.eql("text")) {
+            if (wire.mime != null or wire.width != null or wire.height != null or wire.name != null) return error.InvalidPartList;
+            return .{ .ordinal = ordinal, .kind = .text, .reference = reference };
+        }
+        if (!wire.type.eql("image")) return error.InvalidPartList;
+        const mime = wire.mime orelse return error.InvalidPartList;
+        const format: @import("input_media.zig").Format = if (mime.eql("image/png")) .png else if (mime.eql("image/jpeg")) .jpeg else return error.InvalidPartList;
+        const width = try decimal(wire.width orelse return error.InvalidPartList, false);
+        const height = try decimal(wire.height orelse return error.InvalidPartList, false);
+        if (width > std.math.maxInt(u32) or height > std.math.maxInt(u32)) return error.InvalidPartList;
+        const name: ?input_parts.Name = if (wire.name) |text| input_parts.displayName(text.slice()) catch return error.InvalidPartList else null;
+        return .{ .ordinal = ordinal, .kind = .{ .image = .{ .media = .{ .format = format, .width = @intCast(width), .height = @intCast(height) }, .name = name } }, .reference = reference };
+    }
+
+    fn finish(self: *PartWalk) !void {
+        if ((self.json.next() catch return error.InvalidPartList) != .array_end or
+            (self.json.next() catch return error.InvalidPartList) != .object_end or
+            (self.json.next() catch return error.InvalidPartList) != .end_of_document or
+            self.body.remaining != .nothing) return error.InvalidPartList;
+    }
+
+    fn decodeValue(wire: WireValue) !content_value.Value.Parts {
+        if (!wire.type.eql("parts")) return error.InvalidPartList;
+        const owner: content_value.Owner = if (wire.owner.message) |id|
+            (if (wire.owner.action != null) return error.InvalidPartList else .{ .message = try decimal(id, false) })
+        else
+            .{ .action = try decimal(wire.owner.action orelse return error.InvalidPartList, false) };
+        return .{ .identity = .{ .length = try decimal(wire.bytes, true), .digest = try digest(wire.sha256) }, .owner = owner };
+    }
+
+    fn decimal(text: JsonString(20), allow_zero: bool) !u64 {
+        return decimalId(text, allow_zero) catch error.InvalidPartList;
+    }
+
+    fn digest(text: JsonString(64)) ![32]u8 {
+        var out: [32]u8 = undefined;
+        const hex = text.slice();
+        if (hex.len != 64) return error.InvalidPartList;
+        for (hex) |byte| if (!std.ascii.isDigit(byte) and (byte < 'a' or byte > 'f')) return error.InvalidPartList;
+        _ = std.fmt.hexToBytes(&out, hex) catch return error.InvalidPartList;
+        return out;
+    }
 };
 
 pub const CurrentReply = union(enum) {
@@ -4186,4 +4372,95 @@ test "WIR-5 released_host_info_profiles" {
         defer std.testing.allocator.free(incomplete);
         try std.testing.expectError(error.MissingField, parseHostInfoForProfile(incomplete, "/one", profile));
     }
+}
+
+test "WIR-4 a public parts reply reads back as the Host writes it and refuses any other list" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "parts", .{ .read = true });
+    defer file.close(io);
+    const a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const b = "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b";
+    const c = "c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0";
+    const wire = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"public_parts\",\"session\":\"k7m2qx\"," ++
+        "\"value\":{\"type\":\"parts\",\"bytes\":\"120\",\"sha256\":\"" ++ a ++ "\",\"owner\":{\"action\":\"9\"}},\"parts\":[" ++
+        "{\"ordinal\":\"0\",\"type\":\"text\",\"bytes\":\"0\",\"sha256\":\"" ++ b ++ "\"}," ++
+        "{\"ordinal\":\"1\",\"type\":\"image\",\"mime\":\"image/png\",\"width\":\"1\",\"height\":\"4294967295\",\"name\":\"cat \\\"\\u96ea\\\".png\",\"bytes\":\"67\",\"sha256\":\"" ++ c ++ "\"}," ++
+        "{\"ordinal\":\"2\",\"type\":\"image\",\"mime\":\"image/jpeg\",\"width\":\"3\",\"height\":\"2\",\"name\":null,\"bytes\":\"5\",\"sha256\":\"" ++ b ++ "\"}]}";
+    var identity: content_value.Reference = .{ .length = 120, .digest = @splat(0xaa) };
+    const expected: PublicPartsReply.Expected = .{ .session = "k7m2qx", .owner = .{ .action = 9 }, .identity = identity };
+    try file.writePositionalAll(io, wire, 0);
+    const reply = try PublicPartsReply.decode(io, file, .{ .report = .{ .bytes = wire.len } }, expected);
+    try std.testing.expectEqual(@as(u32, 3), reply.list.count);
+    try std.testing.expect(std.meta.eql(content_value.Owner{ .action = 9 }, reply.list.value.owner));
+    const iterator = try std.testing.allocator.create(PartIterator);
+    defer std.testing.allocator.destroy(iterator);
+    // The iterator restarts from the file each time.
+    for (0..2) |_| {
+        try reply.list.iterator(iterator);
+        const text = (try iterator.next()).?;
+        try std.testing.expect(text.kind == .text and text.ordinal == 0 and text.reference.length == 0);
+        try std.testing.expectEqualSlices(u8, &@as([32]u8, @splat(0x0b)), &text.reference.digest);
+        const png = (try iterator.next()).?;
+        try std.testing.expectEqual(@as(u64, 67), png.reference.length);
+        try std.testing.expectEqual(@import("input_media.zig").Format.png, png.kind.image.media.format);
+        try std.testing.expectEqual(@as(u32, 1), png.kind.image.media.width);
+        try std.testing.expectEqual(@as(u32, std.math.maxInt(u32)), png.kind.image.media.height);
+        try std.testing.expectEqualStrings("cat \"雪\".png", png.kind.image.name.?.slice());
+        const jpeg = (try iterator.next()).?;
+        try std.testing.expect(jpeg.ordinal == 2 and jpeg.kind.image.media.format == .jpeg and jpeg.kind.image.name == null);
+        try std.testing.expectEqual(@as(?content_value.Part, null), try iterator.next());
+    }
+    // A Host refusal decodes as a read failure, not a list.
+    const refusal = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"parts_unavailable\",\"code\":\"ContentIsText\"}";
+    const failure = (try PublicPartsReply.decode(io, file, .{ .command = .{ .status = 409, .body = refusal } }, expected)).failure;
+    try std.testing.expectEqualStrings("ContentIsText", failure.diagnostic.code.slice());
+
+    const Mutation = struct { from: []const u8, to: []const u8 };
+    const mutations = [_]Mutation{
+        .{ .from = "\"session\":\"k7m2qx\"", .to = "\"session\":\"k7m2qy\"" },
+        .{ .from = "{\"action\":\"9\"}", .to = "{\"message\":\"9\"}" },
+        .{ .from = "{\"action\":\"9\"}", .to = "{\"action\":\"9\",\"message\":\"9\"}" },
+        .{ .from = "\"bytes\":\"120\"", .to = "\"bytes\":\"121\"" },
+        .{ .from = "\"type\":\"parts\"", .to = "\"type\":\"text\"" },
+        .{ .from = "\"type\":\"public_parts\"", .to = "\"type\":\"public_part\"" },
+        .{ .from = "\"version\":\"" ++ protocol.wire_version ++ "\"", .to = "\"version\":\"" ++ protocol.wire_version ++ "0\"" },
+        .{ .from = "\"ordinal\":\"1\"", .to = "\"ordinal\":\"3\"" },
+        .{ .from = "\"ordinal\":\"0\"", .to = "\"ordinal\":\"00\"" },
+        .{ .from = "\"type\":\"text\",\"bytes\":\"0\"", .to = "\"type\":\"text\",\"mime\":\"image/png\",\"bytes\":\"0\"" },
+        .{ .from = "\"type\":\"text\",\"bytes\":\"0\"", .to = "\"type\":\"audio\",\"bytes\":\"0\"" },
+        .{ .from = "image/png", .to = "image/gif" },
+        .{ .from = "\"width\":\"1\"", .to = "\"width\":\"0\"" },
+        .{ .from = "\"height\":\"4294967295\"", .to = "\"height\":\"4294967296\"" },
+        .{ .from = ",\"width\":\"3\"", .to = "" },
+        .{ .from = "\"name\":null", .to = "\"name\":\"\"" },
+        .{ .from = "\"name\":null,", .to = "\"name\":null,\"extra\":true," },
+        .{ .from = "\"sha256\":\"" ++ b ++ "\"}]", .to = "\"sha256\":\"" ++ b[0..62] ++ "\"}]" },
+        .{ .from = "\"sha256\":\"" ++ b ++ "\"}]", .to = "\"sha256\":\"" ++ b[0..62] ++ "AB\"}]" },
+        .{ .from = ",\"parts\":[", .to = ",\"parts\":[],\"later\":[" },
+        .{ .from = "\"parts\":[{\"ordinal\":\"0\"", .to = "\"parts\":[],\"x\":[{\"ordinal\":\"0\"" },
+        .{ .from = "}]}", .to = "}]}}" },
+    };
+    for (mutations) |mutation| {
+        const changed = try std.mem.replaceOwned(u8, std.testing.allocator, wire, mutation.from, mutation.to);
+        defer std.testing.allocator.free(changed);
+        try std.testing.expect(!std.mem.eql(u8, changed, wire));
+        try file.writePositionalAll(io, changed, 0);
+        if (PublicPartsReply.decode(io, file, .{ .report = .{ .bytes = changed.len } }, expected)) |_| {
+            std.debug.print("accepted {s}\n", .{changed});
+            return error.TestUnexpectedResult;
+        } else |err| try std.testing.expectEqual(error.InvalidPartList, err);
+    }
+    // An empty list, a short byte count and trailing bytes past the count.
+    const empty = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"public_parts\",\"session\":\"k7m2qx\",\"value\":{\"type\":\"parts\",\"bytes\":\"120\",\"sha256\":\"" ++ a ++ "\",\"owner\":{\"action\":\"9\"}},\"parts\":[]}";
+    try file.writePositionalAll(io, empty, 0);
+    try std.testing.expectError(error.InvalidPartList, PublicPartsReply.decode(io, file, .{ .report = .{ .bytes = empty.len } }, expected));
+    try file.writePositionalAll(io, wire ++ "x", 0);
+    try std.testing.expectError(error.InvalidPartList, PublicPartsReply.decode(io, file, .{ .report = .{ .bytes = wire.len - 1 } }, expected));
+    try std.testing.expectError(error.InvalidPartList, PublicPartsReply.decode(io, file, .{ .report = .{ .bytes = wire.len + 1 } }, expected));
+    // The requested identity binds the manifest.
+    identity.length = 119;
+    try file.writePositionalAll(io, wire, 0);
+    try std.testing.expectError(error.InvalidPartList, PublicPartsReply.decode(io, file, .{ .report = .{ .bytes = wire.len } }, .{ .session = "k7m2qx", .owner = .{ .action = 9 }, .identity = identity }));
 }

@@ -33,6 +33,7 @@ pub const names = [_][]const u8{
     "output-reservation",
     "output-schema",
     "parent",
+    "part",
     "permission-mode",
     "position",
     "preset",

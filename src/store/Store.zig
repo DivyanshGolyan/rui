@@ -1604,7 +1604,20 @@ pub const Store = struct {
         defer entry.release();
         var access: ReadAccess = .open(&entry);
         defer access.deinit();
-        return entry.finish(Ordinary.content, @import("domain/public_parts.zig").step(&access, reader));
+        return entry.finish(Ordinary.public_parts, @import("domain/public_parts.zig").step(&access, reader));
+    }
+
+    /// One indexed part of a Session-scoped owner's parts value, at `start`.
+    pub fn openPublicPart(self: *Store, session: []const u8, owner: @import("../content_value.zig").Owner, part: u32, start: u64) !ContentLocation {
+        return self.queue().run(openPublicPartHeld, .{ self, session, owner, part, start });
+    }
+
+    fn openPublicPartHeld(self: *Store, session: []const u8, owner: @import("../content_value.zig").Owner, part: u32, start: u64) !ContentLocation {
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: ReadAccess = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.public_part, @import("domain/public_parts.zig").openPart(&access, session, owner, part, start));
     }
 
     pub fn modelOperationKind(self: *Store, binding: AttemptBinding) !ModelOperationKind {
@@ -1949,6 +1962,8 @@ pub const Ordinary = struct {
     const page = error{ SessionNotFound, InvalidCursor, InputPartsNotSupported };
     const content = error{ ContentNotFound, InputPartsNotSupported };
     const public_content = error{ ContentNotFound, RangeOutOfBounds, InputPartsNotSupported };
+    const public_parts = error{ ContentNotFound, ContentIsText };
+    const public_part = public_parts || error{RangeOutOfBounds};
     pub const action = error{ActionNotFound};
     pub const action_read = action || error{ InvalidCursor, InputPartsNotSupported };
     const result = error{ ResultNotFound, ResultNotReady, ResultFailed };
