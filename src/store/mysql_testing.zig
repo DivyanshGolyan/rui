@@ -165,37 +165,70 @@ fn FixtureArgs(comptime T: type) type {
     return @Tuple(&types);
 }
 
-fn send(comptime sql: []const u8, fixture_args: anytype) !void {
+/// A fixture text's MySQL template, rendered once per text. Fixture texts
+/// bind only ?N, so `send` fills every slot from its arguments.
+pub fn template(comptime sql: []const u8) rsql.Template {
+    comptime {
+        const rendered = switch (rsql.mysqlRendering(sql)) {
+            .rendered => |value| value,
+            .refused => |message| @compileError(message),
+        };
+        for (rendered.slots) |slot| if (slot != .argument) @compileError("fixture: bind only ?N: " ++ sql);
+        return rendered;
+    }
+}
+
+/// Writes each argument's literal once, then the text around them. Only this
+/// conversion depends on the argument types; the template is a run-time value,
+/// so the fixture text does not make another instance.
+fn send(fixture: rsql.Template, fixture_args: anytype) !void {
     var args: FixtureArgs(@TypeOf(fixture_args)) = undefined;
     inline for (fixture_args, 0..) |value, index| {
         args[index] = if (@TypeOf(value) == testing.Blob) .{ .bytes = value.bytes } else value;
     }
-    const template = comptime switch (rsql.mysqlRendering(sql)) {
-        .rendered => |value| value,
-        .refused => |message| @compileError(message),
-    };
-    const Args = @TypeOf(args);
-    const served = protocol.routesAll(.endpoint);
-    const bound: literal.Bound = .{ .now = 0, .served = &served };
-    const length = try literal.length(template, Args, &args, bound);
+    var literals: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer literals.deinit();
+    var ends: [args.len]usize = undefined;
+    inline for (args, 0..) |value, index| {
+        _ = try literal.valueLength(@TypeOf(value), value);
+        try literal.writeValue(@TypeOf(value), value, &literals.writer);
+        ends[index] = literals.written().len;
+    }
+    try sendLiterals(fixture, literals.written(), &ends);
+}
+
+fn sendLiterals(fixture: rsql.Template, literals: []const u8, ends: []const usize) !void {
+    var length: usize = 0;
+    for (fixture.parts) |part| length += part.len;
+    for (fixture.slots) |slot| length += argumentLiteral(literals, ends, slot.argument).len;
     const writer = try root.beginQuery(length);
-    literal.write(template, Args, &args, bound, writer) catch {};
+    write: {
+        writer.writeAll(fixture.parts[0]) catch break :write;
+        for (fixture.slots, fixture.parts[1..]) |slot, part| {
+            writer.writeAll(argumentLiteral(literals, ends, slot.argument)) catch break :write;
+            writer.writeAll(part) catch break :write;
+        }
+    }
     try root.endQuery();
 }
 
-pub fn exec(storage: *Store, comptime sql: []const u8, args: anytype) !void {
+fn argumentLiteral(literals: []const u8, ends: []const usize, index: usize) []const u8 {
+    return literals[if (index == 0) 0 else ends[index - 1]..ends[index]];
+}
+
+pub fn exec(storage: *Store, fixture: rsql.Template, args: anytype) !void {
     mutex.lockUncancelable(std.testing.io);
     defer mutex.unlock(std.testing.io);
     try use(storage);
-    try send(sql, args);
+    try send(fixture, args);
     try drain(&root, &storage.engine.mysql.state.changes);
 }
 
-pub fn queryU64(storage: *Store, comptime sql: []const u8, args: anytype) !u64 {
+pub fn queryU64(storage: *Store, fixture: rsql.Template, args: anytype) !u64 {
     mutex.lockUncancelable(std.testing.io);
     defer mutex.unlock(std.testing.io);
     try use(storage);
-    try send(sql, args);
+    try send(fixture, args);
     return readU64(&root);
 }
 
