@@ -66,7 +66,7 @@ def needs_you():
             assert re.fullmatch(r"   \? Asks before running {2,}now", asked), asked
             assert len(asked) == 96, asked
             assert "second line" not in frame, frame
-            assert lines.index(asked) == 2, frame
+            assert lines[2] == "" and lines.index(asked) == 3, frame
             assert "echo first line" not in frame and "workspace" not in frame, frame
             assert re.fullmatch(r"     Answered already {2,}now", row(frame, "Answered already")), frame
             mark = cells(screen, "Asks before running")[3]

@@ -151,7 +151,7 @@ def flat_list():
             listed = screen.wait(lambda frame: all(f"   {label}" in frame for label in peers_by_label),
                                  "every finished peer without folding")
             lines = listed.split("\n")
-            assert lines[0] == "   + New chat" and lines[1] == "     Chats  Archived" and re.fullmatch(r"     (?:lead|peer-[0-6]) +(?:now|\d+[mhd])", lines[2]), listed
+            assert lines[0] == "   + New chat" and lines[1] == "     Chats  Archived" and lines[2] == "" and re.fullmatch(r"     (?:lead|peer-[0-6]) +(?:now|\d+[mhd])", lines[3]), listed
             assert not any(re.fullmatch(r"   \S.* · \d+", line) for line in lines), listed
             assert " more" not in listed, listed
             screen.click(4, 1)
