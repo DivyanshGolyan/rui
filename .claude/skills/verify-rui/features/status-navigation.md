@@ -21,11 +21,11 @@ For an unresolved or rejected submission, Alt-D or **alt+d details** opens the s
 
 ## Driving it with verify-rui
 
-Frame states: `chat-footer-below-half`, `chat`, `fold-hover`, `tool-open`, `tool-open-two`, `tool-open-long`, `tool-open-nocolor`, `chat-scrolled`, `chat-top`, `chat-new-below`, `markdown`, `markdown-wrapped`, `chat-info`, `chat-info-model`, `chat-info-archive`, `chat-info-copied`, `chat-info-stacked-actions`
+Frame states: `chat-footer-below-half`, `chat`, `fold-hover`, `tool-open`, `tool-open-two`, `tool-open-long`, `tool-open-nocolor`, `chat-scrolled`, `chat-top`, `chat-new-below`, `markdown`, `markdown-wrapped`, `chat-info`, `chat-info-model`, `chat-info-archive`, `chat-info-copied`, `chat-info-stacked-actions`, `panels-chat-info`
 
-Run `$V frames FULLSHA --only chat-footer-below-half,chat,fold-hover,tool-open,tool-open-two,tool-open-long,tool-open-nocolor,chat-scrolled,chat-top,chat-new-below,markdown,markdown-wrapped,chat-info,chat-info-model,chat-info-archive,chat-info-copied,chat-info-stacked-actions`.
+Run `$V frames FULLSHA --only chat-footer-below-half,chat,fold-hover,tool-open,tool-open-two,tool-open-long,tool-open-nocolor,chat-scrolled,chat-top,chat-new-below,markdown,markdown-wrapped,chat-info,chat-info-model,chat-info-archive,chat-info-copied,chat-info-stacked-actions,panels-chat-info`.
 
-Use both 140×40 and 46×30 captures. The completed short chat in `chat-footer-below-half` must omit context and the permanent info hint. In the info states, two completed answer lines must stay above the panel, and **keep this retry draft** must stay in the input. Opening Model should use only the space its matches need; filtering should return that space. Check one info footer on the physical last row, no extra blank notice row, and no **Context** for these fixtures without an estimate.
+Use both 140×40 and 46×30 captures. The completed short chat in `chat-footer-below-half` must omit context and the permanent info hint. In the info states, two completed answer lines must stay above the panel, and **keep this retry draft** must stay in the input. Opening Model should use only the space its matches need; filtering should return that space. Check one info footer on the physical last row, no extra blank notice row, and no **Context** in the `chat-info` and `chat-info-model` fixtures without an estimate. `panels-chat-info` uses the seeded chat with an estimate, so check its numeric **Context** row at both sizes.
 
 For a live recipe, open a terminal on `demo` with `doctor` PASS. Send `--keys M-i`, wait for **Copy last answer** with `--after GEN`, then capture. From Effort, Down then Enter opens Permissions; choose **ask first** and compare the saved Session inspection. From Effort, Down three times then Enter opens Model because Folder is read only. Type a filter, close the choice with Esc, wait for a new frame, then close info. Your draft must remain unchanged and no message should be sent.
 

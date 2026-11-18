@@ -9,6 +9,7 @@ right: []const u8,
 notice: ?[]const u8 = null,
 style: vaxis.Style = .{},
 right_style: ?vaxis.Style = null,
+left_inset: u16 = 0,
 
 pub fn widget(self: *const Self) vxfw.Widget {
     return .{ .userdata = @constCast(self), .drawFn = draw };
@@ -25,9 +26,10 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const surface = try vxfw.Surface.init(ctx.cell_arena, self.widget(), size);
     @memset(surface.buffer, .{ .style = self.style });
     if (size.width == 0 or size.height == 0) return surface;
-    const right = cell_line.fit(ctx, self.rightText(), size.width);
+    const start = @min(self.left_inset, size.width);
+    const right = cell_line.fit(ctx, self.rightText(), size.width - start);
     const right_col = size.width - right.width;
-    _ = cell_line.paint(ctx, surface, self.left, 0, 0, self.style, right_col);
+    _ = cell_line.paint(ctx, surface, self.left, start, 0, self.style, right_col);
     _ = cell_line.paint(ctx, surface, right.text, right_col, 0, self.right_style orelse self.style, size.width);
     return surface;
 }
@@ -86,4 +88,20 @@ test "Footer notice fits right, truncates in terminal cells, and the next notice
     try std.testing.expectEqualStrings("e\u{301}", unicode.readCell(2, 0).char.grapheme);
     footer.notice = null;
     try std.testing.expectEqualStrings("ctrl+x stop", footer.rightText());
+}
+
+test "Footer panel inset bounds both fields at wide narrow and tiny widths" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const footer: Self = .{ .left = "Settings", .right = "esc", .left_inset = 1 };
+    for ([_]u16{ 0, 1, 2, 3, 4, 5, 6, 46, 140 }) |width| {
+        const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 1 }, .cell_size = .{} };
+        const surface = try footer.widget().draw(ctx);
+        if (width > 0) try std.testing.expectEqualStrings(" ", surface.readCell(0, 0).char.grapheme);
+        if (width >= 46) {
+            try std.testing.expectEqualStrings("S", surface.readCell(1, 0).char.grapheme);
+            try std.testing.expectEqualStrings("e", surface.readCell(width - 3, 0).char.grapheme);
+            try std.testing.expectEqualStrings("c", surface.readCell(width - 1, 0).char.grapheme);
+        }
+    }
 }

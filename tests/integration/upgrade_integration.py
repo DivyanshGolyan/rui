@@ -23,7 +23,7 @@ from urllib.parse import quote
 
 import live_engines
 import settings_fixture
-from human_cli_fixture import split_pane_row
+from terminal_screen import split_pane_row
 
 import host_process
 import os_semantics
