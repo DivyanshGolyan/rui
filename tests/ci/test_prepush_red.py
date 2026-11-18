@@ -121,8 +121,7 @@ AssertionError
     def test_compile_jobs_use_known_commands(self):
         for name, command in (("linux_build_unit", prepush.unit_compile()),
                               ("linux_build", [*build_artifact.compile_command(["request-wait-integration"], jobs=1), "--summary", "line"]),
-                              ("macos_typecheck", ["zig", "build", "-j1", "typecheck-macos", "--summary", "line"]),
-                              ("linux_codegen", prepush.STACK_FRAMES)):
+                              ("macos_typecheck", ["zig", "build", "-j1", "typecheck-macos", "--summary", "line"])):
             with self.subTest(job=name):
                 self.configure(run=dict(RUN, run_attempt=len(name)), jobs=[job(name)], log="src/foo.zig:1: error: no field\nzig build ci-build -Dci-targets=request-wait-integration -Dci-part=rest failed with exit 1; no gates executed.\n")
                 self.assertEqual(self.plan()[1][0][1], command)

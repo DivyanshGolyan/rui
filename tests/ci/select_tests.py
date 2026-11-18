@@ -415,7 +415,7 @@ RULES = (
      "Shipped model facts and the models.dev token-walk parser, without production callers"),
     (("src/model_list.zig",), ("codex-h2-integration",), ("codex-h2-integration",),
      "Provider model lists: the Host's fetch and the wire reply follow"),
-    (RENDERER_HARNESSES, (), (), "Renderer harnesses: only the nonblocking renderer contracts run them"),
+    (RENDERER_HARNESSES, (), (), "Renderer harnesses: only the promotion renderer contracts run them"),
     (("src/openapi*.zig", "openapi.json"), ("test",), ("test",),
      "The wire contract: openapi.json must equal what the wire types emit"),
     (("clients/ts/*",), ("ts-client",), ("ts-client",), "The TypeScript client and its launch of a real Host"),
