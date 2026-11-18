@@ -24,7 +24,7 @@ RESULT = re.compile(r"ENV\[([^|\]]*)\|([^|\]]*)\|([^|\]]*)\|([^\]]*)\]")
 
 
 def session_of(request):
-    return fixture.instructions_session(request["instructions"])
+    return fixture.instructions_session(fixture.request_system_prompt(request))
 
 
 def last_user_text(request):
