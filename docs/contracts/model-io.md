@@ -520,7 +520,7 @@ This runtime context does not modify saved Session instructions or append Conver
 Replay reads neither the Host's cwd nor the caller's current directory.
 Tool definitions own filesystem/cwd behavior and timeout selection; timeout results own the effective budget and recovery guidance.
 Static prompt text follows the running binary, not a copied per-Operation setting.
-The model catalog selects built-in guidance for the six exact, case-sensitive IDs `gpt-6-luna`, `gpt-6.1-terra`, `gpt-6.1-sol`, `gpt-6-astra`, `gpt-6.2-sol` and `gpt-6.2-astra`, independently of provider; the two 6.2 IDs reuse the 6.1 Sol and Astra guidance until Codex publishes their own.
+The model catalog selects built-in guidance for the six exact, case-sensitive IDs `gpt-6-luna`, `gpt-6.1-terra`, `gpt-6.1-sol`, `gpt-6-astra`, `gpt-6.2-sol` and `gpt-6.2-astra`, independently of provider.
 Other IDs use the shared Rui frame and authored instructions without a specialized body; spelling similarity, namespaces and aliases do not borrow another model's guidance or change the requested ID.
 Each call composes from its Operation's frozen model and authored history.
 A deliberate binary upgrade may therefore change built-in wording on reconstruction or retry without changing saved instructions or Conversation.
@@ -617,7 +617,7 @@ They carry a closed versioned format.
 There is no Session account binding or Codex CLI credential fallback.
 
 `rui auth login openai` reads one line from stdin (unechoed on a terminal) and installs it as an owner-only `~/.config/rui/openai.key`, or the absolute path `RUI_OPENAI_KEY_FILE` names; it then saves the provider default as every `rui auth login` does ([Human entry and authentication](session-ui.md#human-entry-and-authentication)).
-An explicitly selected OpenAI provider reads that key once at startup and sends it as `authorization: Bearer` only to `https://api.openai.com/v1/responses` and the model list beside it (`/v1/models`), or to `BASE/responses` and `BASE/models` when `RUI_OPENAI_BASE_URL` names an OpenAI-compatible `https://` base URL with a host and no credentials, query or fragment (an invalid one fails an explicitly selected OpenAI provider, and automatic provider selection then starts without OpenAI), with no ChatGPT account header.
+An explicitly selected OpenAI provider reads that key once at startup and sends it as `authorization: Bearer` only to `https://api.openai.com/v1/responses` and the model list beside it (`/v1/models`), or to the configured `providers.openai.endpoint` Responses URL and its sibling `/models` for an OpenAI-compatible `https://` endpoint with a host and no credentials or fragment, with no ChatGPT account header.
 It speaks the same Responses codec and model catalog as Codex, so a Session's request body is the same on either.
 A missing or unreadable key fails startup.
 A 401 on the key is final, `provider_api_key_rejected`, with no refresh or resend; the Session and overview say to save a new key and restart the Host, which keeps the key it started with.

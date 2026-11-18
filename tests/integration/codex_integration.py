@@ -70,7 +70,7 @@ def proposal_with_private_reasoning(command):
 def start(store, endpoint, *extra):
     host, _ = start_ready_process(
         [fixture.RUI, "host", "serve", "--store", store, "--set", 'execution.activeCapacity=2',
-         "--test-codex-fixture-endpoint", endpoint, *extra],
+         "--set", f"providers.codex.endpoint={endpoint}", *extra],
         required_fields={"execution": "enabled", "nghttp2": "1.70.0"},
         observations="managed" if "--test-phase-trace" in extra else None,
     )
@@ -653,23 +653,23 @@ def openai_journey():
     host = None
     complete = False
     try:
-        for serve in (["--test-openai-fixture-endpoint", url], ["--set", 'providers={"openai":{}}']):
+        for serve in (["--set", f"providers.openai.endpoint={url}"], ["--set", 'providers={"openai":{}}']):
             refused = subprocess.run([fixture.RUI, "host", "serve", "--store", store, *serve],
                                      capture_output=True, text=True, timeout=15)
             assert refused.returncode != 0 and "no OpenAI API key" in refused.stderr, refused
             assert not refused.stdout.startswith("ready "), refused.stdout
         key_file.write_text(OPENAI_KEY + "\n")
         key_file.chmod(0o644)
-        refused = subprocess.run([fixture.RUI, "host", "serve", "--store", store, "--test-openai-fixture-endpoint", url],
+        refused = subprocess.run([fixture.RUI, "host", "serve", "--store", store, "--set", f"providers.openai.endpoint={url}"],
                                  capture_output=True, text=True, timeout=15)
         assert refused.returncode != 0, refused
         key_file.chmod(0o600)
         refused = subprocess.run([fixture.RUI, "host", "serve", "--store", store, "--set", 'providers={"openai":{}}'],
                                  capture_output=True, text=True, timeout=15,
                                  env={**os.environ, "RUI_OPENAI_BASE_URL": "http://api.openai.com/v1"})
-        assert refused.returncode != 0 and "RUI_OPENAI_BASE_URL must be an https:// URL" in refused.stderr, refused
+        assert refused.returncode != 0 and "RUI_OPENAI_BASE_URL is no longer read; set providers.openai.endpoint (rui host set DIR providers.openai.endpoint URL)" in refused.stderr, refused
 
-        host = start(store, url, "--test-openai-fixture-endpoint", url)
+        host = start(store, url, "--set", f"providers.openai.endpoint={url}")
         status = fixture.command("host", "status", "--store", store)
         assert status["capabilities"]["providers"] == {"codex": "chatgpt_device", "openai": "key_file", "chatgpt": "unserved"}, status
         sessions = {}

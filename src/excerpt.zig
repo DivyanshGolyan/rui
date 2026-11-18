@@ -1,6 +1,19 @@
 const std = @import("std");
 const utf8 = @import("utf8_validation.zig");
 
+/// Preserve the original bytes up to a fixed byte budget, including partial UTF-8.
+/// Some existing transactional diagnostics promise this exact byte prefix.
+pub fn bytePrefix(bytes: []const u8, allowance: usize) []const u8 {
+    return bytes[0..@min(bytes.len, allowance)];
+}
+
+test "byte prefix preserves the exact budgeted bytes" {
+    const bytes = "ab雪z";
+    try std.testing.expectEqualStrings("", bytePrefix(bytes, 0));
+    try std.testing.expectEqualStrings(bytes, bytePrefix(bytes, 99));
+    try std.testing.expectEqualSlices(u8, &.{ 'a', 'b', 0xe9 }, bytePrefix(bytes, 3));
+}
+
 pub const boundary_capacity = 5;
 pub const Count = u64;
 pub const head_note_format = "\n[{d} more bytes not shown]";

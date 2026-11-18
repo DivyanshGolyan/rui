@@ -64,7 +64,7 @@ def main():
         home.mkdir()
         workspace.mkdir()
         store = state / "store"
-        environment = {"PATH": os.environ["PATH"], "HOME": str(home), "RUI_TEST_MODELS_DEV_URL": ""}
+        environment = {"PATH": os.environ["PATH"], "HOME": str(home)}
         endpoint = TestHTTPServer(("127.0.0.1", 0), Handler)
         endpoint.workspace = workspace
         endpoint.senders = []

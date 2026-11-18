@@ -1,22 +1,20 @@
 # Built-in instruction provenance
 
-`luna.txt`, `terra-astra.txt`, and `sol.txt` contain modified OpenAI Codex instructions.
-Rui copied the decoded `model_messages.instructions_template` values from `codex-rs/models-manager/models.json` at commit `ee344ca9458351a6ea102795fa73110ad3ede5dc` of `https://github.com/openai/codex`.
-The reviewed stable tag `rust-v0.169.0` resolves to `d32063f96c2dff1dc96af839b3952abb6acfeda4` and contains the same four literal templates.
-Terra and Astra have identical upstream bytes and share one modified asset.
+`luna.txt`, `terra-astra.txt`, `sol.txt`, and `sol-astra-62.txt` contain modified OpenAI Codex instructions.
+Rui copied the decoded `model_messages.instructions_template` values from `codex-rs/models-manager/models.json` at commit `8fca6ffb92a602875a0b97e3e535eb48375bdd8c` of `https://github.com/openai/codex`.
+Terra and Astra have identical upstream bytes and share one modified asset. The 6.2 Sol and Astra templates also have identical upstream bytes and share an asset.
 The [third-party notices](../../THIRD_PARTY_NOTICES.md#openai-codex-instruction-text) retain the applicable copyright notice and full Apache 2.0 license in the installed distribution.
 
 ## Original bytes
 
 | Exact model | Rui asset | Upstream UTF-8 bytes | Upstream SHA-256 |
 | --- | --- | --- | --- |
-| `gpt-6-luna` | `luna.txt` | 18043 | `b707476816bfe5e571a1bd2179f130fff2b132da5ab8e61063acdb7fd24daf12` |
-| `gpt-6.1-terra` | `terra-astra.txt` | 21428 | `35bd51b5f577cb7b24cd5f4629e49e37cb724ab57754ce6f8f202001635bab8a` |
-| `gpt-6.1-sol` | `sol.txt` | 21779 | `e1bdd4f8f0df4b20f4a0ffc8a861ce819df45325d8cecdfb92e80379cf8d142e` |
-| `gpt-6-astra` | `terra-astra.txt` | 21428 | `35bd51b5f577cb7b24cd5f4629e49e37cb724ab57754ce6f8f202001635bab8a` |
-
-Codex had published no template for `gpt-6.2-sol` or `gpt-6.2-astra` on 2026-11-17, when OpenAI released them.
-Until it does, `gpt-6.2-sol` uses `sol.txt` and `gpt-6.2-astra` uses `terra-astra.txt`, the assets of their 6.1 and 6.0 predecessors.
+| `gpt-6-luna` | `luna.txt` | 17799 | `e52174f354e3970ad8de5935fff8d04ddf2890a35659283d163befb56490198c` |
+| `gpt-6.1-terra` | `terra-astra.txt` | 21183 | `4ddce5803b638f01342f657002289d1307634c677df840eeefdd4bc5b451276d` |
+| `gpt-6.1-sol` | `sol.txt` | 21534 | `d12e6dbdfd4a4ddb26a1f6048b69a32b8b32f74e4add9791d1dff7f4cac0b032` |
+| `gpt-6-astra` | `terra-astra.txt` | 21183 | `4ddce5803b638f01342f657002289d1307634c677df840eeefdd4bc5b451276d` |
+| `gpt-6.2-sol` | `sol-astra-62.txt` | 25959 | `aa47d2dee261594c4944241b646088730d74d87afa4da8d2da0554540a5e7623` |
+| `gpt-6.2-astra` | `sol-astra-62.txt` | 25959 | `aa47d2dee261594c4944241b646088730d74d87afa4da8d2da0554540a5e7623` |
 
 ## Rui modifications
 
@@ -34,13 +32,14 @@ Other upstream wording, including model-specific differences and formatting, is 
 
 ## Reproduce the assets
 
-Use an existing checkout of the pinned Codex commit.
-Set `CODEX_SOURCE` to that checkout and run this block from the Rui repository root.
+Use an existing checkout of the pinned Codex commit or an extracted copy of its `codex-rs/models-manager/models.json`.
+Set `CODEX_SOURCE` to the checkout or JSON file and run this block from the Rui repository root. The script checks the original template hashes in either case.
 It extracts original UTF-8 bytes into a temporary directory, applies the checked-in patch, and compares every result.
 The runtime performs no upstream fetch.
 
 ```sh
 python3 - "$CODEX_SOURCE" <<'PY'
+import hashlib
 import json
 import pathlib
 import subprocess
@@ -49,10 +48,23 @@ import tempfile
 
 repo = pathlib.Path.cwd()
 source = pathlib.Path(sys.argv[1])
-assert subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip() == "ee344ca9458351a6ea102795fa73110ad3ede5dc"
-models = {model["slug"]: model["model_messages"]["instructions_template"] for model in json.loads((source / "codex-rs/models-manager/models.json").read_text())["models"] if model.get("model_messages") and model["model_messages"].get("instructions_template")}
+if source.is_dir():
+    assert subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip() == "8fca6ffb92a602875a0b97e3e535eb48375bdd8c"
+    source = source / "codex-rs/models-manager/models.json"
+models = {model["slug"]: model["model_messages"]["instructions_template"] for model in json.loads(source.read_text())["models"] if model.get("model_messages") and model["model_messages"].get("instructions_template")}
+hashes = {
+    "gpt-6-luna": "e52174f354e3970ad8de5935fff8d04ddf2890a35659283d163befb56490198c",
+    "gpt-6.1-terra": "4ddce5803b638f01342f657002289d1307634c677df840eeefdd4bc5b451276d",
+    "gpt-6-astra": "4ddce5803b638f01342f657002289d1307634c677df840eeefdd4bc5b451276d",
+    "gpt-6.1-sol": "d12e6dbdfd4a4ddb26a1f6048b69a32b8b32f74e4add9791d1dff7f4cac0b032",
+    "gpt-6.2-sol": "aa47d2dee261594c4944241b646088730d74d87afa4da8d2da0554540a5e7623",
+    "gpt-6.2-astra": "aa47d2dee261594c4944241b646088730d74d87afa4da8d2da0554540a5e7623",
+}
+for model, expected in hashes.items():
+    assert hashlib.sha256(models[model].encode("utf-8")).hexdigest() == expected, model
 assert models["gpt-6.1-terra"] == models["gpt-6-astra"]
-names = {"luna": "gpt-6-luna", "terra-astra": "gpt-6.1-terra", "sol": "gpt-6.1-sol"}
+assert models["gpt-6.2-sol"] == models["gpt-6.2-astra"]
+names = {"luna": "gpt-6-luna", "terra-astra": "gpt-6.1-terra", "sol": "gpt-6.1-sol", "sol-astra-62": "gpt-6.2-sol"}
 with tempfile.TemporaryDirectory(prefix="rui-instructions-") as temporary:
     directory = pathlib.Path(temporary)
     for name, model in names.items():

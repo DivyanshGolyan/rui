@@ -51,6 +51,71 @@ def execution_idle(store, session):
     return report if execution["custody_occupied"] == "0" and execution["scratch_used_bytes"] == "0" else None
 
 
+def prove_spill_delivery_outcomes(state):
+    # Stop is accepted only after both complete captures have become spills.
+    for mode in ("normal", "session-stop", "action-stop"):
+        name = f"spill-delivery-{mode}"
+        store = state / f"{name}-store"
+        gate = ReleaseGate(state / f"{name}-gate")
+        responses = []
+        add_exchange(responses, name,
+                     "head -c 24000 /dev/zero | tr '\\0' o; "
+                     "head -c 24000 /dev/zero | tr '\\0' e >&2")
+        endpoint = fixture.SuccessEndpoint(responses)
+        thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+        thread.start()
+        host = None
+        try:
+            host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses",
+                                      "--test-transition", "action-result-ready",
+                                      "--test-transition-gate-path", gate.path, "--test-phase-trace")
+            diagnostics = HostDiagnostics(host)
+            session = configure(state, store, f"{name}-config", permission="bypass")
+            fixture.message(state, store, f"{name}-message", session, "run")
+            action = fixture.wait_for(lambda: action_for(store, session), f"{name} Action")["action"]
+            diagnostics.wait("action_result_ready", action=str(action))
+            gate.assert_held()
+            paths = set((store / "scratch").glob(f"bash-*-{action}-*.tmp"))
+            assert len(paths) == 2, paths
+            assert sorted(path.read_bytes() for path in paths) == [b"e" * 24000, b"o" * 24000]
+            if mode == "session-stop":
+                reply = fixture.command("session", "stop", "--store", store, "--session", session,
+                                        "--key", f"{name}-stop", "--record", state / f"{name}-stop.json")
+                assert reply["answer"]["status"] == "accepted", reply
+            elif mode == "action-stop":
+                reply = fixture.command("action", "stop", "--store", store, "--session", session,
+                                        "--action", action, "--key", f"{name}-stop",
+                                        "--record", state / f"{name}-stop.json")
+                assert reply["answer"]["status"] == "accepted", reply
+            gate.release()
+            expected = "succeeded" if mode == "normal" else "cancelled"
+            fixture.wait_for(lambda: resolution(store, session) == expected, f"{name} resolution")
+            fixture.wait_for(lambda: execution_custody_idle(store, session), f"{name} custody release")
+            result = result_text(store, session)
+            report = fixture.command("session", "inspect", "--store", store, "--session", session)
+            used = int(report["execution"]["scratch_used_bytes"])
+            remaining = set((store / "scratch").glob(f"bash-*-{action}-*.tmp"))
+            if mode == "normal":
+                advertised = {pathlib.Path(line.split(": ", 1)[1]) for line in result.splitlines()
+                              if line.startswith(("Full stdout: ", "Full stderr: "))}
+                assert remaining == paths == advertised, (remaining, paths, advertised, result)
+                assert used == 48000, used
+                assert sorted(path.read_bytes() for path in remaining) == [b"e" * 24000, b"o" * 24000]
+            else:
+                assert not remaining, (mode, remaining, result)
+                assert used == 0, (mode, used)
+                assert "Full stdout:" not in result and "Full stderr:" not in result, result
+                expected_text = "Cancelled by Session stop." if mode == "session-stop" else "Action was stopped."
+                assert result == expected_text, result
+            fixture.stop_host(host)
+            host = None
+            assert rows(store, "SELECT resolution_code FROM action_operation WHERE action_id=?", (action,)) == [(expected,)]
+        finally:
+            gate.release()
+            dispose_all((lambda: fixture.stop_host(host)) if host is not None else lambda: None,
+                        endpoint.shutdown, endpoint.server_close, lambda: thread.join(timeout=5))
+
+
 def prove_stdin(state):
     store = state / "stdin-store"
     workspace = state / "stdin-workspace"
@@ -809,6 +874,7 @@ def main():
     prove_native_background(state)
     prove_model_action_read(state)
     prove_automatic_background(state)
+    prove_spill_delivery_outcomes(state)
     prove_stdin(state)
     prove_reused_session(state)
     responses = []
