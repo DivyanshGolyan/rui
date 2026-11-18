@@ -805,7 +805,7 @@ test "FeedView retry click cancels drag departure and lost eligibility or ending
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = gpa, .cmds = .empty };
     defer ctx.cmds.deinit(gpa);
     _ = try testFrame(&view, arena.allocator(), 80, 4);
-    const at: Cell = .{ .row = 3, .col = 27 };
+    const at: Cell = .{ .row = 3, .col = 42 };
     const Cases = enum { drag_same, drag_away_back, release_elsewhere, leave, held, unkeyed, other_ending, hidden_press, disabled, no_press };
     for (std.enums.values(Cases)) |case| {
         view.retry_actionable = case != .disabled;
@@ -847,8 +847,8 @@ test "FeedView retry click accepts left and legacy no-button release only" {
     _ = try testFrame(&view, arena.allocator(), 80, 4);
     for (std.enums.values(vaxis.Mouse.Button)) |button| {
         clicks.count = 0;
-        try retryMouse(&view, &ctx, .{ .row = 3, .col = 27 }, .press);
-        try view.widget().handleEvent(&ctx, .{ .mouse = .{ .row = 3, .col = 27, .button = button, .mods = .{}, .type = .release } });
+        try retryMouse(&view, &ctx, .{ .row = 3, .col = 42 }, .press);
+        try view.widget().handleEvent(&ctx, .{ .mouse = .{ .row = 3, .col = 42, .button = button, .mods = .{}, .type = .release } });
         try std.testing.expectEqual(@as(usize, @intFromBool(button == .left or button == .none)), clicks.count);
         try std.testing.expect(view.retry_press == null);
     }

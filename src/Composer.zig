@@ -195,7 +195,7 @@ test "Composer empty draft shows the screen's placeholder and an input cursor" {
     defer arena.deinit();
     const surface = try composer.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 10 }, .cell_size = .{} });
     try std.testing.expectEqual(@as(u16, 3), surface.size.height);
-    try std.testing.expectEqualStrings("T", surface.readCell(3, 1).char.grapheme);
+    try std.testing.expectEqualStrings("W", surface.readCell(3, 1).char.grapheme);
     try std.testing.expect(surface.readCell(3, 1).style.dim);
     try std.testing.expectEqual(@as(u16, 3), surface.cursor.?.col);
     try std.testing.expectEqual(@as(usize, 0), editor.text().len);
