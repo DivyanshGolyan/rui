@@ -1,6 +1,9 @@
 const builtin = @import("builtin");
 const std = @import("std");
 
+pub const socket = @import("socket.zig");
+pub const Waker = @import("Waker.zig");
+
 pub const tag = builtin.os.tag;
 
 pub const Semantics = struct {
@@ -11,6 +14,7 @@ pub const Semantics = struct {
     proc_memory: bool,
     full_backlog_blocks_connect: bool,
     stack_guard_bus_error: bool,
+    sec_trust: bool,
     link_opener: ?struct { command: []const u8, needs_display: bool },
 };
 
@@ -27,6 +31,7 @@ pub fn semantics(comptime os: std.Target.Os.Tag) Semantics {
         .proc_memory = os == .linux,
         .full_backlog_blocks_connect = os == .linux,
         .stack_guard_bus_error = os == .macos,
+        .sec_trust = os.isDarwin(),
         .link_opener = switch (os) {
             .macos => .{ .command = "open", .needs_display = false },
             .linux => .{ .command = "xdg-open", .needs_display = true },
@@ -63,6 +68,11 @@ pub const full_backlog_blocks_connect = current.full_backlog_blocks_connect;
 /// reports as a bus error; Linux delivers SIGSEGV.
 pub const stack_guard_bus_error = current.stack_guard_bus_error;
 
+/// Darwin verifies a peer against the system's roots with Apple SecTrust,
+/// which checks revocation and ignores OpenSSL's SSL_CERT_FILE and
+/// SSL_CERT_DIR (#990, #997); elsewhere system trust is OpenSSL's store.
+pub const sec_trust = current.sec_trust;
+
 /// The command that opens a link in a browser here, given the environment:
 /// macOS's `open` always has one; Linux's `xdg-open` only in a graphical
 /// session, which names `DISPLAY` or `WAYLAND_DISPLAY`.
@@ -83,9 +93,15 @@ test "Linux and Darwin semantics" {
     try std.testing.expect(linux.proc_memory and !mac.proc_memory);
     try std.testing.expect(linux.full_backlog_blocks_connect and !mac.full_backlog_blocks_connect);
     try std.testing.expect(!linux.stack_guard_bus_error and mac.stack_guard_bus_error);
+    try std.testing.expect(!linux.sec_trust and mac.sec_trust);
     try std.testing.expectEqualStrings("xdg-open", linux.link_opener.?.command);
     try std.testing.expect(linux.link_opener.?.needs_display and !mac.link_opener.?.needs_display);
     try std.testing.expectEqualStrings("open", mac.link_opener.?.command);
     const unsupported = semantics(.windows);
     try std.testing.expect(!unsupported.supported and unsupported.read_only_directory == null);
+}
+
+test {
+    _ = socket;
+    _ = Waker;
 }

@@ -65,6 +65,34 @@ pub fn configure(fd: std.c.fd_t, tcp: bool) bool {
     return suppressSigpipe(fd);
 }
 
+/// Darwin reads a backlog of 0 as the system maximum and refuses a connect
+/// beyond a full backlog, which Linux queues instead
+/// (`os.full_backlog_blocks_connect`).
+pub fn listen(fd: std.c.fd_t, backlog: u31) bool {
+    return std.c.listen(fd, backlog) == 0;
+}
+
+/// Bytes received and not yet read: FIONREAD, whose request number differs.
+pub fn unreadBytes(fd: std.c.fd_t) ?c_int {
+    const fionread = if (builtin.os.tag.isDarwin()) 0x4004667f else std.os.linux.T.FIONREAD;
+    var bytes: c_int = 0;
+    return if (std.c.ioctl(fd, fionread, &bytes) == 0) bytes else null;
+}
+
+/// Bytes sent and not yet acknowledged: Linux's SIOCOUTQ ioctl, Darwin's
+/// SO_NWRITE socket option.
+pub fn unacknowledgedBytes(fd: std.c.fd_t) ?c_int {
+    const siocoutq = 0x5411;
+    const so_nwrite = 0x1024;
+    var bytes: c_int = 0;
+    var size: std.c.socklen_t = @sizeOf(c_int);
+    const status = if (builtin.os.tag.isDarwin())
+        std.c.getsockopt(fd, std.c.SOL.SOCKET, so_nwrite, @ptrCast(&bytes), &size)
+    else
+        std.c.ioctl(fd, siocoutq, &bytes);
+    return if (status == 0) bytes else null;
+}
+
 pub const Shutdown = enum { done, peer_gone, failed };
 
 /// Darwin's shutdown returns ENOTCONN once the peer has closed, where Linux

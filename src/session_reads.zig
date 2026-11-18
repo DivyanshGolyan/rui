@@ -1,6 +1,6 @@
 const std = @import("std");
 const tool_fold = @import("tool_fold.zig");
-const socket_os = @import("os/socket.zig");
+const socket_os = @import("os").socket;
 const client = @import("client.zig");
 const protocol_reply = @import("protocol_reply.zig");
 const protocol = @import("protocol.zig");

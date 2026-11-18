@@ -56,6 +56,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     openapi_emitter.root_module.addImport("url", product.addUrl(b));
+    _ = product.useOs(b, openapi_emitter.root_module);
     const emit_openapi = b.addRunArtifact(openapi_emitter);
     const update_openapi = b.addUpdateSourceFiles();
     update_openapi.addCopyFileToSource(emit_openapi.addOutputFileArg("openapi.json"), "openapi.json");
@@ -80,7 +81,7 @@ pub fn build(b: *std.Build) void {
     const pg_root = unit_module.root(.pg);
     const h2_test_step = b.step(h2_root.target, "Run the HTTP/2 client's own tests");
     const pg_test_step = b.step(pg_root.target, "Run the Postgres wire client's tests (live ones against RUI_TEST_PG_PORT)");
-    if (product.addTlsClient(b, target, .ReleaseSafe, pinned_transport, product.addUrl(b))) |tls_client| {
+    if (product.addTlsClient(b, target, .ReleaseSafe, pinned_transport, product.addUrl(b), product.addOs(b))) |tls_client| {
         const h2 = product.addH2(b, target, .ReleaseSafe, pinned_transport, product.addTestPoll(b), tls_client);
         h2.root_source_file = b.path(h2_root.source);
         const h2_tests = b.addTest(.{ .name = h2_root.name, .root_module = h2, .filters = test_filters });
@@ -123,6 +124,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     product.configurePauses(b, pause_fixture, true);
+    _ = product.useOs(b, pause_fixture.root_module);
     const screen_emulator = screen_module.addScreenEmulator(b, ci, ci_mode);
     const screen = screen_emulator.library;
     const screen_emulator_step = b.step("screen-emulator", "Install the PTY screen observer's libghostty-vt, for harnesses outside build steps");
@@ -288,7 +290,7 @@ pub fn build(b: *std.Build) void {
         .optimize = .ReleaseSafe,
         .link_libc = true,
     });
-    if (product.addTlsClient(b, target, .ReleaseSafe, pinned_transport, product.addUrl(b))) |tls_client| mysql_connection.addImport("tls_client", tls_client);
+    if (product.addTlsClient(b, target, .ReleaseSafe, pinned_transport, product.addUrl(b), product.addOs(b))) |tls_client| mysql_connection.addImport("tls_client", tls_client);
     mysql_wire_tests.root_module.addImport("mysql_connection", mysql_connection);
     const mysql_wire_integration = b.addSystemCommand(&.{"python3"});
     mysql_wire_integration.addFileArg(b.path("tests/integration/mysql_wire_integration.py"));
@@ -452,6 +454,7 @@ pub fn build(b: *std.Build) void {
     if (!pr_ci) fast_integrations.addFileInput(ci.path(release_small));
     fast_integrations.step.dependOn(&units.run_renderer_allocation.step);
     fast_integrations.step.dependOn(&units.signal_stack_probe.step);
+    fast_integrations.step.dependOn(&units.run_os_tests.step);
     check_step.dependOn(&fast_integrations.step);
     const stack_frames_step = b.step(
         "stack-frames",

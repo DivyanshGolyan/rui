@@ -1,7 +1,7 @@
 const std = @import("std");
 const Parser = @import("Parser.zig");
 const request = @import("request.zig");
-const socket_os = @import("../os/socket.zig");
+const socket_os = @import("os").socket;
 
 const Exchange = @This();
 

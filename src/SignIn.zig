@@ -812,7 +812,7 @@ fn apply(self: *Self, ctx: *vxfw.EventContext, effect: core.Effect) !void {
         .copy_text => |text| try self.copyClipboard(ctx, text),
         .open => |link_| {
             const init_ = self.init orelse return;
-            const command = @import("os/os.zig").linkOpener(init_.environ_map) orelse {
+            const command = @import("os").linkOpener(init_.environ_map) orelse {
                 self.issue = "No browser opener is available. Open the displayed URL manually.";
                 return;
             };

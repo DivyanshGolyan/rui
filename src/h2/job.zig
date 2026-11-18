@@ -1,5 +1,5 @@
 const std = @import("std");
-const Waker = @import("Waker.zig");
+const Waker = @import("os").Waker;
 
 pub fn Job(comptime Work: type) type {
     return struct {
