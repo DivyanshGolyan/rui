@@ -28,6 +28,75 @@ pub fn ValueWith(comptime ca_file_bytes: usize) type {
     };
 }
 
+/// Non-secret parsed connection selection. Paths are opaque OS bytes.
+pub fn Destination(comptime ca_file_bytes: usize) type {
+    return struct {
+        const Self = @This();
+        const Value = ValueWith(ca_file_bytes);
+        user: Bounded(mysql.max_user_bytes) = .{},
+        database: Bounded(64) = .{},
+        host: Bounded(253) = .{},
+        socket: Bounded(107) = .{},
+        port: u16 = 0,
+        ca_file: Bounded(ca_file_bytes) = .{},
+        const fields = .{ "user", "database", "host", "socket", "ca_file" };
+        pub const encoded_max = 2 * fields.len + mysql.max_user_bytes + 64 + 253 + 107 + ca_file_bytes + 2;
+
+        pub fn of(value: *const Value) Self {
+            comptime {
+                for (@typeInfo(Value).@"struct".field_names) |field| {
+                    var covered = std.mem.eql(u8, field, "password") or std.mem.eql(u8, field, "port");
+                    for (fields) |name| covered = covered or std.mem.eql(u8, field, name);
+                    if (!covered) @compileError("MySQL value field requires destination coverage or explicit exclusion: " ++ field);
+                }
+            }
+            var result: Self = .{};
+            inline for (fields) |name| @field(result, name) = @field(value.*, name);
+            result.port = if (value.socket.len == 0) value.port else 0;
+            return result;
+        }
+        pub fn eql(a: *const Self, b: *const Self) bool {
+            inline for (fields) |name| {
+                if (!std.mem.eql(u8, @field(a, name).slice(), @field(b, name).slice())) return false;
+            }
+            return a.port == b.port;
+        }
+        pub fn write(self: *const Self, out: *std.Io.Writer) !void {
+            inline for (fields) |name| {
+                const field = &@field(self, name);
+                var length: [2]u8 = undefined;
+                std.mem.writeInt(u16, &length, @intCast(field.len), .little);
+                try out.writeAll(&length);
+                try out.writeAll(field.slice());
+            }
+            var port: [2]u8 = undefined;
+            std.mem.writeInt(u16, &port, self.port, .little);
+            try out.writeAll(&port);
+        }
+        pub fn read(bytes: []const u8) error{Invalid}!Self {
+            var result: Self = .{};
+            var pos: usize = 0;
+            inline for (fields) |name| {
+                if (bytes.len - pos < 2) return error.Invalid;
+                const length = std.mem.readInt(u16, bytes[pos..][0..2], .little);
+                pos += 2;
+                const field = &@field(result, name);
+                if (length > field.bytes.len or length > bytes.len - pos) return error.Invalid;
+                @memcpy(field.bytes[0..length], bytes[pos..][0..length]);
+                field.len = length;
+                pos += length;
+            }
+            if (bytes.len - pos != 2) return error.Invalid;
+            result.port = std.mem.readInt(u16, bytes[pos..][0..2], .little);
+            if (result.user.len == 0 or result.database.len == 0) return error.Invalid;
+            if (result.socket.len != 0) {
+                if (result.host.len != 0 or result.port != 0 or result.ca_file.len != 0) return error.Invalid;
+            } else if (result.host.len == 0 or result.port == 0) return error.Invalid;
+            return result;
+        }
+    };
+}
+
 pub fn parseInto(self: anytype, text: []const u8) error{InvalidMysqlUrl}!void {
     if (!std.mem.startsWith(u8, text, "mysql://") or std.mem.indexOfAny(u8, text, "#\r\n\x00") != null) return error.InvalidMysqlUrl;
     const query_start = std.mem.indexOfScalar(u8, text, '?') orelse text.len;
@@ -167,4 +236,70 @@ test "mysql URL OS paths carry non-NUL bytes while names remain text" {
     try std.testing.expectEqualStrings("/tmp/ca\xff.pem", value.ca_file.slice());
     try std.testing.expectError(error.InvalidMysqlUrl, value.parse("mysql://u:p@/tmp/socket%00/db"));
     try std.testing.expectError(error.InvalidMysqlUrl, value.parse("mysql://u:p@local%FFhost/db"));
+}
+
+test "mysql destination projects each field and has bounded strict encoding" {
+    const Value = ValueWith(4095);
+    const Dest = Destination(4095);
+    var a: Value = .{};
+    var b: Value = .{};
+    defer a.wipe();
+    defer b.wipe();
+    try a.parse("mysql://user:pass@host/db?ssl-ca=/ca");
+    const base = Dest.of(&a);
+    for ([_][]const u8{
+        "mysql://other:pass@host/db?ssl-ca=/ca",
+        "mysql://user:pass@host/other?ssl-ca=/ca",
+        "mysql://user:pass@other/db?ssl-ca=/ca",
+        "mysql://user:pass@host:3307/db?ssl-ca=/ca",
+        "mysql://user:pass@host/db?ssl-ca=/other",
+        "mysql://user:pass@/tmp/mysql.sock/db",
+    }) |text| {
+        try b.parse(text);
+        const other = Dest.of(&b);
+        try std.testing.expect(!base.eql(&other));
+    }
+    for ([_][]const u8{
+        "mysql://user:other@host/db?ssl-ca=/ca",
+        "mysql://user:pass@host:3306/db?ssl-ca=/ca",
+        "mysql://%75ser:pass@host/%64b?ssl-ca=%2Fca",
+    }) |text| {
+        try b.parse(text);
+        const other = Dest.of(&b);
+        try std.testing.expect(base.eql(&other));
+    }
+    try a.parse("mysql://user:pass@/tmp/a.sock/db");
+    try b.parse("mysql://user:pass@/tmp/b.sock/db");
+    const socket_a = Dest.of(&a);
+    const socket_b = Dest.of(&b);
+    try std.testing.expectEqual(@as(u16, 0), socket_a.port);
+    try std.testing.expect(!socket_a.eql(&socket_b));
+    var max: Dest = .{};
+    inline for (Dest.fields) |name| {
+        const field = &@field(max, name);
+        @memset(&field.bytes, 'x');
+        field.len = field.bytes.len;
+    }
+    // The encoding is independent of transport validity; use the TCP arm.
+    max.socket.len = 0;
+    max.port = 65535;
+    var buffer: [Dest.encoded_max + 1]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    try max.write(&writer);
+    const decoded = try Dest.read(writer.buffered());
+    try std.testing.expect(max.eql(&decoded));
+    try std.testing.expectError(error.Invalid, Dest.read(writer.buffered()[0 .. writer.end - 1]));
+    try std.testing.expectError(error.Invalid, Dest.read(buffer[0 .. writer.end + 1]));
+    max.host.len = 0;
+    max.ca_file.len = 0;
+    @memset(&max.socket.bytes, 's');
+    max.socket.len = max.socket.bytes.len;
+    max.port = 0;
+    writer = .fixed(&buffer);
+    try max.write(&writer);
+    const socket_max = try Dest.read(writer.buffered());
+    try std.testing.expect(max.eql(&socket_max));
+    buffer[0] = 255;
+    buffer[1] = 255;
+    try std.testing.expectError(error.Invalid, Dest.read(buffer[0..writer.end]));
 }
