@@ -1372,7 +1372,7 @@ pub const Store = struct {
         self.identities().survey.asked = asked;
         self.identities().survey.capacity = capacity;
         if (survey.kept == .ready and survey.asked == asked and std.meta.eql(survey.capacity.workInput(), capacity.workInput()) and !self.isFenced())
-            return .{ .core = survey.core, .mcp = survey.mcp, .bash = survey.bash, .message = survey.message, .tool_continuation = survey.tool_continuation, .retry = survey.retry };
+            return .{ .core = survey.core, .mcp = survey.mcp, .bash = survey.bash, .message = survey.message, .tool_continuation = survey.tool_continuation, .retry = survey.retry, .retry_waiting = survey.retry_waiting };
         const entry = try enter(self, .none);
         defer entry.release();
         var access: store_access.Access(.survey, error{}) = .open(&entry);
@@ -2109,6 +2109,7 @@ pub noinline fn commitWithSurvey(self: *Store, writer: anytype, follow: anytype)
     kept.message = found.message;
     kept.tool_continuation = found.tool_continuation;
     kept.retry = found.retry;
+    kept.retry_waiting = found.retry_waiting;
     kept.kept = .fresh;
 }
 
@@ -2319,8 +2320,9 @@ const Survey = packed struct(u16) {
     message: bool = false,
     tool_continuation: bool = false,
     retry: bool = false,
+    retry_waiting: bool = false,
     capacity: action_domain.Capacity = .{ .free_credit = .none, .mcp_open = false },
-    _: u3 = 0,
+    _: u2 = 0,
 };
 
 const Admitted = struct {

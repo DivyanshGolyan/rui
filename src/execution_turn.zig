@@ -31,6 +31,7 @@ pub const Work = struct {
     message: bool = true,
     tool_continuation: bool = true,
     retry: bool = true,
+    retry_waiting: bool = false,
 };
 
 const WorkKey = struct { generation: u64, paused: bool, capacity: DispatchCapacity };
@@ -104,6 +105,17 @@ noinline fn admitWork(state: *State, context: anytype, now: std.Io.Clock.Timesta
         state.work = .{ .key = work_key, .found = try context.scanWork(admission_key.paused, admission_key.capacity) };
     }
     const work: Work = if (state.work) |kept| kept.found else .{};
+    if (!work.retry_waiting) {
+        state.retry_deadlines = null;
+    } else if (context.unixMilliseconds()) |now_ms| {
+        const previous = state.retry_deadlines;
+        if (previous == null or previous.?.generation != admission_key.generation or now_ms < previous.?.through or
+            (previous.?.next != null and now_ms >= previous.?.next.?))
+        {
+            const read = try context.publishRetryCrossings(if (previous) |p| p.through else 0, now_ms);
+            state.retry_deadlines = .{ .through = now_ms, .generation = read.generation, .next = read.next };
+        }
+    }
     const pending_model = context.pendingModelAdmission();
     const retries_absent = !work.retry and std.meta.eql(state.work.?.key, work_key);
     const retries_idle = keyIs(state.idle_exhausted, retry_key) and keyIs(state.idle_retry, retry_key);
@@ -209,15 +221,6 @@ fn keyIs(kept: ?RetryKey, key: RetryKey) bool {
 }
 
 pub fn run(state: *State, context: anytype) Outcome {
-    if (context.unixMilliseconds()) |now| {
-        const previous = state.retry_deadlines;
-        if (previous == null or previous.?.generation != context.commitGeneration() or now < previous.?.through or
-            (previous.?.next != null and now >= previous.?.next.?))
-        {
-            const read = context.publishRetryCrossings(if (previous) |p| p.through else 0, now) catch return .terminate;
-            state.retry_deadlines = .{ .through = now, .generation = read.generation, .next = read.next };
-        }
-    }
     var made_progress = serviceLifecycle(state, context);
     if (context.advanceModelAdmission()) made_progress = true;
     const now = context.now();
@@ -1303,6 +1306,7 @@ test "EXR-34 discovery_wakeup" {
     try discoveryClock();
     for ([_]usize{ 0, 1 }) |free| {
         var context = Recording{ .free = free, .generation_advance = 0, .auto_advance = 0, .deadline_next = 1_000_005 };
+        context.work.retry_waiting = true;
         var state: State = .{};
         _ = run(&state, &context);
         _ = run(&state, &context);

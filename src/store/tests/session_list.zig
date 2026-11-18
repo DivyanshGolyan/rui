@@ -149,6 +149,7 @@ test "SUI-30 host_retry_work_version" {
             const session = try configureTestSession(&storage, "deadline-config");
             try submitTestMessage(&storage, &tmp, "deadline-input", "deadline-message", session.slice(), "retry");
             const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try std.testing.expect(!(try storage.dispatchWork(false, .{ .free_credit = .none, .mcp_open = false })).retry_waiting);
             const Clock = struct {
                 fn before(_: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {
                     return .{ .nanoseconds = 31_000_000_000 };
@@ -168,6 +169,9 @@ test "SUI-30 host_retry_work_version" {
             storage.io.vtable = &before;
             defer storage.io = std.testing.io;
             try storage.settleModelAttemptFailure(binding, .{ .uncorrelated = "provider_temporary_http_429" }, .{ .retryable = .{ .waits_ms = .{ 60_000, 60_000, 60_000 } } }, .{});
+            for ([_]@FieldType(@import("../domain/action.zig").Capacity, "free_credit"){ .none, .one }) |credit| {
+                try std.testing.expect((try storage.dispatchWork(false, .{ .free_credit = credit, .mcp_open = false })).retry_waiting);
+            }
             const due = try store_testing.queryU64(&storage, "SELECT retry_due_at_ms FROM model_operation WHERE resolution_code IS NULL", .{});
             try std.testing.expectEqual(@as(u64, 91_001), due);
             const full = try TestingListing.read(&storage, &tmp, .{});
