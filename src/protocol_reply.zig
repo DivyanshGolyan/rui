@@ -2805,6 +2805,19 @@ test "Session list facts own complete rows and render semantic output after scra
         "\"parent\":\"p33rs1\",\"creator\":\"cr3at0\",\"label\":\"Review PR\"" ++ facts["\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"pin_order\":null,\"parent\":\"p33rs1\",\"creator\":\"cr3at0\",\"label\":\"Review \\u0050R\"".len..] ++ "}" ++ testing_list_facts ++ "null}", writer.buffered());
     var exhausted = std.Io.Writer.fixed(&.{});
     try std.testing.expectError(error.WriteFailed, page.writeJson(&exhausted));
+    const collision = try std.mem.replaceOwned(u8, std.testing.allocator, wire, "\"interrupt\":{\"turn\":\"2\",\"operation\":\"6\"}", "\"interrupt\":null");
+    defer std.testing.allocator.free(collision);
+    try file.writePositionalAll(io, collision, 0);
+    const decoded_collision = try SessionListReply.decode(io, file, "/w\nµ", .{}, .{ .report = .{ .bytes = collision.len } });
+    const other = decoded_collision.page.rows[0].work;
+    try std.testing.expectEqualDeep(row.work.state, other.state);
+    try std.testing.expectEqual(row.work.turn, other.turn);
+    try std.testing.expectEqual(row.work.operation, other.operation);
+    try std.testing.expectEqualDeep(row.work.attention, other.attention);
+    try std.testing.expectEqual(row.work.group, other.group);
+    try std.testing.expect(other.actions.interrupt == null);
+    try std.testing.expectEqual(row.work.actions.stop, other.actions.stop);
+    try std.testing.expectEqual(row.work.actions.decide, other.actions.decide);
 }
 
 test "Session list reply owns read failure facts without asserting absence or admission" {
