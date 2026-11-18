@@ -5,7 +5,7 @@
 ## Landing cadence
 
 `main` is the integration branch; `stable` and the latest release are what users run.
-PRs open ready so selected CI and Codex review overlap; a manual promotion runs the expensive tier on a batch of merged commits before it reaches users.
+PRs open as drafts and become ready once Codex is clean, so selected CI runs once per reviewed head; a manual promotion runs the expensive tier on a batch of merged commits before it reaches users.
 GitHub must require pull requests and the GitHub Actions `admission` check on `main`, with no bypass; it does not require an up-to-date base.
 Use squash merges under linear history.
 A PR's checks qualify its merge with the base they ran on, so a green PR merges without rerunning after `main` moves.
@@ -78,6 +78,7 @@ Keep cleanup and resource bounds, and do not retry failed required acceptance to
 [Release](../../.github/workflows/release.yml) runs only inside a green [promotion](#landing-cadence) and publishes the immutable main SHA that promotion qualified.
 Only verified publication advances the `stable` pointer.
 To recover an interrupted publication, rerun the promotion's failed jobs: `gh run rerun <promotion run id> --failed`.
+When every failure of a promotion's first attempt was infrastructure, such as a macOS job GitHub never gave a runner, [Retry infrastructure failures](gates.md#ci-artifacts-and-caches) does this once automatically.
 
 After publishing, Release rechecks the [wire-version gate](../../tests/ci/test_wire_version.py) on open wire-changing PRs: [recheck_wire_prs.py](../../tests/ci/recheck_wire_prs.py) reruns `policy`, and so `admission`, on each open, non-draft PR based on main that touches `openapi.json` or `src/wire_version.zig` and whose latest check ran before publication.
 A red recheck step means the release did ship; its error names each PR it could not recheck and why.

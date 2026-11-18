@@ -621,7 +621,7 @@ test "mutation rejection preserves an empty original creation target" {
     try std.testing.expectEqualStrings("invalid_configuration", answer.result.rejected.slice());
 }
 
-test "CLI-18 creation reply binding" {
+test "CLI-21 creation reply binding" {
     const protocol = @import("protocol.zig");
     const command_reply = @import("command_reply.zig");
     const config = ",\"configuration\":{\"provider\":\"codex\",\"model\":\"gpt-5.5\",\"reasoning_effort\":\"high\",\"workspace\":\"/workspace\",\"tools\":[\"bash\"],\"loaded_tools\":[\"bash\"],\"permission_mode\":\"ask\",\"compaction_trigger\":\"100\"}";

@@ -236,7 +236,7 @@ def missing_key_refusal(result, *, leaf, door, store, receipts):
     invalid = f"rui: the Host did not start: {message} [settings_invalid]\n"
     if leaf:
         expected_out = json.dumps({"rui_start_error": {"code": "settings_invalid", "message": message}}, separators=(",", ":")) + "\n"
-        expected_err = invalid if door == "check" else f"\nrui: detached Host startup failed for Store {store}:\n" + invalid + invalid
+        expected_err = f"rui: these settings would not start a Host: {message} [settings_invalid]\n" if door == "check" else invalid
         assert (result.returncode, result.stdout, result.stderr) == (2 if door == "check" else 1, expected_out, expected_err), result
     else:
         # Caller prose is owned by caller_error, not restated in this fixture.

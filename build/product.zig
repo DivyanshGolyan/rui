@@ -48,7 +48,15 @@ pub fn addIntegrationRui(
     pr_ci: bool,
     identity: BuildIdentity,
 ) *std.Build.Step.Compile {
-    const executable = addRuiWithIdentity(b, target, .ReleaseSafe, name, pinned_transport, identity, false);
+    return withPrBackend(addRuiWithIdentity(b, target, .ReleaseSafe, name, pinned_transport, identity, false), pr_ci);
+}
+
+/// The pause-enabled integration product, on the same PR backend as the other integration products.
+pub fn addPauseIntegrationRui(b: *std.Build, target: std.Build.ResolvedTarget, name: []const u8, pinned_transport: ?PinnedTransport, pr_ci: bool) *std.Build.Step.Compile {
+    return withPrBackend(addPauseRui(b, target, .ReleaseSafe, name, pinned_transport), pr_ci);
+}
+
+fn withPrBackend(executable: *std.Build.Step.Compile, pr_ci: bool) *std.Build.Step.Compile {
     if (pr_ci) executable.use_llvm = false;
     return executable;
 }

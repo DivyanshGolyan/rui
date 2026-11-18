@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Name why a Selected checks run failed, and rerun it once when only infrastructure failed.
+"""Name why a Selected checks or Promote run failed, and rerun it once when only infrastructure failed.
 
 A job failed for infrastructure when no runner ran it or the runner was lost,
 or when a step that only fetches or installs stopped: cancelled, or failed with
@@ -8,10 +8,12 @@ a check failure, including a timeout in a step that builds or tests.
 
 `explain` runs in an aggregate whose requirement failed and prints each failed
 job of the run attempt with its cause. `retry` runs after the run completes:
-on a pull request's first attempt whose every failure was infrastructure, and
-while that run still tests the PR's head, it reruns the failed jobs once. A
-rerun job never repeats a test that ran: its tests were skipped or never
-started.
+on the first attempt of a pull request's run or of a promotion whose every
+failure was infrastructure, while that PR run still tests the PR's head or no
+later promotion was dispatched, it reruns the failed jobs once. A rerun job
+never repeats a test that ran: its tests were skipped or never started. A
+promotion's rerun reruns `qualified` and Release with it, so publication still
+waits for every tier, and Release resumes rather than repeats a publication.
 """
 import argparse
 import json
@@ -22,6 +24,13 @@ import subprocess
 from report_issue import gh, job_log
 
 AGGREGATES = frozenset({"linux", "macos", "admission"})
+PROMOTE = "Promote"
+# Promote's verdict fails whenever a tier did. Promote names a called workflow's
+# jobs after its caller job ("selected / linux").
+PROMOTE_AGGREGATES = frozenset({"qualified"})
+# The rui-mac job-started hook rejects the bot that triggers an automatic rerun.
+SELF_HOSTED_LABEL = "rui-mac"
+PINNED = f"; it was routed to {SELF_HOSTED_LABEL}, whose job-started hook rejects an automatic rerun"
 INFRA_STEPS = frozenset({
     "Set up job",
     "Install the pinned packages tests/ci imports",
@@ -89,11 +98,13 @@ def cause(job, annotations, log):
 def causes(jobs, annotations_of, log_of, finished=True):
     found = []
     for job in jobs:
-        if job["name"] in AGGREGATES or job["conclusion"] in ("success", "skipped", "neutral"):
+        if job["name"].rsplit(" / ", 1)[-1] in AGGREGATES | PROMOTE_AGGREGATES or job["conclusion"] in ("success", "skipped", "neutral"):
             continue
         if job["status"] != "completed" and not finished:
             continue
         kind, why = cause(job, annotations_of(job), log_of(job) if needs_log(job) else None)
+        if SELF_HOSTED_LABEL in (job.get("labels") or ()):
+            why += PINNED
         found.append((job["name"], kind, why))
     return found
 
@@ -102,21 +113,36 @@ def needs_log(job):
     return any(step["conclusion"] == "failure" and infra_step(step["name"]) for step in job.get("steps") or ())
 
 
-def retry_refusal(run, found, head):
+def promotion(run):
+    return run["event"] == "workflow_dispatch" and run["name"] == PROMOTE
+
+
+def retry_refusal(run, found, current):
+    """Say why a completed run must not rerun, or None to rerun its failed jobs.
+
+    `current` is what the run must still be: the open PR's head SHA for a PR
+    run, the newest Promote run's ID for a promotion, or None when neither exists.
+    """
     if run["conclusion"] != "failure":
         return f"the run concluded {run['conclusion']}"
-    if run["event"] != "pull_request":
-        return f"the run is a {run['event']} run, not a pull request's admission"
+    if run["event"] != "pull_request" and not promotion(run):
+        return f"the run is a {run['event']} run of {run['name']}, neither a pull request's admission nor a promotion"
     if run["run_attempt"] != 1:
         return f"attempt {run['run_attempt']} already follows a retry or a manual rerun"
     if not found:
         return "only an aggregate failed, so the failure is its requirement, not infrastructure"
     if checks := [name for name, kind, _ in found if kind != "infra"]:
         return "checks failed: " + ", ".join(checks)
-    if head is None:
+    if pinned := [name for name, _, why in found if why.endswith(PINNED)]:
+        return f"{SELF_HOSTED_LABEL} would reject a bot-triggered rerun of " + ", ".join(pinned)
+    if promotion(run):
+        if current != run["id"]:
+            return f"promotion run {current} was dispatched later; a rerun would queue behind or displace it"
+        return None
+    if current is None:
         return "the run names no open pull request in this repository"
-    if head != run["head_sha"]:
-        return f"the PR's head moved to {head}; a rerun would cancel its newer run"
+    if current != run["head_sha"]:
+        return f"the PR's head moved to {current}; a rerun would cancel its newer run"
     return None
 
 
@@ -136,15 +162,16 @@ def fetch(repository, run_id, attempt, finished):
                   finished)
 
 
-def explain(repository, run_id, attempt, event):
+def explain(repository, run_id, attempt, event, workflow):
     found = fetch(repository, run_id, attempt, finished=False)
     lines = [f"{name}: {kind}: {why}" for name, kind, why in found]
     if not found:
         lines.append("No job of this run failed: the requirement above failed by itself, "
                      "such as a draft or a selection its results do not match.")
     elif all(kind == "infra" for _, kind, _ in found):
-        follow = ("Selected checks reruns the failed jobs once when the run finishes."
-                  if event == "pull_request" and attempt == "1" else "Rerun the failed jobs.")
+        automatic = attempt == "1" and (event == "pull_request" or (event, workflow) == ("workflow_dispatch", PROMOTE))
+        follow = (f"{workflow} reruns the failed jobs once when the run finishes."
+                  if automatic else "Rerun the failed jobs.")
         lines.append(f"Infrastructure only, no check failed. {follow}")
     print("\n".join(f"::error::{line}" for line in lines))
     if summary := os.environ.get("GITHUB_STEP_SUMMARY"):
@@ -152,18 +179,25 @@ def explain(repository, run_id, attempt, event):
             print("\n".join(f"- {line}" for line in lines), file=output)
 
 
+def current(repository, run):
+    if promotion(run):
+        # Runs list newest first, so the first is the latest dispatch.
+        runs = json.loads(gh("api", f"repos/{repository}/actions/workflows/{run['workflow_id']}/runs?per_page=1"))
+        return runs["workflow_runs"][0]["id"] if runs["workflow_runs"] else None
+    pulls = run.get("pull_requests") or ()
+    pull = json.loads(gh("api", f"repos/{repository}/pulls/{pulls[0]['number']}")) if pulls else None
+    return pull["head"]["sha"] if pull and pull["state"] == "open" else None
+
+
 def retry(repository, run_id, dry_run):
     run = json.loads(gh("api", f"repos/{repository}/actions/runs/{run_id}"))
     found = fetch(repository, run_id, run["run_attempt"], finished=True)
     for name, kind, why in found:
         print(f"{name}: {kind}: {why}")
-    pulls = run.get("pull_requests") or ()
-    pull = json.loads(gh("api", f"repos/{repository}/pulls/{pulls[0]['number']}")) if pulls else None
-    head = pull["head"]["sha"] if pull and pull["state"] == "open" else None
-    if refusal := retry_refusal(run, found, head):
+    if refusal := retry_refusal(run, found, current(repository, run)):
         print(f"No retry: {refusal}.")
         return
-    print(f"Infrastructure only on attempt 1 of {run['head_sha']}: rerunning the failed jobs once.")
+    print(f"Infrastructure only on attempt 1 of {run['name']} for {run['head_sha']}: rerunning the failed jobs once.")
     if not dry_run:
         gh("api", "-X", "POST", f"repos/{repository}/actions/runs/{run_id}/rerun-failed-jobs")
 
@@ -179,7 +213,7 @@ def main():
     repository = os.environ["GITHUB_REPOSITORY"]
     if args.command == "explain":
         explain(repository, os.environ["GITHUB_RUN_ID"], os.environ["GITHUB_RUN_ATTEMPT"],
-                os.environ.get("GITHUB_EVENT_NAME"))
+                os.environ.get("GITHUB_EVENT_NAME"), os.environ.get("GITHUB_WORKFLOW"))
     else:
         retry(repository, args.run_id, args.dry_run)
 

@@ -709,7 +709,7 @@ def retired_environment_upgrade_case(root, binary, releases, previous_binary):
         target = c.build("new-target")
         c.select(target)
         output = c.run("host", "restart", "--all", expect=6, timeout=60)
-        expected = "RUI_OPENAI_BASE_URL is no longer read; set providers.openai.endpoint (rui host set DIR providers.openai.endpoint URL)"
+        expected = "RUI_OPENAI_BASE_URL is no longer read; set providers.openai.endpoint (rui host set --store DIR providers.openai.endpoint URL)"
         assert expected in output and "checking" in output, output
         assert old.poll() is None and peer_pid(c.ready["socket"]) == old.pid, output
         assert c.status()["instance"] == previous["instance"], output

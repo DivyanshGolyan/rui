@@ -27,7 +27,7 @@ const allowed_std_exact = [_][]const u8{
     "std.Io.net.HostName.max_len",
 };
 
-const value_modules = [_][]const u8{ "terminal_unicode", "terminal_width", "url" };
+const value_modules = [_][]const u8{ "terminal_unicode", "terminal_width", "url", "build_options" };
 
 const test_only_std = [_][]const u8{ "std.debug.print", "std.testing.expectEqualDeep" };
 

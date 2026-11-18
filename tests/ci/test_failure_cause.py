@@ -2,7 +2,8 @@ from pathlib import Path
 import re
 import unittest
 
-from failure_cause import AGGREGATES, INFRA_ACTIONS, INFRA_STEPS, cause, causes, retry_refusal
+from failure_cause import (AGGREGATES, INFRA_ACTIONS, INFRA_STEPS, PINNED, PROMOTE_AGGREGATES, cause, causes,
+                           retry_refusal)
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOWS = [ROOT / ".github/workflows/check.yml", ROOT / ".github/workflows/previous-release-upgrade.yml"]
@@ -43,8 +44,8 @@ def step(name, conclusion, started="2026-11-09T08:02:56Z", completed="2026-11-09
     return dict(name=name, conclusion=conclusion, started_at=started, completed_at=completed)
 
 
-def job(name, *steps, conclusion="failure", status="completed"):
-    return dict(id=1, name=name, status=status, conclusion=conclusion, steps=list(steps))
+def job(name, *steps, conclusion="failure", status="completed", labels=("ubuntu-24.04",)):
+    return dict(id=1, name=name, status=status, conclusion=conclusion, steps=list(steps), labels=list(labels))
 
 
 class CauseTest(unittest.TestCase):
@@ -112,6 +113,18 @@ class CauseTest(unittest.TestCase):
         self.assertEqual([name for name, *_ in causes(jobs, lambda job: [], lambda job: None)],
                          ["macos suites (check)", "macos_build_unit"])
 
+    def test_promotion_aggregates_under_their_caller_job_are_not_causes(self):
+        verdicts = [job(f"selected / {name}", step("Require every selected Linux part", "failure")) for name in AGGREGATES]
+        verdicts += [job(name, step("Require every selected promotion tier", "failure")) for name in PROMOTE_AGGREGATES]
+        unacquired = job("selected / macos suites (check)", conclusion="cancelled", labels=("macos-15",))
+        found = causes(verdicts + [unacquired], lambda job: [], lambda job: None)
+        self.assertEqual(found, [("selected / macos suites (check)", "infra", "cancelled before any step ran")])
+
+    def test_a_job_routed_to_the_personal_mac_says_so(self):
+        lost = job("macos_build", conclusion="cancelled", labels=("self-hosted", "macOS", "ARM64", "rui-mac"))
+        self.assertEqual(causes([lost], lambda job: [], lambda job: None),
+                         [("macos_build", "infra", "cancelled before any step ran" + PINNED)])
+
     def test_infra_steps_name_steps_that_exist(self):
         text = "\n".join(path.read_text() for path in WORKFLOWS)
         names = set(re.findall(r"(?m)^      - name: (.+)$", text))
@@ -130,11 +143,22 @@ class WiringTest(unittest.TestCase):
                 self.assertIn("if: ${{ failure() }}", explain)
                 self.assertIn("python3 -B tests/ci/failure_cause.py explain", explain)
 
-    def test_the_retry_runs_trusted_code_once_per_failed_pr_run(self):
+    def test_promotion_publishes_only_after_its_verdict(self):
+        text = (ROOT / ".github/workflows/promote.yml").read_text()
+        for name in PROMOTE_AGGREGATES:
+            body = re.search(rf"(?ms)^  {name}:\n(.*?)(?=^  [a-z_]+:|\Z)", text)[1]
+            self.assertIn("needs: [batch, selected, upgrade, renderer]", body)
+        release = re.search(r"(?ms)^  release:\n(.*?)(?=^  [a-z_]+:|\Z)", text)[1]
+        self.assertIn("needs: [batch, qualified]", release, "a rerun's Release waits for the rerun verdict")
+        self.assertNotIn("if:", release, "Release runs only when qualified succeeds")
+
+    def test_the_retry_runs_trusted_code_once_per_failed_pr_run_or_promotion(self):
         text = (ROOT / ".github/workflows/infra-retry.yml").read_text()
-        self.assertIn("workflows: [Selected checks]", text)
+        self.assertIn("workflows: [Selected checks, Promote]", text)
         for condition in ("github.event.workflow_run.conclusion == 'failure'",
                           "github.event.workflow_run.event == 'pull_request'",
+                          "github.event.workflow_run.name == 'Promote' && "
+                          "github.event.workflow_run.event == 'workflow_dispatch'",
                           "github.event.workflow_run.run_attempt == 1"):
             self.assertIn(condition, text)
         self.assertIn("ref: ${{ github.sha }}", text)
@@ -142,11 +166,18 @@ class WiringTest(unittest.TestCase):
 
 
 class RetryTest(unittest.TestCase):
-    RUN = dict(conclusion="failure", event="pull_request", run_attempt=1, head_sha="a" * 40)
+    RUN = dict(id=7, name="Selected checks", conclusion="failure", event="pull_request", run_attempt=1,
+               head_sha="a" * 40)
+    PROMOTION = dict(RUN, name="Promote", event="workflow_dispatch")
     INFRA = [("policy", "infra", "failure at 'Install the pinned workflow linter': returned error: 504")]
 
     def test_infrastructure_only_on_the_first_attempt_of_the_current_head_retries(self):
         self.assertIsNone(retry_refusal(self.RUN, self.INFRA, "a" * 40))
+
+    def test_infrastructure_only_on_the_first_attempt_of_the_latest_promotion_retries(self):
+        self.assertIsNone(retry_refusal(self.PROMOTION, self.INFRA, 7))
+        unacquired = [("release / build (darwin-arm64)", "infra", "cancelled before any step ran")]
+        self.assertIsNone(retry_refusal(self.PROMOTION, unacquired, 7))
 
     def test_anything_else_does_not_retry(self):
         cases = {
@@ -157,6 +188,18 @@ class RetryTest(unittest.TestCase):
             "the PR moved on": (self.RUN, self.INFRA, "b" * 40),
             "no open PR": (self.RUN, self.INFRA, None),
             "a diagnostic dispatch": (dict(self.RUN, event="workflow_dispatch"), self.INFRA, "a" * 40),
+            "a job on the personal Mac": (self.RUN, [("macos_build", "infra", "lost" + PINNED)], "a" * 40),
+            "a promotion's check failed": (self.PROMOTION, self.INFRA + [("selected / linux suites (check)", "check",
+                                                                          "failure")], 7),
+            "a promotion's verdict alone failed": (self.PROMOTION, [], 7),
+            "a promotion already retried": (dict(self.PROMOTION, run_attempt=2), self.INFRA, 7),
+            "a promotion cancelled": (dict(self.PROMOTION, conclusion="cancelled"), self.INFRA, 7),
+            "a later promotion": (self.PROMOTION, self.INFRA, 8),
+            "no promotion listed": (self.PROMOTION, self.INFRA, None),
+            "a promotion on the personal Mac": (self.PROMOTION, [("selected / macos_build", "infra", "lost" + PINNED)],
+                                                7),
+            "Promote's name on another event": (dict(self.PROMOTION, event="push"), self.INFRA, 7),
+            "another workflow's dispatch": (dict(self.PROMOTION, name="Renderer contracts"), self.INFRA, 7),
         }
         for name, (run, found, head) in cases.items():
             with self.subTest(name):

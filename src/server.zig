@@ -1096,6 +1096,19 @@ fn serveOpened(
         .custody = execution.CustodyPool.initialize(custody_records),
         .turns_paused = .init(settings.execution.paused.value),
     };
+    const test_pause = @import("testing/pause.zig");
+    var pause_owner = test_pause.PauseController.init(io, std.heap.c_allocator);
+    defer pause_owner.deinit();
+    const pause_adapter = if (comptime test_pause.enabled) adapter: {
+        if (hooks.pause_fd) |fd| {
+            host.pause_owner = &pause_owner;
+            break :adapter try @import("testing/pause_socket.zig").Adapter.start(std.heap.c_allocator, io, &pause_owner, fd);
+        }
+        break :adapter null;
+    } else {};
+    defer if (comptime test_pause.enabled) {
+        if (pause_adapter) |adapter| adapter.stop();
+    };
     storage.modelTimingSource().* = host.custody.timingSource();
     defer storage.modelTimingSource().* = .{};
     try host.mcp_servers.init(allocator, mcp_servers);
@@ -1138,6 +1151,7 @@ fn serveOpened(
     host.intake_wake = intake.wake[1];
     StopSignals.attach(intake.wake[1]);
     defer StopSignals.detach();
+    if (comptime test_pause.enabled) if (pause_adapter) |adapter| try adapter.waitStart();
     const execution_thread = try signal_stack.spawn(.{}, executionMain, .{&host});
     defer {
         if (listener_open) listener.deinit(io);
@@ -1147,6 +1161,7 @@ fn serveOpened(
         };
         socket_owned = false;
         _ = host.advance(.draining);
+        if (comptime test_pause.enabled) pause_owner.close();
         execution_thread.join();
     }
     try writeReadiness(&lease.paths, host.instance, active_capacity, intake_capacity, descriptor_requirement, descriptor_limit_text, retention_entries.len, served.any());
@@ -1783,10 +1798,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
         },
         .observe_command => |*command| {
             var observation: store_module.Observed = undefined;
-            host.store.observeCommand(command.key.slice(), command.since, &observation) catch |err| {
-                fenceDispatch(host, "command observation", err);
-                return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
-            };
+            host.store.observeCommand(command.key.slice(), command.since, &observation) catch |err| return refuseRead(host, fd, "command observation", err);
             switch (observation) {
                 .full => server_host.traceCommandObservation(host, command.key.slice(), "request_observation_full"),
                 .not_modified => |token| if (command.since) |since| {
@@ -1803,15 +1815,9 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
                 error.ResultNotFound => return respondStatic(fd, 409, .result_unavailable, "result_not_found"),
                 error.ResultNotReady => return respondStatic(fd, 409, .result_unavailable, "result_not_ready"),
                 error.ResultFailed => return respondStatic(fd, 409, .result_unavailable, "result_failed"),
-                else => {
-                    fenceDispatch(host, "result observation", err);
-                    return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
-                },
+                else => return refuseRead(host, fd, "result observation", err),
             };
-            const location = host.store.openContent(reference) catch |err| {
-                fenceDispatch(host, "result content read", err);
-                return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
-            };
+            const location = host.store.openContent(reference) catch |err| return refuseRead(host, fd, "result content read", err);
             try fd.setContent(location, 0, true, false);
         },
         .read_action => |*command| {
@@ -1820,10 +1826,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             host.store.readAction(command, value) catch |err| switch (err) {
                 error.ActionNotFound => return respondStatic(fd, 404, .action_unavailable, "action_not_found"),
                 error.InvalidCursor => return respondStatic(fd, 400, .action_unavailable, "invalid_cursor"),
-                else => {
-                    fenceDispatch(host, "Action status observation", err);
-                    return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
-                },
+                else => return refuseRead(host, fd, "Action status observation", err),
             };
             try fd.json(200, protocol.action_read_reply.max_bytes, host_reply.renderActionRead, .{value});
         },
@@ -1851,11 +1854,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
                     fenceDispatch(host, "session report scratch cleanup", err);
                     return respondStatic(fd, 500, .observation_error, "report_scratch_cleanup_failed");
                 }
-                if (host.store.isFenced()) {
-                    fenceDispatch(host, "session inspection", err);
-                    return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
-                }
-                return respondStatic(fd, if (err == error.ReportScratchExhausted) 507 else 500, .observation_error, @errorName(err));
+                return refuseRead(host, fd, "session inspection", err);
             };
             try fd.setReport(report);
             traceSubject(host, "inspection_captured", "session", request_value.session.slice());
@@ -1874,11 +1873,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
                     fenceDispatch(host, "Session list scratch cleanup", err);
                     return respondStatic(fd, 500, .observation_error, "report_scratch_cleanup_failed");
                 }
-                if (host.store.isFenced()) {
-                    fenceDispatch(host, "Session list", err);
-                    return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
-                }
-                return respondStatic(fd, if (err == error.ReportScratchExhausted) 507 else 500, .observation_error, @errorName(err));
+                return refuseRead(host, fd, "Session list", err);
             };
             try fd.setReport(page);
         },
@@ -1887,10 +1882,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             defer host.allocator.destroy(page);
             host.store.publicConversationPage(command, page) catch |err| switch (err) {
                 error.SessionNotFound, error.InvalidCursor => return respondStatic(fd, 409, .conversation_unavailable, @errorName(err)),
-                else => {
-                    fenceDispatch(host, "conversation page", err);
-                    return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
-                },
+                else => return refuseRead(host, fd, "conversation page", err),
             };
             try fd.json(200, protocol.max_conversation_page_response_bytes, host_reply.renderConversationPage, .{page});
         },
@@ -1900,10 +1892,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             defer host.allocator.destroy(page);
             host.store.activityPage(command, page) catch |err| switch (err) {
                 error.SessionNotFound, error.InvalidCursor => return respondStatic(fd, 409, .activity_unavailable, @errorName(err)),
-                else => {
-                    fenceDispatch(host, "activity page", err);
-                    return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
-                },
+                else => return refuseRead(host, fd, "activity page", err),
             };
             try fd.json(200, host_reply.activityPageBytes(page), host_reply.renderActivityPage, .{page});
         },
@@ -1912,20 +1901,14 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             defer host.allocator.destroy(page);
             host.store.searchActivity(command, page) catch |err| switch (err) {
                 error.SessionNotFound, error.InvalidCursor => return respondStatic(fd, 409, .activity_unavailable, @errorName(err)),
-                else => {
-                    fenceDispatch(host, "activity search", err);
-                    return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
-                },
+                else => return refuseRead(host, fd, "activity search", err),
             };
             try fd.json(200, activity_reply.max_search_bytes, host_reply.renderActivitySearch, .{page});
         },
         .activity_content => |*command| {
             const location = host.store.openActivityContent(command) catch |err| switch (err) {
                 error.ContentNotFound => return respondStatic(fd, 409, .activity_unavailable, @errorName(err)),
-                else => {
-                    fenceDispatch(host, "activity content", err);
-                    return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
-                },
+                else => return refuseRead(host, fd, "activity content", err),
             };
             try deliverPublicContent(host, fd, location, 0, true);
         },
@@ -2066,10 +2049,7 @@ fn deliverConversationContent(host: *Host, fd: std.posix.fd_t, command: protocol
 fn prepareConversationContent(host: *Host, fd: *Reply, command: *const protocol.ConversationContent) !void {
     const location = host.store.openPublicConversationContent(command) catch |err| switch (err) {
         error.ContentNotFound, error.RangeOutOfBounds => return respondStatic(fd, 409, .conversation_unavailable, @errorName(err)),
-        else => {
-            fenceDispatch(host, "conversation content", err);
-            return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
-        },
+        else => return refuseRead(host, fd, "conversation content", err),
     };
     return deliverPublicContent(host, fd, location, command.start, command.stream);
 }
@@ -2090,15 +2070,9 @@ fn deliverActionContent(host: *Host, fd: *Reply, command: anytype, comptime call
         host.store.actionArguments(command.session.slice(), command.action_id);
     const resolved = reference catch |err| switch (err) {
         error.ActionNotFound => return respondStatic(fd, 404, .action_unavailable, "action_not_found"),
-        else => {
-            fenceDispatch(host, phase, err);
-            return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
-        },
+        else => return refuseRead(host, fd, phase, err),
     };
-    const location = host.store.openContent(resolved) catch |err| {
-        fenceDispatch(host, phase, err);
-        return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
-    };
+    const location = host.store.openContent(resolved) catch |err| return refuseRead(host, fd, phase, err);
     fd.setContent(location, 0, true, false) catch {};
 }
 
@@ -2271,6 +2245,16 @@ test "initial Message reply binds its allocated Session and original input befor
         .session = allocated,
     } } });
     try std.testing.expectError(error.RequestBindingMismatch, protocol_reply.decodeMutationReply(.{ .status = 200, .body = response.slice() }, "", target).answer);
+}
+
+/// The Store owns which read failures are fatal: it fences itself for those and returns the
+/// rest, such as InputPartsNotSupported, as ordinary refusals. Dispatch fences only after it.
+fn refuseRead(host: *Host, reply: *Reply, phase: []const u8, err: anyerror) void {
+    if (host.store.isFenced()) {
+        fenceDispatch(host, phase, err);
+        return respondStatic(reply, 500, .invocation_error, "canonical_store_failure");
+    }
+    respondStatic(reply, if (err == error.ReportScratchExhausted) 507 else 500, .observation_error, @errorName(err));
 }
 
 fn respondStatic(reply: *Reply, status: u16, kind: protocol.ErrorType, code: []const u8) void {
@@ -4691,6 +4675,108 @@ test "inline skills suggestions answer heap exhaustion as busy, not a catalog re
         try std.testing.expect(std.mem.startsWith(u8, status, "HTTP/1.1 503 "));
     }
     try std.testing.expect(fail_index > 0);
+}
+
+test "SH-51 a read the Store refuses without fencing leaves the Host serving" {
+    // A Session holds both parts producers: a compound Message and a read_image Resolution.
+    // Every public read that meets them gets the Store's ordinary refusal; none may fence the Host.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var lease: platform.StoreLease = undefined;
+    lease.paths = .{};
+    try lease.paths.scratch.set(root);
+    try lease.paths.store_identity.set("s");
+    var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    var storage: store_module.Store = undefined;
+    try storage.open(std.testing.io, try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite", .{root}), root);
+    defer storage.close() catch unreachable;
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    var configure = try store_module.testingCompleteConfiguration("parts-config", "", try store_module.testingCanonicalCwd(std.testing.io, &workspace_buffer), "model-a");
+    configure.configuration.tools = try .of(&.{"read_image"});
+    const session = (try storage.configure(&configure, .{})).accepted.session;
+    try store_module.testingSubmitMessage(&storage, &tmp, "parts-task", "parts-task", session.slice(), "look");
+    const attempt = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const call: store_module.TestingCall = .{ .item_id = "parts-call", .name = "read_image", .encoded_call_id = "parts-call", .decoded_call_id = "parts-call", .encoded_arguments = "{\\\"path\\\":\\\"image.png\\\"}", .decoded_arguments = "{\"path\":\"image.png\"}" };
+    try store_module.settleCallsForTesting(&storage, &tmp, attempt, "parts-call", &.{call});
+    const selected = (try storage.nextAction(.read_image, .fromFree(1, false))).?;
+    const effect = (try storage.admitActionAttempt(selected, 1234, .{})).?.permit.binding;
+    const png = @embedFile("codecs/fixtures/image-input/pixel.png");
+    try store_module.testing.settleTestActionParts(&storage, &tmp, effect, &.{.{ .bytes = png, .kind = .{ .image = .{} } }});
+    try store_module.testing.submitTestMessagePartsWithSkills(&storage, &tmp, "parts-message", session.slice(), &.{
+        .{ .bytes = "before" }, .{ .bytes = png, .kind = .{ .image = .{} } }, .{ .bytes = "after" },
+    }, null);
+    try std.testing.expect(!storage.isFenced());
+
+    var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = &lease, .store = &storage };
+    var retention = output_retention.Queue.initialize(host.io, root, .{ .used = &host.scratch_used, .limit = 9000 }, &.{});
+    host.retention = &retention;
+    const head = "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"";
+    const Read = struct { path: []const u8, body: []const u8 };
+    const reads = [_]Read{
+        .{ .path = "read-action", .body = try std.fmt.allocPrint(arena, head ++ "read_action\",\"store\":\"s\",\"session\":\"{s}\",\"action\":\"{d}\"}}", .{ session.slice(), selected.action_id }) },
+        .{ .path = "activity-page", .body = try std.fmt.allocPrint(arena, head ++ "activity_page\",\"store\":\"s\",\"session\":\"{s}\",\"end\":null,\"position\":\"0\",\"ordinal\":null,\"direction\":\"forward\",\"kinds\":[\"admission\",\"user\",\"assistant\",\"call\",\"tool_result\"],\"limit\":\"16\"}}", .{session.slice()}) },
+        .{ .path = "conversation-page", .body = try std.fmt.allocPrint(arena, head ++ "conversation_page\",\"store\":\"s\",\"session\":\"{s}\",\"end\":\"0\",\"before_position\":\"0\",\"before_ordinal\":\"0\"}}", .{session.slice()}) },
+        .{ .path = "observe-command", .body = try std.fmt.allocPrint(arena, head ++ "observe_command\",\"store\":\"s\",\"key\":\"parts-message\"}}", .{}) },
+        .{ .path = "inspect-session", .body = try std.fmt.allocPrint(arena, head ++ "inspect_session\",\"store\":\"s\",\"session\":\"{s}\"}}", .{session.slice()}) },
+        .{ .path = "activity-content", .body = try std.fmt.allocPrint(arena, head ++ "activity_content\",\"store\":\"s\",\"session\":\"{s}\",\"position\":\"{d}\",\"ordinal\":\"1\"}}", .{ session.slice(), try store_module.testing.queryU64(&storage, "SELECT acceptance_position FROM action_operation WHERE action_id=?1", .{selected.action_id}) }) },
+        .{ .path = "activity-search", .body = try std.fmt.allocPrint(arena, head ++ "activity_search\",\"store\":\"s\",\"session\":\"{s}\",\"query\":\"after\",\"kinds\":[\"admission\",\"user\",\"tool_result\"],\"before_position\":null,\"before_ordinal\":null,\"limit\":\"16\"}}", .{session.slice()}) },
+        .{ .path = "conversation-content", .body = try std.fmt.allocPrint(arena, head ++ "conversation_content\",\"store\":\"s\",\"session\":\"{s}\",\"position\":\"{d}\",\"ordinal\":\"0\",\"start\":\"0\"}}", .{ session.slice(), try store_module.testing.queryU64(&storage, "SELECT max(session_position) FROM conversation_entry WHERE session_ref=?1 AND entry_kind=1", .{session.slice()}) }) },
+        .{ .path = "list-sessions", .body = try std.fmt.allocPrint(arena, head ++ "list_sessions\",\"store\":\"s\",\"workspace\":null,\"after\":\"0\",\"ceiling\":\"0\"}}", .{}) },
+        .{ .path = "read-result", .body = try std.fmt.allocPrint(arena, head ++ "read_result\",\"store\":\"s\",\"key\":\"parts-message\"}}", .{}) },
+        .{ .path = "read-action-arguments", .body = try std.fmt.allocPrint(arena, head ++ "read_action_arguments\",\"store\":\"s\",\"session\":\"{s}\",\"action\":\"{d}\"}}", .{ session.slice(), selected.action_id }) },
+        .{ .path = "read-action-call-id", .body = try std.fmt.allocPrint(arena, head ++ "read_action_call_id\",\"store\":\"s\",\"session\":\"{s}\",\"action\":\"{d}\"}}", .{ session.slice(), selected.action_id }) },
+    };
+    const Answer = struct { status: []const u8, body: []const u8 };
+    const exchangeRead = struct {
+        fn run(serving: *Host, allocator: std.mem.Allocator, read: Read) !Answer {
+            var sockets: [2]c_int = undefined;
+            try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets));
+            defer _ = std.c.close(sockets[1]);
+            try setNonblocking(sockets[0]);
+            var header_buffer: [256]u8 = undefined;
+            try writeAll(std.testing.io, sockets[1], try std.fmt.bufPrint(&header_buffer, "POST /v1/{s} HTTP/1.1\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\nContent-Length: {d}\r\n\r\n", .{ read.path, read.body.len }));
+            try writeAll(std.testing.io, sockets[1], read.body);
+            const exchange = try std.testing.allocator.create(Intake.Exchange);
+            exchange.* = .{ .owner = undefined, .host = serving, .fd = sockets[0], .accepted_at_ns = 0, .deadline = std.math.maxInt(i128) };
+            defer std.debug.assert(exchange.destroy());
+            try exchange.read();
+            try std.testing.expectEqual(.ready, exchange.state);
+            const reply = try exchange.ensureReply();
+            exchange.prepare() catch |err| exchange.fail(err);
+            return .{
+                .status = try allocator.dupe(u8, reply.header[0..reply.header_length]),
+                .body = try allocator.dupe(u8, switch (reply.body) {
+                    .json => |bytes| bytes,
+                    else => "",
+                }),
+            };
+        }
+    }.run;
+
+    var refused: usize = 0;
+    for (reads) |read| {
+        const answer = try exchangeRead(&host, arena, read);
+        if (std.mem.indexOf(u8, answer.body, "canonical_store_failure") != null or storage.isFenced() or !host.launchAllowed()) {
+            std.debug.print("{s} fenced the Host: {s}{s}\n", .{ read.path, answer.status, answer.body });
+            return error.TestUnexpectedResult;
+        }
+        if (std.mem.indexOf(u8, answer.body, "\"code\":\"InputPartsNotSupported\"") != null) refused += 1;
+    }
+    // Guards against a fixture that never reaches a refusal: store.md says byte readers refuse
+    // parts, so at least the read_image Action read and the compound Message observation do.
+    try std.testing.expect(refused >= 2);
+
+    // A Store that fails its own read fences, and so does the Host.
+    try store_module.testingFailReadsOf(&storage, "action_operation");
+    const failed = try exchangeRead(&host, arena, reads[0]);
+    try std.testing.expect(std.mem.indexOf(u8, failed.body, "canonical_store_failure") != null);
+    try std.testing.expect(storage.isFenced() and !host.launchAllowed());
 }
 
 test "Host startup reports MCP tool collision and excess tools as owned failures" {

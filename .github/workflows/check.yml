@@ -36,6 +36,10 @@ on:
         required: false
         default: false
         type: boolean
+    secrets:
+      # Promote passes it so promotion can route to rui-mac; without it routing stays hosted.
+      MAC_RUNNER_STATUS_TOKEN:
+        required: false
 
 permissions:
   contents: read
@@ -248,7 +252,7 @@ jobs:
     needs: plan
     if: ${{ !github.event.repository.private && needs.plan.outputs.change_kind == 'normal' && needs.plan.outputs.draft_run == 'false' && needs.plan.outputs.compile_only == 'false' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
@@ -276,6 +280,8 @@ jobs:
           publish-caches: 'false'
       - name: Check caller error coverage and shrink-only pending causes
         run: python3 -B tests/ci/caller_errors.py
+      - name: Check flake sources and shrink-only allowances
+        run: python3 -B tests/ci/flake_sources.py
       - name: Check client locality and shrink-only exceptions
         run: python3 -B tests/ci/client_locality.py
       - name: Run tests/ci, less self-checks whose inputs are unchanged
