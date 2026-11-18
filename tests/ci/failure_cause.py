@@ -25,8 +25,8 @@ from report_issue import gh, job_log
 
 AGGREGATES = frozenset({"linux", "macos", "admission"})
 PROMOTE = "Promote"
-# Promote's verdict fails whenever a tier did. Promote names a called workflow's
-# jobs after its caller job ("selected / linux").
+# The qualification tier's verdict fails whenever a tier did. GitHub names a
+# called workflow's jobs after each caller job ("qualify / selected / linux").
 PROMOTE_AGGREGATES = frozenset({"qualified"})
 # The rui-mac job-started hook rejects the bot that triggers an automatic rerun.
 SELF_HOSTED_LABEL = "rui-mac"

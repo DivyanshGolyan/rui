@@ -196,8 +196,8 @@ class PrepushTest(unittest.TestCase):
                 self.assertEqual(commands["flake sources"],
                                  [sys.executable, "-B", "tests/ci/flake_sources.py"])
         self.assertNotIn("flake sources", self.commands(["docs/example.md"]))
-        workflow = (Path(__file__).resolve().parents[2] / ".github/workflows/check.yml").read_text()
-        self.assertIn("run: python3 -B tests/ci/flake_sources.py", workflow)
+        policy = (Path(__file__).resolve().parents[2] / ".github/actions/policy/action.yml").read_text()
+        self.assertIn("run: python3 -B tests/ci/flake_sources.py", policy)
 
     def test_deleted_files_select_owner_checks_not_file_tools(self):
         commands = self.commands(["src/cli_args.zig"], deleted=["src/cli_args.zig"])

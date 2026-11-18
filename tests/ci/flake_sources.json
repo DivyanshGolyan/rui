@@ -134,9 +134,6 @@
   "tests/ci/test_mac_runner.py": {
     "test_double": 16
   },
-  "tests/ci/test_main_build.py": {
-    "test_double": 7
-  },
   "tests/ci/test_model_instruction_fixtures.py": {
     "test_double": 3
   },
@@ -251,7 +248,7 @@
   "tests/integration/dispatch_integration.py": {
     "fixed_sleep": {
       "main": [
-        9,
+        8,
         "settle sleeps before asserting no further provider request or result"
       ]
     },

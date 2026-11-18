@@ -501,22 +501,23 @@ def stop_control_case(process, diagnostics, endpoint, thread, *releases, connect
 
 
 def prove_pre_handoff_stop(state):
+    # EXR-60
     store = state / "pre-handoff-store"
     store.mkdir(mode=0o700)
     endpoint, endpoint_thread = start_success_endpoint()
     endpoint.release.set()
     process = None
     milestones = None
+    handoff = PauseGate("model.before_handoff")
     try:
         url = f"http://127.0.0.1:{endpoint.server_address[1]}/responses"
         process, _ = start_host(
             store,
             url,
             "--test-phase-trace",
-            "--test-before-launch-delay-ms",
-            "3000",
             "--test-suppress-first-control-hint",
             observations="control_peers",
+            pause=handoff,
         )
         milestones = HostDiagnostics(process)
         peers = PeerCensus(milestones)
@@ -528,7 +529,7 @@ def prove_pre_handoff_stop(state):
             session,
             "must never launch",
         ))
-        prepared = milestones.wait("prepared_before_handoff")[0]
+        prepared = handoff.wait()
         stopped = peers.call("session_stop", lambda: stop_session(
             state, store, "pre-handoff-stop", session
         ))
@@ -542,10 +543,11 @@ def prove_pre_handoff_stop(state):
         assert replayed["answer"]["status"] == "accepted", replayed
         assert replayed["answer"]["replayed"] is True, replayed
         milestones.wait("control_hint_published", subject="pre-handoff-stop")
+        handoff.release()
         release_deadline = time.monotonic() + 8
         superseded = milestones.wait(
             "canonical_handoff_superseded",
-            operation=prepared["operation"],
+            operation=str(prepared["context"]["operation"]),
             timeout=release_deadline - time.monotonic(),
         )[0]
         assert isinstance(superseded["trace_lost"], bool), superseded
@@ -590,6 +592,7 @@ def prove_pre_handoff_stop(state):
             "release_elapsed_seconds": 8 - (release_deadline - time.monotonic()),
         }), flush=True)
     finally:
+        handoff.close()
         stop_control_case(process, milestones, endpoint, endpoint_thread)
     peers.finish(time.monotonic() + 5)
 

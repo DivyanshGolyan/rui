@@ -1,6 +1,7 @@
 name: Release
 # Only a green promotion (promote.yml) calls this, with the main SHA it qualified
-# and the version Release build (release-build.yml) planned and built for it.
+# and the version Release build (release-build.yml) planned and built for it,
+# in that promotion's run or in the Qualify main run that qualified the SHA.
 # It publishes the archives that build recorded and the tiers tested; it never rebuilds.
 # Recover a failed publication by rerunning that promotion's failed jobs.
 on:
@@ -14,6 +15,11 @@ on:
         description: Version Release build planned and built; empty repairs stable for an already published release
         type: string
         required: true
+      artifact-run:
+        description: The run holding Release build's archives; empty is this run
+        type: string
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -60,7 +66,8 @@ jobs:
         timeout-minutes: 2
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name rui-linux-x86_64 --dir "$RUNNER_TEMP/memory"
+          ARTIFACT_RUN: ${{ inputs.artifact-run || github.run_id }}
+        run: gh run download "$ARTIFACT_RUN" --repo "$GITHUB_REPOSITORY" --name rui-linux-x86_64 --dir "$RUNNER_TEMP/memory"
       - name: Measure the released Linux executable's Host memory
         # Never holds back the release: the notes say "not measured" when this step does not finish.
         # No token here: this step installs packages and runs fixture and product code.
@@ -81,13 +88,14 @@ jobs:
         if: ${{ inputs.version != '' }}
         env:
           GH_TOKEN: ${{ github.token }}
+          ARTIFACT_RUN: ${{ inputs.artifact-run || github.run_id }}
           VERSION: ${{ inputs.version }}
           SHA: ${{ inputs.sha }}
         run: |
           set -euo pipefail
           for delay in 10 30 ''; do
             rm -rf "$RUNNER_TEMP/artifacts"
-            gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --pattern 'rui-*' --dir "$RUNNER_TEMP/artifacts" && break
+            gh run download "$ARTIFACT_RUN" --repo "$GITHUB_REPOSITORY" --pattern 'rui-*' --dir "$RUNNER_TEMP/artifacts" && break
             test -n "$delay" || exit 1
             echo "::warning::Artifact download failed; retrying in ${delay}s"
             sleep "$delay"
@@ -183,12 +191,13 @@ jobs:
       - name: Publish to npm
         env:
           GH_TOKEN: ${{ github.token }}
+          ARTIFACT_RUN: ${{ inputs.artifact-run || github.run_id }}
         run: |
           set -euo pipefail
           npm install -g npm@11.15.0 --no-audit --no-fund
           for delay in 10 30 ''; do
             rm -rf "$RUNNER_TEMP/npm"
-            gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name rui-npm --dir "$RUNNER_TEMP/npm" && break
+            gh run download "$ARTIFACT_RUN" --repo "$GITHUB_REPOSITORY" --name rui-npm --dir "$RUNNER_TEMP/npm" && break
             test -n "$delay" || exit 1
             echo "::warning::Artifact download failed; retrying in ${delay}s"
             sleep "$delay"

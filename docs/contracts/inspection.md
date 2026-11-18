@@ -346,6 +346,8 @@ A true action indicates that admission accepts the intent if the described facts
 | The latest Turn failed | `failed`, with its code and, for a quota code, the saved `resets_at` | its outcome |
 | No Turn | `idle` | Session creation |
 
+A `working` state for an in-flight compaction adds `compaction:true`; ordinary work omits it.
+
 - **Attached tree obligations (D239):** a Session owes its parent until its active
   Turn, eligible queued Message past its stop cutoff, unpublished forwarded rows,
   undelivered ending Message and recursively owed descendants have transferred

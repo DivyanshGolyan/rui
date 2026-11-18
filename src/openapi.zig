@@ -614,6 +614,7 @@ pub const Document = struct {
         }
         if (T == protocol.WorkStateJson) return d.anyOf(&.{
             try d.shapeSchema(T.plain_shape),
+            try d.shapeSchema(T.compacting_shape),
             try d.shapeSchema(T.retrying_shape),
             try d.shapeSchema(T.bash_shape),
             try d.shapeSchema(T.older_bash_shape),

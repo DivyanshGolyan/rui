@@ -1961,6 +1961,7 @@ pub const JsonWorkState = struct {
         const Wire = struct {
             kind: JsonEnum(Kind),
             since: JsonString(20),
+            compaction: OmittableJson(bool) = .{},
             due_at_ms: OmittableJson(JsonString(20)) = .{},
             cause: OmittableJson(JsonString(protocol.max_code_bytes)) = .{},
             attempt: OmittableJson(JsonString(20)) = .{},
@@ -1982,9 +1983,11 @@ pub const JsonWorkState = struct {
             .idle, .pending, .working, .approval, .stopping, .finished => @splat(false),
         };
         if (!std.mem.eql(bool, &present, &owned)) return error.InvalidCharacter;
+        if (wire.compaction.isPresent() and kind != .working) return error.InvalidCharacter;
         if (wire.call.isPresent() and kind != .bash) return error.InvalidCharacter;
         const since = number(wire.since, false) catch return error.InvalidCharacter;
         const value: protocol.WorkState = switch (kind) {
+            .working => .{ .working = .{ .since = since, .compaction = wire.compaction.value orelse false } },
             .retrying => .{ .retrying = .{
                 .since = since,
                 .due_at_ms = number(wire.due_at_ms.value.?, false) catch return error.InvalidCharacter,
@@ -2015,7 +2018,7 @@ pub const JsonWorkState = struct {
                 .since = since,
                 .cause = std.meta.stringToEnum(protocol.session_work.StopCause, wire.cause.value.?.slice()) orelse return error.InvalidCharacter,
             } },
-            inline .idle, .pending, .working, .approval, .stopping, .finished => |tag| @unionInit(protocol.WorkState, @tagName(tag), .{ .since = since }),
+            inline .idle, .pending, .approval, .stopping, .finished => |tag| @unionInit(protocol.WorkState, @tagName(tag), .{ .since = since }),
         };
         return .{ .value = value };
     }
@@ -2385,7 +2388,7 @@ test "refused peer activity retains absent and canonical targets" {
     }
 }
 
-test "a work state reads back exactly the facts its kind owns" {
+test "SUI-47 work state wire preserves owned facts" {
     var cause: protocol.Bounded(protocol.max_code_bytes) = .{};
     try cause.set("provider_temporary_http_429");
     var quota: protocol.Bounded(protocol.max_code_bytes) = .{};
@@ -2396,6 +2399,7 @@ test "a work state reads back exactly the facts its kind owns" {
         .{ .idle = .{ .since = 1 } },
         .{ .pending = .{ .since = 2 } },
         .{ .working = .{ .since = 3 } },
+        .{ .working = .{ .since = 3, .compaction = true } },
         .{ .retrying = .{ .since = 4, .due_at_ms = 4_500, .cause = cause, .attempt = 2 } },
         .{ .bash = .{ .since = 5, .call = 0, .description = description, .running = 1, .approvals = 0 } },
         .{ .bash = .{ .since = 5, .call = 3, .description = null, .running = 2, .approvals = 3 } },
@@ -2414,10 +2418,20 @@ test "a work state reads back exactly the facts its kind owns" {
         try (protocol.WorkStateJson{ .state = state }).writeJson(&writer);
         const parsed = try std.json.parseFromSlice(JsonWorkState, std.testing.allocator, writer.buffered(), .{});
         defer parsed.deinit();
+        try std.testing.expectEqual(std.meta.activeTag(state), std.meta.activeTag(parsed.value.value));
+        if (state == .working) {
+            try std.testing.expectEqual(state.working.since, parsed.value.value.working.since);
+            try std.testing.expectEqual(state.working.compaction, parsed.value.value.working.compaction);
+        }
         var again: [protocol.WorkStateJson.max_json_bytes]u8 = undefined;
         var again_writer = std.Io.Writer.fixed(&again);
         try std.json.Stringify.value(parsed.value, .{}, &again_writer);
         try std.testing.expectEqualStrings(writer.buffered(), again_writer.buffered());
+        if (state != .working) {
+            var forged: [protocol.WorkStateJson.max_json_bytes + 24]u8 = undefined;
+            const bytes = try std.fmt.bufPrint(&forged, "{s},\"compaction\":true}}", .{writer.buffered()[0 .. writer.buffered().len - 1]});
+            try std.testing.expectError(error.InvalidCharacter, std.json.parseFromSlice(JsonWorkState, std.testing.allocator, bytes, .{}));
+        }
     }
     for ([_][]const u8{
         "{\"kind\":\"bash\",\"since\":\"5\",\"description\":null,\"running\":\"1\",\"approvals\":\"0\"}",
@@ -2427,11 +2441,21 @@ test "a work state reads back exactly the facts its kind owns" {
         defer parsed.deinit();
         try std.testing.expectEqual(call, parsed.value.value.bash.call);
     }
+    for ([_]bool{ false, true }) |compaction| {
+        var bytes: [80]u8 = undefined;
+        const text = try std.fmt.bufPrint(&bytes, "{{\"kind\":\"working\",\"since\":\"3\",\"compaction\":{}}}", .{compaction});
+        const parsed = try std.json.parseFromSlice(JsonWorkState, std.testing.allocator, text, .{});
+        defer parsed.deinit();
+        try std.testing.expectEqual(compaction, parsed.value.value.working.compaction);
+    }
     for ([_][]const u8{
         "{\"kind\":\"idle\",\"since\":\"1\",\"cause\":\"stop\"}",
         "{\"kind\":\"retrying\",\"since\":\"4\",\"due_at_ms\":\"4500\",\"cause\":\"c\"}",
         "{\"kind\":\"bash\",\"since\":\"5\",\"running\":\"1\",\"approvals\":\"0\"}",
         "{\"kind\":\"working\",\"since\":\"3\",\"call\":\"0\"}",
+        "{\"kind\":\"pending\",\"since\":\"3\",\"compaction\":true}",
+        "{\"kind\":\"working\",\"since\":\"3\",\"compaction\":null}",
+        "{\"kind\":\"working\",\"since\":\"3\",\"compaction\":\"true\"}",
         "{\"kind\":\"failed\",\"since\":\"9\",\"code\":\"c\"}",
         "{\"kind\":\"pending\",\"since\":\"0\"}",
         "{\"kind\":\"pending\",\"since\":2}",
