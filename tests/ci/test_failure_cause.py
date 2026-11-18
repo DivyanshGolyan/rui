@@ -151,7 +151,8 @@ class WiringTest(unittest.TestCase):
         release = re.search(r"(?ms)^  release:\n(.*?)(?=^  [a-z_]+:|\Z)", text)[1]
         # Release reads the version from release_build, which a rerun keeps unless it failed.
         self.assertIn("needs: [batch, release_build, qualified]", release, "a rerun's Release waits for the rerun verdict")
-        self.assertNotIn("if:", release, "Release runs only when qualified succeeds")
+        self.assertIn("if: ${{ !cancelled() && needs.qualified.result == 'success' }}", release,
+                      "Release runs only when qualified succeeds")
 
     def test_the_retry_runs_trusted_code_once_per_failed_pr_run_or_promotion(self):
         text = (ROOT / ".github/workflows/infra-retry.yml").read_text()

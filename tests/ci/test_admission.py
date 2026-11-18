@@ -22,7 +22,7 @@ PROMOTE = ROOT / '.github/workflows/promote.yml'
 RELEASE = ROOT / '.github/workflows/release.yml'
 RELEASE_BUILD = ROOT / '.github/workflows/release-build.yml'
 RENDERER = ROOT / '.github/workflows/renderer-contracts.yml'
-MAIN_BUILD = ROOT / '.github/workflows/main-build.yml'
+QUALIFIER = ROOT / '.github/workflows/main-qualifier.yml'
 
 
 def job(text, name):
@@ -771,14 +771,15 @@ class ReleaseFlowTest(unittest.TestCase):
                 self.assertNotRegex(path.read_text(), r'auto_land|auto-land\.yml|stable_hold|completed_run')
 
     def test_only_a_manual_promotion_publishes_main(self):
-        for workflow in (RELEASE, RELEASE_BUILD):
+        # Qualify main builds the release archives too, but only Promote publishes them.
+        for workflow, expected in ((RELEASE, ['promote.yml']), (RELEASE_BUILD, ['main-qualifier.yml', 'promote.yml'])):
             release = workflow.read_text().split('\npermissions:', 1)[0]
             self.assertIn('  workflow_call:', release)
             for trigger in ('push:', 'workflow_dispatch:', 'workflow_run:', 'schedule:'):
                 self.assertNotIn(trigger, release)
             callers = [path.name for path in (ROOT / '.github/workflows').glob('*.yml')
                        if f'uses: ./.github/workflows/{workflow.name}' in path.read_text()]
-            self.assertEqual(callers, ['promote.yml'])
+            self.assertCountEqual(callers, expected)
         promote = PROMOTE.read_text()
         self.assertEqual(re.findall(r'(?m)^  ([a-z_]+):', promote.split('\npermissions:', 1)[0]), ['workflow_dispatch'])
         selected = CHECK.read_text().split('\npermissions:', 1)[0]
@@ -786,23 +787,45 @@ class ReleaseFlowTest(unittest.TestCase):
         self.assertNotIn('  push:', selected)
         self.assertNotIn('workflow_run:', selected)
 
-    def test_main_build_compiles_through_selected_checks_and_reports_outside_it(self):
-        text = MAIN_BUILD.read_text()
+    def test_main_qualifier_runs_promotions_tier_and_records_without_publishing(self):
+        self.assertFalse((ROOT / '.github/workflows/main-build.yml').exists())
+        text = QUALIFIER.read_text()
         on = text.split('\npermissions:', 1)[0]
-        self.assertIn('  push:\n    branches: [main]\n', on)
-        self.assertNotIn('pull_request', on)
-        self.assertRegex(text, r'(?m)^concurrency:\n  # .*\n  group: main-build\n  cancel-in-progress: true$')
-        build = job(text, 'build')
-        self.assertIn('uses: ./.github/workflows/check.yml', build)
-        self.assertIn('compile_only: true', build)
-        self.assertIn('promotion: false', build)
-        self.assertNotIn('write', build)
-        self.assertNotRegex(text, r'zig build|build_artifact|\.github/actions/setup')
+        self.assertRegex(on, r"(?m)^  schedule:\n    - cron: '[0-9]+ \*/3 \* \* \*'$")
+        self.assertIn('  workflow_dispatch:', on)
+        self.assertNotRegex(on, r'push:|pull_request')
+        self.assertRegex(text, r'(?m)^concurrency:\n  # .*\n  group: main-qualifier\n  cancel-in-progress: false$')
+        self.assertNotRegex(text, r'/release\.yml|id-token|actions: write')
+        # Only the release plan's draft lookup holds push access, as in Promote.
+        self.assertEqual(text.count('contents: write'), 1)
+        self.assertIn('contents: write', job(text, 'release_build'))
+        self.assertIn("github.ref == 'refs/heads/main'", job(text, 'batch'))
+        self.assertIn('main_qualified.py batch --head "$HEAD_SHA"', job(text, 'batch'))
+        selected = job(text, 'selected')
+        self.assertIn('uses: ./.github/workflows/check.yml', selected)
+        self.assertIn('promotion: true', selected)
+        self.assertIn('base: ${{ needs.batch.outputs.base }}', selected)
+        self.assertIn('uses: ./.github/workflows/release-build.yml', job(text, 'release_build'))
+        for name in ('release_build', 'selected', 'upgrade', 'renderer'):
+            self.assertIn("if: ${{ needs.batch.outputs.needed == 'true' }}", job(text, name))
+        for name, workflow in (('upgrade', 'previous-release-upgrade.yml'), ('renderer', 'renderer-contracts.yml')):
+            body = job(text, name)
+            self.assertIn(f'uses: ./.github/workflows/{workflow}', body)
+            self.assertIn('needs: [batch, release_build]', body)
+            self.assertIn('batch-base: ${{ needs.batch.outputs.base }}', body)
+            self.assertIn('release-version: ${{ needs.release_build.outputs.version }}', body)
+        qualified = job(text, 'qualified')
+        self.assertIn('if: ${{ always() && ', qualified)
+        self.assertIn('statuses: write', qualified)
+        self.assertIn('main_qualified.py record --sha "$HEAD_SHA" --state "$state" --run-id "$GITHUB_RUN_ID" --version "$VERSION"',
+                      qualified)
         report = job(text, 'report')
-        self.assertIn('needs: build', report)
-        self.assertIn('issues: write', report)
-        self.assertIn('python3 -B tests/ci/main_build.py', report)
-        self.assertIn('compile_only:', CHECK.read_text().split('\npermissions:', 1)[0])
+        self.assertIn('--workflow "Qualify main"', report)
+        self.assertIn('--label main-red', report)
+        # Promote and Qualify main on one SHA never cancel each other's tiers.
+        self.assertIn('${{ github.workflow }}', UPGRADE.read_text().split('\nconcurrency:', 1)[1].split('\n\n', 1)[0])
+        self.assertIn('github.workflow', RENDERER.read_text().split('\nconcurrency:', 1)[1].split('\n\n', 1)[0])
+        self.assertIn('github.workflow', CHECK.read_text().split('\nconcurrency:', 1)[1].split('\n\n', 1)[0])
 
     def test_promotion_publishes_only_after_every_tier_on_the_same_sha(self):
         text = PROMOTE.read_text()
@@ -826,24 +849,32 @@ class ReleaseFlowTest(unittest.TestCase):
         self.assertCountEqual(needs, ['batch', 'release_build', 'selected', 'upgrade', 'renderer'])
         release = job(text, 'release')
         self.assertIn('needs: [batch, release_build, qualified]', release)
-        self.assertNotIn('if:', release)
+        self.assertIn("if: ${{ !cancelled() && needs.qualified.result == 'success' }}", release)
         self.assertIn('sha: ${{ needs.batch.outputs.head }}', release)
-        self.assertIn('version: ${{ needs.release_build.outputs.version }}', release)
+        self.assertIn("version: ${{ needs.batch.outputs.reuse == 'true' && needs.batch.outputs.version"
+                      " || needs.release_build.outputs.version }}", release)
+        # A green qualification publishes that run's archives without qualifying again.
+        self.assertIn('artifact-run: ${{ needs.batch.outputs.run }}', release)
+        self.assertIn('main_qualified.py choose --main "$MAIN_SHA" --sha "$CHOSEN"', job(text, 'batch'))
+        for name in ('release_build', 'selected', 'upgrade', 'renderer'):
+            self.assertIn("needs.batch.outputs.reuse != 'true'", job(text, name).split('\n    if:', 1)[1].split('\n', 1)[0])
+        self.assertIn("if: ${{ always() && needs.batch.result == 'success' && needs.batch.outputs.size != '0' }}", qualified)
+        self.assertEqual(RELEASE.read_text().count('gh run download "$ARTIFACT_RUN"'), 3)
+        self.assertNotIn('gh run download "$GITHUB_RUN_ID"', RELEASE.read_text())
         # Publication never rebuilds: it checks the archives against the digests recorded at build time.
         publication = RELEASE.read_text()
         self.assertNotRegex(publication, r'zig build|\.github/actions/setup')
         self.assertIn('rui-digests/SHA256SUMS', publication)
         self.assertIn('sha256sum --check --strict SHA256SUMS', publication)
         self.assertIn('name: rui-digests', RELEASE_BUILD.read_text())
-        script = step_script(qualified, 'Require every selected promotion tier')
-        good = dict(BATCH_RESULT='success', RELEASE_BUILD_RESULT='success', SELECTED_RESULT='success',
-                    UPGRADE_RESULT='success', RENDERER_RESULT='success')
-        self.assertEqual(subprocess.run(['bash', '-c', script], env=good).returncode, 0)
-        for key in good:
-            for result in ('failure', 'cancelled', 'skipped', ''):
-                with self.subTest(key=key, result=result):
-                    self.assertNotEqual(subprocess.run(['bash', '-c', script],
-                        env=dict(good, **{key: result}), capture_output=True).returncode, 0)
+        script = step_script(qualified, 'Record the verdict on HEAD')
+        self.assertIn('main_qualified.py verdict $RESULTS', script)
+        self.assertIn('main_qualified.py record --sha "$HEAD_SHA" --state "$state"', script)
+        # The requirement is report_issue.py's aggregate step: it files nothing of its own.
+        self.assertIn('      - name: Require every selected promotion tier\n', qualified)
+        self.assertIn('run: test "$STATE" = success', qualified.split('Require every selected promotion tier', 1)[1])
+        for tier in ('release_build', 'selected', 'upgrade', 'renderer'):
+            self.assertIn(f'${{{{ needs.{tier}.result }}}}', qualified)
 
     BISECT = 'python3 -B tests/ci/promotion.py --base "$BASE" --head "$HEAD_SHA" --logs "$RUNNER_TEMP/promotion-bisect"'
 

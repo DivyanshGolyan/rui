@@ -1,0 +1,156 @@
+name: Qualify main
+# Every three hours, and by hand, run Promote's full qualification tier on main
+# HEAD when HEAD has no main-qualified verdict yet: release archives built cold
+# first, Linux and macOS suites, the upgrade check and renderer contracts. The
+# batch runs from the last green qualified commit (else stable), so a failing
+# step bisects to the commit that broke it and files one main-red issue per
+# cause. It records its verdict and its run as the main-qualified status of
+# HEAD; Promote publishes a green one's archives without qualifying again.
+# It never publishes, merges or reverts.
+on:
+  schedule:
+    - cron: '17 */3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # One qualification at a time; a newer main waits for the current run.
+  group: main-qualifier
+  cancel-in-progress: false
+
+jobs:
+  batch:
+    if: ${{ github.ref == 'refs/heads/main' && !github.event.repository.private }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      statuses: write
+    outputs:
+      base: ${{ steps.batch.outputs.base }}
+      head: ${{ steps.batch.outputs.head }}
+      needed: ${{ steps.batch.outputs.needed }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Name the batch since the last qualified commit
+        id: batch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          outputs=$(python3 -B tests/ci/main_qualified.py batch --head "$HEAD_SHA")
+          echo "$outputs" >> "$GITHUB_OUTPUT"
+          echo "$outputs"
+      - name: Mark HEAD as qualifying
+        if: ${{ steps.batch.outputs.needed == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.sha }}
+        run: python3 -B tests/ci/main_qualified.py record --sha "$HEAD_SHA" --state pending --run-id "$GITHUB_RUN_ID"
+  release_build:
+    # The archives Promote publishes when this run qualifies HEAD. Publishes nothing.
+    needs: batch
+    if: ${{ needs.batch.outputs.needed == 'true' }}
+    permissions:
+      # The plan sees draft reservations only with push access; it never writes.
+      contents: write
+      actions: read
+    uses: ./.github/workflows/release-build.yml
+    with:
+      sha: ${{ needs.batch.outputs.head }}
+  selected:
+    needs: batch
+    if: ${{ needs.batch.outputs.needed == 'true' }}
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read
+      checks: read
+    uses: ./.github/workflows/check.yml
+    with:
+      base: ${{ needs.batch.outputs.base }}
+      promotion: true
+  upgrade:
+    needs: [batch, release_build]
+    if: ${{ needs.batch.outputs.needed == 'true' }}
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/previous-release-upgrade.yml
+    with:
+      candidate-ref: ${{ needs.batch.outputs.head }}
+      batch-base: ${{ needs.batch.outputs.base }}
+      release-version: ${{ needs.release_build.outputs.version }}
+  renderer:
+    needs: [batch, release_build]
+    if: ${{ needs.batch.outputs.needed == 'true' }}
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/renderer-contracts.yml
+    with:
+      ref: ${{ needs.batch.outputs.head }}
+      batch-base: ${{ needs.batch.outputs.base }}
+      release-version: ${{ needs.release_build.outputs.version }}
+  qualified:
+    # The verdict, recorded on HEAD whatever it is; a cancelled tier records an
+    # unfinished verdict that the next run qualifies again.
+    needs: [batch, release_build, selected, upgrade, renderer]
+    if: ${{ always() && needs.batch.outputs.needed == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      statuses: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Record the verdict on HEAD
+        id: verdict
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ needs.batch.outputs.head }}
+          VERSION: ${{ needs.release_build.outputs.version }}
+          RESULTS: >-
+            ${{ needs.release_build.result }} ${{ needs.selected.result }}
+            ${{ needs.upgrade.result }} ${{ needs.renderer.result }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2086 # one word per tier result
+          state=$(python3 -B tests/ci/main_qualified.py verdict $RESULTS | sed -n 's/^state=//p')
+          python3 -B tests/ci/main_qualified.py record --sha "$HEAD_SHA" --state "$state" --run-id "$GITHUB_RUN_ID" --version "$VERSION"
+          echo "$HEAD_SHA: main-qualified $state" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "state=$state" >> "$GITHUB_OUTPUT"
+      - name: Require every selected qualification tier
+        env:
+          STATE: ${{ steps.verdict.outputs.state }}
+        run: test "$STATE" = success
+  report:
+    # One issue per failure signature, with the bisect's verdict on it.
+    needs: [batch, selected, upgrade, renderer]
+    if: ${{ failure() && needs.batch.result == 'success' && needs.batch.outputs.needed == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: File each failure under its cause
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ needs.batch.outputs.head }}
+        run: python3 -B tests/ci/report_issue.py --workflow "Qualify main" --run-id "$GITHUB_RUN_ID" --sha "$HEAD_SHA" --label main-red
