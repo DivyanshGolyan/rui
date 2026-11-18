@@ -284,8 +284,8 @@ noinline fn clientCommand(init: std.process.Init, command: cli_args.Command, par
         .session_unpin => try pinSession(init, parsed, false),
         .session_interrupt_model => try interruptModel(init, parsed),
         .session_read_conversation => try readConversation(init, parsed),
-        .session_inspect_part => try readPublicPart(init, parsed, false, false),
-        .session_read_image_part => try readPublicPart(init, parsed, false, true),
+        .session_list_parts => try readPublicParts(init, parsed, .message, false),
+        .session_read_part => try readPublicParts(init, parsed, .message, true),
         .session_resume => try resumeSession(init, parsed),
         .request_inspect => try observe(init, parsed),
         .request_wait => try waitRequest(init, parsed),
@@ -300,8 +300,8 @@ noinline fn clientCommand(init: std.process.Init, command: cli_args.Command, par
         .action_deny => try decideAction(init, parsed, .deny),
         .action_read_call_id => try readActionContent(init, parsed, .call_id),
         .action_read_arguments => try readActionContent(init, parsed, .arguments),
-        .action_inspect_part => try readPublicPart(init, parsed, true, false),
-        .action_read_image_part => try readPublicPart(init, parsed, true, true),
+        .action_list_parts => try readPublicParts(init, parsed, .action, false),
+        .action_read_part => try readPublicParts(init, parsed, .action, true),
         .store_schema => {
             if (!std.mem.eql(u8, parsed.get("engine").?, "mysql")) return error.InvalidArguments;
             const store_schema = @import("store.zig");
@@ -3421,34 +3421,58 @@ fn inspect(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     }
 }
 
-fn readPublicPart(init: std.process.Init, parsed: *const cli_args.Parsed, action: bool, bytes: bool) !void {
+/// `list-parts` prints the owner's certified part list once it decodes whole;
+/// `read-part` streams one part's exact bytes, checked against that list.
+/// Either writes nothing to stdout when it fails.
+fn readPublicParts(init: std.process.Init, parsed: *const cli_args.Parsed, kind: protocol.content_value.Owner.Kind, read_part: bool) !void {
+    const io = init.io;
     const session = parsed.get("session").?;
-    const id = if (action) (try parsed.number(u64, "action")).? else (try parsed.number(u64, "admission")).?;
-    const target: protocol.PublicPartTarget = if (action) .{ .action = id } else .{ .message = id };
-    const ordinal = (try parsed.number(u64, "ordinal")).?;
+    const owner: protocol.content_value.Owner = switch (kind) {
+        .message => .{ .message = (try parsed.number(u64, "admission")).? },
+        .action => .{ .action = (try parsed.number(u64, "action")).? },
+    };
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const store = try selectedStore(init, parsed.get("store"), &selected_buffer);
-    const caller: client.Requests = .{ .io = init.io };
-    if (bytes) {
-        if (caller.readPublicPartBytes(store, session, target, ordinal, std.Io.File.stdout()) catch |err| return readTransportFailure(init.io, store, err)) |failure| {
-            try writeReadFailure(init.io, failure, session, .stderr);
-            return readFailureError(failure);
-        }
-        return;
-    }
+    const caller: client.Requests = .{ .io = io };
+    const file = try renderScratch(init);
+    defer file.close(io);
     var reply_buffer: client.ReplyBuffer = .{};
-    var output: JsonOutput = undefined;
-    var sink: JsonOutput.Sink = .{ .writer = output.init(init.io, .stdout) };
-    const reply = caller.readPublicPart(store, session, target, ordinal, &sink, &reply_buffer) catch |err| return readTransportFailure(init.io, store, err);
-    switch (reply) {
-        .report => {
-            try sink.writer.writeByte('\n');
-            try output.finish();
+    const reply = caller.readPublicParts(store, session, owner, file, &reply_buffer) catch |err| return readTransportFailure(io, store, err);
+    const list = switch (try protocol_reply.PublicPartsReply.decode(io, file, reply, .{ .session = session, .owner = owner })) {
+        .list => |list| list,
+        .failure => |failure| {
+            try writeReadFailure(io, failure, session, .stderr);
+            return readFailureError(failure);
         },
-        .command => |command| {
-            try writeCommandReply(init.io, command, .stderr);
-            return error.HostInvocationFailed;
-        },
+    };
+    if (!read_part) {
+        var output: JsonOutput = undefined;
+        const writer = output.init(io, .stdout);
+        var file_reader = file.reader(io, &.{});
+        var input: [protocol.content_window_bytes]u8 = undefined;
+        var body = file_reader.interface.limited(.limited64(list.bytes), &input);
+        _ = try body.interface.streamRemaining(writer);
+        try writer.writeByte('\n');
+        return output.finish();
+    }
+    const ordinal = (try parsed.number(u32, "part")).?;
+    if (ordinal >= list.count) {
+        // The certified list has no such part: report it as the Host's part read would.
+        var missing: protocol_reply.ReadFailure = .{ .status = 409, .diagnostic = .{ .type = .{}, .code = .{} } };
+        try missing.diagnostic.type.set(@tagName(protocol.ErrorType.parts_unavailable));
+        try missing.diagnostic.code.set("ContentNotFound");
+        try writeReadFailure(io, missing, session, .stderr);
+        return readFailureError(missing);
+    }
+    const iterator = try init.gpa.create(protocol_reply.PartIterator);
+    defer init.gpa.destroy(iterator);
+    try list.iterator(iterator);
+    const part = while (try iterator.next()) |part| {
+        if (part.ordinal == ordinal) break part;
+    } else return error.InvalidResponse;
+    if (caller.readPublicPartContent(store, session, owner, part, std.Io.File.stdout()) catch |err| return readTransportFailure(io, store, err)) |failure| {
+        try writeReadFailure(io, failure, session, .stderr);
+        return readFailureError(failure);
     }
 }
 

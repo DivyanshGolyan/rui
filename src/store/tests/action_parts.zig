@@ -33,7 +33,7 @@ fn hostToolSet(digests: *[records.len][32]u8) tools.HostToolSet {
     return .{ .records = &records, .digests = digests };
 }
 
-fn propose(storage: *core.Store, tmp: *std.testing.TmpDir, comptime runner: tools.Runner) !@import("../../bounded.zig").Bounded(@import("../../session_id.zig").max_reference_bytes) {
+pub fn propose(storage: *core.Store, tmp: *std.testing.TmpDir, comptime runner: tools.Runner) !@import("../../bounded.zig").Bounded(@import("../../session_id.zig").max_reference_bytes) {
     var workspace: [protocol.max_workspace_bytes]u8 = undefined;
     var configure = try testing.completeConfiguration("action-parts-config", "", try testing.canonicalCwd(std.testing.io, &workspace), "model-a");
     const name = if (runner == .bash) "bash" else "fetch_page";
@@ -529,111 +529,4 @@ test "old text operation retry excludes later image message and background final
             try expectOldTextView(&storage, retry);
         }
     }.run);
-}
-
-fn expectedPublicDigest(bytes: []const u8) [32]u8 {
-    const domain = "rui/content/v1";
-    var hash = std.crypto.hash.sha2.Sha256.init(.{});
-    var prefix: [8]u8 = undefined;
-    std.mem.writeInt(u64, &prefix, domain.len, .big);
-    hash.update(&prefix);
-    hash.update(domain);
-    hash.update(bytes);
-    return hash.finalResult();
-}
-
-fn expectPublicParts(storage: *core.Store, session: @import("../../bounded.zig").Bounded(@import("../../session_id.zig").max_reference_bytes), target: @import("../domain/public_parts.zig").Target, parts: []const testing.MessagePart) !void {
-    var public = try @import("../domain/public_parts.zig").Reader.init(session, target);
-    defer public.deinit();
-    var ordinal: usize = 0;
-    while (true) switch (try storage.readPublicParts(&public)) {
-        .pending => {},
-        .done => break,
-        .part => |part| {
-            const expected = parts[ordinal];
-            try std.testing.expectEqual(@as(u32, @intCast(ordinal)), part.ordinal);
-            try std.testing.expectEqual(expected.kind == .image, part.kind == .image);
-            if (expected.kind == .image) {
-                const format = expected.kind.image.assertion orelse .png;
-                try std.testing.expectEqual(format, part.kind.image.media.format);
-            }
-            try std.testing.expectEqual(@as(u64, expected.bytes.len), part.location.reference.length);
-            try std.testing.expectEqualSlices(u8, &expectedPublicDigest(expected.bytes), &part.location.reference.digest);
-            var reader: @import("../domain/content.zig").ContentReader = undefined;
-            reader.open(part.location);
-            defer reader.close();
-            var offset: usize = 0;
-            var buffer: [257]u8 = undefined;
-            while (offset < expected.bytes.len) {
-                const count = try reader.read(offset, &buffer);
-                try std.testing.expect(count > 0);
-                try std.testing.expectEqualSlices(u8, expected.bytes[offset..][0..count], buffer[0..count]);
-                offset += count;
-            }
-            ordinal += 1;
-        },
-    };
-    try std.testing.expectEqual(parts.len, ordinal);
-}
-
-test "INS-9 public parts preserve ordered metadata and certify the manifest" {
-    try testing.forEachEngine(struct {
-        fn run(case: *testing.Case) !void {
-            for ([_][]const testing.MessagePart{ &mixed, &images, &text }, 0..) |parts, parts_index| {
-                for ([_]bool{ false, true }) |action_target| {
-                    for ([_]bool{ false, true }) |corrupt| {
-                        if (corrupt and parts_index != 0) continue;
-                        var tmp = std.testing.tmpDir(.{});
-                        defer tmp.cleanup();
-                        var storage: core.Store = undefined;
-                        try testing.testingStoreWith(case, &storage, &tmp, std.testing.io, .{ .host_tool_set = &tools.built_in_tool_set });
-                        defer storage.close() catch unreachable;
-                        const session = try propose(&storage, &tmp, .bash);
-                        const selected = (try storage.nextAction(.bash, .fromFree(2, true))).?;
-                        const binding = (try storage.admitActionAttempt(selected, 30_000, .{})).?.permit.binding;
-                        try testing.settleTestActionParts(&storage, &tmp, binding, parts);
-                        try testing.submitTestMessageParts(&storage, &tmp, "public-message", session.slice(), parts);
-                        const admission = try testing.queryU64(&storage, "SELECT admission_id FROM message_admission WHERE command_key=?1", .{"public-message"});
-                        const target: @import("../domain/public_parts.zig").Target = if (action_target) .{ .action = selected.action_id } else .{ .message = admission };
-                        if (!corrupt) {
-                            try expectPublicParts(&storage, session, target, parts);
-                        } else {
-                            const content = if (action_target) try testing.queryU64(&storage, "SELECT resolution_content_id FROM action_operation WHERE action_id=?1", .{selected.action_id}) else try testing.queryU64(&storage, "SELECT content_id FROM message_admission WHERE admission_id=?1", .{admission});
-                            try testing.exec(&storage, "DELETE FROM content_part WHERE content_id=?1 AND ordinal=?2", .{ content, parts.len - 1 });
-                            var reader = try @import("../domain/public_parts.zig").Reader.init(session, target);
-                            defer reader.deinit();
-                            while (true) {
-                                const progress = storage.readPublicParts(&reader) catch |err| {
-                                    try std.testing.expectEqual(error.CorruptStore, err);
-                                    try std.testing.expect(storage.isFenced());
-                                    break;
-                                };
-                                try std.testing.expect(progress == .pending);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }.run);
-}
-
-test "seed CLI mixed parts fixture" {
-    // INS-10: seed the Store used by the image export owner.
-    const path = std.c.getenv("RUI_PARTS_SEED_DIR") orelse return;
-    const directory = try std.Io.Dir.openDirAbsolute(std.testing.io, std.mem.span(path), .{});
-    defer directory.close(std.testing.io);
-    var tmp: std.testing.TmpDir = .{ .dir = directory, .parent_dir = .cwd(), .sub_path = @splat(0) };
-    var storage: core.Store = undefined;
-    try testing.testingStoreToolSet(&storage, &tmp, std.testing.io, &tools.built_in_tool_set);
-    const session = try propose(&storage, &tmp, .bash);
-    const selected = (try storage.nextAction(.bash, .fromFree(2, true))).?;
-    const binding = (try storage.admitActionAttempt(selected, 30_000, .{})).?.permit.binding;
-    try testing.settleTestActionParts(&storage, &tmp, binding, &mixed);
-    try testing.submitTestMessageParts(&storage, &tmp, "cli-mixed-message", session.slice(), &mixed);
-    const admission = try testing.queryU64(&storage, "SELECT admission_id FROM message_admission WHERE command_key=?1", .{"cli-mixed-message"});
-    var output: [256]u8 = undefined;
-    const receipt = try std.fmt.bufPrint(&output, "{{\"session\":\"{s}\",\"admission\":\"{d}\",\"action\":\"{d}\"}}\n", .{ session.slice(), admission, selected.action_id });
-    try storage.close();
-    try directory.writeFile(std.testing.io, .{ .sub_path = "parts-seed.json", .data = receipt });
 }
