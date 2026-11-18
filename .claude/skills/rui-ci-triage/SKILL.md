@@ -73,7 +73,7 @@ Search the open CI issues for the signature before filing, and group them by fix
   Reproduce it on Linux by pointing `TMPDIR` at a long symlinked directory.
 - Accept a race fix only when the forced run fails without it and passes with it.
   A later Mac green proves nothing alone.
-- Changes to fixtures that use raw sockets or wait on process lifetime need real native Mac evidence from the candidate admission run.
+- Changes to fixtures that use raw sockets or wait on process lifetime need real native Mac evidence: PRs run no macOS, so dispatch Selected checks with `native_targets` on the candidate.
 
 ## Report
 

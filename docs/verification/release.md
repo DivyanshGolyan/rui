@@ -21,13 +21,13 @@ The existing Linux producers and artifact restore share that compile selection; 
 This is compilation, not execution of every unit test, and does not add portable `test-logic` unless that root is selected separately.
 Required producers must succeed even when no product execution target was selected.
 
-[Selected checks](../../.github/workflows/check.yml) qualify each ready PR's immutable merge candidate.
-For normal changes, Linux runs the affected targets from [select_tests.py](../../tests/ci/select_tests.py), `typecheck-macos` when the change touches what it compiles (Zig, C, the build, patches and embedded files), and, when selected, the `stack-frames` oracle.
-Native macOS runs the affected targets, or `check`, only when the change touches a [Mac path](../../tests/ci/platform_boundary.py): Darwin branches, process observation and Host retirement/lease owners, C and shell sources, the PTY launcher, the HTTP/2 client, release and install scripts, and the Mac workflow. The platform-boundary scanner enforces the process observation and lease sites alongside the other platform-sensitive operations. The CLI is a Mac path because it directly waits for Host retirement and launches and restarts Hosts; its edits therefore select native Mac.
+[Selected checks](../../.github/workflows/check.yml) qualify each ready PR's immutable merge candidate with the PR tier only: Linux compilation and the affected Linux targets from [select_tests.py](../../tests/ci/select_tests.py).
+[ci_plan.py](../../tests/ci/ci_plan.py) owns that tier and routes everything else to promotion: native macOS, `typecheck-macos`, the `stack-frames` oracle, the previous installed-release upgrade, renderer contracts, the cache-execution proof and the Linux-memory collector checks.
+The owner accepted on 18 Nov 2026 that a defect only those checks catch now surfaces at promotion, which bisects the batch, rather than on the PR; in the five days measured these checks took about 48% of PR runner-minutes.
+The selector still computes the [Mac paths](../../tests/ci/platform_boundary.py) and the upgrade and `typecheck-macos` obligations; on a PR they only keep a change out of the documentation lane.
+Promotion selects them over its whole batch: native Mac runs its core targets plus the batch's selection, `typecheck-macos`, cache execution and Linux memory run when the batch touches their paths, and the main build type-checks macOS after every merge.
 Darwin-only linking and settings live in `build/darwin.zig`, a Mac path.
-Other build plumbing (`build.zig`, `build.zig.zon`, the setup action, `tests/ci/qualification.py`) is not a Mac path: Linux runs it, `typecheck-macos` compiles Rui for Darwin, and promotion links and runs it on a Mac.
-The [previous installed-release upgrade](../../.github/workflows/previous-release-upgrade.yml) runs on Linux against that same candidate only for upgrade, installer and migration paths, the check itself, and a `schema.zig` edit that changes the Store format: its `schema_version`, a `bootstrap_digests` row or a migration step.
-Promotion runs it on both systems.
+The [previous installed-release upgrade](../../.github/workflows/previous-release-upgrade.yml) runs on both systems in every promotion.
 In the same job and suite, `--running-host` starts the pinned v0.69.1 release on a private Store, saves a completed provider answer and Session configuration, and leaves the Host running while the candidate's rendered `release/install.sh` runs.
 The candidate is the existing `upgrade-fixture` production actor with a synthetic numeric release identity (ordinary untagged source builds report `unreleased`); archive transport is local, but checksum verification, extraction, publication and restart use the real release installer.
 The installer must exit 0 and name that Store's restart; without any subsequent start/restart command, status must report a new instance and the socket peer's executable must be the selected candidate and report its release version.
@@ -36,14 +36,13 @@ The real v0.69.1 Host has neither the later `chatgpt` route fact nor a Store hin
 Startup, install, observation and cleanup are bounded; failures stop both the known previous child and any candidate Host, retain private diagnostics only in the job's artifact directory, and otherwise remove the fixture root after confirmed lease release.
 The historical source pin still tests stopped-Store unsupported-format refusal separately.
 For a Store format change, run `python3 tests/ci/schema_number.py --check`, exercise the affected migrations with `-Dtest-filter`, and remove the new step's statements as a negative control. Ready CI supplies the unfiltered compile described above. Existing main digest rows and steps stay unchanged. Format 70's wire-label tests cover the exact one-statement step on both dialects and populated wire-13 SQLite reopen; its live MySQL witness requires a configured server. Format 74's tests cover the label's deletion on both dialects, a new Store without one, reopening without one, a populated format-73 SQLite Store whatever its label reads, and older formats still migrating; the MySQL witnesses require a configured server. Format 75's pin migration tests preserve populated Commands and stop references, create empty canonical pin objects, accept the new kind, retain nullable current pointers, and reopen through production SQLite admission. Its MySQL witnesses cover both a fresh format-74 shape and historical upgrades, plus absent and ambiguous kind-CHECK refusal before DDL. Run with a configured MySQL server; a skip is not proof.
-Renderer contracts run nonblocking only for renderer and frontend owners.
-The documentation lane skips heavyweight policy, product builds and suites, and prior-release upgrades.
+The documentation lane skips heavyweight policy, product builds and suites.
 It requires a successful plan with canonical empty product outputs and a successful Linux aggregate that verifies all product producers were skipped.
 The allowlist reads committed Git paths and modes against the selector's resolved base and candidate; any selected runtime, native, cache or resource obligation restores normal verification.
 Reference and consistency checks remain reviewed evidence, not automated link validation.
-The always-run `admission` aggregate requires the exact results for the declared change kind, including the selected Mac, upgrade and cache-execution checks for normal changes.
-Failed, cancelled, missing or unexpectedly skipped required jobs do not qualify a candidate, and an unselected Mac or upgrade job must be skipped.
-A draft PR runs only the plan (candidate, `git diff --check` and selection summary) and cheap aggregates; policy, builds, suites, codegen, typecheck, cache execution and previous-release upgrades are skipped.
+The always-run `admission` aggregate requires the exact results for the declared change kind; on a PR the Mac and cache-execution jobs must be skipped.
+Failed, cancelled, missing or unexpectedly skipped required jobs do not qualify a candidate, and an unselected Mac job must be skipped.
+A draft PR runs only the plan (candidate, `git diff --check` and selection summary) and cheap aggregates; policy, builds and suites are skipped.
 The plan owns draft routing without changing the diff's documentation/normal classification; readiness computes a fresh full selection.
 Draft checks never satisfy `admission`.
 Local `prepush.py` supplies cheap feedback only; [landing](../agents/landing.md#publish-and-merge) keeps current-candidate admission and clean Codex evidence as merge gates.
