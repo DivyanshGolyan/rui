@@ -3093,6 +3093,7 @@ test "Message observation work and recovery fit their exchange-owned response bo
     var bash_description: protocol.Bounded(protocol.session_work.max_description_bytes) = .{};
     try bash_description.set(&@as([protocol.session_work.max_description_bytes]u8, @splat(1)));
     var observation = store_module.CommandObservation{ .status = .accepted, .kind = .{ .message = .{
+        .form = .parts,
         .content = .{ .length = max, .digest = @splat(0xff) },
         .queue = .{ .admission_id = max, .state = .{ .processing = .{ .turn_id = max, .operation_id = max, .attempt_ordinal = max } } },
         .admitted_at = max,
@@ -4989,7 +4990,9 @@ const MutationWitness = struct {
                 .rejected => |code| hash.update(code.slice()),
                 .conflict => {},
             }
-            const input = try std.json.Stringify.valueAlloc(std.testing.allocator, answer.input, .{});
+            // The frozen witness predates input forms; base replies are text-form.
+            if (answer.input) |value| try std.testing.expect(value.form == .text);
+            const input = try std.json.Stringify.valueAlloc(std.testing.allocator, if (answer.input) |value| value.content else null, .{});
             defer std.testing.allocator.free(input);
             hash.update(input);
         } else |err| hash.update(@errorName(err));
