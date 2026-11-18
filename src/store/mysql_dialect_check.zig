@@ -459,7 +459,7 @@ fn piece(comptime text: []const u8) []const []const u8 {
     return if (trimmed.len == 0) &.{} else &.{trimmed};
 }
 
-test "the dialect check prepares only when compiled in, skips without a server, and refuses a server it cannot check" {
+test "SH-70 the dialect check prepares only when compiled in, skips without a server, and refuses a server it cannot check" {
     const cases = [_]struct { compiled_in: bool, server: bool, want: Decision }{
         .{ .compiled_in = true, .server = true, .want = .prepare },
         .{ .compiled_in = true, .server = false, .want = .skip },

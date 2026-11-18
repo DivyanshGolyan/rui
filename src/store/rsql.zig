@@ -2476,12 +2476,90 @@ test "canonical form classification keeps filtered count portable inside an aggr
     );
 }
 
-test "markers nest, and text outside them is copied" {
-    try std.testing.expectEqualStrings(
-        "x IS NULL OR (length(CAST(x AS BLOB))=6 AND (x NOT GLOB '*[^a-f]*' AND length(x)=length(CAST(x AS BLOB)))) AND '@octets(y)'='@'",
-        comptime render(.sqlite, "x IS NULL OR (@octets(x)=6 AND @charset(x,'a-f')) AND '@octets(y)'='@'"),
-    );
-    try std.testing.expectEqualStrings("(length(CAST(a AS BLOB)) IS b)", comptime render(.sqlite, "@same(@octets(a), b)"));
+fn repeated(comptime text: []const u8, comptime times: usize) []const u8 {
+    comptime {
+        var out: [text.len * times]u8 = undefined;
+        for (0..times) |index| @memcpy(out[index * text.len ..][0..text.len], text);
+        const final = out;
+        return &final;
+    }
+}
+
+test "SH-69 a statement renders the same SQLite and MySQL text whatever its pieces" {
+    const Reordered = Write(.{
+        .sql = "UPDATE turn SET outcome_at=@now WHERE turn_id=?2 AND session_ref=@session(?1) AND operation_id>?2",
+        .Args = struct { session: SessionHead, turn_id: u64 },
+        .expect = .{ .at_most = 1 },
+    });
+    const Indexed = Read(.{
+        .sql = "SELECT action_id FROM action_operation @index(action_operation_executable) WHERE action_id>?1",
+        .Args = struct { after: u64 },
+        .Row = struct { action_id: Positive },
+        .cardinality = .optional,
+    });
+    const Quoted = Read(.{
+        .sql = "SELECT content_id FROM content WHERE content_id=?1 AND digest<>'@now @octets(x) ?2'",
+        .Args = struct { content_id: u64 },
+        .Row = struct { content_id: Positive },
+        .cardinality = .optional,
+    });
+    const nested = "x IS NULL OR (@same(@octets(x),6) AND @count_where(@charset(x,'a-f'))=1) AND '@octets(y)'='@'";
+    const long_text = "@same(a,1)" ++ comptime repeated(" OR @same(a,1)", 80);
+    const Case = struct { sqlite: []const u8, mysql: []const u8, slots: []const Slot, want_sqlite: []const u8, want_mysql: []const u8, want_slots: []const Slot };
+    const cases = [_]Case{
+        // Repeated and reordered parameters, @now after the Args, @session as its parameter.
+        .{
+            .sqlite = Reordered.sql,
+            .mysql = comptime Reordered.mysql.prepared(),
+            .slots = Reordered.mysql.slots,
+            .want_sqlite = "UPDATE turn SET outcome_at=?3 WHERE turn_id=?2 AND session_ref=?1 AND operation_id>?2",
+            .want_mysql = "UPDATE turn SET outcome_at=? WHERE turn_id=? AND session_ref=? AND operation_id>?",
+            .want_slots = &.{ .now, .{ .argument = 1 }, .{ .argument = 0 }, .{ .argument = 1 } },
+        },
+        // @index is INDEXED BY on SQLite; MySQL drops an index it cannot force.
+        .{
+            .sqlite = Indexed.sql,
+            .mysql = comptime Indexed.mysql.prepared(),
+            .slots = Indexed.mysql.slots,
+            .want_sqlite = "SELECT action_id FROM action_operation INDEXED BY action_operation_executable WHERE action_id>?1",
+            .want_mysql = "SELECT action_id FROM action_operation  WHERE action_id>?",
+            .want_slots = &.{.{ .argument = 0 }},
+        },
+        // Marker and parameter text inside a string literal stays text.
+        .{
+            .sqlite = Quoted.sql,
+            .mysql = comptime Quoted.mysql.prepared(),
+            .slots = Quoted.mysql.slots,
+            .want_sqlite = "SELECT content_id FROM content WHERE content_id=?1 AND digest<>'@now @octets(x) ?2'",
+            .want_mysql = "SELECT content_id FROM content WHERE content_id=? AND digest<>'@now @octets(x) ?2'",
+            .want_slots = &.{.{ .argument = 0 }},
+        },
+        // Nested markers beside text and a quoted marker, which are copied.
+        .{
+            .sqlite = comptime render(.sqlite, nested),
+            .mysql = comptime render(.mysql, nested),
+            .slots = &.{},
+            .want_sqlite = "x IS NULL OR ((length(CAST(x AS BLOB)) IS 6) AND count(*) FILTER (WHERE (x NOT GLOB '*[^a-f]*' AND length(x)=length(CAST(x AS BLOB))))=1) AND '@octets(y)'='@'",
+            .want_mysql = "x IS NULL OR ((OCTET_LENGTH(x) <=> 6) AND count(CASE WHEN (NOT REGEXP_LIKE(x,'[^a-f]','c')) THEN 1 END)=1) AND '@octets(y)'='@'",
+            .want_slots = &.{},
+        },
+        // The empty text.
+        .{ .sqlite = comptime render(.sqlite, ""), .mysql = comptime render(.mysql, ""), .slots = &.{}, .want_sqlite = "", .want_mysql = "", .want_slots = &.{} },
+        // A text over 1 KB of markers.
+        .{
+            .sqlite = comptime render(.sqlite, long_text),
+            .mysql = comptime render(.mysql, long_text),
+            .slots = &.{},
+            .want_sqlite = "(a IS 1)" ++ comptime repeated(" OR (a IS 1)", 80),
+            .want_mysql = "(a <=> 1)" ++ comptime repeated(" OR (a <=> 1)", 80),
+            .want_slots = &.{},
+        },
+    };
+    for (cases) |case| {
+        try std.testing.expectEqualStrings(case.want_sqlite, case.sqlite);
+        try std.testing.expectEqualStrings(case.want_mysql, case.mysql);
+        try std.testing.expectEqualDeep(case.want_slots, case.slots);
+    }
 }
 
 test "each marker renders its MySQL spelling" {
@@ -2494,23 +2572,6 @@ test "each marker renders its MySQL spelling" {
     try std.testing.expectEqualStrings("max(CASE WHEN r.permission_mode=0 THEN a.decided_at END)", comptime render(.mysql, "@max_where(a.decided_at,r.permission_mode=0)"));
     try std.testing.expectEqualStrings("GROUP_CONCAT(tool.name SEPARATOR ',')", comptime render(.mysql, "@list(tool.name)"));
     try std.testing.expectEqualStrings("GREATEST(a, b)>LEAST(c,d) AND max(e)=1 AND f='@octets(g)'", comptime render(.mysql, "max(a, b)>min(c,d) AND max(e)==1 AND f='@octets(g)'"));
-}
-
-test "a statement's MySQL text has a slot for each parameter, @now and @session, and drops a lowered @index" {
-    const W = Write(.{
-        .sql = "UPDATE turn SET outcome_at=@now WHERE turn_id=?1 AND session_ref=@session(?2) AND operation_id>?1",
-        .Args = struct { turn_id: u64, session: SessionHead },
-        .expect = .{ .at_most = 1 },
-    });
-    try std.testing.expectEqualStrings("UPDATE turn SET outcome_at=? WHERE turn_id=? AND session_ref=? AND operation_id>?", comptime W.mysql.prepared());
-    try std.testing.expectEqualDeep(@as([]const Slot, &.{ .now, .{ .argument = 0 }, .{ .argument = 1 }, .{ .argument = 0 } }), W.mysql.slots);
-    const S = Read(.{
-        .sql = "SELECT action_id FROM action_operation @index(action_operation_executable) WHERE action_id>?1",
-        .Args = struct { after: u64 },
-        .Row = struct { action_id: Positive },
-        .cardinality = .optional,
-    });
-    try std.testing.expectEqualStrings("SELECT action_id FROM action_operation  WHERE action_id>?", comptime S.mysql.prepared());
 }
 
 test "@served is the opening's function on SQLite and a slot per provider on MySQL" {
