@@ -7,7 +7,6 @@ import re
 import subprocess
 import tempfile
 import textwrap
-import time
 import shlex
 import unittest
 
@@ -21,6 +20,7 @@ ROOT = Path(__file__).resolve().parents[2]
 CHECK = ROOT / '.github/workflows/check.yml'
 POLICY = ROOT / '.github/actions/policy/action.yml'
 POLICY_CHECKS = ROOT / '.github/actions/policy/checks.sh'
+BESIDE = ROOT / '.github/actions/policy/beside.sh'
 UPGRADE = ROOT / '.github/workflows/previous-release-upgrade.yml'
 PROMOTE = ROOT / '.github/workflows/promote.yml'
 RELEASE = ROOT / '.github/workflows/release.yml'
@@ -333,104 +333,43 @@ class AdmissionTest(unittest.TestCase):
             self.assertIn('fetch-depth: 0', job(CHECK.read_text(), name))
         self.assertIn('uses: ./.github/actions/policy\n', job(CHECK.read_text(), 'policy'))
         self.assertIn('      run: bash .github/actions/policy/checks.sh\n', POLICY.read_text())
-        self.assertIn('bash .github/actions/policy/background.sh start', job(CHECK.read_text(), 'pr_linux'))
-        self.assertIn('bash .github/actions/policy/checks.sh', (ROOT / '.github/actions/policy/background.sh').read_text())
+        self.assertIn('bash .github/actions/policy/beside.sh -- ', job(CHECK.read_text(), 'pr_linux'))
+        self.assertIn('bash .github/actions/policy/checks.sh', BESIDE.read_text())
         self.assertIn(' python3 -B tests/ci/client_locality.py\n', POLICY_CHECKS.read_text())
 
-    def test_single_pr_job_reports_policy_promptly_whatever_policy_and_compile_did(self):
-        """Walks the single PR job's own steps in order, as the runner does, over policy that passes,
-        fails or loses its launcher, and a compile that passes or fails. The policy launch and report
-        run for real; the compile and tests are simulated outcomes."""
-        body = job(CHECK.read_text(), 'pr_linux')
-        blocks = re.split(r'(?m)^      - ', body.split('\n    steps:\n', 1)[1])[1:]
-        steps = []
-        for block in blocks:
-            name = re.match(r'name: (.+)', block)
-            condition = re.search(r'(?m)^        if: \$\{\{ (.*) \}\}$', block)
-            steps.append(dict(name=name[1] if name else block.split('\n', 1)[0],
-                              condition=condition[1] if condition else 'success()',
-                              id=(re.search(r'(?m)^        id: (\S+)$', block) or [None, None])[1],
-                              tolerated='continue-on-error: true' in block))
-        launch = step_script(body, 'Start the policy checks beside the compile')
-        report = step_script(body, 'Report the policy checks that ran beside the compile')
-        # GitHub's bash steps run as `bash --noprofile --norc -eo pipefail {0}`.
-        shell = ['bash', '--noprofile', '--norc', '-eo', 'pipefail', '-c']
-        policies = {'passes': 'exit 0', 'fails': 'exit 3',
-                    'dies without a result': 'kill -9 "$PPID"; exit 0'}
-
-        def admitted(condition, failed, outcomes):
-            expression = condition
-            if not re.search(r'always\(\)|failure\(\)|cancelled\(\)', expression) and failed:
-                return False
-            expression = re.sub(r"needs\.plan\.outputs\.[a-z_]+ != '\[\]'", 'True', expression)
-            expression = re.sub(r'steps\.([a-z-]+)\.outcome', lambda m: repr(outcomes.get(m[1], 'success')), expression)
-            expression = (expression.replace('!cancelled()', 'True').replace('success()', str(not failed))
-                          .replace('failure()', str(failed)).replace('&&', ' and ').replace('||', ' or '))
-            return eval(expression, {'__builtins__': {}})
-
-        # Hold orphans as this process's unreaped zombies, as a PID 1 that never reaps does, so a
-        # killed launcher stays visible to kill -0 for the whole report.
-        import ctypes
-        import platform
-        if platform.system() != 'Linux':
-            self.skipTest('the single PR job runs on Linux')
-        libc = ctypes.CDLL(None, use_errno=True)
-        PR_SET_CHILD_SUBREAPER = 36
-        self.assertEqual(libc.prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0), 0)
-
-        def reap():
-            while True:
-                try:
-                    if os.waitpid(-1, os.WNOHANG) == (0, 0):
-                        return
-                except ChildProcessError:
-                    return
-        self.addCleanup(reap)
-        self.addCleanup(libc.prctl, PR_SET_CHILD_SUBREAPER, 0, 0, 0, 0)
-        for (policy, checks), compiled in product(policies.items(), (True, False)):
-            with self.subTest(policy=policy, compiled=compiled), tempfile.TemporaryDirectory() as root:
+    def test_policy_beside_a_command_reports_both_and_fails_only_for_the_command(self):
+        """beside.sh over policy {passes, fails, killed by a signal} x command {passes, fails}.
+        The stubs order themselves: the command blocks on a fifo until the policy stub has opened it,
+        so policy demonstrably started before the command finished. The timeout is only a watchdog."""
+        policies = {'passes': 'exit 0', 'fails': 'exit 3', 'killed by a signal': 'kill -KILL $$'}
+        commands = {'passes': 0, 'fails': 5}
+        for (policy, ending), (command, code) in product(policies.items(), commands.items()):
+            with self.subTest(policy=policy, command=command), tempfile.TemporaryDirectory() as root:
                 root = Path(root)
                 (root / '.github/actions/policy').mkdir(parents=True)
-                (root / '.github/actions/policy/background.sh').write_text(
-                    (ROOT / '.github/actions/policy/background.sh').read_text())
-                (root / '.github/actions/policy/checks.sh').write_text(f'echo "policy log line"\nsleep 1\n{checks}\n')
-                (root / 'temp').mkdir()
-                env = dict(os.environ, RUNNER_TEMP=str(root / 'temp'), SKIPS='[]')
-                failed, outcomes, ran, reported = False, {}, [], None
-                for step in steps:
-                    if not admitted(step['condition'], failed, outcomes):
-                        continue
-                    ran.append(step['name'])
-                    if step['name'] == 'Start the policy checks beside the compile':
-                        ok = subprocess.run([*shell, launch], cwd=root, env=env, timeout=30).returncode == 0
-                    elif step['name'] == 'Compile only the binaries the selected targets need':
-                        ok = compiled
-                    elif step['name'] == 'Report the policy checks that ran beside the compile':
-                        began = time.monotonic()
-                        reported = subprocess.run([*shell, report], cwd=root, env=env, capture_output=True,
-                                                  text=True, timeout=60)
-                        self.assertLess(time.monotonic() - began, 15, 'the report must not wait out its timeout')
-                        ok = reported.returncode == 0
-                    elif step['name'] == 'Fail for the policy or format checks that failed above':
-                        ok = False
-                    else:
-                        ok = True
-                    if step['id']:
-                        outcomes[step['id']] = 'success' if ok else 'failure'
-                    failed |= not ok and not step['tolerated']
-                compile_step = 'Compile only the binaries the selected targets need'
-                self.assertLess(ran.index('Start the policy checks beside the compile'), ran.index(compile_step))
-                self.assertGreater(ran.index('Report the policy checks that ran beside the compile'),
-                                   ran.index(compile_step), 'the report runs after the compile, whatever it did')
-                self.assertIn('policy log line', reported.stdout)
-                if policy == 'dies without a result':
-                    self.assertIn('::error::The policy checks stopped without a result', reported.stdout)
+                (root / '.github/actions/policy/beside.sh').write_text(BESIDE.read_text())
+                fifo = root / 'started'
+                os.mkfifo(fifo)
+                (root / '.github/actions/policy/checks.sh').write_text(
+                    f'echo "policy log line"\necho started > "{fifo}"\n{ending}\n')
+                output = root / 'output'
+                result = subprocess.run(
+                    ['bash', '.github/actions/policy/beside.sh', '--', 'bash', '-c',
+                     f'read line < "{fifo}"; [ "$line" = started ] || exit 9; exit {code}'],
+                    cwd=root, capture_output=True, text=True, timeout=120,
+                    env=dict(os.environ, RUNNER_TEMP=str(root), GITHUB_OUTPUT=str(output), SKIPS='[]'))
+                self.assertEqual(result.returncode, code, result.stdout + result.stderr)
+                self.assertIn('::group::Policy checks, run beside: bash -c', result.stdout)
+                self.assertIn('policy log line', result.stdout.split('::group::', 1)[1].split('::endgroup::')[0])
+                expected = {'passes': None, 'fails': 3, 'killed by a signal': 137}[policy]
+                if expected is None:
+                    self.assertNotIn('Policy checks failed', result.stdout)
+                    self.assertEqual(output.read_text(), 'policy=success\n')
                 else:
-                    # A failing policy run records its own exit status; it never looks like a lost launcher.
-                    self.assertNotIn('stopped without a result', reported.stdout)
-                if policy == 'fails':
-                    self.assertIn('::error::Policy checks failed (exit 3)', reported.stdout)
-                self.assertEqual(not failed, compiled and policy == 'passes', ran)
+                    self.assertIn(f'::error::Policy checks failed (exit {expected})', result.stdout)
+                    self.assertEqual(output.read_text(), 'policy=failure\n')
+                self.assertEqual('::error::The command beside the policy checks failed (exit 5)' in result.stdout,
+                                 command == 'fails')
 
     def test_policy_checks_all_run_after_a_failure_and_the_script_fails_naming_it(self):
         names = ["Check caller error coverage and shrink-only pending causes",

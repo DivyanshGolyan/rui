@@ -599,7 +599,7 @@ class AdapterTest(unittest.TestCase):
         single = workflow_job(workflow, "pr_linux")
         self.assertIn("name: linux pr", single)
         self.assertIn("fetch-depth: 0", single)
-        self.assertIn("bash .github/actions/policy/background.sh start", single)
+        self.assertIn("bash .github/actions/policy/beside.sh -- ", single)
         checks = (Path(__file__).resolve().parents[2] / ".github/actions/policy/checks.sh").read_text()
         self.assertIn('python3 -B tests/ci/policy_suite.py --skips "$SKIPS"', checks)
         needs = re.search(r"needs: \[([^\]]+)\]", admission)[1].split(", ")
