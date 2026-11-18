@@ -196,9 +196,9 @@ The Responses provider maps uniquely named top-level `input_tokens` and `output_
 A provider total is not a count.
 A missing, invalid or duplicate count, or a cache read above the input, leaves usage absent, and pressure falls back to retained-context estimates; a missing counter is not zero.
 
-The CLI and TUI choose a token-count trigger at 90% of the window for Codex's nine exact [release-supported model IDs](cli.md#supported-model-ids), and zero extra output reservation (D111).
-Eight have a 272,000-token window in the [pinned Codex catalog](https://github.com/openai/codex/blob/970111f6cb62cc02fe36a82ea7d71b37a2889c97/codex-rs/models-manager/models.json), so a 244,800-token trigger.
-`gpt-6.1-terra` has a 500,000-token window in a [later Codex catalog](https://github.com/openai/codex/blob/5c0b1ac71f2f04016abdfcf43bee7e0c96867f0e/codex-rs/models-manager/models.json), so a 450,000-token trigger.
+The CLI and TUI choose a token-count trigger at 90% of the window in the [Codex catalog pinned at commit `8fca6ffb92a602875a0b97e3e535eb48375bdd8c`](https://github.com/openai/codex/blob/8fca6ffb92a602875a0b97e3e535eb48375bdd8c/codex-rs/models-manager/models.json), bounded by 90% of Rui's shipped catalog window, and zero extra output reservation (D111).
+`gpt-6.1-sol`, `gpt-6.1-terra`, and `gpt-6.2-sol` have a 500,000-token Codex window, so a 450,000-token trigger when Rui's catalog permits it.
+Other models use a 244,800-token Codex fallback, subject to the same shipped catalog bound.
 For a model Rui does not list, the CLI and TUI send a fixed 115,200-token trigger: small on purpose, because an early compaction costs a summary and a late one a refused request.
 Every new spec supplies a positive token count; the Host never computes a percentage trigger from the catalog.
 The catalog only bounds a requested count against the exact model's known context window; an excessive count is the request error `compact_at_too_large` on create or update, while an unlisted model has no known-window refusal (D166).

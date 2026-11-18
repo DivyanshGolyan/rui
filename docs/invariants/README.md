@@ -13,3 +13,4 @@ First drafts, written from the README and the contracts and checked against fixe
 | [Session UI and diagnostics](session-ui.md) | 38 |
 | [CI tooling and policy checks](ci-tooling.md) | 64 |
 | [Test pause point owner](pause.md) | 7 |
+| [Theme palette](theme.md) | 5 |

@@ -47,9 +47,9 @@ class TerminalTimesTest(unittest.TestCase):
 
 class ExclusiveOwnerTest(unittest.TestCase):
     def test_every_server_global_mutator_is_in_the_exclusive_owner(self):
-        import test_harness_contracts as contracts
+        import flake_sources
         source = (ROOT / "src/store/mysql_testing.zig").read_text()
-        _, tests, declarations = contracts.zig_blocks(source)
+        _, tests, declarations = flake_sources.zig_blocks(source)
         bodies = {name: source[start:end] for start, end, name in declarations}
         global_functions = {name for name, body in bodies.items() if "SET GLOBAL" in body}
         while True:
