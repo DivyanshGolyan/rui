@@ -248,7 +248,7 @@ jobs:
     needs: plan
     if: ${{ !github.event.repository.private && needs.plan.outputs.change_kind == 'normal' && needs.plan.outputs.draft_run == 'false' && needs.plan.outputs.compile_only == 'false' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:

@@ -642,6 +642,14 @@ class SelectionTest(unittest.TestCase):
                     else:
                         self.assertEqual(result["native_targets"], [])
 
+    def test_pause_socket_inputs_select_the_socket_fixture(self):
+        for path in ("src/testing/pause.zig", "src/testing/pause_socket.zig",
+                     "src/pause_socket_fixture.zig", "tests/integration/pause_client.py",
+                     "tests/integration/pause_socket_test.py"):
+            with self.subTest(path=path):
+                selected = select([path], "review", AVAILABLE)["targets"]
+                self.assertTrue(covers("pause-socket-test", selected), (path, selected))
+
     def test_request_wait_selects_its_native_oracle_and_portable_core(self):
         for path in ("src/client.zig", "src/cli_args.zig", "src/server.zig",
                      "src/TestObservation.zig", "tests/integration/request_wait_integration.py",
@@ -1946,7 +1954,8 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
             invocations.touch()
             env = dict(os.environ, PATH=f"{root}:{os.environ['PATH']}", FAIL_FIXTURE=fail,
                        CHECK_OVERLAP=str(int(overlap)), GATE_DIR=str(root), TEST_PYTHON=sys.executable,
-                       HOLD_FIXTURE=hold, TEST_PART=part, CHECK_TIMING=str(int(timing)))
+                       HOLD_FIXTURE=hold, TEST_PART=part, CHECK_TIMING=str(int(timing)),
+                       RUI_TEST_PAUSE_SOCKET_BINARY="pause-socket")
             if python_delay:
                 (root / "sitecustomize.py").write_text(
                     f"import time\ntime.sleep({python_delay!r})\n")
@@ -2280,7 +2289,7 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
             "human_cli_integration.py release", "preference_policy_integration.py preferences",
             "model_picker_integration.py release", "model_picker_signin_integration.py release",
             "model_picker_failure_integration.py release",
-            "request_wait_integration.py release",
+            "request_wait_integration.py release", "pause_socket_test.py pause-socket",
             "bash_lifecycle_integration.py release", "bash_recovery_integration.py release",
             "codex_integration.py release", "control_integration.py release",
             "session_list_integration.py release", "conversation_page_integration.py release",
