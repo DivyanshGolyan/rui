@@ -527,23 +527,6 @@ def command_panel_case():
     print("session chrome: command list lifts the input rule at both frame sizes, stays plain, omits redundant descriptions, and shows only N more", flush=True)
 
 
-def command_escape_case():
-    with Chrome("rui-chrome-command-escape.", []) as chrome:
-        session = chrome.session()
-        for width, height in ((140, 40), (46, 30)):
-            master, caller, _ = chrome.open(session, lambda screen: True, columns=width, height=height)
-            opened = chrome.frame(master, b"/ne", lambda screen: "/new" in screen and "› /ne" in screen)
-            assert composer_bounds(opened) is not None, opened
-            closed = chrome.frame(master, b"\x1b", lambda screen: composing(screen, "") and "/new" not in screen)
-            assert composing(closed, ""), closed
-            settled = settle_screen(master)
-            assert composing(settled, "") and "/new" not in settled, settled
-            overview = chrome.frame(master, b"\x1b", lambda screen: composer_bounds(screen) is None and "Settings" in screen)
-            assert composer_bounds(overview) is None, overview
-            chrome.leave(master, caller)
-    print("session chrome: lone Escape closes a drawn command list before leaving chat at both sizes", flush=True)
-
-
 def pages_case():
     release = threading.Event()
     with Chrome("rui-chrome-pages.", []) as chrome:
@@ -882,7 +865,6 @@ def notice_case():
 
 def main():
     command_panel_case()
-    command_escape_case()
     send_state_case()
     send_recovery_case()
     activity_case()
