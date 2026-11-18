@@ -113,7 +113,7 @@ test "a Workspace's changed page reads only its own Sessions, however many other
     try std.testing.expectEqual(alone, try Page.steps(&storage, &tmp, request, &watched));
 }
 
-test "a fixed creator subtree skips unrelated Sessions in its Workspace" {
+test "SL-2: a fixed creator subtree skips unrelated Sessions in its Workspace" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;

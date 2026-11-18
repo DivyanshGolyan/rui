@@ -34,7 +34,7 @@ pub fn exclusive(name: []const u8) bool {
         // SESSION Handler reads include internal dictionary reads. Peer fixture
         // DDL must not churn shared metadata caches during this exact comparison.
         "store.mysql_testing.test.store.mysql obligation reconciliation reads stay flat in completed Turn history",
-        "store.tests.session_list.test.Session list rolls up descendants beyond the page through real agent births",
+        "store.tests.session_list.test.SL-1: Session list rolls up eligible descendants beyond the page",
     };
     for (isolated) |test_name| if (std.mem.eql(u8, name, test_name)) return true;
     const prefix = "store.mysql_testing.test.";
@@ -226,7 +226,7 @@ test "history fixtures own a contention-free window for every shard count" {
 test "session handler comparison has exclusive ownership for every shard count" {
     const names = [_][]const u8{
         "store.mysql_testing.test.store.mysql obligation reconciliation reads stay flat in completed Turn history",
-        "store.tests.session_list.test.Session list rolls up descendants beyond the page through real agent births",
+        "store.tests.session_list.test.SL-1: Session list rolls up eligible descendants beyond the page",
         "store.test.ordinary",
     };
     const times = [_]Timing{

@@ -733,7 +733,7 @@ test "a list row reads the same steps however long its Session's history, in rou
     }.run);
 }
 
-test "Session list rolls up descendants beyond the page through real agent births" {
+test "SL-1: Session list rolls up eligible descendants beyond the page" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
@@ -868,6 +868,62 @@ test "Session list rolls up descendants beyond the page through real agent birth
                 .sqlite => "SQLite VM steps",
                 .mysql => "MySQL handler reads",
             } });
+
+            // A second, idle chain isolates archive eligibility from the active work above.
+            const filter_root = try configureTestSession(&storage, "rollup-filter-root");
+            const filter_child = try configureTestSession(&storage, "rollup-filter-child");
+            const filter_leaf = try configureTestSession(&storage, "rollup-filter-leaf");
+            try store_testing.exec(&storage, "UPDATE session SET creator_ref=?1 WHERE session_ref=?2", .{ filter_root.slice(), filter_child.slice() });
+            try store_testing.exec(&storage, "UPDATE session SET creator_ref=?1 WHERE session_ref=?2", .{ filter_child.slice(), filter_leaf.slice() });
+            var archive: protocol.SessionArchiveCommand = .{ .session = filter_child, .archived = true };
+            try archive.key.set("rollup-filter-archive");
+            try std.testing.expect(storage.archiveSession(&archive, .{}) == .accepted);
+            try store_testing.exec(&storage, "UPDATE session SET created_at=CASE WHEN session_ref=?1 THEN 100 WHEN session_ref=?2 THEN 200 ELSE 300 END WHERE session_ref IN (?1,?2,?3)", .{ filter_root.slice(), filter_child.slice(), filter_leaf.slice() });
+            try store_testing.exec(&storage, "UPDATE session_stop SET stopped_at=200 WHERE session_ref=?1", .{filter_child.slice()});
+            const start = try store_testing.queryU64(&storage, "SELECT created_seq FROM session WHERE session_ref=?1", .{filter_root.slice()});
+            const end = try store_testing.queryU64(&storage, "SELECT created_seq FROM session WHERE session_ref=?1", .{filter_leaf.slice()});
+            const ids = [3][]const u8{ filter_root.slice(), filter_child.slice(), filter_leaf.slice() };
+            var other_workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const other_workspace = other_workspace_buffer[0..try tmp.dir.realPath(std.testing.io, &other_workspace_buffer)];
+            const cases = [_]struct {
+                filter: protocol.SessionArchiveFilter,
+                scope: enum { any, matching, other } = .any,
+                visible: [3]bool,
+                own: [3]u64,
+                subtree: [3]u64,
+                descendants: [3]u64,
+            }{
+                .{ .filter = .active, .visible = .{ true, false, true }, .own = .{ 100, 0, 300 }, .subtree = .{ 100, 0, 300 }, .descendants = .{ 0, 0, 0 } },
+                .{ .filter = .archived, .visible = .{ false, true, false }, .own = .{ 0, 200, 0 }, .subtree = .{ 0, 200, 0 }, .descendants = .{ 0, 0, 0 } },
+                .{ .filter = .all, .visible = .{ true, true, true }, .own = .{ 100, 200, 300 }, .subtree = .{ 300, 300, 300 }, .descendants = .{ 2, 1, 0 } },
+                .{ .filter = .all, .scope = .matching, .visible = .{ true, true, true }, .own = .{ 100, 200, 300 }, .subtree = .{ 300, 300, 300 }, .descendants = .{ 2, 1, 0 } },
+                .{ .filter = .all, .scope = .other, .visible = .{ false, false, false }, .own = .{ 0, 0, 0 }, .subtree = .{ 0, 0, 0 }, .descendants = .{ 0, 0, 0 } },
+            };
+            for (cases) |filter_case| {
+                var request: protocol.ListSessions = .{ .archive = filter_case.filter, .after = start - 1, .ceiling = end };
+                if (filter_case.scope != .any) {
+                    request.workspace = .{};
+                    try request.workspace.?.set(if (filter_case.scope == .matching) workspace else other_workspace);
+                }
+                const bytes = try testingSessionList(&storage, &tmp, request, &used, 103);
+                defer std.testing.allocator.free(bytes);
+                var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
+                defer parsed.deinit();
+                const rows = parsed.value.object.get("sessions").?.array.items;
+                var row_index: usize = 0;
+                for (ids, filter_case.visible, 0..) |id, visible, index| {
+                    if (!visible) continue;
+                    try std.testing.expect(row_index < rows.len);
+                    const row = rows[row_index].object;
+                    row_index += 1;
+                    try std.testing.expectEqualStrings(id, row.get("reference").?.string);
+                    try std.testing.expectEqual(filter_case.own[index], try std.fmt.parseInt(u64, row.get("state_change_at").?.string, 10));
+                    try std.testing.expectEqual(filter_case.subtree[index], try std.fmt.parseInt(u64, row.get("subtree_state_change_at").?.string, 10));
+                    try std.testing.expectEqual(filter_case.descendants[index], try std.fmt.parseInt(u64, row.get("descendant_count").?.string, 10));
+                    try std.testing.expectEqual(@as(u64, 0), try std.fmt.parseInt(u64, row.get("descendant_needs_you_count").?.string, 10));
+                }
+                try std.testing.expectEqual(row_index, rows.len);
+            }
         }
     }.run);
 }
