@@ -947,6 +947,8 @@ If the shell is left raw or hidden, run `stty sane; printf '\033[?2026l\033[0m\0
 Host work and captured-request recovery are independent of terminal state; unsent drafts remain invocation-local and are lost on exit or crash.
 
 
+The sidebar Settings control uses the visible word as its pointer target and hover shade. Empty cells and the memory readout are not Settings targets and do not select a row. Keyboard focus can still reach and activate Settings.
+
 ## Required evidence
 
 ### Interface and owner checks

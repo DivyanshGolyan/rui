@@ -7660,6 +7660,27 @@ test "creation preference read failure is retained through repair and ordinary r
     try std.testing.expectEqualStrings("bypass", Seen.now.creation.permission_mode.slice());
 }
 
+test "App Settings pointer leaves the empty row inert and opens the word" {
+    for ([_]u16{ 46, 140 }) |width| {
+        const rig = try openListed();
+        defer rig.close();
+        rig.overview.state.launch = .done;
+        var shown = try rig.shown(width, 30);
+        defer shown.deinit();
+        const row = view.layout(&rig.overview.state).settings.start + 1;
+        const selection = rig.overview.state.selected;
+        for ([_]u16{ 0, 4, 13, 20, width - 1 }) |col| {
+            try std.testing.expect(try rig.click(col, row, width, 30) == null);
+            try std.testing.expect(rig.overview.root.input.listFocused());
+            try std.testing.expectEqual(selection, rig.overview.state.selected);
+            try std.testing.expect(!rig.overview.root.input.layer.settingsOpen());
+        }
+        try std.testing.expect(try rig.click(5, row, width, 30) == null);
+        try std.testing.expect(rig.overview.root.input.layer.settingsOpen());
+        try std.testing.expectEqual(selection, rig.overview.state.selected);
+    }
+}
+
 test "App overview Tab projection is list then Settings and Settings Enter uses the drawn identity" {
     for ([_]u16{ 46, 140 }) |width| {
         const rig = try openListed();

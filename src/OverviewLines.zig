@@ -102,6 +102,7 @@ pub const Settings = struct {
     memory: ?overview_view.Memory = null,
     available: ?@import("upgrade_status.zig").Version = null,
     run: ?@import("upgrade_status.zig").Run = null,
+    settings_target: ?Hover.Rect = null,
     update_target: ?Hover.Rect = null,
     update_identity: @import("upgrade_status.zig").Target = .{ .available = null, .run = null },
     hover: Hover = .{},
@@ -127,7 +128,9 @@ pub const Settings = struct {
         if (input != .mouse) return;
         const mouse = input.mouse;
         if (mouse.button != .left or mouse.mods.alt or mouse.type != .press or mouse.col < 0 or mouse.col >= self.size.width) return;
-        const click: overview_view.Click = if (mouse.row == 1 and self.size.height > 1 and mouse.col >= 5 and mouse.col < @min(13, self.size.width -| 2)) .settings else if (self.update_target) |target| (if (target.contains(mouse.col, mouse.row)) .{ .update = self.update_identity } else return) else return;
+        const is_settings = if (self.settings_target) |target| target.contains(mouse.col, mouse.row) else false;
+        const is_update = if (self.update_target) |target| target.contains(mouse.col, mouse.row) else false;
+        const click: overview_view.Click = if (is_settings) .settings else if (is_update) .{ .update = self.update_identity } else return;
         try self.on_click(self.userdata, ctx, click);
         ctx.consumeAndRedraw();
     }
@@ -137,6 +140,7 @@ pub const Settings = struct {
         const size = ctx.max.size();
         const height = @min(2, size.height);
         self.size = .{ .width = size.width, .height = height };
+        self.settings_target = null;
         self.update_target = null;
         self.update_identity = .{ .available = self.available, .run = self.run };
         const target: Hover.Rect = .{ .row = 1, .col = @min(5, size.width), .width = @min(13, size.width -| 2) -| @min(5, size.width) };
@@ -146,10 +150,15 @@ pub const Settings = struct {
         if (height == 0 or size.width == 0) return surface;
         for (0..size.width) |column| surface.writeCell(@intCast(column), 0, widget_style.line(self.caps, .horizontal));
         if (height < 2) return surface;
+        self.settings_target = target;
         const ground: overview_view.Background = if (self.selected) .selection else if (self.hover.contains(target)) .hover else .ground;
-        const row_style = widget_style.of(self.caps, .{ .background = ground });
+        const row_style = widget_style.of(self.caps, .{});
         @memset(surface.buffer[size.width .. 2 * size.width], .{ .style = row_style });
-        try @import("widgets/RowInset.zig").draw(ctx, surface, 1, &.{.{ .text = "   Settings", .style = widget_style.of(self.caps, .{ .colour = if (self.selected) .strong else .normal, .bold = self.selected, .background = ground }) }}, row_style);
+        try @import("widgets/RowInset.zig").draw(ctx, surface, 1, &.{ .{ .text = "   ", .style = row_style }, .{ .text = "Settings", .style = widget_style.of(self.caps, .{ .colour = if (self.selected) .strong else .normal, .bold = self.selected, .background = ground }) } }, row_style);
+        for (0..size.width) |col| {
+            if (!target.contains(@intCast(col), 1)) surface.buffer[size.width + col].style = row_style;
+        }
+        for (@as(usize, @intCast(target.col))..@as(usize, @intCast(target.col)) + target.width) |col| surface.buffer[size.width + col].style = widget_style.of(self.caps, .{ .colour = if (self.selected) .strong else .normal, .bold = self.selected, .background = ground });
         self.hover.targets = try ctx.arena.dupe(Hover.Rect, &.{target});
         const status = @import("upgrade_status.zig");
         var buffer: [status.max_line_bytes]u8 = undefined;
@@ -167,7 +176,7 @@ pub const Settings = struct {
                 .quiet => .quiet,
                 .link => .ink,
                 .warning => .attention,
-            }, .background = ground });
+            } });
             const stable = try ctx.arena.dupe(u8, text);
             const label: vxfw.RichText = .{ .text = &.{.{ .text = stable, .style = style }}, .softwrap = false, .width_basis = .parent };
             const drawn = try label.draw(ctx.withConstraints(.{}, .{ .width = @intCast(text_width), .height = 1 }));
@@ -254,7 +263,7 @@ test "sidebar bottom separates Settings memory and update targets across geometr
             try std.testing.expect(std.mem.endsWith(u8, row, try std.fmt.allocPrint(arena.allocator(), "{s} ", .{wording})));
             try std.testing.expect(std.mem.indexOf(u8, row, "rui") == null);
             const colour: overview_view.Colour = if (failed) .attention else if (!busy and !done and available != null) .ink else .quiet;
-            try std.testing.expectEqual(widget_style.of(caps, .{ .colour = colour, .background = if (selected) .selection else .ground }), frame.readCell(@intCast(width - label_width - 1), 1).style);
+            try std.testing.expectEqual(widget_style.of(caps, .{ .colour = colour, .background = .ground }), frame.readCell(@intCast(width - label_width - 1), 1).style);
         }
         const expected_target: ?Hover.Rect = if (height >= 2 and width >= label_width + 15 and (failed or (!busy and !done and available != null))) .{ .row = 1, .col = @intCast(width - label_width - 1), .width = @intCast(label_width) } else null;
         try std.testing.expectEqual(expected_target, settings.update_target);
@@ -269,6 +278,34 @@ test "sidebar bottom separates Settings memory and update targets across geometr
             try std.testing.expectEqual(expected, clicks.got);
         };
     };
+}
+
+test "sidebar Settings word alone responds to hover and repeated clicks" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    for ([_]u16{ 8, 12, 15, 46, 140 }) |width| {
+        var clicks: Clicks = .{};
+        var settings: Settings = .{ .selected = false, .caps = .{}, .userdata = &clicks, .on_click = Clicks.take, .memory = .{ .rui = 38 * overview_view.mib, .tools = 120 * overview_view.mib } };
+        const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 2 }, .cell_size = .{} };
+        var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        _ = try settings.widget().draw(draw_ctx);
+        for (0..width) |column| {
+            const inside = column >= 5 and column < @min(13, width -| 2);
+            try settings.widget().handleEvent(&events, .{ .mouse = .{ .col = @intCast(column), .row = 1, .button = .none, .type = .motion, .mods = .{} } });
+            const frame = try settings.widget().draw(draw_ctx);
+            try std.testing.expectEqual(inside, settings.hover.pointing);
+            for (0..width) |painted| {
+                const shaded = painted >= 5 and painted < @min(13, width -| 2) and inside;
+                const expected = widget_style.of(settings.caps, .{ .background = if (shaded) .hover else .ground }).bg;
+                try std.testing.expectEqual(expected, frame.readCell(@intCast(painted), 1).style.bg);
+            }
+            for (0..2) |_| {
+                clicks.got = null;
+                try settings.widget().handleEvent(&events, .{ .mouse = .{ .col = @intCast(column), .row = 1, .button = .left, .type = .press, .mods = .{} } });
+                try std.testing.expectEqual(@as(?overview_view.Click, if (inside) .settings else null), clicks.got);
+            }
+        }
+    }
 }
 
 test "Session pin alternate gestures never activate New Session or Settings" {
