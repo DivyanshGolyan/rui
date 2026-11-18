@@ -718,16 +718,20 @@ def keys_case():
             assert all(not line.strip() for line in pane_rows[used_rows:]), keys
             for absent in ("/help", "Ctrl-X twice", "shift+enter or ctrl+j", "Commands", "Marks", "Esc returns", "↑↓ · enter change · esc close", "‹ Rui · settings", 'ctrl+g', 'ctrl+d', 'ctrl+n', 'ctrl+end', 'ctrl+c/d', 'pgup/pgdn', 'first session', 'latest / last', 'scroll / select'):
                 assert absent not in keys, (width, absent, keys)
-            settings = chrome.frame(master, b"\rx\x1b", lambda screen: "Notifications" in screen and "Version" in screen)
+            settings = chrome.frame(master, b"\r\x1b", lambda screen: "Notifications" in screen and "Version" in screen)
             assert "earlier message" not in settings, settings
             if width == 140:
                 chrome.frame(master, b"\x1b", lambda screen:
                              latest(screen, "KEYS-ANSWER") and composing(screen, "")
                              and "Rui · settings" not in screen)
+                chrome.frame(master, gesture, lambda screen: "Notifications" in screen and "Version" in screen)
+                chrome.frame(master, b"x", lambda screen: latest(screen, "KEYS-ANSWER") and composing(screen, "x")
+                             and "Notifications" not in screen)
+                chrome.frame(master, b"\x7f", lambda screen: composing(screen, ""))
             else:
                 chrome.frame(master, b"\x1b", lambda screen: "Settings" in screen and "Rui · settings" not in screen and not any(line.startswith(" ‹ ") for line in rows(screen)))
             chrome.leave(master, caller)
-    print("session chrome: Settings > Keys shows src/keymap.zig's reference rows aligned, paired at 140 columns and one column at 46; Enter/text are inert and Esc returns one layer, preserving a wide conversation", flush=True)
+    print("session chrome: Settings > Keys shows src/keymap.zig's reference rows aligned, paired at 140 columns and one column at 46; Enter is inert, Esc returns one layer, and printable input returns to the wide conversation", flush=True)
 
 
 def keys_reference():
