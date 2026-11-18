@@ -1190,6 +1190,12 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
         .tick, .list, .host, .memory, .observed, .first_line, .resized, .launch_size, .launch_poll, .presentation_start, .presentation_presented, .presentation_tick, .list_settled => {},
         else => state.presentation_revision +%= 1,
     }
+    switch (event) {
+        .input, .clicked, .open, .leave => if (state.presentation_fell_back and state.launch == .waiting) {
+            state.launch = .done;
+        },
+        else => {},
+    }
 
     var effects: Effects = .{};
     switch (event) {
@@ -6582,6 +6588,27 @@ test "launch core handles late list after presentation release" {
         }
         try expectEffects(&.{}, try step(&state, .launch_poll));
     };
+}
+
+test "launch core drops a late launch once the overview is used" {
+    for ([_]bool{ false, true }) |leave| {
+        var state = try testState();
+        defer state.deinit();
+        _ = try step(&state, .{ .launch_start = .{ .explicit_session = false, .restoring = false } });
+        _ = try step(&state, .{ .presentation_start = 1000 });
+        _ = try step(&state, .{ .launch_size = .{ .size = .{ .width = 140, .height = 30 }, .wide = true } });
+        _ = try step(&state, .{ .tick = test_now_s * 1000 });
+        _ = try step(&state, .{ .presentation_tick = .{ .now_ms = 1150, .list_visible = true, .host_unavailable = false } });
+        try std.testing.expect(!state.hidesOverview());
+        if (leave) {
+            _ = try step(&state, .leave);
+        } else {
+            _ = try step(&state, .{ .open = "aaaaaa".* });
+        }
+        try std.testing.expectEqual(.done, state.launch);
+        _ = try respond(&state, .full, testToken(1), &.{});
+        try expectEffects(&.{}, try step(&state, .launch_poll));
+    }
 }
 
 test "initial presentation core does not hold a narrow resumed chat" {
