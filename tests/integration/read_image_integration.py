@@ -21,7 +21,7 @@ from bash_fixture import action_for, allow, rows
 CASES = (
     "ask-missing", "deny-missing", "deny-fifo", "stop-pending", "background-pending",
     "missing", "directory", "fifo", "text", "gif", "empty", "truncated-png",
-    "truncated-jpeg", "oversized", "mcp-mixed",
+    "truncated-jpeg", "oversized", "mcp-mixed", "unsupported-retained",
 )
 PNG = fixture.ROOT / "src/codecs/fixtures/image-input/pixel.png"
 
@@ -297,6 +297,58 @@ def prove_mcp_mixed(root):
         fixture.dispose_dispatch(processes, endpoints, [])
 
 
+def prove_unsupported_retained(root):
+    state = root / "unsupported-retained"
+    state.mkdir(mode=0o700)
+    workspace = state / "workspace"
+    workspace.mkdir()
+    image = workspace / "image.png"
+    image.write_bytes(PNG.read_bytes())
+    endpoint = fixture.SuccessEndpoint([
+        fixture.sse_tool_calls("image", [("read_image", "image-call", json.dumps({"path": image.name}))]),
+        fixture.sse_answer("image-answer", "reasoning", "message", "received")[0],
+        fixture.sse_answer("unexpected", "reasoning", "message", "unexpected request")[0],
+    ])
+    thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+    thread.start()
+    processes = []
+    try:
+        store = state / "store"
+        processes.append(fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses"))
+        configured = fixture.command(
+            "session", "configure", "--store", store, "--workspace", workspace,
+            "--record", state / "configure.json", "--key", "configure",
+            "--provider", "codex", "--model", "gpt-4.1", "--tools", "read_image",
+            "--permission-mode", "bypass",
+        )
+        assert configured["answer"]["status"] == "accepted", configured
+        session = configured["context"]["session"]
+        fixture.message(state, store, "initial", session, "Read the image")
+        initial, answer, _ = fixture.wait_for_result_release(store, "initial", session, time.monotonic() + 20)
+        assert initial["state"] == "completed" and answer == b"received", initial
+        assert len(endpoint.requests) == 2, endpoint.requests
+        continuation = json.loads(endpoint.requests[1])
+        outputs = [item for item in continuation["input"] if item.get("type") == "function_call_output"]
+        assert len(outputs) == 1 and outputs[0]["call_id"] == "image-call", outputs
+        parts = outputs[0]["output"]
+        images = [part for part in parts if part.get("type") == "input_image"]
+        assert len(images) == 1, parts
+        assert base64.b64decode(images[0]["image_url"].split(",", 1)[1], validate=True) == PNG.read_bytes()
+        image.unlink()
+        switched = fixture.command(
+            "session", "configure", "--store", store, "--session", session,
+            "--record", state / "switch.json", "--key", "switch", "--model", "gpt-3.5-turbo",
+        )
+        assert switched["answer"]["status"] == "accepted", switched
+        fixture.message(state, store, "after-switch", session, "Recall the image")
+        result, _, _ = fixture.wait_for_result_release(store, "after-switch", session, time.monotonic() + 20)
+        assert result["state"] == "failed" and result["result"]["code"] == "model_image_input_unsupported", result
+        assert len(endpoint.requests) == 2, endpoint.requests
+        print("retained image on unsupported model: refused before provider HTTP")
+    finally:
+        fixture.dispose_dispatch(processes, {endpoint: thread}, [])
+
+
 def main():
     names = sys.argv[2:] or CASES
     assert all(name in CASES for name in names), names
@@ -306,6 +358,8 @@ def main():
         for name in names:
             if name == "mcp-mixed":
                 prove_mcp_mixed(state)
+            elif name == "unsupported-retained":
+                prove_unsupported_retained(state)
             else:
                 prove_case(state, name)
         completed = True
