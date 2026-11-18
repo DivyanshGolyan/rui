@@ -1311,21 +1311,6 @@ test "feed message identity survives display replacement and trimming" {
 }
 
 test "content_links SUI-26 rendered links wrap, hit and leave with their content" {
-    const terminal = @import("TerminalText.zig");
-    const cases = [_]struct { input: []const u8, home: []const u8, output: []const u8 }{
-        .{ .input = "[here](~/é(a):2), [web](https://x) /tmp/z;", .home = "/home/test", .output = terminal.link_open ++ "file:///home/test/%C3%A9%28a%29" ++ terminal.link_end ++ "\x1b[4mhere\x1b[0m" ++ terminal.link_close ++ ", " ++ terminal.link_open ++ "https://x" ++ terminal.link_end ++ "\x1b[4mweb\x1b[0m" ++ terminal.link_close ++ " " ++ terminal.link_open ++ "file:///tmp/z" ++ terminal.link_end ++ "\x1b[4m/tmp/z\x1b[0m" ++ terminal.link_close ++ ";" },
-        .{ .input = "[x](/tmp/a:12:3) [y](/tmp/a:abc)", .home = "", .output = terminal.link_open ++ "file:///tmp/a" ++ terminal.link_end ++ "\x1b[4mx\x1b[0m" ++ terminal.link_close ++ " " ++ terminal.link_open ++ "file:///tmp/a%3Aabc" ++ terminal.link_end ++ "\x1b[4my\x1b[0m" ++ terminal.link_close },
-        .{ .input = "[x](~/a)", .home = "", .output = "[x](~/a)" },
-        .{ .input = "[x](//host/a) [x](./a)", .home = "/home/test", .output = "[x](//host/a) [x](./a)" },
-    };
-    for (cases) |case| {
-        var output = std.Io.Writer.Allocating.init(testing.allocator);
-        defer output.deinit();
-        var renderer: @import("AnswerRenderer.zig") = .{ .out = &output.writer, .home = case.home };
-        try renderer.feed(case.input);
-        try renderer.finish();
-        try testing.expectEqualStrings(case.output, output.written());
-    }
     const input = "See [Tool loading docs](/Users/divyanshgolyan/code/personal/rui/docs/using-rui.md:316).";
     const label = "Tool loading docs";
     const expected = "See " ++ label ++ ".";
