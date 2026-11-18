@@ -77,9 +77,9 @@ pub const Command = enum {
 
     fn definitionValue(self: Command) Definition {
         return switch (self) {
-            .session_start => .{ .resource = .session, .name = "start", .description = "Read the first Message from stdin, atomically create a Session and admit that Message. Print a JSON mutation receipt with the new ID in .context.session, the request handle in .context.key and the resolved configuration, not a completed answer. Fresh Sessions allow all built-in tools and initially load bash, find_tools, skill and web_search; set instructions separately with session configure --instructions -. Recover the original request as kind message after lost output.", .details = label_help ++ parent_help, .options = destination ++ capture ++ parent ++ binding ++ start_settings, .mutation = true },
+            .session_start => .{ .resource = .session, .name = "start", .description = "Compose the first Message from stdin and ordered --text, --text-file and --image operands, atomically create a Session and admit that Message. Print a JSON mutation receipt with the new ID in .context.session, the request handle in .context.key and the resolved configuration, not a completed answer. Fresh Sessions allow all built-in tools and initially load bash, find_tools, skill and web_search; set instructions separately with session configure --instructions -. Recover the original request as kind message after lost output.", .details = label_help ++ parent_help ++ message_help, .options = destination ++ capture ++ parent ++ binding ++ start_settings ++ message_operands, .mutation = true },
             .session_configure => .{ .resource = .session, .name = "configure", .description = "Capture settings, including the Session's Label (its name or title), then admit configuration only. Omit the Session selector to create a fresh address with concrete defaults or a named preset; addressed changes preserve omitted settings. --reload-skills only rescans this Session catalog, appends changed catalog instructions, and acknowledges without starting model work. Do not combine it with settings.", .details = compaction_help, .options = destination ++ session ++ capture ++ parent ++ preset ++ binding ++ settings ++ &[_]Option{flag("reload-skills")}, .conflicts = settings_conflicts, .mutation = true },
-            .session_send => .{ .resource = .session, .name = "send", .description = "Read exact Message text from stdin and admit it to --to ID, exactly six lowercase Crockford characters (for example k7m2qx). Peers use their sender's Store and reject a conflicting --store. Without a sender, --store or saved Store defaults apply. Returns an admission receipt, before the recipient completes. Each /name word in the text that names one of the recipient's advertised skills appends that skill's complete SKILL.md and absolute path to what the model reads; the text itself is saved as written. Empty stdin sends nothing.", .options = destination ++ capture ++ &[_]Option{value("to", "ID")}, .mutation = true, .requires = &.{&.{"to"}} },
+            .session_send => .{ .resource = .session, .name = "send", .description = "Compose a Message from stdin and ordered --text, --text-file and --image operands and admit it to --to ID, exactly six lowercase Crockford characters (for example k7m2qx). Peers use their sender's Store and reject a conflicting --store. Without a sender, --store or saved Store defaults apply. Returns an admission receipt, before the recipient completes. Each /name word in the text that names one of the recipient's advertised skills appends that skill's complete SKILL.md and absolute path to what the model reads; the text itself is saved as written. An empty composition sends nothing.", .details = message_help, .options = destination ++ capture ++ &[_]Option{value("to", "ID")} ++ message_operands, .mutation = true, .requires = &.{&.{"to"}} },
             .session_inspect => .{ .resource = .session, .name = "inspect", .description = "Read saved Session settings and work as JSON, or export exact retained failed-response bytes. Inspection never admits work.", .details = "--failed-response body|metadata requires --operation ID and --attempt N, excludes --profile, and writes only that stored byte stream to stdout. Redirect body output to a file; it can contain binary or private data. Missing records or omitted bodies fail on stderr. Partial bodies export their retained prefix; inspect metadata for status. No Host is started and no provider is contacted.\n", .options = destination ++ session ++ &[_]Option{ choice("profile", cli_value.ReportProfile), choice("failed-response", cli_value.FailedResponsePart), value("operation", "ID"), value("attempt", "N") }, .conflicts = &.{.{ .code = .profile_excludes_failed_response, .a = "profile", .b = "failed-response" }}, .requires = need_session },
             .session_list => .{ .resource = .session, .name = "list", .description = "List active Sessions in the current Workspace, or all Workspaces with --all, as one JSON value. --archived lists only archived Sessions; --include-archived includes both. --since TOKEN, the since of an earlier listing, lists only the Sessions that may have changed since it (delta changed), nothing (not_modified), or every Session (full).", .options = destination ++ &[_]Option{ flag("all"), flag("archived"), flag("include-archived"), value("since", "TOKEN") }, .conflicts = &.{.{ .code = .archive_visibility_conflict, .a = "archived", .b = "include-archived" }} },
             .session_stop => .{ .resource = .session, .name = "stop", .description = "Admit a stop for selected Session work. The stop is saved, so a restarted Host does not resume that work. The address remains reusable by later input; acknowledgment is not physical retirement. --all stops every Session in the Store that is pending, working, retrying, running Bash or awaiting approval, as overview Ctrl-X would, each as its own recoverable request with one JSON reply line and a recovery handle on stderr; it needs a running Host.", .options = destination ++ session ++ capture ++ &[_]Option{flag("all")}, .conflicts = &.{ .{ .code = .all_excludes_session, .a = "all", .b = "session" }, .{ .code = .all_excludes_record, .a = "all", .b = "record" }, .{ .code = .all_excludes_key, .a = "all", .b = "key" }, .{ .code = .all_excludes_key, .a = "all", .b = "key-hex" } }, .mutation = true, .requires = &.{&.{ "session", "all" }} },
@@ -172,6 +172,17 @@ const compaction_help = label_help ++ parent_help ++ preset_help ++ reasoning_he
     \\
 ++ model_capability.model_help ++ "These release-supported IDs do not guarantee account availability or live qualification.\n";
 
+const message_help =
+    \\--text TEXT, --text-file FILE and --image FILE may be repeated in Message order. Images are local PNG or JPEG files.
+    \\--text-file - selects stdin once. Without explicit text, nonterminal stdin precedes images when nonempty.
+    \\With explicit text, nonempty stdin must be selected with --text-file -; with no operands stdin supplies the Message.
+    \\
+;
+const message_operands = &[_]Option{
+    .{ .name = "image", .argument = "FILE", .repeated = true, .ordered = true },
+    .{ .name = "text", .argument = "TEXT", .repeated = true, .ordered = true },
+    .{ .name = "text-file", .argument = "FILE", .repeated = true, .ordered = true },
+};
 const destination = serve_grammar.destination;
 const session = &[_]Option{value("session", "ID")};
 const parent = &[_]Option{value("parent", "ID")};
@@ -326,7 +337,7 @@ test "option name set covers every grammar and rejects unknown names" {
 
 test "CLI-2 invalid_input_is_local" {
     try expectValidation(.session_send, &.{ "--to", "a", "--to", "a", "hi" }, error.DuplicateArgument);
-    try expectValidation(.session_send, &.{ "--to", "a", "--text", "f" }, error.UnknownArgument);
+    try expectValidation(.session_send, &.{ "--to", "a", "--text", "f" }, false);
     try expectValidation(.session_send, &.{ "--to", "a", "hi", "again" }, error.InvalidArguments);
     try expectValidation(.session_send, &.{ "--to", "a", "--bogus" }, error.UnknownArgument);
     for ([_][]const u8{ "--session", "--session-hex" }) |old|
@@ -906,4 +917,24 @@ test "preset is a Configure option and Start refuses it" {
     try expectValidation(.session_configure, &.{ "--preset", "x", "--preset", "x" }, error.DuplicateArgument);
     try expectValidation(.session_start, &.{ "--preset", "x" }, error.UnknownArgument);
     try expectValidation(.session_configure, &.{ "--session", "k7m2qx", "--preset", "x" }, false);
+}
+
+test "CLI-20 preserve interleaving for start and send" {
+    for ([_]Command{ .session_start, .session_send }) |command| {
+        const argv = &[_][]const u8{ "--text", "first", "--image", "a.png", "--text-file", "-", "--image", "b.jpg", "--text", "last" };
+        var storage: [1024]u8 = undefined;
+        const definition = command.definition();
+        const parsed = try testParse(definition, argv, &storage);
+        var iterator = parsed.ordered();
+        const names = [_][]const u8{ "text", "image", "text-file", "image", "text" };
+        const values = [_][]const u8{ "first", "a.png", "-", "b.jpg", "last" };
+        for (names, values) |name, expected| {
+            const operand = iterator.next().?;
+            try std.testing.expectEqualStrings(name, operand.name);
+            try std.testing.expectEqualStrings(expected, operand.value);
+        }
+        try std.testing.expect(iterator.next() == null);
+        try std.testing.expectError(error.UnknownArgument, testParse(definition, &.{ "--image", "a", "--bogus" }, &storage));
+        try std.testing.expectError(error.MissingArgumentValue, testParse(definition, &.{"--image"}, &storage));
+    }
 }

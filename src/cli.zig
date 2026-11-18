@@ -2480,6 +2480,27 @@ fn messageWithStep(init: std.process.Init, parsed: *const cli_args.Parsed, confi
         return error.InvalidSession;
     }
     var input = client.MessageInput{ .store = "", .session = destination, .text_path = "-", .configuration = if (configuration) |value| value.input else null };
+    var iterator = parsed.ordered();
+    var count: usize = 0;
+    while (iterator.next()) |_| {
+        count += 1;
+        if (count > @import("input_parts.zig").max_parts) return error.TooManyInputParts;
+    }
+    if (count != 0) {
+        const operands = try init.arena.allocator().alloc(client.MessageOperand, count);
+        iterator = parsed.ordered();
+        var n: usize = 0;
+        while (iterator.next()) |item| : (n += 1) {
+            operands[n] = if (std.mem.eql(u8, item.name, "text"))
+                .{ .text = item.value }
+            else if (std.mem.eql(u8, item.name, "text-file"))
+                .{ .text_file = item.value }
+            else
+                .{ .image = item.value };
+        }
+        input.operands = operands;
+    }
+
     const address = init.environ_map.get("RUI_ADDRESS");
     const sender_store = init.environ_map.get("RUI_STORE");
     const handle = init.environ_map.get("RUI_SENDER_HANDLE");
@@ -3906,8 +3927,9 @@ fn writeMutationJson(writer: *std.Io.Writer, reply: protocol_reply.MutationReply
     }
     try writer.writeByte('}');
     if (reply.target == .message and answer.result != .conflict) {
-        const input = answer.input orelse protocol_reply.CommandObservation.ContentReference{ .bytes = reply.target.message.bytes, .digest = reply.target.message.digest };
-        try writer.print(",\"input\":{{\"type\":\"text\",\"bytes\":\"{d}\",\"sha256\":\"{s}\"}}", .{ input.bytes, std.fmt.bytesToHex(input.digest, .lower) });
+        const input = answer.input orelse protocol_reply.CommandObservation.InputReference{ .form = reply.target.message.form, .content = .{ .bytes = reply.target.message.bytes, .digest = reply.target.message.digest } };
+        try writer.writeAll(",\"input\":");
+        try input.writeJson(writer);
         if (answer.result == .accepted) try writer.print(",\"queue\":{{\"status\":\"queued\",\"admission\":\"{d}\"}}", .{answer.result.accepted.message.admission});
     }
     if (reply.target == .session_stop) try writer.print(",\"completion\":{{\"status\":\"{s}\"}}", .{if (answer.result == .accepted) @tagName(answer.result.accepted.session_stop.completion) else "unavailable"});
@@ -4983,7 +5005,7 @@ test "CLI boundary classifies local failures with repair lines and exits" {
         .{ .err = error.HomeUnavailable, .code = .home_unavailable, .exit = 6, .phrase = "Set HOME to your absolute home directory" },
         .{ .err = error.InvalidModel, .code = .model_id_malformed, .exit = 2, .phrase = "1-256 printable non-space ASCII bytes" },
         .{ .err = error.InteractiveTerminalRequired, .code = .terminal_required, .exit = 2, .phrase = "terminal input and output with cursor addressing" },
-        .{ .err = error.EmptyMessageInput, .code = .message_empty, .exit = 2, .phrase = "Pipe or redirect a nonempty Message" },
+        .{ .err = error.EmptyMessageInput, .code = .message_empty, .exit = 2, .phrase = "Provide nonempty Message text or an image" },
         .{ .err = error.EnvironmentTooLarge, .code = .environment_too_large, .exit = 2, .phrase = "Unset or shorten the largest variables" },
         .{ .err = error.Unexpected, .code = .internal_unexpected, .exit = 1, .phrase = "report this code with the command" },
         .{ .err = error.CrossStorePeerSend, .code = .internal_unexpected, .exit = 1, .phrase = "internal fault" },

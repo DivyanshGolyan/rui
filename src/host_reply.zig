@@ -49,8 +49,14 @@ pub fn renderMessageReply(
 ) !void {
     const shapes = protocol.message_reply;
     try switch (result) {
-        .accepted => |value| response.appendShape(shapes.accepted, .{ value.replayed, value.session.slice(), value.admission_id, value.content.length, value.content.digest, value.admission_id }),
-        .rejected => |value| renderToolRejection(response, session, value, shapes.rejected),
+        .accepted => |value| switch (value.form) {
+            .bytes => response.appendShape(shapes.accepted, .{ value.replayed, value.session.slice(), value.admission_id, value.content.length, value.content.digest, value.admission_id }),
+            .parts => response.appendShape(shapes.accepted_parts, .{ value.replayed, value.session.slice(), value.admission_id, value.content.length, value.content.digest, value.admission_id }),
+        },
+        .rejected => |value| switch (value.form) {
+            .bytes => renderToolRejection(response, session, value, shapes.rejected),
+            .parts => renderToolRejection(response, session, value, shapes.rejected_parts),
+        },
         .conflict => response.appendShape(shapes.conflict, .{session}),
         .infrastructure_failure => renderStatic(response, .invocation_error, "canonical_store_failure"),
     };
@@ -211,7 +217,10 @@ pub fn renderFullCommandObservation(
     switch (observation.kind) {
         .configure => |configured| if (observation.status == .accepted) try response.appendShape(shapes.revision, .{ configured.revision, configured.created }),
         .message => |*maybe_message| if (maybe_message.*) |*message| {
-            try response.appendShape(shapes.input, .{ message.content.length, message.content.digest });
+            switch (message.form) {
+                .bytes => try response.appendShape(shapes.input, .{ message.content.length, message.content.digest }),
+                .parts => try response.appendShape(shapes.input_parts, .{ message.content.length, message.content.digest }),
+            }
             if (message.queue) |accepted| {
                 try response.appendShape(shapes.queue, .{ accepted.admission_id, message.admitted_at });
                 const binding: ?AttemptBinding = switch (accepted.state) {
@@ -359,10 +368,12 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     try std.testing.expectEqual(protocol.message_reply.max_bytes, @max(
         try Worst.reply(renderMutationReply(.message), @as([]const u8, &escaped_session), .{
             command_reply.MessageReply{ .accepted = .{ .replayed = false, .admission_id = max, .content = content, .session = session } },
+            command_reply.MessageReply{ .accepted = .{ .form = .parts, .replayed = false, .admission_id = max, .content = content, .session = session } },
             command_reply.MessageReply.conflict,
         }),
         try Worst.reply(renderMutationReply(.message), @as([]const u8, &escaped_session), .{
             command_reply.MessageReply{ .rejected = .{ .replayed = false, .code = Worst.tag(protocol.MessageRejection), .content = content } },
+            command_reply.MessageReply{ .rejected = .{ .form = .parts, .replayed = false, .code = Worst.tag(protocol.MessageRejection), .content = content } },
         }) + message_expansion,
     ));
 
@@ -597,4 +608,25 @@ test "Action read JSON reaches its exact bound with an escaped final window" {
     writer = .fixed(bytes);
     try renderActionRead(.{ .writer = &writer }, value);
     try std.testing.expect(std.mem.endsWith(u8, writer.buffered(), "\"final\":null}"));
+}
+
+test "SH-60 Message replies and observations preserve the input form" {
+    const content: command_reply.ContentReference = .{ .length = 41, .digest = @splat(0xab) };
+    var session: protocol.Bounded(protocol.max_session_bytes) = .{};
+    try session.set("k7m2qx");
+    for ([_]@import("input_parts.zig").Form{ .bytes, .parts }) |form| {
+        const expected = if (form == .bytes) "\"input\":{\"type\":\"text\",\"bytes\":\"41\"" else "\"input\":{\"type\":\"parts\",\"bytes\":\"41\"";
+        for ([_]command_reply.MessageReply{
+            .{ .accepted = .{ .form = form, .replayed = false, .admission_id = 1, .content = content, .session = session } },
+            .{ .rejected = .{ .form = form, .replayed = false, .code = .unknown_session, .content = content } },
+        }) |reply| {
+            var response: protocol.ResponseBuffer = .{};
+            try response.render(renderMessageReply, .{ session.slice(), reply });
+            try std.testing.expect(std.mem.indexOf(u8, response.slice(), expected) != null);
+        }
+        var observation: command_reply.CommandObservation = .{ .status = .accepted, .target = session, .kind = .{ .message = .{ .form = form, .content = content, .queue = .{ .admission_id = 1, .state = .queued }, .work = .{ .state = .{ .pending = .{ .since = 10 } } } } } };
+        var response: protocol.CommandObservationBuffer = .{};
+        try response.render(renderFullCommandObservation, .{ "key", &observation, null });
+        try std.testing.expect(std.mem.indexOf(u8, response.slice(), expected) != null);
+    }
 }
