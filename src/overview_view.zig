@@ -4279,26 +4279,38 @@ test "provider bands derive from the same conversation work as rows" {
 
 fn projectionCase3() !void {
     const ref = "aaaaaa".*;
-    for ([_]u64{ 5, 20 }) |delay| {
-        var state = try opened(&.{ retryRow(&ref, "provider_temporary_http_429", 10), session("bbbbbb", .{ .finished = ago(10) }, .{}) });
+    for ([_]u64{ 0, 2 }) |occupied| for ([_]bool{ false, true }) |activity| for ([_]bool{ false, true }) |started| {
+        if (occupied == 2 and started) continue;
+        const retry = retryRow(&ref, "provider_temporary_http_429", 5);
+        var state = try opened(&.{ retry, session("bbbbbb", .{ .finished = ago(10) }, .{}) });
         defer state.deinit();
+        _ = try step(&state, .{ .host = .{ .instance = testToken(0).instance, .started_at = test_now_s, .slots = 2, .slots_in_use = occupied } });
         _ = try step(&state, .{ .conversation = ref });
-        _ = try step(&state, .{ .tick = state.now_ms + list_interval_ms });
-        const retry = retryRow(&ref, "provider_temporary_http_429", delay);
-        _ = try step(&state, .{ .observed = .{ .read_version = testToken(2), .reference = ref, .work = fixtureWork(.{ .state = retry.state }), .opening = false } });
-        try std.testing.expectEqual(@as(?u64, (test_now_s + delay) * 1000), state.wakeAt());
-        try std.testing.expectEqualStrings(&ref, &state.rows.items[state.order.items[0]].reference);
-        _ = try step(&state, .{ .tick = (test_now_s + delay) * 1000 });
+        _ = try step(&state, .{ .tick = (test_now_s + 5) * 1000 });
         try std.testing.expectEqual(Kind.pending, shownKind(&state, state.find(ref).?));
-        // Group changes only when the next Host observation serves the due retry.
+        // An equal revision cannot replace the old snapshot before the Host publishes the crossing.
+        const due = retry.state.asOf(state.now_ms);
+        _ = try step(&state, .{ .observed = .{ .read_version = testToken(1), .reference = ref, .work = fixtureWork(.{ .state = due }), .opening = false } });
+        _ = try respond(&state, .changed, testToken(1), &.{retry});
         try std.testing.expectEqual(@as(u32, 1), state.summary.counts.working);
-        try std.testing.expectEqualStrings(&ref, &state.rows.items[state.order.items[0]].reference);
-        _ = try step(&state, .{ .observed = .{ .read_version = testToken(3), .reference = ref, .work = fixtureWork(.{ .state = retry.state.asOf(state.now_ms) }), .opening = false } });
-        try std.testing.expectEqual(@as(u32, 1), state.summary.counts.queued);
-        try std.testing.expectEqualStrings("bbbbbb", &state.rows.items[state.order.items[0]].reference);
+        const served: WorkState = if (started) .{ .working = .{ .since = test_now_s + 5 } } else due;
+        if (activity) {
+            _ = try step(&state, .{ .observed = .{ .read_version = testToken(2), .reference = ref, .work = fixtureWork(.{ .state = served }), .opening = false } });
+        } else {
+            _ = try step(&state, .{ .tick = state.now_ms + list_interval_ms });
+            const listed = session(&ref, served, .{});
+            _ = try respond(&state, .changed, testToken(2), &.{listed});
+        }
+        if (started) {
+            try std.testing.expectEqual(@as(u32, 1), state.summary.counts.working);
+            try std.testing.expectEqualStrings(&ref, &state.rows.items[state.order.items[0]].reference);
+        } else {
+            try std.testing.expectEqual(@as(u32, 1), state.summary.counts.queued);
+            try std.testing.expectEqualStrings("bbbbbb", &state.rows.items[state.order.items[0]].reference);
+        }
         _ = try step(&state, .{ .conversation = null });
-        try std.testing.expectEqual(Kind.pending, shownKind(&state, state.find(ref).?));
-    }
+        try std.testing.expectEqual(if (started) Kind.working else Kind.pending, shownKind(&state, state.find(ref).?));
+    };
 }
 
 test "the band derives provider trouble from rows, in priority order" {

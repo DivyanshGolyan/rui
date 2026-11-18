@@ -321,6 +321,9 @@ test "production turn preserves skipped continuation preference through actual S
                 pub fn scheduledRetry(_: *const @This()) turn.ScheduledRetry {
                     return .unknown;
                 }
+                pub fn publishRetryCrossings(_: *@This(), _: u64, _: u64) error{Fence}!turn.DeadlineRead {
+                    unreachable;
+                }
                 pub fn unixMilliseconds(_: *const @This()) ?u64 {
                     return null;
                 }

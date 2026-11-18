@@ -138,6 +138,74 @@ test "Session list pages accepted creation order with exact workspace and fixed 
     }.run);
 }
 
+test "SUI-30 host_retry_work_version" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try configureTestSession(&storage, "deadline-config");
+            try submitTestMessage(&storage, &tmp, "deadline-input", "deadline-message", session.slice(), "retry");
+            const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            const Clock = struct {
+                fn before(_: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {
+                    return .{ .nanoseconds = 31_000_000_000 };
+                }
+                fn after(_: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {
+                    return .{ .nanoseconds = 91_001_000_000 };
+                }
+                fn random(_: ?*anyopaque, bytes: []u8) void {
+                    @memset(bytes, 0);
+                }
+            };
+            var before = std.testing.io.vtable.*;
+            before.now = Clock.before;
+            before.random = Clock.random;
+            var after = before;
+            after.now = Clock.after;
+            storage.io.vtable = &before;
+            defer storage.io = std.testing.io;
+            try storage.settleModelAttemptFailure(binding, .{ .uncorrelated = "provider_temporary_http_429" }, .{ .retryable = .{ .waits_ms = .{ 60_000, 60_000, 60_000 } } }, .{});
+            const due = try store_testing.queryU64(&storage, "SELECT retry_due_at_ms FROM model_operation WHERE resolution_code IS NULL", .{});
+            try std.testing.expectEqual(@as(u64, 91_001), due);
+            const full = try TestingListing.read(&storage, &tmp, .{});
+            var before_row = try testingListRow(&storage, &tmp, session.slice());
+            defer before_row.deinit();
+            try std.testing.expectEqualStrings("working", before_row.get(&.{ "work", "group" }).string);
+            const baseline = try storage.publishRetryCrossings(31_000, due - 1);
+            try std.testing.expectEqual(full.since.generation, baseline.generation);
+            try std.testing.expectEqual(@as(?u64, due), baseline.next);
+            storage.io.vtable = &after;
+            const crossing = try storage.publishRetryCrossings(due - 1, due);
+            try std.testing.expectEqual(baseline.generation + 1, crossing.generation);
+            const delta = try TestingListing.read(&storage, &tmp, .{ .since = full.since });
+            try std.testing.expectEqual(protocol.ListDelta.changed, delta.delta);
+            try delta.expectReferences(&.{session.slice()[0..change_ring.id_bytes].*});
+            var after_row = try testingListRow(&storage, &tmp, session.slice());
+            defer after_row.deinit();
+            try std.testing.expectEqualStrings("queued", after_row.get(&.{ "work", "group" }).string);
+            var request: protocol.ActivityPage = .{};
+            try request.session.set(session.slice());
+            const activity = try store_core.activityPageForTesting(&storage, request);
+            try std.testing.expectEqual(crossing.generation, activity.work.read_version.generation);
+            try std.testing.expect(activity.work.work.state == .pending);
+            const unchanged = try storage.publishRetryCrossings(due, due + 1);
+            try std.testing.expectEqual(crossing.generation, unchanged.generation);
+            storage.io.vtable = &before;
+            const reversed = try storage.publishRetryCrossings(due + 1, due - 1);
+            try std.testing.expectEqual(unchanged.generation + 1, reversed.generation);
+            try std.testing.expectEqual(@as(?u64, due), reversed.next);
+            const reverse_delta = try TestingListing.read(&storage, &tmp, .{ .since = delta.since });
+            try reverse_delta.expectReferences(&.{session.slice()[0..change_ring.id_bytes].*});
+            var reversed_row = try testingListRow(&storage, &tmp, session.slice());
+            defer reversed_row.deinit();
+            try std.testing.expectEqualStrings("working", reversed_row.get(&.{ "work", "group" }).string);
+        }
+    }.run);
+}
+
 test "a since listing answers only the Sessions changed since its token, or everything" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {

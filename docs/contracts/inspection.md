@@ -262,7 +262,7 @@ The live `work` object also carries required nullable `creator`, read from the s
 A non-null value is a canonical six-character Session reference; malformed IDs reject during decoding.
 Detached children retain this creator even though they have no lifecycle parent.
 Like live work, this preview may postdate a page's pinned historical end.
-A listing row and completed live-work read carry `read_version`, the actual Store opening identity and commit generation sampled under their read Access (not a traversal's frozen `since`). The overview settles both into one keyed presentation row: newer revisions replace work and last line together, equal revisions retain that value after retry-clock normalization, and older reads cannot regress its state, detail or age. Conversation departure changes focus, not the accepted row. Listing membership and listing-only terminal-status accounting remain separate. Only a Host handshake establishes the opening identity; foreign reads cannot rebase it or consume listing tokens. The served Host and its Store tokens share that incarnation. A row outside membership is retained only while its conversation owns a reader, then retired with that producer.
+A listing row and completed live-work read carry `read_version`, the actual Store opening identity and work version sampled under their read Access (not a traversal's frozen `since`). The overview settles both into one keyed presentation row: newer revisions replace work and last line together, equal revisions retain that value after retry-clock normalization, and older reads cannot regress its state, detail or age. Conversation departure changes focus, not the accepted row. Listing membership and listing-only terminal-status accounting remain separate. Only a Host handshake establishes the opening identity; foreign reads cannot rebase it or consume listing tokens. The served Host and its Store tokens share that incarnation. A row outside membership is retained only while its conversation owns a reader, then retired with that producer.
 This is a logical inventory prefix, not a historical transaction snapshot: immutable call classification remains attached to its item even at an interior end before the rejection-result position.
 Call fields are in `name`, `call_id`, `arguments` order.
 Content references carry exact decimal-string bytes and SHA-256; no preview truncation or private provider content enters activity.
@@ -358,8 +358,7 @@ A true action indicates that admission accepts the intent if the described facts
   Whether Active Capacity is why it waits is not a Store fact; host information's slots in use supply that context.
 - **A stop that selected no Turn** counts only if it excluded queued Messages.
   A stop that excluded nothing leaves the state unchanged.
-- **A retry falling due** commits nothing, so Session listing's `since` does not report it.
-  Every reader applies the same past-due rule when it reads, so a past-due retry reads `pending` everywhere.
+- **A retry falling due** changes the Host's work version even without a Store commit. The Host records affected Sessions in the existing change ring, so incremental list and Activity readers receive the new work even when execution capacity is full. The same Host rule reads a past-due retry as `pending`.
 - **`resets_at`** comes from the failed Operation's saved diagnostic.
   A missing or unreadable diagnostic reads `null` and fences nothing.
 - **Inputs that contradict** the table's preconditions are canonical corruption, and the Store fences, as other readers do.

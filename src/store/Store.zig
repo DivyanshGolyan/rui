@@ -1005,6 +1005,27 @@ pub const Store = struct {
         };
     }
 
+    pub const RetryDeadlineRead = struct { generation: u64, next: ?u64 };
+
+    pub fn publishRetryCrossings(self: *Store, from: u64, now: u64) !RetryDeadlineRead {
+        return self.queue().run(publishRetryCrossingsHeld, .{ self, from, now });
+    }
+
+    fn publishRetryCrossingsHeld(self: *Store, from: u64, now: u64) !RetryDeadlineRead {
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: ReadAccess = .open(&entry);
+        defer access.deinit();
+        var crossings: session_list_read.RetryCrossings = .{};
+        const next = try entry.finish(Ordinary.none, session_list_read.retryCrossings(&access, from, now, &crossings));
+        if (crossings.touched.count != 0 or crossings.touched.everything) {
+            const generation = self.commit_generation.fetchAdd(1, .release) + 1;
+            self.changes.record(generation, &crossings.touched);
+            if (self.commitWake().load(.acquire)) |wake| wake.set(self.io);
+        }
+        return .{ .generation = self.commitGeneration(), .next = next };
+    }
+
     pub fn readSessionList(self: *Store, request: *const session_list.ListSessions, visitor: anytype) !void {
         try request.validate();
         var watched: session_list_read.Watched(@TypeOf(visitor)) = .{ .visitor = visitor };

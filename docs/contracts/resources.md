@@ -36,6 +36,7 @@ The retry scans use a due-time index that excludes future deadlines, and run at 
 A scan that found nothing runs again only after a commit, a relevant slot or ordinary-custody availability change, or the earliest scheduled retry falling due by the wall clock, the clock the Store admits by; the admission scan reads that due time in its own round, and an idle Host sends the Store no query.
 After a commit, one read round says which kinds of dispatch work the Store holds (core and MCP Actions, Bash, waiting Messages, tool continuations), and only those kinds' scans run; the answer is a hint, since each admission reads its own facts again, and a kind it wrongly names costs one empty round.
 That round also reads whether any open Turn's Attempt is unresolved with a retry state; while none is, neither retry scan runs, since a commit is the only thing that makes one.
+The work-version owner separately reads the next retry deadline and publishes crossings to the bounded Session change ring, independent of execution capacity or provider availability. It repeats that read on a work-version change or a crossed deadline; an unchanged idle Host performs no repeated query.
 Missed ticks do not queue.
 Full capacity or an empty array must not cause spinning.
 
