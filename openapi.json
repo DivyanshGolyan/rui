@@ -1135,6 +1135,99 @@
         }
       }
     },
+    "/v1/public-part": {
+      "post": {
+        "operationId": "publicPart",
+        "summary": "Typed metadata for an ordered Message or Action Resolution part.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/WireVersion"
+          },
+          {
+            "$ref": "#/components/parameters/HostInstance"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PublicPartRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The reply.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicPartReply"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "A refusal or failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorReply"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/public-part-bytes": {
+      "post": {
+        "operationId": "publicPartBytes",
+        "summary": "Exact bytes of one image part.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/WireVersion"
+          },
+          {
+            "$ref": "#/components/parameters/HostInstance"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PublicPartBytesRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The content bytes, from the requested offset.",
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "A refusal or failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorReply"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/activity-search": {
       "post": {
         "operationId": "activitySearch",
@@ -13082,6 +13175,208 @@
           "session",
           "action",
           "decision"
+        ],
+        "additionalProperties": false
+      },
+      "PublicPartBytesRequest": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "const": "20"
+          },
+          "kind": {
+            "const": "public_part_bytes"
+          },
+          "store": {
+            "type": "string",
+            "maxLength": 492,
+            "x-rui-max-bytes": 492
+          },
+          "session": {
+            "type": "string",
+            "maxLength": 128,
+            "x-rui-max-bytes": 128
+          },
+          "id": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "ordinal": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "target": {
+            "type": "string",
+            "enum": [
+              "message",
+              "action"
+            ]
+          }
+        },
+        "required": [
+          "version",
+          "kind",
+          "store",
+          "session",
+          "id",
+          "ordinal",
+          "target"
+        ],
+        "additionalProperties": false
+      },
+      "PublicPartReply": {
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "version": {
+                "const": "20"
+              },
+              "type": {
+                "const": "public_part"
+              },
+              "part": {
+                "type": "null"
+              }
+            },
+            "required": [
+              "version",
+              "type",
+              "part"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "version": {
+                "const": "20"
+              },
+              "type": {
+                "const": "public_part"
+              },
+              "part": {
+                "type": "object",
+                "properties": {
+                  "ordinal": {
+                    "$ref": "#/components/schemas/Decimal"
+                  },
+                  "type": {
+                    "const": "text"
+                  },
+                  "bytes": {
+                    "$ref": "#/components/schemas/Decimal"
+                  },
+                  "sha256": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  }
+                },
+                "required": [
+                  "ordinal",
+                  "type",
+                  "bytes",
+                  "sha256"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "version",
+              "type",
+              "part"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "version": {
+                "const": "20"
+              },
+              "type": {
+                "const": "public_part"
+              },
+              "part": {
+                "type": "object",
+                "properties": {
+                  "ordinal": {
+                    "$ref": "#/components/schemas/Decimal"
+                  },
+                  "type": {
+                    "const": "image"
+                  },
+                  "mime": {
+                    "type": "string",
+                    "maxLength": 10,
+                    "x-rui-max-bytes": 10
+                  },
+                  "bytes": {
+                    "$ref": "#/components/schemas/Decimal"
+                  },
+                  "sha256": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  }
+                },
+                "required": [
+                  "ordinal",
+                  "type",
+                  "mime",
+                  "bytes",
+                  "sha256"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "version",
+              "type",
+              "part"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      },
+      "PublicPartRequest": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "const": "20"
+          },
+          "kind": {
+            "const": "public_part"
+          },
+          "store": {
+            "type": "string",
+            "maxLength": 492,
+            "x-rui-max-bytes": 492
+          },
+          "session": {
+            "type": "string",
+            "maxLength": 128,
+            "x-rui-max-bytes": 128
+          },
+          "id": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "ordinal": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "target": {
+            "type": "string",
+            "enum": [
+              "message",
+              "action"
+            ]
+          }
+        },
+        "required": [
+          "version",
+          "kind",
+          "store",
+          "session",
+          "id",
+          "ordinal",
+          "target"
         ],
         "additionalProperties": false
       },

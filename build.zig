@@ -151,6 +151,19 @@ pub fn build(b: *std.Build) void {
         "Run TD2 original-recovery encodings through the direct-PTY matrix (nonblocking)",
     ).dependOn(&screen_module.addPtyHarness(b, screen, "tests/integration/input_equivalence.py", ci.path(release_safe)).step);
 
+    const public_parts_seed = b.addTest(.{
+        .name = "public-parts-seed",
+        .use_llvm = test_actor_llvm,
+        .root_module = b.createModule(.{ .root_source_file = b.path("src/tests.zig"), .target = target, .optimize = .ReleaseSafe }),
+        .filters = &.{"seed CLI mixed parts fixture"},
+    });
+    product.configureUnitRoot(b, public_parts_seed, target, pinned_transport);
+    const public_parts_integration = b.addSystemCommand(&.{ "python3", "-B" });
+    public_parts_integration.addFileArg(b.path("tests/integration/public_parts_integration.py"));
+    public_parts_integration.addFileArg(ci.path(release_safe));
+    public_parts_integration.addFileArg(public_parts_seed.getEmittedBin());
+    b.step("public-parts-integration", "Inspect and export Store-seeded Message and Action parts through the CLI").dependOn(&public_parts_integration.step);
+
     const session_list_client = b.addExecutable(.{
         .name = "rui-session-list-client-test",
         .use_llvm = test_actor_llvm,

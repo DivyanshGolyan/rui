@@ -165,6 +165,34 @@ fn exercise(case: *testing.Case, background: bool) !void {
             const content = try testing.queryU64(&storage, "SELECT resolution_content_id FROM action_operation WHERE action_id=?1", .{selected.action_id});
             const compound = parts.len != 1 or parts[0].kind != .text;
             try std.testing.expectEqual(@as(u64, if (compound) 1 else 0), try testing.queryU64(&storage, "SELECT form FROM content WHERE content_id=?1", .{content}));
+            var public = try @import("../domain/public_parts.zig").Reader.init(session, .{ .action = selected.action_id });
+            defer public.deinit();
+            var ordinal: usize = 0;
+            while (true) switch (try storage.readPublicParts(&public)) {
+                .pending => {},
+                .done => break,
+                .part => |part| {
+                    const expected = parts[ordinal];
+                    try std.testing.expectEqual(@as(u32, @intCast(ordinal)), part.ordinal);
+                    try std.testing.expectEqual(expected.kind == .image, part.kind == .image);
+                    if (expected.kind == .image) if (expected.kind.image.assertion) |format| try std.testing.expectEqual(format, part.kind.image.media.format);
+                    try std.testing.expectEqual(@as(u64, expected.bytes.len), part.location.reference.length);
+                    try std.testing.expectEqualSlices(u8, &protocol.contentDigest(expected.bytes), &part.location.reference.digest);
+                    var reader: @import("../domain/content.zig").ContentReader = undefined;
+                    reader.open(part.location);
+                    defer reader.close();
+                    var offset: usize = 0;
+                    var buffer: [257]u8 = undefined;
+                    while (offset < expected.bytes.len) {
+                        const count = try reader.read(offset, &buffer);
+                        try std.testing.expect(count > 0);
+                        try std.testing.expectEqualSlices(u8, expected.bytes[offset..][0..count], buffer[0..count]);
+                        offset += count;
+                    }
+                    ordinal += 1;
+                },
+            };
+            try std.testing.expectEqual(parts.len, ordinal);
             const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             for (0..2) |pass| {
                 if (pass == 1) {
@@ -527,6 +555,95 @@ test "old text operation retry excludes later image message and background final
             const retry = (try shared.admitRetryForTesting(&storage)).?.permit.binding;
             try std.testing.expectEqual(original.operation_id, retry.operation_id);
             try expectOldTextView(&storage, retry);
+        }
+    }.run);
+}
+
+test "public Message parts preserve ordered metadata and bytes" {
+    try testing.forEachEngine(struct {
+        fn run(case: *testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: core.Store = undefined;
+            try testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try testing.configureTestSession(&storage, "public-part-config");
+            try testing.submitTestMessageParts(&storage, &tmp, "public-part-message", session.slice(), &mixed);
+            const admission = try testing.queryU64(&storage, "SELECT admission_id FROM message_admission WHERE session_ref=?1", .{session.slice()});
+            var public = try @import("../domain/public_parts.zig").Reader.init(session, .{ .message = admission });
+            defer public.deinit();
+            var ordinal: usize = 0;
+            while (true) switch (try storage.readPublicParts(&public)) {
+                .pending => {},
+                .done => break,
+                .part => |part| {
+                    const expected = mixed[ordinal];
+                    try std.testing.expectEqual(@as(u32, @intCast(ordinal)), part.ordinal);
+                    try std.testing.expectEqual(expected.kind == .image, part.kind == .image);
+                    if (expected.kind == .image) try std.testing.expectEqual(expected.kind.image.assertion.?, part.kind.image.media.format);
+                    try std.testing.expectEqual(@as(u64, expected.bytes.len), part.location.reference.length);
+                    try std.testing.expectEqualSlices(u8, &protocol.contentDigest(expected.bytes), &part.location.reference.digest);
+                    var reader: @import("../domain/content.zig").ContentReader = undefined;
+                    reader.open(part.location);
+                    defer reader.close();
+                    var offset: usize = 0;
+                    var buffer: [257]u8 = undefined;
+                    while (offset < expected.bytes.len) {
+                        const count = try reader.read(offset, &buffer);
+                        try std.testing.expect(count > 0);
+                        try std.testing.expectEqualSlices(u8, expected.bytes[offset..][0..count], buffer[0..count]);
+                        offset += count;
+                    }
+                    ordinal += 1;
+                },
+            };
+            try std.testing.expectEqual(mixed.len, ordinal);
+        }
+    }.run);
+}
+
+test "seed CLI mixed parts fixture" {
+    const path = std.c.getenv("RUI_PARTS_SEED_DIR") orelse return;
+    const directory = try std.Io.Dir.openDirAbsolute(std.testing.io, std.mem.span(path), .{});
+    defer directory.close(std.testing.io);
+    var tmp: std.testing.TmpDir = .{ .dir = directory, .parent_dir = .cwd(), .sub_path = @splat(0) };
+    var storage: core.Store = undefined;
+    try testing.testingStoreToolSet(&storage, &tmp, std.testing.io, &tools.built_in_tool_set);
+    const session = try propose(&storage, &tmp, .bash);
+    const selected = (try storage.nextAction(.bash, .fromFree(2, true))).?;
+    const binding = (try storage.admitActionAttempt(selected, 30_000, .{})).?.permit.binding;
+    try testing.settleTestActionParts(&storage, &tmp, binding, &mixed);
+    try testing.submitTestMessageParts(&storage, &tmp, "cli-mixed-message", session.slice(), &mixed);
+    const admission = try testing.queryU64(&storage, "SELECT admission_id FROM message_admission WHERE command_key=?1", .{"cli-mixed-message"});
+    var output: [256]u8 = undefined;
+    const receipt = try std.fmt.bufPrint(&output, "{{\"session\":\"{s}\",\"admission\":\"{d}\",\"action\":\"{d}\"}}\n", .{ session.slice(), admission, selected.action_id });
+    try storage.close();
+    try directory.writeFile(std.testing.io, .{ .sub_path = "parts-seed.json", .data = receipt });
+}
+
+test "public parts certify the complete manifest before the first part" {
+    try testing.forEachEngine(struct {
+        fn run(case: *testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: core.Store = undefined;
+            try testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try testing.configureTestSession(&storage, "public-corrupt-config");
+            try testing.submitTestMessageParts(&storage, &tmp, "public-corrupt-message", session.slice(), &mixed);
+            const admission = try testing.queryU64(&storage, "SELECT admission_id FROM message_admission WHERE command_key=?1", .{"public-corrupt-message"});
+            const content = try testing.queryU64(&storage, "SELECT content_id FROM message_admission WHERE admission_id=?1", .{admission});
+            try testing.exec(&storage, "DELETE FROM content_part WHERE content_id=?1 AND ordinal=?2", .{ content, mixed.len - 1 });
+            var reader = try @import("../domain/public_parts.zig").Reader.init(session, .{ .message = admission });
+            defer reader.deinit();
+            while (true) {
+                const progress = storage.readPublicParts(&reader) catch |err| {
+                    try std.testing.expectEqual(error.CorruptStore, err);
+                    try std.testing.expect(storage.isFenced());
+                    return;
+                };
+                try std.testing.expect(progress == .pending);
+            }
         }
     }.run);
 }

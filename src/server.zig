@@ -1491,6 +1491,8 @@ const Route = enum {
     activity_page,
     activity_search,
     activity_content,
+    public_part,
+    public_part_bytes,
     skill_suggestions,
     model_list,
     unsupported_control,
@@ -1898,6 +1900,8 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             };
             try fd.json(200, activity_reply.max_search_bytes, host_reply.renderActivitySearch, .{page});
         },
+        .public_part => |*command| try preparePublicPart(host, fd, command, false),
+        .public_part_bytes => |*command| try preparePublicPart(host, fd, command, true),
         .activity_content => |*command| {
             const location = host.store.openActivityContent(command) catch |err| switch (err) {
                 error.ContentNotFound => return respondStatic(fd, 409, .activity_unavailable, @errorName(err)),
@@ -2033,6 +2037,45 @@ fn createUnfilled(allocator: std.mem.Allocator, comptime T: type) error{OutOfMem
     return @ptrCast(@alignCast(bytes));
 }
 
+fn renderPublicPart(out: protocol.JsonOut, selected: ?store_module.PublicParts.Part) !void {
+    const shape = protocol.public_part_reply;
+    try out.appendShape(shape.head, .{});
+    if (selected) |part| {
+        switch (part.kind) {
+            .text => try out.appendShape(shape.text, .{ part.ordinal, part.location.reference.length, part.location.reference.digest }),
+            .image => |image| try out.appendShape(shape.image, .{ part.ordinal, image.media.format.mime(), part.location.reference.length, part.location.reference.digest }),
+        }
+    } else try out.appendShape(shape.missing, .{});
+}
+
+fn preparePublicPart(host: *Host, fd: *Reply, command: *const protocol.PublicPart, comptime bytes: bool) !void {
+    var reader = try store_module.PublicParts.Reader.init(command.session, switch (command.target) {
+        .message => |id| .{ .message = id },
+        .action => |id| .{ .action = id },
+    });
+    defer reader.deinit();
+    const selected: ?store_module.PublicParts.Part = while (true) {
+        const progress = host.store.readPublicParts(&reader) catch |err| switch (err) {
+            error.ContentNotFound => return respondStatic(fd, 409, .conversation_unavailable, @errorName(err)),
+            else => {
+                fenceDispatch(host, "public parts", err);
+                return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
+            },
+        };
+        switch (progress) {
+            .pending => {},
+            .done => break null,
+            .part => |part| if (part.ordinal == command.ordinal) break part,
+        }
+    };
+    if (bytes) {
+        const part = selected orelse return respondStatic(fd, 409, .conversation_unavailable, "part_not_found");
+        if (part.kind != .image) return respondStatic(fd, 409, .conversation_unavailable, "part_not_image");
+        return deliverPublicContent(host, fd, part.location, 0, true);
+    }
+    try fd.json(200, protocol.public_part_reply.max_bytes, renderPublicPart, .{selected});
+}
+
 fn deliverConversationContent(host: *Host, fd: std.posix.fd_t, command: protocol.ConversationContent) !void {
     var reply = Reply{ .io = host.io, .allocator = host.allocator };
     defer reply.deinit();
@@ -2135,6 +2178,10 @@ const HeaderReader = struct {
             .activity_page
         else if (std.mem.eql(u8, path, "/v1/activity-content"))
             .activity_content
+        else if (std.mem.eql(u8, path, "/v1/public-part"))
+            .public_part
+        else if (std.mem.eql(u8, path, "/v1/public-part-bytes"))
+            .public_part_bytes
         else if (std.mem.eql(u8, path, "/v1/skill-suggestions"))
             .skill_suggestions
         else if (std.mem.eql(u8, path, "/v1/model-list"))

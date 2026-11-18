@@ -86,6 +86,7 @@ pub const SavedHostToolSet = store_core.SavedHostToolSet;
 pub const PermissionDecisionReply = command_domain.PermissionDecisionReply;
 pub const PrefixSeal = historical_domain.PrefixSeal;
 pub const PublicConversationPage = reads_domain.PublicConversationPage;
+pub const PublicParts = @import("store/domain/public_parts.zig");
 pub const schema_version = store_schema.schema_version;
 pub const minimum_schema_version = store_schema.migration_baseline;
 pub const SessionReport = report_domain.SessionReport;
