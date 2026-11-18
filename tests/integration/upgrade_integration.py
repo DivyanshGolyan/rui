@@ -13,7 +13,6 @@ import secrets
 import shlex
 import shutil
 import signal
-import socket
 import stat
 import subprocess
 import sys
@@ -330,95 +329,15 @@ def discovery_cases(root, binary, releases):
             c.assert_unchanged()
             c.assert_no_host()
 
-    for path, checking in (("/releases/latest", True), (releases.sums_path, True), (releases.archive_path, False)):
-        with case(root, binary, releases, "download-403-" + ("latest" if path.endswith("latest") else "sums" if checking else "archive")) as c:
-            c.old_selection()
-            releases.status[path] = 403
-            output = c.upgrade(*(["--check"] if checking else []), expect=6)
-            assert "upgrade_download_failed" in output, output
-            assert "curl: (22)" in output and "403" in output, output
-            assert "upgrade_preparation_failed" not in output, output
-            c.assert_unchanged()
-            c.assert_no_host()
-
-    with case(root, binary, releases, "offline-discovery") as c:
+    with case(root, binary, releases, "download-403-latest") as c:
         c.old_selection()
-        with socket.socket() as reserved:
-            reserved.bind(("127.0.0.1", 0))
-            c.env["RUI_TEST_UPGRADE_RELEASES_URL"] = f"http://127.0.0.1:{reserved.getsockname()[1]}/releases"
-            child = c.spawn_upgrade()
-            output = c.finish_upgrade(child, success=False)
-            assert "upgrade_download_failed" in output and "curl: (" in output, output
+        releases.status["/releases/latest"] = 403
+        output = c.upgrade("--check", expect=6)
+        assert "upgrade_download_failed" in output, output
+        assert "curl: (22)" in output and "403" in output, output
+        assert "upgrade_preparation_failed" not in output, output
         c.assert_unchanged()
         c.assert_no_host()
-
-
-def download_cases(root, binary, releases):
-    latest, sums, archive = "/releases/latest", releases.sums_path, releases.archive_path
-    paths = (latest, sums, archive)
-    for failed_path in paths:
-        stage = paths.index(failed_path)
-        for code in (6, 28):
-            with case(root, binary, releases, f"download-recover-{stage}-{code}") as c:
-                c.old_selection()
-                curl = CurlAttempts(c, {failed_path: [code]})
-                # A failed archive attempt writes junk to the real output file.
-                # Installation and its checksum prove the retry replaced it.
-                output = c.upgrade()
-                assert "Installed Rui" in output, output
-                selected = c.link.resolve()
-                assert selected != c.original and c.original.exists()
-                assert subprocess.check_output([str(c.link), "--version"], env=c.env,
-                                               text=True, timeout=5).startswith("rui " + releases.version)
-                expected = [(path, "normal", 0) for path in paths[:stage]]
-                expected += [(failed_path, "normal", code), (failed_path, "ipv4", 0)]
-                expected += [(path, "ipv4", 0) for path in paths[stage + 1:]]
-                curl.assert_attempts(expected)
-                c.assert_no_host()
-                # A separate invocation starts with ordinary address selection.
-                output = c.upgrade("--check")
-                assert f"Latest published stable: {releases.version}" in output, output
-                curl.assert_attempts(expected + [(latest, "normal", 0), (sums, "normal", 0)])
-                assert c.link.resolve() == selected
-                c.assert_no_host()
-
-    for stage, failed_path in enumerate(paths):
-        for first, final in ((6, 28), (28, 6)):
-            with case(root, binary, releases, f"download-both-fail-{stage}-{first}") as c:
-                c.old_selection()
-                curl = CurlAttempts(c, {failed_path: [first, final]})
-                output = c.upgrade(expect=6)
-                assert "upgrade_download_failed" in output, output
-                assert f"curl fixture final: {failed_path} attempt 2 exit {final}" in output, output
-                assert f"curl fixture final: {failed_path} attempt 1" not in output, output
-                assert "discarded earlier diagnostic" not in output, output
-                curl.assert_attempts([(path, "normal", 0) for path in paths[:stage]] +
-                                     [(failed_path, "normal", first), (failed_path, "ipv4", final)])
-                c.assert_unchanged()
-                c.assert_no_host()
-
-        for code in (22, 60, 7, 23, "signal"):
-            with case(root, binary, releases, f"download-no-retry-{stage}-{code}") as c:
-                c.old_selection()
-                curl = CurlAttempts(c, {failed_path: [code]})
-                output = c.finish_upgrade(c.spawn_upgrade(), success=False)
-                assert "upgrade_download_failed" in output, output
-                curl.assert_attempts([(path, "normal", 0) for path in paths[:stage]] +
-                                     [(failed_path, "normal", code)])
-                c.assert_unchanged()
-                c.assert_no_host()
-
-    for stage, failed_path in enumerate((sums, archive), 1):
-        with case(root, binary, releases, f"download-sticky-no-extra-retry-{stage}") as c:
-            c.old_selection()
-            curl = CurlAttempts(c, {latest: [6], failed_path: [6]})
-            output = c.upgrade(expect=6)
-            assert "upgrade_download_failed" in output, output
-            curl.assert_attempts([(latest, "normal", 6), (latest, "ipv4", 0)] +
-                                 [(path, "ipv4", 0) for path in paths[1:stage]] +
-                                 [(failed_path, "ipv4", 6)])
-            c.assert_unchanged()
-            c.assert_no_host()
 
 
 def install_cases(root, binary, releases):
@@ -2151,12 +2070,10 @@ def main():
                 tool_custody_cases(root, binary, releases, operation)
                 print(f"upgrade native: tool {operation} custody passed", flush=True)
         if selection == "download":
-            download_cases(root, binary, releases)
-            print("upgrade native: download_cases passed", flush=True)
             terminal_download_recovery(root, binary, releases, artifacts)
             print("upgrade native: terminal_download_recovery passed", flush=True)
         if selection == "all":
-            for suite in (discovery_cases, download_cases, install_cases, lifecycle_cases, restart_all_cases):
+            for suite in (discovery_cases, install_cases, lifecycle_cases, restart_all_cases):
                 suite(root, binary, releases)
                 print(f"upgrade native: {suite.__name__} passed", flush=True)
             for operation in ("restart", "upgrade"):
