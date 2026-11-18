@@ -133,7 +133,7 @@ pub const Units = struct {
     run_os_tests: *std.Build.Step.Run,
 };
 
-pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pinned_transport: ?product.PinnedTransport, test_filters: []const []const u8) Units {
+pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pinned_transport: ?product.PinnedTransport, test_filters: []const []const u8, pr_ci: bool) Units {
     const native_group = group(.native_pair);
     if (native_group.roots.len == 0) @panic("Native group must contain a unit root");
     const identities = b.allocator.alloc(UnitRoot.Id, if (test_filters.len == 0) unit_partition.roots.len else 1) catch @panic("OOM");
@@ -303,7 +303,9 @@ pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pin
     });
     _ = product.useOs(b, signal_stack_probe_root);
     const signal_stack_probe = ci.run(b.addExecutable(.{
-        .use_llvm = if (target.result.cpu.arch == .x86_64) false else null,
+        // The handler's stack behaviour depends on codegen, so outside the PR tier the probe is
+        // built with LLVM like the shipped binaries.
+        .use_llvm = if (pr_ci) false else null,
         .name = "rui-signal-stack-probe",
         .root_module = signal_stack_probe_root,
     }));
