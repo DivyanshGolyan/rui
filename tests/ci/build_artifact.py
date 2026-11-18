@@ -59,6 +59,8 @@ def compile_command(targets, part="all", *, jobs=None, pr_mode=False):
     # producer the same overlap, including LLVM promotion builds. Local
     # feedback supplies its own serialized budget without changing the graph.
     mode = ["-Dpr-ci=true"] if pr_mode else []
+    if os.environ.get("RUI_COMPILE_PIN_OS") == "1":
+        mode.append("-Dci-pin-os=true")
     if jobs is None and platform.system() == "Linux" and platform.machine() == "x86_64":
         jobs = 8
     if jobs is not None:

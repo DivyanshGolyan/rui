@@ -413,8 +413,18 @@ jobs:
           TARGETS: ${{ needs.plan.outputs.linux_compile_targets }}
           RUI_COMPILE_MEASURE: "1"
         run: |
-          lscpu
-          (while :; do printf "%s MEASURE load " "$(date -u +%FT%TZ)"; cat /proc/loadavg; sleep 5; done) &
+          lscpu | grep -E 'Model name|^CPU\(s\)'
+          echo "MEASURE kernel $(uname -r) cores $(nproc)"; free -m
+          (while :; do printf "%s MEASURE load " "$(date -u +%FT%TZ)"; cat /proc/loadavg
+            ps -eo etimes=,pcpu=,rss=,args= | grep -E 'zig (build-exe|build-lib|build-obj|test|clang|cc) ' | grep -v grep | python3 -c '
+          import re, sys
+          for line in sys.stdin:
+              e, c, r, a = line.split(None, 3)
+              name = re.search(r"--name (\S+)", a)
+              src = re.search(r"(\S+\.(?:c|zig)) ", a)
+              print("MEASURE proc", e, c, r, a.split()[1], name.group(1) if name else "-", src.group(1).split("/")[-1] if src else "-")
+          '
+            sleep 5; done) &
           sampler=$!
           trap 'kill "$sampler" 2>/dev/null || true; wait "$sampler" 2>/dev/null || true' EXIT
           inventory() {
@@ -428,6 +438,69 @@ jobs:
             python3 -B tests/ci/build_artifact.py compile "$TARGETS" 2>&1 | awk '{ print strftime("%Y-%m-%dT%H:%M:%S%z"), $0; fflush() }'
           fi
           inventory after
+          echo "// second touch" >> src/protocol.zig
+          touch "$RUNNER_TEMP/measure-marker"
+          echo "MEASURE second compile after another source touch"
+          python3 -B tests/ci/build_artifact.py compile "$TARGETS" 2>&1 | awk '{ print strftime("%Y-%m-%dT%H:%M:%S%z"), $0; fflush() }'
+          inventory after-second
+          echo "MEASURE new output files, largest first:"
+          find .zig-cache/o "$HOME/.cache/zig/o" -type f -newer "$RUNNER_TEMP/measure-marker" -printf '%s %p\n' | sort -rn | head -80
+          echo "MEASURE new bytes=$(find .zig-cache "$HOME/.cache/zig" -type f -newer "$RUNNER_TEMP/measure-marker" -printf '%s\n' | paste -sd+ | bc)"
+  pr_linux_pinned:
+    name: linux pr pinned measurement
+    needs: plan
+    if: ${{ needs.plan.outputs.pr_job == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.candidate_ref }}
+          fetch-depth: 0
+          filter: blob:none
+      - uses: ./.github/actions/setup
+        with:
+          targets: ${{ needs.plan.outputs.pr_setup_targets }}
+          cache-part: compiled
+          publish-caches: 'false'
+      - name: Compile without policy
+        env:
+          TARGETS: ${{ needs.plan.outputs.linux_compile_targets }}
+          RUI_COMPILE_MEASURE: "1"
+          RUI_COMPILE_PIN_OS: "1"
+        run: |
+          lscpu | grep -E 'Model name|^CPU\(s\)'
+          echo "MEASURE kernel $(uname -r) cores $(nproc)"; free -m
+          (while :; do printf "%s MEASURE load " "$(date -u +%FT%TZ)"; cat /proc/loadavg
+            ps -eo etimes=,pcpu=,rss=,args= | grep -E 'zig (build-exe|build-lib|build-obj|test|clang|cc) ' | grep -v grep | python3 -c '
+          import re, sys
+          for line in sys.stdin:
+              e, c, r, a = line.split(None, 3)
+              name = re.search(r"--name (\S+)", a)
+              src = re.search(r"(\S+\.(?:c|zig)) ", a)
+              print("MEASURE proc", e, c, r, a.split()[1], name.group(1) if name else "-", src.group(1).split("/")[-1] if src else "-")
+          '
+            sleep 5; done) &
+          sampler=$!
+          trap 'kill "$sampler" 2>/dev/null || true; wait "$sampler" 2>/dev/null || true' EXIT
+          inventory() {
+            for root in .zig-cache "$HOME/.cache/zig"; do
+              echo "MEASURE $1 $root bytes=$(du -sb "$root" | cut -f1) manifests=$(find "$root/h" -type f 2>/dev/null | wc -l) outputs=$(find "$root/o" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l) c_objects=$(find "$root/o" -name '*.o' ! -name '*_zcu.o' 2>/dev/null | wc -l)"
+            done
+          }
+          inventory restored
+          touch "$RUNNER_TEMP/measure-marker"
+          if [ "$TARGETS" != "[]" ]; then
+            python3 -B tests/ci/build_artifact.py compile "$TARGETS" 2>&1 | awk '{ print strftime("%Y-%m-%dT%H:%M:%S%z"), $0; fflush() }'
+          fi
+          inventory after
+          echo "// second touch" >> src/protocol.zig
+          touch "$RUNNER_TEMP/measure-marker"
+          echo "MEASURE second compile after another source touch"
+          python3 -B tests/ci/build_artifact.py compile "$TARGETS" 2>&1 | awk '{ print strftime("%Y-%m-%dT%H:%M:%S%z"), $0; fflush() }'
+          inventory after-second
           echo "MEASURE new output files, largest first:"
           find .zig-cache/o "$HOME/.cache/zig/o" -type f -newer "$RUNNER_TEMP/measure-marker" -printf '%s %p\n' | sort -rn | head -80
           echo "MEASURE new bytes=$(find .zig-cache "$HOME/.cache/zig" -type f -newer "$RUNNER_TEMP/measure-marker" -printf '%s\n' | paste -sd+ | bc)"

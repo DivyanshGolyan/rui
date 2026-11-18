@@ -14,7 +14,12 @@ pub fn build(b: *std.Build) void {
     const ci_part = b.option(ci_module.CiPart, "ci-part", "Which selected CI compiles this producer emits") orelse .all;
     const ci: ci_module.CiArtifacts = .{ .b = b, .directory = b.option([]const u8, "ci-artifacts", "Verified native CI executables") };
     const ci_mode = ci_targets != null or ci.directory != null;
-    const ci_query: std.Target.Query = .{ .cpu_model = .baseline };
+    const ci_pin_os = b.option(bool, "ci-pin-os", "Measurement only: pin the CI target's OS version") orelse false;
+    const pinned_os: std.Target.Query.OsVersion = .{ .semver = .{ .major = 5, .minor = 10, .patch = 0 } };
+    const ci_query: std.Target.Query = if (ci_pin_os)
+        .{ .cpu_model = .baseline, .os_version_min = pinned_os, .os_version_max = pinned_os }
+    else
+        .{ .cpu_model = .baseline };
     const target = b.standardTargetOptions(.{ .default_target = if (ci_mode) ci_query else .{} });
     const optimize = b.standardOptimizeOption(.{});
     if (pr_ci and (target.result.cpu.arch != .x86_64 or target.result.os.tag != .linux))
