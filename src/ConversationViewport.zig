@@ -1976,15 +1976,6 @@ fn bandPadding() !void {
             const cell = screen.screen.readCell(@intCast(column), 1).?;
             if (colour) try testing.expectEqual(band, cell.style.bg) else try testing.expect(cell.style.reverse);
         }
-        const selecting = @import("transcript_selection.zig");
-        const row_type = selecting.RowFor(@TypeOf(document));
-        const content_row: row_type = .{ .document = &document, .cells = screen.cells[width..][0..width], .line = 0 };
-        const bottom_pos: Position = .{ .row = 2 };
-        const cap_row: row_type = .{ .document = &document, .cells = screen.cells[2 * @as(usize, width) ..][0..width], .line = document.selectionLine(layout, bottom_pos) };
-        const copy = try selecting.copy(testing.allocator, &document, .of(content_row.spot(4), cap_row.spot(width)));
-        try testing.expect(copy == .text);
-        defer testing.allocator.free(copy.text.bytes);
-        try testing.expectEqualStrings("short", copy.text.bytes);
         for ([_]Position{ .{ .row = 1 }, .{ .offset = second, .row = second_rows - 1 } }) |from| {
             window.fill(.{ .style = ground });
             const drawn = document.draw(window.child(.{ .height = 1 }), from, true, true, ground, colours);

@@ -645,7 +645,7 @@ pub fn sui4RootRouting() !void {
         .{ .input = key, .effects = .{}, .layer = .settings, .pasting = false },
     };
     var state: State = .{ .layer = .settings };
-    for (straddles, 0..) |expected, index| {
+    for (straddles) |expected| {
         try std.testing.expectEqual(expected.effects, step(&state, Case.facts(false, .plain, .enter), expected.input));
         try std.testing.expectEqual(Case.layer(expected.layer), state.layer);
         try std.testing.expectEqual(expected.pasting, state.pasting);

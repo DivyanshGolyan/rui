@@ -1418,4 +1418,5 @@ pub fn testMessageLayout() !void {
     try boundedPreview();
     try consecutiveBands();
     try viewport.testMessageLayout();
+    try selecting.testBandCopy();
 }
