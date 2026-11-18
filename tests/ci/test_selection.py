@@ -948,24 +948,14 @@ class SelectionTest(unittest.TestCase):
         for result in ('failure', 'cancelled', 'skipped'):
             cases.append((*green, 'failure', 'success', 'true', result))
         cases.append((*green, 'failure', 'success', 'false', 'success'))
-        cases = [(*case, 'false', 'skipped') for case in cases]
-        for targets in ('[]', '["check"]'):
-            build = native = typecheck = 'skipped' if targets == '[]' else 'success'
-            for codegen, result, expected in (('true', 'success', 'success'),
-                                             ('true', 'failure', 'failure'),
-                                             ('true', 'cancelled', 'failure'),
-                                             ('true', 'skipped', 'failure'),
-                                             ('false', 'success', 'failure')):
-                cases.append((targets, 'success', 'success', build, native, False, expected,
-                              typecheck, 'false', 'skipped', codegen, result))
         cases = [(*case, 'false' if case[0] in ('', '[]') else 'true') for case in cases]
         for typecheck, expected in (('skipped', 'success'), ('success', 'failure'), ('failure', 'failure')):
             cases.append(('["test-logic"]', 'success', 'success', 'success', 'success', False, expected,
-                          typecheck, 'false', 'skipped', 'false', 'skipped', 'false'))
+                          typecheck, 'false', 'skipped', 'false'))
         for typecheck, expected in (('success', 'success'), ('skipped', 'failure'), ('failure', 'failure')):
             cases.append(('[]', 'success', 'success', 'skipped', 'skipped', False, expected,
-                          typecheck, 'false', 'skipped', 'false', 'skipped', 'true'))
-        for (targets, plan, policy, build, native, private, expected, typecheck, split, unit, codegen, codegen_result,
+                          typecheck, 'false', 'skipped', 'true'))
+        for (targets, plan, policy, build, native, private, expected, typecheck, split, unit,
              typecheck_selected) in cases:
             with self.subTest(targets=targets, plan=plan, policy=policy, build=build, native=native, private=private,
                               typecheck=typecheck, typecheck_selected=typecheck_selected, split=split, unit=unit):
@@ -983,7 +973,6 @@ class SelectionTest(unittest.TestCase):
                                                  'NATIVE_RESULT': native, 'TYPECHECK_RESULT': typecheck,
                                                  'TYPECHECK': typecheck_selected,
                                                  'SPLIT': split, 'UNIT_RESULT': unit,
-                                                 'CODEGEN': codegen, 'CODEGEN_RESULT': codegen_result,
                                                  'COMPILE_ONLY': 'false'})
                     actual = 'success' if result.returncode == 0 else 'failure'
                 self.assertEqual(actual, expected)
@@ -1069,15 +1058,6 @@ class SelectionTest(unittest.TestCase):
                                     env=dict(os.environ, PLAN_RESULT=plan, BUILD_RESULT='success',
                                              NATIVE_RESULT='success', SPLIT='true', UNIT_RESULT='success'))
             self.assertNotEqual(result.returncode, 0)
-
-    def test_codegen_is_required_but_not_a_dependency_of_suite_startup(self):
-        text = Path('.github/workflows/check.yml').read_text()
-        codegen = re.search(r'(?ms)^  linux_codegen:\n(.*?)(?=^  [a-z_]+:|\Z)', text)[1]
-        suites = re.search(r'(?ms)^  linux_suites:\n(.*?)(?=^  [a-z_]+:|\Z)', text)[1]
-        self.assertIn('needs: plan', codegen)
-        self.assertIn('zig build stack-frames -Dcpu=baseline --summary all', codegen)
-        self.assertNotIn('-Dpr-ci', codegen)
-        self.assertNotIn('linux_codegen', suites)
 
     def test_shared_state_and_unknown_code_fail_closed(self):
         for path in ("src/future_owner.zig", "tests/integration/future_case.py"):
@@ -1296,13 +1276,8 @@ class SelectionTest(unittest.TestCase):
 
     def test_renderer_harnesses_select_no_blocking_target(self):
         workflow = Path(".github/workflows/renderer-contracts.yml").read_text()
-        filters = re.findall(r"(?m)^    paths:\n((?:      - '[^']+'\n)+)", workflow)
-        self.assertEqual(len(filters), 1)
-        for block in filters:
-            harnesses = {p for p in re.findall(r"'([^']+)'", block) if p.startswith("tests/integration/")}
-            self.assertEqual(harnesses - {"tests/integration/terminal_restoration_*"},
-                             set(RENDERER_HARNESSES))
-        for path in ("tests/integration/input_equivalence.py",):
+        self.assertNotIn("pull_request", workflow, "promotion alone runs the renderer contracts")
+        for path in RENDERER_HARNESSES:
             with self.subTest(path=path):
                 result = select([path], "review", AVAILABLE)
                 self.assertEqual(result["targets"] + result["native_targets"], [])

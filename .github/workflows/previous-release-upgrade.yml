@@ -13,11 +13,6 @@ on:
         required: false
         type: string
         default: ''
-      systems:
-        description: JSON list of runners; PRs pass Linux only, promotion takes both
-        required: false
-        type: string
-        default: '["ubuntu-24.04", "macos-15"]'
       release-version:
         description: Version of this run's release archives (Promote's Release build) to test; empty compiles the candidate
         required: false
@@ -45,8 +40,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Manual dispatch has no inputs and runs both systems.
-        os: ${{ fromJSON(inputs.systems || '["ubuntu-24.04", "macos-15"]') }}
+        # Promotion and manual dispatch run both systems; pull requests never run this.
+        os: [ubuntu-24.04, macos-15]
     steps:
       - name: Validate immutable candidate
         env:
@@ -146,10 +141,6 @@ jobs:
         # Each check's only copy; steps.py records the failed ones for a promotion to replay.
         timeout-minutes: 45
         env:
-          # A PR's Selected suites already run host-launch-integration on the PR
-          # build whenever the change reaches it. Promotion and manual runs
-          # repeat it here on the shipped build, which costs a second LLVM compile.
-          HOST_LAUNCH: ${{ github.event_name != 'pull_request' }}
           # A promotion tests its release executable instead of compiling rui twice more.
           # Only this step sees it, so a bisect replay compiles each commit's own.
           RUI_UNDER_TEST: ${{ steps.release.outputs.rui }}
@@ -158,12 +149,9 @@ jobs:
           uname -sm
           git rev-parse HEAD
           zig version
-          startup=()
-          if [ "$HOST_LAUNCH" = true ]; then
-            startup=('startup=RUI_FAILURE_ARTIFACTS="$RUNNER_TEMP/rui-failure-artifacts" zig build host-launch-integration -j2 --summary all ${RUI_UNDER_TEST:+"-Drui-under-test=$RUI_UNDER_TEST"}')
-          fi
+          # Repeat host-launch-integration on the shipped build, which costs a second LLVM compile.
           python3 -B tests/ci/steps.py --output-root "$RUNNER_TEMP/rui-upgrade-data" \
-            ${startup[@]+"${startup[@]}"} \
+            'startup=RUI_FAILURE_ARTIFACTS="$RUNNER_TEMP/rui-failure-artifacts" zig build host-launch-integration -j2 --summary all ${RUI_UNDER_TEST:+"-Drui-under-test=$RUI_UNDER_TEST"}' \
             'current-upgrade=mkdir -p "$STEP_OUTPUT"; RUI_UPGRADE_FAILURES="$STEP_OUTPUT" python3 -B tests/integration/previous_release_upgrade.py . .' \
             'running-upgrade=mkdir -p "$STEP_OUTPUT"; RUI_UPGRADE_FAILURES="$STEP_OUTPUT" python3 -B tests/integration/previous_release_upgrade.py --running-host ${RUI_UNDER_TEST:+--candidate-release "$RUI_UNDER_TEST"} "$RUNNER_TEMP/previous-running-release" .' \
             'previous-upgrade=mkdir -p "$STEP_OUTPUT"; RUI_UPGRADE_FAILURES="$STEP_OUTPUT" python3 -B tests/integration/previous_release_upgrade.py "$RUNNER_TEMP/previous-release" .'

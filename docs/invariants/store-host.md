@@ -56,6 +56,8 @@
 | SH-48 | Product | A detached Host inherits only its intended launch descriptors and retains a useful startup failure diagnostic. | detached launch and inherited descriptor fixtures | `detached_descriptor_custody`: vary open descriptors and startup failures and inspect child descriptors and caller diagnostic. | src/host_launch.c |
 | SH-51 | Host | A public read the Store refuses as ordinary answers the caller and leaves the Host serving; only a Store that fenced itself fences dispatch. | Host wire, in process | `SH-51 a read the Store refuses without fencing leaves the Host serving`: read every route that meets a parts Message or Action Resolution, then make the Store fail one read. | docs/contracts/store.md:25 |
 
+| SH-47 | Module | Saved Host path settings accept absolute paths and reject relative paths before changing the saved file. | savedEdit and saved Host file | `SH-47 saved path admission`: enumerate the independently listed path leaves and compare acceptance, typed reason and file bytes. | src/host_start.zig:126; docs/contracts/host.md |
+
 Owned elsewhere: ADM-14 (atomic admission acknowledgment), CLI-16 (client discovery classification), CM-36 (configured endpoint binding), EXR-30 (owned scratch cleanup and preservation of unrelated entries).
 
 ## Seams the harness must provide

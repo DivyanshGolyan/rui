@@ -145,7 +145,7 @@ test('build restores keep each part apart and seed parts without snapshots from 
       parts.add(part);
     }
   }
-  for (const part of ['compiled', 'compiled-unit', 'codegen', 'baseline']) assert.ok(parts.has(part), part);
+  for (const part of ['compiled', 'compiled-unit', 'baseline']) assert.ok(parts.has(part), part);
   const [d1, d2, s1, s2] = ['d', 'e', 'b', 'c'].map(c => c.repeat(64));
   const keys = (part, deps, sources = s2) => nameKeys(part, deps, sources);
   // actions/cache: an exact key, else the newest key matching the first restore
@@ -753,7 +753,7 @@ test('existing job timeout budgets are not increased to make space for saves', (
   const directory = `${__dirname}/../../.github/workflows`;
   for (const [file, expected] of [
     ['cache-maintenance.yml', {baseline: '30', runner: '15', previous_release: '45'}],
-    ['check.yml', {linux_build: '60', linux_build_unit: '15', macos_build: '60', macos_build_unit: '60', macos_typecheck: '15', cache_execution: '20', linux_codegen: '20', linux_suites: '${{ inputs.promotion && 300 || 35 }}', macos_suites: '${{ inputs.promotion && 300 || 35 }}'}],
+    ['check.yml', {linux_build: '60', linux_build_unit: '15', macos_build: '60', macos_build_unit: '60', macos_typecheck: '15', cache_execution: '20', linux_suites: '${{ inputs.promotion && 300 || 35 }}', macos_suites: '${{ inputs.promotion && 300 || 35 }}'}],
     ['renderer-contracts.yml', {contracts: '${{ inputs.batch-base && 300 || 45 }}', mutations: '60'}],
   ]) {
     const jobs = workflowJobs(readFileSync(`${directory}/${file}`, 'utf8'));
@@ -779,7 +779,6 @@ test('new work deadlines derive a save window and cover recorded green durations
       macos_build: [1117, '43720387127'],
       macos_build_unit: [760, '43720387127'],
       cache_execution: [351, '42755585733'],
-      linux_codegen: [593, '43762678033'],
     },
     'cache-maintenance.yml': {
       baseline: [568, '43433947643'],

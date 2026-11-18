@@ -74,7 +74,7 @@ runs:
       # Restore order: this part at these dependencies, this part across a
       # repin, then the same v3 and v2 part during migration, then maintenance's
       # v2 baseline at these dependencies, which
-      # seeds parts main never saves (codegen). Baseline's seed is its own
+      # seeds a part with no snapshot of its own yet. Baseline's seed is its own
       # first prefix, so it is left empty, and actions/cache drops empty keys.
       run: |
         set -euo pipefail

@@ -43,7 +43,7 @@ A capture made with no `reply` is a silent terminal, for a fixture that answers 
 | --- | --- |
 | Documentation | Review references and consistency. The plan runs `git diff --check` on the committed candidate diff. Only nonempty, exclusively allowlisted regular nonexecutable documentation and asset changes qualify for the [documentation lane](../../tests/ci/docs_only.py); executable, unknown and mixed changes keep normal verification. Source sentence layout remains optional |
 | Runtime behavior | Subsystem mapping below on the PR head for Linux main acceptance; Mac mapping and full Debug recovery on the exact main SHA before stable promotion. A skip is not evidence |
-| Build or dependency | Linux `check-full`, `typecheck-macos` and mapped checks before merge; macOS `check-full` in promotion; manual empty-cache acceptance |
+| Build or dependency | Linux `check-full` and mapped checks before merge; `typecheck-macos` in the main build after merge; macOS `check-full` in promotion; manual empty-cache acceptance |
 | Resource owner | Comparable measurements and lifecycle evidence on applicable runners |
 
 The executable minimum is [select_tests.py](../../tests/ci/select_tests.py), using targets from [build.zig](../../build.zig) and its modules under `build/`.
@@ -86,9 +86,9 @@ Long, churn, full Debug and H2 targets follow their mappings, not an uncondition
 | Standalone Current, reply-delivery and login-signal oracles | Owning integration target; login signal on Linux only | Neither composed gate runs them. Changes to their helpers keep these targets |
 | Canonical-failure oracle | `canonical-failure-integration` on both systems | Skip it when a composed gate is selected; the human CLI fixture runs all cases |
 | Build, dependencies, bootstrap or the CI artifact producer | `check-full`, full Debug admission, long timeout and churn witnesses, relevant H2 and standalone targets, manual empty-cache evidence | Transport build, dependency pins and bootstrap select both H2 targets |
-| Main admission, every ready PR | Successful plan and Linux aggregate on the immutable merge candidate: compile and format, `typecheck-macos` for compile inputs, `stack-frames` and the selected unit roots and integration targets. Normal changes also require policy. Native Mac runs only for [Mac paths](../../tests/ci/platform_boundary.py), including process observation, Host retirement and lease owners, and the native CI compiler producer's Darwin scheduling policy. Platform-neutral build plumbing alone selects no native Mac run. The [upgrade check](../../.github/workflows/previous-release-upgrade.yml) runs on hosted Linux only for upgrade, installer and Store-format paths | The conservative documentation lane requires explicit empty product selections and skipped policy, native, upgrade and cache jobs. Admission requires the exact Mac and upgrade results the plan selected: success when selected, skipped otherwise. Required admission runs before main |
+| Main admission, every ready PR | Successful plan and Linux aggregate on the immutable merge candidate: Linux compilation and format and the selected Linux unit roots and integration targets. Normal changes also require policy. The PR tier runs nothing else: native Mac, `typecheck-macos`, `stack-frames`, the [upgrade check](../../.github/workflows/previous-release-upgrade.yml), [renderer contracts](#renderer-contracts), the cache-execution proof and the Linux-memory collector checks belong to promotion, which the plan in [ci_plan.py](../../tests/ci/ci_plan.py) routes them to. The owner accepted on 18 Nov 2026 that a Mac, frame, upgrade or renderer defect now surfaces at promotion rather than on the PR | The conservative documentation lane requires explicit empty product selections and skipped policy, native and cache jobs. Admission requires the PR tier's Mac and cache-execution jobs to be skipped. Required admission runs before main |
 | Promotion, manual | [Promote](../../.github/workflows/promote.yml) on main HEAD: Linux and macOS `check-full`, `test-logic` and `admission-debug-integration` with the batch's selected targets, `stack-frames`, the upgrade check on both systems and [renderer contracts](#renderer-contracts). Cold release builds run first, beside the suites; the upgrade check and renderer contracts test those executables, and publication ships those exact archives | A failing job bisects each failed step over the batch since `stable` and files one `promotion-red` issue per cause. Only a fully green promotion publishes a release and advances `stable` |
-| Host stack frames (Zig the Host compiles: `server.zig` and the `host_modules` closure; other `src/` inputs, `build.zig`, `tests/ci/stack_frames.*`) | `stack-frames` on x86-64 Linux; `check` runs it, `check-full` does not | [stack_frames.py](../../tests/ci/stack_frames.py) reads the ReleaseSafe binary's prologues and direct calls. It fails on a frame over 8 KiB reachable from a Host thread or a function of a module in `host_modules` unless an exception in [stack_frames.json](../../tests/ci/stack_frames.json) names its cause, and on a thread whose deepest chain passes its `chain_ceiling`. Exceptions and ceilings only shrink. Calls through function pointers outside `host_modules` are not followed, and no other platform is measured |
+| Host stack frames (Zig the Host compiles: `server.zig` and the `host_modules` closure; other `src/` inputs, `build.zig`, `tests/ci/stack_frames.*`) | `stack-frames` on x86-64 Linux in promotion; `check` runs it outside `-Dpr-ci`, `check-full` does not, and pull requests never run it | [stack_frames.py](../../tests/ci/stack_frames.py) reads the ReleaseSafe binary's prologues and direct calls. It fails on a frame over 8 KiB reachable from a Host thread or a function of a module in `host_modules` unless an exception in [stack_frames.json](../../tests/ci/stack_frames.json) names its cause, and on a thread whose deepest chain passes its `chain_ceiling`. Exceptions and ceilings only shrink. Calls through function pointers outside `host_modules` are not followed, and no other platform is measured |
 | Caller error coverage (`cli.zig`, `cli_args.zig`, `client.zig`, `preferences.zig` and root `caller_*.zig` under `src/`) | `python3 tests/ci/caller_errors.py`, the prepush driver and CI policy | Caller-facing CLI modules cannot use raw `@errorName`; every literal production error reference or declaration in that inventory needs a catalog mapping or an existing pending entry. The trusted `origin/main` pending set only shrinks; first rollout bootstraps from the same trusted CLI-owned sources and the exact pinned Zig standard library. Closed inferred sets also fail compilation through `caller_error.of`; unmapped errors widened from other owners remain `internal_unexpected`, exit 1 (unclassified), without extending the CLI inventory. |
 | CI policy | Selector tests, workflow validation and `test-logic` on both runner architectures | Exercise actual CI bootstrap. The policy job runs every `tests/ci` test except the self-checks in `POLICY_SELF_CHECKS` ([select_tests.py](../../tests/ci/select_tests.py)), each of which runs only when the diff changes a file it reads |
 | Client locality (Zig client production import closure and named client sources, and `clients/ts/src` excluding generated `wire.ts`) | `python3 tests/ci/client_locality.py`, prepush and CI policy; `test_client_locality.py` tests the scan and ratchet | Production source scans reject named Host rule owners outside the existing allowlist. Exceptions only shrink against trusted `origin/main`; the first rollout accepts the initial list when no baseline exists. |
@@ -109,7 +109,7 @@ The Linux aggregate always checks the plan's selected parts or exact skips.
 
 Qualification Go changes select `measurement-check`.
 Changes to the CLI configuration surface (CLI grammar and client, creation defaults, the wire protocol and `openapi.json`, and Host configuration admission) select it too: its configure contract runs the measurement runners' `session configure` call and a replay of its saved record against the current Rui, so drift fails in the PR that causes it rather than in the next campaign.
-Linux-memory Python or C changes also run the collector unittests and compile the diagnostic probe on Linux.
+Linux-memory Python or C changes also run the collector unittests and compile the diagnostic probe on Linux in promotion.
 Other qualification changes state manual syntax or compilation requirements.
 Stored historical results select no product suites.
 Syntax checks, probe compilation and unrelated product tests do not qualify a resource claim.
@@ -162,12 +162,11 @@ Artificial shared setup or pair deadlines and prelaunch fit reserves are not rou
 
 ## Renderer contracts
 
-[Renderer contracts](../../.github/workflows/renderer-contracts.yml) run nonblocking build targets on pull requests that touch renderer, frontend or terminal owners, `build.zig` or the harnesses, and on manual dispatch: `renderer-contracts-selftest`, the synthetic `direct-pty` key matrix and Ghostty vectors, `direct-pty-controls` and `input-equivalence`.
+[Renderer contracts](../../.github/workflows/renderer-contracts.yml) run build targets in every promotion and on manual dispatch, never on pull requests: `renderer-contracts-selftest`, the synthetic `direct-pty` key matrix and Ghostty vectors, `direct-pty-controls` and `input-equivalence`.
 No gate root imports their sources, and neither Selected checks nor merging requires them; a red result is a defect to fix, not a waiver.
-`src/os` holds no PTY or terminal code, so its edits run the Selected fixtures that reach them, not these contracts.
 Every promotion requires them, and a failing contract bisects the batch.
 Manual dispatch adds the [renderer mutation runner](../../tests/ci/renderer_mutation.py) for `test` and `test-logic`.
-PR failures remain visible in workflow results; there is no scheduled campaign, and only a promotion files issues.
+There is no scheduled campaign, and only a promotion files issues.
 Its anchors are checked per change: [`renderer_mutation_test.py`](../../tests/ci/renderer_mutation_test.py), run by the Selected `policy` job, requires each mutation's anchor exactly once in current source, so moving a protection re-anchors its mutation in the same change.
 
 Injected PTYs are not physical keyboard, terminal-emulator or display qualification.
@@ -195,9 +194,9 @@ The Mac cross-build requires an Apple SDK.
 The release publisher is serialized and never treats cancelled acceptance as a pass.
 Build caches hold compilation inputs and outputs, not acceptance.
 All Zig unit Run steps bypass Zig acceptance caching, and Go tests use `-count=1`.
-Cache-policy changes run [the fixed-seed execution regression](../../tests/ci/cache_execution.py) on Linux before main, and on macOS in promotion when the batch changed cache policy.
+Cache-policy changes run [the fixed-seed execution regression](../../tests/ci/cache_execution.py) in promotion when the batch changed cache policy, never on pull requests.
 Cache policy is the proof, the prune script and the cache publication policy module themselves, and changed non-comment lines that name a Zig build cache or `has_side_effects` in the build, the workflows and the setup action, whose caches are all build caches; any change to the `cache_execution` job counts too.
-The required `admission` aggregate includes this job when selected.
+The plan never selects it for a pull request, so `admission` requires it skipped there.
 Build-cache keys separate native tools, Apple SDK, architecture, dependency pins, scripts, source inputs and shard.
 Only `main` saves caches; PR jobs restore main's snapshots and save none, so PR caches never feed a privileged workflow or evict main's.
 Setup restores caches and captures missing exact keys; an explicit `save-only` invocation of the same cache composite runs under `always()` after compilation, before long failure diagnostics.
@@ -263,20 +262,22 @@ Warm compilation snapshots are not test acceptance. Cleanup waits for all mainte
 Maintenance also builds the pinned previous release per platform for the read-only upgrade check.
 The API-only cleanup job runs trusted main code with cache-deletion permission and consumes no producer code, caches or artifacts.
 
-CI uses standard `ubuntu-24.04` and Apple Silicon `macos-15` runners, plus `ubuntu-24.04-arm` for the Linux arm64 release build and the optional [self-hosted Mac runner](#self-hosted-mac-runner) for eligible Selected checks, with no paid host or storage expansion.
+CI uses standard `ubuntu-24.04` and Apple Silicon `macos-15` runners, plus `ubuntu-24.04-arm` for the Linux arm64 release build and the optional [self-hosted Mac runner](#self-hosted-mac-runner) for eligible Selected checks, including promotion's, with no paid host or storage expansion.
 Free eligibility does not prove capacity; report the actual runner outcome and do not raise paid spend silently.
 Apart from the shard rerun above and a [listed flake](#listed-flakes)'s rerun, test execution has no automatic retry.
-Infrastructure failures are not test execution: [Retry infrastructure failures](../../.github/workflows/infra-retry.yml) reruns a PR run's failed jobs once when every failure was infrastructure (no runner took or kept the job, or a step that only fetches, installs or starts services failed with a network error such as GitHub's 504) and the run still tests the PR's head.
-A build or test step's failure, a later attempt or any check failure in the run never reruns, and a rerun job's tests had not run.
+Infrastructure failures are not test execution: [Retry infrastructure failures](../../.github/workflows/infra-retry.yml) reruns a PR run's or a Promote run's failed jobs once when every failure was infrastructure (no runner took or kept the job, or a step that only fetches, installs or starts services failed with a network error such as GitHub's 504) and the PR run still tests the PR's head, or no later Promote run was dispatched.
+A build or test step's failure, a later attempt, any check failure in the run or a failed job routed to `rui-mac` (whose hook rejects the bot that triggers the rerun) never reruns, and a rerun job's tests had not run.
+A promotion's rerun also reruns `qualified` and Release, so publication still requires every tier, and Release resumes an interrupted publication rather than publishing twice ([Release publication](release.md#release-publication)).
 
 ## Self-hosted Mac runner
 
-Selected checks decides once per run whether to send `macos_build`, `macos_build_unit` and `macos_suites` to `["self-hosted", "macOS", "ARM64", "rui-mac"]`.
+Selected checks decides once per run, promotion included, whether to send `macos_build`, `macos_build_unit` and `macos_suites` to `["self-hosted", "macOS", "ARM64", "rui-mac"]`.
 Only same-repository pull requests authored by DivyanshGolyan, with both actor and triggering actor allowlisted, and manual dispatches by those actors are eligible.
 The allowlist lives in [mac_runner.py](../../tests/ci/mac_runner.py).
 Fork PRs, including NimishGolyan/rui, stay hosted.
-Promotion, compile-only main builds, macOS qualification and the existing cache-execution checks keep their hosted runners; hosted-VM measurements therefore remain comparable.
-The routing job reads `GET /repos/{repo}/actions/runners` with the repository secret `MAC_RUNNER_STATUS_TOKEN`, a fine-grained PAT limited to this repository with Administration: read.
+A promotion dispatched by an allowlisted actor routes by the same rule, so hosted macOS capacity no longer gates a release; its Mac suite jobs then share the one runner, and their measurements are not comparable with hosted VMs.
+Compile-only main builds (which publish main's caches), the promotion's previous-release upgrade and cache-execution checks, and the Release builds (cold, released bytes) keep their hosted runners.
+The routing job reads `GET /repos/{repo}/actions/runners` with the repository secret `MAC_RUNNER_STATUS_TOKEN`, a fine-grained PAT limited to this repository with Administration: read; Promote passes only that secret to its Selected checks call.
 An online `rui-mac` selects the Mac when idle or when its queued jobs are fewer than hosted queued jobs plus one if at least five hosted jobs are running; ties select `macos-15`. If queue data is unavailable, only an idle Mac is selected; unavailable runner status, an offline runner or `RUI_MAC_RUNNER=off` selects hosted macOS.
 This is a snapshot, not a reservation: after choosing the Mac, jobs queue for its one runner process; a later disconnect does not reroute that run.
 The Mac restores caches but never publishes them to GitHub.
