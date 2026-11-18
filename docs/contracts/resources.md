@@ -150,7 +150,7 @@ Reserve growth before I/O with checked arithmetic and serialized owner accountin
 Charge sparse gaps and simultaneous copies; overwrites need no new charge.
 Return a provably unused reservation after short/error writes; an unknown partial write retains its submitted increment until safe cleanup.
 Ingress charges decoded file growth, not HTTP framing or escaping, and transfers each charge with its sealed file.
-Failed removal retains only that file’s charge until restart cleanup.
+Failed removal retains that file’s charge until its owner successfully reclaims it or startup cleanup removes it.
 After the owner closes its final descriptor, an already-absent private name establishes reclamation; otherwise private scratch charge survives unlink and pending I/O, releasing only after successful shrink or safe final closure.
 No writable alias may bypass accounting; no per-write heap allocation, directory scan, SQLite transaction or global lock across disk I/O.
 Logical bytes do not model block rounding/cache/compression or reserve real disk space.
@@ -195,6 +195,7 @@ Canonical permission, Edit intent and outcome evidence are not disposable spillo
 A Bash result names only what carries information: the unchanged outcome line and warnings, a `stdout:` section only when stdout is nonempty and a `stderr:` section only when stderr is nonempty.
 A fitting stream is complete. A truncated stream shows its head, a separate `[N bytes left out]` line (the exact number of source bytes not shown, without thousands separators), then its tail. The head receives one half of that stream's existing allowance and the tail the rest, both cut on valid UTF-8 boundaries. If a newline lies within the last 256 source bytes of the head, the head ends just after the last such newline; if one lies within the first 256 source bytes of the tail and the tail does not already start a line (the source byte before it is not a newline), the tail starts just after the first such newline. A cut that already falls on a line boundary therefore stays where it is at either end. Bytes removed by either adjustment count as left out.
 After the stream sections, `Full stdout: PATH` or `Full stderr: PATH` names each truncated stream, or `Full output was not retained.` reports unavailable retention. There is no separate `[earlier output omitted]` line. An untruncated stream names no file.
+After a cleanup failure fences dispatch, the original Bash owner retains custody and retries reclamation. Once that owner successfully reclaims an untruncated stream, its capture file has been removed or was already absent, and its charge is released. If the Tool Result was saved before cleanup failed, it already contains the complete stream, so reading the result and continuing the model after restart do not require that file.
 Saved results from older Hosts retain their `stdout tail:` / `stderr tail:` sections and `[earlier output omitted]` notice; readers accept both shapes without rewriting stored results.
 
 MCP answers are bounded by the existing 4 MiB per-call answer buffer.

@@ -12,7 +12,7 @@ editor: *Editor,
 method: vaxis.gwidth.Method = .unicode,
 style: vaxis.Style = .{},
 quiet: vaxis.Style = .{ .dim = true },
-rule_style: vaxis.Style = .{ .dim = true },
+caps: view.Caps = .{},
 command_style: vaxis.Style = .{},
 /// The exact-match row's source word, derived by the completion owner.
 known_word: ?commands.Span = null,
@@ -25,7 +25,7 @@ max_rows: u16 = std.math.maxInt(u16),
 pub fn setCaps(self: *Self, caps: view.Caps) void {
     self.style = widget_style.of(caps, .{});
     self.quiet = widget_style.of(caps, .{ .colour = .quiet });
-    self.rule_style = widget_style.of(caps, .{ .colour = .quiet });
+    self.caps = caps;
     self.command_style = widget_style.of(caps, .{ .colour = .ink });
     self.method = caps.width;
     self.ascii = !caps.unicode;
@@ -84,14 +84,14 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         .screen = &screen,
     };
     if (rule != 0) for (0..width) |column| {
-        const cell: vaxis.Cell = .{ .char = .{ .grapheme = if (self.ascii) "-" else "─", .width = 1 }, .style = self.rule_style };
+        const cell = widget_style.line(self.caps, .horizontal);
         surface.writeCell(@intCast(column), 0, cell);
         surface.writeCell(@intCast(column), surface.size.height - 1, cell);
     };
     const label_storage = try ctx.arena.create([64]u8);
     const label = layout.label(label_storage, shown.hidden_above, shown.hidden_below, if (self.ascii) .{ .up = "^", .down = "v", .dot = "-" } else .{ .up = "↑", .down = "↓", .dot = "·" });
     if (rule != 0) if (layout.labelColumn(vaxis.gwidth.gwidth(label, self.method), width)) |column| {
-        _ = window.child(.{ .x_off = @intCast(column), .height = 1 }).printSegment(.{ .text = label, .style = self.rule_style }, .{ .wrap = .none });
+        _ = window.child(.{ .x_off = @intCast(column), .height = 1 }).printSegment(.{ .text = label, .style = self.quiet }, .{ .wrap = .none });
     };
     for (0..shown.visible) |index| {
         const row: u16 = @intCast(index + text_row);
@@ -119,8 +119,8 @@ test "Composer keeps the caret visible between rules without changing draft byte
     try std.testing.expectEqualStrings("s", tail.readCell(3, 3).char.grapheme);
     try std.testing.expectEqual(@as(u16, 3), tail.cursor.?.row);
     try std.testing.expectEqual(@as(u16, 6), tail.cursor.?.col);
-    try std.testing.expectEqualStrings("─", tail.readCell(0, 0).char.grapheme);
-    try std.testing.expectEqualStrings("─", tail.readCell(0, 4).char.grapheme);
+    try std.testing.expectEqualStrings("┄", tail.readCell(0, 0).char.grapheme);
+    try std.testing.expectEqualStrings("┄", tail.readCell(0, 4).char.grapheme);
     editor.setCursor(0);
     const head = try composer.widget().draw(ctx.withConstraints(.{}, .{ .width = 8, .height = 5 }));
     try std.testing.expectEqualStrings("›", head.readCell(1, 1).char.grapheme);
@@ -372,8 +372,8 @@ test "Composer measures panels once between its rules without changing draft or 
         try std.testing.expectEqual(before.cursor.?.row + child.surface.size.height, after.cursor.?.row);
         try std.testing.expectEqual(before.cursor.?.col, after.cursor.?.col);
         if (rule != 0) {
-            try std.testing.expectEqualStrings("─", after.readCell(0, 0).char.grapheme);
-            try std.testing.expectEqualStrings("─", after.readCell(0, after.size.height - 1).char.grapheme);
+            try std.testing.expectEqualStrings("┄", after.readCell(0, 0).char.grapheme);
+            try std.testing.expectEqualStrings("┄", after.readCell(0, after.size.height - 1).char.grapheme);
         }
         for (rule..before.size.height - rule) |row| for (0..width) |col| {
             try std.testing.expectEqualDeep(before.readCell(col, row), after.readCell(col, row + child.surface.size.height));

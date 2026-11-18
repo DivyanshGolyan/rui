@@ -28,7 +28,7 @@ An unsent request is failed-not-run; a lost sent request is indeterminate.
 Session stop before send cancels the call; after send, closing the connection leaves the remote outcome indeterminate.
 Shared Action settlement preserves MCP adapter evidence, including a definite answer when stop races settlement; Bash's confirmed local stop remains cancelled.
 
-MCP and `read_image` supply content and outcomes to the same tool-result route for excerpting, image validation, layout, optional retention, sealing and settlement. The profile is derived from the frozen tool record and offer. Bash and core-tool migration to this route are separate work.
+Bash, MCP and `read_image` supply content and outcomes to the same tool-result route for excerpting, image validation, layout, optional retention, sealing and settlement. The profile is derived from the frozen tool record and offer. Core-tool migration to this route is separate work.
 
 For a complete MCP result containing an image-typed content block, the Action Resolution retains text and validated PNG or JPEG images in content order. The `isError` wording precedes the content. Invalid image data, MIME, or media produces a short Text diagnostic in that block's position, without exposing its base64; an image is never partially retained. Other content types, including audio and resources, remain raw JSON text. One text excerpt budget covers all text runs, including image diagnostics; omitted text receives the existing omitted-byte note, and later valid images can still be retained. Scratch capacity failure settles `storage_failed`.
 

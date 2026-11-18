@@ -1,3 +1,4 @@
+from terminal_screen import RULE_GLYPHS, VERTICAL_DIVIDER, split_pane_row
 import errno
 import fcntl
 import json
@@ -9,7 +10,6 @@ import subprocess
 import termios
 import threading
 import time
-import unicodedata
 
 import terminal_process as terminal_process_module
 from terminal_process import answers_to
@@ -142,24 +142,6 @@ def chat_content_row(row):
     return row.removeprefix(" ")
 
 
-def split_pane_row(row):
-    if row.startswith((" ›", " >")):
-        return "", "", row
-    rule = re.match(r"^([─-]{2,})([┼┤+])", row)
-    if rule:
-        return rule.group(1), rule.group(2), row[rule.end():]
-    divider = row.find("│")
-    column = 0
-    for index, char in enumerate(row):
-        if char == "|" and column == 40 and (divider < 0 or index < divider):
-            divider = index
-            break
-        column += 0 if unicodedata.combining(char) else 2 if unicodedata.east_asian_width(char) in ("W", "F") else 1
-    if divider >= 0:
-        return row[:divider], row[divider], row[divider + 1:]
-    return "", "", row
-
-
 def pane_content(row):
     return split_pane_row(row)[2]
 
@@ -175,7 +157,8 @@ def composer_line(screen, y):
 
 def composer_bounds(screen):
     rules = [index for index in range(len(screen.split("\n")))
-             if set(composer_line(screen, index)) in ({"─"}, {"-"})]
+             if len(set(composer_line(screen, index))) == 1
+             and composer_line(screen, index)[0] in RULE_GLYPHS]
     return tuple(rules[-2:]) if len(rules) >= 2 else None
 
 
@@ -257,7 +240,7 @@ def assert_chat_info_layout(screen, *, context=None):
     assert prompts and max(prompts) < footers[0], ("info footer follows input", screen)
     effort = next(index for index in range(bounds[0] + 1, bounds[1]) if contents[index].startswith("   Effort"))
     assert bounds[0] < effort < min(prompts), ("panel inside input rules", screen)
-    assert not any(any(char in row for char in "┌┐└┘│") for row in contents[bounds[0] + 1:bounds[1]]), screen
+    assert not any(any(char in row for char in ("┌┐└┘" + VERTICAL_DIVIDER)) for row in contents[bounds[0] + 1:bounds[1]]), screen
     actions = next(index for index in range(bounds[0] + 1, bounds[1]) if "Rename" in contents[index])
     assert not contents[actions - 1].strip(), ("blank row before chat actions", screen)
     assert not any(row.strip().startswith("Context") and "unknown" in row for row in contents), screen
