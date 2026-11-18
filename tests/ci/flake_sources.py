@@ -65,10 +65,14 @@ def zig_tests(code):
     return ''.join(chars)
 
 
+# The one test-scope classifier every rule uses: whole files that only tests compile.
+ZIG_TEST_ONLY = re.compile(r"(?:^|/)(?:tests?|testing)/|_tests/|tests?\.zig$")
+
+
 def inventory(source, path):
     language = 'py' if path.endswith('.py') else 'zig' if path.endswith('.zig') else 'ts'
     code = mask(source, language)
-    if language == 'zig' and not (path.startswith('tests/') or path.endswith('_test.zig') or '/test/' in path or '/tests/' in path or '/testing/' in path or path.endswith('/tests.zig') or '_tests/' in path or path.startswith('src/testing/')):
+    if language == 'zig' and not ZIG_TEST_ONLY.search(path):
         code = zig_tests(code)
     counts = Counter()
     if language == 'py':
@@ -293,7 +297,6 @@ ZIG_SKIPPED = re.compile(r'//[^\n]*|\\\\[^\n]*|"(?:\\.|[^"\\\n])*"|\'(?:\\.|[^\'
 ZIG_TEST = re.compile(r'\s*test\s*(?:"((?:\\.|[^"\\])*)"|(\w+))?\s*')
 ZIG_DECLARATION = re.compile(r"\b(?:fn|const|var)\s+(\w+)")
 ZIG_EXPRESSION = re.compile(r"(?:\.|\berror)\s*$")
-ZIG_TEST_ONLY = re.compile(r"(?:^|/)(?:tests|testing)/|tests?\.zig$")
 
 
 @lru_cache(maxsize=512)

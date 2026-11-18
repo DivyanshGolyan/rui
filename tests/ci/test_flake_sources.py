@@ -29,6 +29,20 @@ class FlakeSourcesTest(unittest.TestCase):
                 (root / path).write_text(sleeping)
             self.assertEqual(set(flake.read_sources(root)), {'src/own.zig'})
 
+    def test_every_rule_shares_the_zig_test_scope(self):
+        helper = ('fn helper() void {\n'
+                  '    while (std.time.milliTimestamp() < deadline) { _ = readState(); }\n'
+                  '    io.sleep(1);\n'
+                  '}\n')
+        for path, expected in [('src/store/creator_tests.zig', True), ('src/x_test.zig', True), ('src/tests.zig', True),
+                               ('src/testing/helper.zig', True), ('tests/x.zig', True), ('src/a/test/x.zig', True),
+                               ('src/x_tests/y.zig', True), ('src/store/creator.zig', False)]:
+            with self.subTest(path=path):
+                self.assertEqual(flake.ZIG_TEST_ONLY.search(path) is not None, expected)
+                counts = flake.inventory(helper, path)
+                self.assertEqual(counts.get('fixed_sleep', 0) > 0, expected)
+                self.assertEqual(sum(counts.values()) > 0, expected)
+
     def test_fixed_sleep(self):
         self.assert_rule_table('fixed_sleep', [
             ('tests/x.py', 'time.sleep(1)\nasyncio.sleep(1)', 2),
