@@ -191,41 +191,42 @@ class MessageObservationTests(unittest.TestCase):
                      "attention": None, "group": "queued",
                      "actions": {"stop": True, "interrupt": None, "decide": None}},
         }
-        for as_of in ("100", "101", "0100", "99", "102", 100, "１００"):
-            with self.subTest(as_of=as_of), \
-                    patch.object(transport.dispatch, "command", return_value={"as_of": as_of, "observation": observation}), \
-                    patch.object(transport.dispatch.time, "time", side_effect=(100.9, 101.1)):
-                if as_of in ("100", "101"):
-                    self.assertIs(transport.dispatch.observe("/store", "key"), observation)
-                else:
-                    with self.assertRaises(AssertionError):
-                        transport.dispatch.observe("/store", "key")
-
-    def test_nonterminal_message_work_requires_all_served_members(self):
-        work = {"state": {"kind": "approval", "since": "90"}, "first_action": None,
-                "attention": {"kind": "approval", "turn": "1", "step": "0"}, "group": "needs_you",
-                "actions": {"stop": True, "interrupt": None, "decide": None}}
-        cases = [("complete", None)] + [("work", name) for name in work] + [
-            ("actions", name) for name in work["actions"]]
-        for state, kind, group in (("queued", "pending", "queued"), ("processing", "working", "working"),
-                                   ("waiting_for_permission", "approval", "needs_you")):
-            for owner, missing in cases:
-                candidate = copy.deepcopy(work)
-                candidate["state"]["kind"] = kind
-                candidate["group"] = group
-                if kind != "approval":
-                    candidate["attention"] = None
-                if missing is not None:
-                    del (candidate["actions"] if owner == "actions" else candidate)[missing]
-                observation = {"kind": "message", "state": state, "work": candidate}
-                with self.subTest(state=state, owner=owner, missing=missing), \
-                        patch.object(transport.dispatch, "command", return_value={"as_of": "100", "observation": observation}), \
-                        patch.object(transport.dispatch.time, "time", side_effect=(100.1, 100.9)):
-                    if missing is None:
+        with patch.object(transport.dispatch, "command") as command, \
+                patch.object(transport.dispatch.time, "time") as clock:
+            for as_of in ("100", "101", "0100", "99", "102", 100, "１００"):
+                with self.subTest(as_of=as_of):
+                    command.return_value = {"as_of": as_of, "observation": observation}
+                    clock.side_effect = (100.9, 101.1)
+                    if as_of in ("100", "101"):
                         self.assertIs(transport.dispatch.observe("/store", "key"), observation)
                     else:
                         with self.assertRaises(AssertionError):
                             transport.dispatch.observe("/store", "key")
+
+            work = {"state": {"kind": "approval", "since": "90"}, "first_action": None,
+                    "attention": {"kind": "approval", "turn": "1", "step": "0"}, "group": "needs_you",
+                    "actions": {"stop": True, "interrupt": None, "decide": None}}
+            cases = [("complete", None)] + [("work", name) for name in work] + [
+                ("actions", name) for name in work["actions"]]
+            for state, kind, group in (("queued", "pending", "queued"), ("processing", "working", "working"),
+                                       ("waiting_for_permission", "approval", "needs_you")):
+                for owner, missing in cases:
+                    with self.subTest(state=state, owner=owner, missing=missing):
+                        candidate = copy.deepcopy(work)
+                        candidate["state"]["kind"] = kind
+                        candidate["group"] = group
+                        if kind != "approval":
+                            candidate["attention"] = None
+                        if missing is not None:
+                            del (candidate["actions"] if owner == "actions" else candidate)[missing]
+                        observed = {"kind": "message", "state": state, "work": candidate}
+                        command.return_value = {"as_of": "100", "observation": observed}
+                        clock.side_effect = (100.1, 100.9)
+                        if missing is None:
+                            self.assertIs(transport.dispatch.observe("/store", "key"), observed)
+                        else:
+                            with self.assertRaises(AssertionError):
+                                transport.dispatch.observe("/store", "key")
 
     def test_completed_reader_uses_host_state_not_binding_or_result(self):
         for state in ("queued", "processing", "waiting_for_permission", "completed", "failed", "cancelled", "rejected"):
