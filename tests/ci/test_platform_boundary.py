@@ -287,7 +287,7 @@ class PlatformBoundaryTest(unittest.TestCase):
         self.assertTrue(select(["tests/integration/terminal_leader.py"], "review", AVAILABLE)["mac_required"])
         self.assertFalse(select(["src/os/socket.zig"], "development", AVAILABLE)["mac_required"])
 
-    def test_ci_producer_darwin_policy_requires_native_on_ready_prs(self):
+    def test_ci_producer_darwin_policy_requires_native_in_promotion_not_on_prs(self):
         from ci_plan import plan
         from docs_only import ChangeKind
 
@@ -297,22 +297,30 @@ class PlatformBoundaryTest(unittest.TestCase):
                         <= set(selected["native_targets"]))
         ready = plan(selected, event_name="pull_request", draft=False,
                      promotion=False, change_kind=ChangeKind.NORMAL).outputs
-        self.assertTrue(ready["native"])
-        self.assertEqual(ready["native_targets"], selected["native_targets"])
+        self.assertFalse(ready["native"], "the PR tier runs no macOS")
+        self.assertEqual(ready["change_kind"], "normal")
+        promoted = plan(selected, event_name="workflow_dispatch", draft=False,
+                        promotion=True, change_kind=ChangeKind.NORMAL).outputs
+        self.assertTrue(promoted["native"])
+        self.assertIn("check-full", promoted["native_targets"])
         draft = plan(selected, event_name="pull_request", draft=True,
                      promotion=False, change_kind=ChangeKind.NORMAL).outputs
         self.assertFalse(draft["native"])
         self.assertEqual(draft["native_targets"], [])
         self.assertFalse(select(["tests/ci/build_artifact.py"], "development", AVAILABLE)["mac_required"])
 
-    def test_client_process_observation_keeps_native_mac_upgrade_on_ready_prs(self):
+    def test_client_process_observation_keeps_native_mac_upgrade_in_promotion(self):
         from ci_plan import plan
         from docs_only import ChangeKind
         selection = select(["src/client.zig"], "review", AVAILABLE)
-        result = plan(selection, event_name="pull_request", draft=False,
-                      promotion=False, change_kind=ChangeKind.NORMAL)
-        self.assertTrue(result.outputs["native"])
-        self.assertIn("upgrade-integration", result.outputs["native_targets"])
+        self.assertTrue(selection["mac_required"])
+        ready = plan(selection, event_name="pull_request", draft=False,
+                     promotion=False, change_kind=ChangeKind.NORMAL)
+        self.assertFalse(ready.outputs["native"])
+        promoted = plan(selection, event_name="workflow_dispatch", draft=False,
+                        promotion=True, change_kind=ChangeKind.NORMAL)
+        self.assertTrue(promoted.outputs["native"])
+        self.assertIn("upgrade-integration", promoted.outputs["native_targets"])
 
     def test_linux_gate_requires_the_macos_type_check(self):
         self.assertIn("typecheck-macos", AVAILABLE)
