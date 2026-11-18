@@ -4925,16 +4925,15 @@ def main(mode="all", correlation_case="all"):
         endpoints[preparation_stop_endpoint] = preparation_stop_thread
         preparation_stop_thread.start()
         preparation_stop_store = state / "preparation-stop-store"
+        # EXR-63
+        preparation_stop_gate = PauseGate("model.preparation_advanced", occurrence=1)
+        releases.append(preparation_stop_gate.close)
         preparation_stop_host = start_host(
             preparation_stop_store,
             f"http://127.0.0.1:{preparation_stop_endpoint.server_port}/responses",
-            "--test-phase-trace",
-            "--test-request-preparation-advance-delay-ms",
-            "1500",
-            observations="dispatch",
+            pause=preparation_stop_gate,
         )
         processes.append(preparation_stop_host)
-        preparation_stop_trace = HostDiagnostics(preparation_stop_host)
         preparation_stop_session = configure(
             state,
             preparation_stop_store,
@@ -4949,7 +4948,7 @@ def main(mode="all", correlation_case="all"):
             preparation_stop_session,
             "p" * (64 * 1024),
         )
-        preparation_stop_trace.wait("preparation_advance_completed")
+        preparation_stop_gate.wait()
         stopped_preparation = command(
             "session", "stop",
             "--store",
@@ -4962,6 +4961,7 @@ def main(mode="all", correlation_case="all"):
             preparation_stop_session,
         )
         assert stopped_preparation["answer"]["status"] == "accepted", stopped_preparation
+        preparation_stop_gate.release()
         stopped_resources = wait_for(
             lambda: (lambda value: value if value["execution"]["custody_occupied"] == "0"
                     and value["execution"]["scratch_used_bytes"] == "0" else None)(
@@ -4979,6 +4979,7 @@ def main(mode="all", correlation_case="all"):
         assert preparation_stop_endpoint.requests == []
         stop_process(preparation_stop_host)
         processes.remove(preparation_stop_host)
+        preparation_stop_gate.close()
         with sqlite3.connect(preparation_stop_store / "rui.sqlite3") as database:
             assert database.execute(
                 "SELECT attempt_ordinal,resolution_code FROM model_operation"
@@ -5017,20 +5018,19 @@ def main(mode="all", correlation_case="all"):
         )
         stop_host(offline_shutdown_host)
         processes.remove(offline_shutdown_host)
+        # EXR-64
+        preparation_shutdown_gate = PauseGate("model.preparation_advanced", occurrence=1)
+        releases.append(preparation_shutdown_gate.close)
         preparation_shutdown_host = start_host(
             preparation_shutdown_store,
             f"http://127.0.0.1:{preparation_shutdown_endpoint.server_port}/responses",
             "--fault",
             "shutdown-after-accept",
-            "--test-phase-trace",
-            "--test-request-preparation-advance-delay-ms",
-            "1500",
             accelerated_retries=False,
-            observations="dispatch",
+            pause=preparation_shutdown_gate,
         )
         processes.append(preparation_shutdown_host)
-        preparation_shutdown_trace = HostDiagnostics(preparation_shutdown_host)
-        preparation_shutdown_trace.wait("preparation_advance_completed")
+        preparation_shutdown_gate.wait()
         shutdown_trigger = subprocess.run(
             [
                 str(RUI),
@@ -5044,9 +5044,11 @@ def main(mode="all", correlation_case="all"):
             timeout=10,
         )
         assert shutdown_trigger.returncode in (0, 1, 6), shutdown_trigger
+        preparation_shutdown_gate.release()
         assert preparation_shutdown_host.wait(timeout=10) != 0
         stop_process(preparation_shutdown_host)
         processes.remove(preparation_shutdown_host)
+        preparation_shutdown_gate.close()
         assert preparation_shutdown_endpoint.requests == []
         assert not list((preparation_shutdown_store / "scratch").glob("provider-request-*.tmp"))
         preparation_shutdown_host = start_host(

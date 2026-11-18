@@ -178,7 +178,6 @@ const serve_test = &[_]Option{
     hiddenNumber("test-request-scratch-limit", 0, std.math.maxInt(u64)),
     hiddenNumber("test-request-preparation-byte-allowance", 1, std.math.maxInt(usize)),
     hiddenNumber("test-request-preparation-item-allowance", 1, std.math.maxInt(usize)),
-    hiddenNumber("test-request-preparation-advance-delay-ms", 0, std.math.maxInt(i64)),
 };
 
 pub const definition: grammar.Definition = .{

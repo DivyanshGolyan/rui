@@ -62,7 +62,6 @@ pub const names = [_][]const u8{
     "test-observation-state-fd",
     "test-phase-trace",
     "test-provider-inactivity-seconds",
-    "test-request-preparation-advance-delay-ms",
     "test-request-preparation-byte-allowance",
     "test-request-preparation-item-allowance",
     "test-request-scratch-limit",

@@ -2118,7 +2118,8 @@ fn advanceModelPreparation(
         .read => unreachable,
         .pending => {
             tracePreparationAdvance(host, "preparation_advance_completed", stats, owner.binding);
-            pause(host, .preparation_advanced);
+            // This blocking pause holds the shared execution loop until release.
+            if (comptime test_pause.enabled) reachModel(host, .model_preparation_advanced, owner.binding);
         },
         .failed => |err| {
             tracePreparationAdvanceError(host, "preparation_advance_failed", err, stats, owner.binding);
