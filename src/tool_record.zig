@@ -435,9 +435,24 @@ const built_in_records = blk: {
 const built_in_digests = blk: {
     @setEvalBranchQuota(1_000_000);
     var out: [built_in_records.len][32]u8 = undefined;
-    for (&built_in_records, &out) |*each, *digest| digest.* = recordDigest(each);
+    const snapshots = @import("tool_digests_generated.zig").entries;
+    for (&built_in_records, &out, 0..) |*each, *digest, index| {
+        if (index < snapshots.len and sameRecord(each, &snapshots[index].record)) {
+            digest.* = snapshots[index].digest;
+        } else {
+            digest.* = recordDigest(each);
+        }
+    }
     break :blk out;
 };
+
+// A snapshot serves only the exact record it was generated from. A changed record is hashed
+// normally, so an out-of-date snapshot cannot change a tool's persistent identity.
+fn sameRecord(a: *const Record, b: anytype) bool {
+    return std.mem.eql(u8, @tagName(a.owner), @tagName(b.owner)) and a.read_only == b.read_only and
+        std.mem.eql(u8, a.name, b.name) and std.mem.eql(u8, a.server, b.server) and
+        std.mem.eql(u8, a.description, b.description) and std.mem.eql(u8, a.input_schema, b.input_schema);
+}
 
 test "the built-in tool set is valid and finds each built-in by name" {
     try std.testing.expect(built_in_tool_set.valid());
