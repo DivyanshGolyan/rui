@@ -1,3 +1,4 @@
+// Measurement PR only, never merge: forces a recompile of every root.
 const std = @import("std");
 const Protocol = @This();
 const session_settings = @import("session_settings.zig");
