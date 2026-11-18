@@ -229,11 +229,33 @@ def flag_start_failures(root):
         assert json.loads(done.stdout) == {"rui_start_error": {"code": "settings_invalid", "message": message}}, (flags, done)
 
 
+def missing_key_refusal(result, *, leaf, door, store, receipts):
+    message = "providers.openai.key: credential source is missing, unreadable, insecure or invalid"
+    invalid = f"rui: the Host did not start: {message} [settings_invalid]\n"
+    if leaf:
+        expected_out = json.dumps({"rui_start_error": {"code": "settings_invalid", "message": message}}, separators=(",", ":")) + "\n"
+        expected_err = invalid if door == "check" else f"\nrui: detached Host startup failed for Store {store}:\n" + invalid + invalid
+        assert (result.returncode, result.stdout, result.stderr) == (2 if door == "check" else 1, expected_out, expected_err), result
+    else:
+        # Caller prose is owned by caller_error, not restated in this fixture.
+        # Compare its entire executed receipt across matrix cells after removing
+        # only the per-cell Store name, and anchor the typed failure codes.
+        assert result.returncode == (6 if door == "check" else 1) and not result.stdout, result
+        assert NO_KEY in result.stderr and "[sign_in_required]\n" in result.stderr, result
+        if door == "start":
+            assert result.stderr.endswith("[internal_unexpected]\n"), result
+        else:
+            assert result.stderr.endswith("[sign_in_required]\n"), result
+        receipt = result.stderr.replace(str(store), "<store>")
+        assert receipt == receipts.setdefault(door, receipt), result
+
+
 def credential_location_matrix():
     # Sign-in admission records the path but deliberately reads it at dispatch,
     # whereas OpenAI reads its key during admission. Status is client-only.
-    with tempfile.TemporaryDirectory(prefix="rui-credential-matrix-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="cl-") as temporary:
         root = pathlib.Path(temporary).resolve()
+        receipts = {}
         for kind, leaf, variable, present in itertools.product(("openai", "codex"), (False, True), (False, True), (False, True)):
             case = root / f"{kind}-{int(leaf)}{int(variable)}{int(present)}"
             case.mkdir(mode=0o700)
@@ -277,11 +299,7 @@ def credential_location_matrix():
                 if should_start:
                     assert check.returncode == 0, (case, check)
                 else:
-                    assert check.returncode != 0, (case, check)
-                    if leaf:
-                        assert "providers.openai.key" in check.stdout + check.stderr, (case, check)
-                    else:
-                        assert "sign_in_required" in check.stdout + check.stderr, (case, check)
+                    missing_key_refusal(check, leaf=leaf, door="check", store=store, receipts=receipts)
                 started = subprocess.run([RUI, "host", "start", *flags], env=env, capture_output=True, text=True, timeout=30)
                 try:
                     if should_start:
@@ -290,8 +308,7 @@ def credential_location_matrix():
                         assert kind in info["capabilities"]["providers"], (case, info)
                         host_stop(runtime / "rui.sock", str(store), info["instance"])
                     else:
-                        assert started.returncode != 0, (case, started)
-                        assert ("providers.openai.key" if leaf else "sign_in_required") in started.stdout + started.stderr, (case, started)
+                        missing_key_refusal(started, leaf=leaf, door="start", store=store, receipts=receipts)
                 finally:
                     if (runtime / "rui.sock").exists():
                         from host_launch_fixture import forced_crash_cleanup
