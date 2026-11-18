@@ -298,6 +298,7 @@ test "Palette renders every chat command and description in the same normal styl
     const cases = .{
         .{ commands.conversation, &[_][]const u8{ "/archive", "/clear", "/copy", "/effort", "/model", "/new", "/pin", "/reload-skills", "/rename", "/requests", "/result", "/setup", "/unarchive", "/unpin" } },
     };
+    const descriptions = [_][]const u8{ "", "start a new chat", "copy the last answer", "", "", "start a new chat", "", "", "", "recover a lost request", "show a saved answer", "defaults for new chats", "restore this chat", "" };
     inline for (cases) |case| {
         var menu: slash_menu.Menu = .{ .shown = commands.Shown.next(null, 1, case[0].listed()) };
         const shown = &menu.shown.?;
@@ -316,8 +317,13 @@ test "Palette renders every chat command and description in the same normal styl
             }
             const line = std.mem.trimEnd(u8, text[0..used], " ");
             try std.testing.expect(std.mem.startsWith(u8, line, expected));
-            if (shown.list.entries[row].description.len == 0) try std.testing.expectEqualStrings(expected, line);
-            try std.testing.expect(std.mem.indexOf(u8, line, shown.list.entries[row].description[0..@min(20, shown.list.entries[row].description.len)]) != null);
+            try std.testing.expectEqualStrings(descriptions[row], shown.list.entries[row].description);
+            if (descriptions[row].len == 0) try std.testing.expectEqualStrings(expected, line);
+            if (descriptions[row].len != 0) {
+                const column = shown.list.descriptionColumn();
+                try std.testing.expectEqualStrings(descriptions[row], line[column..]);
+                for (line[expected.len..column]) |byte| try std.testing.expectEqual(@as(u8, ' '), byte);
+            }
             if (shown.list.entries[row].description.len != 0) {
                 try std.testing.expect(!surface.readCell(0, @intCast(row)).style.dim);
                 try std.testing.expectEqual(surface.readCell(0, @intCast(row)).style, surface.readCell(@intCast(shown.list.descriptionColumn() + 2), @intCast(row)).style);
@@ -414,7 +420,7 @@ test "Palette panel keeps every selected row visible across tiny bounds budgets 
     for ([_]bool{ false, true }) |unicode| {
         for (0..14) |width_index| {
             const width: u16 = if (width_index == 13) 80 else @intCast(width_index);
-            for (0..9) |height| for (0..9) |budget| {
+            for (0..13) |height| for (0..13) |budget| {
                 var menu: slash_menu.Menu = .{ .shown = commands.Shown.next(null, 7, commands.conversation.listed()) };
                 const shown = &menu.shown.?;
                 for (0..shown.list.count) |selected| {
@@ -456,6 +462,15 @@ test "Palette panel keeps every selected row visible across tiny bounds budgets 
                         try std.testing.expectEqual(vaxis.Color.default, cell.style.bg);
                     }
                     if (width - 2 * inset >= 5) try std.testing.expectEqualStrings("/", surface.readCell(inset + 2, @intCast(row)).char.grapheme);
+                    // Every cell belongs to the plain panel or the selection bar.
+                    for (0..surface.size.height) |panel_row| for (0..width) |col| {
+                        const cell = surface.readCell(@intCast(col), @intCast(panel_row));
+                        const expected_style = if (panel_row == row) widget_style.of(caps, .{ .background = .selection }) else palette.style;
+                        try std.testing.expectEqual(expected_style.bg, cell.style.bg);
+                        try std.testing.expectEqual(expected_style.reverse, cell.style.reverse);
+                        for ([_][]const u8{ "┌", "┐", "└", "┘", "│" }) |border|
+                            try std.testing.expect(!std.mem.eql(u8, border, cell.char.grapheme));
+                    };
                     for (palette.hover.targets, 0..) |rect, index| {
                         try std.testing.expectEqual(@as(i17, @intCast(top + index)), rect.row);
                         try std.testing.expectEqual(inset, rect.col);
@@ -499,8 +514,13 @@ test "Palette full-width rows activate and overflow consumes clicks" {
                 try std.testing.expectEqual(@as(u64, 7), selected.pick.?.revision);
             } else try std.testing.expectEqual(null, selected.pick);
         };
-        const label = try std.fmt.allocPrint(arena.allocator(), commands.more, .{shown.list.count - 4});
-        try std.testing.expectEqualStrings(label[0..1], surface.readCell(2, 4).char.grapheme);
+        const label = "10 more";
+        for (label, 0..) |byte, col| {
+            const cell = surface.readCell(@intCast(col + 2), 4);
+            try std.testing.expectEqualStrings(&.{byte}, cell.char.grapheme);
+            try std.testing.expectEqual(palette.quiet, cell.style);
+        }
+        for (2 + label.len..width) |col| try std.testing.expectEqualStrings(" ", surface.readCell(@intCast(col), 4).char.grapheme);
         try std.testing.expectEqual(palette.quiet, surface.readCell(2, 4).style);
     };
 }
