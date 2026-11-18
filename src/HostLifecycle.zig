@@ -310,6 +310,8 @@ fn verifyPass(init: std.process.Init, allocator: std.mem.Allocator, plan: *const
     var after: ?identity.Snapshot = null;
     defer if (after) |*peer| peer.deinit(allocator);
     var facts: client.ReplacementFacts = undefined;
+    // The probe borrows Store bytes from both answers until the pass ends.
+    var own: client.HostStatus = undefined;
     while (true) switch (activation.verdict(probe)) {
         .read => |read| switch (read) {
             .before => probe.before = if (client.observeUpgradePeer(allocator, init.io, directory, until)) |peer| peer: {
@@ -337,10 +339,13 @@ fn verifyPass(init: std.process.Init, allocator: std.mem.Allocator, plan: *const
                 const actual = (try installedVersion(allocator, init.io, home, after.?.executable, null)) orelse break :version .unknown;
                 break :version .{ .order = actual.order(version) };
             },
-            .own => probe.own = switch (client.hostStatus(init.io, directory)) {
-                .ready => |ready| .{ .ready = .{ .instance = ready.instance, .store = ready.store.slice(), .capacity = ready.active_capacity } },
-                .incompatible => .incompatible,
-                .unavailable, .owned_unavailable, .access_failure => .unavailable,
+            .own => probe.own = own: {
+                own = client.hostStatus(init.io, directory);
+                break :own switch (own) {
+                    .ready => |*ready| .{ .ready = .{ .instance = ready.instance, .store = ready.store.slice(), .capacity = ready.active_capacity } },
+                    .incompatible => .incompatible,
+                    .unavailable, .owned_unavailable, .access_failure => .unavailable,
+                };
             },
             .final => probe.final = if (client.observeUpgradePeer(allocator, init.io, directory, until)) |peer| final: {
                 var last = peer;
