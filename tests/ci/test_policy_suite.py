@@ -131,6 +131,71 @@ class PolicySuiteTest(unittest.TestCase):
                 self.assertLess(lines.index('class b'), lines.index('cleanup a'))
                 self.assertIn('module skipped', result.stderr)
 
+        for fixture in ('none', 'class', 'module'):
+            for failure in ('none', 'serial', 'parallel'):
+                for jobs in (1, 2, 4):
+                    with self.subTest(case='serial', fixture=fixture, failure=failure, jobs=jobs), tempfile.TemporaryDirectory() as directory:
+                        root = Path(directory)
+                        module_fixture = """
+                    unittest.addModuleCleanup(record, 'module cleanup')
+                    def setUpModule(): record('module setup')
+                    def tearDownModule(): record('module teardown')
+                        """ if fixture == 'module' else ''
+                        class_fixture = """
+                        @classmethod
+                        def setUpClass(cls): record('class setup')
+                        @classmethod
+                        def tearDownClass(cls): record('class teardown')
+                        """ if fixture == 'class' else ''
+                        (root / 'test_store_shards.py').write_text(
+                            "import os, unittest\n"
+                            "def record(value):\n"
+                            "    with open(os.environ['EVENTS'], 'a') as output: output.write(value + '\\n')\n"
+                            + textwrap.dedent(module_fixture)
+                            + "class LauncherTest(unittest.TestCase):\n"
+                            + textwrap.indent(textwrap.dedent(class_fixture), '    ')
+                            + textwrap.indent(textwrap.dedent('''\
+                                def test_a_sibling(self): record('sibling')
+                                def test_per_test_deadline_survives_closed_output(self):
+                                    record('deadline')
+                                    self.assertEqual(os.getpid(), int(os.environ['RUNNER_PID']))
+                                    if os.environ['FAIL_CASE'] == 'serial': self.fail('serial failure marker')
+                                def test_per_test_timeout_is_independent_of_process_deadline(self):
+                                    record('timeout')
+                                    self.assertEqual(os.getpid(), int(os.environ['RUNNER_PID']))
+                            '''), '    ')
+                            + "class Extra(unittest.TestCase):\n    def test_extra(self): record('extra')\n")
+                        (root / 'test_other.py').write_text(textwrap.dedent('''\
+                            import os, unittest
+                            class Other(unittest.TestCase):
+                                def test_parallel(self):
+                                    with open(os.environ['EVENTS'], 'a') as output: output.write('parallel\\n')
+                                    if os.environ['FAIL_CASE'] == 'parallel': self.fail('parallel failure marker')
+                        '''))
+                        events = root / 'events'
+                        result = subprocess.run([sys.executable, '-B', '-c',
+                            'import os,policy_suite,sys; os.environ["RUNNER_PID"]=str(os.getpid()); sys.exit(not policy_suite.run_parallel(policy_suite.suite([], sys.argv[1]), int(sys.argv[2]), sys.argv[1]))',
+                            str(root), str(jobs)], capture_output=True, text=True,
+                            env=dict(os.environ, PYTHONPATH=str(runner.parent), EVENTS=str(events), FAIL_CASE=failure))
+                        self.assertEqual(result.returncode, int(failure != 'none'), result.stderr)
+                        lines = events.read_text().splitlines()
+                        self.assertCountEqual(lines, ['parallel', 'extra', 'sibling', 'deadline', 'timeout']
+                                              + ([fixture + ' setup', fixture + ' teardown'] if fixture != 'none' else [])
+                                              + (['module cleanup'] if fixture == 'module' else []))
+                        self.assertLess(lines.index('parallel'), lines.index('deadline'))
+                        self.assertLess(lines.index('deadline'), lines.index('timeout'))
+                        if fixture != 'none':
+                            self.assertLess(lines.index(fixture + ' setup'), lines.index('sibling'))
+                            self.assertLess(lines.index('timeout'), lines.index(fixture + ' teardown'))
+                        if fixture == 'module':
+                            self.assertLess(lines.index('module setup'), lines.index('extra'))
+                            self.assertLess(lines.index('extra'), lines.index('module teardown'))
+                            self.assertLess(lines.index('module teardown'), lines.index('module cleanup'))
+                        self.assertIn('Ran 5 tests', result.stderr)
+                        if failure != 'none':
+                            self.assertIn(failure + ' failure marker', result.stderr)
+                            self.assertIn('FAILED (failures=1)', result.stderr)
+
         for label, body, marker in [('unimportable', 'raise ImportError("missing marker")\n', 'missing marker'),
                                     ('worker death', 'import os, unittest\nclass D(unittest.TestCase):\n    def test_die(self): os._exit(7)\n', 'test_die')]:
             for jobs in (1, 2, 4):
