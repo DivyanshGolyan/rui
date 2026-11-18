@@ -46,7 +46,7 @@ function report(work: CurrentReport["work"], parent: string | null = null): Curr
 		session: {
 			reference: "abc123", parent, workspace: "/work", provider: "openai", model: "model-a", revision: "1",
 			tools: ["bash"], loaded_tools: ["bash"], permission_mode: "ask", label: "Review", created_at: "1",
-			instructions: { bytes: "0", sha256: "0".repeat(64) }, output_schema: null,
+			instructions: { type: "text", bytes: "0", sha256: "0".repeat(64) }, output_schema: null,
 			compaction_trigger: "100000", context_estimate: null, output_reservation: "0",
 			compaction_trigger_override: null, output_reservation_override: null,
 			reasoning_effort: "high", reasoning_effort_override: null,
@@ -64,7 +64,7 @@ const idleWork: CurrentReport["work"] = {
 };
 
 test("status requests the Current profile and maps reported facts and parent losslessly", async () => {
-	const latestOutcome = { code: "failed_saved", content: { bytes: "7", sha256: "a".repeat(64) } };
+	const latestOutcome = { code: "failed_saved", content: { type: "text", bytes: "7", sha256: "a".repeat(64) } } as const;
 	for (const archiveState of ["active", "archiving", "archived"] as const) for (const parent of [null, "p4rent"]) {
 		const link: Link = {
 			async exchange(path, build) {

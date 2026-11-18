@@ -63,7 +63,7 @@ def content_reference(text):
     data = text.encode()
     domain = b"rui/content/v1"
     digest = hashlib.sha256(len(domain).to_bytes(8, "big") + domain + data).hexdigest()
-    return {"bytes": str(len(data)), "sha256": digest}
+    return {"type": "text", "bytes": str(len(data)), "sha256": digest}
 
 
 def stored_message_parts(database):
