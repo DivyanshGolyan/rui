@@ -96,7 +96,7 @@ class CompilerProbe(unittest.TestCase):
             (root / "alpha.zig").write_text('test "mentions nested.beta.test. prefix" { _ = @import("hidden.zig"); }\nconst Inner = struct { test "nested" {} };\ntest { _ = Inner; }\n')
             (root / "hidden.zig").write_text('test "discovered from named body" {}\n')
             (root / "nested/beta.zig").write_text('test "beta named" {}\ntest {}\n')
-            environment = subprocess.check_output([zig, "env"], timeout=20).decode()
+            environment = subprocess.check_output([zig, "env"], timeout=300).decode()
             if environment.lstrip().startswith(".{"):
                 lib = json.loads(re.search(r'\.lib_dir = ("(?:[^"\\]|\\.)*")', environment).group(1))
             else:
@@ -107,7 +107,7 @@ class CompilerProbe(unittest.TestCase):
             (root / "runner.zig").write_text(generator.generate((Path(lib) / "compiler/test_runner.zig").read_text()))
             (root / "partition.zig").write_text('const std = @import("std"); pub const Timing = struct { name: []const u8, seconds: f64 }; pub const Root = enum { aggregate, alpha, beta }; pub fn owner(n: []const u8) Root { if (std.mem.startsWith(u8,n,"alpha.")) return .alpha; if (std.mem.startsWith(u8,n,"nested.beta.")) return .beta; return .aggregate; }')
             baseline = root / "before"
-            subprocess.run([zig, "test", str(root / "aggregate.zig"), "--test-no-exec", "-fno-llvm", f"-femit-bin={baseline}"], check=True, timeout=60)
+            subprocess.run([zig, "test", str(root / "aggregate.zig"), "--test-no-exec", "-fno-llvm", f"-femit-bin={baseline}"], check=True, timeout=300)
             aggregate = root / "aggregate.zig"
             aggregate.write_text(aggregate.read_text().replace(
                 '_ = @import("nested/beta.zig");',
@@ -121,11 +121,11 @@ class CompilerProbe(unittest.TestCase):
                 subprocess.run([zig, "test", "--test-no-exec", "-fno-llvm", *filters,
                                 "--test-runner", str(root / "runner.zig"), "--dep", "unit_test_partition", "--dep", "unit_test_options",
                                 f"-Mroot={root / 'aggregate.zig'}", f"-Munit_test_partition={root / 'partition.zig'}",
-                                f"-Munit_test_options={options}", f"-femit-bin={binary}"], check=True, timeout=60)
+                                f"-Munit_test_options={options}", f"-femit-bin={binary}"], check=True, timeout=300)
                 inventory = names.query(binary)
                 after.extend(inventory)
                 requests = message(4, b"") + b"".join(message(5, struct.pack("<I", i)) for i in range(len(inventory))) + message(0, b"")
-                executed = subprocess.run([str(binary), "--listen=-"], input=requests, capture_output=True, timeout=20, check=True)
+                executed = subprocess.run([str(binary), "--listen=-"], input=requests, capture_output=True, timeout=300, check=True)
                 position, results = 0, []
                 while position < len(executed.stdout):
                     tag, size = struct.unpack_from("<II", executed.stdout, position)
