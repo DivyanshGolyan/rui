@@ -1177,13 +1177,16 @@ test "schema 75 MySQL pin migration handles fresh and historically upgraded kind
             }
             // The expected fixture describes the current schema, while this Store is at format 74.
             const format_74_rows = comptime blk: {
-                const current = store_testing.expected_mysql_rows;
+                var rows = store_testing.expected_mysql_rows;
                 const baseline = store_testing.baseline_rows;
-                const start = std.mem.indexOf(u8, current, "INSERT INTO message_admission(").?;
-                const end = start + std.mem.indexOf(u8, current[start..], ";\n").? + 2;
-                const old_start = std.mem.indexOf(u8, baseline, "INSERT INTO message_admission(").?;
-                const old_end = old_start + std.mem.indexOf(u8, baseline[old_start..], ";\n").? + 2;
-                break :blk current[0..start] ++ baseline[old_start..old_end] ++ current[end..];
+                for (.{ "INSERT INTO message_admission(", "INSERT INTO conversation_entry(" }) |insert| {
+                    const start = std.mem.indexOf(u8, rows, insert).?;
+                    const end = start + std.mem.indexOf(u8, rows[start..], ";\n").? + 2;
+                    const old_start = std.mem.indexOf(u8, baseline, insert).?;
+                    const old_end = old_start + std.mem.indexOf(u8, baseline[old_start..], ";\n").? + 2;
+                    rows = rows[0..start] ++ baseline[old_start..old_end] ++ rows[end..];
+                }
+                break :blk rows;
             };
             try load(migrated_database_sql, format_74_rows, true);
         }
