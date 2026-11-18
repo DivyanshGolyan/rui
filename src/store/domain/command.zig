@@ -2263,14 +2263,6 @@ const external_decision_eligible = rsql.Read(.{
     .cardinality = .optional,
 });
 
-const external_decision_eligible = rsql.Read(.{
-    .sql = "SELECT " ++ action_domain.externalDecisionEligibleSql("a", "t") ++ " AS eligible FROM action_operation a " ++
-        "JOIN model_operation operation ON operation.operation_id=a.parent_operation_id JOIN turn t ON t.turn_id=operation.turn_id WHERE a.action_id=?1",
-    .Args = struct { action_id: u64 },
-    .Row = struct { eligible: bool },
-    .cardinality = .optional,
-});
-
 const save_decision = rsql.Write(.{
     .sql = "INSERT INTO permission_decision_command(command_key,action_id,decision) VALUES(?1,?2,?3)",
     .Args = struct { key: []const u8, action_id: []const u8, decision: mutation_answer.PermissionDecision },
