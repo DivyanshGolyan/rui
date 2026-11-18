@@ -1352,7 +1352,6 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
         .presentation_tick => |frame| if (state.presentation == .holding) {
             const deadline = state.presentation.holding;
             if (frame.now_ms >= deadline or frame.host_unavailable or frame.list_visible == false) {
-                if (state.listed_at_ms == null and (state.launch == .sizing or state.launch == .waiting)) state.launch = .done;
                 releaseInitialPresentation(state, &effects);
             }
         },
@@ -6511,7 +6510,7 @@ test "initial presentation core releases for live answer deadline failure and Ho
             .late => {
                 const deadline = try step(&state, .{ .presentation_tick = .{ .now_ms = 1150, .list_visible = true, .host_unavailable = false } });
                 try std.testing.expect(deadline.redraw);
-                try std.testing.expectEqual(.done, state.launch);
+                try std.testing.expect(if (width >= 100) state.launch == .waiting else state.launch == .done);
                 try std.testing.expect(state.listed_at_ms == null);
                 const fallback = try screenText(&state, width, 30, .{});
                 defer std.testing.allocator.free(fallback);
@@ -6534,7 +6533,7 @@ test "initial presentation core releases for live answer deadline failure and Ho
             .host_unavailable => {
                 const lost = try step(&state, .{ .presentation_tick = .{ .now_ms = 1001, .list_visible = true, .host_unavailable = true } });
                 try std.testing.expect(lost.redraw);
-                try std.testing.expectEqual(.done, state.launch);
+                try std.testing.expect(if (width >= 100) state.launch == .waiting else state.launch == .done);
             },
         }
         try std.testing.expect(state.initialPresentation(true) != .holding);
@@ -6544,6 +6543,41 @@ test "initial presentation core releases for live answer deadline failure and Ho
         try std.testing.expectEqual(.done, state.initialPresentation(true));
         const again = try step(&state, .{ .presentation_tick = .{ .now_ms = 1200, .list_visible = true, .host_unavailable = false } });
         try std.testing.expect(!again.redraw);
+    };
+}
+
+test "launch core handles late list after presentation release" {
+    const Release = enum { deadline, hidden, unavailable };
+    const Listing = enum { empty, sessions };
+    for ([_]u16{ 46, 140 }) |width| for (std.enums.values(Release)) |release| for (std.enums.values(Listing)) |listing| for ([_]bool{ false, true }) |size_first| {
+        var state = try testState();
+        defer state.deinit();
+        _ = try step(&state, .{ .launch_start = .{ .explicit_session = false, .restoring = false } });
+        _ = try step(&state, .{ .presentation_start = 1000 });
+        if (size_first) _ = try step(&state, .{ .launch_size = .{ .size = .{ .width = width, .height = 30 }, .wide = width >= 100 } });
+        _ = try step(&state, .{ .tick = test_now_s * 1000 });
+        _ = try step(&state, .{ .presentation_tick = .{
+            .now_ms = if (release == .deadline) 1150 else 1001,
+            .list_visible = release != .hidden,
+            .host_unavailable = release == .unavailable,
+        } });
+        try std.testing.expectEqual(.released, state.initialPresentation(true));
+        if (!size_first) _ = try step(&state, .{ .launch_size = .{ .size = .{ .width = width, .height = 30 }, .wide = width >= 100 } });
+        var older = session("aaaaaa", .{ .idle = ago(1) }, .{ .first = null });
+        var newest = session("bbbbbb", .{ .idle = ago(1) }, .{ .first = null });
+        older.created_at = 1;
+        newest.created_at = 2;
+        const rows = [_]Listed{ older, newest };
+        _ = try respond(&state, .full, testToken(1), if (listing == .empty) &.{} else &rows);
+        const effects = try step(&state, .launch_poll);
+        if (width < 100) {
+            try expectEffects(&.{}, effects);
+        } else if (listing == .empty) {
+            try expectEffects(&.{.{ .create = null }}, effects);
+        } else {
+            try expectEffects(&.{ .{ .open = "bbbbbb".* }, .list_models }, effects);
+        }
+        try expectEffects(&.{}, try step(&state, .launch_poll));
     };
 }
 
