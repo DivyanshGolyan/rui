@@ -69,10 +69,13 @@ def prove_stdin(state):
     )
     probe = "import os,stat; print('null' if stat.S_ISCHR(os.fstat(0).st_mode) else 'file'); print(len(os.read(0,1)))"
     failed_send = "Bash failed. Exit code: 2.\nstderr:\n"
-    retained_output_bytes = {"large": 524288, "over": 0, "null": 7, "missing": 7, "empty": 7,
-                             "closed": 6, "timeout": 0}
+    retained_output_bytes = {"large": 524288, "stdout-cut": 24000, "stderr-cut": 24000,
+                             "over": 0, "null": 0, "missing": 0, "empty": 0,
+                             "closed": 0, "timeout": 0}
     cases = [
         ("large", {"cmd": f"{shlex.quote(sys.executable)} -c {shlex.quote(program)}", "stdin": large}, "succeeded"),
+        ("stdout-cut", {"cmd": "head -c 24000 /dev/zero | tr '\\0' o; printf short >&2"}, "succeeded"),
+        ("stderr-cut", {"cmd": "printf short; head -c 24000 /dev/zero | tr '\\0' e >&2"}, "succeeded"),
         ("over", {"cmd": "touch forbidden-over-limit", "stdin": large + "z"}, "spawn_failed"),
         ("null", {"cmd": f"{shlex.quote(sys.executable)} -c {shlex.quote(probe)}", "stdin": None}, "succeeded"),
         ("missing", {"cmd": f"{shlex.quote(sys.executable)} -c {shlex.quote(probe)}"}, "succeeded"),
@@ -124,6 +127,15 @@ def prove_stdin(state):
                 assert (workspace / "input.bin").read_bytes() == large.encode(), "large input changed or stopped before EOF"
                 assert " bytes left out]" in result and "Full stdout:" in result and "Full stderr:" in result, result
                 assert not (workspace / "evaluated").exists() and not (workspace / "substituted").exists()
+            elif name in ("stdout-cut", "stderr-cut"):
+                cut_stream = "stdout" if name == "stdout-cut" else "stderr"
+                other_stream = "stderr" if cut_stream == "stdout" else "stdout"
+                assert f"{other_stream}:\nshort" in result, result
+                assert f"Full {other_stream}:" not in result, result
+                paths = [line.split(": ", 1)[1] for line in result.splitlines()
+                         if line.startswith(f"Full {cut_stream}: ")]
+                assert len(paths) == 1, result
+                assert pathlib.Path(paths[0]).read_bytes() == (b"o" if cut_stream == "stdout" else b"e") * 24000
             elif name == "over":
                 assert result == "Bash was not started: decoded stdin exceeds 122880 bytes. Split the input across smaller calls or read an existing file.", result
                 assert not (workspace / "forbidden-over-limit").exists(), "over-limit input launched"
@@ -136,14 +148,18 @@ def prove_stdin(state):
                 assert result.startswith(failed_send), result
                 refusal = result[len(failed_send):]
                 assert_caller_error(refusal, "rui session send: ", "message_empty", not_sent=False)
-                retained_output_bytes[name] = len(refusal.encode())
+                retained_output_bytes[name] = 0
                 assert not (state / f"{name}.json").exists(), "empty input published a capture"
                 assert fixture.command("request", "inspect", "--store", store, "--key", name)["observation"]["status"] == "absent"
             fixture.wait_for(lambda: fixture.command("session", "inspect", "--store", store, "--session", session)
                              ["execution"]["custody_occupied"] == "0", f"{name} custody release")
             used = int(fixture.command("session", "inspect", "--store", store, "--session", session)
                        ["execution"]["scratch_used_bytes"])
-            assert used == baseline + retained_output_bytes[name], (name, baseline, used, "input charge leaked")
+            assert used == baseline + retained_output_bytes[name], (name, baseline, used, "unexpected retained charge")
+            actual_paths = set((store / "scratch").glob(f"bash-*-{action['action']}-*.tmp"))
+            named_paths = {pathlib.Path(line.split(": ", 1)[1]) for line in result.splitlines()
+                           if line.startswith(("Full stdout: ", "Full stderr: "))}
+            assert actual_paths == named_paths, (name, actual_paths, named_paths)
             continuation = json.loads(endpoint.requests[-1])
             call = next(item for item in continuation["input"] if item.get("type") == "function_call")
             assert call["arguments"] == descriptors[name], (name, "continuation changed canonical input")
@@ -870,7 +886,7 @@ def main():
     responses.append(
         fixture.sse_tool_calls(
             "settlement-stop-calls",
-            [("bash", "settlement-stop-call", json.dumps({"cmd": "printf sealed", "timeout_ms": None, "description": "Print sealed output"}))],
+            [("bash", "settlement-stop-call", json.dumps({"cmd": "head -c 24000 /dev/zero | tr '\\0' o; head -c 24000 /dev/zero | tr '\\0' e >&2", "timeout_ms": None, "description": "Print output before stop"}))],
         )
     )
     exited_child_pid = state / "exited-child-pid"
@@ -953,7 +969,8 @@ def main():
         "head -c 2097152 /dev/zero | tr '\\0' q",
         timeout_ms=None,
     )
-    add_exchange(responses, "cleanup", "printf cleaned")
+    cleanup_marker = state / "cleanup-launches"
+    add_exchange(responses, "cleanup", f"printf x >> {shlex.quote(str(cleanup_marker))}; printf cleaned")
     add_exchange(responses, "preparation", "printf never")
     add_exchange(responses, "spawn", "printf never")
     add_exchange(responses, "arguments", "printf never")
@@ -1589,6 +1606,8 @@ def main():
             "action_result_ready",
             action=str(settlement_stop_action["action"]),
         )
+        sealed_paths = list((store / "scratch").glob(f"bash-*-{settlement_stop_action['action']}-*.tmp"))
+        assert len(sealed_paths) == 2 and sorted(path.stat().st_size for path in sealed_paths) == [24000, 24000], sealed_paths
         fixture.command(
             "session", "stop",
             "--store",
@@ -1621,6 +1640,8 @@ def main():
             == 0,
             "post-settlement Bash cleanup",
         )
+        fixture.wait_for(lambda: execution_idle(store, session), "stopped result releases retained output")
+        assert not list((store / "scratch").glob(f"bash-*-{settlement_stop_action['action']}-*.tmp"))
         fixture.stop_host(host)
         host, milestones = None, None
         host = fixture.start_host(store, endpoint_url)
@@ -1860,10 +1881,14 @@ def main():
             lambda: resolution(store, session) == "succeeded",
             "known result before cleanup failure",
         )
-        cleanup_report = fixture.command(
-            "session", "inspect", "--store", store, "--session", session
+        cleanup_report = fixture.wait_for(
+            lambda: (report if (report := fixture.command(
+                "session", "inspect", "--store", store, "--session", session
+            ))["execution"]["dispatch_fenced"] else None),
+            "cleanup-failure dispatch fence",
         )
-        assert cleanup_report["execution"]["dispatch_fenced"] is True, cleanup_report
+        saved_cleanup_result = result_text(store, session)
+        assert saved_cleanup_result == "Bash succeeded. Exit code: 0.\nstdout:\ncleaned", saved_cleanup_result
         assert int(cleanup_report["execution"]["custody_occupied"]) > 0, cleanup_report
         assert list((store / "scratch").glob("bash-*-*.tmp"))
         cleanup_gate.unlink()
@@ -1875,8 +1900,9 @@ def main():
             "cleanup-failure original owner reclamation",
         )
         cleanup_attempt = f"{cleanup_action['action']}-1.tmp"
-        assert (store / "scratch" / f"bash-stdout-{cleanup_attempt}").exists()
-        assert (store / "scratch" / f"bash-stderr-{cleanup_attempt}").exists()
+        assert not (store / "scratch" / f"bash-stdout-{cleanup_attempt}").exists()
+        assert not (store / "scratch" / f"bash-stderr-{cleanup_attempt}").exists()
+        assert result_text(store, session) == saved_cleanup_result
         fixture.stop_host(host)
         host = fixture.start_host(store, endpoint_url)
         assert resolution(store, session) == "succeeded"
@@ -1884,6 +1910,16 @@ def main():
             lambda: fixture.completed_observation(store, "cleanup-message"),
             "cleanup-failure continuation",
         )
+        assert result_text(store, session) == saved_cleanup_result
+        assert fixture.read_result(store, "cleanup-message") == b"continued"
+        assert cleanup_marker.read_bytes() == b"x", "cleanup failure replayed the Bash command"
+        cleanup_outputs = [
+            item["output"]
+            for request in endpoint.requests
+            for item in json.loads(request)["input"]
+            if item.get("type") == "function_call_output" and item.get("call_id") == "cleanup-call"
+        ]
+        assert cleanup_outputs and all(output == saved_cleanup_result for output in cleanup_outputs), cleanup_outputs
 
         for name, fault, expected in (
             ("preparation", "bash-preparation", "storage_failed"),

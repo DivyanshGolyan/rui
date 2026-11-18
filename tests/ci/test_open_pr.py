@@ -26,10 +26,11 @@ class OpenPrTest(unittest.TestCase):
         self.assertIn("head=fix-x", args)
         self.assertIn("body=Description", args)
 
-    def test_open_requests_codex_review_on_ready_and_draft_candidates(self):
+    def test_open_requests_codex_review_only_on_drafts(self):
         url = "https://github.com/example/rui/pull/9"
         for draft in (False, True):
-            for comment_error in (None, subprocess.CalledProcessError(1, ["gh", "api"], stderr="denied")):
+            for comment_error in ((None, subprocess.CalledProcessError(1, ["gh", "api"], stderr="denied"))
+                                  if draft else (None,)):
                 with self.subTest(draft=draft, comment_error=comment_error):
                     stdout, stderr = io.StringIO(), io.StringIO()
                     created = '{"number": 9, "html_url": "%s"}' % url
@@ -50,8 +51,9 @@ class OpenPrTest(unittest.TestCase):
                         call(*open_pr.create_args("example/rui", "Title", GOAL + "Description",
                                                  "main", "fix-x", draft=draft))])
                     self.assertIn("draft=true" if draft else "draft=false", gh.call_args.args)
-                    self.assertEqual(github.call_args_list, [
-                        call("POST", "repos/example/rui/issues/9/comments", [("body", "@codex review")])])
+                    self.assertEqual(github.call_args_list, ([
+                        call("POST", "repos/example/rui/issues/9/comments", [("body", "@codex review")])]
+                        if draft else []))
                     self.assertIn(url, stdout.getvalue())
                     if comment_error:
                         self.assertEqual(result, 1)
@@ -66,7 +68,7 @@ class OpenPrTest(unittest.TestCase):
                             self.assertNotIn("Opened ready", stdout.getvalue())
                             self.assertNotIn("Selected CI runs beside review", stdout.getvalue())
                         else:
-                            self.assertIn("Opened ready and requested Codex review", stdout.getvalue())
+                            self.assertIn("Opened ready; Codex reviews automatically", stdout.getvalue())
                             self.assertIn("Selected CI runs beside review", stdout.getvalue())
                             self.assertNotIn("Opened draft", stdout.getvalue())
 
@@ -107,7 +109,7 @@ class OpenPrTest(unittest.TestCase):
                     gh.assert_called_once_with(*open_pr.create_args(
                         "example/rui", "Title", body, "parent", "fix-x"))
                     self.assertEqual(body_file.read_text(encoding="utf-8"), "Replaced after validation")
-                    github.assert_called_once()
+                    github.assert_not_called()
                 else:
                     self.assertIn("nonempty fenced sketch", stderr.getvalue())
                     overlaps.assert_not_called()

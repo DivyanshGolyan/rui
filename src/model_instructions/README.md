@@ -15,6 +15,9 @@ The [third-party notices](../../THIRD_PARTY_NOTICES.md#openai-codex-instruction-
 | `gpt-6.1-sol` | `sol.txt` | 21779 | `e1bdd4f8f0df4b20f4a0ffc8a861ce819df45325d8cecdfb92e80379cf8d142e` |
 | `gpt-6-astra` | `terra-astra.txt` | 21428 | `35bd51b5f577cb7b24cd5f4629e49e37cb724ab57754ce6f8f202001635bab8a` |
 
+Codex had published no template for `gpt-6.2-sol` or `gpt-6.2-astra` on 2026-11-17, when OpenAI released them.
+Until it does, `gpt-6.2-sol` uses `sol.txt` and `gpt-6.2-astra` uses `terra-astra.txt`, the assets of their 6.1 and 6.0 predecessors.
+
 ## Rui modifications
 
 [codex.patch](codex.patch) records every changed byte against the decoded originals.

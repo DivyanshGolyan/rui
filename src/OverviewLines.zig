@@ -143,7 +143,7 @@ pub const Settings = struct {
         @memset(surface.buffer, .{ .style = widget_style.of(self.caps, .{ .colour = .quiet }) });
         self.hover.targets = &.{};
         if (height == 0 or size.width == 0) return surface;
-        for (0..size.width) |column| surface.writeCell(@intCast(column), 0, .{ .char = .{ .grapheme = if (self.caps.unicode) "─" else "-", .width = 1 }, .style = widget_style.of(self.caps, .{ .colour = .quiet }) });
+        for (0..size.width) |column| surface.writeCell(@intCast(column), 0, widget_style.line(self.caps, .horizontal));
         if (height < 2) return surface;
         const ground: overview_view.Background = if (self.selected) .selection else if (self.hover.contains(target)) .hover else .ground;
         const row_style = widget_style.of(self.caps, .{ .background = ground });
@@ -217,14 +217,18 @@ test "sidebar bottom separates Settings memory and update targets across geometr
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const status = @import("upgrade_status.zig");
-    const runs = [_]?status.Run{ null, .checking, .{ .ended = .{ .how = .{ .failed = .download }, .outcome = .unchanged } }, .{ .ended = .{ .how = .{ .upgraded = .{ .version = .{ .schema = 76, .patch = 0 }, .restarted = true } }, .outcome = .compatible } } };
-    for (runs) |run| for ([_]?status.Version{ null, .{ .schema = 76, .patch = 0 } }) |available| for ([_]overview_view.Caps{ .{}, .{ .unicode = false }, .{ .depth = .none } }) |caps| for ([_]bool{ false, true }) |selected| for ([_]u16{ 0, 1, 8, 14, 20, 30, 46, 140 }) |width| for ([_]u16{ 0, 1, 2, 3 }) |height| {
+    const runs = [_]?status.Run{ null, .checking, .cancelling, .{ .installing = .{ .found = .{ .host = .none } } }, .{ .ended = .{ .how = .{ .failed = .download }, .outcome = .unchanged } }, .{ .ended = .{ .how = .{ .upgraded = .{ .version = .{ .schema = 76, .patch = 0 }, .restarted = true } }, .outcome = .compatible } } };
+    for (runs) |run| for ([_]?status.Version{ null, .{ .schema = 76, .patch = 0 } }) |available| for ([_]overview_view.Caps{ .{}, .{ .unicode = false }, .{ .depth = .none }, .{ .background = .{ 255, 255, 255 } }, .{ .unicode = false, .background = .{ 255, 255, 255 } } }) |caps| for ([_]bool{ false, true }) |selected| for ([_]u16{ 0, 1, 8, 9, 10, 12, 13, 14, 15, 16, 17, 20, 21, 22, 23, 24, 25, 26, 28, 29, 30, 31, 34, 35, 36, 37, 44, 45, 46, 140 }) |width| for ([_]u16{ 0, 1, 2, 3, 4 }) |height| {
         defer _ = arena.reset(.retain_capacity);
         var clicks: Clicks = .{};
         var settings: Settings = .{ .selected = selected, .caps = caps, .userdata = &clicks, .on_click = Clicks.take, .run = run, .available = available, .memory = .{ .rui = 38 * overview_view.mib, .tools = 120 * overview_view.mib } };
         const frame = try settings.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = height }, .cell_size = .{} });
         try std.testing.expectEqual(@min(height, 2), frame.size.height);
-        if (width > 0 and height > 0) for (0..width) |column| try std.testing.expectEqualStrings(if (caps.unicode) "─" else "-", frame.readCell(@intCast(column), 0).char.grapheme);
+        if (width > 0 and height > 0) for (0..width) |column| {
+            const rule = frame.readCell(@intCast(column), 0);
+            try std.testing.expectEqualStrings(if (caps.unicode) "┄" else "-", rule.char.grapheme);
+            try std.testing.expectEqual(widget_style.line(caps, .horizontal).style, rule.style);
+        };
         const busy = if (run) |active| active.going() else false;
         const failed = if (run) |active| active == .ended and active.ended.how == .failed else false;
         const done = if (run) |active| active == .ended and active.ended.how == .upgraded else false;
