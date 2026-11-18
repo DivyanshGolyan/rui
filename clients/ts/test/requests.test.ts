@@ -410,7 +410,7 @@ async function servedCase2() {
 	}
 }
 
-test("SUI-29 typescript_served_work", async () => {
+test("SUI-44 typescript_served_work", async () => {
 	await servedCase0();
 	await servedCase1();
 	await servedCase2();

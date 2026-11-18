@@ -911,7 +911,7 @@ class ReleaseFlowTest(unittest.TestCase):
         self.assertIn(proof, cache)
         self.assertLess(cache.index('uses: ./.github/actions/setup'), cache.index(proof))
         self.assertNotIn('native_acceptance', job(workflow, 'policy'))
-        self.assertIn('timeout-minutes: 5', job(workflow, 'policy'))
+        self.assertIn('timeout-minutes: 10', job(workflow, 'policy'))
         self.assertIn('timeout-minutes: 20', cache)
         discovered = unittest.defaultTestLoader.discover(str(ROOT / 'tests/ci'))
         def ids(suite):
