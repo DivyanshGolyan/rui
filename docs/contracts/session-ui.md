@@ -119,7 +119,7 @@ Below 100 columns no list sits beside the chat, so Left on an empty draft leaves
 While the list has keys, its selected row takes the focused background and the chat's prompt shows a quiet `›` with no caret; while the chat has keys, the open chat's row keeps a dimmed, inactive selection.
 A click on the list gives it keys, and a click in the chat gives keys back to the chat's input, by the same transition as Enter on the open chat's row.
 Divyansh chose this list focus, Left on an empty draft and Esc leaving at every width in November 2026 (PR #1400).
-The rules table says which work states Ctrl-X may stop: pending, working, retrying, Bash and approval.
+The Host serves whether Ctrl-X may stop this work; the client also suppresses another stop while its own stop request remains open.
 Ctrl-X on such a row opens a confirm prompt in the core's state; a second Ctrl-X returns the `stop` effect, Esc only cancels, and any other input cancels before it acts.
 Every creation and stop is an entry in the core's request ledger (`State.requests`) until a definite answer removes it; a full ledger refuses new requests and evicts nothing, and departure prints every entry still left.
 A stop's answer asks for a listing at once, so `■ stopped` follows within one refresh.
