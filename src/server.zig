@@ -4551,7 +4551,7 @@ test "inline skills suggestions answer heap exhaustion as busy, not a catalog re
     try std.testing.expect(fail_index > 0);
 }
 
-test "SH-49 a read the Store refuses without fencing leaves the Host serving" {
+test "SH-51 a read the Store refuses without fencing leaves the Host serving" {
     // A Session holds both parts producers: a compound Message and a read_image Resolution.
     // Every public read that meets them gets the Store's ordinary refusal; none may fence the Host.
     var tmp = std.testing.tmpDir(.{});
