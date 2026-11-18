@@ -42,7 +42,7 @@ fi
 
 cases() {
     run_case execution admission sh "$directory/admission_integration.sh" "$release_safe"
-    run_case execution dispatch python3 "$directory/dispatch_integration.py" "$release_safe"
+    run_case execution dispatch python3 "$directory/dispatch_integration.py" "$pause_binary"
     run_case execution read-image python3 "$directory/read_image_integration.py" "$release_safe"
     run_case execution bash-owner python3 "$directory/bash_owner_integration.py" "$release_safe"
     run_case execution bash python3 "$directory/bash_integration.py" "$pause_binary"
@@ -65,7 +65,7 @@ cases() {
     run_case callers preference-policy python3 "$directory/preference_policy_integration.py" "$preference_policy_actor"
     run_case execution bash-lifecycle python3 "$directory/bash_lifecycle_integration.py" "$release_safe"
     run_case execution bash-recovery python3 "$directory/bash_recovery_integration.py" "$pause_binary"
-    run_case execution codex python3 "$directory/codex_integration.py" "$release_safe"
+    run_case execution codex python3 "$directory/codex_integration.py" "$pause_binary"
     run_case execution control python3 "$directory/control_integration.py" "$pause_binary"
     run_case callers session-list python3 "$directory/session_list_integration.py" "$release_safe" "$session_list_client"
     run_case callers conversation-page python3 "$directory/conversation_page_integration.py" "$release_safe"
