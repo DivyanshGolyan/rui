@@ -871,7 +871,7 @@ test "absent destination preflight checks read-only ancestor reached through dot
     defer tmp.cleanup();
     var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
-    const target = @import("os/os.zig").read_only_directory ++ "/rui-preflight-never-created";
+    const target = @import("os").read_only_directory ++ "/rui-preflight-never-created";
     try std.testing.expectError(error.AccessDenied, validateStoreDestination(io, target));
     var path_buffer: [2048]u8 = undefined;
     var length = (try std.fmt.bufPrint(&path_buffer, "{s}/missing/", .{root})).len;

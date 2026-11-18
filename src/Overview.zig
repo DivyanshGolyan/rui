@@ -1596,9 +1596,9 @@ fn upgradeValue(raw: *anyopaque) session_upgrade.Upgrade {
     return self.state.upgrade;
 }
 
-fn conversationLine(raw: *anyopaque, kind: view.Kind) SessionFrontend.Lender.Said {
+fn conversationLine(raw: *anyopaque, can_stop: bool) SessionFrontend.Lender.Said {
     const self: *Self = @ptrCast(@alignCast(raw));
-    const said = view.conversation(&self.state, self.opened, kind);
+    const said = view.conversation(&self.state, self.opened, can_stop);
     return .{ .text = said.text, .notice = said.notice, .stoppable = said.stoppable };
 }
 
@@ -1945,6 +1945,22 @@ const Seen = struct {
     }
 };
 
+fn fixtureWork(value: protocol.session_work.Work) protocol.session_work.Work {
+    var served = value;
+    served.served_attention = protocol.session_work.attention(served);
+    served.served_group = protocol.session_work.group(served);
+    served.actions.stop = switch (served.served_group.?) {
+        .needs_you, .working, .queued => true,
+        .done => false,
+    };
+    served.actions.decide = if (served.served_group.? == .needs_you) served.first_action else null;
+    return served;
+}
+
+fn fixtureSessionWork(value: protocol.session_work.Work) protocol.SessionWork {
+    return .fromCore(fixtureWork(value));
+}
+
 const listed_references = [_][]const u8{ "k7m2qx", "b4n8wd", "p3c6tz", "h5r9vy", "m2j7fs" };
 
 const fake_operations: Operations = .{
@@ -1967,7 +1983,7 @@ const fake_operations: Operations = .{
             page.* = .{ .count = Seen.now.listed, .delta = .full, .since = .{ .instance = @splat(1), .generation = Seen.now.lists }, .next = null };
             for (page.rows[0..Seen.now.listed], listed_references[0..Seen.now.listed], 0..) |*row, reference, at| {
                 const since = test_now_s - 10 - at;
-                row.* = .{ .read_version = page.since, .work = .{ .state = if (at < Seen.now.working) .{ .working = .{ .since = since } } else .{ .idle = .{ .since = since } }, .turn = 1, .operation = 1 } };
+                row.* = .{ .read_version = page.since, .work = fixtureSessionWork(.{ .state = if (at < Seen.now.working) .{ .working = .{ .since = since } } else .{ .idle = .{ .since = since } }, .turn = 1, .operation = 1 }) };
                 row.reference.set(reference) catch unreachable;
                 row.workspace.set("/work") catch unreachable;
                 row.model.set("gpt-5.5") catch unreachable;
@@ -2899,7 +2915,7 @@ test "while a conversation holds the terminal its stop goes first, the listing g
     overview.opened = "k7m2qx".*;
     try overview.dispatch(.lent);
     try std.testing.expectEqual(Job.list, std.meta.activeTag(overview.job));
-    _ = try conversed(overview, .working, .stop);
+    _ = try conversed(overview, .working, .{ .stop = true });
     try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(2)), overview, Lent.answered);
     try std.testing.expectEqual(Job.stop, std.meta.activeTag(overview.job));
     try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(2)), overview, Lent.answered);
@@ -2936,7 +2952,7 @@ test "a terminal that answers the program status probe gets each Session's recor
         var finished = false;
         fn list(self: *Self, requests: client.Requests, cursor: protocol_reply.SessionListCursor, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
             _ = try fake_operations.list(self, requests, cursor, page);
-            if (finished) page.rows[0].work = .{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = 1, .operation = 1 };
+            if (finished) page.rows[0].work = fixtureSessionWork(.{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = 1, .operation = 1 });
             return null;
         }
     };
@@ -2961,7 +2977,7 @@ test "a terminal that answers the program status probe gets each Session's recor
     written = rig.signalled();
     try std.testing.expect(std.mem.startsWith(u8, written, "\x1b]7501;state=done:id=rui/k7m2qx:app=rui:msg=Rml4IHRoZSBmbGFreSB0ZXN0\x1b\\"));
     overview.opened = "k7m2qx".*;
-    try observed(overview, .{ .read_version = .{ .instance = @splat(1), .generation = Seen.now.lists + 1 }, .work = .{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = 2, .operation = 2 } }, false);
+    try observed(overview, .{ .read_version = .{ .instance = @splat(1), .generation = Seen.now.lists + 1 }, .work = fixtureWork(.{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = 2, .operation = 2 }) }, false);
     try std.testing.expectEqualStrings("", rig.signalled());
     try std.testing.expect(try overview.event(.{ .open = "k7m2qx".* }) != null);
     written = rig.signalled();
@@ -3070,12 +3086,12 @@ test "each later finish, and each later wait, is a record again though no listin
     const blocked = "\x1b]7501;state=blocked:id=rui/k7m2qx:kind=permission:app=rui:msg=Rml4IHRoZSBmbGFreSB0ZXN0\x1b\\";
     const finished = struct {
         fn of(id: u64) protocol.SessionWork {
-            return .{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = id, .operation = id };
+            return fixtureSessionWork(.{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = id, .operation = id });
         }
     }.of;
     const waiting = struct {
         fn of(id: u64, action: u64) protocol.SessionWork {
-            return .{ .state = .{ .approval = .{ .since = test_now_s } }, .turn = id, .operation = id, .first_action = action };
+            return fixtureSessionWork(.{ .state = .{ .approval = .{ .since = test_now_s } }, .turn = id, .operation = id, .first_action = action });
         }
     }.of;
     for ([_]struct { work: ?protocol.SessionWork, record: ?[]const u8 }{
@@ -3108,7 +3124,7 @@ test "a later Turn's finish the conversation read first is still a record when t
         var finished_turn: u64 = 1;
         fn list(self: *Self, requests: client.Requests, cursor: protocol_reply.SessionListCursor, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
             _ = try fake_operations.list(self, requests, cursor, page);
-            page.rows[0].work = .{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = finished_turn, .operation = finished_turn };
+            page.rows[0].work = fixtureSessionWork(.{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = finished_turn, .operation = finished_turn });
             return null;
         }
     };
@@ -3127,7 +3143,7 @@ test "a later Turn's finish the conversation read first is still a record when t
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expect(std.mem.indexOf(u8, rig.signalled(), "\x1b]7501;") == null);
     overview.opened = "k7m2qx".*;
-    try observed(overview, .{ .read_version = .{ .instance = @splat(1), .generation = Seen.now.lists + 1 }, .work = .{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = 2, .operation = 2 } }, false);
+    try observed(overview, .{ .read_version = .{ .instance = @splat(1), .generation = Seen.now.lists + 1 }, .work = fixtureWork(.{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = 2, .operation = 2 }) }, false);
     try std.testing.expectEqualStrings("", rig.signalled());
     Listing.finished_turn = 2;
     try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 + 120_000 }) == null);
@@ -3144,7 +3160,7 @@ test "a finish the conversation opened on is no done record when a listing reads
         var finished_turn: ?u64 = null;
         fn list(self: *Self, requests: client.Requests, cursor: protocol_reply.SessionListCursor, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
             _ = try fake_operations.list(self, requests, cursor, page);
-            if (finished_turn) |finished| page.rows[0].work = .{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = finished, .operation = finished };
+            if (finished_turn) |finished| page.rows[0].work = fixtureSessionWork(.{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = finished, .operation = finished });
             return null;
         }
     };
@@ -3163,7 +3179,7 @@ test "a finish the conversation opened on is no done record when a listing reads
     Listing.finished_turn = 1;
     try std.testing.expect(try overview.event(.{ .open = "k7m2qx".* }) != null);
     overview.opened = "k7m2qx".*;
-    try observed(overview, .{ .read_version = .{ .instance = @splat(1), .generation = Seen.now.lists + 1 }, .work = .{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = 1, .operation = 1 } }, true);
+    try observed(overview, .{ .read_version = .{ .instance = @splat(1), .generation = Seen.now.lists + 1 }, .work = fixtureWork(.{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = 1, .operation = 1 }) }, true);
     try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 + 60_000 }) == null);
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expect(std.mem.startsWith(u8, rig.signalled(), "\x1b]7501;state=idle:id=rui/k7m2qx:app=rui:msg=Rml4IHRoZSBmbGFreSB0ZXN0\x1b\\"));
@@ -3195,7 +3211,7 @@ test "records go out though the terminal never answered the probe, and nothing e
     try std.testing.expect(std.mem.indexOf(u8, written, "\x1b]7501;state=working:id=rui/k7m2qx:app=rui:msg=Rml4IHRoZSBmbGFreSB0ZXN0\x1b\\") != null);
     try std.testing.expect(std.mem.indexOfScalar(u8, written, 0x07) == null);
     overview.opened = "k7m2qx".*;
-    try observed(overview, .{ .read_version = .{ .instance = @splat(1), .generation = Seen.now.lists + 1 }, .work = .{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = 1, .operation = 1 } }, false);
+    try observed(overview, .{ .read_version = .{ .instance = @splat(1), .generation = Seen.now.lists + 1 }, .work = fixtureWork(.{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = 1, .operation = 1 }) }, false);
     try std.testing.expectEqualStrings("", rig.signalled());
 }
 
@@ -3220,7 +3236,7 @@ test "a stop answered under a conversation says so there, and goes before a list
     finished.overview.opened = "k7m2qx".*;
     try finished.lend();
     try std.testing.expectEqual(@as(usize, 2), Seen.now.lists);
-    try std.testing.expectEqualStrings(unsure, conversationLine(finished.overview, .working).notice.?);
+    try std.testing.expectEqualStrings(unsure, conversationLine(finished.overview, true).notice.?);
 
     const queued = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, ops, &cancellation);
     defer queued.close();
@@ -3234,7 +3250,7 @@ test "a stop answered under a conversation says so there, and goes before a list
     try queued.lend();
     try std.testing.expectEqual(@as(usize, 1), Seen.now.stops);
     try std.testing.expectEqual(@as(usize, 2), Seen.now.lists);
-    try std.testing.expectEqualStrings(unsure, conversationLine(queued.overview, .working).notice.?);
+    try std.testing.expectEqualStrings(unsure, conversationLine(queued.overview, true).notice.?);
 }
 
 test "a failed terminal restore still prints the departure guidance" {
@@ -4327,6 +4343,7 @@ test "overview archive effects preserve server filter, pending visibility, and r
                     .archiving => .{ .stopping = .{ .since = test_now_s } },
                     .archived => .{ .stopped = .{ .since = test_now_s, .cause = .stop } },
                 };
+                row.work = fixtureSessionWork(row.work.core());
             }
             return null;
         }
@@ -8081,6 +8098,7 @@ test "overview redraw deadline includes quota header with failed row off screen"
             const row = &page.rows[page.count - 1];
             row.work.state = .{ .failed = .{ .since = test_now_s, .code = .{}, .resets_at = test_now_s + 200 } };
             try row.work.state.failed.code.set("provider_quota");
+            row.work = fixtureSessionWork(row.work.core());
             row.provider = .codex;
             return failure;
         }
@@ -8548,6 +8566,7 @@ test "SUI-43 overview rows survive chat exit animation and resize" {
                     2 => .{ .approval = .{ .since = since } },
                     else => .{ .failed = .{ .since = since, .code = .{}, .resets_at = null } },
                 };
+                row.work = fixtureSessionWork(row.work.core());
             }
             return failure;
         }

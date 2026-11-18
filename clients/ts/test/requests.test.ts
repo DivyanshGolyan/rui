@@ -76,11 +76,39 @@ test("status requests the Current profile and maps reported facts and parent los
 			},
 		};
 		assert.deepEqual(await new Session(link, 'session"\n').status(), {
-			archiveState, state: "idle", since: "9007199254740993", turn: null, operation: null, interruptTarget: null, pendingMessages: "9007199254740993",
+			archiveState, state: "idle", since: "9007199254740993", turn: null, operation: null, attention: null, group: "done", canStop: false, decide: null, interruptTarget: null, pendingMessages: "9007199254740993",
 			parent, label: "Review", model: "model-a", effort: "high", tools: ["bash"], loadedTools: ["bash"], permissionMode: "ask", latestOutcome,
 		});
 	}
 });
+
+async function servedCase0() {
+	const facts = { attention: { kind: "approval", turn: "7", step: "9" }, group: "needs_you", actions: { stop: true, interrupt: { turn: "7", operation: "8" }, decide: null } } as const;
+	const link: Link = { async exchange(path) {
+		return Buffer.from(JSON.stringify(path === "/v1/inspect-session"
+			? report({ ...idleWork, ...facts })
+			: { sessions: [{ reference: "abc123", label: null, state: "idle", archive_state: "active", parent: null, creator: null, work: { ...idleWork, ...facts } }], next: null }));
+	} };
+	const expected = { attention: facts.attention, group: facts.group, canStop: true, decide: null, interruptTarget: facts.actions.interrupt };
+	const status = await new Session(link, "abc123").status();
+	const [row] = await new Sessions(link).list();
+	for (const result of [status, row]) {
+		assert.ok(result);
+		for (const [key, value] of Object.entries(expected)) assert.deepEqual(result[key as keyof typeof expected], value);
+	}
+}
+
+async function servedCase1() {
+	for (const missing of ["attention", "group", "actions"] as const) {
+		const work: Record<string, unknown> = { ...idleWork };
+		delete work[missing];
+		const link: Link = { async exchange(path) { return Buffer.from(JSON.stringify(path === "/v1/inspect-session"
+			? { ...report(idleWork), work }
+			: { sessions: [{ reference: "abc123", work }], next: null })); } };
+		await assert.rejects(new Session(link, "abc123").status(), /missing served facts/);
+		await assert.rejects(new Sessions(link).list(), /missing served facts/);
+	}
+}
 
 test("status preserves configured and loaded tool intent from each Current report", async () => {
 	const configurations = [
@@ -369,4 +397,21 @@ test("stop Action reports refusal and request key conflicts", async () => {
 test("stop Action preserves the existing Resolution position", async () => {
     const link: Link = { exchange: async () => Buffer.from(JSON.stringify({ answer: { status: "accepted", action: "42", resolution_position: "9007199254740993" } })) };
     assert.equal(await new Session(link, "session").stopAction("42"), "9007199254740993");
+});
+
+async function servedCase2() {
+	for (const missing of ["attention", "group", "actions"] as const) {
+		const work: Record<string, unknown> = { ...idleWork };
+		delete work[missing];
+		const session = new Session({ async exchange() {
+			return Buffer.from(JSON.stringify({ delta: "full", since: null, items: [], more: false, end: "0", work }));
+		} }, "abc123");
+		await assert.rejects(session.listActivity().next(), /missing served facts/);
+	}
+}
+
+test("SUI-57 typescript_served_work", async () => {
+	await servedCase0();
+	await servedCase1();
+	await servedCase2();
 });

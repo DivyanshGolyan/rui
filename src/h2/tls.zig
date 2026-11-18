@@ -1,15 +1,13 @@
 const std = @import("std");
-const builtin = @import("builtin");
 const tls_client = @import("tls_client");
 const c = tls_client.c;
 const h2 = @import("h2.zig");
 const sec_trust = @import("sec_trust.zig");
+const socket_os = @import("os").socket;
 
 const alpn_h2 = "\x02h2";
 
 pub const HostKind = tls_client.HostKind;
-
-pub const send_flags: c_int = if (builtin.os.tag == .linux) std.c.MSG.NOSIGNAL else 0;
 
 pub const Context = struct {
     ctx: *c.SSL_CTX,
@@ -141,7 +139,7 @@ fn socketOf(bio: ?*c.BIO) std.posix.fd_t {
 fn bioWrite(bio: ?*c.BIO, data: [*c]const u8, length: c_int) callconv(.c) c_int {
     c.BIO_clear_flags(bio, c.BIO_FLAGS_RWS | c.BIO_FLAGS_SHOULD_RETRY);
     while (true) {
-        const sent = std.c.send(socketOf(bio), data, @intCast(length), send_flags);
+        const sent = std.c.send(socketOf(bio), data, @intCast(length), socket_os.send_flags);
         if (sent >= 0) return @intCast(sent);
         switch (std.posix.errno(sent)) {
             .INTR => continue,

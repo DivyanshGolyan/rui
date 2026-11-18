@@ -1,6 +1,5 @@
 import os
 import pathlib
-import shlex
 import signal
 import subprocess
 import sys
@@ -40,27 +39,7 @@ def matching_processes(store, *, descendants=False):
     expected = str(pathlib.Path(store).resolve())
     owned = os_semantics.processes_executing(RUI)
     matches = []
-    candidates = []
-    if pathlib.Path("/proc").is_dir():
-        for entry in pathlib.Path("/proc").iterdir():
-            if not entry.name.isdigit():
-                continue
-            try:
-                argv = (entry / "cmdline").read_bytes().split(b"\0")
-                candidates.append((int(entry.name), [part.decode() for part in argv if part]))
-            except (FileNotFoundError, ProcessLookupError, PermissionError, UnicodeDecodeError):
-                continue
-    else:
-        listing = subprocess.run(
-            ["ps", "-axo", "pid=,command="], capture_output=True, text=True, timeout=5, check=True
-        )
-        for line in listing.stdout.splitlines():
-            try:
-                pid_text, command = line.strip().split(maxsplit=1)
-                candidates.append((int(pid_text), shlex.split(command)))
-            except (ValueError, IndexError):
-                continue
-    for pid, text in candidates:
+    for pid, text in os_semantics.process_commands():
         if pid in owned and len(text) >= 5 and text[1:4] == ["host", "serve", "--store"]:
             try:
                 selected = str(pathlib.Path(text[4]).resolve())

@@ -5,6 +5,7 @@ pub const retained_cleanup_retry_ms = 100;
 pub const retry_poll_interval_ns: u64 = std.time.ns_per_s;
 
 pub const Admission = enum { no_work, retry_later, progress, admitted };
+pub const DeadlineRead = struct { generation: u64, next: ?u64 };
 pub const PendingModelAdmission = enum { message, tool_continuation };
 const Kind = enum { bash, retry, message, tool_continuation };
 
@@ -30,6 +31,7 @@ pub const Work = struct {
     message: bool = true,
     tool_continuation: bool = true,
     retry: bool = true,
+    retry_waiting: bool = false,
 };
 
 const WorkKey = struct { generation: u64, paused: bool, capacity: DispatchCapacity };
@@ -56,6 +58,7 @@ pub const State = struct {
     work: ?struct { key: WorkKey, found: Work } = null,
     retained_cleanup_at: ?std.Io.Clock.Timestamp = null,
     capacity_was_full: bool = false,
+    retry_deadlines: ?struct { through: u64, generation: u64, next: ?u64 } = null,
 };
 
 pub fn serviceLifecycle(state: *State, context: anytype) bool {
@@ -102,6 +105,17 @@ noinline fn admitWork(state: *State, context: anytype, now: std.Io.Clock.Timesta
         state.work = .{ .key = work_key, .found = try context.scanWork(admission_key.paused, admission_key.capacity) };
     }
     const work: Work = if (state.work) |kept| kept.found else .{};
+    if (!work.retry_waiting) {
+        state.retry_deadlines = null;
+    } else if (context.unixMilliseconds()) |now_ms| {
+        const previous = state.retry_deadlines;
+        if (previous == null or previous.?.generation != admission_key.generation or now_ms < previous.?.through or
+            (previous.?.next != null and now_ms >= previous.?.next.?))
+        {
+            const read = try context.publishRetryCrossings(if (previous) |p| p.through else 0, now_ms);
+            state.retry_deadlines = .{ .through = now_ms, .generation = read.generation, .next = read.next };
+        }
+    }
     const pending_model = context.pendingModelAdmission();
     const retries_absent = !work.retry and std.meta.eql(state.work.?.key, work_key);
     const retries_idle = keyIs(state.idle_exhausted, retry_key) and keyIs(state.idle_retry, retry_key);
@@ -286,6 +300,8 @@ const Recording = struct {
     core_admission: Admission = .no_work,
     retry_admission: Admission = .no_work,
     scheduled_retry: ScheduledRetry = .none,
+    deadline_next: ?u64 = null,
+    deadline_reads: usize = 0,
     unix_ms: ?u64 = 1_000_000,
     work: Work = .{},
     work_fence: bool = false,
@@ -388,6 +404,15 @@ const Recording = struct {
 
     fn dispatchFenced(self: *const Recording) bool {
         return self.fenced;
+    }
+
+    fn publishRetryCrossings(self: *Recording, _: u64, now_ms: u64) error{Fence}!DeadlineRead {
+        self.deadline_reads += 1;
+        if (self.deadline_next) |due| if (now_ms >= due) {
+            self.generation += 1;
+            self.deadline_next = null;
+        };
+        return .{ .generation = self.generation, .next = self.deadline_next };
     }
 
     fn providerConfigured(self: *const Recording) bool {
@@ -764,7 +789,7 @@ test "rolled back retry admission does not suppress other kinds or lose preferen
     try std.testing.expectEqual(@as(usize, 1), context.count(.admit_new));
 }
 
-test "capacity release after a full turn schedules retry maintenance" {
+fn discoveryCapacity() !void {
     var context = Recording{
         .now_ns = std.time.ns_per_s,
         .provider = true,
@@ -876,7 +901,7 @@ test "admission scans rerun only after a commit, a released slot or a reopened p
     try std.testing.expectEqual(@as(usize, 6), context.count(.admit_bash));
 }
 
-test "admission rescans after any slot change or commit and skips while both stand still" {
+fn discoveryChanges() !void {
     var context = Recording{ .provider = true, .free = 1, .generation_advance = 0 };
     var state: State = .{};
     _ = run(&state, &context);
@@ -936,7 +961,7 @@ test "an admission that must retry later keeps scanning without a commit" {
     try std.testing.expectEqual(@as(usize, 3), context.count(.admit_continuation));
 }
 
-test "retry scans wait while the work survey read no Attempt for them" {
+fn discoveryAbsent() !void {
     var context = Recording{ .provider = true, .free = 1, .generation_advance = 0, .auto_advance = 0, .work = .{ .retry = false } };
     var state: State = .{};
     _ = run(&state, &context);
@@ -953,7 +978,7 @@ test "retry scans wait while the work survey read no Attempt for them" {
     try std.testing.expectEqual(@as(usize, 1), context.count(.admit_retry));
 }
 
-test "retry scans that found nothing rerun only after a commit, a slot change or a scheduled retry falling due" {
+fn discoveryRetry() !void {
     var context = Recording{ .provider = true, .free = 1, .generation_advance = 0, .auto_advance = 0 };
     var state: State = .{};
     _ = run(&state, &context);
@@ -996,7 +1021,7 @@ test "retry scans that found nothing rerun only after a commit, a slot change or
     try std.testing.expectEqual(@as(usize, 5), context.count(.admit_retry));
 }
 
-test "a scheduled retry rescans when the wall clock cannot be read, and a moved key rescans whatever the clock says" {
+fn discoveryClock() !void {
     var context = Recording{ .provider = true, .free = 1, .generation_advance = 0, .auto_advance = 0 };
     context.scheduled_retry = .{ .at_unix_ms = context.unix_ms.? + 5_000 };
     var state: State = .{};
@@ -1271,4 +1296,29 @@ test "pending admission reads progress with full capacity and stale discovery hi
     try std.testing.expectEqual(@as(usize, 1), context.count(.admit_new));
     try std.testing.expectEqual(preference, state.preference);
     try std.testing.expect(state.idle_admission == null);
+}
+
+test "EXR-34 discovery_wakeup" {
+    try discoveryCapacity();
+    try discoveryChanges();
+    try discoveryAbsent();
+    try discoveryRetry();
+    try discoveryClock();
+    for ([_]usize{ 0, 1 }) |free| {
+        var context = Recording{ .free = free, .generation_advance = 0, .auto_advance = 0, .deadline_next = 1_000_005 };
+        context.work.retry_waiting = true;
+        var state: State = .{};
+        _ = run(&state, &context);
+        _ = run(&state, &context);
+        try std.testing.expectEqual(@as(usize, 1), context.deadline_reads);
+        context.unix_ms = 1_000_004;
+        _ = run(&state, &context);
+        try std.testing.expectEqual(@as(usize, 1), context.deadline_reads);
+        context.unix_ms = 1_000_005;
+        _ = run(&state, &context);
+        try std.testing.expectEqual(@as(usize, 2), context.deadline_reads);
+        try std.testing.expectEqual(@as(u64, 1), context.generation);
+        _ = run(&state, &context);
+        try std.testing.expectEqual(@as(usize, 2), context.deadline_reads);
+    }
 }

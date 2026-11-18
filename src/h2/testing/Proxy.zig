@@ -1,6 +1,5 @@
 const std = @import("std");
-const builtin = @import("builtin");
-const tls = @import("../tls.zig");
+const socket_os = @import("os").socket;
 const Proxy = @This();
 
 pub const Options = struct {
@@ -27,7 +26,7 @@ pub fn start(allocator: std.mem.Allocator, options: Options) !*Proxy {
     errdefer _ = std.c.close(fd);
     var address = loopback(0);
     if (std.c.bind(fd, @ptrCast(&address), @sizeOf(std.c.sockaddr.in)) != 0) return error.BindFailed;
-    if (std.c.listen(fd, 16) != 0) return error.ListenFailed;
+    if (!socket_os.listen(fd, 16)) return error.ListenFailed;
     var length: std.c.socklen_t = @sizeOf(std.c.sockaddr.in);
     if (std.c.getsockname(fd, @ptrCast(&address), &length) != 0) return error.BindFailed;
     self.* = .{
@@ -72,7 +71,7 @@ fn run(self: *Proxy) void {
         const client = std.c.accept(self.listener, null, null);
         if (client < 0) continue;
         defer _ = std.c.close(client);
-        quiet(client);
+        _ = socket_os.suppressSigpipe(client);
         self.serve(client);
     }
 }
@@ -107,7 +106,7 @@ fn serve(self: *Proxy, client: std.posix.fd_t) void {
     const target = std.c.socket(std.c.AF.INET, std.c.SOCK.STREAM, 0);
     if (target < 0) return;
     defer _ = std.c.close(target);
-    quiet(target);
+    _ = socket_os.suppressSigpipe(target);
     const address = loopback(self.options.target_port);
     if (std.c.connect(target, @ptrCast(&address), @sizeOf(std.c.sockaddr.in)) != 0) return;
     self.relay(client, target);
@@ -129,16 +128,10 @@ fn relay(self: *Proxy, a: std.posix.fd_t, b: std.posix.fd_t) void {
     }
 }
 
-fn quiet(fd: std.posix.fd_t) void {
-    if (!builtin.os.tag.isDarwin()) return;
-    const one: c_int = 1;
-    _ = std.c.setsockopt(fd, std.c.SOL.SOCKET, std.c.SO.NOSIGPIPE, &one, @sizeOf(c_int));
-}
-
 fn sendAll(fd: std.posix.fd_t, bytes: []const u8) bool {
     var sent: usize = 0;
     while (sent < bytes.len) {
-        const count = std.c.send(fd, bytes[sent..].ptr, bytes.len - sent, tls.send_flags);
+        const count = std.c.send(fd, bytes[sent..].ptr, bytes.len - sent, socket_os.send_flags);
         if (count <= 0) return false;
         sent += @intCast(count);
     }

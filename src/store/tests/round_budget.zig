@@ -175,6 +175,9 @@ test "each Store entry point takes its round budget on its common path" {
             defer storage.close() catch unreachable;
             var meter: RoundMeter = .{ .storage = &storage };
             meter.start();
+            _ = try storage.publishRetryCrossings(0, 1);
+            meter.stop(.publishRetryCrossings);
+            meter.start();
             try storage.saveModelFacts(&.{.{ .id = "catalog-budget", .context_window = null, .efforts = .{}, .openai_listed = true }}, null);
             meter.stop(.saveModelFacts);
             meter.start();

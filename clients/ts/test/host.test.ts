@@ -329,7 +329,7 @@ test("closing Rui rejects a parked follower and releases its watch without abort
 		return follower;
 	});
 	t.mock.method(rui, "exchange", async () => Buffer.from(JSON.stringify({
-		delta: "full", since: null, items: [], more: false, end: "0", queued: { count: "0" }, work: { state: { kind: "idle" } },
+		delta: "full", since: null, items: [], more: false, end: "0", queued: { count: "0" }, work: { attention: null, group: "working", actions: { stop: false, interrupt: null, decide: null }, state: { kind: "idle" } },
 	})));
 	const feed = rui.getSession("s").listActivity({ follow: true, signal: controller.signal });
 	let failure: unknown;

@@ -727,6 +727,15 @@ const NativeTurn = struct {
         return self.host.store.commitGeneration();
     }
 
+    pub fn publishRetryCrossings(self: *NativeTurn, from: u64, now_ms: u64) error{Fence}!execution_turn.DeadlineRead {
+        const read = self.host.store.publishRetryCrossings(from, now_ms) catch |err| {
+            fenceDispatch(self.host, "retry deadline read", err);
+            self.fenced = true;
+            return error.Fence;
+        };
+        return .{ .generation = read.generation, .next = read.next };
+    }
+
     pub fn controlGeneration(self: *const NativeTurn) u64 {
         return self.host.store.controlGeneration();
     }
@@ -909,7 +918,7 @@ const NativeTurn = struct {
             self.fenced = true;
             return error.Fence;
         };
-        return .{ .core = found.core, .mcp = found.mcp, .bash = found.bash, .message = found.message, .tool_continuation = found.tool_continuation, .retry = found.retry };
+        return .{ .core = found.core, .mcp = found.mcp, .bash = found.bash, .message = found.message, .tool_continuation = found.tool_continuation, .retry = found.retry, .retry_waiting = found.retry_waiting };
     }
 
     pub fn scheduledRetry(self: *const NativeTurn) execution_turn.ScheduledRetry {
