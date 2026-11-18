@@ -178,7 +178,7 @@ func runScenario(binary, root string, s scenario) (row map[string]any, err error
 	row = map[string]any{"parameters": s, "stderr_path": stderrPath, "status": "failed"}
 
 	targetInputs := [][]byte{}
-	session, err := c.Configure("target-config", "", "--tools", "none")
+	session, err := c.Configure("target-config", "", "--tools", "none", "--reasoning-effort", "medium")
 	if err != nil {
 		return row, err
 	}

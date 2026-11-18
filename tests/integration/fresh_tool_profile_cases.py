@@ -45,7 +45,7 @@ def declarations(request):
 def requests_for(w, session):
     with w.endpoint.lock:
         bodies = [json.loads(body) for body in w.endpoint.requests]
-    return [body for body in bodies if fixture.instructions_session(body["instructions"]) == session]
+    return [body for body in bodies if fixture.instructions_session(fixture.request_system_prompt(body)) == session]
 
 
 def finished(w, session):
