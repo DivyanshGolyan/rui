@@ -388,6 +388,7 @@ test "a model list reply reads as what the Host writes" {
 
 pub const HostInfoProfile = enum {
     current,
+    released_20,
     released_18,
     released_17,
     released_16,
@@ -403,6 +404,7 @@ pub const HostInfoProfile = enum {
     pub fn wire(self: HostInfoProfile) []const u8 {
         return switch (self) {
             .current => protocol.wire_version,
+            .released_20 => "20",
             .released_18 => "18",
             .released_17 => "17",
             .released_16 => "16",
@@ -416,6 +418,7 @@ pub const HostInfoProfile = enum {
     fn Providers(comptime self: HostInfoProfile) type {
         return switch (self) {
             .current => protocol.Routes,
+            .released_20 => struct { codex: protocol.Route, openai: protocol.Route, chatgpt: protocol.Route },
             .released_18 => struct { codex: protocol.Route, openai: protocol.Route, chatgpt: protocol.Route },
             .released_17 => struct { codex: protocol.Route, openai: protocol.Route, chatgpt: protocol.Route },
             .released_16 => struct { codex: protocol.Route, openai: protocol.Route, chatgpt: protocol.Route },
@@ -686,6 +689,7 @@ test "upgrade Host information profiles retain the entire strict shape" {
     try std.testing.expectEqualStrings("9", HostInfoProfile.released_9.wire());
     try std.testing.expectEqualStrings("13", HostInfoProfile.released_13.wire());
     try std.testing.expectEqualStrings("14", HostInfoProfile.released_14.wire());
+    try std.testing.expectEqualStrings("20", HostInfoProfile.released_20.wire());
     try std.testing.expectEqualStrings("18", HostInfoProfile.released_18.wire());
     try std.testing.expectEqualStrings("17", HostInfoProfile.released_17.wire());
     try std.testing.expectEqualStrings("16", HostInfoProfile.released_16.wire());
@@ -702,6 +706,12 @@ test "upgrade Host information profiles retain the entire strict shape" {
     defer std.testing.allocator.free(historical);
     const historical_full = try std.mem.replaceOwned(u8, std.testing.allocator, current, "\"version\":\"" ++ protocol.wire_version ++ "\"", historical_field);
     defer std.testing.allocator.free(historical_full);
+    const released_20 = try std.mem.replaceOwned(u8, std.testing.allocator, current, "\"version\":\"" ++ protocol.wire_version ++ "\"", "\"version\":\"" ++ comptime HostInfoProfile.released_20.wire() ++ "\"");
+    defer std.testing.allocator.free(released_20);
+    try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(released_20, "/one"));
+    const missing_20 = try std.mem.replaceOwned(u8, std.testing.allocator, released_20, ",\"chatgpt\":\"unserved\"", "");
+    defer std.testing.allocator.free(missing_20);
+    try std.testing.expectError(error.MissingField, parseHostInfoForProfile(missing_20, "/one", .released_20));
     const released_18 = try std.mem.replaceOwned(u8, std.testing.allocator, current, "\"version\":\"" ++ protocol.wire_version ++ "\"", "\"version\":\"" ++ comptime HostInfoProfile.released_18.wire() ++ "\"");
     defer std.testing.allocator.free(released_18);
     try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(released_18, "/one"));
@@ -733,6 +743,7 @@ test "upgrade Host information profiles retain the entire strict shape" {
     defer std.testing.allocator.free(missing_14);
     try std.testing.expectError(error.MissingField, parseHostInfoForProfile(missing_14, "/one", .released_14));
     const samples = [_]struct { body: []const u8, profile: HostInfoProfile, historical: bool }{
+        .{ .body = released_20, .profile = .released_20, .historical = true },
         .{ .body = released_18, .profile = .released_18, .historical = true },
         .{ .body = released_17, .profile = .released_17, .historical = true },
         .{ .body = released_16, .profile = .released_16, .historical = true },

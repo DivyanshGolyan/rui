@@ -5227,14 +5227,14 @@ test "mutation decoder preserves base bytes and the entire command domain" {
         }
         const expected = switch (kind) {
             .action_stop => continue,
-            .configure => "23826d5d66fc13cb4c75e15593c84b4591a1baf8ddb99a9cbfabf291b3cec12e",
-            .message => "ef22fa6a7b2086a1cf11913f2670da5c11cc713f84727ca1abbdf9f3d4a4f46f",
-            .session_stop => "a98107ee7efe29d5c2480097568daa514649c76e9c7c1cc740ed5fbc697cbc90",
-            .session_archive => "91da63974ced68e1596b479409b543ae90ec8161c1612840b3e26a0eca02acb3",
-            .model_interruption => "54ed6236f058bb77a9b8039bb9a2bc144a5066bf742084c9ceb7ff7e73f890e1",
-            .permission_decision => "f66bb4623f2b0d67ae3ddafb8ead166b83daf53877ab965918108eceac49a3e8",
-            .session_pin => "aa74b927c4314f8576e070e3c2cff253fa4c6aeb1de6a93410f535fd255d1230",
-            .action_background => "36da16c3d5ecd7bb88bdb3612c921f3dfc3eb2114fa974f9274e957356061b7f",
+            .configure => "b9f94c52d2de846f027e169eb0d7e8f4365f01cc153151c8307e48d05f306c31",
+            .message => "b3f30c9a293b421daa933574dc68692b79d382e297435d72012ca7092db29ee1",
+            .session_stop => "9bfdb63b3bf3151df509c74b4a10b8b11602ad278ec52045ba787ffcbc5a04ef",
+            .session_archive => "07d1d0a652b3c9a2e3f1fcc60590922505703857013aa7cbd77ba081d29d0476",
+            .model_interruption => "c96d8d53234d3fdb70777eb3eec0cb820eca9a30de2c377656d02a21626ee1ee",
+            .permission_decision => "c75c2b8de8393a6fd06dd8951ae7a0dffd09172069f06c9e739f8d3247fd3c37",
+            .session_pin => "829a95280d7c0dca204a4c41420c5ab9c4f8fd1b915bc55252b0dd43eaf22ab3",
+            .action_background => "b82bacc6fe2ae3da6cf22ed6da809f288de0182c341528239ac7cdff27b54312",
         };
         const actual = std.fmt.bytesToHex(hash.finalResult(), .lower);
         std.testing.expectEqualStrings(expected, &actual) catch |err| {
