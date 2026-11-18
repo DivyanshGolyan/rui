@@ -1281,7 +1281,7 @@ fn startHost(init: std.process.Init, selected: []const u8, assignments: []const 
 }
 
 fn reportHostLaunch(io: std.Io, result: *const HostLaunchResult, quiet: bool, overrides: bool, shown: usize) !void {
-    if (result.outcome == .failed and result.wait == null) if (result.outcome.failed.refusal) |*refusal| return writeRefusal(io, refusal, .invalid);
+    if (result.outcome == .failed) if (result.outcome.failed.refusal) |*refusal| return writeRefusal(io, refusal, if (result.wait == null) .invalid else caller_exit.knownError(result.outcome.failed.cause.err));
     var bytes: [host_launch.max_report_bytes]u8 = undefined;
     var writer = std.Io.Writer.fixed(&bytes);
     try host_launch.writeDiagnostics(result, &writer, shown);

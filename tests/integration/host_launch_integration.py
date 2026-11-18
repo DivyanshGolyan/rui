@@ -764,8 +764,7 @@ def detached_settings_checks(root, env):
             assert checked.returncode == 0 and not checked.stdout, (name, checked)
         else:
             assert checked.returncode == 2, (name, checked)
-            failure = json.loads(checked.stdout)["rui_start_error"]
-            assert failure["code"] == "settings_invalid" and reason in failure["message"], (name, failure)
+            assert not checked.stdout and "[settings_invalid]" in checked.stderr and reason in checked.stderr, (name, checked)
         assert not matching_processes(directory), (name, checked)
     for arguments, reason in (
             (("--settings", "-"), "no stdin"),
@@ -774,8 +773,7 @@ def detached_settings_checks(root, env):
             (("--set", "interface.lifetime=stdin"), "no stdin")):
         checked = host_command(env, "settings", "--check", "--store", directory, *arguments)
         assert checked.returncode == 2, (arguments, checked)
-        failure = json.loads(checked.stdout)["rui_start_error"]
-        assert failure["code"] == "settings_invalid" and reason in failure["message"], failure
+        assert not checked.stdout and "[settings_invalid]" in checked.stderr and reason in checked.stderr, checked
     # No database, diagnostics or lease was created by a check.
     assert {path.name for path in directory.iterdir()} == original_files
     assert json.loads((directory / "host.json").read_text()) == {"providers": {}}
@@ -1433,6 +1431,25 @@ def contended_starters(root, env):
     print("contended starters: delayed ready owner adopted; absent and retired winners preserve typed refusal", flush=True)
 
 
+def typed_child_refusal(root, env):
+    directory = root / "typed-child-refusal"
+    directory.mkdir(mode=0o700)
+    saved = directory / "host.json"
+    saved.write_text(json.dumps({"providers": {"openai": {"key": {"env": "PR7C_ABSENT_KEY"}}}}))
+    saved.chmod(0o600)
+    selected_env = {**env, "RUI_STORE": str(directory)}
+    selected_env.pop("PR7C_ABSENT_KEY", None)
+    child = subprocess.run([RUI, "host", "serve", "--store", directory], env=selected_env,
+                           stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=COMMAND_TIMEOUT)
+    assert child.returncode == 2 and json.loads(child.stdout)["rui_start_error"]["code"] == "settings_invalid", child
+    for args in ([RUI, "host", "start", "--store", directory], [RUI]):
+        result = subprocess.run(args, env=selected_env, stdin=subprocess.DEVNULL, capture_output=True,
+                                text=True, timeout=COMMAND_TIMEOUT)
+        assert result.returncode == 1 and result.stdout == child.stdout, result
+        assert result.stderr == child.stderr and "internal_unexpected" not in result.stderr, (child, result)
+    managed_descriptor_rejection(root / "unexpected-parent", selected_env, 64)
+
+
 def main():
     assert len(sys.argv) in (2, 3), "usage: host_launch_integration.py /absolute/path/to/rui [startup-limits|store-identity|provider-policy|detached-checks|frozen-settings|contention]"
     from host_launch_exit_test import check_exit_reader, check_process_discovery, check_failure_retention, check_provider_disposal
@@ -1442,6 +1459,10 @@ def main():
         home.mkdir(mode=0o700)
         credential = root / "credentials" / "missing.json"
         env = environment(home, credential)
+        if len(sys.argv) == 3 and sys.argv[2] == "typed-refusal":
+            typed_child_refusal(root, env)
+            return
+        typed_child_refusal(root, env)
         check_provider_disposal(dispose_provider_case, stop_endpoint)
         if len(sys.argv) == 3 and sys.argv[2] == "frozen-settings":
             frozen_settings_launches(root, env)
