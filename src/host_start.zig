@@ -268,10 +268,9 @@ fn saveConnectionWithFault(init: std.process.Init, dir: []const u8, endpoint_edi
             const automatic = !document.object.contains("providers");
             if (ctx.key == .existing) {
                 if (automatic) {
-                    var entry = try defaultApiEntry(ctx.init) orelse return error.ConnectionSuperseded;
+                    var entry: hs.ProviderEntry(.api_key) = .{};
                     try matchConnectionSource(ctx.init, ctx.key.existing, ctx.endpoint, &entry);
                 } else {
-                    try explicitBaseUrl(ctx.init, settings, &failure);
                     const entry = if (settings.providers.entries.openai) |*entry| entry else return error.ConnectionSuperseded;
                     try matchConnectionSource(ctx.init, ctx.key.existing, ctx.endpoint, entry);
                 }
@@ -280,7 +279,7 @@ fn saveConnectionWithFault(init: std.process.Init, dir: []const u8, endpoint_edi
             const key_bytes = switch (ctx.key) {
                 .provided => |value| value,
                 .existing => existing: {
-                    try resolveProviders(ctx.init, settings, .{}, &failure);
+                    try resolveProviders(ctx.init, settings, &failure);
                     const entry = settings.providers.entries.openai orelse return error.ApiKeyMissing;
                     if (!api_key.valid(entry.key.value())) return error.ApiKeyMissing;
                     break :existing try ctx.gpa.dupe(u8, entry.key.value());
@@ -424,9 +423,8 @@ pub fn inspectConnection(init: std.process.Init, dir: []const u8) !ConnectionInf
     defer settings.deinit();
     var problem: cli_args.Refusal = undefined;
     const parsed = try cli_args.Command.host_serve.definition().parse(&.{}, init.arena.allocator(), &problem);
-    var fixtures: providers.Fixtures = .{};
     var failure: start_report.Failure = undefined;
-    try fillAt(init, &parsed, dir, settings, &fixtures, &failure);
+    try fillAt(init, &parsed, dir, settings, &failure);
     var result: ConnectionInfo = .{};
     try result.endpoint.set(if (settings.providers.entries.openai) |*entry| if (entry.endpoint) |*value| value.slice() else openai_endpoint else openai_endpoint);
     if (settings.providers.entries.openai) |*entry| {
@@ -436,7 +434,7 @@ pub fn inspectConnection(init: std.process.Init, dir: []const u8) !ConnectionInf
             result.key_source = entry.key.source;
         }
     } else return result;
-    resolveProviders(init, settings, fixtures, &failure) catch {
+    resolveProviders(init, settings, &failure) catch {
         result.readiness = .credential_error;
         return result;
     };
@@ -477,51 +475,16 @@ fn defaultProviders(init: std.process.Init, settings: *hs.Settings, failure: *st
                 break :usable api_key.present(path) catch false;
             },
         };
-        if (usable) serve: {
+        if (usable) {
             const at = "providers." ++ @tagName(provider);
-            if (comptime provider.facts().credential == .api_key) {
-                @field(settings.providers.entries, @tagName(provider)) = try defaultApiEntry(init) orelse break :serve;
-                break :serve;
-            }
             try assign(settings, init.gpa, at, "{}", failure);
         }
     }
 }
 
-fn defaultApiEntry(init: std.process.Init) !?hs.ProviderEntry(.api_key) {
-    var entry: hs.ProviderEntry(.api_key) = .{};
-    if (init.environ_map.get(providers.openai_base_url_variable)) |base| {
-        const endpoint = providers.endpointUnder(init.gpa, base) catch |err| {
-            if (err != error.InvalidBaseUrl) return err;
-            stderr.diagnostic(@import("host_launch.zig").invalid_base_url ++ "; this Host starts without {s}.\n", .{protocol.Provider.openai.shown()});
-            return null;
-        };
-        defer init.gpa.free(endpoint);
-        entry.endpoint = .{};
-        try entry.endpoint.?.text.set(endpoint);
-    }
-    return entry;
-}
-
-fn explicitBaseUrl(init: std.process.Init, settings: *hs.Settings, failure: *start_report.Failure) !void {
-    const entry = settings.providers.entries.openai orelse return;
-    if (entry.endpoint != null) return;
-    const base = init.environ_map.get(providers.openai_base_url_variable) orelse return;
-    const endpoint = providers.endpointUnder(init.gpa, base) catch |err| {
-        if (err == error.InvalidBaseUrl) stderr.diagnostic(@import("host_launch.zig").invalid_base_url ++ "; the Host did not start.\n", .{});
-        return err;
-    };
-    defer init.gpa.free(endpoint);
-    try text(settings, init.gpa, "providers.openai.endpoint", endpoint, failure);
-}
-
-pub fn fillAt(init: std.process.Init, parsed: *const cli_args.Parsed, dir: []const u8, settings: *hs.Settings, fixtures: *providers.Fixtures, failure: *start_report.Failure) !void {
-    if (parsed.get("test-codex-fixture-endpoint") != null and init.environ_map.get("RUI_CODEX_CREDENTIAL_FILE") == null) return error.FixtureCredentialPathRequired;
-    if (parsed.get("test-chatgpt-fixture-endpoint") != null and init.environ_map.get("RUI_CHATGPT_CREDENTIAL_FILE") == null) return error.FixtureCredentialPathRequired;
-    if (parsed.get("test-openai-fixture-endpoint") != null and init.environ_map.get(api_key.path_variable) == null) return error.FixtureCredentialPathRequired;
+pub fn fillAt(init: std.process.Init, parsed: *const cli_args.Parsed, dir: []const u8, settings: *hs.Settings, failure: *start_report.Failure) !void {
     const intent = try readSources(init, .{ .dir = dir, .settings_file = parsed.get("settings"), .assignments = parsed.all("set") }, settings, failure);
     try finishSources(init, settings, intent, failure);
-    try fixtureInputs(init, parsed, settings, fixtures, failure);
 }
 
 /// One placement owner for serving, starting and directory-based client lookup.
@@ -541,26 +504,6 @@ fn testHostDir(tmp: *std.testing.TmpDir, buffer: *[std.Io.Dir.max_path_bytes]u8)
     var host = try tmp.dir.createDirPathOpen(std.testing.io, "host-dir", .{ .permissions = .fromMode(0o700) });
     defer host.close(std.testing.io);
     return buffer[0..try host.realPath(std.testing.io, buffer)];
-}
-
-fn fixtureInputs(init: std.process.Init, parsed: *const cli_args.Parsed, settings: *hs.Settings, fixtures: *providers.Fixtures, failure: *start_report.Failure) !void {
-    const gpa = init.gpa;
-    if (parsed.get("test-openai-fixture-endpoint")) |endpoint| {
-        try text(settings, gpa, "providers.openai.endpoint", endpoint, failure);
-        try assign(settings, gpa, "providers.openai.unauthenticated", "true", failure);
-        fixtures.openai = true;
-    }
-    if (parsed.get("test-codex-fixture-endpoint")) |endpoint| {
-        try text(settings, gpa, "providers.codex.endpoint", endpoint, failure);
-        try assign(settings, gpa, "providers.codex.unauthenticated", "true", failure);
-        fixtures.codex = true;
-    }
-    if (parsed.get("test-chatgpt-fixture-endpoint")) |endpoint| {
-        const base = providers.responsesBase(endpoint) orelse return error.InvalidArguments;
-        try text(settings, gpa, "providers.chatgpt.endpoint", endpoint, failure);
-        try assign(settings, gpa, "providers.chatgpt.unauthenticated", "true", failure);
-        fixtures.chatgpt_token_endpoint = try std.fmt.allocPrint(init.arena.allocator(), "{s}/oauth/token", .{base});
-    }
 }
 
 fn invalid(failure: *start_report.Failure, comptime path: []const u8, comptime reason: []const u8) error{SettingsInvalid} {
@@ -632,12 +575,12 @@ pub noinline fn report(io: std.Io, failure: *const start_report.Failure) void {
     std.Io.File.stderr().writeStreamingAll(io, sentence) catch {};
 }
 
-pub fn prepare(init: std.process.Init, settings: *hs.Settings, fixtures: providers.Fixtures, failure: *start_report.Failure) !hs.Prepared {
+pub fn prepare(init: std.process.Init, settings: *hs.Settings, failure: *start_report.Failure) !hs.Prepared {
     var cwd: [std.Io.Dir.max_path_bytes]u8 = undefined;
     if (settings.store == .mysql and settings.interface.dir.anchored)
         try anchorPlacement(init, settings, cwd[0..try std.Io.Dir.cwd().realPath(init.io, &cwd)], failure);
     hs.anchor(settings, cwd[0..try std.Io.Dir.cwd().realPath(init.io, &cwd)]) catch return invalid(failure, "store.sqlite.dir", "Host directory exceeds the path byte bound");
-    try resolveProviders(init, settings, fixtures, failure);
+    try resolveProviders(init, settings, failure);
     if (settings.store == .mysql) resolve(init, &settings.store.mysql.url) catch |err| return resolutionFailure(failure, "store.mysql.url", err);
     for (settings.tools.mcp.names[0..settings.tools.mcp.len], settings.tools.mcp.values[0..settings.tools.mcp.len]) |*name, *server| {
         resolve(init, &server.bearer_token) catch |err| {
@@ -648,11 +591,11 @@ pub fn prepare(init: std.process.Init, settings: *hs.Settings, fixtures: provide
     return hs.seal(settings, failure);
 }
 
-pub fn resolveProviders(init: std.process.Init, settings: *hs.Settings, fixtures: providers.Fixtures, failure: *start_report.Failure) !void {
+pub fn resolveProviders(init: std.process.Init, settings: *hs.Settings, failure: *start_report.Failure) !void {
     inline for (std.enums.values(protocol.Provider)) |provider| {
         if (@field(settings.providers.entries, @tagName(provider))) |*entry| {
             switch (comptime provider.facts().credential) {
-                .api_key => if (!entry.unauthenticated.value or fixtures.openai) {
+                .api_key => if (!entry.unauthenticated.value) {
                     if (entry.key.source == .default) {
                         try defaultKeySource(init, &entry.key);
                         resolve(init, &entry.key) catch |err| {
@@ -661,7 +604,7 @@ pub fn resolveProviders(init: std.process.Init, settings: *hs.Settings, fixtures
                         };
                     } else resolve(init, &entry.key) catch |err| return resolutionFailure(failure, "providers." ++ @tagName(provider) ++ ".key", err);
                 },
-                .sign_in => if (!entry.unauthenticated.value or (provider == .codex and fixtures.codex) or (provider == .chatgpt and fixtures.chatgpt_token_endpoint != null)) {
+                .sign_in => if (!entry.unauthenticated.value) {
                     if (entry.credential_file == null) {
                         var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
                         const path = provider_login.credentialPath(init, provider, &path_buffer, false) catch |err| return if (err == error.HomeRequired) error.HomeUnavailable else err;
@@ -735,21 +678,20 @@ pub const Admission = enum { foreground, detached };
 /// placement admission, without rebasing a running Host's argv. Both doors
 /// finish provider selection and resolve before the caller's proxy precondition
 /// and `admitSelected` anchor/seal. No Store or Host is opened here.
-pub fn intake(init: std.process.Init, parsed: *const cli_args.Parsed, dir: []const u8, settings: *hs.Settings, fixtures: *providers.Fixtures, failure: *start_report.Failure, admission: Admission) !void {
+pub fn intake(init: std.process.Init, parsed: *const cli_args.Parsed, dir: []const u8, settings: *hs.Settings, failure: *start_report.Failure, admission: Admission) !void {
     switch (admission) {
-        .foreground => try fillAt(init, parsed, dir, settings, fixtures, failure),
+        .foreground => try fillAt(init, parsed, dir, settings, failure),
         .detached => {
             const intent = try readStart(init, .{ .dir = dir, .settings_file = parsed.get("settings"), .assignments = parsed.all("set") }, settings, failure);
             try finishSources(init, settings, intent, failure);
-            try fixtureInputs(init, parsed, settings, fixtures, failure);
         },
     }
-    try resolveProviders(init, settings, fixtures.*, failure);
+    try resolveProviders(init, settings, failure);
 }
 
-pub fn admitSelected(init: std.process.Init, dir: []const u8, settings: *hs.Settings, fixtures: providers.Fixtures, failure: *start_report.Failure) !hs.Prepared {
+pub fn admitSelected(init: std.process.Init, dir: []const u8, settings: *hs.Settings, failure: *start_report.Failure) !hs.Prepared {
     try anchorPlacement(init, settings, dir, failure);
-    return prepare(init, settings, fixtures, failure);
+    return prepare(init, settings, failure);
 }
 
 fn parseForTest(gpa: std.mem.Allocator, args: []const []const u8) !cli_args.Parsed {
@@ -776,7 +718,7 @@ test "Host start resolves environment private file and saved credential sources"
     var failure: start_report.Failure = undefined;
     try hs.apply(settings, gpa, "{\"providers\":{}}", .file, checkPreset, &failure);
     try assign(settings, gpa, "providers.openai.key", "env:HOST_START_TEST_\xff", &failure);
-    _ = try prepare(init, settings, .{}, &failure);
+    _ = try prepare(init, settings, &failure);
     try std.testing.expectEqualStrings("env-key", settings.providers.entries.openai.?.key.value());
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -792,16 +734,16 @@ test "Host start resolves environment private file and saved credential sources"
     try environment.put("RUI_CHATGPT_CREDENTIAL_FILE", "/tmp/./chatgpt-\xff.json");
     try assign(settings, arena.allocator(), "providers.codex", "{}", &failure);
     try assign(settings, arena.allocator(), "providers.chatgpt", "{}", &failure);
-    _ = try prepare(init, settings, .{}, &failure);
+    _ = try prepare(init, settings, &failure);
     try std.testing.expectEqualStrings("file-key", settings.providers.entries.openai.?.key.value());
     try std.testing.expectEqualStrings(path, settings.providers.entries.openai.?.key.source.file.slice());
     try std.testing.expectEqualStrings("/tmp/./codex-\xff.json", settings.providers.entries.codex.?.credential_file.?.slice());
     try std.testing.expectEqualStrings("/tmp/./chatgpt-\xff.json", settings.providers.entries.chatgpt.?.credential_file.?.slice());
     try private.setFilePermissions(std.testing.io, "openai.key", .fromMode(0o644), .{});
     try assign(settings, arena.allocator(), "providers.openai.key", "null", &failure);
-    try std.testing.expectError(error.InsecureCredentialFile, prepare(init, settings, .{}, &failure));
+    try std.testing.expectError(error.InsecureCredentialFile, prepare(init, settings, &failure));
     try assign(settings, arena.allocator(), "providers.openai.key", try std.fmt.allocPrint(arena.allocator(), "file:{s}", .{path}), &failure);
-    try std.testing.expectError(error.SettingsInvalid, prepare(init, settings, .{}, &failure));
+    try std.testing.expectError(error.SettingsInvalid, prepare(init, settings, &failure));
     try std.testing.expect(std.mem.startsWith(u8, failure.message.slice(), "providers.openai.key:"));
 }
 
@@ -916,8 +858,7 @@ test "Host start private file origin refuses literal secrets and assignments ove
     try std.testing.expect(std.mem.indexOf(u8, failure.message.slice(), "never-print-this") == null);
     try private.writeFile(init.io, .{ .sub_path = "host.json", .data = "{\"providers\":{},\"tools\":{\"bash\":{\"timeoutMs\":17}},\"execution\":{\"activeCapacity\":3},\"interface\":{\"lifetime\":\"stdin\"}}" });
     const parsed = try parseForTest(arena.allocator(), &.{ "--settings", path, "--set", "tools.bash.timeoutMs=99", "--set", "execution.activeCapacity=4", "--set", "providers.codex={}" });
-    var fixtures: providers.Fixtures = .{};
-    try fillAt(init, &parsed, try testHostDir(&tmp, &host_root), settings, &fixtures, &failure);
+    try fillAt(init, &parsed, try testHostDir(&tmp, &host_root), settings, &failure);
     try std.testing.expectEqual(@as(u64, 99), settings.tools.bash.timeout_ms.value);
     try std.testing.expectEqual(@as(usize, 4), settings.execution.active_capacity.value);
     try std.testing.expectEqual(hs.Interface.Lifetime.stdin, settings.interface.lifetime.value);
@@ -977,7 +918,6 @@ test "Host start pipe file and assignment admissions report every code on both s
         settings.* = .{};
         defer settings.deinit();
         var admission_failure: start_report.Failure = undefined;
-        var fixtures: providers.Fixtures = .{};
         switch (source) {
             .pipe => {
                 var bytes: [4 + document.len]u8 = undefined;
@@ -994,11 +934,11 @@ test "Host start pipe file and assignment admissions report every code on both s
             },
             .file => {
                 const parsed = try parseForTest(arena.allocator(), &.{ "--settings", path });
-                try fillAt(init, &parsed, try testHostDir(&tmp, &host_root), settings, &fixtures, &admission_failure);
+                try fillAt(init, &parsed, try testHostDir(&tmp, &host_root), settings, &admission_failure);
             },
             .assignments => {
                 const parsed = try parseForTest(arena.allocator(), &.{ "--set", "tools.bash.timeoutMs=17" });
-                try fillAt(init, &parsed, try testHostDir(&tmp, &host_root), settings, &fixtures, &admission_failure);
+                try fillAt(init, &parsed, try testHostDir(&tmp, &host_root), settings, &admission_failure);
             },
         }
         try std.testing.expectEqual(@as(u64, 17), settings.tools.bash.timeout_ms.value);
@@ -1079,8 +1019,7 @@ test "Host start every generated leaf saves shows loads and unsets to defaults" 
         try expectJsonEqual(lookup(canonical, path).?, lookup(json, path).?);
         effective.* = .{};
         defer effective.deinit();
-        var fixtures: providers.Fixtures = .{};
-        try fillAt(init, &parsed, dir, effective, &fixtures, &failure);
+        try fillAt(init, &parsed, dir, effective, &failure);
         const loaded = try complete(arena.allocator(), effective, &failure);
         try expectJsonEqual(lookup(canonical, path).?, lookup(loaded, path).?);
         try savedEdit(init, dir, path, null, &failure);
@@ -1126,8 +1065,7 @@ test "Host start saved input is sparse ordered private and JSON files carry OS p
     try private.writeFile(init.io, .{ .sub_path = "override.json", .data = "{\"tools\":{\"bash\":{\"timeoutMs\":18}}}" });
     try private.setFilePermissions(init.io, "override.json", .fromMode(0o600), .{});
     const parsed = try parseForTest(arena.allocator(), &.{ "--settings", document, "--set", "tools.bash.timeoutMs=19", "--set", "tools.bash.timeoutMs=20" });
-    var fixtures: providers.Fixtures = .{};
-    try fillAt(init, &parsed, dir, settings, &fixtures, &failure);
+    try fillAt(init, &parsed, dir, settings, &failure);
     try std.testing.expectEqual(@as(u64, 20), settings.tools.bash.timeout_ms.value);
     try std.testing.expectEqualStrings("/tmp/\xff", settings.tools.bash.path.slice());
     try savedEdit(init, dir, "tools.bash.path", "{raw-path", &failure);
@@ -1172,8 +1110,7 @@ test "Host start explicit providers replace automatic defaults and MySQL keeps i
         settings.* = .{};
         defer settings.deinit();
         const parsed = try parseForTest(arena.allocator(), args);
-        var fixtures: providers.Fixtures = .{};
-        try fillAt(init, &parsed, dir, settings, &fixtures, &failure);
+        try fillAt(init, &parsed, dir, settings, &failure);
         inline for (std.enums.values(protocol.Provider)) |provider| {
             const served = @field(settings.providers.entries, @tagName(provider)) != null;
             const wanted = switch (index) {
@@ -1185,21 +1122,10 @@ test "Host start explicit providers replace automatic defaults and MySQL keeps i
             try std.testing.expectEqual(wanted, served);
         }
     }
-    try environment.put(providers.openai_base_url_variable, "https://example.test/custom/v1/");
-    for ([_][]const u8{ "providers.openai={}", "providers.openai.endpoint=https://named.test/responses" }, [_][]const u8{ "https://example.test/custom/v1/responses", "https://named.test/responses" }) |assignment, endpoint| {
-        settings.* = .{};
-        defer settings.deinit();
-        const parsed = try parseForTest(arena.allocator(), &.{ "--set", assignment });
-        var fixtures: providers.Fixtures = .{};
-        try fillAt(init, &parsed, dir, settings, &fixtures, &failure);
-        try std.testing.expectEqualStrings(endpoint, settings.providers.entries.openai.?.endpoint.?.slice());
-    }
-    _ = environment.swapRemove(providers.openai_base_url_variable);
     settings.* = .{};
     defer settings.deinit();
     const parsed = try parseForTest(arena.allocator(), &.{ "--store", dir, "--set", "store.mysql.url=env:MYSQL_TEST_URL" });
-    var fixtures: providers.Fixtures = .{};
-    try fillAt(init, &parsed, dir, settings, &fixtures, &failure);
+    try fillAt(init, &parsed, dir, settings, &failure);
     try std.testing.expectEqual(start_report.Store.mysql, storeKind(settings));
     try anchorPlacement(init, settings, dir, &failure);
     var runtime: [platform.max_socket_path_bytes]u8 = undefined;
@@ -1245,8 +1171,7 @@ test "Host start reads a previous release's retired flags as the settings those 
         const translated = try serve_grammar.currentArguments(arena.allocator(), case.args);
         const replayed_args = try std.mem.concat(arena.allocator(), []const u8, &.{ &.{ "--set", serve_grammar.previousProviders(false, false).? }, translated });
         const parsed = try parseForTest(arena.allocator(), replayed_args);
-        var fixtures: providers.Fixtures = .{};
-        try fillAt(init, &parsed, dir, replayed, &fixtures, &failure);
+        try fillAt(init, &parsed, dir, replayed, &failure);
         const expected = try gpa.create(hs.Settings);
         defer gpa.destroy(expected);
         expected.* = .{};
@@ -1429,6 +1354,7 @@ pub fn launchReady(result: *HostLaunchResult, ready: @import("protocol_reply.zig
 pub const ProviderIntent = settings_handoff.ProviderIntent;
 
 pub fn readSources(init: std.process.Init, request: Spawn, settings: *hs.Settings, failure: *start_report.Failure) !ProviderIntent {
+    try refuseRetiredEnvironment(init.environ_map, failure);
     var wiping: secret_value.WipingAllocator = .{ .backing = init.gpa };
     var memory: std.heap.ArenaAllocator = .init(wiping.allocator());
     defer memory.deinit();
@@ -1448,11 +1374,23 @@ pub fn readSources(init: std.process.Init, request: Spawn, settings: *hs.Setting
     return intent;
 }
 
-pub fn finishSources(init: std.process.Init, settings: *hs.Settings, intent: ProviderIntent, failure: *start_report.Failure) !void {
-    switch (intent) {
-        .automatic => try defaultProviders(init, settings, failure),
-        .explicit => try explicitBaseUrl(init, settings, failure),
+const RetiredVariable = struct { name: []const u8, replacement: []const u8 };
+const retired_environment = [_]RetiredVariable{
+    .{ .name = "RUI_OPENAI_BASE_URL", .replacement = "providers.openai.endpoint" },
+    .{ .name = "RUI_TEST_MODELS_DEV_URL", .replacement = "models.catalogUrl" },
+};
+
+fn refuseRetiredEnvironment(environ: *const std.process.Environ.Map, failure: *start_report.Failure) error{SettingsInvalid}!void {
+    inline for (retired_environment) |retired| {
+        if (environ.get(retired.name) != null) {
+            failure.* = .init(.settings_invalid, retired.name ++ " is no longer read; set " ++ retired.replacement ++ " (rui host set DIR " ++ retired.replacement ++ " URL)");
+            return error.SettingsInvalid;
+        }
     }
+}
+
+pub fn finishSources(init: std.process.Init, settings: *hs.Settings, intent: ProviderIntent, failure: *start_report.Failure) !void {
+    if (intent == .automatic) try defaultProviders(init, settings, failure);
 }
 
 pub const Cwd = struct {
@@ -1625,14 +1563,15 @@ pub fn decodeStart(init: std.process.Init, bytes: []const u8, selected: []const 
     return intent;
 }
 
-pub fn intakeFrozen(init: std.process.Init, bytes: []const u8, selected: []const u8, settings: *hs.Settings, fixtures: providers.Fixtures, failure: *start_report.Failure) !void {
+pub fn intakeFrozen(init: std.process.Init, bytes: []const u8, selected: []const u8, settings: *hs.Settings, failure: *start_report.Failure) !void {
+    try refuseRetiredEnvironment(init.environ_map, failure);
     const intent = try decodeStart(init, bytes, selected, settings, failure);
-    try finishDetached(init, settings, intent, fixtures, failure);
+    try finishDetached(init, settings, intent, failure);
 }
 
-pub fn finishDetached(init: std.process.Init, settings: *hs.Settings, intent: ProviderIntent, fixtures: providers.Fixtures, failure: *start_report.Failure) !void {
+pub fn finishDetached(init: std.process.Init, settings: *hs.Settings, intent: ProviderIntent, failure: *start_report.Failure) !void {
     try finishSources(init, settings, intent, failure);
-    try resolveProviders(init, settings, fixtures, failure);
+    try resolveProviders(init, settings, failure);
 }
 
 /// One detached source/placement owner for spawn and settings --check. Keep
@@ -1833,7 +1772,6 @@ pub noinline fn spawn(init: std.process.Init, typed: Spawn, ops: Ops, progress: 
                 result.wait.?.observe(result.startup(), ops.now(ops.context, io));
                 const lost = refusal != null and refusal.?.code == .store_locked;
                 if (lost) result.startup_len = 0;
-                if (std.mem.indexOf(u8, result.startup(), @import("host_launch.zig").invalid_base_url) != null) result.warning = .invalid_openai_base_url;
                 var facts = ready;
                 const exact = !lost and ops.verify(ops.context, io, &paths, launched_pid, launched_started, executable_buffer[0..length], until, &facts);
                 return launchReady(result, facts, &paths, !exact);
@@ -2102,8 +2040,7 @@ test "Host start placement agrees across Store interface and every door without 
                 .client => try savedPlacement(init.io, dir),
                 .serve => result: {
                     const parsed = try parseForTest(arena.allocator(), &.{});
-                    var fixtures: providers.Fixtures = .{};
-                    try fillAt(init, &parsed, dir, settings, &fixtures, &failure);
+                    try fillAt(init, &parsed, dir, settings, &failure);
                     try anchorPlacement(init, settings, dir, &failure);
                     break :result try platform.placementPaths(init.io, settings);
                 },
@@ -2212,8 +2149,7 @@ test "Host start guided connection isolates two Stores preserves providers and f
     settings.* = .{};
     defer settings.deinit();
     const parsed = try parseForTest(a, &.{});
-    var fixtures: providers.Fixtures = .{};
-    try fillAt(init, &parsed, first_dir, settings, &fixtures, &failure);
+    try fillAt(init, &parsed, first_dir, settings, &failure);
     try std.testing.expect(settings.providers.entries.codex != null and settings.providers.entries.chatgpt != null);
     try std.testing.expectEqual(@as(usize, 7), settings.execution.active_capacity.value);
     try std.testing.expect(!settings.providers.entries.openai.?.unauthenticated.value);
@@ -2519,7 +2455,7 @@ test "Host start guided reuse refuses endpoint-only supersession with unchanged 
     }
 }
 
-test "Host start guided reuse admits equivalent automatic omitted endpoint env base and default file sources" {
+test "Host start guided reuse admits equivalent automatic omitted endpoint and default file sources" {
     const Source = enum { automatic, omitted_endpoint, explicit_file };
     const Gate = struct {
         fn yes() bool {
@@ -2534,7 +2470,6 @@ test "Host start guided reuse admits equivalent automatic omitted endpoint env b
         var env: std.process.Environ.Map = .init(std.testing.allocator);
         defer env.deinit();
         try env.put("HOME", home);
-        try env.put(providers.openai_base_url_variable, "https://effective.example/v1");
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         const init = initForTest(&arena, &env);
@@ -2544,7 +2479,7 @@ test "Host start guided reuse admits equivalent automatic omitted endpoint env b
         try savedEdit(init, dir, if (source == .automatic) "execution.activeCapacity" else "providers", if (source == .automatic) "7" else "{\"openai\":{}}", &failure);
         const admitted = try inspectConnection(init, dir);
         try std.testing.expect(admitted.reusable());
-        try std.testing.expectEqualStrings("https://effective.example/v1/responses", admitted.endpoint.slice());
+        try std.testing.expectEqualStrings(providers.endpoint(.openai), admitted.endpoint.slice());
         if (source == .explicit_file) {
             var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
             try savedEdit(init, dir, "providers.openai.key", try std.fmt.allocPrint(arena.allocator(), "file:{s}", .{try api_key.path(&env, &path_buffer)}), &failure);
@@ -2647,15 +2582,14 @@ test "Host detached check shares source admission then resolves and seals withou
         settings.* = .{};
         defer settings.deinit();
         var failure: start_report.Failure = undefined;
-        var fixtures: providers.Fixtures = .{};
         var args: std.ArrayList([]const u8) = .empty;
         defer args.deinit(gpa);
         try args.appendSlice(gpa, &.{ "--set", "providers={}" });
         try args.appendSlice(gpa, case.args);
         const parsed = try parseForTest(arena.allocator(), args.items);
         const admitted: anyerror!void = admit: {
-            intake(init, &parsed, dir, settings, &fixtures, &failure, door) catch |err| break :admit err;
-            _ = admitSelected(init, dir, settings, fixtures, &failure) catch |err| break :admit err;
+            intake(init, &parsed, dir, settings, &failure, door) catch |err| break :admit err;
+            _ = admitSelected(init, dir, settings, &failure) catch |err| break :admit err;
         };
         if (if (door == .foreground) case.foreground else case.detached) {
             try admitted;
@@ -2672,10 +2606,9 @@ test "Host detached check shares source admission then resolves and seals withou
     settings.* = .{};
     defer settings.deinit();
     var failure: start_report.Failure = undefined;
-    var fixtures: providers.Fixtures = .{};
     const parsed = try parseForTest(arena.allocator(), &.{});
-    try intake(init, &parsed, dir, settings, &fixtures, &failure, .detached);
-    _ = try admitSelected(init, dir, settings, fixtures, &failure);
+    try intake(init, &parsed, dir, settings, &failure, .detached);
+    _ = try admitSelected(init, dir, settings, &failure);
     try std.testing.expectEqual(.mysql, std.meta.activeTag(settings.store));
 }
 
@@ -2731,11 +2664,49 @@ test "Host restart sources preserve previous and current release provider semant
         defer gpa.destroy(settings);
         settings.* = .{};
         defer settings.deinit();
-        var fixtures: @import("providers.zig").Fixtures = .{};
         var failure: @import("start_report.zig").Failure = undefined;
-        try fillAt(init, &parsed, dir, settings, &fixtures, &failure);
+        try fillAt(init, &parsed, dir, settings, &failure);
         try std.testing.expectEqual(@as(usize, 7), settings.execution.active_capacity.value);
         const entries = settings.providers.entries;
         try std.testing.expectEqual(case.served, Served{ .codex = entries.codex != null, .openai = entries.openai != null, .chatgpt = entries.chatgpt != null });
+    }
+}
+
+test "retired endpoint environment is refused by each admission before effects" {
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const dir = try testHostDir(&tmp, &root);
+    const Door = enum { serve, start, check };
+    inline for (retired_environment) |retired| {
+        for ([_]bool{ false, true }) |present| for (std.enums.values(Door)) |door| {
+            var environment: std.process.Environ.Map = .init(gpa);
+            defer environment.deinit();
+            if (present) try environment.put(retired.name, "");
+            var arena: std.heap.ArenaAllocator = .init(gpa);
+            defer arena.deinit();
+            const init = initForTest(&arena, &environment);
+            const settings = try gpa.create(hs.Settings);
+            defer gpa.destroy(settings);
+            settings.* = .{};
+            defer settings.deinit();
+            var failure: start_report.Failure = undefined;
+            const parsed = try parseForTest(arena.allocator(), &.{ "--set", "providers={}" });
+            const outcome = switch (door) {
+                .serve => intake(init, &parsed, dir, settings, &failure, .foreground),
+                .start => checkStart(init, .{ .dir = dir, .assignments = &.{"providers={}"} }, &failure),
+                .check => intake(init, &parsed, dir, settings, &failure, .detached),
+            };
+            if (present) {
+                try std.testing.expectError(error.SettingsInvalid, outcome);
+                try std.testing.expectEqual(start_report.StartError.settings_invalid, failure.code);
+                try std.testing.expectEqualStrings(retired.name ++ " is no longer read; set " ++ retired.replacement ++ " (rui host set DIR " ++ retired.replacement ++ " URL)", failure.message.slice());
+            } else try outcome;
+            var host = try tmp.dir.openDir(init.io, "host-dir", .{ .iterate = true });
+            defer host.close(init.io);
+            var entries = host.iterate();
+            try std.testing.expectEqual(null, try entries.next(init.io));
+        };
     }
 }

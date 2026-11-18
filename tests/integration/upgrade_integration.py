@@ -700,6 +700,22 @@ def pre_freeze_target_case(root, binary, releases, pre_freeze_binary):
         print("upgrade native: actual pre-1480 public-check-capable target refused before stop; old PID/instance unchanged", flush=True)
 
 
+def retired_environment_upgrade_case(root, binary, releases, previous_binary):
+    """A real pre-refusal Host's environment must be checked before stopping it."""
+    with case(root, binary, releases, "retired-environment-upgrade") as c:
+        c.env["RUI_OPENAI_BASE_URL"] = "http://127.0.0.1:9/v1"
+        old, previous = c.start_host(native=previous_binary)
+        del c.env["RUI_OPENAI_BASE_URL"]  # check must use the Host's captured environment
+        target = c.build("new-target")
+        c.select(target)
+        output = c.run("host", "restart", "--all", expect=6, timeout=60)
+        expected = "RUI_OPENAI_BASE_URL is no longer read; set providers.openai.endpoint (rui host set DIR providers.openai.endpoint URL)"
+        assert expected in output and "checking" in output, output
+        assert old.poll() is None and peer_pid(c.ready["socket"]) == old.pid, output
+        assert c.status()["instance"] == previous["instance"], output
+        print("upgrade native: retired environment refused at checking; old PID and instance unchanged", flush=True)
+
+
 def lifecycle_cases(root, binary, releases):
     frozen_upgrade_cases(root, binary, releases)
     frozen_credential_refusal_case(root, binary, releases)
@@ -2097,11 +2113,11 @@ def terminal_cleanup_dual_failure(root, binary, releases, artifacts):
 
 
 def main():
-    modes = ("restart-all", "lifecycle", "custody", "download", "terminal", "startup", "future-target", "known-target", "frozen-settings", "pre-freeze-target")
+    modes = ("restart-all", "lifecycle", "custody", "download", "terminal", "startup", "future-target", "known-target", "frozen-settings", "pre-freeze-target", "retired-environment")
     if len(sys.argv) not in (2, 3, 4, 5) or (len(sys.argv) >= 3 and sys.argv[2] not in modes):
-        sys.exit("usage: python3 tests/integration/upgrade_integration.py REAL_RUI [restart-all|lifecycle|custody|terminal|startup|future-target FUTURE_REAL_RUI|known-target BASELINE_RUI KNOWN_BAD_RUI|frozen-settings|pre-freeze-target PRE_FREEZE_REAL_RUI]")
+        sys.exit("usage: python3 tests/integration/upgrade_integration.py REAL_RUI [restart-all|lifecycle|custody|terminal|startup|future-target FUTURE_REAL_RUI|known-target BASELINE_RUI KNOWN_BAD_RUI|frozen-settings|pre-freeze-target PRE_FREEZE_REAL_RUI|retired-environment PREVIOUS_REAL_RUI]")
     selection = sys.argv[2] if len(sys.argv) >= 3 else "all"
-    assert len(sys.argv) == (4 if selection in ("future-target", "pre-freeze-target") else 5 if selection == "known-target" else 2 if selection == "all" else 3), "supply the native binaries required by this mode"
+    assert len(sys.argv) == (4 if selection in ("future-target", "pre-freeze-target", "retired-environment") else 5 if selection == "known-target" else 2 if selection == "all" else 3), "supply the native binaries required by this mode"
     binary = pathlib.Path(sys.argv[1]).resolve(strict=True)
     target_binary = pathlib.Path(sys.argv[3]).resolve(strict=True) if selection == "future-target" else binary
     root = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-upgrade-"))
@@ -2123,6 +2139,8 @@ def main():
         if selection == "frozen-settings":
             frozen_upgrade_cases(root, binary, releases)
             frozen_credential_refusal_case(root, binary, releases)
+        if selection == "retired-environment":
+            retired_environment_upgrade_case(root, binary, releases, pathlib.Path(sys.argv[3]).resolve(strict=True))
         if selection == "pre-freeze-target":
             pre_freeze_target_case(root, binary, releases, pathlib.Path(sys.argv[3]).resolve(strict=True))
         if selection == "future-target":

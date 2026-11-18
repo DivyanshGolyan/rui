@@ -250,8 +250,8 @@ def run():
         assert first not in status.stdout + status.stderr
 
         host, _ = start_ready_process(
-            [fixture.RUI, "host", "serve", "--store", store, "--set", 'execution.activeCapacity=2', "--test-chatgpt-fixture-endpoint", url,
-             "--test-codex-fixture-endpoint", url],
+            [fixture.RUI, "host", "serve", "--store", store, "--set", 'execution.activeCapacity=2', "--set", f"providers.chatgpt.endpoint={url}", "--set", f"providers.chatgpt.tokenEndpoint={base}/oauth/token",
+             "--set", f"providers.codex.endpoint={url}"],
             required_fields={"execution": "enabled"},
         )
         configured = fixture.command(

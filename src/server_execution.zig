@@ -545,8 +545,8 @@ pub fn executionMain(host: *Host) void {
             continue;
         });
     }
-    const catalog_url = host.hooks.models_dev_url orelse "https://models.dev/api.json";
-    listing_urls.set(.catalog, if (catalog_url.len == 0) null else catalog_url);
+    const catalog_url = host.catalog_url orelse "https://models.dev/api.json";
+    listing_urls.set(.catalog, catalog_url);
     for (listing_urls.values, &workspace.listings.values) |url, *work| work.url = url;
     var reactor_storage: provider.Reactor = undefined;
     const reactor: ?*provider.Reactor = reactor: {
@@ -571,7 +571,7 @@ pub fn executionMain(host: *Host) void {
             .budget = budget,
             .listing_urls = listing_urls,
         }) catch |err| {
-            if (!host.providers.any() and catalog_url.len != 0) {
+            if (!host.providers.any()) {
                 listingFailed(host, .catalog, err);
                 break :reactor null;
             }

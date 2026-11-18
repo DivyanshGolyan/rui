@@ -19,12 +19,12 @@ class HostFixtureSettingsTest(unittest.TestCase):
         self.assertEqual(host_process.isolated_host_arguments(argv), argv + ["--set", "providers={}"])
         self.assertEqual(argv[-1], "/missing-fixture-host", "must not mutate caller argv")
 
-    def test_explicit_sources_and_hidden_endpoints_keep_selection(self):
+    def test_explicit_sources_and_provider_endpoints_keep_selection(self):
         for options in (["--settings", "document.json"], ["--settings", "-"],
                         ["--set", 'providers={"openai":{}}'],
                         ["--set", "providers.codex.unauthenticated=true"],
-                        ["--test-chatgpt-fixture-endpoint", "http://127.0.0.1/responses"],
-                        ["--test-openai-fixture-endpoint", "http://127.0.0.1/responses"]):
+                        ["--set", "providers.chatgpt.endpoint=http://127.0.0.1/responses"],
+                        ["--set", "providers.openai.endpoint=http://127.0.0.1/responses"]):
             with self.subTest(options=options):
                 argv = ["rui", "host", "serve", *options]
                 self.assertEqual(host_process.isolated_host_arguments(argv), argv)
