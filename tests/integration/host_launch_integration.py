@@ -1431,6 +1431,26 @@ def contended_starters(root, env):
     print("contended starters: delayed ready owner adopted; absent and retired winners preserve typed refusal", flush=True)
 
 
+def saved_path_refusal(root, env):
+    directory = root / "saved-path-refusal"
+    directory.mkdir(mode=0o700)
+    saved = directory / "host.json"
+    saved.write_text(json.dumps({"providers": {"openai": {"key": {"env": "PR7C_ABSENT_KEY"}}},
+                                 "tools": {"bash": {"path": "relative/bash"}}}))
+    saved.chmod(0o600)
+    start = run_start(directory, env)
+    assert start.returncode == 2, start
+    failure = json.loads(start.stdout)["rui_start_error"]
+    assert failure["code"] == "settings_invalid" and "tools.bash.path" in failure["message"], failure
+    saved.write_text(json.dumps({"providers": {"openai": {"key": {"env": "PR7C_ABSENT_KEY"}}}}))
+    before = saved.read_bytes()
+    edit = host_command(env, "set", "--store", directory, "tools.bash.path", "relative/bash")
+    assert edit.returncode == 2 and not edit.stdout and saved.read_bytes() == before, edit
+    assert edit.stderr.split(": ", 1)[1] == start.stderr.split(": ", 1)[1], (edit, start)
+    after = run_start(directory, env)
+    assert after.returncode == 1 and "tools.bash.path" not in after.stderr, after
+
+
 def typed_child_refusal(root, env):
     directory = root / "typed-child-refusal"
     directory.mkdir(mode=0o700)
@@ -1472,8 +1492,10 @@ def main():
         credential = root / "credentials" / "missing.json"
         env = environment(home, credential)
         if len(sys.argv) == 3 and sys.argv[2] == "typed-refusal":
+            saved_path_refusal(root, env)
             typed_child_refusal(root, env)
             return
+        saved_path_refusal(root, env)
         typed_child_refusal(root, env)
         check_provider_disposal(dispose_provider_case, stop_endpoint)
         if len(sys.argv) == 3 and sys.argv[2] == "frozen-settings":
