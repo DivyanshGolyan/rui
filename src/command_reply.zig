@@ -421,10 +421,17 @@ fn ShapeTree(comptime capacity: usize) type {
     };
 }
 
-fn shapeTree(comptime shape: anytype) ShapeTree(shapeText(shape).len) {
+fn shapeNodeCapacity(comptime text: []const u8) usize {
+    @setEvalBranchQuota(100_000);
+    // There is one root, and each child consumes its own member colon.
+    // Colons inside strings can only increase this bound.
+    return 1 + std.mem.countScalar(u8, text, ':');
+}
+
+fn shapeTree(comptime shape: anytype) ShapeTree(shapeNodeCapacity(shapeText(shape))) {
     @setEvalBranchQuota(100_000);
     const text = shapeText(shape);
-    var tree: ShapeTree(text.len) = .{};
+    var tree: ShapeTree(shapeNodeCapacity(text)) = .{};
     _ = tree.value(text, shapeHoles(shape), "", "");
     if (tree.cursor != text.len) @compileError("trailing command reply shape data");
     return tree;
