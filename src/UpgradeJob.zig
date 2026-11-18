@@ -96,7 +96,7 @@ fn work(raw: *anyopaque, task: *ClientTask) !void {
 
 fn newerRelease(running_text: []const u8, candidate: @import("release_candidate.zig").Version) ?upgrade_status.Version {
     const running = @import("release_candidate.zig").Version.parse(running_text) catch return null;
-    return if (running.order(candidate) == .lt) version(candidate) else null;
+    return if (running.order(candidate) == .lt) upgrade.versionOf(candidate) else null;
 }
 
 fn progress(raw: *anyopaque, phase: upgrade.Phase) void {
@@ -195,18 +195,11 @@ fn facts(self: *const Self) upgrade_run.Facts {
             if (self.checked) |*check| {
                 value = result.facts(check);
             } else {
-                const receipt = result.installation.receipt();
-                value.published = .{ .ok = .{ .changed = result.installation == .installed, .selected = version(receipt.selected_version.?) } };
-                value.hosts = .{ .ok = result.hosts.summary(result.store) };
+                result.addFacts(&value);
             }
         }
         if (self.failure) |err| {
-            const cause: upgrade_run.Cause = if (err == error.Cancelled) .cancelled else switch (caller_error.of(err)) {
-                .upgrade_download_failed => .download,
-                .upgrade_release_invalid => .release,
-                .upgrade_preparation_failed => .preparation,
-                else => .other,
-            };
+            const cause = upgrade.causeOf(err);
             if (self.checked == null) value.selection = .{ .failed = cause } else value.prepared = .{ .failed = cause };
         }
     }
@@ -215,10 +208,6 @@ fn facts(self: *const Self) upgrade_run.Facts {
 
 pub fn status(self: *const Self) upgrade_status.Run {
     return upgrade_run.run(self.facts(), self.cancelling, self.finished, self.phase.load(.acquire));
-}
-
-fn version(of: @FieldType(@FieldType(upgrade.Check, "candidate"), "version")) upgrade_status.Version {
-    return .{ .schema = of.schema, .patch = of.patch };
 }
 
 fn ending(self: *const Self) upgrade_status.Ended {
@@ -648,7 +637,7 @@ test "background discovery domain covers version order publication failure cance
     }) |case| {
         const available = newerRelease(case[0], case[1]);
         try std.testing.expectEqual(case[2], available != null);
-        if (available) |found| try std.testing.expectEqualDeep(version(case[1]), found);
+        if (available) |found| try std.testing.expectEqualDeep(upgrade_status.Version{ .schema = case[1].schema, .patch = case[1].patch }, found);
     }
     const Worker = struct {
         fn run(raw: *anyopaque, _: *ClientTask) !void {
@@ -740,5 +729,29 @@ test "discovery handoff domain retains validated candidate and transport only fo
         job.deinit();
         try std.testing.expect(job.candidate == null and job.download.stderr == null and !job.started);
         try std.testing.expectEqual(.automatic, job.download.family);
+    };
+}
+
+test "SH-76 Upgrade job adapts joined errors and receipts through the shared owner" {
+    const cases = [_]struct { anyerror, upgrade_run.Cause }{
+        .{ error.Cancelled, .cancelled }, // F2 (#1792) retains cancellation guidance.
+        .{ error.ReleaseDownloadFailed, .download },
+        .{ error.InvalidReleaseVersion, .release },
+        .{ error.ReleaseChecksumMismatch, .preparation },
+        .{ error.AccessDenied, .other },
+    };
+    for (cases) |row| for ([_]bool{ false, true }) |has_check| {
+        const job: Self = .{ .operation = .install, .checked = if (has_check) news_check else null, .failure = row[0] };
+        const value = job.facts();
+        try std.testing.expectEqual(row[1], if (has_check) value.prepared.?.failed else value.selection.?.failed);
+    };
+    for ([_]bool{ false, true }) |changed| for ([_]bool{ false, true }) |has_check| {
+        var result = test_result;
+        if (!changed) result.installation = .{ .unchanged = result.installation.receipt() };
+        const job: Self = .{ .operation = .install, .checked = if (has_check) news_check else null, .result = result };
+        const value = job.facts();
+        try std.testing.expectEqualDeep(upgrade_run.Published{ .changed = changed, .selected = .{ .schema = 60, .patch = 1 } }, value.published.?.ok);
+        try std.testing.expectEqual(@as(usize, 1), value.hosts.?.ok.counts.failed);
+        try std.testing.expect(value.hosts.?.ok.guidance);
     };
 }
