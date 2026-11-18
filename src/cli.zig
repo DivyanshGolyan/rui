@@ -3926,10 +3926,12 @@ fn writeMutationJson(writer: *std.Io.Writer, reply: protocol_reply.MutationReply
         .conflict => try writer.writeAll(",\"code\":\"idempotency_key_conflict\""),
     }
     try writer.writeByte('}');
-    if (reply.target == .message and answer.result != .conflict) {
-        const input = answer.input orelse protocol_reply.CommandObservation.InputReference{ .form = reply.target.message.form, .content = .{ .bytes = reply.target.message.bytes, .digest = reply.target.message.digest } };
+    if (answer.input) |input| {
         try writer.writeAll(",\"input\":");
-        try input.writeJson(writer);
+        switch (input) {
+            .accepted => |value| try (protocol.MessageInputJson{ .value = value }).writeJson(writer),
+            .rejected => |receipt| try receipt.writeJson(writer),
+        }
         if (answer.result == .accepted) try writer.print(",\"queue\":{{\"status\":\"queued\",\"admission\":\"{d}\"}}", .{answer.result.accepted.message.admission});
     }
     if (reply.target == .session_stop) try writer.print(",\"completion\":{{\"status\":\"{s}\"}}", .{if (answer.result == .accepted) @tagName(answer.result.accepted.session_stop.completion) else "unavailable"});
@@ -4006,6 +4008,32 @@ test "session start mutation receipt adds configuration without changing send" {
     reply.target.message.creates_session = false;
     try writeMutationJson(&writer, reply, null);
     try std.testing.expectEqualStrings(context ++ tail, writer.buffered());
+}
+
+test "Message mutation JSON preserves accepted parts owners and rejected receipts" {
+    const wire_prefix = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"message_reply\"";
+    const accepted = ",\"answer\":{\"status\":\"accepted\",\"replayed\":true,\"session\":\"k7m2qx\",\"admission\":\"7\"}";
+    const rejected = ",\"answer\":{\"status\":\"rejected\",\"replayed\":false,\"session\":\"k7m2qx\",\"code\":\"invalid_input\"}";
+    const input = ",\"input\":{\"type\":\"parts\",\"bytes\":\"12\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"";
+    const queue = ",\"queue\":{\"status\":\"queued\",\"admission\":\"7\"}";
+    const target: protocol_reply.MutationTarget = .{ .message = .{ .bytes = 12, .digest = @splat(0xaa), .form = .parts } };
+    const context = "{\"context\":{\"store\":\"/store\",\"session\":\"k7m2qx\",\"key\":\"receipt\",\"kind\":\"message\"}";
+    for ([_][]const u8{
+        accepted ++ input ++ ",\"owner\":{\"message\":\"7\"}}" ++ queue,
+        rejected ++ input ++ "}",
+    }) |expected| {
+        var body: [1024]u8 = undefined;
+        const wire = try std.fmt.bufPrint(&body, "{s}{s},\"execution\":{{\"status\":\"queued\"}}}}", .{ wire_prefix, expected });
+        var reply = protocol_reply.decodeMutationReply(.{ .status = 200, .body = wire }, "k7m2qx", target);
+        try reply.context.store.set("/store");
+        try reply.context.key.set("receipt");
+        reply.context.kind = .message;
+        var output: [1024]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&output);
+        try writeMutationJson(&writer, reply, null);
+        const expected_json = try std.fmt.bufPrint(&body, "{s}{s}}}", .{ context, expected });
+        try std.testing.expectEqualStrings(expected_json, writer.buffered());
+    }
 }
 
 test "mutation presentation renders owned diagnostics and context with bounded writer" {

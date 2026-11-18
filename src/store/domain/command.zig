@@ -8,6 +8,8 @@ const message_admission = @import("../../message_admission.zig");
 const workspace_path = @import("../../workspace_path.zig");
 const outcome_code = @import("../../outcome_code.zig");
 const content_string = @import("../../content_string.zig");
+const content_value = @import("../../content_value.zig");
+const input_parts = @import("../../input_parts.zig");
 const tool_defs = @import("../../tool_record.zig");
 const tool_presentation = @import("../../tool_presentation.zig");
 const idempotency_key = @import("../../idempotency_key.zig");
@@ -109,10 +111,18 @@ const message_sender = rsql.Read(.{
 });
 
 const message_replay = rsql.Read(.{
-    .sql = "SELECT m.admission_id,m.session_ref,m.content_id,content.byte_length AS length,content.digest FROM message_admission m " ++
+    .sql = "SELECT m.admission_id,m.session_ref,m.content_id,content.byte_length,content.digest,content.private,content.form FROM message_admission m " ++
         "JOIN content ON content.content_id=m.content_id WHERE m.command_key=?1",
     .Args = struct { key: []const u8 },
-    .Row = struct { admission_id: rsql.Positive, session_ref: Bounded(session_id.max_reference_bytes), content_id: rsql.Positive, length: u64, digest: [32]u8 },
+    .Row = struct {
+        admission_id: rsql.Positive,
+        session_ref: Bounded(session_id.max_reference_bytes),
+        content_id: rsql.Positive,
+        byte_length: u64,
+        digest: [32]u8,
+        private: bool,
+        form: u8,
+    },
     .cardinality = .one,
 });
 
@@ -299,7 +309,7 @@ pub const SubmitMessage = struct {
         switch (try classify(message_admission.Rejection, &message.saved, .message, command.session.slice(), &message.digest)) {
             .fresh => {},
             .conflict => return t.done(.conflict),
-            .rejected => |code| return t.done(.{ .rejected = .{ .replayed = true, .code = code, .content = if (t.input.parts_saving) |saving| saving.reference.identity() else .{ .length = command.text.length, .digest = command.text.digest } } }),
+            .rejected => |code| return t.done(t.rejectedReply(code, true)),
             .accepted => |existing| {
                 _ = existing.primary_content_id orelse return error.CorruptStore;
                 t.later = .{ .replay = undefined };
@@ -342,12 +352,37 @@ pub const SubmitMessage = struct {
         };
         const row = &t.later.replay;
         if (row.content_id.get() != existing.primary_content_id.? or !existing.target.eql(row.session_ref.slice())) return error.CorruptStore;
+        const admission_id = row.admission_id.get();
+        const metadata: content_domain.content_metadata.Row = .{ .byte_length = row.byte_length, .digest = row.digest, .private = row.private, .form = row.form };
+        const content = try content_parts.publicValue(&metadata, .{ .message = admission_id });
+        const submitted = t.submittedInput();
+        const identity = submitted.identity();
+        if (row.form != @backingInt(std.meta.activeTag(submitted)) or row.byte_length != identity.length or
+            !std.mem.eql(u8, &row.digest, &identity.digest)) return error.CorruptStore;
         return t.done(.{ .accepted = .{
             .replayed = true,
-            .admission_id = row.admission_id.get(),
-            .content = .{ .length = row.length, .digest = row.digest },
+            .admission_id = admission_id,
+            .content = content,
             .session = existing.target,
         } });
+    }
+
+    fn submittedInput(t: *const SubmitMessage) input_parts.Reference {
+        if (t.input.parts_saving) |saving| return saving.reference;
+        const text = &t.input.command.text;
+        return .{ .bytes = .{ .length = text.length, .digest = text.digest } };
+    }
+
+    fn acceptedInput(t: *const SubmitMessage) content_value.Value {
+        return switch (t.submittedInput()) {
+            .bytes => |identity| .{ .text = identity },
+            .parts => |identity| .{ .parts = .{ .identity = identity, .owner = .{ .message = t.admission_id } } },
+        };
+    }
+
+    fn rejectedReply(t: *const SubmitMessage, code: message_admission.Rejection, is_replay: bool) MessageReply {
+        const input = t.submittedInput();
+        return .{ .rejected = .{ .form = std.meta.activeTag(input), .replayed = is_replay, .code = code, .content = input.identity() } };
     }
 
     fn done(t: *SubmitMessage, reply: MessageReply) transition.Next(SubmitMessage) {
@@ -504,15 +539,14 @@ pub const SubmitMessage = struct {
     pub fn committed(t: *SubmitMessage) Result {
         const command = t.input.command;
         if (t.admission_id == 0) {
-            t.input.reply.* = .{ .rejected = .{ .replayed = false, .code = t.rejection, .content = if (t.input.parts_saving) |saving| saving.reference.identity() else .{ .length = command.text.length, .digest = command.text.digest } } };
+            t.input.reply.* = t.rejectedReply(t.rejection, false);
             return;
         }
-        const message = t.reads();
         t.input.reply.* = .{
             .accepted = .{
                 .replayed = false,
                 .admission_id = t.admission_id,
-                .content = .{ .length = message.text.length, .digest = message.text.digest },
+                .content = t.acceptedInput(),
                 .session = if (command.configuration != null) t.creation.applied.session else command.session,
             },
         };
@@ -2342,13 +2376,7 @@ const permission_target = rsql.Read(.{
     .cardinality = .one,
 });
 
-fn observedInput(content_id: u64, metadata: *const content_domain.content_metadata.Row, pending: *?content_domain.Value) !void {
-    if (metadata.private) return error.CorruptStore;
-    const value = try content_domain.Value.of(content_id, metadata.form, metadata.byte_length, metadata.digest);
-    if (value.reference == .parts) pending.* = value;
-}
-
-pub fn observeCommand(a: anytype, key: []const u8, observation: *CommandObservation, pending: *?content_domain.Value) !void {
+pub fn observeCommand(a: anytype, key: []const u8, observation: *CommandObservation) !void {
     var saved: saved_command.Result = undefined;
     lookupCommand(a, key, &saved);
     var message: message_observation.Result = undefined;
@@ -2369,22 +2397,17 @@ pub fn observeCommand(a: anytype, key: []const u8, observation: *CommandObservat
         .configure => observation.kind = .{ .configure = .{ .revision = command.revision, .created = command.created } },
         .message => {
             observation.kind = .{ .message = null };
-            if (!command.accepted) {
-                if (command.primary_content_id) |id| {
-                    var metadata: content_domain.content_metadata.Row = undefined;
-                    a.read(content_domain.content_metadata, .{ .content_id = @intCast(id) }, &metadata);
-                    try store_access.runAs(a, error.CorruptStore);
-                    try observedInput(@intCast(id), &metadata, pending);
-                }
-                return;
-            }
+            if (!command.accepted) return;
             const row = message orelse return error.CorruptStore;
             const content_id = command.primary_content_id orelse return error.CorruptStore;
             if (!row.session_ref.eql(command.target.slice()) or row.content_id.get() != content_id) return error.CorruptStore;
             const metadata: content_domain.content_metadata.Row = .{ .byte_length = row.input_length, .digest = row.input_digest, .private = row.input_private, .form = row.input_form };
-            try observedInput(row.content_id.get(), &metadata, pending);
             const queue = try messageQueue(&row);
-            observation.kind.message = .{ .form = try @import("../../input_parts.zig").Form.decode(row.input_form), .content = .{ .length = row.input_length, .digest = row.input_digest }, .queue = queue, .admitted_at = row.admitted_at.get() };
+            observation.kind.message = .{
+                .content = try content_parts.publicValue(&metadata, .{ .message = queue.admission_id }),
+                .queue = queue,
+                .admitted_at = row.admitted_at.get(),
+            };
             if (row.has_recovery) try readRecovery(a, key, &observation.kind.message.?.recovery);
             switch (queue.state) {
                 .queued, .processing => observation.kind.message.?.work = try readMessageWork(a, &work, command.target.slice(), row.created_at.get(), queue.state),

@@ -2158,8 +2158,9 @@ pub const ContentValueJson = struct {
     value: content_value.Value,
 
     pub const openapi_name = "ContentValue";
-    pub const text_shape = .{ "{\"type\":\"text\",\"bytes\":\"", Hole.decimal, "\",\"sha256\":\"", Hole{ .hex = 32 }, "\"}" };
-    pub const parts_shape = .{ "{\"type\":\"parts\",\"bytes\":\"", Hole.decimal, "\",\"sha256\":\"", Hole{ .hex = 32 }, "\",\"owner\":", Hole{ .json = OwnerJson }, "}" };
+    pub const text_shape = content_reference_shape;
+    const parts_head = .{ "{\"type\":\"parts\",\"bytes\":\"", Hole.decimal, "\",\"sha256\":\"", Hole{ .hex = 32 }, "\",\"owner\":" };
+    pub const parts_shape = parts_head ++ .{ Hole{ .json = OwnerJson }, "}" };
     pub const openapi_shapes = .{ text_shape, parts_shape };
     pub const max_json_bytes = maxShapeBytes(openapi_shapes);
 
@@ -2177,6 +2178,22 @@ pub const ContentValueJson = struct {
             .text => |reference| try writeShape(out, text_shape, .{ reference.length, reference.digest }),
             .parts => |parts| try writeShape(out, parts_shape, .{ parts.identity.length, parts.identity.digest, OwnerJson{ .owner = parts.owner } }),
         }
+    }
+};
+
+/// The stored input of an accepted Message, whose parts are owned by its admission.
+pub const MessageInputJson = struct {
+    value: content_value.Value,
+
+    pub const openapi_name = "MessageInput";
+    pub const openapi_shapes = .{
+        ContentValueJson.text_shape,
+        ContentValueJson.parts_head ++ OwnerJson.message_shape ++ .{"}"},
+    };
+    pub const max_json_bytes = maxShapeBytes(openapi_shapes);
+
+    pub fn writeJson(self: *const MessageInputJson, out: *std.Io.Writer) !void {
+        try (ContentValueJson{ .value = self.value }).writeJson(out);
     }
 };
 
@@ -2314,16 +2331,12 @@ pub const configuration_reply = struct {
 pub const message_reply = struct {
     const head = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"" ++ command_spec.spec(.message).reply_type ++ "\",\"answer\":{\"status\":";
     const execution = ",\"execution\":{\"status\":\"queued\"}}";
-    pub const accepted = .{ head ++ "\"accepted\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"admission\":\"", Hole.decimal, "\"},\"input\":" } ++
-        content_reference_shape ++ .{ ",\"queue\":{\"status\":\"queued\",\"admission\":\"", Hole.decimal, "\"}" ++ execution };
-    pub const accepted_parts = .{ head ++ "\"accepted\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"admission\":\"", Hole.decimal, "\"},\"input\":" } ++
-        parts_reference_shape ++ .{ ",\"queue\":{\"status\":\"queued\",\"admission\":\"", Hole.decimal, "\"}" ++ execution };
-    pub const rejected = .{ head ++ "\"rejected\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"code\":\"", Hole{ .tag = MessageRejection }, "\",\"message\":", Hole{ .optional_string = @import("tool_record.zig").HostToolSet.max_refusal_message_bytes }, "},\"input\":" } ++
-        content_reference_shape ++ .{execution};
-    pub const rejected_parts = .{ head ++ "\"rejected\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"code\":\"", Hole{ .tag = MessageRejection }, "\",\"message\":", Hole{ .optional_string = @import("tool_record.zig").HostToolSet.max_refusal_message_bytes }, "},\"input\":" } ++
-        parts_reference_shape ++ .{execution};
+    pub const accepted = .{ head ++ "\"accepted\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"admission\":\"", Hole.decimal, "\"},\"input\":", Hole{ .json = MessageInputJson }, ",\"queue\":{\"status\":\"queued\",\"admission\":\"", Hole.decimal, "\"}" ++ execution };
+    const rejection = .{ head ++ "\"rejected\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"code\":\"", Hole{ .tag = MessageRejection }, "\",\"message\":", Hole{ .optional_string = @import("tool_record.zig").HostToolSet.max_refusal_message_bytes }, "},\"input\":" };
+    pub const rejected = rejection ++ content_reference_shape ++ .{execution};
+    pub const rejected_parts = rejection ++ parts_reference_shape ++ .{execution};
     pub const conflict = .{ head ++ "\"conflict\",\"replayed\":false,\"session\":", Hole{ .string = max_session_bytes }, ",\"code\":\"idempotency_key_conflict\"}" ++ execution };
-    pub const max_bytes = maxShapeBytes(.{ accepted, accepted_parts, rejected, rejected_parts, conflict });
+    pub const max_bytes = maxShapeBytes(.{ accepted, rejected, rejected_parts, conflict });
 };
 
 pub const session_stop_reply = struct {
@@ -2426,10 +2439,13 @@ pub const command_observation_reply = struct {
     pub fn head(comptime kind: CommandKind) struct { []const u8, Hole, []const u8, Hole, []const u8, Hole, []const u8, Hole } {
         return .{ prefix, .{ .string = max_key_bytes }, ",\"delta\":\"full\",\"since\":", .{ .optional_string = change_ring.SessionToken.max_bytes }, ",\"observation\":{\"status\":\"", .{ .tag = CommandObservationStatus }, "\",\"kind\":\"" ++ @tagName(kind) ++ "\",\"target\":", .{ .string = max_session_bytes } };
     }
+    pub fn statusHead(comptime kind: CommandKind, comptime status: CommandObservationStatus) struct { []const u8, Hole, []const u8, Hole, []const u8, Hole } {
+        const shape = head(kind);
+        return .{ shape[0], shape[1], shape[2], shape[3], shape[4] ++ @tagName(status) ++ shape[6], shape[7] };
+    }
     pub const code = .{ ",\"code\":", Hole{ .string = max_code_bytes } };
     pub const revision = .{ ",\"revision\":\"", Hole.decimal, "\",\"created\":", Hole.boolean };
-    pub const input = .{",\"input\":"} ++ content_reference_shape;
-    pub const input_parts = .{",\"input\":"} ++ parts_reference_shape;
+    pub const input = .{ ",\"input\":", Hole{ .json = MessageInputJson } };
     pub const state = .{ ",\"state\":\"", Hole{ .tag = MessageRequestState }, "\"" };
     pub const queue = .{ ",\"queue\":{\"admission\":\"", Hole.decimal, "\",\"admitted_at\":\"", Hole.decimal, "\"}" };
     pub const binding = .{ ",\"binding\":{\"turn\":\"", Hole.decimal, "\",\"operation\":\"", Hole.decimal, "\",\"attempt\":\"", Hole.decimal, "\"}" };
@@ -2444,15 +2460,12 @@ pub const command_observation_reply = struct {
     const queued_state = .{",\"state\":\"queued\""};
     const processing_state = .{",\"state\":\"processing\""};
     const permission_state = .{",\"state\":\"waiting_for_permission\""};
-    const rejected_state = .{",\"state\":\"rejected\""};
+    pub const message_rejected = .{",\"state\":\"rejected\""};
     const completed_state = .{",\"state\":\"completed\""};
     const failed_state = .{",\"state\":\"failed\""};
     const cancelled_state = .{",\"state\":\"cancelled\""};
     pub const permission_work = .{ ",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"", Hole.decimal, "\"},\"first_action\":", Hole.optional_id } ++ SessionWork.extra_fields ++ .{"}"};
-    pub const message_variants = .{
-        rejected_state,
-        rejected_state ++ input,
-        rejected_state ++ input_parts,
+    pub const message_accepted = .{
         queued_state ++ input ++ queue ++ work,
         processing_state ++ input ++ queue ++ binding ++ work,
         processing_state ++ input ++ queue ++ binding ++ work ++ recovery,
@@ -2466,20 +2479,6 @@ pub const command_observation_reply = struct {
         cancelled_state ++ input ++ queue ++ binding ++ cancelled ++ recovery,
         failed_state ++ input ++ queue ++ binding ++ failed,
         failed_state ++ input ++ queue ++ binding ++ failed ++ recovery,
-    } ++ .{
-        queued_state ++ input_parts ++ queue ++ work,
-        processing_state ++ input_parts ++ queue ++ binding ++ work,
-        processing_state ++ input_parts ++ queue ++ binding ++ work ++ recovery,
-        permission_state ++ input_parts ++ queue ++ permission_work,
-        permission_state ++ input_parts ++ queue ++ binding ++ permission_work,
-        permission_state ++ input_parts ++ queue ++ binding ++ permission_work ++ recovery,
-        cancelled_state ++ input_parts ++ queue ++ cancelled,
-        completed_state ++ input_parts ++ queue ++ binding ++ completed,
-        completed_state ++ input_parts ++ queue ++ binding ++ completed ++ recovery,
-        cancelled_state ++ input_parts ++ queue ++ binding ++ cancelled,
-        cancelled_state ++ input_parts ++ queue ++ binding ++ cancelled ++ recovery,
-        failed_state ++ input_parts ++ queue ++ binding ++ failed,
-        failed_state ++ input_parts ++ queue ++ binding ++ failed ++ recovery,
     };
     pub const session_stop = .{ ",\"selection\":{\"turn\":", Hole.optional_id, ",\"admission_cutoff\":\"", Hole.decimal, "\"},\"completion\":{\"status\":\"", Hole{ .tag = SessionStopCompletion }, "\"}" };
     pub const session_pin = .{ ",\"pinned\":", Hole.boolean };

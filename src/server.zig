@@ -2257,7 +2257,7 @@ test "initial Message reply binds its allocated Session and original input befor
     try response.render(host_reply.renderMessageReply, .{ "", store_module.MessageReply{ .accepted = .{
         .replayed = true,
         .admission_id = 17,
-        .content = content,
+        .content = .{ .text = content },
         .session = allocated,
     } } });
     const target: protocol_reply.MutationTarget = .{ .message = .{ .bytes = content.length, .digest = content.digest, .creates_session = true } };
@@ -2273,7 +2273,7 @@ test "initial Message reply binds its allocated Session and original input befor
     try response.render(host_reply.renderMessageReply, .{ "", store_module.MessageReply{ .accepted = .{
         .replayed = true,
         .admission_id = 17,
-        .content = content,
+        .content = .{ .text = content },
         .session = allocated,
     } } });
     try std.testing.expectError(error.RequestBindingMismatch, protocol_reply.decodeMutationReply(.{ .status = 200, .body = response.slice() }, "", target).answer);
@@ -2935,7 +2935,7 @@ test "message observation renders Host state binding live work and persistent re
     const content = store_module.ContentReference{ .length = 3, .digest = @splat(0) };
     const bound = store_module.AttemptBinding{ .turn_id = 2, .operation_id = 3, .attempt_ordinal = 4 };
     var observation = store_module.CommandObservation{ .status = .accepted, .kind = .{ .message = .{
-        .content = content,
+        .content = .{ .text = content },
         .queue = .{ .admission_id = 1, .state = .queued },
         .admitted_at = 11,
         .work = .{ .state = .{ .pending = .{ .since = 10 } } },
@@ -3073,8 +3073,10 @@ test "Message observation work and recovery fit their exchange-owned response bo
     var bash_description: protocol.Bounded(protocol.session_work.max_description_bytes) = .{};
     try bash_description.set(&@as([protocol.session_work.max_description_bytes]u8, @splat(1)));
     var observation = store_module.CommandObservation{ .status = .accepted, .kind = .{ .message = .{
-        .form = .parts,
-        .content = .{ .length = max, .digest = @splat(0xff) },
+        .content = .{ .parts = .{
+            .identity = .{ .length = max, .digest = @splat(0xff) },
+            .owner = .{ .message = max },
+        } },
         .queue = .{ .admission_id = max, .state = .{ .processing = .{ .turn_id = max, .operation_id = max, .attempt_ordinal = max } } },
         .admitted_at = max,
         .work = .{ .state = .{ .bash = .{ .since = max, .call = max, .description = bash_description, .running = max, .approvals = max } }, .first_action = max, .served_attention = .{ .kind = .approval, .turn = max, .step = max }, .served_group = .needs_you, .actions = .{ .stop = false, .interrupt = .{ .turn = max, .operation = max }, .decide = max } },
@@ -4560,7 +4562,7 @@ test "inline skills binding under heap exhaustion answers 503 without key admiss
     var retry_offer = try SessionEnvironments.Offer.init(std.testing.allocator, 0);
     const accepted = try submitMessage(&host, &command, &retry_offer);
     try std.testing.expect(accepted == .accepted and accepted.accepted.replayed);
-    try std.testing.expectEqual(@as(u64, text.len), accepted.accepted.content.length);
+    try std.testing.expectEqual(@as(u64, text.len), accepted.accepted.content.text.length);
     try std.testing.expect(host.launchAllowed() and !storage.isFenced());
     var reload: wire_request.ConfigureCommand = .{ .session = configured.accepted.session, .reload_skills = true };
     try reload.key.set("pressure-reload");
@@ -5194,6 +5196,7 @@ const MutationWitness = struct {
     const session = "k7m2qx";
     const content: store_module.ContentReference = .{ .length = 9, .digest = .{ 0xc8, 0x84, 0x92, 0x9e, 0xdd, 0xc9, 0x45, 0x02, 0xb8, 0x37, 0x7e, 0x33, 0x3d, 0xcd, 0x72, 0x80, 0x64, 0xdc, 0xb2, 0xc4, 0x57, 0xe1, 0x0c, 0x4a, 0x3c, 0xc9, 0x82, 0xde, 0xde, 0xfd, 0xcb, 0xcd } };
     const Hash = std.crypto.hash.sha2.Sha256;
+    const frozen_wire_version = "20";
 
     fn named() protocol.Bounded(protocol.max_session_bytes) {
         var value: protocol.Bounded(protocol.max_session_bytes) = .{};
@@ -5227,7 +5230,7 @@ const MutationWitness = struct {
     fn accepted(comptime kind: command_spec.CommandKind) @typeInfo(@TypeOf(host_reply.renderMutationReply(kind))).@"fn".param_types[2].? {
         return .{ .accepted = switch (kind) {
             .configure => .{ .replayed = false, .revision = 13, .created = false, .session = named() },
-            .message => .{ .replayed = false, .admission_id = 17, .content = content, .session = named() },
+            .message => .{ .replayed = false, .admission_id = 17, .content = .{ .text = content }, .session = named() },
             .session_stop => .{ .replayed = false, .selection = .{ .selected_turn_id = 19, .admission_cutoff = 23 }, .completion = .pending },
             .session_archive => .{ .replayed = false, .archived = true, .completion = .pending },
             .session_pin => .{ .replayed = false, .pinned = false },
@@ -5242,7 +5245,7 @@ const MutationWitness = struct {
     fn hashResponse(hash: *Hash, body: []const u8) !void {
         const current = "{\"version\":\"" ++ protocol.wire_version ++ "\",";
         try std.testing.expect(std.mem.startsWith(u8, body, current));
-        hash.update("{\"version\":\"" ++ protocol.previous_wire_version ++ "\",");
+        hash.update("{\"version\":\"" ++ frozen_wire_version ++ "\",");
         hash.update(body[current.len..]);
     }
 
@@ -5260,9 +5263,18 @@ const MutationWitness = struct {
                 .rejected => |code| hash.update(code.slice()),
                 .conflict => {},
             }
-            // The frozen witness predates input forms; base replies are text-form.
-            if (answer.input) |value| try std.testing.expect(value.form == .text);
-            const input = try std.json.Stringify.valueAlloc(std.testing.allocator, if (answer.input) |value| value.content else null, .{});
+            // The frozen witness hashes the original text receipt fields.
+            const receipt: ?@import("mutation_answer.zig").ContentReference = if (answer.input) |value| switch (value) {
+                .accepted => |accepted_input| blk: {
+                    try std.testing.expect(accepted_input == .text);
+                    break :blk .{ .bytes = accepted_input.text.length, .digest = accepted_input.text.digest };
+                },
+                .rejected => |rejected_input| blk: {
+                    try std.testing.expectEqual(.text, rejected_input.form);
+                    break :blk rejected_input.content;
+                },
+            } else null;
+            const input = try std.json.Stringify.valueAlloc(std.testing.allocator, receipt, .{});
             defer std.testing.allocator.free(input);
             hash.update(input);
         } else |err| hash.update(@errorName(err));
@@ -5326,7 +5338,7 @@ test "mutation decoder preserves base bytes and the entire command domain" {
     try std.testing.expectError(error.TestUnexpectedResult, MutationWitness.hashResponse(&version_probe, "{\"version\":\"" ++ protocol.next_wire_version ++ "\",\"type\":\"configuration_reply\"}"));
     try MutationWitness.hashResponse(&version_probe, "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"configuration_reply\"}");
     var frozen_probe = MutationWitness.Hash.init(.{});
-    frozen_probe.update("{\"version\":\"" ++ protocol.previous_wire_version ++ "\",\"type\":\"configuration_reply\"}");
+    frozen_probe.update("{\"version\":\"" ++ MutationWitness.frozen_wire_version ++ "\",\"type\":\"configuration_reply\"}");
     try std.testing.expectEqualSlices(u8, &frozen_probe.finalResult(), &version_probe.finalResult());
     var covered: u16 = 0;
     inline for (comptime std.meta.tags(command_spec.CommandKind)) |kind| {
@@ -5889,11 +5901,13 @@ test "SH-61 Host submits a sealed ordered input through Message admission" {
     var offer = try SessionEnvironments.Offer.init(std.testing.allocator, 0);
     const result = try submitMessageInput(&host, &command, &offer, loan);
     try std.testing.expect(result == .accepted);
-    try std.testing.expectEqual(@import("input_parts.zig").Form.parts, result.accepted.form);
-    try std.testing.expectEqualSlices(u8, &loan.digest, &result.accepted.content.digest);
+    const content = result.accepted.content;
+    try std.testing.expect(content == .parts);
+    try std.testing.expectEqualSlices(u8, &loan.digest, &content.parts.identity.digest);
+    try std.testing.expectEqualDeep(@import("content_value.zig").Owner{ .message = result.accepted.admission_id }, content.parts.owner);
     var observed: store_module.Observed = undefined;
     try storage.observeCommand(command.key.slice(), null, &observed);
-    try std.testing.expectEqual(@import("input_parts.zig").Form.parts, observed.full.observation.kind.message.?.form);
+    try std.testing.expectEqualDeep(content, observed.full.observation.kind.message.?.content);
 }
 
 test "SH-65 Host wire admits image bytes in order and preserves refusal identity" {

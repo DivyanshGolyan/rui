@@ -4,6 +4,9 @@ const CommandKind = @import("cli_value.zig").CommandKind;
 const session_id = @import("session_id.zig");
 const wire_field = @import("wire_field.zig");
 const decimalId = wire_field.decimalId;
+const JsonString = wire_field.JsonString;
+const OmittableJson = wire_field.OmittableJson;
+const content_value = @import("content_value.zig");
 
 pub const max_code_bytes = 96;
 pub const max_session_bytes = 128;
@@ -42,7 +45,80 @@ pub const InputReference = struct {
         try writer.print("{{\"type\":\"{s}\",\"bytes\":\"{d}\",\"sha256\":\"{s}\"}}", .{ @tagName(self.form), self.content.bytes, std.fmt.bytesToHex(self.content.digest, .lower) });
     }
 };
-pub const InputForm = enum { text, parts };
+pub const InputForm = std.meta.Tag(content_value.Value);
+
+const JsonContentOwner = struct {
+    value: content_value.Owner,
+
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+        const Wire = struct { message: OmittableJson(JsonString(20)) = .{}, action: OmittableJson(JsonString(20)) = .{} };
+        var strict = options;
+        strict.ignore_unknown_fields = false;
+        strict.duplicate_field_behavior = .@"error";
+        const wire = try std.json.innerParse(Wire, allocator, source, strict);
+        if (wire.message.isPresent() == wire.action.isPresent()) return error.InvalidCharacter;
+        return .{ .value = if (wire.message.value) |id| .{ .message = try contentNumber(id, false) } else .{ .action = try contentNumber(wire.action.value.?, false) } };
+    }
+};
+
+pub const InputWire = struct {
+    fields: Fields,
+
+    const Fields = struct {
+        type: JsonString(8),
+        bytes: JsonString(20),
+        sha256: JsonString(64),
+        owner: OmittableJson(JsonContentOwner) = .{},
+    };
+
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !InputWire {
+        var strict = options;
+        strict.duplicate_field_behavior = .@"error";
+        return .{ .fields = try std.json.innerParse(Fields, allocator, source, strict) };
+    }
+
+    fn digest(self: InputWire) error{InvalidCharacter}![32]u8 {
+        if (self.fields.sha256.slice().len != 64) return error.InvalidCharacter;
+        var result: [32]u8 = undefined;
+        _ = std.fmt.hexToBytes(&result, self.fields.sha256.slice()) catch return error.InvalidCharacter;
+        return result;
+    }
+
+    fn receipt(self: InputWire) error{InvalidResponse}!InputReference {
+        const wire = self.fields;
+        if (wire.owner.isPresent()) return error.InvalidResponse;
+        return .{
+            .form = std.meta.stringToEnum(InputForm, wire.type.slice()) orelse return error.InvalidResponse,
+            .content = .{ .bytes = try decimalId(wire.bytes, true), .digest = self.digest() catch return error.InvalidResponse },
+        };
+    }
+
+    pub fn contentValue(self: InputWire, max_content_bytes: u64) error{InvalidCharacter}!content_value.Value {
+        const wire = self.fields;
+        const form = std.meta.stringToEnum(InputForm, wire.type.slice()) orelse return error.InvalidCharacter;
+        const length = try contentNumber(wire.bytes, true);
+        if (length > max_content_bytes) return error.InvalidCharacter;
+        for (wire.sha256.slice()) |byte| if (!std.ascii.isDigit(byte) and (byte < 'a' or byte > 'f')) return error.InvalidCharacter;
+        const reference: content_value.Reference = .{ .length = length, .digest = try self.digest() };
+        return switch (form) {
+            .text => if (wire.owner.isPresent()) error.InvalidCharacter else .{ .text = reference },
+            .parts => .{ .parts = .{ .identity = reference, .owner = (wire.owner.value orelse return error.InvalidCharacter).value } },
+        };
+    }
+};
+
+fn contentNumber(digits: JsonString(20), zero: bool) error{InvalidCharacter}!u64 {
+    const value = decimalId(digits, zero) catch return error.InvalidCharacter;
+    if (value > std.math.maxInt(i64)) return error.InvalidCharacter;
+    return value;
+}
+
+pub fn matchesMessageAdmission(input: content_value.Value, admission: u64) bool {
+    return switch (input) {
+        .text => true,
+        .parts => |parts| parts.owner == .message and parts.owner.message == admission,
+    };
+}
 
 pub const Target = union(CommandKind) {
     configure,
@@ -57,7 +133,8 @@ pub const Target = union(CommandKind) {
 };
 
 pub const Answer = struct {
-    input: ?InputReference = null,
+    input: ?Input = null,
+
     result: union(enum) {
         accepted: union(enum) {
             configure: struct { revision: u64, created: bool, skills: ?SkillsReloadStatus = null },
@@ -74,6 +151,11 @@ pub const Answer = struct {
         conflict,
     },
     replayed: bool,
+
+    pub const Input = union(enum) {
+        accepted: content_value.Value,
+        rejected: InputReference,
+    };
 };
 
 pub const InvocationDiagnostic = struct {
@@ -111,9 +193,10 @@ pub fn decode(comptime protocol: type, comptime command_reply: type, allocator: 
                     if ((status == 409) != conflict) break :candidate;
                     const Parser = command_reply.DecoderWithPolicy(@field(Reply, name), universe, struct {
                         pub fn Type(comptime T: type) type {
+                            if (T == protocol.MessageInputJson) return InputWire;
                             return T;
                         }
-                    }, DecodePolicy(kind));
+                    }, DecodePolicy(kind, accepted));
                     const partial = Parser.parsePartial(allocator, body) catch |err| {
                         if (err == error.RequestBindingMismatch) return error.RequestBindingMismatch;
                         break :candidate;
@@ -124,7 +207,7 @@ pub fn decode(comptime protocol: type, comptime command_reply: type, allocator: 
                         if (err == error.RequestBindingMismatch) return error.RequestBindingMismatch;
                         break :candidate;
                     }
-                    return decide(kind, accepted, conflict, partial, target);
+                    return decide(protocol, kind, accepted, conflict, partial, target);
                 }
             }
         },
@@ -134,7 +217,7 @@ pub fn decode(comptime protocol: type, comptime command_reply: type, allocator: 
 
 // These compatibility rules retain the base reader's semantic boundaries:
 // refusal prose is diagnostic, and Message execution may carry a reason.
-fn DecodePolicy(comptime kind: CommandKind) type {
+fn DecodePolicy(comptime kind: CommandKind, comptime accepted: bool) type {
     return struct {
         pub fn ignored(comptime path: []const u8) bool {
             return std.mem.eql(u8, path, ".answer.message");
@@ -148,7 +231,7 @@ fn DecodePolicy(comptime kind: CommandKind) type {
             if (std.mem.eql(u8, path, ".answer.action_selection.kind")) return wire_field.JsonEnum(@FieldType(@import("action_control.zig").Selection, "kind"));
             if (std.mem.eql(u8, path, ".answer.replayed") or std.mem.eql(u8, path, ".answer.created")) return bool;
             if (std.mem.eql(u8, path, ".answer.code")) return wire_field.JsonString(max_code_bytes);
-            if (std.mem.eql(u8, path, ".input.type")) return wire_field.JsonString(8);
+            if (kind == .message and !accepted and std.mem.eql(u8, path, ".input")) return InputWire;
             if (std.mem.eql(u8, path, ".execution.reason")) return wire_field.JsonString(64);
             inline for (.{ ".answer.status", ".queue.status", ".execution.status", ".completion.status" }) |field| {
                 if (std.mem.eql(u8, path, field)) return wire_field.JsonString(16);
@@ -216,7 +299,7 @@ fn require(partial: anytype, comptime path: []const u8) Error!void {
     if (!partial.has(path)) return error.InvalidResponse;
 }
 
-fn decide(comptime kind: CommandKind, comptime accepted: bool, comptime conflict: bool, partial: anytype, target: Target) Error!Answer {
+fn decide(comptime protocol: type, comptime kind: CommandKind, comptime accepted: bool, comptime conflict: bool, partial: anytype, target: Target) Error!Answer {
     const wire = partial.value;
     const answer = wire.answer;
     if (!accepted) {
@@ -235,17 +318,18 @@ fn decide(comptime kind: CommandKind, comptime accepted: bool, comptime conflict
         try require(partial, ".completion");
         if (!accepted and !wire.completion.status.eql("unavailable")) return error.InvalidResponse;
     }
-    var confirmed_input: ?InputReference = null;
-    if (comptime kind == .message and !conflict) {
+    const confirmed_input: ?Answer.Input = if (comptime kind == .message and !conflict) input: {
         try require(partial, ".input");
-        const input = wire.input;
-        var digest: [32]u8 = undefined;
-        if (!input.type.eql(@tagName(target.message.form)) or input.sha256.slice().len != 64) return error.InvalidResponse;
-        _ = std.fmt.hexToBytes(&digest, input.sha256.slice()) catch return error.InvalidResponse;
-        const bytes = try decimalId(input.bytes, true);
-        confirmed_input = .{ .form = target.message.form, .content = .{ .bytes = bytes, .digest = digest } };
-        if (bytes != target.message.bytes or !std.mem.eql(u8, &digest, &target.message.digest)) return error.RequestBindingMismatch;
-    }
+        if (comptime accepted) {
+            const input = wire.input.contentValue(protocol.max_sqlite_content_bytes) catch return error.InvalidResponse;
+            const identity = input.identity();
+            try matchInput(target.message, std.meta.activeTag(input), identity.length, identity.digest);
+            break :input .{ .accepted = input };
+        }
+        const input = try wire.input.receipt();
+        try matchInput(target.message, input.form, input.content.bytes, input.content.digest);
+        break :input .{ .rejected = input };
+    } else null;
     const value: @FieldType(@FieldType(Answer, "result"), "accepted") = if (!accepted) undefined else switch (kind) {
         .configure => blk: {
             try require(partial, ".answer.revision");
@@ -262,6 +346,7 @@ fn decide(comptime kind: CommandKind, comptime accepted: bool, comptime conflict
             const admission = try decimalId(answer.admission, false);
             try require(partial, ".queue");
             if (!wire.queue.status.eql("queued") or try decimalId(wire.queue.admission, false) != admission) return error.InvalidResponse;
+            if (!matchesMessageAdmission(confirmed_input.?.accepted, admission)) return error.InvalidResponse;
             break :blk .{ .message = .{ .admission = admission } };
         },
         .session_stop => blk: {
@@ -299,6 +384,11 @@ fn decide(comptime kind: CommandKind, comptime accepted: bool, comptime conflict
         .replayed = answer.replayed,
         .result = if (accepted) .{ .accepted = value } else if (conflict) .conflict else .{ .rejected = answer.code.value },
     };
+}
+
+fn matchInput(target: @FieldType(Target, "message"), form: InputForm, bytes: u64, digest: [32]u8) Error!void {
+    if (form != target.form) return error.InvalidResponse;
+    if (bytes != target.bytes or !std.mem.eql(u8, &digest, &target.digest)) return error.RequestBindingMismatch;
 }
 
 pub fn validateInvocationDiagnostic(current_version: []const u8, status: u16, version: []const u8, diagnostic: InvocationDiagnostic) error{InvalidResponse}!void {
@@ -597,32 +687,60 @@ test "mutation rejection preserves an empty original creation target" {
     try std.testing.expectEqualStrings("invalid_configuration", answer.result.rejected.slice());
 }
 
-test "ADM-23 multipart mutation reply binds form and manifest identity" {
-    const current = @import("protocol.zig").wire_version;
+test "ADM-23 Message mutation replies bind capture identity and accepted parts ownership" {
+    const protocol = @import("protocol.zig");
+    const command_reply = @import("command_reply.zig");
     const digest: [32]u8 = @splat(7);
+    const prefix = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"message_reply\",\"answer\":";
+    const accepted = "{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"admission\":\"7\"}";
+    const rejected = "{\"status\":\"rejected\",\"replayed\":false,\"session\":\"k7m2qx\",\"code\":\"invalid_input\"}";
+    const execution = ",\"execution\":{\"status\":\"queued\"}}";
+    const queue = ",\"queue\":{\"status\":\"queued\",\"admission\":\"7\"}";
+    const owner = ",\"owner\":{\"message\":\"7\"}";
     var body: [1024]u8 = undefined;
-    inline for (.{ .text, .parts }) |target_form| {
-        const target: Target = .{ .message = .{ .bytes = 108, .digest = digest, .form = target_form } };
-        inline for (.{ .text, .parts }) |wire_form| {
-            const wire = try std.fmt.bufPrint(&body, "{{\"version\":\"{s}\",\"type\":\"message_reply\",\"answer\":{{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"admission\":\"7\"}},\"input\":{{\"type\":\"{s}\",\"bytes\":\"108\",\"sha256\":\"{s}\"}},\"queue\":{{\"status\":\"queued\",\"admission\":\"7\"}},\"execution\":{{\"status\":\"queued\"}}}}", .{ current, @tagName(wire_form), std.fmt.bytesToHex(digest, .lower) });
-            const result = decodeForTest(@import("protocol.zig"), @import("command_reply.zig"), 200, wire, "k7m2qx", target).answer;
-            if (target_form == wire_form) {
-                const answer = try result;
-                try std.testing.expectEqual(@as(u64, 7), answer.result.accepted.message.admission);
-                try std.testing.expectEqual(target_form, answer.input.?.form);
-                var output: [256]u8 = undefined;
-                var writer = std.Io.Writer.fixed(&output);
-                try answer.input.?.writeJson(&writer);
-                const expected = try std.fmt.allocPrint(std.testing.allocator, "{{\"type\":\"{s}\",\"bytes\":\"108\",\"sha256\":\"{s}\"}}", .{ @tagName(target_form), std.fmt.bytesToHex(digest, .lower) });
-                defer std.testing.allocator.free(expected);
-                try std.testing.expectEqualStrings(expected, writer.buffered());
-                var changed = target;
-                changed.message.digest[0] ^= 1;
-                try std.testing.expectError(error.RequestBindingMismatch, decodeForTest(@import("protocol.zig"), @import("command_reply.zig"), 200, wire, "k7m2qx", changed).answer);
-                changed = target;
-                changed.message.bytes += 1;
-                try std.testing.expectError(error.RequestBindingMismatch, decodeForTest(@import("protocol.zig"), @import("command_reply.zig"), 200, wire, "k7m2qx", changed).answer);
-            } else try std.testing.expectError(error.InvalidResponse, result);
-        }
+    for ([_]InputForm{ .text, .parts }) |form| {
+        const target: Target = .{ .message = .{ .bytes = 108, .digest = digest, .form = form } };
+        const receipt = try std.fmt.bufPrint(&body, "{s}{s},\"input\":{{\"type\":\"{t}\",\"bytes\":\"108\",\"sha256\":\"{s}\"}}{s}", .{ prefix, rejected, form, std.fmt.bytesToHex(digest, .lower), execution });
+        const rejection = try decodeForTest(protocol, command_reply, 200, receipt, "k7m2qx", target).answer;
+        try std.testing.expectEqualDeep(InputReference{ .form = form, .content = .{ .bytes = 108, .digest = digest } }, rejection.input.?.rejected);
+        const wire = try std.fmt.bufPrint(&body, "{s}{s},\"input\":{{\"type\":\"{t}\",\"bytes\":\"108\",\"sha256\":\"{s}\"{s}}}{s}{s}", .{ prefix, accepted, form, std.fmt.bytesToHex(digest, .lower), if (form == .parts) owner else "", queue, execution });
+        const answer = try decodeForTest(protocol, command_reply, 200, wire, "k7m2qx", target).answer;
+        try std.testing.expectEqual(@as(u64, 7), answer.result.accepted.message.admission);
+        const input = answer.input.?.accepted;
+        try std.testing.expectEqual(form, std.meta.activeTag(input));
+        try std.testing.expectEqualDeep(content_value.Reference{ .length = 108, .digest = digest }, input.identity());
+        if (form == .parts) try std.testing.expectEqualDeep(content_value.Owner{ .message = 7 }, input.parts.owner);
+        var changed = target;
+        changed.message.digest[0] ^= 1;
+        try std.testing.expectError(error.RequestBindingMismatch, decodeForTest(protocol, command_reply, 200, wire, "k7m2qx", changed).answer);
+        changed = target;
+        changed.message.bytes += 1;
+        try std.testing.expectError(error.RequestBindingMismatch, decodeForTest(protocol, command_reply, 200, wire, "k7m2qx", changed).answer);
+        changed = target;
+        changed.message.form = if (form == .parts) .text else .parts;
+        try std.testing.expectError(error.InvalidResponse, decodeForTest(protocol, command_reply, 200, wire, "k7m2qx", changed).answer);
+    }
+    const parts: Target = .{ .message = .{ .bytes = 108, .digest = digest, .form = .parts } };
+    const text: Target = .{ .message = .{ .bytes = 108, .digest = digest } };
+    for ([_][]const u8{
+        "",
+        ",\"owner\":null",
+        ",\"owner\":{}",
+        ",\"owner\":{\"message\":null}",
+        ",\"owner\":{\"message\":\"7\",\"action\":null}",
+        ",\"owner\":{\"message\":\"7\",\"extra\":1}",
+        ",\"owner\":{\"message\":\"7\",\"messa\\u0067e\":\"7\"}",
+        owner ++ owner,
+        ",\"owner\":{\"action\":\"7\"}",
+        ",\"owner\":{\"message\":\"8\"}",
+    }) |invalid_owner| {
+        const wire = try std.fmt.bufPrint(&body, "{s}{s},\"input\":{{\"type\":\"parts\",\"bytes\":\"108\",\"sha256\":\"{s}\"{s}}}{s}{s}", .{ prefix, accepted, std.fmt.bytesToHex(digest, .lower), invalid_owner, queue, execution });
+        try std.testing.expectError(error.InvalidResponse, decodeForTest(protocol, command_reply, 200, wire, "k7m2qx", parts).answer);
+    }
+    for ([_][]const u8{ owner, ",\"owner\":null" }) |invalid_owner| {
+        const rejected_wire = try std.fmt.bufPrint(&body, "{s}{s},\"input\":{{\"type\":\"parts\",\"bytes\":\"108\",\"sha256\":\"{s}\"{s}}}{s}", .{ prefix, rejected, std.fmt.bytesToHex(digest, .lower), invalid_owner, execution });
+        try std.testing.expectError(error.InvalidResponse, decodeForTest(protocol, command_reply, 200, rejected_wire, "k7m2qx", parts).answer);
+        const text_wire = try std.fmt.bufPrint(&body, "{s}{s},\"input\":{{\"type\":\"text\",\"bytes\":\"108\",\"sha256\":\"{s}\"{s}}}{s}{s}", .{ prefix, accepted, std.fmt.bytesToHex(digest, .lower), invalid_owner, queue, execution });
+        try std.testing.expectError(error.InvalidResponse, decodeForTest(protocol, command_reply, 200, text_wire, "k7m2qx", text).answer);
     }
 }

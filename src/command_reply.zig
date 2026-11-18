@@ -9,6 +9,7 @@ const tool_presentation = @import("tool_presentation.zig");
 const session_id = @import("session_id.zig");
 const Bounded = @import("bounded.zig").Bounded;
 const cli_value = @import("cli_value.zig");
+const content_value = @import("content_value.zig");
 const mutation_answer = @import("mutation_answer.zig");
 const session_work = @import("session_work.zig");
 const change_ring = @import("change_ring.zig");
@@ -38,10 +39,9 @@ pub const ConfigureReply = union(enum) {
 };
 
 pub const AcceptedMessage = struct {
-    form: @import("input_parts.zig").Form = .bytes,
     replayed: bool,
     admission_id: u64,
-    content: ContentReference,
+    content: content_value.Value,
     session: Bounded(session_id.max_reference_bytes),
 };
 
@@ -159,7 +159,7 @@ pub const PublicConversationItem = struct {
     position: u64,
     ordinal: u64,
     kind: conversation_read.ConversationItemKind,
-    content: @import("content_value.zig").Value,
+    content: content_value.Value,
     presentation: ?tool_presentation.ToolPresentation = null,
     admitted_at: ?u64 = null,
     sender: ?protocol.NamedPeer = null,
@@ -175,8 +175,7 @@ pub const PublicConversationPage = struct {
 };
 
 pub const MessageObservation = struct {
-    form: @import("input_parts.zig").Form = .bytes,
-    content: ContentReference,
+    content: content_value.Value,
     queue: ?AcceptedMessageQueue = null,
     admitted_at: u64 = 0,
     work: ?session_work.Work = null,

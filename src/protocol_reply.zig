@@ -1776,7 +1776,7 @@ pub const CommandObservation = struct {
     code: ?protocol.Bounded(protocol.max_code_bytes) = null,
     revision: ?u64 = null,
     created: ?bool = null,
-    input: ?InputReference = null,
+    input: ?content_value.Value = null,
     state: ?protocol.MessageRequestState = null,
     queue: ?struct { admission: u64, admitted_at: u64 } = null,
     binding: ?struct { turn: u64, operation: u64, attempt: u64 } = null,
@@ -1794,7 +1794,6 @@ pub const CommandObservation = struct {
     resolution_position: ?u64 = null,
 
     pub const ContentReference = mutation_answer.ContentReference;
-    pub const InputReference = mutation_answer.InputReference;
 
     pub const Recovery = struct {
         unknown_outcomes: [protocol.message_recovery_limit]protocol.MessageUnknownOutcome = undefined,
@@ -1827,7 +1826,7 @@ pub const CommandObservation = struct {
         if (self.revision) |revision| try writer.print(",\"revision\":\"{d}\",\"created\":{}", .{ revision, self.created.? });
         if (self.input) |input| {
             try writer.writeAll(",\"input\":");
-            try input.writeJson(writer);
+            try (protocol.MessageInputJson{ .value = input }).writeJson(writer);
         }
         if (self.queue) |queue| try writer.print(",\"queue\":{{\"admission\":\"{d}\",\"admitted_at\":\"{d}\"}}", .{ queue.admission, queue.admitted_at });
         if (self.binding) |binding| try writer.print(",\"binding\":{{\"turn\":\"{d}\",\"operation\":\"{d}\",\"attempt\":\"{d}\"}}", .{ binding.turn, binding.operation, binding.attempt });
@@ -1839,7 +1838,7 @@ pub const CommandObservation = struct {
             }
             if (result.text) |text| {
                 try writer.writeAll(",\"text\":");
-                try (InputReference{ .form = .text, .content = text }).writeJson(writer);
+                try protocol.ContentValueJson.text(.{ .length = text.bytes, .digest = text.digest }).writeJson(writer);
             }
             try writer.writeByte('}');
         }
@@ -1900,6 +1899,7 @@ pub const CommandObservation = struct {
         const universe = comptime shapes ++ .{ protocol.error_reply, protocol.session_pin_reply.accepted };
         const JsonTypes = struct {
             pub fn Type(comptime T: type) type {
+                if (T == protocol.MessageInputJson) return mutation_answer.InputWire;
                 if (T == protocol.WorkStateJson) return JsonWorkState;
                 if (T == protocol.WorkAttentionJson) return JsonWorkAttention;
                 if (T == protocol.WorkActionsJson) return JsonWorkActions;
@@ -1915,7 +1915,7 @@ pub const CommandObservation = struct {
                 fixed.reset();
                 const Decoder = @import("command_reply.zig").DecoderWithJson(shape, universe, JsonTypes);
                 const wire = Decoder.parse(fixed.allocator(), reply.body) catch break :candidate;
-                return decodeObservation(wire, key, comptime observationShapeHasParts(shape));
+                return decodeObservation(wire, key);
             }
         }
         return error.InvalidObservation;
@@ -1927,16 +1927,7 @@ pub const CommandObservation = struct {
         more: bool,
     };
 
-    fn observationShapeHasParts(comptime shape: anytype) bool {
-        inline for (shape) |piece| {
-            if (comptime @typeInfo(@TypeOf(piece)) == .pointer) {
-                if (std.mem.eql(u8, piece, protocol.parts_reference_shape[0])) return true;
-            }
-        }
-        return false;
-    }
-
-    fn decodeObservation(wire: anytype, key: []const u8, comptime parts: bool) !ObservationReply {
+    fn decodeObservation(wire: anytype, key: []const u8) !ObservationReply {
         if (!wire.key.eql(key)) return error.RequestBindingMismatch;
         const since: ?SessionToken = blk: {
             if (comptime @TypeOf(wire.since) == ?void) break :blk null;
@@ -1957,7 +1948,7 @@ pub const CommandObservation = struct {
             @field(observed, name) = @field(facts, name);
         };
         if (comptime @hasField(Facts, "revision")) observed.revision = try decimalId(facts.revision, false);
-        if (comptime @hasField(Facts, "input")) observed.input = .{ .form = if (parts) .parts else .text, .content = try decodeReference(facts.input) };
+        if (comptime @hasField(Facts, "input")) observed.input = facts.input.contentValue(protocol.max_sqlite_content_bytes) catch return error.InvalidObservation;
         if (comptime @hasField(Facts, "state")) observed.state = std.meta.stringToEnum(protocol.MessageRequestState, facts.state.slice()) orelse return error.InvalidObservation;
         if (comptime @hasField(Facts, "queue")) observed.queue = .{ .admission = try decimalId(facts.queue.admission, false), .admitted_at = try decimalId(facts.queue.admitted_at, false) };
         if (comptime @hasField(Facts, "binding")) observed.binding = .{ .turn = try decimalId(facts.binding.turn, false), .operation = try decimalId(facts.binding.operation, false), .attempt = try decimalId(facts.binding.attempt, true) };
@@ -2018,10 +2009,12 @@ pub const CommandObservation = struct {
         if (kind != .message) return;
         const state = self.state orelse return error.InvalidObservation;
         if (!accepted) {
-            if (state != .rejected or self.queue != null or self.binding != null or self.result != null or self.work != null or self.recovery != null) return error.InvalidObservation;
+            if (state != .rejected or self.input != null or self.queue != null or self.binding != null or self.result != null or self.work != null or self.recovery != null) return error.InvalidObservation;
             return;
         }
-        if (self.input == null or self.queue == null or state == .rejected) return error.InvalidObservation;
+        const input = self.input orelse return error.InvalidObservation;
+        const queue = self.queue orelse return error.InvalidObservation;
+        if (state == .rejected or !mutation_answer.matchesMessageAdmission(input, queue.admission)) return error.InvalidObservation;
         if (self.result) |result| {
             if (self.work != null or !std.mem.eql(u8, @tagName(state), @tagName(result.status))) return error.InvalidObservation;
             if (result.status != .cancelled and self.binding == null) return error.InvalidObservation;
@@ -2111,28 +2104,13 @@ pub const JsonFirstMessage = struct {
     }
 };
 
-/// The one reader of a `ContentValue` member: `{"type":"text","bytes","sha256"}`, or
-/// `{"type":"parts","bytes","sha256","owner":{"message"|"action":ID}}`.
+/// The one reader of a `ContentValue` member.
 pub const JsonContentValue = struct {
     value: content_value.Value,
 
     pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
-        const Owner = struct { message: ?JsonString(20) = null, action: ?JsonString(20) = null };
-        const Wire = struct { type: JsonEnum(std.meta.Tag(content_value.Value)), bytes: JsonString(20), sha256: JsonString(64), owner: ?Owner = null };
-        const wire = try std.json.innerParse(Wire, allocator, source, options);
-        var reference: content_value.Reference = .{ .length = try number(wire.bytes, true), .digest = undefined };
-        const hex = wire.sha256.slice();
-        if (reference.length > protocol.max_sqlite_content_bytes or hex.len != 64) return error.InvalidCharacter;
-        for (hex) |byte| if (!std.ascii.isDigit(byte) and (byte < 'a' or byte > 'f')) return error.InvalidCharacter;
-        _ = std.fmt.hexToBytes(&reference.digest, hex) catch return error.InvalidCharacter;
-        return .{ .value = switch (wire.type.value) {
-            .text => if (wire.owner != null) return error.InvalidCharacter else .{ .text = reference },
-            .parts => .{ .parts = .{ .identity = reference, .owner = owner: {
-                const owner = wire.owner orelse return error.InvalidCharacter;
-                if ((owner.message == null) == (owner.action == null)) return error.InvalidCharacter;
-                break :owner if (owner.message) |id| .{ .message = try number(id, false) } else .{ .action = try number(owner.action.?, false) };
-            } } },
-        } };
+        const wire = try mutation_answer.InputWire.jsonParse(allocator, source, options);
+        return .{ .value = try wire.contentValue(protocol.max_sqlite_content_bytes) };
     }
 
     /// Model text (an answer, an outcome, a call field) is never parts.
@@ -2148,12 +2126,6 @@ pub const JsonContentValue = struct {
         var out = std.Io.Writer.fixed(&buffer);
         (protocol.ContentValueJson{ .value = self.value }).writeJson(&out) catch unreachable;
         try jw.print("{s}", .{out.buffered()});
-    }
-
-    fn number(digits: JsonString(20), zero: bool) error{InvalidCharacter}!u64 {
-        const value = decimalId(digits, zero) catch return error.InvalidCharacter;
-        if (value > std.math.maxInt(i64)) return error.InvalidCharacter;
-        return value;
     }
 };
 
@@ -3508,6 +3480,7 @@ fn listValidationCase2() !void {
 }
 
 const testing_observation_input = ",\"input\":{\"type\":\"text\",\"bytes\":\"11\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"}";
+const testing_observation_parts_head = ",\"input\":{\"type\":\"parts\",\"bytes\":\"11\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"";
 const testing_observation_queue = ",\"queue\":{\"admission\":\"23\",\"admitted_at\":\"1762329000\"}";
 const testing_observation_work = ",\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"1762329010\"},\"first_action\":null,\"attention\":null,\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null}}";
 const testing_observation_binding = ",\"binding\":{\"turn\":\"37\",\"operation\":\"41\",\"attempt\":\"0\"}";
@@ -3528,11 +3501,15 @@ test "ADM-27 keyed observation preserves input identity across states" {
         .{ "cancelled", "", ",\"result\":{\"status\":\"cancelled\",\"code\":\"cancelled\"}" },
     }) |case| {
         inline for (.{ "text", "parts" }) |form| {
-            const input = ",\"input\":{\"type\":\"" ++ form ++ "\",\"bytes\":\"11\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"}";
+            const parts = comptime std.mem.eql(u8, form, "parts");
+            const input = if (parts) testing_observation_parts_head ++ ",\"owner\":{\"message\":\"23\"}}" else testing_observation_input;
             const facts = testing_observation_message ++ ",\"state\":\"" ++ case[0] ++ "\"" ++ input ++ testing_observation_queue ++ case[1] ++ case[2] ++ "}";
             const observed = try (try CommandObservation.parse(.{ .status = 200, .body = testing_observation_prefix ++ facts ++ "}" }, "k")).forMessage(&address);
             try std.testing.expectEqual(.accepted, observed.status);
-            try std.testing.expectEqualStrings(form, @tagName(observed.input.?.form));
+            const value = observed.input.?;
+            try std.testing.expectEqualStrings(form, @tagName(value));
+            try std.testing.expectEqualDeep(content_value.Reference{ .length = 11, .digest = @splat(0xaa) }, value.identity());
+            if (parts) try std.testing.expectEqualDeep(content_value.Owner{ .message = 23 }, value.parts.owner);
             try std.testing.expectEqualStrings(case[0], @tagName(observed.state.?));
             try std.testing.expectEqual(@as(u64, 23), observed.queue.?.admission);
             try std.testing.expectEqual(@as(u64, 1762329000), observed.queue.?.admitted_at);
@@ -3547,14 +3524,42 @@ test "ADM-27 keyed observation preserves input identity across states" {
             try std.testing.expectEqualStrings(facts, writer.buffered());
         }
     }
-    inline for (.{ "text", "parts" }) |form| {
-        const facts = "{\"status\":\"rejected\",\"kind\":\"message\",\"target\":\"k7m2qx\",\"code\":\"invalid_input\",\"state\":\"rejected\",\"input\":{\"type\":\"" ++ form ++ "\",\"bytes\":\"11\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"}}";
-        const observed = try CommandObservation.parse(.{ .status = 200, .body = testing_observation_prefix ++ facts ++ "}" }, "k");
-        try std.testing.expectEqualStrings(form, @tagName(observed.input.?.form));
-        var output: [protocol.command_observation_reply.max_bytes]u8 = undefined;
-        var writer = std.Io.Writer.fixed(&output);
-        try observed.writeJson(&writer);
-        try std.testing.expectEqualStrings(facts, writer.buffered());
+    const rejection = "{\"status\":\"rejected\",\"kind\":\"message\",\"target\":\"k7m2qx\",\"code\":\"invalid_input\",\"state\":\"rejected\"";
+    const observed = try CommandObservation.parse(.{ .status = 200, .body = testing_observation_prefix ++ rejection ++ "}}" }, "k");
+    try std.testing.expectEqual(.rejected, observed.status);
+    try std.testing.expect(observed.input == null);
+    var output: [protocol.command_observation_reply.max_bytes]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&output);
+    try observed.writeJson(&writer);
+    try std.testing.expectEqualStrings(rejection ++ "}", writer.buffered());
+    inline for (.{ testing_observation_input, testing_observation_parts_head ++ ",\"owner\":{\"message\":\"23\"}}", ",\"input\":null" }) |input| {
+        const body = testing_observation_prefix ++ rejection ++ input ++ "}}";
+        try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = body }, "k"));
+    }
+}
+
+test "ADM-27 keyed observation rejects invalid Message input owners" {
+    const prefix = testing_observation_prefix ++ testing_observation_message ++ ",\"state\":\"queued\"";
+    const suffix = "}" ++ testing_observation_queue ++ testing_observation_work ++ "}}";
+    const owner = ",\"owner\":{\"message\":\"23\"}";
+    inline for (.{
+        "",
+        ",\"owner\":null",
+        ",\"owner\":{}",
+        ",\"owner\":{\"message\":null}",
+        ",\"owner\":{\"message\":\"23\",\"action\":null}",
+        ",\"owner\":{\"message\":\"23\",\"extra\":true}",
+        ",\"owner\":{\"message\":\"23\",\"messa\\u0067e\":\"23\"}",
+        owner ++ owner,
+        ",\"owner\":{\"action\":\"23\"}",
+        ",\"owner\":{\"message\":\"22\"}",
+    }) |invalid_owner| {
+        const body = prefix ++ testing_observation_parts_head ++ invalid_owner ++ suffix;
+        try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = body }, "k"));
+    }
+    inline for (.{ owner, ",\"owner\":null" }) |invalid_owner| {
+        const body = prefix ++ testing_observation_input[0 .. testing_observation_input.len - 1] ++ invalid_owner ++ suffix;
+        try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = body }, "k"));
     }
 }
 
@@ -3606,9 +3611,7 @@ fn expectObservationFieldPresence(original: *const CommandObservation) !void {
             try std.json.Stringify.value(facts.value, .{}, &writer);
             try writer.writeByte('}');
             const parsed = CommandObservation.parse(.{ .status = 200, .body = writer.buffered() }, "k");
-            if (std.mem.eql(u8, name, "input") and original.kind == .message and original.status == .rejected) {
-                _ = try parsed;
-            } else try std.testing.expectError(error.InvalidObservation, parsed);
+            try std.testing.expectError(error.InvalidObservation, parsed);
         }
     }
 }

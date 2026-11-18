@@ -6,7 +6,7 @@
 
 | id | level | invariant | seam that observes it | owner test | source |
 | --- | --- | --- | --- | --- | --- |
-| CLI-19 | Product | Request inspect and wait report the admitted multipart input identity unchanged. | CLI admission and request observation | `cli_image_integration.py:cli_observation` | docs/contracts/inspection.md |
+| CLI-19 | Product | Request inspect and wait report the admitted multipart input identity and Message owner unchanged. | CLI admission and request observation | `cli_image_integration.py:cli_observation` | docs/contracts/inspection.md |
 | CLI-21 | Product | Native Message input refuses ambiguous or empty compositions and preserves scalar stdin bytes and implicit stdin order. | CLI and fake provider | `cli_image_integration.py:cli_rules` | docs/contracts/cli.md |
 | CLI-20 | Surface | Message operand flags retain their order and unknown or incomplete flags are refused. | CLI grammar parser | `CLI-20 preserve interleaving for start and send` | docs/contracts/cli.md |
 | CLI-1 | Surface | Help succeeds without Host, credentials, terminal or state changes for every documented command scope. | CLI parse/help output | `help_is_independent`: table root, resource and operation help with absent prerequisites; check output, status and untouched temporary state. | docs/contracts/cli.md:97 |
