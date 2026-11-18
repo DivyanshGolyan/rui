@@ -194,6 +194,7 @@ pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pin
     const test_step = b.step(root(.filtered).target, "Run unit, Store, and protocol tests");
     // Compile the same owner with the product option off as a separate root.
     const pause_product = b.addTest(.{
+        .use_llvm = if (target.result.cpu.arch == .x86_64) false else null,
         .name = "pause-product-compile-out",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/testing/pause.zig"),
@@ -302,6 +303,7 @@ pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pin
     });
     _ = product.useOs(b, signal_stack_probe_root);
     const signal_stack_probe = ci.run(b.addExecutable(.{
+        .use_llvm = if (target.result.cpu.arch == .x86_64) false else null,
         .name = "rui-signal-stack-probe",
         .root_module = signal_stack_probe_root,
     }));
