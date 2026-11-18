@@ -2307,19 +2307,21 @@ test "SUI-40 pinned Session separator is ground and inert" {
         const new_row: u16 = for (0..30) |row| {
             if (std.mem.indexOf(u8, try shown.line(@intCast(row)), "New chat") != null) break @intCast(row);
         } else return error.NewSessionNotDrawn;
-        const separator = pinned_row + 1;
         try std.testing.expectEqual(selection == .new_session, std.meta.eql(highlight, shown.screen.readCell(1, new_row).?.style.bg));
-        for (0..30) |col| {
-            const cell = shown.screen.readCell(@intCast(col), separator).?;
-            try std.testing.expect(std.mem.trim(u8, cell.char.grapheme, " ").len == 0);
-            try std.testing.expectEqual(ground, cell.style.bg);
+        try std.testing.expect((try shown.line(pinned_row + 2)).len != 0);
+        for ([_]u16{ new_row + 2, pinned_row + 1 }) |row| {
+            for (0..width) |col| {
+                const cell = shown.screen.readCell(@intCast(col), row).?;
+                try std.testing.expect(std.mem.trim(u8, cell.char.grapheme, " ").len == 0);
+                try std.testing.expectEqual(ground, cell.style.bg);
+            }
+            const opens = Seen.now.conversations;
+            const pins = Seen.now.pins;
+            try std.testing.expect(try rig.click(4, row, width, 30) == null);
+            try std.testing.expectEqual(selection, overview.state.selected);
+            try std.testing.expectEqual(opens, Seen.now.conversations);
+            try std.testing.expectEqual(pins, Seen.now.pins);
         }
-        const opens = Seen.now.conversations;
-        const pins = Seen.now.pins;
-        try std.testing.expect(try rig.click(4, separator, width, 30) == null);
-        try std.testing.expectEqual(selection, overview.state.selected);
-        try std.testing.expectEqual(opens, Seen.now.conversations);
-        try std.testing.expectEqual(pins, Seen.now.pins);
     };
 }
 
@@ -4284,7 +4286,7 @@ test "Footer notices fit or truncate on the right without adding rows; persisten
     }
 }
 
-test "Settings Keys opens from the overview and Esc returns to settings" {
+fn sui4NestedKeys() !void {
     for ([_]u16{ 46, 140 }) |width| {
         const rig = try openListed();
         defer rig.close();
@@ -4898,11 +4900,11 @@ test "SUI-41 sidebar stays live and wheels route to their pane" {
     try std.testing.expectEqualStrings("b4n8wd", &overview.state.selected.session);
     const before = overview.app_sessions.list.scroll;
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-    try app_events.mouse(&ctx, frame, .{ .col = 4, .row = 3, .button = .wheel_down, .type = .press, .mods = .{} });
+    try app_events.mouse(&ctx, frame, .{ .col = 4, .row = 4, .button = .wheel_down, .type = .press, .mods = .{} });
     try std.testing.expectEqual(@as(usize, 0), peer.wheels);
     try std.testing.expect(!std.meta.eql(before, overview.app_sessions.list.scroll));
     const scrolled = overview.app_sessions.list.scroll;
-    try app_events.mouse(&ctx, frame, .{ .col = 45, .row = 2, .button = .wheel_down, .type = .press, .mods = .{} });
+    try app_events.mouse(&ctx, frame, .{ .col = 45, .row = 3, .button = .wheel_down, .type = .press, .mods = .{} });
     try std.testing.expectEqual(@as(usize, 1), peer.wheels);
     try std.testing.expectEqualDeep(scrolled, overview.app_sessions.list.scroll);
     Seen.now.listed = 2;
@@ -5302,7 +5304,7 @@ test "App root navigation shows and focuses the main pane before every Session s
     }
 }
 
-test "App settings Enter reaches Root at both widths with and without a retained Session" {
+fn sui4SettingsEntry() !void {
     const Settings = struct {
         var dir: std.Io.Dir = undefined;
         var files: u8 = 0;
@@ -5347,6 +5349,7 @@ test "App settings Enter reaches Root at both widths with and without a retained
                 _ = overview.app_session.?.frontend.?.input.append("retained draft");
             }
             const previous = overview.root.session;
+            const previous_selection = overview.state.selected;
             const frontend = if (overview.app_session) |left| left.frontend else null;
             var ctx = rig.context();
             defer ctx.cmds.deinit(std.testing.allocator);
@@ -5363,7 +5366,11 @@ test "App settings Enter reaches Root at both widths with and without a retained
                 try app_events.send(&ctx, "\r", overview.root.widget(), overview.widget());
             }
             try std.testing.expect(overview.root.input.layer.settingsOpen());
-            try std.testing.expect(overview.state.selected == .settings);
+            if (retained) {
+                try std.testing.expectEqual(previous_selection, overview.state.selected);
+            } else {
+                try std.testing.expect(overview.state.selected == .settings);
+            }
             try std.testing.expect(!ctx.quit);
             try std.testing.expect(ctx.redraw);
             const focus = ctx.cmds.items[ctx.cmds.items.len - 1].request_focus;
@@ -5984,7 +5991,7 @@ test "bare CSI and SS3 arrows move between view tabs through the existing key ta
     };
 }
 
-test "App settings Model keeps every named app binding live while filter text stays local" {
+fn sui4ModelKeys() !void {
     for (std.enums.values(keymap.Key)) |key| for (key_encodings.get(key)) |bytes| {
         if (std.mem.eql(u8, bytes, "\x1b")) continue;
         errdefer std.debug.print("settings Model key={s} bytes={x}\n", .{ @tagName(key), bytes });
@@ -6007,7 +6014,7 @@ test "App settings Model keeps every named app binding live while filter text st
     };
 }
 
-test "App settings Model filters live choices and saves the next Session at both widths" {
+fn sui4ModelFilter() !void {
     for ([_]u16{ 140, 46 }) |width| for ([_][]const u8{ "codex", "openai" }) |provider| for ([_][]const u8{ "gpt-6-luna", "future-chat" }) |id| {
         errdefer std.debug.print("Model width={d} provider={s} id={s}\n", .{ width, provider, id });
         var tmp = std.testing.tmpDir(.{});
@@ -6209,7 +6216,7 @@ test "chat info Archive backend forwards exact core ledger admission through the
     };
 }
 
-test "Overview mouse Settings hover persists across frames and never changes selection or focus" {
+fn sui4Hover() !void {
     const rig = try openListed();
     defer rig.close();
     var plain = try rig.shown(80, 24);
@@ -6353,6 +6360,9 @@ test "Overview pinned New Session hover survives unchanged frames without select
         var ctx = rig.context();
         defer ctx.cmds.deinit(std.testing.allocator);
         const pinned = rig.overview.app_new_session.widget();
+        const new_row: u16 = for (0..30) |row| {
+            if (std.mem.indexOf(u8, try plain.line(@intCast(row)), "New chat") != null) break @intCast(row);
+        } else return error.NewSessionNotDrawn;
         const motion: vxfw.Event = .{ .mouse = .{ .col = 4, .row = 0, .button = .none, .type = .motion, .mods = .{} } };
         try pinned.handleEvent(&ctx, .mouse_enter);
         try pinned.handleEvent(&ctx, motion);
@@ -6360,8 +6370,8 @@ test "Overview pinned New Session hover survives unchanged frames without select
             var hovered = try rig.shown(width, 30);
             defer hovered.deinit();
             const style = @import("widget_style.zig").of(rig.overview.caps, .{ .background = .hover });
-            try std.testing.expectEqual(style.bg, hovered.screen.readCell(4, 0).?.style.bg);
-            try std.testing.expectEqual(style.reverse, hovered.screen.readCell(4, 0).?.style.reverse);
+            try std.testing.expectEqual(style.bg, hovered.screen.readCell(4, new_row).?.style.bg);
+            try std.testing.expectEqual(style.reverse, hovered.screen.readCell(4, new_row).?.style.reverse);
             try std.testing.expect(rig.overview.app_new_session.row.inner.hover.pointing);
             try std.testing.expectEqual(selected, rig.overview.state.selected);
             for (ctx.cmds.items) |cmd| try std.testing.expect(cmd != .request_focus);
@@ -6374,7 +6384,7 @@ test "Overview pinned New Session hover survives unchanged frames without select
         try pinned.handleEvent(&ctx, .mouse_leave);
         var left = try rig.shown(width, 30);
         defer left.deinit();
-        try std.testing.expectEqual(plain.screen.readCell(4, 0).?.style, left.screen.readCell(4, 0).?.style);
+        try std.testing.expectEqual(plain.screen.readCell(4, new_row).?.style, left.screen.readCell(4, new_row).?.style);
         try std.testing.expect(!rig.overview.app_new_session.row.inner.hover.pointing);
     }
 }
@@ -7404,7 +7414,7 @@ test "empty New Session owner upgrade handoff preserves model draft and caret th
     try std.testing.expectEqual(@as(usize, 1), EmptySessionOwner.count);
 }
 
-test "Overview forwards captured covered pane and paste without rereading newer Root state" {
+fn sui4CapturedPaste() !void {
     const rig = try openOverview();
     defer rig.close();
     const overview = rig.overview;
@@ -7654,7 +7664,7 @@ test "creation preference read failure is retained through repair and ordinary r
     try std.testing.expectError(error.UnsupportedPreferencesVersion, overview.jobs[0].create.settings);
     try File.write(tmp.dir, File.valid);
     try std.testing.expect(try rig.press("\r") == null);
-    try std.testing.expect(try rig.click(3, 0, 140, 24) == null);
+    try std.testing.expect(try rig.clickNewSession(140, 24) == null);
     try std.testing.expectEqual(@as(usize, 1), overview.job_count);
     try std.testing.expectError(error.UnsupportedPreferencesVersion, overview.jobs[0].create.settings);
     try std.testing.expect(try rig.settle() == null);
@@ -7674,7 +7684,28 @@ test "creation preference read failure is retained through repair and ordinary r
     try std.testing.expectEqualStrings("bypass", Seen.now.creation.permission_mode.slice());
 }
 
-test "App overview Tab projection is list then Settings and Settings Enter uses the drawn identity" {
+fn sui4Pointer() !void {
+    for ([_]u16{ 46, 140 }) |width| {
+        const rig = try openListed();
+        defer rig.close();
+        rig.overview.state.launch = .done;
+        var shown = try rig.shown(width, 30);
+        defer shown.deinit();
+        const row = view.layout(&rig.overview.state).settings.start + 1;
+        const selection = rig.overview.state.selected;
+        for ([_]u16{ 0, 4, 13, 20, width - 1 }) |col| {
+            try std.testing.expect(try rig.click(col, row, width, 30) == null);
+            try std.testing.expect(rig.overview.root.input.listFocused());
+            try std.testing.expectEqual(selection, rig.overview.state.selected);
+            try std.testing.expect(!rig.overview.root.input.layer.settingsOpen());
+        }
+        try std.testing.expect(try rig.click(5, row, width, 30) == null);
+        try std.testing.expect(rig.overview.root.input.layer.settingsOpen());
+        try std.testing.expectEqual(selection, rig.overview.state.selected);
+    }
+}
+
+fn sui4Tab() !void {
     for ([_]u16{ 46, 140 }) |width| {
         const rig = try openListed();
         defer rig.close();
@@ -8625,4 +8656,25 @@ test "SUI-43 overview rows survive chat exit animation and resize" {
         }
         try std.testing.expect(changed);
     }
+}
+
+test "SUI-4 Settings focus navigation and retained draft" {
+    const cases = [_]*const fn () anyerror!void{
+        sui4SettingsEntry,
+        sui4NestedKeys,
+        sui4ModelKeys,
+        sui4ModelFilter,
+        sui4Hover,
+        sui4CapturedPaste,
+        sui4Pointer,
+        sui4Tab,
+        OverviewLines.sui4WordBounds,
+        OverviewLines.sui4BottomControls,
+        SessionFrontend.sui4DraftHandoff,
+        @import("Composer.zig").sui4InactivePrompt,
+        @import("app_input.zig").sui4ChoiceFocus,
+        @import("app_input.zig").sui4PasteOwnership,
+        @import("app_input.zig").sui4RootRouting,
+    };
+    for (cases) |case| try case();
 }

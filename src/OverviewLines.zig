@@ -49,18 +49,19 @@ pub const SessionControls = struct {
         const width = @import("widgets/RowInset.zig").contentWidth(ctx.max.width.?);
         const lines = try overview_view.controls(ctx.arena, self.state, width, self.caps);
         const rows = try ctx.arena.create([]const GroupedList.Row);
-        const projected = try ctx.arena.alloc(GroupedList.Row, lines.len);
-        for (lines, projected) |line, *row| {
+        const projected = try ctx.arena.alloc(GroupedList.Row, lines.len + 1);
+        for (lines, projected[0..lines.len]) |line, *row| {
             const regions = try ctx.arena.alloc(GroupedList.Region, line.regions.len);
             for (line.regions, regions) |region, *target| target.* = .{ .start = region.start, .end = region.end, .target = region.target, .selected = region.selected };
             row.* = .{ .segments = line.segments, .target = line.target, .regions = regions };
         }
+        projected[lines.len] = .{ .segments = &.{} };
         rows.* = projected;
         self.row.rows = .of(rows);
         self.row.selected = if (self.state.selected == .new_session) 0 else null;
         self.row.caps = self.caps;
         self.row.on_press = .{ .userdata = self.userdata, .pressed = self.on_click };
-        var surface = try self.row.widget().draw(ctx.withConstraints(.{}, .{ .width = ctx.max.width.?, .height = @min(2, ctx.max.height.?) }));
+        var surface = try self.row.widget().draw(ctx.withConstraints(.{}, .{ .width = ctx.max.width.?, .height = @min(3, ctx.max.height.?) }));
         surface.widget = self.widget();
         return surface;
     }
@@ -101,6 +102,7 @@ pub const Settings = struct {
     memory: ?overview_view.Memory = null,
     available: ?@import("upgrade_status.zig").Version = null,
     run: ?@import("upgrade_status.zig").Run = null,
+    settings_target: ?Hover.Rect = null,
     update_target: ?Hover.Rect = null,
     update_identity: @import("upgrade_status.zig").Target = .{ .available = null, .run = null },
     hover: Hover = .{},
@@ -126,7 +128,9 @@ pub const Settings = struct {
         if (input != .mouse) return;
         const mouse = input.mouse;
         if (mouse.button != .left or mouse.mods.alt or mouse.type != .press or mouse.col < 0 or mouse.col >= self.size.width) return;
-        const click: overview_view.Click = if (mouse.row == 1 and self.size.height > 1 and mouse.col >= 5 and mouse.col < @min(13, self.size.width -| 2)) .settings else if (self.update_target) |target| (if (target.contains(mouse.col, mouse.row)) .{ .update = self.update_identity } else return) else return;
+        const is_settings = if (self.settings_target) |target| target.contains(mouse.col, mouse.row) else false;
+        const is_update = if (self.update_target) |target| target.contains(mouse.col, mouse.row) else false;
+        const click: overview_view.Click = if (is_settings) .settings else if (is_update) .{ .update = self.update_identity } else return;
         try self.on_click(self.userdata, ctx, click);
         ctx.consumeAndRedraw();
     }
@@ -136,6 +140,7 @@ pub const Settings = struct {
         const size = ctx.max.size();
         const height = @min(2, size.height);
         self.size = .{ .width = size.width, .height = height };
+        self.settings_target = null;
         self.update_target = null;
         self.update_identity = .{ .available = self.available, .run = self.run };
         const target: Hover.Rect = .{ .row = 1, .col = @min(5, size.width), .width = @min(13, size.width -| 2) -| @min(5, size.width) };
@@ -145,10 +150,15 @@ pub const Settings = struct {
         if (height == 0 or size.width == 0) return surface;
         for (0..size.width) |column| surface.writeCell(@intCast(column), 0, widget_style.line(self.caps, .horizontal));
         if (height < 2) return surface;
+        self.settings_target = target;
         const ground: overview_view.Background = if (self.selected) .selection else if (self.hover.contains(target)) .hover else .ground;
-        const row_style = widget_style.of(self.caps, .{ .background = ground });
+        const row_style = widget_style.of(self.caps, .{});
         @memset(surface.buffer[size.width .. 2 * size.width], .{ .style = row_style });
-        try @import("widgets/RowInset.zig").draw(ctx, surface, 1, &.{.{ .text = "   Settings", .style = widget_style.of(self.caps, .{ .colour = if (self.selected) .strong else .normal, .bold = self.selected, .background = ground }) }}, row_style);
+        try @import("widgets/RowInset.zig").draw(ctx, surface, 1, &.{ .{ .text = "   ", .style = row_style }, .{ .text = "Settings", .style = widget_style.of(self.caps, .{ .colour = if (self.selected) .strong else .normal, .bold = self.selected, .background = ground }) } }, row_style);
+        for (0..size.width) |col| {
+            if (!target.contains(@intCast(col), 1)) surface.buffer[size.width + col].style = row_style;
+        }
+        for (@as(usize, @intCast(target.col))..@as(usize, @intCast(target.col)) + target.width) |col| surface.buffer[size.width + col].style = widget_style.of(self.caps, .{ .colour = if (self.selected) .strong else .normal, .bold = self.selected, .background = ground });
         self.hover.targets = try ctx.arena.dupe(Hover.Rect, &.{target});
         const status = @import("upgrade_status.zig");
         var buffer: [status.max_line_bytes]u8 = undefined;
@@ -166,7 +176,7 @@ pub const Settings = struct {
                 .quiet => .quiet,
                 .link => .ink,
                 .warning => .attention,
-            }, .background = ground });
+            } });
             const stable = try ctx.arena.dupe(u8, text);
             const label: vxfw.RichText = .{ .text = &.{.{ .text = stable, .style = style }}, .softwrap = false, .width_basis = .parent };
             const drawn = try label.draw(ctx.withConstraints(.{}, .{ .width = @intCast(text_width), .height = 1 }));
@@ -181,15 +191,16 @@ pub const Settings = struct {
     }
 };
 
-test "SUI-45 chat tabs paint and accept only their visible cells" {
+fn sui45TabsGeometry() !void {
     var state: overview_view.State = undefined;
     try state.init(std.testing.allocator, .{ .cwd = "/w", .home = "/h" });
     defer state.deinit();
-    for ([_]bool{ false, true }) |sidebar| for ([_]bool{ false, true }) |unicode| for (0..27) |raw_width| for ([_]u16{ 0, 1, 2 }) |height| {
+    for ([_]bool{ false, true }) |sidebar| for ([_]bool{ false, true }) |unicode| for ([_]overview_view.ArchiveFilter{ .active, .archived }) |filter| for (0..27) |raw_width| for ([_]u16{ 0, 1, 2, 3, 4 }) |height| {
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         const width: u16 = if (raw_width == 25) 46 else if (raw_width == 26) 140 else @intCast(raw_width);
         state.conversing = if (sidebar) "aaaaaa".* else null;
+        state.archive = filter;
         var clicks: Clicks = .{};
         var controls: SessionControls = .{ .state = &state, .caps = .{ .unicode = unicode }, .userdata = &clicks, .on_click = Clicks.take };
         const draw: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = height }, .cell_size = .{} };
@@ -209,7 +220,13 @@ test "SUI-45 chat tabs paint and accept only their visible cells" {
                 " ";
             try std.testing.expectEqualStrings(expected, screen.readCell(@intCast(col), 1).?.char.grapheme);
         };
+        if (height >= 3) for (0..width) |col| try std.testing.expectEqualStrings(" ", screen.readCell(@intCast(col), 2).?.char.grapheme);
         var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        if (height >= 3) {
+            clicks.got = null;
+            try controls.widget().handleEvent(&events, .{ .mouse = .{ .col = 5, .row = 2, .button = .left, .type = .press, .mods = .{} } });
+            try std.testing.expectEqual(null, clicks.got);
+        }
         for (0..141) |col| {
             clicks.got = null;
             events.consume_event = false;
@@ -220,7 +237,7 @@ test "SUI-45 chat tabs paint and accept only their visible cells" {
     };
 }
 
-test "sidebar bottom separates Settings memory and update targets across geometry and states" {
+pub fn sui4BottomControls() !void {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const status = @import("upgrade_status.zig");
@@ -246,7 +263,7 @@ test "sidebar bottom separates Settings memory and update targets across geometr
             try std.testing.expect(std.mem.endsWith(u8, row, try std.fmt.allocPrint(arena.allocator(), "{s} ", .{wording})));
             try std.testing.expect(std.mem.indexOf(u8, row, "rui") == null);
             const colour: overview_view.Colour = if (failed) .attention else if (!busy and !done and available != null) .ink else .quiet;
-            try std.testing.expectEqual(widget_style.of(caps, .{ .colour = colour, .background = if (selected) .selection else .ground }), frame.readCell(@intCast(width - label_width - 1), 1).style);
+            try std.testing.expectEqual(widget_style.of(caps, .{ .colour = colour, .background = .ground }), frame.readCell(@intCast(width - label_width - 1), 1).style);
         }
         const expected_target: ?Hover.Rect = if (height >= 2 and width >= label_width + 15 and (failed or (!busy and !done and available != null))) .{ .row = 1, .col = @intCast(width - label_width - 1), .width = @intCast(label_width) } else null;
         try std.testing.expectEqual(expected_target, settings.update_target);
@@ -261,6 +278,34 @@ test "sidebar bottom separates Settings memory and update targets across geometr
             try std.testing.expectEqual(expected, clicks.got);
         };
     };
+}
+
+pub fn sui4WordBounds() !void {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    for ([_]u16{ 8, 12, 15, 46, 140 }) |width| {
+        var clicks: Clicks = .{};
+        var settings: Settings = .{ .selected = false, .caps = .{}, .userdata = &clicks, .on_click = Clicks.take, .memory = .{ .rui = 38 * overview_view.mib, .tools = 120 * overview_view.mib } };
+        const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 2 }, .cell_size = .{} };
+        var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        _ = try settings.widget().draw(draw_ctx);
+        for (0..width) |column| {
+            const inside = column >= 5 and column < @min(13, width -| 2);
+            try settings.widget().handleEvent(&events, .{ .mouse = .{ .col = @intCast(column), .row = 1, .button = .none, .type = .motion, .mods = .{} } });
+            const frame = try settings.widget().draw(draw_ctx);
+            try std.testing.expectEqual(inside, settings.hover.pointing);
+            for (0..width) |painted| {
+                const shaded = painted >= 5 and painted < @min(13, width -| 2) and inside;
+                const expected = widget_style.of(settings.caps, .{ .background = if (shaded) .hover else .ground }).bg;
+                try std.testing.expectEqual(expected, frame.readCell(@intCast(painted), 1).style.bg);
+            }
+            for (0..2) |_| {
+                clicks.got = null;
+                try settings.widget().handleEvent(&events, .{ .mouse = .{ .col = @intCast(column), .row = 1, .button = .left, .type = .press, .mods = .{} } });
+                try std.testing.expectEqual(@as(?overview_view.Click, if (inside) .settings else null), clicks.got);
+            }
+        }
+    }
 }
 
 test "Session pin alternate gestures never activate New Session or Settings" {
@@ -293,7 +338,7 @@ test "Session pin alternate gestures never activate New Session or Settings" {
     };
 }
 
-test "session tab focus survives pointer hover without changing active filter" {
+fn sui45TabsTint() !void {
     var state: overview_view.State = undefined;
     try state.init(std.testing.allocator, .{ .cwd = "/w", .home = "/h" });
     defer state.deinit();
@@ -301,21 +346,36 @@ test "session tab focus survives pointer hover without changing active filter" {
     defer arena.deinit();
     var clicks: Clicks = .{};
     var controls: SessionControls = .{ .state = &state, .userdata = &clicks, .on_click = Clicks.take };
-    const draw: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 2 }, .cell_size = .{} };
     var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-    for ([_]overview_view.ArchiveFilter{ .active, .archived }) |filter| for ([_]overview_view.Selection{ .sessions, .archived }) |focus| for ([_]i16{ 5, 15, 30 }) |pointer| {
+    for ([_]u16{ 46, 140 }) |width| for ([_]overview_view.ArchiveFilter{ .active, .archived }) |filter| for ([_]overview_view.Selection{ .sessions, .archived }) |focus| for ([_]i16{ 4, 5, 9, 10, 11, 12, 19, 20, 30 }) |pointer| {
+        const draw: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 2 }, .cell_size = .{} };
         state.archive = filter;
         state.selected = focus;
         _ = try controls.widget().draw(draw);
         try controls.widget().handleEvent(&events, .{ .mouse = .{ .col = pointer, .row = 1, .button = .none, .type = .motion, .mods = .{} } });
         const shown = try controls.widget().draw(draw);
-        var screen: vaxis.Screen = try .init(arena.allocator(), .{ .cols = 46, .rows = 2, .x_pixel = 0, .y_pixel = 0 });
-        const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 46, .height = 2, .screen = &screen };
+        var screen: vaxis.Screen = try .init(arena.allocator(), .{ .cols = width, .rows = 2, .x_pixel = 0, .y_pixel = 0 });
+        const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 2, .screen = &screen };
         try shown.render(window, controls.widget());
-        try std.testing.expectEqual(widget_style.of(.{}, .{ .background = .selection }).bg, screen.readCell(if (focus == .sessions) 5 else 15, 1).?.style.bg);
+        for (0..width) |column| {
+            const chat = column >= 5 and column < 10;
+            const archived = column >= 12 and column < 20;
+            const selected = if (focus == .sessions) chat else archived;
+            const hovered = (chat and pointer >= 5 and pointer < 10) or (archived and pointer >= 12 and pointer < 20);
+            const ground: overview_view.Background = if (selected) .selection else if (hovered) .hover else .ground;
+            try std.testing.expectEqual(widget_style.of(.{}, .{ .background = ground }).bg, screen.readCell(@intCast(column), 1).?.style.bg);
+        }
         try std.testing.expectEqual(filter == .active, screen.readCell(5, 1).?.style.bold);
         try std.testing.expectEqual(filter == .archived, screen.readCell(15, 1).?.style.bold);
         try std.testing.expectEqual(focus, state.selected);
         try std.testing.expectEqual(filter, state.archive);
     };
+}
+
+test "SUI-45 chat tabs paint and accept only their visible cells" {
+    const cases = [_]*const fn () anyerror!void{
+        sui45TabsGeometry,
+        sui45TabsTint,
+    };
+    for (cases) |case| try case();
 }

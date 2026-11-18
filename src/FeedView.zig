@@ -434,7 +434,9 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const note_height: u16 = if (pending_note) |document| @intCast(document.measure(self.layout(), .{}, std.math.maxInt(u16)).rows) else 0;
     const pending_height = @as(u32, body_height) + note_height;
     const tail = if (self.tail) |child| try child.draw(ctx.withConstraints(.{}, ctx.max)) else null;
-    const gap: u16 = if (pending != null and tail != null and tail.?.size.height != 0) 1 else 0;
+    const last = if (self.window.count == 0) null else self.window.entries[self.window.count - 1];
+    const canonical_message = if (last) |entry| self.window.document.endsUserMessage(entry.offset + entry.length) else false;
+    const gap: u16 = if ((pending != null or canonical_message) and tail != null and tail.?.size.height != 0) 1 else 0;
     self.window.tail_rows = @as(u32, pending_height) + gap + (if (tail) |child| child.size.height else 0);
     const entries = self.window.layoutEntriesWith(self.layout(), self.presentation());
     const visible = self.anchor.visible(entries, self.size.height);
@@ -574,7 +576,7 @@ fn testCell(surface: vxfw.Surface, row: usize, col: usize) []const u8 {
     return surface.buffer[row * surface.size.width + col].char.grapheme;
 }
 
-test "FeedView bottom alignment and scroll round trip include the activity tail away from end" {
+fn activityScrollRoundTrip() !void {
     const window = try testWindow();
     defer std.testing.allocator.destroy(window);
     try window.append(&.{.{ .key = .{ .position = 10 }, .text = .{ .bytes = "0\n1\n2\n3\n4\n5\n6\n7\n8\n9\na\nb\n" } }});
@@ -1247,7 +1249,7 @@ fn appendQuoteTestRow(window: *Window, position: u64, bytes: []const u8) !void {
     try window.append(&.{.{ .key = .{ .position = position }, .text = resident.Text.fromDocument(&document) }});
 }
 
-test "FeedView optimistic multiline band and attached note stay inside the viewport with or without colour" {
+fn optimisticBand() !void {
     for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |colour| {
         const window = try testWindow();
         defer std.testing.allocator.destroy(window);
@@ -1278,7 +1280,7 @@ test "FeedView optimistic multiline band and attached note stay inside the viewp
     };
 }
 
-test "FeedView maximum original and escaped preview remain bounded and scroll without oversized surfaces" {
+fn boundedPreview() !void {
     const bytes = try std.testing.allocator.alloc(u8, SessionInput.capacity);
     defer std.testing.allocator.free(bytes);
     @memset(bytes, 0x1b);
@@ -1356,7 +1358,6 @@ test "SUI-38 FeedView separates consecutive message bands on the chat ground" {
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         const frame = try testFrame(&view, arena.allocator(), width, 10);
-        // Locate the two messages in the rendered frame; bottom alignment may move them.
         var first: ?u16 = null;
         var second: ?u16 = null;
         for (0..frame.size.height) |row| {
@@ -1367,8 +1368,6 @@ test "SUI-38 FeedView separates consecutive message bands on the chat ground" {
         const first_row = first orelse return error.TestUnexpectedResult;
         const second_row = second orelse return error.TestUnexpectedResult;
         try std.testing.expect(second_row >= first_row + 4);
-        // The final row of the first band and first row of the next band
-        // enclose one full-width row of chat ground.
         const gap_row = second_row - 2;
         for (0..width) |column| {
             const gap = frame.readCell(@intCast(column), gap_row);
@@ -1382,4 +1381,49 @@ test "SUI-38 FeedView separates consecutive message bands on the chat ground" {
             }
         }
     };
+}
+
+fn activityGap() !void {
+    for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |colour| for ([_]u8{ 0, 1, 2, 3, 4, 5 }) |kind| {
+        const window = try testWindow();
+        defer std.testing.allocator.destroy(window);
+        if (kind == 1 or kind == 2 or kind == 4) {
+            var document: viewport.Sized(128, true) = .{};
+            try document.append(if (kind == 1 or kind == 4) PendingText.user_message_on ++ "› hello\n" ++ PendingText.user_message_off else "assistant\n");
+            try document.prepare();
+            try window.append(&.{.{ .key = .{ .position = 1 }, .text = resident.Text.fromDocument(&document) }});
+        }
+        const activity: vxfw.Text = .{ .text = "Thinking" };
+        var anchor: Feed = .{};
+        var view: Self = .{ .window = window, .anchor = &anchor, .colour = colour, .style = .{ .bg = .{ .index = 8 } }, .colours = .{ .user_band = .{ .index = 10 } }, .tail = if (kind >= 3) null else activity.widget(), .pending = if (kind == 0 or kind == 5) .{ .text = "hello" } else null };
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const frame = try testFrame(&view, arena.allocator(), width, 8);
+        const gap: u32 = if (kind == 0 or kind == 1) 1 else 0;
+        try std.testing.expectEqual(@as(u32, if (kind == 0 or kind == 5) 3 else 0) + gap + @as(u32, if (kind >= 3) 0 else 1), window.tail_rows);
+        if (gap != 0) {
+            try std.testing.expectEqual(@as(usize, 1), frame.children.len);
+            const row: usize = @intCast(frame.children[0].origin.row - 1);
+            const cap = frame.readCell(0, row - 1);
+            if (colour) try std.testing.expectEqual(view.colours.user_band, cap.style.bg) else try std.testing.expect(cap.style.reverse);
+            for (0..width) |column| {
+                const cell = frame.readCell(column, row);
+                try std.testing.expectEqualStrings(" ", cell.char.grapheme);
+                try std.testing.expectEqual(view.style.bg, cell.style.bg);
+                try std.testing.expect(!cell.style.reverse);
+            }
+        }
+        _ = try testFrame(&view, arena.allocator(), width, 2);
+    };
+}
+
+pub fn testActivityTail() !void {
+    try activityScrollRoundTrip();
+    try activityGap();
+}
+
+pub fn testMessageLayout() !void {
+    try optimisticBand();
+    try boundedPreview();
+    try viewport.testMessageLayout();
 }

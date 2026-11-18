@@ -1239,10 +1239,7 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
                 .sessions => try selectView(state, .active, &effects),
                 .archived => try selectView(state, .archived, &effects),
                 .update => |target| if (input.upgrade_admitted and std.meta.eql(target, upgrade_status.Target{ .available = state.upgrade.available, .run = state.upgrade.run }) and !state.upgrading()) startUpgrade(state),
-                .settings => {
-                    state.selected = .settings;
-                    effects.add(.open_settings);
-                },
+                .settings => effects.add(.open_settings),
             };
         },
         .unconfirmed => |left| {
