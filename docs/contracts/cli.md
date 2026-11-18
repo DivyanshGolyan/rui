@@ -356,6 +356,7 @@ Persisted model syntax and transport encoding remain independent of the compiled
 | Contract | Canonical checks | Limits and exceptions |
 | --- | --- | --- |
 | [Mutation presentation](#public-operations) and canonical envelope | `canonical-failure-integration`, modes `producers`, `committed`, `interactive`, `presentMutationReply` tests | Negatives fail at exact assertion, not setup. PTYs use one unrenewed ten-second exit deadline. No macOS, power-loss or aggregate claim |
+| CLI help and invocation refusals | `cli_invocation.zig` CLI-1 and CLI-2, `cli_args.zig` grammar tests and `human_cli_integration.py:help_case` | Core tables cover argv decisions and diagnostics; the fixture checks an unwritable HOME, unread stdin and the retired name on a PTY. |
 | [Caller capture and recovery](#caller-capture-and-recovery) | `human_cli_integration.py` | Uncertain Bash effect never replayed |
 | Attached CLI creation | `cli_args.zig` parent grammar, `configure_input.zig` parent creation defaults, `client.zig` parent capture through native ingress, `cli.zig` attached start receipt, native `configure parent` Store tests and `attached_creation_cases.py` | Provider-dependent compactAt uses the CLI default binding unless explicit; no parent preflight read |
 | [Saved defaults](#store-selection-and-defaults) | `'preference edits'`, `human_cli_integration.py` | Not credential, launch, Mac or power-loss |

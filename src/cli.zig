@@ -20,6 +20,7 @@ fn recordExit(status: caller_exit.Status) void {
 }
 const cli_value = @import("cli_value.zig");
 const cli_args = @import("cli_args.zig");
+const cli_invocation = @import("cli_invocation.zig");
 const configure_input = @import("configure_input.zig");
 const json_ascii = @import("json_ascii.zig");
 const client = @import("client.zig");
@@ -106,86 +107,86 @@ fn run(init: std.process.Init) !void {
     const args = try allocator.alloc([]const u8, raw_args.len);
     defer allocator.free(args);
     for (raw_args, args) |raw, *arg| arg.* = raw;
-    if (args.len == 2 and std.mem.eql(u8, args[1], "--host-coordinator")) {
-        return @import("host_coordinator.zig").run(init, allocator);
-    }
-    if (args.len == 2 and (std.mem.eql(u8, args[1], "--help") or std.mem.eql(u8, args[1], "-h"))) {
-        return std.Io.File.stdout().writeStreamingAll(init.io, usage_text);
-    }
-    if (args.len == 2 and std.mem.eql(u8, args[1], "--version")) {
-        return std.Io.File.stdout().writeStreamingAll(init.io, version_text);
-    }
-    if (args.len >= 2 and std.mem.eql(u8, args[1], "upgrade")) return runUpgrade(init, args[2..]);
-    if (args.len >= 2 and std.mem.eql(u8, args[1], "--publish-install")) return publishInstall(init, args[2..]);
-    if (args.len == 2 and std.mem.eql(u8, args[1], "--installation-path")) {
-        const advice = @import("installation_path.zig");
-        const home = init.environ_map.get("HOME") orelse return error.HomeUnavailable;
-        var observed = try advice.inspect(allocator, init.io, home, init.environ_map.get("PATH") orelse "");
-        defer observed.deinit(allocator);
-        var output: std.Io.Writer.Allocating = .init(allocator);
-        defer output.deinit();
-        try advice.write(&output.writer, &observed, home);
-        return std.Io.File.stdout().writeStreamingAll(init.io, output.written());
-    }
-    if (args.len == 2 and std.mem.eql(u8, args[1], "--installation-path-state")) {
-        const advice = @import("installation_path.zig");
-        const home = init.environ_map.get("HOME") orelse return error.HomeUnavailable;
-        var observed = try advice.inspect(allocator, init.io, home, init.environ_map.get("PATH") orelse "");
-        defer observed.deinit(allocator);
-        var line: [16]u8 = undefined;
-        return std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&line, "{s}\n", .{@tagName(observed.state)}));
-    }
-    if (args.len == 2 and std.mem.eql(u8, args[1], "--installation-facts")) {
-        const schema = @import("store.zig");
-        var output: [128]u8 = undefined;
-        return std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&output, "{{\"schema_version\":{d},\"minimum_schema_version\":{d}}}\n", .{ schema.schema_version, schema.minimum_schema_version }));
-    }
-    if (args.len < 2 or std.mem.startsWith(u8, args[1], "--")) return @call(.never_inline, newSession, .{ init, args[1..] }) catch |err| return if (reportedByOwner(err)) reportedFailure(err) else err;
-    if (cli_args.retired(args[1])) |replacement| {
-        const replacement_resource = replacement[0..std.mem.indexOfScalar(u8, replacement, ' ').?];
-        stderr.diagnostic("rui: `{s}` is now `rui {s}`; see rui {s} --help. Nothing was captured or sent. To start a Session, use rui session start with Message text on stdin.\n", .{ args[1], replacement, replacement_resource });
-        return error.InvalidInvocation;
-    }
-    const resource = std.meta.stringToEnum(cli_args.Resource, args[1]) orelse return @call(.never_inline, newSession, .{ init, args[1..] }) catch |err| return if (reportedByOwner(err)) reportedFailure(err) else err;
-    if (args.len == 2 or (args.len == 3 and (std.mem.eql(u8, args[2], "--help") or std.mem.eql(u8, args[2], "-h")))) {
-        return printHelp(init.io, .{ .resource = resource });
-    }
-    const command = cli_args.find(resource, args[2]) orelse {
-        var operation: [64]u8 = undefined;
-        if (std.fmt.bufPrint(&operation, "{s} {s}", .{ @tagName(resource), args[2] }) catch null) |name| if (cli_args.retired(name)) |replacement| {
-            stderr.diagnostic("rui: `{s}` is now `rui {s}`; see rui {s} --help. Nothing was captured or sent.\n", .{ name, replacement, @tagName(resource) });
-            return error.InvalidInvocation;
-        };
-        stderr.diagnostic("rui: unknown {s} operation; use rui {s} --help.\n", .{ @tagName(resource), @tagName(resource) });
-        return error.InvalidInvocation;
-    };
-    const definition = command.definition();
-    failure_held.resource = @tagName(resource);
-    failure_held.operation = definition.name;
-    var problem: cli_args.Refusal = undefined;
-    const parsed = definition.parseSyntax(args[3..], init.arena.allocator(), &problem) catch {
-        reportParseProblem(problem, @tagName(resource), definition.name, null);
-        return error.InvalidInvocation;
-    };
-    if (parsed.help) return printHelp(init.io, .{ .command = definition });
-    if (parsed.missing()) |group| {
-        reportMissing(resource, definition, group) catch {};
-        return error.InvalidInvocation;
-    }
-    validateFreshInvocation(init.io, &parsed, &problem) catch |err| {
-        switch (err) {
-            error.InvalidOptionValue, error.InvalidInstructionsSource, error.ConflictingArguments => {
-                reportParseProblem(problem, @tagName(resource), definition.name, null);
-                return error.InvalidInvocation;
+    var facts: cli_invocation.Facts = .{ .args = args };
+    while (true) switch (cli_invocation.next(facts, init.arena.allocator())) {
+        .host_coordinator => return @import("host_coordinator.zig").run(init, allocator),
+        .root_help => return std.Io.File.stdout().writeStreamingAll(init.io, usage_text),
+        .version => return std.Io.File.stdout().writeStreamingAll(init.io, version_text),
+        .upgrade => |tail| return runUpgrade(init, tail),
+        .publish_install => |tail| return publishInstall(init, tail),
+        .installation => |kind| switch (kind) {
+            .path => {
+                const advice = @import("installation_path.zig");
+                const home = init.environ_map.get("HOME") orelse return error.HomeUnavailable;
+                var observed = try advice.inspect(allocator, init.io, home, init.environ_map.get("PATH") orelse "");
+                defer observed.deinit(allocator);
+                var output: std.Io.Writer.Allocating = .init(allocator);
+                defer output.deinit();
+                try advice.write(&output.writer, &observed, home);
+                return std.Io.File.stdout().writeStreamingAll(init.io, output.written());
             },
-            else => return err,
-        }
+            .state => {
+                const advice = @import("installation_path.zig");
+                const home = init.environ_map.get("HOME") orelse return error.HomeUnavailable;
+                var observed = try advice.inspect(allocator, init.io, home, init.environ_map.get("PATH") orelse "");
+                defer observed.deinit(allocator);
+                var line: [16]u8 = undefined;
+                return std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&line, "{s}\n", .{@tagName(observed.state)}));
+            },
+            .facts => {
+                const schema = @import("store.zig");
+                var output: [128]u8 = undefined;
+                return std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&output, "{{\"schema_version\":{d},\"minimum_schema_version\":{d}}}\n", .{ schema.schema_version, schema.minimum_schema_version }));
+            },
+        },
+        .new_session => |tail| return @call(.never_inline, newSession, .{ init, tail }) catch |err| return if (reportedByOwner(err)) reportedFailure(err) else err,
+        .resource_help => |resource| return printHelp(init.io, .{ .resource = resource }),
+        .command_help => |definition| {
+            failure_held.resource = @tagName(definition.resource);
+            failure_held.operation = definition.name;
+            return printHelp(init.io, .{ .command = definition });
+        },
+        .refused => |refused| {
+            switch (refused) {
+                .syntax => |syntax| {
+                    failure_held.resource = @tagName(syntax.resource);
+                    failure_held.operation = syntax.operation;
+                },
+                .missing => |missing| {
+                    failure_held.resource = @tagName(missing.resource);
+                    failure_held.operation = missing.definition.name;
+                },
+                else => {},
+            }
+            var buffer: [4096]u8 = undefined;
+            var writer: std.Io.Writer = .fixed(&buffer);
+            cli_invocation.writeRefusal(&writer, refused) catch unreachable;
+            stderr.diagnosticBytes(writer.buffered());
+            return error.InvalidInvocation;
+        },
+        .stat_record => |record| {
+            failure_held.resource = @tagName(record.resource);
+            failure_held.operation = record.operation;
+            _ = std.Io.Dir.cwd().statFile(init.io, record.path, .{}) catch |err| switch (err) {
+                error.FileNotFound => {
+                    facts.record_exists = false;
+                    continue;
+                },
+                else => return err,
+            };
+            facts.record_exists = true;
+        },
+        .dispatch => |route| {
+            failure_held.resource = @tagName(route.parsed.definition.resource);
+            failure_held.operation = route.parsed.definition.name;
+            dispatch(init, route.command, &route.parsed, args) catch |err| {
+                if (err == error.EnvironmentTooLarge) reportEnvironmentTooLarge(.{ .map = init.environ_map });
+                return err;
+            };
+            try postCommandHold(init);
+            return;
+        },
     };
-    dispatch(init, command, &parsed, args) catch |err| {
-        if (err == error.EnvironmentTooLarge) reportEnvironmentTooLarge(.{ .map = init.environ_map });
-        return err;
-    };
-    try postCommandHold(init);
 }
 
 fn reportedByOwner(err: anyerror) bool {

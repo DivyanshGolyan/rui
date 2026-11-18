@@ -150,111 +150,30 @@ def defaults(home, *args, success=True, environment=None):
 def help_case():
     with tempfile.TemporaryDirectory(prefix="rui-help.") as directory:
         home = pathlib.Path(directory)
-        for flag in ("--help", "-h"):
-            result = subprocess.run(
-                [str(fixture.RUI), flag], env={**os.environ, "HOME": str(home)},
-                capture_output=True, text=True, timeout=10,
-            )
-            assert result.returncode == 0, (flag, result.stdout, result.stderr)
-            assert "rui [--store PATH]" in result.stdout, result.stdout
-            assert not result.stderr, result.stderr
-            assert list(home.iterdir()) == [], "help created runtime state"
-        for command in ("session configure", "session inspect"):
-            for flag in ("--help", "-h"):
-                output = run(home, *command.split(), flag)
-                assert output.startswith(f"rui {command} ["), output
-                if command == "session configure":
-                    for phrase in ("Omission preserves", "default resets", "A model Rui does not list",
-                                   "rui session inspect", "extra compaction headroom",
-                                   "Changes apply to new model requests.",
-                                   "Requests already accepted keep their original settings, even when retried."):
-                        assert phrase in output, output
-                assert list(home.iterdir()) == [], "scoped help created runtime state"
-        for flag in ("--compaction-trigger", "--output-reservation"):
-            for args in ((flag, "10", flag, "20"), ("--model", "--help"),
-                         ("--session", "-h")):
-                output = run(home, "session", "configure", *args, success=False)
-                assert "rui session configure [" not in output, output
-                assert list(home.iterdir()) == [], "invalid configuration captured a request"
+        home.chmod(0o500)
         result = subprocess.run(
-            [str(fixture.RUI), "--not-an-option"], env={**os.environ, "HOME": str(home)},
+            [str(fixture.RUI), "--help"], env={**os.environ, "HOME": str(home)},
             capture_output=True, text=True, timeout=10,
         )
-        assert result.returncode != 0, result
-        assert_caller_error(result.stderr, "rui: --not-an-option: ", "option_unknown")
-        assert list(home.iterdir()) == [], "invalid arguments created runtime state"
-        send_help = run(home, "session", "send", "--help")
-        assert "\nRequires: --to ID.\n" in send_help and "stdin" in send_help, send_help
-        assert "\nRequires: PROVIDER.\n" in run(home, "auth", "login", "--help")
-        record = home / "explicit.json"
-        for args, accepted in (
-                (("session", "send"), "--to ID"),
-                (("session", "send", "--to", "k7m2qx", "--key", "half-key"), "--record FILE"),
-                (("session", "send", "--to", "k7m2qx", "--record", record), "--key KEY or --key-hex HEX"),
-                (("request", "recover", "--record", record, "--kind", "message"), "--store PATH or --store-hex HEX"),
-                (("auth", "login"), "PROVIDER")):
-            result = subprocess.run([str(fixture.RUI), *map(str, args)], env={**os.environ, "HOME": str(home)},
-                stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10)
-            operation = " ".join(args[:2])
-            assert result.returncode == 2 and result.stdout == "", (args, result)
-            assert_caller_error(result.stderr, f"rui {operation}: {accepted}: ", "option_required")
-            assert f" Accepted: {accepted}. " in result.stderr, (args, result.stderr)
-            assert "usage:" not in result.stderr and "rui [PROMPT]" not in result.stderr, (args, result.stderr)
-            assert "request:" not in result.stderr, ("missing requirement printed a capture notice", result.stderr)
-            assert list(home.iterdir()) == [], ("missing requirement created capture or record state", args)
-        for args, (context, code) in (
-                (("session", "send", "k7m2qx"),
-                 ("k7m2qx", "session_id_needs_to")),
-                (("session", "send", "--", "k7m2qx"),
-                 ("k7m2qx", "session_id_needs_to")),
-                (("session", "configure", "k7m2qx"),
-                 ("k7m2qx", "session_id_needs_session")),
-                (("session", "inspect", "--", "k7m2qx"),
-                 ("k7m2qx", "session_id_needs_session")),
-                (("session", "send", "--to", "k7m2qx", "literal"),
-                 ("literal", "message_not_stdin")),
-                (("session", "send", "--to", "k7m2qx", "--", "literal"),
-                 ("literal", "message_not_stdin")),
-                (("session", "start", "literal"),
-                 ("literal", "message_not_stdin")),
-                (("session", "start", "--", "literal"),
-                 ("literal", "message_not_stdin")),
-                (("session", "configure", "--instructions", "instructions.txt"),
-                 ("--instructions instructions.txt", "instructions_source")),
-                (("session", "list", "literal"),
-                 ("literal", "positional_unexpected"))):
-            input_read, input_write = os.pipe()
-            try:
-                untouched = b"held stdin must not be consumed\n"
-                os.write(input_write, untouched)
-                result = subprocess.run([str(fixture.RUI), *args], env={**os.environ, "HOME": str(home)},
-                    stdin=input_read, capture_output=True, text=True, timeout=5)
-                assert result.returncode == 2 and result.stdout == "", (args, result)
-                assert_caller_error(result.stderr, f"rui {args[0]} {args[1]}: {context}: ", code)
-                assert select.select([input_read], [], [], 0)[0] and os.read(input_read, len(untouched)) == untouched
-                assert list(home.iterdir()) == [], ("invalid input created runtime state", args)
-            finally:
-                dispose_all(lambda: os.close(input_read), lambda: os.close(input_write))
-        for args, context, code, accepted in (
-                (("session", "start", "--permission-mode", "auto"),
-                 "rui session start: --permission-mode auto: ", "choice_unsupported", " Accepted: ask, bypass. "),
-                (("request", "inspect", "HANDLE", "--store", "P"),
-                 "rui request inspect: --store with HANDLE: ", "handle_names_store_and_key", ""),
-                (("session", "interrupt-model", "--session", "k7m2qx", "--turn", "12x", "--operation", "3"),
-                 "rui session interrupt-model: --turn 12x: ", "id_malformed", "")):
-            input_read, input_write = os.pipe()
-            try:
-                untouched = b"unread grammar input\n"
-                os.write(input_write, untouched)
-                result = subprocess.run([str(fixture.RUI), *args], env={**os.environ, "HOME": str(home)},
-                    stdin=input_read, capture_output=True, text=True, timeout=5)
-                assert result.returncode == 2 and result.stdout == "", (args, result)
-                assert_caller_error(result.stderr, context, code)
-                assert accepted in result.stderr, (args, result.stderr)
-                assert select.select([input_read], [], [], 0)[0] and os.read(input_read, len(untouched)) == untouched
-                assert list(home.iterdir()) == [], (args, "rejected invocation created runtime state")
-            finally:
-                dispose_all(lambda: os.close(input_read), lambda: os.close(input_write))
+        assert result.returncode == 0 and "rui [--store PATH]" in result.stdout, result
+        assert not result.stderr and list(home.iterdir()) == [], result.stderr
+
+        input_read, input_write = os.pipe()
+        try:
+            untouched = b"held stdin must not be consumed\n"
+            os.write(input_write, untouched)
+            result = subprocess.run(
+                [str(fixture.RUI), "session", "send", "k7m2qx"],
+                env={**os.environ, "HOME": str(home)}, stdin=input_read,
+                capture_output=True, text=True, timeout=5,
+            )
+            assert result.returncode == 2 and result.stdout == "", result
+            assert_caller_error(result.stderr, "rui session send: k7m2qx: ", "session_id_needs_to")
+            assert select.select([input_read], [], [], 0)[0] and os.read(input_read, len(untouched)) == untouched
+            assert list(home.iterdir()) == [], "invalid input created runtime state"
+        finally:
+            dispose_all(lambda: os.close(input_read), lambda: os.close(input_write))
+
         master, slave = pty.openpty()
         try:
             caller = spawn([str(fixture.RUI), "setup"],
@@ -269,11 +188,6 @@ def help_case():
         assert b"Provider:" not in output + errors and b"ChatGPT login" not in output + errors, (output, errors)
         assert b"usage:" not in errors and b"rui [PROMPT]" not in errors, errors
         assert list(home.iterdir()) == [], "retired name created runtime state"
-        literal = subprocess.run([str(fixture.RUI), "--", "setup"], env={**os.environ, "HOME": str(home)},
-            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10)
-        assert literal.returncode == 2 and '[positional_unexpected]' in literal.stderr, literal
-        assert "is now" not in literal.stderr, literal.stderr
-        assert list(home.iterdir()) == [], "literal prompt without a terminal created runtime state"
 
 
 def compiled_model_cases():
