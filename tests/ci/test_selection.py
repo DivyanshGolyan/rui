@@ -619,7 +619,8 @@ class SelectionTest(unittest.TestCase):
 
     def test_upgrade_owners_select_standalone_fixture_in_both_phases(self):
         others = {"src/installation_path.zig": True, "src/TerminalEditor.zig": False, "src/Installation.zig": True,
-                  "src/release_candidate.zig": True, "src/HostLifecycle.zig": True, "src/host_identity.zig": True,
+                  "src/release_candidate.zig": True, "src/HostLifecycle.zig": True, "src/host_activation.zig": True,
+                  "src/host_identity.zig": True,
                   "src/host_identity.c": True, "src/stderr.zig": False, "src/host_launch.c": True,
                   "src/cli.zig": False, "src/cli_args.zig": False, "src/client.zig": False, "src/slash_commands.zig": False,
                   "src/Overview.zig": False, "src/overview_view.zig": False, "src/SessionFrontend.zig": False,
@@ -850,6 +851,14 @@ class SelectionTest(unittest.TestCase):
                 for family in ("targets", "native_targets"):
                     self.assertTrue({"test-logic", owner} <= set(result[family]))
                     self.assertNotIn("check", result[family])
+
+    def test_host_activation_core_selects_the_fixtures_that_drive_host_lifecycle(self):
+        result = select(["src/host_activation.zig"], "review", AVAILABLE)
+        for family in ("targets", "native_targets"):
+            self.assertTrue({"test-logic", "upgrade-integration", "host-stop-integration", "host-launch-integration"}
+                            <= set(result[family]), result[family])
+            self.assertNotIn("check", result[family])
+        self.assertTrue(result["upgrade_required"])
 
     def test_response_timing_keeps_native_timeout_consumers(self):
         result = select(["src/ResponseTiming.zig"], "review", AVAILABLE)

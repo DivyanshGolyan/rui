@@ -3,6 +3,7 @@ const client = @import("client.zig");
 const release = @import("release_candidate.zig");
 const Installation = @import("Installation.zig");
 const HostLifecycle = @import("HostLifecycle.zig");
+const host_activation = @import("host_activation.zig");
 const restart_all = @import("host_restart_all.zig");
 const platform = @import("platform.zig");
 const TerminalText = @import("TerminalText.zig");
@@ -212,10 +213,7 @@ fn waitAfterPublication(init: std.process.Init, cancellation: ?*const client.Can
 }
 
 pub fn compatible(result: *const Result) bool {
-    return switch (result.selectedActivation()) {
-        .client_incompatible, .unconfirmed, .failed, .replacement_observed, .refused => false,
-        else => true,
-    };
+    return host_activation.clientSafe(result.selectedActivation());
 }
 
 fn field(writer: *std.Io.Writer, value: []const u8) !void {
@@ -298,7 +296,9 @@ test "upgrade owns cleanup facts by phase after native borrowed paths are reclai
     }
 }
 
-test "upgrade restart results cover every activation for selected and other Stores" {
+// SH-69 owns which outcomes guide and which keep the client safe; this checks only
+// that the upgrade report routes the selected Store's outcome and renders the Host lines.
+test "upgrade result report embeds the Host lines and its rollback note follows guidance" {
     const receipt: Installation.Receipt = .{ .operation_build = "/prepared", .selected_after = "/selected" };
     const info = @typeInfo(HostLifecycle.ActivationOutcome).@"union";
     inline for (info.field_names, info.field_types) |name, Payload| {
@@ -311,16 +311,6 @@ test "upgrade restart results cover every activation for selected and other Stor
                     .hosts = .{ .entries = &entries, .version = .{ .schema = 99, .patch = 0 } },
                     .store = "/selected-store",
                 };
-                const guided = switch (activation) {
-                    .not_needed, .superseded, .already_ready, .ready, .client_incompatible => false,
-                    .unsupported, .replacement_observed, .cancelled, .failed, .unconfirmed, .refused => true,
-                };
-                const safe = !selected or switch (activation) {
-                    .client_incompatible, .unconfirmed, .failed, .replacement_observed, .refused => false,
-                    else => true,
-                };
-                try std.testing.expectEqual(safe, compatible(&result));
-                try std.testing.expectEqual(guided, hasGuidance(&result));
                 try std.testing.expectEqualDeep(if (selected) activation else HostLifecycle.ActivationOutcome.not_needed, result.selectedActivation());
                 var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
                 defer output.deinit();
@@ -329,42 +319,10 @@ test "upgrade restart results cover every activation for selected and other Stor
                 defer shared.deinit();
                 try result.hosts.write(&shared.writer);
                 try std.testing.expect(std.mem.indexOf(u8, output.written(), shared.written()) != null);
-                try std.testing.expectEqual(guided, std.mem.indexOf(u8, output.written(), "Installation was not rolled back") != null);
+                try std.testing.expectEqual(hasGuidance(&result), std.mem.indexOf(u8, output.written(), "Installation was not rolled back") != null);
             }
         }
     }
-}
-
-test "upgrade restart results retain unknown failures and other Store guidance without borrowing compatibility" {
-    const receipt: Installation.Receipt = .{ .operation_build = "/prepared", .selected_after = "/selected" };
-    var entries = [_]restart_all.Entry{
-        .{ .socket = "/other.sock", .store = "/other", .state = .{ .outcome = .{ .client_incompatible = 123 } } },
-        .{ .socket = "/selected.sock", .store = "/store", .state = .{ .outcome = .{ .ready = .{ .instance = @splat(1), .pid = 42 } } } },
-    };
-    var result: Result = .{ .installation = .{ .installed = receipt }, .store = "/store", .hosts = .{ .entries = &entries, .version = .{ .schema = 99, .patch = 0 } } };
-    try std.testing.expect(compatible(&result));
-    try std.testing.expect(!hasGuidance(&result));
-    try std.testing.expectEqual(@as(usize, 2), result.hosts.totals().restarted);
-    entries[0].state = .{ .outcome = .{ .failed = .starting } };
-    try std.testing.expect(compatible(&result));
-    try std.testing.expect(hasGuidance(&result));
-    try std.testing.expectEqual(@as(usize, 1), result.hosts.totals().failed);
-    entries[0].store = null;
-    entries[0].state = .{ .failed = .{ .stage = .discovery, .cause = "ConnectionRefused" } };
-    try std.testing.expect(compatible(&result));
-    result.hosts.entries = entries[0..1];
-    try std.testing.expect(!compatible(&result));
-    try std.testing.expect(hasGuidance(&result));
-    result.hosts = .{ .failure = error.AccessDenied };
-    try std.testing.expect(!compatible(&result));
-    try std.testing.expect(hasGuidance(&result));
-    result.hosts = .{};
-    try std.testing.expect(compatible(&result));
-    try std.testing.expect(!hasGuidance(&result));
-    var bytes: [128]u8 = undefined;
-    var out = std.Io.Writer.fixed(&bytes);
-    try result.hosts.write(&out);
-    try std.testing.expectEqualStrings("No running Hosts.\n", out.buffered());
 }
 
 test "adopted candidate stays owned until fresh check preconditions permit consumption" {
