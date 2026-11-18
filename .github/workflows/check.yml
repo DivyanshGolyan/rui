@@ -205,7 +205,6 @@ jobs:
         env:
           CANDIDATE_REF: ${{ github.sha }}
           # A PR's base.sha can trail the main its merge commit was built on.
-          BRANCH_HEAD: ${{ github.event.pull_request.head.sha }}
           BASE: ${{ github.event_name == 'pull_request' && 'HEAD^1' || inputs.base }}
           DRAFT: ${{ github.event.pull_request.draft || false }}
           EVENT_NAME: ${{ github.event_name }}
@@ -215,7 +214,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$CANDIDATE_REF"
-          python3 tests/ci/select_tests.py --base "$BASE" --branch-head "${BRANCH_HEAD:-}" --phase review > selection.json
+          python3 tests/ci/select_tests.py --base "$BASE" --phase review > selection.json
           cat selection.json
           BASE=$(python3 -c 'import json; print(json.load(open("selection.json"))["base"])')
           git diff --check "$BASE" HEAD
@@ -332,13 +331,15 @@ jobs:
           mkdir -p "$RUNNER_TEMP/actionlint"
           bash .github/scripts/install-actionlint.sh "$RUNNER_TEMP/actionlint"
           echo "$RUNNER_TEMP/actionlint" >> "$GITHUB_PATH"
-      - name: Policy checks
-        id: policy
-        continue-on-error: true
-        uses: ./.github/actions/policy
-        with:
-          skips: ${{ needs.plan.outputs.policy_skips }}
-          compiler-installed: 'true'
+      # Policy is Python and Node on mostly one core; the compile below analyses each binary
+      # on one thread. Policy runs beside it at lower priority and reports after the tests.
+      - name: Start the policy checks beside the compile
+        env:
+          SKIPS: ${{ needs.plan.outputs.policy_skips }}
+        run: |
+          set -euo pipefail
+          ( nice -n 10 bash .github/actions/policy/checks.sh > "$RUNNER_TEMP/policy.log" 2>&1
+            echo $? > "$RUNNER_TEMP/policy.status" ) &
       - name: Check formatting
         id: format
         continue-on-error: true
@@ -374,13 +375,23 @@ jobs:
           path: ${{ runner.temp }}/rui-failure-artifacts
           retention-days: 3
           if-no-files-found: ignore
+      - name: Report the policy checks that ran beside the compile
+        id: policy
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        timeout-minutes: 20
+        run: |
+          set -euo pipefail
+          until [ -s "$RUNNER_TEMP/policy.status" ]; do sleep 2; done
+          cat "$RUNNER_TEMP/policy.log"
+          exit "$(cat "$RUNNER_TEMP/policy.status")"
       - name: Fail for the policy or format checks that failed above
         if: ${{ !cancelled() && (steps.policy.outcome == 'failure' || steps.format.outcome == 'failure') }}
         env:
           POLICY: ${{ steps.policy.outcome }}
           FORMAT: ${{ steps.format.outcome }}
         run: |
-          echo "::error::Policy checks: $POLICY; format check: $FORMAT. Compile and tests above still ran."
+          echo "::error::Policy checks: $POLICY; format check: $FORMAT. Compile and tests still ran."
           exit 1
   linux_build:
     needs: plan

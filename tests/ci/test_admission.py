@@ -18,6 +18,7 @@ from strict_paths import STRICT, strict
 ROOT = Path(__file__).resolve().parents[2]
 CHECK = ROOT / '.github/workflows/check.yml'
 POLICY = ROOT / '.github/actions/policy/action.yml'
+POLICY_CHECKS = ROOT / '.github/actions/policy/checks.sh'
 UPGRADE = ROOT / '.github/workflows/previous-release-upgrade.yml'
 PROMOTE = ROOT / '.github/workflows/promote.yml'
 RELEASE = ROOT / '.github/workflows/release.yml'
@@ -108,12 +109,12 @@ class PlanFixture:
         self.git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '--allow-empty', '-qm', 'fixture')
         return self.git('rev-parse', 'HEAD')
 
-    def run(self, base=None, candidate=None, event='pull_request', draft=False, promotion=False, compile_only=False, branch_head='', native_targets=None):
+    def run(self, base=None, candidate=None, event='pull_request', draft=False, promotion=False, compile_only=False, native_targets=None):
         self.output = self.root / 'output'
         self.output.write_text('')
         script = step_script(job(CHECK.read_text(), 'plan'), 'Select existing targets')
         env = dict(os.environ, PYTHONDONTWRITEBYTECODE='1', BASE=base or self.base, DRAFT=str(draft).lower(), EVENT_NAME=event,
-                   PROMOTION=str(promotion).lower(), COMPILE_ONLY=str(compile_only).lower(), BRANCH_HEAD=branch_head,
+                   PROMOTION=str(promotion).lower(), COMPILE_ONLY=str(compile_only).lower(),
                    GITHUB_REF_NAME='5/merge', CANDIDATE_REF=candidate or self.git('rev-parse', 'HEAD'),
                    GITHUB_OUTPUT=str(self.output), GITHUB_STEP_SUMMARY=str(self.root / 'summary'),
                    NATIVE_TARGETS=json.dumps(native_targets) if native_targets is not None else '')
@@ -327,17 +328,81 @@ class AdmissionTest(unittest.TestCase):
 
     def test_policy_runs_live_client_locality_with_trusted_main_history(self):
         for name in ('policy', 'pr_linux'):
-            body = job(CHECK.read_text(), name)
-            self.assertIn('fetch-depth: 0', body)
-            self.assertIn('uses: ./.github/actions/policy\n', body)
-        self.assertIn('      run: python3 -B tests/ci/client_locality.py\n', POLICY.read_text())
+            self.assertIn('fetch-depth: 0', job(CHECK.read_text(), name))
+        self.assertIn('uses: ./.github/actions/policy\n', job(CHECK.read_text(), 'policy'))
+        self.assertIn('      run: bash .github/actions/policy/checks.sh\n', POLICY.read_text())
+        self.assertIn('bash .github/actions/policy/checks.sh', job(CHECK.read_text(), 'pr_linux'))
+        self.assertIn(' python3 -B tests/ci/client_locality.py\n', POLICY_CHECKS.read_text())
+
+    def test_single_pr_job_runs_policy_beside_compile_and_reports_it_after_the_tests(self):
+        body = job(CHECK.read_text(), 'pr_linux')
+        steps = re.findall(r'(?m)^      - (?:name: (.+)$|uses: (\S+))', body)
+        names = [name or uses.split('@')[0] for name, uses in steps]
+        self.assertEqual(names, [
+            'actions/checkout', './.github/actions/setup',
+            'Install the pinned packages tests/ci imports', 'actions/setup-node', 'actions/cache',
+            'Install the pinned workflow linter',
+            'Start the policy checks beside the compile',
+            'Check formatting',
+            'Compile only the binaries the selected targets need',
+            'Give tests macOS\'s temporary directory shape',
+            'Run selected targets on SQLite, stopping at the first failure',
+            'Retain bounded failed-fixture diagnostics',
+            'Report the policy checks that ran beside the compile',
+            'Fail for the policy or format checks that failed above',
+        ])
+        start = body.split('      - name: Start the policy checks beside the compile\n', 1)[1].split('\n      - ', 1)[0]
+        self.assertIn('( nice -n 10 bash .github/actions/policy/checks.sh > "$RUNNER_TEMP/policy.log" 2>&1', start)
+        self.assertIn('echo $? > "$RUNNER_TEMP/policy.status" ) &', start)
+        self.assertNotIn('continue-on-error', start)
+        report = body.split('      - name: Report the policy checks that ran beside the compile\n', 1)[1].split('\n      - ', 1)[0]
+        for line in ('id: policy', "if: ${{ !cancelled() }}", 'continue-on-error: true',
+                     'cat "$RUNNER_TEMP/policy.log"', 'exit "$(cat "$RUNNER_TEMP/policy.status")"'):
+            self.assertIn(line, report)
+        final = body.split('      - name: Fail for the policy or format checks that failed above\n', 1)[1]
+        self.assertIn("steps.policy.outcome == 'failure' || steps.format.outcome == 'failure'", final)
+        self.assertNotIn('continue-on-error', final)
+
+    def test_policy_checks_all_run_after_a_failure_and_the_script_fails_naming_it(self):
+        names = ["Check caller error coverage and shrink-only pending causes",
+                 "Check flake sources and shrink-only allowances",
+                 "Check client locality and shrink-only exceptions",
+                 "Run tests/ci, less self-checks whose inputs are unchanged",
+                 "Reject undefined fixture names before native builds",
+                 "Check the TypeScript client's generated wire types and type-check it",
+                 "Validate workflows with pinned-linter compatibility exceptions"]
+        for failing in (None, 1, 5, 6):
+            with self.subTest(failing=failing), tempfile.TemporaryDirectory() as root:
+                root = Path(root)
+                (root / 'bin').mkdir()
+                (root / 'clients/ts').mkdir(parents=True)
+                (root / '.github/workflows').mkdir(parents=True)
+                (root / '.github/workflows/check.yml').write_text('on: push\n')
+                (root / 'actionlint').mkdir()
+                marker = {1: 'flake_sources', 5: 'npm', 6: 'actionlint'}.get(failing, 'never')
+                for tool in ('python3', 'npm', 'actionlint/actionlint'):
+                    fake = root / ('bin/' + tool if '/' not in tool else tool)
+                    fake.write_text('#!/bin/sh\necho "$0 $*" >> "$CALLS"\n'
+                                    f'case "$0 $*" in *{marker}*) exit 3;; esac\nexit 0\n')
+                    fake.chmod(0o755)
+                result = subprocess.run(['bash', str(POLICY_CHECKS)], cwd=root, capture_output=True, text=True,
+                                        env=dict(os.environ, PATH=f"{root / 'bin'}:{os.environ['PATH']}",
+                                                 RUNNER_TEMP=str(root), SKIPS='[]', CALLS=str(root / 'calls')))
+                for name in names:
+                    self.assertEqual(result.stdout.count(f"{name}: exit "), 1, name)
+                if failing is None:
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                else:
+                    self.assertEqual(result.returncode, 1)
+                    self.assertIn(f"{names[failing]}: exit 3", result.stdout)
+                    self.assertIn(f"Policy checks failed: {names[failing]}", result.stdout)
 
     def test_policy_skips_only_the_named_unchanged_self_checks(self):
         script = 'python3 -B tests/ci/policy_suite.py --skips "$SKIPS"'
-        self.assertIn('      run: ' + script + '\n', POLICY.read_text())
+        self.assertIn(' ' + script + '\n', POLICY_CHECKS.read_text())
         self.assertIn('        SKIPS: ${{ inputs.skips }}\n', POLICY.read_text())
-        for name in ('policy', 'pr_linux'):
-            self.assertIn('skips: ${{ needs.plan.outputs.policy_skips }}', job(CHECK.read_text(), name))
+        self.assertIn('skips: ${{ needs.plan.outputs.policy_skips }}', job(CHECK.read_text(), 'policy'))
+        self.assertIn('SKIPS: ${{ needs.plan.outputs.policy_skips }}', job(CHECK.read_text(), 'pr_linux'))
         modules = {
             'test_alpha': 'class Alpha(unittest.TestCase):\n    def test_one(self): pass\n    def test_two(self): pass\n',
             'test_beta': ('class Kept(unittest.TestCase):\n    def test_kept(self): pass\n'
@@ -517,7 +582,15 @@ class CandidatePlanTest(unittest.TestCase):
         'documentation': (['README.md'], set()),
         'tests/ci only': (['tests/ci/select_tests.py'], set()),
         'unreached source': (['src/future_owner.zig'], {'test-logic', 'test-native'}),
-        'build hub': (['build.zig'], {'test-logic', 'test-native'}),
+        'build hub': (['build.zig'], {'test-logic'}),
+        'compiler and cache setup': (['.github/actions/setup/action.yml'], {'test-logic'}),
+        'CI artifact producer': (['tests/ci/build_artifact.py'], {'test-logic'}),
+        'dependency pins': (['build.zig.zon', 'src/fetch_dependencies.sh'], {'test-logic'}),
+        'workflow and policy only': (['.github/workflows/check.yml', '.github/actions/policy/action.yml',
+                                      'tests/ci/ci_plan.py'], set()),
+        'producer and documentation': (['tests/ci/build_artifact.py', 'docs/verification/gates.md'], {'test-logic'}),
+        'producer and core source': (['tests/ci/build_artifact.py', 'src/request_encoding.zig'],
+                                     {'test-logic', 'test-native'}),
         'Store': (['src/store.zig'], {'test-native', 'test-store'}),
         'fixture script': (['tests/integration/overview_integration.py'], {'overview-integration'}),
         'slow fixture owner': (['src/Upgrade.zig'], {'upgrade-integration'}),
@@ -718,7 +791,7 @@ def plan(selection, *, event_name, draft, promotion, change_kind, compile_only):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertNotEqual(self.aggregate(workflow, 'admission', admission, draft, results).returncode, 0)
 
-    def test_main_merge_obligation_requires_compile_without_running_unselected_units(self):
+    def test_a_branch_that_merged_main_gets_only_its_own_diffs_pr_tier(self):
         workflow = CHECK.read_text()
         linux = step_script(job(workflow, 'linux'), 'Require every selected Linux part')
         with PlanFixture() as fixture:
@@ -736,24 +809,21 @@ def plan(selection, *, event_name, draft, promotion, change_kind, compile_only):
             candidate = fixture.git('rev-parse', 'HEAD')
             self.assertEqual(fixture.git('rev-parse', 'HEAD^1'), main)
             self.assertEqual(fixture.git('rev-parse', 'HEAD^2'), branch)
-            output = fixture.plan(self, base=main, candidate=candidate, branch_head=branch)
+            output = fixture.plan(self, base=main, candidate=candidate)
+            # The PR tier no longer compiles every unit partition for a branch that merged
+            # main: the candidate gets only what its own diff selects (here, documentation).
             self.assertEqual(output['candidate_ref'], candidate)
-            self.assertEqual(output['change_kind'], 'normal')
+            self.assertEqual(output['change_kind'], 'documentation')
             self.assertEqual(json.loads(output['targets']), [])
-            self.assertEqual(json.loads(output['linux_compile_targets']), ['test'])
+            self.assertEqual(json.loads(output['linux_compile_targets']), [])
+            self.assertEqual(output['pr_job'], 'false')
+            self.assertEqual(json.loads(output['pr_setup_targets']), [])
             self.assertEqual(output['linux_matrix'], '{"include": []}')
-            self.assertEqual(output['linux_split'], 'false')
-            self.assertEqual(json.loads(output['pr_setup_targets']), ['test'])
-            results = dict(plan='success', policy='skipped', pr_linux='success', linux_build='skipped',
-                           linux_build_unit='skipped',
-                           linux_suites='skipped', macos_typecheck='skipped')
+            results = dict(plan='success', policy='skipped', pr_linux='skipped', linux_build='skipped',
+                           linux_build_unit='skipped', linux_suites='skipped', macos_typecheck='skipped')
             self.assertEqual(self.aggregate(workflow, 'linux', linux, output, results).returncode, 0)
-            for status in ('skipped', 'failure', 'cancelled', ''):
-                with self.subTest(status=status):
-                    self.assertNotEqual(self.aggregate(workflow, 'linux', linux, output,
-                        dict(results, pr_linux=status)).returncode, 0)
             self.assertNotEqual(self.aggregate(workflow, 'linux', linux, output,
-                dict(results, linux_suites='success')).returncode, 0)
+                dict(results, pr_linux='success')).returncode, 0)
 
     def test_linux_suite_scheduling_uses_execution_not_compile_selection(self):
         from ci_plan import plan
