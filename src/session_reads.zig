@@ -1207,6 +1207,11 @@ const FakeHost = struct {
     pub fn answer(self: *FakeHost, fd: std.posix.fd_t) !void {
         var buffer: [8192]u8 = undefined;
         const request = try fake_host.readRequest(fd, &buffer) orelse return;
+        if (request.is("/v1/public-parts") or request.is("/v1/public-part-content")) {
+            if (self.parts) |parts| return parts.serve(fd, request);
+            self.others += 1;
+            return;
+        }
         var storage: [4096]u8 = undefined;
         var fixed = std.heap.FixedBufferAllocator.init(&storage);
         const Cursor = struct { end: ?[]const u8 = null, position: []const u8, ordinal: ?[]const u8 = null, direction: []const u8 = "forward", kinds: []const protocol.ActivityItem.Kind = &.{}, limit: []const u8 = "16" };
@@ -1227,7 +1232,7 @@ const FakeHost = struct {
             self.contents += 1;
             if (self.refuse_content) return fake_host.refuse(fd, .activity_unavailable, "ContentNotFound");
             fake_host.respondContent(fd, if (self.content_texts) |texts| texts[@intCast(position - 1)] else text);
-        } else if (self.parts) |parts| try parts.serve(fd, request) else self.others += 1;
+        } else self.others += 1;
     }
 
     fn withHost(self: *FakeHost, action: anytype) !void {

@@ -549,7 +549,7 @@ test "EXR-65 read_transcript renders parts entries" {
     const long_display = try std.fmt.allocPrint(arena, "{s}\n[image 1: PNG 1x1, 0.1 KB]\ntail", .{long_text});
     const Case = struct { arguments: []const u8, expected: []const u8, whole: bool = false };
     const cases = [_]Case{
-        .{ .arguments = try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"limit\":1}}", .{other.slice()}), .expected = try std.fmt.allocPrint(arena, "{d}.0 admission person 3 parts, 1 images: \"before\"\n", .{position}) },
+        .{ .arguments = try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"limit\":1,\"before\":\"{d}.0\"}}", .{ other.slice(), long_position }), .expected = try std.fmt.allocPrint(arena, "{d}.0 admission person 3 parts, 1 images: \"before\"\n", .{position}) },
         .{ .arguments = try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"full\":\"{d}.0\"}}", .{ other.slice(), position }), .whole = true, .expected = try std.fmt.allocPrint(arena, "Entry {d}.0 admission, bytes 0 to {d} of {d}:\n{s}", .{ position, display.len, display.len, display }) },
         // Starts inside the placeholder, then on the separator before it.
         .{ .arguments = try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"full\":\"{d}.0\",\"offset\":10}}", .{ other.slice(), position }), .whole = true, .expected = try std.fmt.allocPrint(arena, "Entry {d}.0 admission, bytes 10 to {d} of {d}:\n{s}", .{ position, display.len, display.len, display[10..] }) },
