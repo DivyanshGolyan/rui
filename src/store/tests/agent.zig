@@ -314,7 +314,7 @@ test "start_agent narrows configured tool names including unloaded MCP members" 
                     try expectToolSetNames(&storage, child.tool_set_id, entry.names);
                     try std.testing.expectEqualStrings("ask", child.permission_mode.slice());
                     try std.testing.expectEqualStrings(create.configuration.workspace.value.slice(), child.workspace.slice());
-                    try std.testing.expectEqual(protocol.Provider.codex, child.provider.?);
+                    try std.testing.expectEqual(@as(protocol.Provider, .codex), child.provider.?);
                     started += 1;
                 }
                 try std.testing.expectEqual(1 + started, try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{}));
@@ -1104,7 +1104,7 @@ fn inheritedCompactionCases() !void {
                 const result = try storage.configure(&child, .{});
                 try std.testing.expect(result == .accepted);
                 const observed = try storage.inspectSessionForTesting(result.accepted.session.slice());
-                try std.testing.expectEqual(protocol.Provider.codex, observed.provider.?);
+                try std.testing.expectEqual(@as(protocol.Provider, .codex), observed.provider.?);
                 try std.testing.expectEqual(@as(?u64, 450000), observed.compaction_trigger);
                 try std.testing.expectEqualStrings("gpt-6.1-sol", observed.model.slice());
                 try std.testing.expect((try storage.configure(&child, .{})).accepted.replayed);

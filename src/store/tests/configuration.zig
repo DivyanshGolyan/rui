@@ -239,7 +239,7 @@ fn requiredCreationCases() !void {
             try std.testing.expect(initial_reply == .accepted);
             const session = initial_reply.accepted.session;
             const observation = try storage.inspectSessionForTesting(session.slice());
-            try std.testing.expectEqual(protocol.Provider.codex, observation.provider.?);
+            try std.testing.expectEqual(@as(protocol.Provider, .codex), observation.provider.?);
             try std.testing.expectEqualStrings("model-a", observation.model.slice());
 
             var equal: wire_request.ConfigureCommand = .{};
@@ -360,7 +360,7 @@ fn workspaceCreationCases() !void {
             try std.testing.expect(reply == .accepted);
             const observed = try storage.inspectSessionForTesting(reply.accepted.session.slice());
             try expectToolSetNames(&storage, observed.tool_set_id, &.{});
-            try std.testing.expectEqual(protocol.Provider.codex, observed.provider.?);
+            try std.testing.expectEqual(@as(protocol.Provider, .codex), observed.provider.?);
             try std.testing.expectEqualStrings(workspace, observed.workspace.slice());
             var enable: wire_request.ConfigureCommand = .{};
             try enable.key.set("enable-bash");
@@ -393,7 +393,7 @@ fn soleProviderCases() !void {
             const reply = try storage.configure(&command, .{});
             try std.testing.expect(reply == .accepted);
             const observed = try storage.inspectSessionForTesting(reply.accepted.session.slice());
-            try std.testing.expectEqual(protocol.Provider.openai, observed.provider.?);
+            try std.testing.expectEqual(@as(protocol.Provider, .openai), observed.provider.?);
             try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .low), observed.reasoning_effort);
         }
     }.run);
@@ -1285,7 +1285,7 @@ fn noProviderCases() !void {
             const reply = try storage.configure(&command, .{});
             try std.testing.expect(reply == .accepted);
             const observed = try storage.inspectSessionForTesting(reply.accepted.session.slice());
-            try std.testing.expectEqual(protocol.Provider.codex, observed.provider.?);
+            try std.testing.expectEqual(@as(protocol.Provider, .codex), observed.provider.?);
         }
     }.run);
 }
