@@ -568,9 +568,15 @@ fn parseNode(comptime tree: anytype, comptime index: usize, comptime universe: a
     }
     if (try source.next() != .object_begin) return error.UnexpectedToken;
     const fields = comptime children(tree, index);
-    const known = comptime knownNames(universe, node.path);
+    const foreign_names = comptime blk: {
+        var names: []const []const u8 = &.{};
+        for (knownNames(universe, node.path)) |name| {
+            if (!@hasField(T, name)) names = names ++ [_][]const u8{name};
+        }
+        break :blk names;
+    };
     var seen: [fields.len]bool = @splat(false);
-    var seen_foreign: [known.len]bool = @splat(false);
+    var seen_foreign: [foreign_names.len]bool = @splat(false);
     var value: T = undefined;
     while (true) {
         const token = try source.nextAllocMax(allocator, .alloc_if_needed, options.max_value_len.?);
@@ -590,7 +596,7 @@ fn parseNode(comptime tree: anytype, comptime index: usize, comptime universe: a
             }
         } else {
             var consumed = false;
-            inline for (known, 0..) |field, i| {
+            inline for (foreign_names, 0..) |field, i| {
                 if (std.mem.eql(u8, name, field)) {
                     if (comptime !ignored(Policy, node.path ++ "." ++ field)) {
                         if (seen_foreign[i]) return error.DuplicateField;
