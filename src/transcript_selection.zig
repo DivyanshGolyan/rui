@@ -333,7 +333,7 @@ test "selection contrasts with sent bands and padding at both widths" {
     };
 }
 
-pub fn testBandCopy() !void {
+fn testBandCopy() !void {
     const testing = std.testing;
     for ([_]u16{ 46, 140 }) |width| for ([_]u8{ 0, 1, 2 }) |depth| for ([_]bool{ false, true }) |unicode_caps| {
         const method: vaxis.gwidth.Method = if (unicode_caps) .unicode else .wcwidth;
@@ -359,4 +359,9 @@ pub fn testBandCopy() !void {
         defer testing.allocator.free(result.text.bytes);
         try testing.expectEqualStrings("short", result.text.bytes);
     };
+}
+
+test "SUI-34 user message bands retain padded rows and selectable source text" {
+    try viewport.testBandPadding();
+    try testBandCopy();
 }

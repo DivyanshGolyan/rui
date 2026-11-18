@@ -1336,7 +1336,7 @@ test "FeedView canonical failure annotation is exact-key frame decoration rather
     }
 }
 
-fn consecutiveBands() !void {
+test "SUI-38 FeedView separates consecutive message bands on the chat ground" {
     for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |colour| {
         const window = try testWindow();
         defer std.testing.allocator.destroy(window);
@@ -1425,7 +1425,5 @@ pub fn testActivityTail() !void {
 pub fn testMessageLayout() !void {
     try optimisticBand();
     try boundedPreview();
-    try consecutiveBands();
     try viewport.testMessageLayout();
-    try selecting.testBandCopy();
 }

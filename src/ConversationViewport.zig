@@ -1938,7 +1938,7 @@ fn bandLines() !void {
     try std.testing.expectEqual(@as(@TypeOf(unfinished.lineKind(0, null)), .plain), unfinished.lineKind(unfinished.length, null));
 }
 
-fn bandPadding() !void {
+pub fn testBandPadding() !void {
     const testing = std.testing;
     for ([_]u16{ 46, 140 }) |width| for ([_]u8{ 0, 1, 2 }) |depth| for ([_]bool{ false, true }) |unicode_caps| {
         const method: Method = if (unicode_caps) .unicode else .wcwidth;
@@ -2025,12 +2025,7 @@ pub fn testMessageLayout() !void {
     try wrappedBand();
     try bandProvenance();
     try bandLines();
-    try bandPadding();
     try legacyBandShape();
-}
-
-test "SUI-34 user message bands retain padded rows and selectable source text" {
-    try bandPadding();
 }
 
 test "SUI-31 answer prose has a bounded measure while code and tables use the pane" {
