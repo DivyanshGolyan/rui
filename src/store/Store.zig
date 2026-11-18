@@ -870,7 +870,7 @@ pub const Store = struct {
                 try store_access.runAs(access, error.CorruptStore);
                 break :blk true;
             },
-            .done => false,
+            .certified, .done => false,
         };
     }
 
