@@ -398,3 +398,14 @@ test("stop Action preserves the existing Resolution position", async () => {
     const link: Link = { exchange: async () => Buffer.from(JSON.stringify({ answer: { status: "accepted", action: "42", resolution_position: "9007199254740993" } })) };
     assert.equal(await new Session(link, "session").stopAction("42"), "9007199254740993");
 });
+
+test("feed rejects full replies missing served work facts", async () => {
+	for (const missing of ["attention", "group", "actions"] as const) {
+		const work: Record<string, unknown> = { ...idleWork };
+		delete work[missing];
+		const session = new Session({ async exchange() {
+			return Buffer.from(JSON.stringify({ delta: "full", since: null, items: [], more: false, end: "0", work }));
+		} }, "abc123");
+		await assert.rejects(session.listActivity().next(), /missing served facts/);
+	}
+});

@@ -102,7 +102,7 @@ test("archival wakes an idle activity iterator without submitting a Message", as
 			pageReads++;
 			if (pageReads === 1) initialRead();
 			else controller.abort();
-			return Buffer.from(JSON.stringify({ delta: "full", since: "token", end: "0", items: [], more: false, queued: { count: "0" }, work: { state: { kind: "idle" } } }));
+			return Buffer.from(JSON.stringify({ delta: "full", since: "token", end: "0", items: [], more: false, queued: { count: "0" }, work: { attention: null, group: "working", actions: { stop: false, interrupt: null, decide: null }, state: { kind: "idle" } } }));
 		},
 	}, "k7m2qx");
 	const iterator = session.listActivity({ follow: true, signal: controller.signal });

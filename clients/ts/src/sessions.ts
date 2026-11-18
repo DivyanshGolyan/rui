@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import type { SessionNotifications } from "./notifications.ts";
 import { RuiRequestError, type RequestAnswer } from "./errors.ts";
-import { listActivity, searchActivity, type ActivitySearchEntry, type SearchActivityOptions, readContent, readContentBytes, type FeedEntry, type ListActivityOptions } from "./feed.ts";
+import { servedWork, listActivity, searchActivity, type ActivitySearchEntry, type SearchActivityOptions, readContent, readContentBytes, type FeedEntry, type ListActivityOptions } from "./feed.ts";
 import { WIRE_VERSION, type ReplyLimits } from "./transport.ts";
 import type { components } from "./wire.ts";
 
@@ -87,22 +87,6 @@ export interface ServedWork {
 	canStop: boolean;
 	decide: string | null;
 	interruptTarget: InterruptTarget | null;
-}
-
-function servedWork(work: Schemas["SessionWork"]): ServedWork {
-	if (!work || !("attention" in work) || !("group" in work) || !work.actions ||
-		typeof work.actions.stop !== "boolean" || !("interrupt" in work.actions) || !("decide" in work.actions) ||
-		!["needs_you", "working", "queued", "done"].includes(work.group) ||
-		(work.attention !== null && (typeof work.attention !== "object" ||
-			!["approval", "failed", "finished"].includes(work.attention.kind) ||
-			typeof work.attention.turn !== "string" || typeof work.attention.step !== "string")) ||
-		(work.actions.decide !== null && typeof work.actions.decide !== "string") ||
-		(work.actions.interrupt !== null && (typeof work.actions.interrupt !== "object" ||
-			typeof work.actions.interrupt.turn !== "string" || typeof work.actions.interrupt.operation !== "string"))) {
-		throw new Error("Invalid work reply: missing served facts");
-	}
-	return { attention: work.attention, group: work.group, canStop: work.actions.stop,
-		decide: work.actions.decide, interruptTarget: work.actions.interrupt };
 }
 
 export interface SessionSummary extends ServedWork {
