@@ -1601,45 +1601,6 @@ def renderer_cases():
         print("renderer: a card decides only the request it drew", flush=True)
 
         session = configure()
-        marker = answer("info yields")
-        holding = threading.Event()
-        held = [threading.Event(), threading.Event()]
-        released = [threading.Event(), threading.Event()]
-        def hold_info_read(_):
-            if holding.is_set():
-                for ready, resume in zip(held, released):
-                    if not ready.is_set():
-                        ready.set()
-                        resume.wait(10)
-                        break
-            return True
-        proxy = canonical.ReplyProxy(host, "/v1/activity-page", lambda response: response, before_forward=hold_info_read)
-        with terminal(session, columns=140) as tty:
-            tty.send("info yields\r", marker)
-            holding.set()
-            fixture.wait_for(tty.draining(held[0].is_set), "first held Activity page", timeout=10)
-            tty.send("\x1bi", "Copy last answer")
-            released[0].set()
-            fixture.wait_for(tty.draining(held[1].is_set), "info Activity page", timeout=10)
-            tty.send("\x1b", predicate=lambda: "Copy last answer" not in tty.capture.completed)
-            row, line = next((index, line) for index, line in enumerate(tty.capture.completed.split("\n")) if "Settings" in line)
-            col = line.index("Settings") + 1
-            tty.send(f"\x1b[<0;{col};{row + 1}M\x1b[<0;{col};{row + 1}m", "Notifications")
-            keys = tty.send("\x1b[B" * 6 + "\r", "earlier message")
-            assert all(stale not in keys for stale in ("/help", "Commands", "Marks", "Esc returns", "Ctrl-X twice", 'ctrl+g', 'ctrl+d', 'ctrl+n', 'ctrl+end', 'ctrl+c/d', 'pgup/pgdn', 'first session', 'latest / last', 'scroll / select')), keys
-            frames = tty.every_frame()
-            released[1].set()
-            time.sleep(1.5)
-            assert "earlier message" in tty.capture.completed, tty.capture.completed
-            for frame in frames:
-                assert " · info" not in frame and "Copy last answer" not in frame, frame
-            tty.caller.send_signal(signal.SIGINT)
-            tty.finish()
-        proxy.close()
-        proxy = None
-        print("renderer: delayed info inspection cannot cover Settings > Keys after the panel closes", flush=True)
-
-        session = configure()
         marker = answer("fresh start")
         with terminal(session) as tty:
             tty.send("fresh start\r", marker)

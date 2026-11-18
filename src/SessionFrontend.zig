@@ -10978,6 +10978,12 @@ test "SUI-44 empty chat welcome is centred until the first message" {
         try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "cotton") == null);
         held.self.line = .{ .read = .{ .revision = 1, .end = 0 }, .folder = .{} };
         try held.self.line.folder.?.set("/work");
+        for ([_]bool{ false, true }) |asks| {
+            held.self.line.asks = asks;
+            const welcome = try held.shown();
+            for ([_][]const u8{ "Permission:", "Bash runs without", "Bash commands can run without asking you" }) |absent|
+                try std.testing.expect(std.mem.indexOf(u8, welcome, absent) == null);
+        }
         const empty = try held.shown();
         var lines = std.mem.splitScalar(u8, empty, '\n');
         var found = false;
