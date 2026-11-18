@@ -51,6 +51,11 @@ def execution_idle(store, session):
     return report if execution["custody_occupied"] == "0" and execution["scratch_used_bytes"] == "0" else None
 
 
+def turn_ended(store, session):
+    report = fixture.command("session", "inspect", "--store", store, "--session", session)
+    return report if report["work"]["state"]["kind"] in ("finished", "stopped", "failed") else None
+
+
 def prove_spill_delivery_outcomes(state):
     # EXR-49
     # Stop is accepted only after both complete captures have become spills.
@@ -94,7 +99,9 @@ def prove_spill_delivery_outcomes(state):
                                  f"{name} continuation")
             fixture.wait_for(lambda: execution_custody_idle(store, session), f"{name} custody release")
             result = result_text(store, session)
-            report = fixture.command("session", "inspect", "--store", store, "--session", session)
+            # The normal result continues to the model, whose exchange holds its own
+            # scratch until the turn ends; measure the spills alone after that.
+            report = fixture.wait_for(lambda: turn_ended(store, session), f"{name} turn end")
             used = int(report["execution"]["scratch_used_bytes"])
             remaining = set((store / "scratch").glob(f"bash-*-{action}-*.tmp"))
             if mode == "normal":

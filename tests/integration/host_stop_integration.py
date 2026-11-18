@@ -120,7 +120,7 @@ def mixed_effect_drain(provider_first):
         thread.start()
         host = None
         diagnostics = None
-        # SH-51
+        # SH-52
         signalled = PauseGate("host.shutdown_signalled", occurrence=1)
         try:
             host = fixture.start_host(
