@@ -24,20 +24,27 @@ pub fn startEffort(model: []const u8, saved: ?catalog.ReasoningEffort) ?catalog.
     };
 }
 
-test "client compaction defaults fit small ChatGPT model windows" {
-    try std.testing.expectEqual(@as(u64, 115200), compactionTrigger(.codex, "gpt-5.3-codex-spark"));
-    try std.testing.expectEqual(@as(u64, 115200), compactionTrigger(.openai, "gpt-5.3-codex-spark"));
+test "CM-39 default compaction trigger" {
+    const cases = [_]struct { provider: Provider, model: []const u8, tokens: u64 }{
+        .{ .provider = .codex, .model = "gpt-6.1-sol", .tokens = 450000 },
+        .{ .provider = .codex, .model = "gpt-6.1-terra", .tokens = 450000 },
+        .{ .provider = .codex, .model = "gpt-6.2-sol", .tokens = 450000 },
+        .{ .provider = .codex, .model = "gpt-6.2-astra", .tokens = 244800 },
+        .{ .provider = .codex, .model = "gpt-6-sol", .tokens = 244800 },
+        .{ .provider = .codex, .model = "gpt-6.1-terra@eu", .tokens = 244800 },
+        .{ .provider = .codex, .model = "openai/gpt-6.1-terra", .tokens = 244800 },
+        .{ .provider = .codex, .model = "gpt-6.1-terra-extra", .tokens = 115200 },
+        .{ .provider = .codex, .model = "gpt-5.3-codex-spark", .tokens = 115200 },
+        .{ .provider = .codex, .model = "unlisted-model", .tokens = 115200 },
+        .{ .provider = .openai, .model = "gpt-6.1-terra", .tokens = 945000 },
+        .{ .provider = .openai, .model = "gpt-6.2-sol", .tokens = 945000 },
+        .{ .provider = .openai, .model = "gpt-5.3-codex-spark", .tokens = 115200 },
+        .{ .provider = .openai, .model = "unlisted-model", .tokens = 115200 },
+    };
+    for (cases) |case| try std.testing.expectEqual(case.tokens, compactionTrigger(case.provider, case.model));
 }
 
-test "client defaults use product compaction defaults and catalog effort admission" {
-    try std.testing.expectEqual(@as(u64, 450000), compactionTrigger(.codex, "gpt-6.1-sol"));
-    try std.testing.expectEqual(@as(u64, 450000), compactionTrigger(.codex, "gpt-6.1-terra"));
-    try std.testing.expectEqual(@as(u64, 244800), compactionTrigger(.codex, "gpt-6.2-astra"));
-    try std.testing.expectEqual(@as(u64, 244800), compactionTrigger(.codex, "gpt-6-sol"));
-    try std.testing.expectEqual(@as(u64, 450000), compactionTrigger(.codex, "gpt-6.2-sol"));
-    try std.testing.expectEqual(@as(u64, 945000), compactionTrigger(.openai, "gpt-6.1-sol"));
-    try std.testing.expectEqual(@as(u64, 115200), compactionTrigger(.openai, "unlisted-model"));
-    try std.testing.expectEqual(@as(u64, 115200), compactionTrigger(.codex, "unlisted-model"));
+test "client start effort uses catalog effort admission" {
     try std.testing.expectEqual(catalog.ReasoningEffort.max, startEffort("gpt-6.1-sol", .max).?);
     try std.testing.expectEqual(catalog.ReasoningEffort.low, startEffort("gpt-5.5", .max).?);
     try std.testing.expectEqual(catalog.ReasoningEffort.low, startEffort("gpt-6-luna", null).?);
