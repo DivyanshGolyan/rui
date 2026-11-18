@@ -2150,7 +2150,7 @@ const Rig = struct {
         var frame = try rig.shown(width, height);
         defer frame.deinit();
         for (0..height) |row| {
-            if (std.mem.indexOf(u8, try frame.line(@intCast(row)), "New Session")) |column| {
+            if (std.mem.indexOf(u8, try frame.line(@intCast(row)), "New chat")) |column| {
                 return rig.click(@intCast(column), @intCast(row), width, height);
             }
         }
@@ -2305,7 +2305,7 @@ test "SUI-40 pinned Session separator is ground and inert" {
             if (std.mem.indexOf(u8, try shown.line(@intCast(row)), "Pinned test Session") != null) break @intCast(row);
         } else return error.PinnedSessionNotDrawn;
         const new_row: u16 = for (0..30) |row| {
-            if (std.mem.indexOf(u8, try shown.line(@intCast(row)), "New Session") != null) break @intCast(row);
+            if (std.mem.indexOf(u8, try shown.line(@intCast(row)), "New chat") != null) break @intCast(row);
         } else return error.NewSessionNotDrawn;
         const separator = pinned_row + 1;
         try std.testing.expectEqual(selection == .new_session, std.meta.eql(highlight, shown.screen.readCell(1, new_row).?.style.bg));
@@ -2861,7 +2861,7 @@ test "a stop whose reply was lost names its request on departure" {
 
 fn finishedGuidance(rig: *Rig, buffer: []u8) ![]const u8 {
     const written = try finishedWith(rig, {}, null, buffer);
-    const at = std.mem.indexOf(u8, written, "\nDetached. Host work continues.\nOverview: rui --store ") orelse return error.TestExpectedDetached;
+    const at = std.mem.indexOf(u8, written, "\nYour chats keep working while you are away.\nCome back with: rui\nOverview: rui --store ") orelse return error.TestExpectedDetached;
     return written[0..at];
 }
 
@@ -3248,7 +3248,7 @@ test "a failed terminal restore still prints the departure guidance" {
     try std.testing.expect(try rig.press("\r") == null);
     try std.testing.expect(try rig.settle() == null);
     var buffer: [1024]u8 = undefined;
-    try std.testing.expectEqualStrings("rui: Not sure the new Session was created. Check with: rui request recover lost-handle\n", try finishedGuidance(rig, &buffer));
+    try std.testing.expectEqualStrings("rui: Not sure the new chat was created. Check with: rui request recover lost-handle\n", try finishedGuidance(rig, &buffer));
 }
 
 const HostRecovery = struct {
@@ -3487,7 +3487,7 @@ test "Settings composes the Overview list at most once with and without a retain
             if (!retained) try std.testing.expectEqual(@as(usize, 1), Count.widget(surface, overview.inputHostWidget()));
             var shown = try rig.shown(width, 30);
             defer shown.deinit();
-            try std.testing.expectEqual(list_count, std.mem.count(u8, try shown.text(), "+ New Session"));
+            try std.testing.expectEqual(list_count, std.mem.count(u8, try shown.text(), "+ New chat"));
         }
     }
 }
@@ -4037,7 +4037,7 @@ test "a conversation that fails to open still names unconfirmed creation on depa
     rig.overview.stopApp();
     var buffer: [1024]u8 = undefined;
     const written = try finishedWith(rig, {}, error.AccessDenied, &buffer);
-    try std.testing.expectEqualStrings("rui: Not sure the new Session was created. Check with: rui request recover lost-handle\n" ++
+    try std.testing.expectEqualStrings("rui: Not sure the new chat was created. Check with: rui request recover lost-handle\n" ++
         "\nResume: rui session resume --store $'/store' k7m2qx\n", written);
 }
 
@@ -4109,7 +4109,7 @@ test "leaving while creation is queued or running says what became of it" {
         const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
         defer rig.close();
         try std.testing.expect((try rig.press("\r\x03")).? == .overview);
-        try std.testing.expectEqualStrings("rui: The new Session was not created.\n", try finishedGuidance(rig, &buffer));
+        try std.testing.expectEqualStrings("rui: The new chat was not created.\n", try finishedGuidance(rig, &buffer));
         try std.testing.expectEqual(@as(usize, 0), Seen.now.creates);
     }
     {
@@ -4678,7 +4678,7 @@ test "SUI-29 overview top space and drawn controls accept clicks" {
             try std.testing.expect(!rig.overview.state.creating());
             try std.testing.expect(!rig.overview.root.input.layer.settingsOpen());
 
-            const label = if (control == .new_session) "New Session" else "Settings";
+            const label = if (control == .new_session) "New chat" else "Settings";
             var column: u16 = undefined;
             const row: u16 = for (0..30) |at| {
                 if (std.mem.indexOf(u8, try shown.line(@intCast(at)), label)) |col| {
@@ -5569,7 +5569,7 @@ fn controlsAboveScroll() !void {
             var marker: ?usize = null;
             for (0..9) |row| {
                 const line = try shown.line(@intCast(row));
-                if (std.mem.indexOf(u8, line, "New Session") != null) control = row;
+                if (std.mem.indexOf(u8, line, "New chat") != null) control = row;
                 if (std.mem.indexOf(u8, line, "↑") != null) marker = row;
             }
             try std.testing.expect(control != null and marker != null and control.? < marker.?);
@@ -5605,7 +5605,7 @@ fn sidebarControls() !void {
     _ = try rig.press("\x1b[F\x1b[A");
     var before = try rig.shown(140, 11);
     defer before.deinit();
-    try std.testing.expect(std.mem.indexOf(u8, try before.text(), "+ New Session") != null);
+    try std.testing.expect(std.mem.indexOf(u8, try before.text(), "+ New chat") != null);
     const selected = rig.overview.state.selected.session;
     _ = try rig.press("\r");
     for ([_]u16{ 140, 46, 140, 46 }) |width| {
@@ -5613,7 +5613,7 @@ fn sidebarControls() !void {
         defer shown.deinit();
         const text = try shown.text();
         try std.testing.expect(std.mem.indexOf(u8, text, "Chat transcript") != null);
-        try std.testing.expectEqual(width == 140, std.mem.indexOf(u8, text, "+ New Session") != null);
+        try std.testing.expectEqual(width == 140, std.mem.indexOf(u8, text, "+ New chat") != null);
         try std.testing.expectEqual(width == 140, std.mem.indexOf(u8, text, "Archived") != null);
         if (width == 140) {
             const line = rig.overview.app_sessions.selected.?;
@@ -5628,7 +5628,8 @@ fn sidebarControls() !void {
     for ([_]u16{ 46, 140 }) |width| {
         var shown = try rig.shown(width, 20);
         defer shown.deinit();
-        try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "+ New Session") != null);
+        try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "+ New chat") != null);
+        try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "Chats") != null);
         try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "Archived") != null);
     }
 }
@@ -5670,7 +5671,7 @@ fn sidebarLateListing() !void {
         for ([_]vxfw.Size{ .{ .width = 140, .height = 40 }, .{ .width = 46, .height = 30 }, .{ .width = 140, .height = 30 } }) |size| {
             var shown = try rig.shown(size.width, size.height);
             defer shown.deinit();
-            try std.testing.expectEqual(size.width == 140, std.mem.indexOf(u8, try shown.text(), "+ New Session") != null);
+            try std.testing.expectEqual(size.width == 140, std.mem.indexOf(u8, try shown.text(), "+ New chat") != null);
             try std.testing.expect(std.mem.indexOf(u8, try shown.line(size.height - 1), "alt+i info") == null);
             if (size.width == 140) {
                 try std.testing.expectEqual(if (listed) listed_references.len else 1, overview.app_sessions.shown_at.len);
@@ -5758,7 +5759,8 @@ fn sidebarLateListing() !void {
     for ([_]u16{ 140, 46 }) |width| {
         var shown = try rig.shown(width, 30);
         defer shown.deinit();
-        try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "+ New Session") != null);
+        try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "+ New chat") != null);
+        try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "Chats") != null);
         try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "Archived") != null);
         try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "Fix the flaky test") != null);
         try std.testing.expect(std.mem.startsWith(u8, try shown.line(29), "     Settings"));
@@ -5779,7 +5781,7 @@ fn controlsAboveProvider() !void {
         var shown = try rig.shown(width, 4);
         defer shown.deinit();
         try std.testing.expectEqualStrings("", std.mem.trim(u8, try shown.line(0), " "));
-        try std.testing.expect(std.mem.indexOf(u8, try shown.line(1), "New Session") != null);
+        try std.testing.expect(std.mem.indexOf(u8, try shown.line(1), "New chat") != null);
     }
 }
 test "relaunch departure matrix preserves every screen and all unsent drafts" {
@@ -6630,7 +6632,7 @@ test "overview ignores printable ASCII Unicode unknown keys x r and bracketed pa
         defer after.deinit();
         try std.testing.expectEqualStrings(try before.text(), try after.text());
         try std.testing.expect(after.cursor() == null);
-        try std.testing.expect(std.mem.indexOf(u8, try after.text(), "Type a task") == null);
+        try std.testing.expect(std.mem.indexOf(u8, try after.text(), "What shall we work on?") == null);
     }
 }
 
@@ -7097,7 +7099,7 @@ const EmptySessionOwner = struct {
         try std.testing.expect(self.rig.overview.root.session.?.eql(self.frontend().widget()));
         try std.testing.expectEqualStrings("", self.frontend().input.composition().bytes);
         try std.testing.expect(self.frontend().submission.intent == null);
-        try self.expectSelectedName(reference, "New Session");
+        try self.expectSelectedName(reference, "New chat");
         return reference;
     }
 
@@ -7123,7 +7125,7 @@ const EmptySessionOwner = struct {
         try std.testing.expectEqualStrings("gpt-5.5", canonical(self.frontend().session).model.slice());
         try self.readCurrent();
         try std.testing.expectEqualStrings("gpt-5.5", self.frontend().line.model.slice());
-        try self.expectSelectedName(self.rig.overview.app_session.?.session, "New Session");
+        try self.expectSelectedName(self.rig.overview.app_session.?.session, "New chat");
     }
 
     fn chooseEffort(self: *EmptySessionOwner) !void {
@@ -7137,7 +7139,7 @@ const EmptySessionOwner = struct {
         try self.joinRead();
         try self.readCurrent();
         try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, .medium), self.frontend().line.effort);
-        try self.expectSelectedName(self.rig.overview.app_session.?.session, "New Session");
+        try self.expectSelectedName(self.rig.overview.app_session.?.session, "New chat");
     }
 
     fn expectSelectedName(self: *EmptySessionOwner, reference: view.Reference, name: []const u8) !void {
@@ -7159,7 +7161,7 @@ const EmptySessionOwner = struct {
                 for (0..columns) |col| try text.writer.writeAll(shown.screen.readCell(@intCast(col), @intCast(row)).?.char.grapheme);
                 try text.writer.writeByte('\n');
             }
-            try std.testing.expectEqual(@as(usize, if (std.mem.eql(u8, name, "New Session")) 2 else 1), std.mem.count(u8, text.written(), name));
+            try std.testing.expectEqual(@as(usize, if (std.mem.eql(u8, name, "New chat")) 2 else 1), std.mem.count(u8, text.written(), name));
             try std.testing.expect(std.mem.indexOf(u8, text.written(), &reference) == null);
             try std.testing.expectEqual(@as(?u32, 0), overview.app_sessions.selected);
             var bold_name = false;
@@ -7258,7 +7260,7 @@ test "empty New Session owner opens blank then hides on leave without deleting i
     empty.label = .{};
     try empty.label.?.set("Renamed but still empty");
     try fixture.refresh();
-    try fixture.expectSelectedName(reference, "New Session");
+    try fixture.expectSelectedName(reference, "New chat");
     try fixture.leave();
     try fixture.expectVisible(&.{});
     try fixture.refresh();
@@ -7309,7 +7311,7 @@ test "empty New Session owner promotes the same row only after a canonical first
     try std.testing.expect(chat.submission.intent != null);
     try std.testing.expectEqualStrings(EmptySessionOwner.message, try chat.input.message(chat.submission.intent.?.message));
     try std.testing.expect(EmptySessionOwner.canonical(&reference).first_message == null);
-    try fixture.expectSelectedName(reference, "New Session");
+    try fixture.expectSelectedName(reference, "New chat");
     try EmptySessionOwner.wait(&chat.submission.task);
     try std.testing.expect(chat.submission.join() == .failed);
     try std.testing.expect(chat.submission.captured != null);
@@ -7329,7 +7331,7 @@ test "empty New Session owner promotes the same row only after a canonical first
     try std.testing.expect(chat.submission.intent == null);
     try fixture.refresh();
     try std.testing.expect(fixture.rig.overview.state.rows.items[0].first == null);
-    try fixture.expectSelectedName(reference, "New Session");
+    try fixture.expectSelectedName(reference, "New chat");
     const row = EmptySessionOwner.canonical(&reference);
     row.first_message = .{ .position = 2, .admission = 37, .admitted_at = test_now_s, .sender = null, .content = .{ .length = EmptySessionOwner.message.len, .digest = protocol.contentDigest(EmptySessionOwner.message) } };
     row.end = 2;
@@ -8234,7 +8236,7 @@ test "wide launch draws late listing after presentation deadline without flashin
         {
             var frame = try rig.shown(140, 40);
             defer frame.deinit();
-            try std.testing.expect(std.mem.indexOf(u8, try frame.text(), "+ New Session") == null);
+            try std.testing.expect(std.mem.indexOf(u8, try frame.text(), "+ New chat") == null);
         }
         if (fast) {
             Seen.now.listed = 1;
@@ -8242,19 +8244,19 @@ test "wide launch draws late listing after presentation deadline without flashin
             try std.testing.expect(try rig.settle() == null);
             var frame = try rig.shown(140, 40);
             defer frame.deinit();
-            try std.testing.expect(std.mem.indexOf(u8, try frame.text(), "+ New Session") == null);
+            try std.testing.expect(std.mem.indexOf(u8, try frame.text(), "+ New chat") == null);
         } else {
             _ = try overview.event(.{ .presentation_tick = .{ .now_ms = 1149, .list_visible = true, .host_unavailable = false } });
             {
                 var frame = try rig.shown(140, 40);
                 defer frame.deinit();
-                try std.testing.expect(std.mem.indexOf(u8, try frame.text(), "+ New Session") == null);
+                try std.testing.expect(std.mem.indexOf(u8, try frame.text(), "+ New chat") == null);
             }
             _ = try overview.event(.{ .presentation_tick = .{ .now_ms = 1150, .list_visible = true, .host_unavailable = false } });
             {
                 var frame = try rig.shown(140, 40);
                 defer frame.deinit();
-                try std.testing.expect(std.mem.indexOf(u8, try frame.text(), "+ New Session") != null);
+                try std.testing.expect(std.mem.indexOf(u8, try frame.text(), "+ New chat") != null);
             }
             _ = try overview.event(.presentation_presented);
             Seen.now.listed = 1;
@@ -8262,14 +8264,14 @@ test "wide launch draws late listing after presentation deadline without flashin
             try std.testing.expect(try rig.settle() == null);
             var frame = try rig.shown(140, 40);
             defer frame.deinit();
-            try std.testing.expect(std.mem.indexOf(u8, try frame.text(), "+ New Session") != null);
+            try std.testing.expect(std.mem.indexOf(u8, try frame.text(), "+ New chat") != null);
         }
         try std.testing.expect(try rig.next(try overview.event(.launch_poll)) == null);
         try std.testing.expect(overview.state.launch == .creating);
         {
             var pending = try rig.shown(140, 40);
             defer pending.deinit();
-            try std.testing.expectEqual(!fast, std.mem.indexOf(u8, try pending.text(), "+ New Session") != null);
+            try std.testing.expectEqual(!fast, std.mem.indexOf(u8, try pending.text(), "+ New chat") != null);
         }
         try std.testing.expect(try rig.settle() == null);
         try std.testing.expectEqual(@as(usize, 1), Seen.now.creates);
@@ -8280,7 +8282,7 @@ test "wide launch draws late listing after presentation deadline without flashin
         defer split.deinit();
         const divider = split.screen.readCell(Root.list_width, 0).?.char.grapheme;
         try std.testing.expect(std.mem.eql(u8, divider, "┆") or std.mem.eql(u8, divider, "|"));
-        try std.testing.expect(std.mem.indexOf(u8, try split.text(), "+ New Session") != null);
+        try std.testing.expect(std.mem.indexOf(u8, try split.text(), "+ New chat") != null);
         try std.testing.expect(std.mem.indexOf(u8, try split.text(), "enter open") == null);
     }
 }
@@ -8308,7 +8310,7 @@ test "wide launch waits for listing and opens the newest empty Session without c
     _ = try view.step(&rig.overview.state, .{ .launch_start = .{ .explicit_session = false, .restoring = false } });
     var shown = try rig.shown(140, 40);
     defer shown.deinit();
-    try std.testing.expectEqual(@as(?usize, null), std.mem.indexOf(u8, try shown.text(), "+ New Session"));
+    try std.testing.expectEqual(@as(?usize, null), std.mem.indexOf(u8, try shown.text(), "+ New chat"));
     try std.testing.expectEqual(@as(?usize, null), std.mem.indexOf(u8, try shown.text(), "enter open"));
     var ctx = rig.context();
     defer {
@@ -8395,7 +8397,7 @@ test "wide launch creates a focused empty chat and Escape returns to overview" {
     try std.testing.expect(overview.state.launch == .creating);
     var pending = try rig.shown(140, 40);
     defer pending.deinit();
-    try std.testing.expectEqual(@as(?usize, null), std.mem.indexOf(u8, try pending.text(), "+ New Session"));
+    try std.testing.expectEqual(@as(?usize, null), std.mem.indexOf(u8, try pending.text(), "+ New chat"));
     _ = try rig.settle();
     try std.testing.expectEqual(@as(usize, 1), Seen.now.creates);
     const frontend = overview.app_session.?.frontend.?;
@@ -8458,7 +8460,7 @@ test "wide launch refused and unconfirmed creation restore the overview" {
         var refused = try rig.shown(140, 40);
         defer refused.deinit();
         const text = try refused.text();
-        try std.testing.expect(std.mem.indexOf(u8, text, "+ New Session") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "+ New chat") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, if (uncertain) "Creation unsure; details on exit" else "Not created") != null);
         try std.testing.expectEqual(uncertain, rig.overview.state.creating());
     }
@@ -8486,7 +8488,7 @@ test "wide launch shows stopped Host recovery and failed listing" {
         var recovered = try rig.shown(140, 40);
         defer recovered.deinit();
         const text = try recovered.text();
-        try std.testing.expect(std.mem.indexOf(u8, text, "+ New Session") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "+ New chat") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, if (availability == .stopped) "Host stopped" else "Host unreachable") != null);
         if (availability == .stopped) try std.testing.expect(std.mem.indexOf(u8, text, "start") != null);
         try std.testing.expectEqual(.done, rig.overview.state.launch);
@@ -8539,7 +8541,7 @@ test "SUI-43 overview rows survive chat exit animation and resize" {
             }
             errdefer std.debug.print("paint cells: {s}\n", .{text.written()});
             for (labels) |label| try std.testing.expect(std.mem.indexOf(u8, text.written(), label) != null);
-            try std.testing.expect(std.mem.indexOf(u8, text.written(), "+ New Session") != null);
+            try std.testing.expect(std.mem.indexOf(u8, text.written(), "+ New chat") != null);
             try std.testing.expect(std.mem.indexOf(u8, text.written(), "Settings") != null);
         }
     };
@@ -8584,7 +8586,7 @@ test "SUI-43 overview rows survive chat exit animation and resize" {
     stage = "chat";
     var chat = try rig.shown(46, 30);
     defer chat.deinit();
-    try std.testing.expect(std.mem.indexOf(u8, try chat.text(), "Type a task") != null);
+    try std.testing.expect(std.mem.indexOf(u8, try chat.text(), "What shall we work on?") != null);
     stage = "escape";
     try std.testing.expect(try rig.press("\x1b") == null);
     try std.testing.expect(overview.root.session == null);

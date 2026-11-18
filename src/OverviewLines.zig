@@ -181,35 +181,42 @@ pub const Settings = struct {
     }
 };
 
-test "session tabs press only separate drawn destinations and clear clipped targets" {
+test "SUI-45 chat tabs paint and accept only their visible cells" {
     var state: overview_view.State = undefined;
     try state.init(std.testing.allocator, .{ .cwd = "/w", .home = "/h" });
     defer state.deinit();
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    for ([_]bool{ false, true }) |sidebar| for ([_]u16{ 0, 1, 9, 20, 46, 140 }) |width| for ([_]u16{ 0, 1, 2 }) |height| {
+    for ([_]bool{ false, true }) |sidebar| for ([_]bool{ false, true }) |unicode| for (0..27) |raw_width| for ([_]u16{ 0, 1, 2 }) |height| {
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const width: u16 = if (raw_width == 25) 46 else if (raw_width == 26) 140 else @intCast(raw_width);
         state.conversing = if (sidebar) "aaaaaa".* else null;
         var clicks: Clicks = .{};
-        var controls: SessionControls = .{ .state = &state, .userdata = &clicks, .on_click = Clicks.take };
-        const draw: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 2 }, .cell_size = .{} };
-        _ = try controls.widget().draw(draw);
-        const shown = try controls.widget().draw(draw.withConstraints(.{}, .{ .width = width, .height = height }));
+        var controls: SessionControls = .{ .state = &state, .caps = .{ .unicode = unicode }, .userdata = &clicks, .on_click = Clicks.take };
+        const draw: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = height }, .cell_size = .{} };
+        _ = try controls.widget().draw(draw.withConstraints(.{}, .{ .width = 140, .height = 2 }));
+        const shown = try controls.widget().draw(draw);
+        var screen: vaxis.Screen = try .init(arena.allocator(), .{ .cols = width, .rows = height, .x_pixel = 0, .y_pixel = 0 });
+        const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = height, .screen = &screen };
+        try shown.render(window, controls.widget());
+        if (height >= 2) for (0..width) |col| {
+            const chat_end = @min(10, width -| 3);
+            const archive_end = @min(20, width -| 3);
+            const expected: []const u8 = if (col >= 5 and col < chat_end)
+                (if (chat_end < 10 and col + 1 == chat_end) (if (unicode) "…" else ".") else "Chats"[col - 5 ..][0..1])
+            else if (col >= 12 and col < archive_end)
+                (if (archive_end < 20 and col + 1 == archive_end) (if (unicode) "…" else ".") else "Archived"[col - 12 ..][0..1])
+            else
+                " ";
+            try std.testing.expectEqualStrings(expected, screen.readCell(@intCast(col), 1).?.char.grapheme);
+        };
         var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-        if (width >= 20 and height >= 1) {
-            var screen: vaxis.Screen = try .init(arena.allocator(), .{ .cols = width, .rows = height, .x_pixel = 0, .y_pixel = 0 });
-            const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = height, .screen = &screen };
-            try shown.render(window, controls.widget());
-            var line: std.ArrayList(u8) = .empty;
-            for (0..width) |col| try line.appendSlice(arena.allocator(), screen.readCell(@intCast(col), 0).?.char.grapheme);
-            try std.testing.expect(std.mem.startsWith(u8, line.items, "   + New Session"));
-        }
-        for (0..3) |row| for (0..@max(1, width)) |col| {
+        for (0..141) |col| {
             clicks.got = null;
             events.consume_event = false;
-            try controls.widget().handleEvent(&events, .{ .mouse = .{ .col = @intCast(col), .row = @intCast(row), .button = .left, .type = .press, .mods = .{} } });
-            const expected: ?overview_view.Click = if (col >= width or row >= height) null else if (row == 0) .new_session else if (col >= 5 and col < @min(13, width -| 3)) .sessions else if (col >= 15 and col < @min(23, width -| 3)) .archived else null;
+            try controls.widget().handleEvent(&events, .{ .mouse = .{ .col = @intCast(col), .row = 1, .button = .left, .type = .press, .mods = .{} } });
+            const expected: ?overview_view.Click = if (height < 2 or col >= width) null else if (col >= 5 and col < @min(10, width -| 3)) .sessions else if (col >= 12 and col < @min(20, width -| 3)) .archived else null;
             try std.testing.expectEqual(expected, clicks.got);
-        };
+        }
     };
 }
 

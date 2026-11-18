@@ -190,12 +190,12 @@ test "Composer draws between paste fragments that join the original suffix" {
 test "Composer empty draft shows the screen's placeholder and an input cursor" {
     var bytes: [32]u8 = undefined;
     var editor: Editor = .init(&bytes);
-    var composer: Self = .{ .editor = &editor, .placeholder = "Type a task", .style = .{ .bg = .{ .index = 19 } }, .quiet = .{ .dim = true, .bg = .{ .index = 19 } } };
+    var composer: Self = .{ .editor = &editor, .placeholder = "What shall we work on?", .style = .{ .bg = .{ .index = 19 } }, .quiet = .{ .dim = true, .bg = .{ .index = 19 } } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const surface = try composer.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 10 }, .cell_size = .{} });
     try std.testing.expectEqual(@as(u16, 3), surface.size.height);
-    try std.testing.expectEqualStrings("T", surface.readCell(3, 1).char.grapheme);
+    try std.testing.expectEqualStrings("W", surface.readCell(3, 1).char.grapheme);
     try std.testing.expect(surface.readCell(3, 1).style.dim);
     try std.testing.expectEqual(@as(u16, 3), surface.cursor.?.col);
     try std.testing.expectEqual(@as(usize, 0), editor.text().len);
@@ -274,7 +274,7 @@ test "Composer stays untinted with a blinking block caret in both themes and wid
             const caps: view.Caps = .{ .background = background, .depth = depth };
             const input = widget_style.of(caps, .{});
             const ground = widget_style.of(caps, .{ .colour = .quiet });
-            for ([_]u16{ 140, 46 }) |width| for ([_][]const u8{ "Type a task", "" }) |placeholder| {
+            for ([_]u16{ 140, 46 }) |width| for ([_][]const u8{ "What shall we work on?", "" }) |placeholder| {
                 for ([_]bool{ false, true }) |has_draft| for ([_]bool{ false, true }) |caret| {
                     const text = if (has_draft) draft else "";
                     std.debug.assert(editor.set(text, text.len) == null);

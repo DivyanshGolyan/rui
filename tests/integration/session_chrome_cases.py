@@ -148,7 +148,7 @@ def composing(screen, draft):
     bounds = composer_bounds(screen)
     expected = {(" › " + draft).rstrip()}
     if not draft:
-        expected.add(" › Type a task")
+        expected.add(" › What shall we work on?")
     return (bounds is not None and bounds[1] == bounds[0] + 2
             and shown[bounds[0] + 1].rstrip() in expected)
 

@@ -16,6 +16,9 @@ const PendingText = @import("TerminalText.zig");
 window: *Window,
 anchor: *Feed,
 tail: ?vxfw.Widget = null,
+welcome: bool = false,
+welcome_unicode: bool = true,
+welcome_quiet: vaxis.Style = .{},
 pending: ?struct { text: []const u8, note: ?[]const u8 = null } = null,
 message_note: ?resident.MessageNote = null,
 latest_ending: ?resident.LatestEnding = null,
@@ -438,6 +441,17 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     var screen: vaxis.Screen = .{ .width = self.size.width, .height = self.size.height, .width_method = self.method, .buf = surface.buffer };
     const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = screen.width, .height = screen.height, .screen = &screen };
     try self.window.drawWith(visible, win, self.colour, self.style, self.colours, self.presentation(), ctx.arena);
+    if (self.welcome and self.window.count == 0 and self.pending == null and self.size.height >= 2) {
+        const title = "rui";
+        const subtitle = if (self.welcome_unicode) "cotton · light enough to carry far" else "cotton - light enough to carry far";
+        const row = self.size.height / 3;
+        _ = win.print(&.{.{ .text = title, .style = self.style }}, .{ .row_offset = row, .col_offset = (self.size.width -| @as(u16, title.len)) / 2, .wrap = .none });
+        if (row + 1 < self.size.height) {
+            const subtitle_width = @import("display_text.zig").width(subtitle, .{ .viewport = self.method });
+            _ = win.print(&.{.{ .text = subtitle, .style = self.welcome_quiet }}, .{ .row_offset = row + 1, .col_offset = @intCast((self.size.width -| subtitle_width) / 2), .wrap = .none });
+        }
+    }
+
     var first: ?resident.Point = null;
     if (visible.first < self.window.count) {
         const entry = self.window.entries[visible.first];
@@ -729,7 +743,7 @@ test "FeedView retry click hits only painted suffix cells including wrapped tail
     const gpa = std.testing.allocator;
     const window = try testWindow();
     defer gpa.destroy(window);
-    const words = "× Model reply unreadable\n";
+    const words = "× The model's reply didn't come through\n";
     const older = "ctrl+r retries elsewhere\n";
     try window.append(&.{
         .{ .key = .{ .position = 10 }, .text = .{ .bytes = older }, .tight = true },
@@ -742,7 +756,7 @@ test "FeedView retry click hits only painted suffix cells including wrapped tail
     defer arena.deinit();
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = gpa, .cmds = .empty };
     defer ctx.cmds.deinit(gpa);
-    const shown = older ++ "× Model reply unreadable · ctrl+r retries\n";
+    const shown = older ++ "× The model's reply didn't come through · ctrl+r retries\n";
     const start = std.mem.lastIndexOf(u8, shown, "ctrl+r retries").?;
     var expected: viewport.Sized(256, true) = .{ .sidenotes = true, .quotes = true };
     try expected.append(shown);
@@ -781,7 +795,7 @@ test "FeedView retry click cancels drag departure and lost eligibility or ending
     const gpa = std.testing.allocator;
     const window = try testWindow();
     defer gpa.destroy(window);
-    try window.append(&.{.{ .key = .{ .position = 20 }, .text = .{ .bytes = "× Model reply unreadable\n" } }});
+    try window.append(&.{.{ .key = .{ .position = 20 }, .text = .{ .bytes = "× The model's reply didn't come through\n" } }});
     var anchor: Feed = .{};
     var clicks: RetryClicks = .{};
     const latest: resident.LatestEnding = .{ .key = .{ .position = 20 }, .cause = @import("marks.zig").cause("malformed_provider_output", null) };
@@ -791,7 +805,7 @@ test "FeedView retry click cancels drag departure and lost eligibility or ending
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = gpa, .cmds = .empty };
     defer ctx.cmds.deinit(gpa);
     _ = try testFrame(&view, arena.allocator(), 80, 4);
-    const at: Cell = .{ .row = 3, .col = 27 };
+    const at: Cell = .{ .row = 3, .col = 42 };
     const Cases = enum { drag_same, drag_away_back, release_elsewhere, leave, held, unkeyed, other_ending, hidden_press, disabled, no_press };
     for (std.enums.values(Cases)) |case| {
         view.retry_actionable = case != .disabled;
@@ -822,7 +836,7 @@ test "FeedView retry click accepts left and legacy no-button release only" {
     const gpa = std.testing.allocator;
     const window = try testWindow();
     defer gpa.destroy(window);
-    try window.append(&.{.{ .key = .{ .position = 20 }, .text = .{ .bytes = "× Model reply unreadable\n" } }});
+    try window.append(&.{.{ .key = .{ .position = 20 }, .text = .{ .bytes = "× The model's reply didn't come through\n" } }});
     var anchor: Feed = .{};
     var clicks: RetryClicks = .{};
     var view: Self = .{ .window = window, .anchor = &anchor, .handler = clicks.handler(), .retry_actionable = true, .latest_ending = .{ .key = .{ .position = 20 }, .cause = @import("marks.zig").cause("malformed_provider_output", null) } };
@@ -833,8 +847,8 @@ test "FeedView retry click accepts left and legacy no-button release only" {
     _ = try testFrame(&view, arena.allocator(), 80, 4);
     for (std.enums.values(vaxis.Mouse.Button)) |button| {
         clicks.count = 0;
-        try retryMouse(&view, &ctx, .{ .row = 3, .col = 27 }, .press);
-        try view.widget().handleEvent(&ctx, .{ .mouse = .{ .row = 3, .col = 27, .button = button, .mods = .{}, .type = .release } });
+        try retryMouse(&view, &ctx, .{ .row = 3, .col = 42 }, .press);
+        try view.widget().handleEvent(&ctx, .{ .mouse = .{ .row = 3, .col = 42, .button = button, .mods = .{}, .type = .release } });
         try std.testing.expectEqual(@as(usize, @intFromBool(button == .left or button == .none)), clicks.count);
         try std.testing.expect(view.retry_press == null);
     }
@@ -886,7 +900,7 @@ test "FeedView tool rows and retry chips hover only their painted targets withou
     try heading.prepare();
     try window.append(&.{
         .{ .key = .{ .position = 10 }, .text = resident.Text.fromDocument(&heading), .tight = true },
-        .{ .key = .{ .position = 20 }, .text = .{ .bytes = "× Model reply unreadable\n" }, .tight = true },
+        .{ .key = .{ .position = 20 }, .text = .{ .bytes = "× The model's reply didn't come through\n" }, .tight = true },
     });
     var anchor: Feed = .{};
     var actions: Actions = .{};
