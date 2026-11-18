@@ -355,17 +355,14 @@ fn run(text: []const u8) !?Refused {
 }
 
 pub fn shadowPrepare(comptime text: []const u8) void {
-    once(text, null);
+    once(text);
 }
 
-pub fn shadowPrepareFixture(comptime text: []const u8) void {
-    switch (comptime rsql.mysqlRendering(text)) {
-        .refused => |message| once(text, message),
-        .rendered => |template| inline for (comptime statements(template.prepared())) |statement| once(statement, null),
-    }
+pub fn shadowPrepareFixture(comptime template: rsql.Template) void {
+    inline for (comptime statements(template.prepared())) |statement| once(statement);
 }
 
-fn once(comptime text: []const u8, comptime unrendered: ?[]const u8) void {
+fn once(comptime text: []const u8) void {
     if (!@import("builtin").is_test) @compileError("test-only check");
     const Seen = Once(text);
     if (Seen.done.load(.acquire)) return;
@@ -375,7 +372,6 @@ fn once(comptime text: []const u8, comptime unrendered: ?[]const u8) void {
     if (Seen.done.load(.monotonic)) return;
     Seen.done.store(true, .release);
     _ = connection() orelse return;
-    if (unrendered) |message| return std.log.err("{s}\n  {s}", .{ message, text });
     const refused = run(comptime prepareQuery(text)) catch |err| {
         state = .broken;
         std.log.err("MySQL dialect check: connection failed: {s}", .{@errorName(err)});
