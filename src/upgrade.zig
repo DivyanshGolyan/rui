@@ -12,7 +12,7 @@ const installation_path = @import("installation_path.zig");
 const caller_error = @import("caller_error.zig");
 const upgrade_run = @import("upgrade_run.zig");
 
-pub const Phase = enum(u8) { checking, preparing, publishing, stopping, awaiting_retirement, starting, verifying, finished };
+pub const Phase = upgrade_run.Phase;
 pub const Progress = struct {
     context: *anyopaque,
     report: *const fn (*anyopaque, Phase) void,

@@ -4,6 +4,7 @@ const installation_path = @import("installation_path.zig");
 const caller_error = @import("caller_error.zig");
 const ClientTask = @import("ClientTask.zig");
 const upgrade_status = @import("upgrade_status.zig");
+const upgrade_run = @import("upgrade_run.zig");
 const release_candidate = @import("release_candidate.zig");
 const test_poll = @import("test_poll");
 const Self = @This();
@@ -120,7 +121,7 @@ fn advanceWith(self: *Self, worker: ClientTask.Run) !bool {
     if (!self.task.completed()) return false;
     self.joinWorker();
     if (self.operation == .check and self.failure == null and !self.cancelling) {
-        if (self.checked) |*checked| if (upgrade.canInstall(checked)) {
+        if (self.checked) |*checked| if (upgrade_run.next(resumed(checked)) != .end) {
             self.operation = .install;
             self.phase.store(.preparing, .release);
             self.task.start(self.init.io, self, worker) catch |err| {
@@ -143,7 +144,7 @@ fn joinWorker(self: *Self) void {
 
 fn finish(self: *Self) void {
     std.debug.assert(self.task.thread == null);
-    if (self.operation == .install) self.outcome = if (self.result) |*result| if (upgrade.compatible(result)) .compatible else .incompatible else .unchanged;
+    self.outcome = upgrade_run.outcome(self.facts());
     self.phase.store(.finished, .release);
     self.finished = true;
 }
@@ -176,22 +177,44 @@ pub fn deinit(self: *Self) void {
     self.* = .{ .discovery_attempted = self.discovery_attempted };
 }
 
-pub fn status(self: *const Self) upgrade_status.Run {
-    if (self.finished) return .{ .ended = .{ .how = self.ending(), .outcome = self.outcome } };
-    if (self.cancelling) return .cancelling;
-    if (self.operation == .install) if (self.checked) |*checked| if (!current(checked)) return .{ .installing = .{
-        .found = .{ .host = if (checked.hosts.entries.len == 0) .none else .{ .running = checked.hosts.entries.len } },
-        .step = switch (self.phase.load(.acquire)) {
-            .checking, .preparing, .finished => .preparing,
-            .publishing => .publishing,
-            .stopping, .awaiting_retirement, .starting, .verifying => .restarting,
-        },
-    } };
-    return .checking;
+fn resumed(checked: *const upgrade.Check) upgrade_run.Facts {
+    var value = checked.facts(.install);
+    value.resumed = true;
+    return value;
 }
 
-fn current(checked: *const upgrade.Check) bool {
-    return upgrade.holdsRelease(checked) and checked.hosts.entries.len == 0;
+// Only joined results are read here; progress is the existing atomic.
+fn facts(self: *const Self) upgrade_run.Facts {
+    var value: upgrade_run.Facts = .{ .mode = .install };
+    if (self.operation == .install or self.task.thread == null) {
+        if (self.checked) |*check| value = check.facts(.install);
+    }
+    value.resumed = self.operation == .install;
+    if (self.task.thread == null) {
+        if (self.result) |*result| {
+            if (self.checked) |*check| {
+                value = result.facts(check);
+            } else {
+                const receipt = result.installation.receipt();
+                value.published = .{ .ok = .{ .changed = result.installation == .installed, .selected = version(receipt.selected_version.?) } };
+                value.hosts = .{ .ok = result.hosts.summary(result.store) };
+            }
+        }
+        if (self.failure) |err| {
+            const cause: upgrade_run.Cause = if (err == error.Cancelled) .cancelled else switch (caller_error.of(err)) {
+                .upgrade_download_failed => .download,
+                .upgrade_release_invalid => .release,
+                .upgrade_preparation_failed => .preparation,
+                else => .other,
+            };
+            if (self.checked == null) value.selection = .{ .failed = cause } else value.prepared = .{ .failed = cause };
+        }
+    }
+    return value;
+}
+
+pub fn status(self: *const Self) upgrade_status.Run {
+    return upgrade_run.run(self.facts(), self.cancelling, self.finished, self.phase.load(.acquire));
 }
 
 fn version(of: @FieldType(@FieldType(upgrade.Check, "candidate"), "version")) upgrade_status.Version {
@@ -199,34 +222,7 @@ fn version(of: @FieldType(@FieldType(upgrade.Check, "candidate"), "version")) up
 }
 
 fn ending(self: *const Self) upgrade_status.Ended {
-    const failed: upgrade_status.Ended = .{ .failed = if (self.failure) |err| switch (caller_error.of(err)) {
-        .upgrade_download_failed => .download,
-        .upgrade_release_invalid, .upgrade_preparation_failed => .release,
-        else => .other,
-    } else .other };
-    const checked = &(self.checked orelse return if (self.cancelling) .cancelled else failed);
-    if (self.result) |*result| {
-        const selected = result.installation.receipt().selected_version.?;
-        const target = version(selected);
-        if (!upgrade.compatible(result)) return .{ .incompatible = target };
-        const restarted = result.hosts.totals().restarted != 0;
-        if (result.installation == .unchanged and !restarted) {
-            if (selected.order(checked.candidate.version) == .gt) return .{ .superseded = target };
-            return .{ .up_to_date = target };
-        }
-        return .{ .upgraded = .{ .version = target, .restarted = restarted } };
-    }
-    if (self.cancelling) return .cancelled;
-    if (self.failure != null) return failed;
-    return .{
-        .refused = switch (checked.selected) {
-            .absent => .first_install,
-            .source => .source_build,
-            .unknown_managed => .unknown_build,
-            .ineligible => .package_managed,
-            .released => unreachable,
-        },
-    };
+    return upgrade_run.ending(self.facts(), self.cancelling);
 }
 
 pub fn writeReceipt(self: *const Self, writer: *std.Io.Writer) !void {
@@ -239,14 +235,12 @@ pub fn writeReceipt(self: *const Self, writer: *std.Io.Writer) !void {
 pub fn relaunchBuild(self: *const Self) ?[]const u8 {
     std.debug.assert(!self.started or self.finished);
     const result = &(self.result orelse return null);
-    if (result.installation != .installed) return null;
+    if (!upgrade_run.installed(self.facts())) return null;
     return result.installation.receipt().selected_after;
 }
 
 pub fn hasGuidance(self: *const Self) bool {
-    return self.failure != null or self.cleanup.any() or
-        (if (self.result) |*result| upgrade.hasGuidance(result) else false) or
-        (if (self.checked) |checked| checked.path.state != .selected else false);
+    return upgrade_run.guidance(self.facts(), self.cleanup.any(), if (self.checked) |checked| checked.path.state == .selected else true);
 }
 
 pub fn writeReport(self: *const Self, writer: *std.Io.Writer) !void {
@@ -635,7 +629,7 @@ test "relaunch uses only an installed receipt selection and keeps every guidance
             try std.testing.expect(job.hasGuidance());
         }
         job.cleanup = .{};
-        var checked: upgrade.Check = undefined;
+        var checked: upgrade.Check = news_check;
         inline for (.{ .selected, .shadowed, .missing, .unavailable }) |state| {
             checked.path = .{ .state = state };
             job.checked = checked;
@@ -908,4 +902,54 @@ test "discovery handoff domain retains validated candidate and transport only fo
         try std.testing.expect(job.candidate == null and job.download.stderr == null and !job.started);
         try std.testing.expectEqual(.automatic, job.download.family);
     };
+}
+
+test "run endings baseline from the existing job" {
+    const V = upgrade_status.Version{ .schema = 60, .patch = 1 };
+    const Case = struct { installed: bool, stopped: bool, expected: upgrade_status.Ended, relaunch: bool };
+    const cases = [_]Case{
+        .{ .installed = true, .stopped = false, .expected = .{ .upgraded = .{ .version = V, .restarted = false } }, .relaunch = true },
+        .{ .installed = true, .stopped = true, .expected = .{ .upgraded = .{ .version = V, .restarted = false } }, .relaunch = true },
+        .{ .installed = false, .stopped = false, .expected = .{ .up_to_date = V }, .relaunch = false },
+        .{ .installed = false, .stopped = true, .expected = .{ .up_to_date = V }, .relaunch = false },
+    };
+    for (cases) |case| {
+        var job: Self = .{ .started = true, .operation = .install, .checked = news_check, .cancelling = case.stopped, .result = test_result };
+        if (!case.installed) job.result.?.installation = .{ .unchanged = test_result.installation.receipt() };
+        job.finish();
+        try std.testing.expectEqualDeep(case.expected, job.status().ended.how);
+        try std.testing.expectEqual(case.relaunch, job.relaunchBuild() != null);
+    }
+    // F2 (#1792): a cancellation returned by the worker still retains guidance.
+    var cancelled: Self = .{ .started = true, .operation = .install, .checked = news_check, .cancelling = true, .failure = error.Cancelled };
+    cancelled.finish();
+    try std.testing.expectEqual(upgrade_status.Ended.cancelled, cancelled.status().ended.how);
+    try std.testing.expect(cancelled.hasGuidance());
+}
+
+test "run endings baseline failure and phase tables" {
+    const failures = [_]struct { err: anyerror, stopped: bool, ended: upgrade_status.Ended }{
+        .{ .err = error.ReleaseDownloadFailed, .stopped = false, .ended = .{ .failed = .download } },
+        .{ .err = error.InvalidReleaseVersion, .stopped = false, .ended = .{ .failed = .release } },
+        .{ .err = error.ReleaseChecksumMismatch, .stopped = false, .ended = .{ .failed = .release } },
+        .{ .err = error.AccessDenied, .stopped = false, .ended = .{ .failed = .other } },
+        .{ .err = error.Cancelled, .stopped = true, .ended = .cancelled },
+    };
+    for (failures) |case| {
+        var job: Self = .{ .started = true, .failure = case.err, .cancelling = case.stopped };
+        job.finish();
+        try std.testing.expectEqualDeep(case.ended, job.status().ended.how);
+        try std.testing.expect(job.hasGuidance());
+        try std.testing.expect(job.relaunchBuild() == null);
+    }
+    const phases = [_]struct { upgrade.Phase, upgrade_status.Step }{
+        .{ .checking, .preparing },   .{ .preparing, .preparing },            .{ .publishing, .publishing },
+        .{ .stopping, .restarting },  .{ .awaiting_retirement, .restarting }, .{ .starting, .restarting },
+        .{ .verifying, .restarting }, .{ .finished, .preparing },
+    };
+    for (phases) |case| {
+        var job: Self = .{ .started = true, .operation = .install, .checked = news_check };
+        job.phase.store(case[0], .release);
+        try std.testing.expectEqual(case[1], job.status().installing.step);
+    }
 }
