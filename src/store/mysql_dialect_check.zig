@@ -1177,6 +1177,7 @@ test "schema 75 MySQL pin migration handles fresh and historically upgraded kind
             }
             // The expected fixture describes the current schema, while this Store is at format 74.
             const format_74_rows = comptime blk: {
+                @setEvalBranchQuota(1_000_000);
                 var rows = store_testing.expected_mysql_rows;
                 const baseline = store_testing.baseline_rows;
                 for (.{ "INSERT INTO message_admission(", "INSERT INTO conversation_entry(" }) |insert| {

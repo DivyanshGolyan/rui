@@ -11,10 +11,27 @@ pub fn configurePauses(b: *std.Build, compile: *std.Build.Step.Compile, enabled:
     compile.root_module.addOptions("build_options", options);
 }
 
-/// The files src/store/rsql.zig's comptime check and render read. Their contents fingerprint the
-/// generated statement table (src/store/rsql_table.zig): an edit to any of them makes every entry
-/// miss until tests/ci/rsql_table.py regenerates it.
-pub const rsql_table_inputs = [_][]const u8{ "src/store/rsql.zig", "src/store/schema.zig", "src/provider_name.zig", "src/change_ring.zig" };
+/// The files the comptime statement checks and schema rendering read: rsql.zig, schema.zig and their
+/// direct imports. Their contents fingerprint the generated table (src/store/rsql_table.zig): an edit
+/// to any of them makes every statement and schema value miss until tests/ci/rsql_table.py regenerates it.
+pub const rsql_table_inputs = [_][]const u8{
+    "src/store/rsql.zig",       "src/store/schema.zig",                 "src/provider_name.zig", "src/change_ring.zig",
+    "src/session_settings.zig", "src/store_path.zig",                   "src/store_id.zig",      "src/tool_name.zig",
+    "src/bounded.zig",          "src/tool_record.zig",                  "src/prefix_seal.zig",   "src/retry_policy.zig",
+    "src/turn_policy.zig",      "src/store/domain/model_admission.zig", "src/store/sqlite.zig",  "src/store/mysql_literal.zig",
+    "src/outcome_code.zig",
+};
+
+/// The Store format number declared in src/store/schema.zig, read as text: importing schema.zig
+/// into the build script would compile its whole comptime schema there.
+pub fn schemaVersion(b: *std.Build) u32 {
+    const source = b.root.root_dir.handle.readFileAlloc(b.graph.io, b.pathJoin(&.{ b.root.sub_path, "src/store/schema.zig" }), b.allocator, .limited(64 * 1024 * 1024)) catch
+        std.debug.panic("cannot read src/store/schema.zig", .{});
+    const prefix = "\npub const schema_version: u32 = ";
+    const start = (std.mem.indexOf(u8, source, prefix) orelse std.debug.panic("src/store/schema.zig declares no schema_version", .{})) + prefix.len;
+    const end = std.mem.indexOfScalarPos(u8, source, start, ';') orelse std.debug.panic("src/store/schema.zig: unterminated schema_version", .{});
+    return std.fmt.parseInt(u32, source[start..end], 10) catch std.debug.panic("src/store/schema.zig: schema_version is not a number", .{});
+}
 
 const RsqlTable = struct { inputs: []const u8, collect: bool };
 var rsql_table: ?RsqlTable = null;

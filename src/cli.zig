@@ -931,11 +931,18 @@ noinline fn runUpgrade(init: std.process.Init, args: []const []const u8) !void {
     var output = std.Io.File.stdout().writerStreaming(init.io, &buffer);
     try upgrade.writeCheck(&output.interface, &checked);
     try output.flush();
-    if (checking) return;
-    if (!upgrade.canInstall(&checked)) {
-        recordExit(.environment);
-        return error.Reported;
-    }
+    const upgrade_run = @import("upgrade_run.zig");
+    var resumed = checked.facts(if (checking) .check else .install);
+    resumed.resumed = true;
+    if (upgrade_run.next(resumed) == .end) switch (upgrade_run.exit(resumed)) {
+        .done => return,
+        .not_installable => {
+            recordExit(.environment);
+            return error.Reported;
+        },
+        // A failed check or install returns its error before this point.
+        .check_failed, .install_failed, .restart_failed => unreachable,
+    };
     var cleanup: upgrade.CleanupReceipts = .{};
     defer {
         var cleanup_buffer: [512]u8 = undefined;
@@ -955,7 +962,12 @@ noinline fn runUpgrade(init: std.process.Init, args: []const []const u8) !void {
     defer result.deinit(allocator);
     try upgrade.writeResult(&output.interface, &result);
     try output.flush();
-    if (result.hosts.totals().failed != 0) return error.HostRestartFailed;
+    switch (upgrade_run.exit(result.facts(&checked))) {
+        .done => {},
+        .restart_failed => return error.HostRestartFailed,
+        // A failed check or install returns its error before publication.
+        .check_failed, .not_installable, .install_failed => unreachable,
+    }
 }
 
 noinline fn upgradeDownload(err: anyerror, download: *const @import("upgrade.zig").Download) void {

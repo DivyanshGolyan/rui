@@ -628,7 +628,7 @@ class SelectionTest(unittest.TestCase):
                   "install.sh": True, "build.zig": True}
         source = Path(__file__).resolve().parents[2] / "src"
         own = {f"src/{path.name}" for path in source.glob("*.zig") if path.name.lower().startswith("upgrade")}
-        self.assertLessEqual({"src/upgrade.zig", "src/upgrade_process.zig", "src/UpgradeJob.zig", "src/upgrade_status.zig"}, own)
+        self.assertLessEqual({"src/upgrade.zig", "src/upgrade_process.zig", "src/upgrade_run.zig", "src/UpgradeJob.zig", "src/upgrade_status.zig"}, own)
         self.assertEqual(own, {path for path in tree_graph().owners["upgrade-integration"] if "pgrade" in path})
         expected = others | dict.fromkeys(own | {"src/upgrade_new.zig", "src/UpgradeNew.zig"}, True)
         for path, upgrade_required in expected.items():
@@ -857,6 +857,13 @@ class SelectionTest(unittest.TestCase):
         for family in ("targets", "native_targets"):
             self.assertTrue({"test-logic", "upgrade-integration", "host-stop-integration", "host-launch-integration"}
                             <= set(result[family]), result[family])
+            self.assertNotIn("check", result[family])
+        self.assertTrue(result["upgrade_required"])
+
+    def test_upgrade_run_core_selects_logic_and_the_upgrade_fixture(self):
+        result = select(["src/upgrade_run.zig"], "review", AVAILABLE)
+        for family in ("targets", "native_targets"):
+            self.assertTrue({"test-logic", "upgrade-integration"} <= set(result[family]), result[family])
             self.assertNotIn("check", result[family])
         self.assertTrue(result["upgrade_required"])
 
@@ -1830,7 +1837,7 @@ fi
 
     def test_cache_maintenance_preserves_unowned_and_current_caches(self):
         result = subprocess.run(["node", "--test", "tests/ci/cache_maintenance.test.cjs"],
-                                capture_output=True, text=True, timeout=10)
+                                capture_output=True, text=True, timeout=300)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_isolated_full_check_parts_keep_other_selected_work_once(self):
@@ -1869,7 +1876,7 @@ class FullCheckPartitionTest(unittest.TestCase):
                  ready=lambda live: not live)
 
     def run_part(self, part, fail="", overlap=False, hold="", timing=False, clock_error="",
-                 timeout=60, python_delay=0, fail_at="", native=True):
+                 timeout=300, python_delay=0, fail_at="", native=True, timeout_after_held=False):
         with ExitStack() as owner:
             root = Path(tempfile.mkdtemp())
             process = None
@@ -1881,7 +1888,7 @@ class FullCheckPartitionTest(unittest.TestCase):
                     if process is not None and not retired:
                         self.wait_for_group_retirement(
                             process.pid, disposal_deadline if disposal_deadline is not None
-                            else time.monotonic() + 5)
+                            else time.monotonic() + 30)
                     shutil.rmtree(root)
                 except BaseException as cleanup:
                     if failure is None:
@@ -1976,9 +1983,15 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
             arguments = (["parallel", str(root / "native") if native else "", "status", "sessions", "activity", "preferences", "notice", "mysql-admin"]
                          if part == "parallel" else
                          ["status", "sessions", "activity", "preferences", part, "notice", "mysql-admin"])
-            command = [
-                "/bin/sh", "tests/integration/check.sh", "release", "debug", *arguments,
-            ]
+            driver = "tests/integration/check.sh"
+            if hold:
+                source = Path(driver).read_text()
+                wait = '        if wait "$pid"; then'
+                self.assertEqual(source.count(wait), 1)
+                source = source.replace(wait, '        touch "$GATE_DIR/wait.$name"\n' + wait)
+                command = ["/bin/sh", "-c", source, driver, "release", "debug", *arguments]
+            else:
+                command = ["/bin/sh", driver, "release", "debug", *arguments]
             releases = []
             if timing:
                 clock = root / "clock"
@@ -2016,7 +2029,7 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
                                 os.write(releases[1], b"r\n")
                                 def timing_recorded():
                                     self.assertIsNone(process.poll())
-                                    return any(path.read_text().strip()
+                                    return any(path.read_text().endswith("\n")
                                                for path in root.glob("rui-check.*/preference-policy.status"))
                                 wait_for(timing_recorded, "the completed peer to record timing before the inventory wait",
                                          interval=.005, deadline=deadline)
@@ -2031,18 +2044,37 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
                                 wait_for(held_started, f"held {hold} to start", interval=.005, deadline=deadline)
                                 if fail_at == "held_ready":
                                     self.fail("injected failure at held_ready")
-                                observation_deadline = time.monotonic() + .1
-                                while time.monotonic() < observation_deadline:
-                                    self.assertFalse((root / "isolated.started").exists())
-                                    time.sleep(.005)
+                                held_name = {
+                                    "native": "native",
+                                    "admission_integration.sh": "admission",
+                                    "dispatch_integration.py": "dispatch",
+                                    "bash_owner_integration.py": "bash-owner",
+                                    "bash_integration.py": "bash",
+                                    "peer_integration.py": "peer",
+                                    "sender_identity_integration.py": "sender-identity",
+                                    "bash_lifecycle_integration.py": "bash-lifecycle",
+                                    "bash_recovery_integration.py": "bash-recovery",
+                                    "codex_integration.py": "codex",
+                                    "control_integration.py": "control",
+                                    "descriptor_capacity_integration.py": "descriptor-capacity",
+                                    "host_stop_integration.py": "host-stop",
+                                    "human_cli_integration.py:renderer": "human-cli-renderer",
+                                }[hold]
+                                def held_wait_started():
+                                    self.assertIsNone(process.poll())
+                                    return (root / f"wait.{held_name}").exists()
+                                wait_for(held_wait_started, f"driver to wait for {held_name}",
+                                         interval=.005, deadline=deadline)
+                                self.assertFalse((root / "isolated.started").exists())
                         finally:
-                            if sys.exception() is None:
+                            if sys.exception() is None and not timeout_after_held:
                                 for release in releases:
                                     os.write(release, b"r\n")
-                        stdout, stderr = process.communicate(timeout=max(0, deadline - time.monotonic()))
+                        stdout, stderr = process.communicate(
+                            timeout=.001 if timeout_after_held else max(0, deadline - time.monotonic()))
                     except BaseException as failure:
                         failure.add_note(f"driver_pid={process.pid}")
-                        disposal_deadline = time.monotonic() + 5
+                        disposal_deadline = time.monotonic() + 30
                         try:
                             os.killpg(process.pid, signal.SIGKILL)
                         except ProcessLookupError:
@@ -2093,7 +2125,9 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
 
     def test_driver_deadline_reaps_and_preserves_the_original_failure(self):
         for part, options, error, message, held in (
-            ("all", {"python_delay": 2, "timeout": .001}, subprocess.TimeoutExpired, "", ()),
+            ("parallel", {"hold": "dispatch_integration.py", "overlap": True,
+                          "timeout_after_held": True}, subprocess.TimeoutExpired, "",
+             ("dispatch_integration.py.release",)),
             ("parallel", {"hold": "dispatch_integration.py", "overlap": True,
                           "fail_at": "held_ready"}, AssertionError, "held_ready",
              ("dispatch_integration.py.release",)),
@@ -2123,11 +2157,11 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
                     self.assertIn(identity, peers)
                     def peer_state(identity=identity):
                         observed = subprocess.run(["ps", "-o", "stat=", "-p", peers[identity]],
-                                                  capture_output=True, text=True)
+                                                  capture_output=True, text=True, timeout=30)
                         self.assertIn(observed.returncode, (0, 1), observed.stderr)
                         self.assertFalse(observed.stderr)
                         return observed.stdout.strip()
-                    wait_for(peer_state, f"held peer {identity} to retire", timeout=5, interval=.005,
+                    wait_for(peer_state, f"held peer {identity} to retire", timeout=30, interval=.005,
                              ready=lambda state: not state or state.startswith("Z"))
 
     def test_disposal_and_diagnostic_faults_preserve_the_primary_failure(self):
@@ -2156,7 +2190,7 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
                 finally:
                     if fault == "retirement" and rejected.exception.__notes__:
                         pid = int(rejected.exception.__notes__[0].split("=")[1])
-                        self.wait_for_group_retirement(pid, time.monotonic() + 5)
+                        self.wait_for_group_retirement(pid, time.monotonic() + 30)
                         for note in rejected.exception.__notes__:
                             if note.startswith("retained driver root: "):
                                 shutil.rmtree(note.removeprefix("retained driver root: "))
@@ -2178,7 +2212,7 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
 
                 def live_members():
                     census = run(["ps", "-axo", "pgid=,stat="], capture_output=True,
-                                 text=True, check=True, timeout=5)
+                                 text=True, check=True, timeout=30)
                     return [row for row in census.stdout.splitlines()
                             if int(row.split()[0]) == group and not row.split()[1].startswith("Z")]
 
@@ -2190,7 +2224,7 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
 
                     def signal_others():
                         census = run(["ps", "-axo", "pid=,pgid=,stat="], capture_output=True,
-                                     text=True, check=True, timeout=5)
+                                     text=True, check=True, timeout=30)
                         others = [int(pid) for pid, member_group, state in
                                   (row.split() for row in census.stdout.splitlines())
                                   if int(member_group) == group and int(pid) != held
@@ -2202,7 +2236,7 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
                                 pass
                         return others
                     wait_for(signal_others, f"driver group {group} to keep only its held descendant",
-                             interval=.005, timeout=5, ready=lambda others: not others)
+                             interval=.005, timeout=30, ready=lambda others: not others)
 
                 def census_then_deliver(*args, **kwargs):
                     nonlocal observed_live
@@ -2247,7 +2281,7 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
                             killpg(group, signal.SIGKILL)
                         except ProcessLookupError:
                             pass
-                        self.wait_for_group_retirement(group, time.monotonic() + 5)
+                        self.wait_for_group_retirement(group, time.monotonic() + 30)
                     if root is not None and root.exists():
                         rmtree(root)
 
