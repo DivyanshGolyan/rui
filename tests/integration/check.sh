@@ -66,14 +66,14 @@ cases() {
     run_case execution bash-lifecycle python3 "$directory/bash_lifecycle_integration.py" "$release_safe"
     run_case execution bash-recovery python3 "$directory/bash_recovery_integration.py" "$pause_binary"
     run_case execution codex python3 "$directory/codex_integration.py" "$release_safe"
-    run_case execution control python3 "$directory/control_integration.py" "$release_safe"
+    run_case execution control python3 "$directory/control_integration.py" "$pause_binary"
     run_case callers session-list python3 "$directory/session_list_integration.py" "$release_safe" "$session_list_client"
     run_case callers conversation-page python3 "$directory/conversation_page_integration.py" "$release_safe"
     run_case callers activity python3 "$directory/activity_integration.py" "$release_safe" "$activity_client"
     run_case execution descriptor-capacity python3 "$directory/descriptor_capacity_integration.py" "$pause_binary"
     run_case callers host-status python3 "$directory/host_status_integration.py" "$release_safe" "$host_status_actor" "$mysql_launch_admin"
     run_case isolated host-launch python3 "$directory/host_launch_integration.py" "$release_safe"
-    run_case callers host-stop python3 "$directory/host_stop_integration.py" "$release_safe" "$host_status_actor"
+    run_case callers host-stop python3 "$directory/host_stop_integration.py" "$pause_binary" "$host_status_actor"
     run_case callers settings python3 "$directory/settings_integration.py" "$release_safe" --require-mcp-sdk
     run_case isolated admission-debug sh "$directory/admission_integration.sh" "$debug" artifact-smoke
     run_case isolated host-process python3 "$directory/host_process_test.py"
