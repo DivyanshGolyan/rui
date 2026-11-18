@@ -60,6 +60,8 @@
 | EXR-52 | Host | Bash can launch with the admitted client population held at the advertised descriptor capacity. | Host readiness, clients and real Bash process | `descriptor_capacity_integration.py:prove_bash_spawn_with_full_client_population` | docs/contracts/resources.md:62 |
 | EXR-53 | Host | A real Bash child does not inherit an accepted Host exchange descriptor. | Host socket and Bash child | `descriptor_capacity_integration.py:prove_accept_inheritance` | docs/contracts/execution.md:435 |
 | EXR-54 | Host | Lost custody or fenced Bash settlement releases both sealed spills and their scratch accounting. | Host custody and scratch directory | `Bash releases both spills after lost custody or fenced settlement` | docs/contracts/resources.md:174 |
+| EXR-55 | Host | A Session stop selected after the Bash leader exits with descendant pipes open saves cancellation and retires the descendant. | Host control, Store and process observation | `bash_integration.py:main` stopped-pipes case | docs/contracts/execution.md:514 |
+| EXR-56 | Host | A Session stop selected before Bash handoff prevents the command from launching. | Host control, Store and command effect | `bash_integration.py:main` prelaunch-stop case | docs/contracts/execution.md:364 |
 
 Owned elsewhere: SH-3 (storage failure fencing).
 

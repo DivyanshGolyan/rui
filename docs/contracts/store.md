@@ -220,7 +220,7 @@ No running Hosts prints `No running Hosts.` and starts nothing.
 Source/release installers and `rui upgrade` use this one install-wide restart owner; only installation eligibility differs.
 
 Lifecycle control observation is separate from ordinary client readiness.
-Upgrade can read the complete bounded Host-info envelope using only the current wire or the historical wire `17`, `16`, `15`, `14`, `13` and `9` profiles, with matching HTTP and body versions and peer PID from that same connection.
+Upgrade can read the complete bounded Host-info envelope using only the current wire or the historical wire `20`, `18`, `17`, `16`, `15`, `14`, `13` and `9` profiles, with matching HTTP and body versions and peer PID from that same connection.
 Only an explicit wrong-wire response permits the historical read-only profile; malformed, unavailable or unknown profiles grant no authority.
 A historical managed Host is paused through its retained executable with the captured exact instance. Its process generation (gone or zombie) and runtime/Store lease must retire; a different authenticated owner holding the lease is eligible for adoption, never another stop. Historical control facts never grant Session access.
 Target source admission precedes interruption and covers read/apply, detached rejection, placement/anchoring, provider finishing, resolution and sealing without database access. Released v0.75.0 is a witnessed capability exception: foreground-only check accepts stdin lifetime but detached start refuses it, so restarting onto that target is refused before stopping the running Host. Targets with no check are also refused before stop; intentional source builds are not excluded by version text alone.

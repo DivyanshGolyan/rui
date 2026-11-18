@@ -14,7 +14,7 @@ import time
 
 import model_fixture as dispatch
 from product_defaults import compaction_trigger
-from host_process import HostDiagnostics, ReleaseGate, TestHTTPServer, TRANSPORT_EXCHANGE_LIMIT, _failure_destination, preserve_failure_metadata, wait_for_execution_release as wait_for_drain
+from host_process import HostDiagnostics, PauseGate, ReleaseGate, TestHTTPServer, TRANSPORT_EXCHANGE_LIMIT, _failure_destination, preserve_failure_metadata, wait_for_execution_release as wait_for_drain
 import os_semantics
 from h2_fixture import Endpoint, closed_host_request
 
@@ -567,12 +567,13 @@ def refused_stream(root, endpoint, phase):
 
 
 def flow_while_execution_held(root, endpoint):
+    # PAU-17
     store = root / "flow-store"
-    gate = ReleaseGate(root / "flow-settlement-gate")
+    gate = PauseGate("model.result_ready", occurrence=1)
     host = dispatch.start_host(
         store, f"https://localhost:{endpoint.server_address[1]}/responses",
         "--set", "network.caFile=" + str(str(root / "cert.pem")),
-        "--test-phase-trace", "--test-model-result-gate-path", str(gate.path), active_capacity=2,
+        "--test-phase-trace", active_capacity=2, pause=gate,
     )
     try:
         diagnostics = HostDiagnostics(host)
@@ -582,11 +583,11 @@ def flow_while_execution_held(root, endpoint):
             dispatch.message(root, store, f"flow-{name}-message", sessions[name], name)
         assert endpoint.ready.wait(20), "both flow-probe streams did not become live"
         quick = dispatch.observe(store, "flow-quick-message")["binding"]
-        diagnostics.wait("sealed_before_settlement", timeout=20, operation=quick["operation"])
+        arrival = gate.wait(operation=quick["operation"])
+        assert arrival["context"]["attempt"] == int(quick["attempt"]), arrival
         endpoint.flow_release.set()
         assert endpoint.flow_ping_acked.wait(10), "no PING answer while execution was held"
         assert endpoint.flow_body_sent.wait(10), "the sibling stream stalled while execution was held"
-        gate.assert_held()
         assert dispatch.observe(store, "flow-quick-message").get("result") is None
         gate.release()
         result_deadline = time.monotonic() + 20
@@ -601,7 +602,7 @@ def flow_while_execution_held(root, endpoint):
         print(json.dumps({"case": "flow_while_execution_held", "streams": 2, "connections": 1,
                           "held_body_bytes": len(endpoint.answers["flow"]), "ping_answered": True}), flush=True)
     finally:
-        gate.release()
+        gate.close()
         dispatch.stop_host(host)
 
 

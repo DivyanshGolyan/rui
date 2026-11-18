@@ -165,6 +165,19 @@ pub fn build(b: *std.Build) void {
         "Run TD2 original-recovery encodings through the direct-PTY matrix (nonblocking)",
     ).dependOn(&screen_module.addPtyHarness(b, screen, "tests/integration/input_equivalence.py", release_safe).step);
 
+    const public_parts_seed = b.addTest(.{
+        .name = "public-parts-seed",
+        .use_llvm = test_actor_llvm,
+        .root_module = b.createModule(.{ .root_source_file = b.path("src/tests.zig"), .target = target, .optimize = .ReleaseSafe }),
+        .filters = &.{"seed CLI mixed parts fixture"},
+    });
+    product.configureUnitRoot(b, public_parts_seed, target, pinned_transport);
+    const public_parts_integration = b.addSystemCommand(&.{ "python3", "-B" });
+    public_parts_integration.addFileArg(b.path("tests/integration/public_parts_integration.py"));
+    public_parts_integration.addFileArg(release_safe);
+    public_parts_integration.addFileArg(ci.path(public_parts_seed));
+    b.step("public-parts-integration", "Inspect and export Store-seeded Message and Action parts through the CLI").dependOn(&public_parts_integration.step);
+
     const session_list_client = b.addExecutable(.{
         .name = "rui-session-list-client-test",
         .use_llvm = test_actor_llvm,
@@ -215,7 +228,7 @@ pub fn build(b: *std.Build) void {
 
     const h2_integration = b.addSystemCommand(&.{"python3"});
     h2_integration.addFileArg(b.path("tests/integration/transport_h2_integration.py"));
-    h2_integration.addFileArg(release_safe);
+    h2_integration.addFileArg(ci.path(pause_rui));
     const h2_oracle_tests = b.addSystemCommand(&.{"python3"});
     h2_oracle_tests.addFileArg(b.path("tests/integration/transport_h2_integration_test.py"));
     h2_oracle_tests.addFileArg(release_safe);
@@ -374,7 +387,7 @@ pub fn build(b: *std.Build) void {
 
     const host_stop_integration = b.addSystemCommand(&.{"python3"});
     host_stop_integration.addFileArg(b.path("tests/integration/host_stop_integration.py"));
-    host_stop_integration.addFileArg(release_safe);
+    host_stop_integration.addFileArg(ci.path(pause_rui));
     host_stop_integration.addFileArg(ci.path(host_status_actor));
     const host_stop_step = b.step("host-stop-integration", "Run native exact-instance Host shutdown and custody drain");
     host_stop_step.dependOn(&host_stop_integration.step);
