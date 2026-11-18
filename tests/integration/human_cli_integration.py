@@ -383,48 +383,13 @@ def compiled_model_cases():
 
 
 def preference_edits(home, store):
-    defaults(home, "--store", store, "--provider", "codex", "--model", "gpt-6-luna")
     saved = home / ".config/rui/preferences"
-    pinned = f"version=1\nstore={store.resolve()}\nprovider=codex\nmodel=gpt-6-luna\n"
-    cleared = f"version=1\nstore={store.resolve()}\nprovider=codex\nmodel=\n"
-    assert saved.read_text() == pinned
-    defaults(home, "--store", store)
-    assert saved.read_text() == pinned, "omitted model lost its selection"
-    assert defaults(home, "--clear-model")["model"] is None
-    assert saved.read_text() == cleared, "clear persisted a recommendation or retained the model"
-    defaults(home)
-    assert saved.read_text() == cleared, "inspection persisted a recommendation"
+    original = saved.read_bytes()
+    # CLI grammar owns the conflicting option refusals; CLI-22 and CLI-23 own content edits.
     for flags in (("--clear-model", "--model", "gpt-6-luna"),
                   ("--model", "gpt-6-luna", "--clear-model"), ("--model", "")):
         defaults(home, *flags, success=False)
-        assert saved.read_text() == cleared, "rejected edit changed preferences"
-    saved.write_text(pinned.replace("provider=codex", "provider=retired").replace("gpt-6-luna", "old-model"))
-    defaults(home, "--clear-model")
-    assert saved.read_text() == cleared.replace("provider=codex", "provider=retired")
-    assert defaults(home)["next_session"] == {"status": "unsupported_provider"}
-    defaults(home, "--provider", "codex", "--clear-model")
-    assert saved.read_text() == cleared
-    defaults(home, "--model", "gpt-6-luna")
-    assert saved.read_text() == pinned
-    assert defaults(home)["notifications"] is True
-    assert defaults(home, "--notifications", "off")["notifications"] is False
-    assert saved.read_text() == pinned.replace("version=1", "version=2") + "notifications=off\n"
-    defaults(home, "--notifications", "maybe", success=False)
-    assert defaults(home, "--notifications", "on")["notifications"] is True
-    assert saved.read_text() == pinned
-
-    original = saved.read_bytes()
-    for mode in ("ask", "bypass"):
-        changed = defaults(home, "--permission-mode", mode)
-        assert changed["changed"] and changed["permission_mode"] == mode, changed
-        inspected = defaults(home)
-        assert not inspected["changed"] and inspected["permission_mode"] == mode, inspected
-        assert saved.read_text().startswith("version=4\n"), saved.read_text()
-        assert saved.read_text().endswith(f"reasoning_effort=\npermission_mode={mode}\n"), saved.read_text()
-    retained = saved.read_bytes()
-    defaults(home, "--permission-mode", "plan", success=False)
-    assert saved.read_bytes() == retained, "invalid permission mode changed preferences"
-    saved.write_bytes(original)
+        assert saved.read_bytes() == original, "rejected edit changed preferences"
 
 
 def read_pipe_output(stream, *, count=None, timeout=10):
@@ -2103,10 +2068,6 @@ def main(selected="all"):
             "status": "selected", "provider": "codex", "model": "gpt-6.1-sol", "local_credential": "configured"}, sole
         (saved.parent / "preferences.backup").rename(saved)
         credential.unlink()
-        saved.write_text("version=9\n")
-        defaults(preferences_home, success=False)
-        defaults(preferences_home, "--model", "another-model", success=False)
-        saved.write_text(f"version=1\nstore={store.resolve()}\nprovider=codex\nmodel=gpt-6-luna\n")
         saved.chmod(0o644)
         defaults(preferences_home, success=False)
         saved.chmod(0o600)

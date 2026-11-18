@@ -64,6 +64,8 @@ Owned elsewhere: ADM-16 (captured-request recovery), ADM-20 (keyed-observation v
 
 ## Legacy tests these replace
 
+- Saved-defaults encoding and edit cases in `tests/integration/human_cli_integration.py:preference_edits`: CLI-22 and CLI-23; conflicting CLI option refusals and the on-disk configure witness remain.
+
 - CLI grammar/help/refusal blocks in `src/cli_args.zig:306` and `src/caller_exit.zig`: CLI-1–CLI-4, CLI-7, CLI-13. Preserve unrelated feature ownership until migrated.
 - Session list cases in `src/protocol_reply.zig:2750`, `tests/integration/session_list_integration.py` and `tests/integration/session_list_facts_integration.py`: CLI-11–CLI-12.
 - Current-observation, keyed-observation and canonical failure blocks in `src/protocol_reply.zig:2538,3196` and `tests/integration/canonical_failure_integration.py`: INS-2, ADM-20 and WIR-2.
