@@ -1958,6 +1958,19 @@ while True:
                                  ("initial-frame", screens[count - 1], False))
                 self.assertTrue(records[0]["ok"])
 
+    def test_initial_readiness_accepts_before_and_after_wording(self):
+        def check(predicate, _description, **_kwargs):
+            for label in ("+ New Session", "+ New chat"):
+                with self.subTest(label=label):
+                    self.assertTrue(predicate(types.SimpleNamespace(completed=f" {label}\n Settings")))
+                    self.assertFalse(predicate(types.SimpleNamespace(completed=f" {label}")))
+            for title, close in (("Sign in to Rui", "[ Close ]"), ("Welcome to Rui", "Close")):
+                screen = f" {title}\n ChatGPT  subscription\n API key  service\n {close}\n"
+                with self.subTest(title=title):
+                    self.assertTrue(predicate(types.SimpleNamespace(completed=screen)))
+                    self.assertFalse(predicate(types.SimpleNamespace(completed=screen.replace(close, ""))))
+        self.helper["frame_initial_ready"](types.SimpleNamespace(wait=check))
+
     def test_initial_readiness_requires_complete_guided_account_controls(self):
         modal = (
             '                                  ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n'

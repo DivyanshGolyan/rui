@@ -10740,25 +10740,47 @@ test "consent and full panels compose across adoption, nested choices, and draft
     };
 }
 
-test "empty chat welcome follows observed first message at both widths" {
-    const held = try HeldFrontend.create();
-    defer held.destroy();
-    const self = &held.self;
-    self.line.read = .{ .revision = 1, .end = 0 };
-    self.line.folder = .{};
-    try self.line.folder.?.set("/work");
-    for ([_]u16{ 46, 140 }) |width| {
-        held.size = .{ .width = width, .height = 30 };
+test "TUI-1 empty chat welcome is centred until the first message" {
+    for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |unicode| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        held.size = .{ .width = width, .height = if (width == 46) 30 else 40 };
+        held.self.app_caps.unicode = unicode;
+        held.self.app_caps.depth = .direct;
+        const subtitle = if (unicode) "cotton · light enough to carry far" else "cotton - light enough to carry far";
+        try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "cotton") == null);
+        held.self.line = .{ .read = .{ .revision = 1, .end = 0 }, .folder = .{} };
+        try held.self.line.folder.?.set("/work");
         const empty = try held.shown();
-        try std.testing.expect(std.mem.indexOf(u8, empty, "rui") != null);
-        try std.testing.expect(std.mem.indexOf(u8, empty, "cotton") != null);
-        try std.testing.expect(std.mem.indexOf(u8, empty, "रुई") == null);
-        self.line.folder = null;
-        self.line.first_position = 1;
-        const started = try held.shown();
-        try std.testing.expect(std.mem.indexOf(u8, started, "cotton") == null);
-        self.line.first_position = null;
-        self.line.folder = .{};
-        try self.line.folder.?.set("/work");
-    }
+        var lines = std.mem.splitScalar(u8, empty, '\n');
+        var found = false;
+        var row: u16 = 0;
+        while (lines.next()) |line| : (row += 1) {
+            const trimmed = std.mem.trim(u8, line, " ");
+            if (!std.mem.eql(u8, trimmed, "rui")) continue;
+            found = true;
+            try std.testing.expect(@abs(@as(isize, @intCast(2 * std.mem.indexOf(u8, line, "rui").? + 3)) - @as(isize, width)) <= 2);
+            const next = lines.next().?;
+            try std.testing.expectEqualStrings(subtitle, std.mem.trim(u8, next, " "));
+            const cells = @import("display_text.zig").width(subtitle, .{ .viewport = held.self.app_caps.width });
+            const col = std.mem.indexOf(u8, next, subtitle).?;
+            try std.testing.expect(@abs(@as(isize, @intCast(2 * col + cells)) - @as(isize, width)) <= 2);
+            const gpa = held.arena.allocator();
+            var screen: vaxis.Screen = try .init(gpa, .{ .rows = held.size.height.?, .cols = width, .x_pixel = 0, .y_pixel = 0 });
+            const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = held.size.height.?, .screen = &screen };
+            const surface = try held.draw();
+            try surface.render(window, held.self.widget());
+            try std.testing.expectEqual(style.of(held.self.app_caps, .{ .colour = .quiet }).fg, screen.readCell(@intCast(col), row + 1).?.style.fg);
+        }
+        try std.testing.expect(found);
+        try held.keys("draft");
+        try std.testing.expect(std.mem.indexOf(u8, try held.shown(), subtitle) != null);
+        const ticket = held.self.input.submitText("first message");
+        held.self.submission.intent = .{ .message = ticket };
+        try std.testing.expect(std.mem.indexOf(u8, try held.shown(), subtitle) == null);
+        held.self.submission.intent = null;
+        held.self.line.first_position = 1;
+        held.self.line.folder = null;
+        try std.testing.expect(std.mem.indexOf(u8, try held.shown(), subtitle) == null);
+    };
 }

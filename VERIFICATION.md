@@ -37,6 +37,8 @@ Run `zig build test-logic -Dtest-filter='initial presentation core'` and `zig bu
 
 ## Contract index
 
+The [Session UI invariant catalog](docs/invariants/session-ui.md) names the screen-seam owners for the welcome and chat tabs.
+
 ARCHITECTURE owns behavior; tests own cases.
 Quoted names are Zig filters: `zig build test -Dtest-filter='model revisions'`.
 Other identifiers name targets, `tests/integration/` fixtures, modes or functions.

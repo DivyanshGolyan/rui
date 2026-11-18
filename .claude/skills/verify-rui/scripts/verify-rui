@@ -2910,12 +2910,12 @@ def frame_steps(run, terminal, steps, exiting=False):
 def frame_initial_ready(terminal, first_wait=None, allow_exit=False):
     def ready(capture):
         text = capture.completed
-        guided = (re.search(r"^ *Welcome to Rui *$", text, re.M) is not None
+        guided = (re.search(r"^ *(?:Welcome to Rui|Sign in to Rui) *$", text, re.M) is not None
                   and all(re.search(r"^ *" + re.escape(label) + r" {2,}\S", text, re.M)
                           for label in ("ChatGPT", "API key"))
-                  and re.search(r"^ *Close(?: {2,}\S| *$)", text, re.M) is not None)
-        return (("›" in text or all(marker in text for marker in
-                 ("+ New chat", "Settings")) or guided)
+                  and re.search(r"^ *(?:Close|\[ Close \])(?: {2,}\S| *$)", text, re.M) is not None)
+        return (("›" in text or ("Settings" in text and any(label in text for label in
+                 ("+ New chat", "+ New Session"))) or guided)
                 and "Opening…" not in text and (not first_wait or first_wait in text))
 
     terminal.wait(ready, "initial screen ready" + (f" with {first_wait!r}" if first_wait else ""),
