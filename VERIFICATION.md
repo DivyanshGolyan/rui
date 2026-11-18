@@ -35,6 +35,15 @@ Run `zig build test-logic -Dtest-filter='initial presentation core'` and `zig bu
 
 `GroupedList row inset is stable for selection hover and plain rows` checks shared row bounds at zero, narrow and wide widths in direct, indexed and no colour. Run the touched list, overview, panel, model-choice and palette owners, and remove the inset as a negative control. Capture before and after list and panel frames in day and night at 140×40 and 46×30 through verify-rui; these are renderer evidence, not physical-terminal evidence.
 
+## Host settings stack evidence
+
+These are test cases to run, not a claim that this documents-only change ran them. The [Host contract](docs/contracts/host.md#detached-launch-admission) owns detached admission and its broader native qualifications.
+
+- `src/host_start.zig` — `Host start pipe file and assignment admissions report every code on both streams even if one refuses` covers attempt receipts; `saved edits share detached relative path admission for every schema path` covers save refusal; `Host detached check shares source admission then resolves and seals without opening a Store` covers check without Store access; `retired endpoint environment is refused by each admission before effects` covers both retired variables.
+- `src/credential_location.zig` — `credential default covers each variable and home combination`; `src/host_start.zig` — `sign-in leaf overrides environment location before dispatch`. `tests/integration/settings_integration.py` functions `credential_location_matrix` and `signin_dispatch_matrix` exercise client/check/start and actual dispatch respectively; sign-in admission alone does not read the file.
+- `src/host_settings.zig` — `Host provider credential policy derives fixture mode from the endpoint` covers fixture and token endpoint admission; `tests/integration/settings_integration.py` function `token_endpoint_refusals` covers native refusals.
+- `src/host_settings_handoff.zig` — `frozen settings handoff preserves OS-byte selector intent and file-origin schema without public sources`; `src/HostLifecycle.zig` — `upgrade target capability exception is the witnessed release not a future version threshold`. The contract's native evidence qualifies upgrade and platform limits; owner tests alone do not prove Darwin descriptor inheritance.
+
 ## Contract index
 
 ARCHITECTURE owns behavior; tests own cases.
