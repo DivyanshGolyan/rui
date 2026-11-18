@@ -68,6 +68,8 @@ pub const CompactionFacts = struct {
     usage_tokens: ?u64,
     uncovered_bytes: u64,
     unknown_images: u64 = 0,
+    impossible_images: u64 = 0,
+    image_tokens: u64 = 0,
     builtin_instruction_bytes: u64 = 0,
     output_reservation: u64,
 };
@@ -87,7 +89,7 @@ pub fn nextPurpose(facts: CompactionFacts) Purpose {
 
 pub fn comparedPressure(facts: CompactionFacts) ?u64 {
     if (forcedPurpose(facts.previous, facts.trigger) != null or !facts.context_changed) return null;
-    return (facts.usage_tokens orelse 0) +| @as(u64, @intCast(estimatedBytes(facts) / 4)) +| facts.output_reservation;
+    return (facts.usage_tokens orelse 0) +| @as(u64, @intCast(estimatedBytes(facts) / 4)) +| facts.image_tokens +| facts.output_reservation;
 }
 
 fn estimatedBytes(facts: CompactionFacts) u128 {
