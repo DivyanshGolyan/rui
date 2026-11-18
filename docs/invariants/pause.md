@@ -27,3 +27,5 @@ send an exit frame: the Python process watcher reaps it and synthesizes a
 length-prefixed JSON child-exit event with its PID and return code. EOF while
 the process remains alive immediately unblocks pending calls; callers can wait
 independently for the child-exit event.
+
+Known limit: a paused Action blocks other execution work until release; resumable polling will be added when an invariant test needs concurrent execution progress.

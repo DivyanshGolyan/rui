@@ -83,7 +83,7 @@ class PauseClient:
                     waiter.set()
                 self.pending.clear()
 
-    def _call(self, op, _sent=None, **kwargs):
+    def _call(self, op, **kwargs):
         event, result = threading.Event(), []
         with self.lock:
             if self.failure is not None:
@@ -95,8 +95,6 @@ class PauseClient:
             self.pending[seq] = (event, result)
             try:
                 self.sock.sendall(json.dumps(dict(seq=seq, op=op, **kwargs)).encode() + b"\n")
-                if _sent is not None:
-                    _sent.set()
             except OSError as exc:
                 self.pending.pop(seq, None)
                 self.transport_failure = exc
@@ -131,8 +129,8 @@ class PauseClient:
     def arm(self, point, context=None, occurrence=None):
         return self._call("arm", point=point, context=context or {}, occurrence=occurrence)
 
-    def wait(self, point, context=None, occurrence=None, *, _sent=None):
-        return self._call("wait", _sent=_sent, point=point, context=context or {}, occurrence=occurrence)
+    def wait(self, point, context=None, occurrence=None):
+        return self._call("wait", point=point, context=context or {}, occurrence=occurrence)
 
     def release(self, id):
         return self._call("release", id=id)

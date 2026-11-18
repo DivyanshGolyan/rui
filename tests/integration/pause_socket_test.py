@@ -1,3 +1,4 @@
+import json
 import socket
 import subprocess
 import sys
@@ -10,12 +11,27 @@ BINARY = sys.argv.pop(1)
 POINT = "action.before_handoff"
 
 
+class ObservedSocket:
+    def __init__(self, sock):
+        self.sock = sock
+        self.wait_sent = threading.Event()
+
+    def sendall(self, data):
+        self.sock.sendall(data)
+        if json.loads(data)["op"] == "wait":
+            self.wait_sent.set()
+
+    def __getattr__(self, name):
+        return getattr(self.sock, name)
+
+
 class SocketTest(unittest.TestCase):
     def setUp(self):
         parent, child = socket.socketpair()
         self.process = subprocess.Popen([BINARY, str(child.fileno())], pass_fds=(child.fileno(),), stdin=subprocess.PIPE, stdout=subprocess.PIPE)
         child.close()
-        self.client = PauseClient(parent, self.process)
+        self.socket = ObservedSocket(parent)
+        self.client = PauseClient(self.socket, self.process)
         self.addCleanup(self.cleanup_process)
 
     def cleanup_process(self):
@@ -49,10 +65,9 @@ class SocketTest(unittest.TestCase):
         self.client.arm(POINT)
         self.client.start()
         result = []
-        sent = threading.Event()
-        thread = threading.Thread(target=lambda: result.append(self.client.wait(POINT, _sent=sent)))
+        thread = threading.Thread(target=lambda: result.append(self.client.wait(POINT)))
         thread.start()
-        self.assertTrue(sent.wait(5))
+        self.assertTrue(self.socket.wait_sent.wait(5))
         with self.assertRaisesRegex(PauseError, "UnknownArrival"):
             self.client.release(999)
         self.process.stdin.write(b"\x05")
@@ -100,15 +115,14 @@ class SocketTest(unittest.TestCase):
         self.client.arm(POINT)
         self.client.start()
         result = []
-        sent = threading.Event()
         def wait():
             try:
-                self.client.wait(POINT, _sent=sent)
+                self.client.wait(POINT)
             except Exception as exc:
                 result.append(exc)
         thread = threading.Thread(target=wait)
         thread.start()
-        self.assertTrue(sent.wait(5))
+        self.assertTrue(self.socket.wait_sent.wait(5))
         with self.assertRaisesRegex(PauseError, "UnknownArrival"):
             self.client.release(999)
         self.client.close()
