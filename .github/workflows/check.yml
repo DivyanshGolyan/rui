@@ -343,12 +343,17 @@ jobs:
         env:
           TARGETS: ${{ needs.plan.outputs.linux_compile_targets }}
           SKIPS: ${{ needs.plan.outputs.policy_skips }}
+          RUI_COMPILE_MEASURE: "1"
         run: |
+          lscpu
+          (while :; do printf "%s MEASURE load " "$(date -u +%FT%TZ)"; cat /proc/loadavg; sleep 5; done) &
+          sampler=$!
+          trap 'kill "$sampler" 2>/dev/null || true; wait "$sampler" 2>/dev/null || true' EXIT
           bash .github/actions/policy/beside.sh -- bash -euo pipefail -c '
             if [ "$TARGETS" != "[]" ]; then
               python3 -B tests/ci/build_artifact.py compile "$TARGETS"
               zig build --fetch=all
-            fi'
+            fi' 2>&1 | awk '{ print strftime("%Y-%m-%dT%H:%M:%S%z"), $0; fflush() }'
       - name: Give tests macOS's temporary directory shape
         if: ${{ needs.plan.outputs.targets != '[]' }}
         uses: ./.github/actions/darwin-tmpdir
@@ -379,6 +384,53 @@ jobs:
         run: |
           echo "::error::Policy checks: $POLICY; format check: $FORMAT. Compile and tests still ran."
           exit 1
+      - name: Measurement PR must never merge
+        if: ${{ always() }}
+        run: |
+          echo "Measurement PR: never merge"
+          exit 1
+  pr_linux_quiet:
+    name: linux pr quiet measurement
+    needs: plan
+    if: ${{ needs.plan.outputs.pr_job == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.candidate_ref }}
+          fetch-depth: 0
+          filter: blob:none
+      - uses: ./.github/actions/setup
+        with:
+          targets: ${{ needs.plan.outputs.pr_setup_targets }}
+          cache-part: compiled
+          publish-caches: 'false'
+      - name: Compile without policy
+        env:
+          TARGETS: ${{ needs.plan.outputs.linux_compile_targets }}
+          RUI_COMPILE_MEASURE: "1"
+        run: |
+          lscpu
+          (while :; do printf "%s MEASURE load " "$(date -u +%FT%TZ)"; cat /proc/loadavg; sleep 5; done) &
+          sampler=$!
+          trap 'kill "$sampler" 2>/dev/null || true; wait "$sampler" 2>/dev/null || true' EXIT
+          inventory() {
+            for root in .zig-cache "$HOME/.cache/zig"; do
+              echo "MEASURE $1 $root bytes=$(du -sb "$root" | cut -f1) manifests=$(find "$root/h" -type f 2>/dev/null | wc -l) outputs=$(find "$root/o" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l) c_objects=$(find "$root/o" -name '*.o' ! -name '*_zcu.o' 2>/dev/null | wc -l)"
+            done
+          }
+          inventory restored
+          touch "$RUNNER_TEMP/measure-marker"
+          if [ "$TARGETS" != "[]" ]; then
+            python3 -B tests/ci/build_artifact.py compile "$TARGETS" 2>&1 | awk '{ print strftime("%Y-%m-%dT%H:%M:%S%z"), $0; fflush() }'
+          fi
+          inventory after
+          echo "MEASURE new output files, largest first:"
+          find .zig-cache/o "$HOME/.cache/zig/o" -type f -newer "$RUNNER_TEMP/measure-marker" -printf '%s %p\n' | sort -rn | head -80
+          echo "MEASURE new bytes=$(find .zig-cache "$HOME/.cache/zig" -type f -newer "$RUNNER_TEMP/measure-marker" -printf '%s\n' | paste -sd+ | bc)"
   linux_build:
     needs: plan
     if: ${{ needs.plan.outputs.pr_job == 'false' && needs.plan.outputs.linux_compile_targets != '' && needs.plan.outputs.linux_compile_targets != '[]' }}

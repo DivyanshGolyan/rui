@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import zipfile
 
 import git_command
@@ -69,8 +70,16 @@ def build(targets, part="all"):
     prefix = Path(os.environ["RUNNER_TEMP"]) / "rui-compiled-build"
     if prefix.exists():
         shutil.rmtree(prefix)
-    subprocess.run([*compile_command(targets, part, pr_mode=pr_ci()),
-                    "--prefix", str(prefix), "--summary", "all"], check=True)
+    measurement = ["--verbose-cc"] if os.environ.get("RUI_COMPILE_MEASURE") == "1" else []
+    started = time.monotonic()
+    if measurement:
+        print("MEASURE zig build start", flush=True)
+    try:
+        subprocess.run([*compile_command(targets, part, pr_mode=pr_ci()),
+                        "--prefix", str(prefix), "--summary", "all", *measurement], check=True)
+    finally:
+        if measurement:
+            print(f"MEASURE zig build end wall_s={time.monotonic() - started:.3f}", flush=True)
     return prefix / "bin"
 
 
