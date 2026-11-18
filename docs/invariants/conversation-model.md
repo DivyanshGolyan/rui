@@ -41,9 +41,9 @@
 | CM-37 | Host | A peer Message conveys its actual sender and attachment relationship to the receiving model. | Fake provider wire | `peer_context`: vary parent, child and unrelated senders and compare delivered context. | src/model_adapter.zig:1298 |
 | CM-38 | Module | Model admission reads Session facts with its selection inside the Store hold and before opening its transaction. | Store admission API with deterministic selection and transaction instrumentation | `admission_selection_order`: observe selection and transaction ordering for empty and admitted work, including no transaction for an empty selection. | docs/contracts/model-io.md:213; src/store/sqlite_tests/model_admission.zig:1013 |
 
-Owned elsewhere: ADM-3 (Label presentation and model input), ADM-4 (configuration field presence), ADM-21 (missing-tool catalog decisions), SES-1, SES-4–SES-7 and SES-17 (stop exclusion), SES-10 (queue survival after Turn failure), EXR-1 (provider candidate rejection), EXR-5 (Action permission snapshot), EXR-42 (loaded-tool narrowing and fallback), EXR-44 (allocation exhaustion during skill reload).
-
 | CM-39 | Module | Skill references in ordered Message input are read from each text part in order, excluding image bytes. | Skill reference scanner over sealed input | `CM-39 skill references are read from ordered text parts only` | src/session_skills.zig |
+
+Owned elsewhere: ADM-3 (Label presentation and model input), ADM-4 (configuration field presence), ADM-21 (missing-tool catalog decisions), SES-1, SES-4–SES-7 and SES-17 (stop exclusion), SES-10 (queue survival after Turn failure), EXR-1 (provider candidate rejection), EXR-5 (Action permission snapshot), EXR-42 (loaded-tool narrowing and fallback), EXR-44 (allocation exhaustion during skill reload).
 
 ## Seams the harness must provide
 
