@@ -112,12 +112,12 @@ test "widget styles resolve theme colours and preserve NO_COLOR" {
     try std.testing.expectEqual(vaxis.Color{ .rgb = .{ 0x1f, 0x2d, 0x6b } }, day.fg);
     try std.testing.expectEqual(vaxis.Color{ .rgb = .{ 0xf3, 0xee, 0xe2 } }, day.bg);
     const night = of(.{}, .{ .colour = .failure, .background = .selection, .bold = true });
-    try std.testing.expectEqual(vaxis.Color{ .rgb = .{ 0xf0, 0x8b, 0x74 } }, night.fg);
-    try std.testing.expectEqual(vaxis.Color{ .rgb = .{ 0x2b, 0x2f, 0x45 } }, night.bg);
+    try std.testing.expectEqual(vaxis.Color{ .rgb = .{ 0xeb, 0x9c, 0x84 } }, night.fg);
+    try std.testing.expectEqual(vaxis.Color{ .rgb = .{ 0x30, 0x37, 0x4f } }, night.bg);
     try std.testing.expect(night.bold);
     const indexed = of(.{ .depth = .indexed }, .{ .colour = .strong });
     try std.testing.expectEqual(vaxis.Color{ .index = 255 }, indexed.fg);
-    try std.testing.expectEqual(vaxis.Color{ .index = 234 }, indexed.bg);
+    try std.testing.expectEqual(vaxis.Color{ .index = 235 }, indexed.bg);
     const selvedge = of(.{ .background = .{ 255, 255, 255 } }, .{ .colour = .quiet, .background = .bar });
     try std.testing.expectEqual(vaxis.Color{ .rgb = .{ 0x62, 0x5a, 0x4c } }, selvedge.fg);
     const attention = of(.{ .depth = .indexed, .background = .{ 255, 255, 255 } }, .{ .colour = .attention, .background = .bar });
@@ -127,7 +127,7 @@ test "widget styles resolve theme colours and preserve NO_COLOR" {
         try std.testing.expect(!of(.{ .depth = depth }, .{}).dim);
     }
     const selected = of(.{ .depth = .indexed }, .{ .background = .selection });
-    try std.testing.expectEqual(vaxis.Color{ .index = 237 }, selected.bg);
+    try std.testing.expectEqual(vaxis.Color{ .index = 238 }, selected.bg);
     for (std.enums.values(view.Colour)) |colour| for (std.enums.values(view.Background)) |background| {
         for ([_]bool{ false, true }) |bold| for ([_]bool{ false, true }) |reverse| for ([_]bool{ false, true }) |dim| {
             const plain = of(.{ .depth = .none }, .{ .colour = colour, .background = background, .bold = bold, .reverse = reverse, .dim = dim });
@@ -199,12 +199,8 @@ test "widget indexed colours use nearest xterm entries and decided pins" {
             const role: view.Style = .{ .colour = colour, .background = ground };
             const direct = of(.{ .background = terminal }, role);
             const indexed = of(.{ .depth = .indexed, .background = terminal }, role);
-            const expected_fg: u8 = if (terminal != null and colour == .attention) 58 else Check.nearest(direct.fg.rgb);
-            const expected_bg: u8 = switch (ground) {
-                .selection => if (terminal == null) 237 else 188,
-                .hover => if (terminal == null) 235 else 254,
-                else => Check.nearest(direct.bg.rgb),
-            };
+            const expected_fg: u8 = if (terminal != null and colour == .attention) 58 else if (terminal == null and ground == .selection and (colour == .quiet or colour == .mark)) 249 else Check.nearest(direct.fg.rgb);
+            const expected_bg: u8 = if (terminal == null and ground == .selection) 238 else Check.nearest(direct.bg.rgb);
             try std.testing.expectEqual(vaxis.Color{ .index = expected_fg }, indexed.fg);
             try std.testing.expectEqual(vaxis.Color{ .index = expected_bg }, indexed.bg);
         };

@@ -170,23 +170,37 @@ fn activityToolSources(comptime range: fn (comptime []const u8, comptime []const
         range("last.background_position", "tool_call.call_ordinal+1") ++ " AND " ++ toolGroupCompletesAtLast("last.parent_operation_id", "last.background_position") ++ order;
 }
 
+fn visibleEntrySql(comptime entry: []const u8) []const u8 {
+    return "NOT EXISTS(SELECT 1 FROM message_admission hidden WHERE hidden.admission_id=" ++ entry ++ ".source_admission_id AND hidden.source_kind=4)";
+}
+
+fn activityVisibleInputs(comptime range: fn (comptime []const u8, comptime []const u8) []const u8, comptime kinds: []const u8, comptime users: bool) []const u8 {
+    comptime var sql: []const u8 = "";
+    inline for ([_]u8{ 1, 2, 3, 5 }, 0..) |source, index| {
+        const kind = std.fmt.comptimePrint("{d}", .{source});
+        if (index != 0) sql = sql ++ " UNION ALL ";
+        if (users) {
+            sql = sql ++ "SELECT e.session_position AS position,0 AS ordinal,2 AS kind,e.source_admission_id AS id FROM conversation_entry e @index(conversation_entry_activity_user) " ++
+                "WHERE e.session_ref=?1 AND e.entry_kind=1 AND e.source_kind=" ++ kind ++ " AND (" ++ kinds ++ "/4)%2=1 AND " ++ range("e.session_position", "0");
+        } else {
+            sql = sql ++ "SELECT admission_position AS position,0 AS ordinal," ++ (if (source == 1) "1" else "11") ++ " AS kind,admission_id AS id FROM message_admission @index(message_admission_activity) " ++
+                "WHERE session_ref=?1 AND source_kind=" ++ kind ++ " AND (" ++ kinds ++ (if (source == 1) "/2" else "/2048") ++ ")%2=1 AND " ++ range("admission_position", "0");
+        }
+    }
+    return sql;
+}
+
 fn activitySources(comptime range: fn (comptime []const u8, comptime []const u8) []const u8, comptime kinds: []const u8, comptime order: []const u8) [4][]const u8 {
     const Kinds = struct {
         fn on(comptime kind: u5) []const u8 {
             return std.fmt.comptimePrint("({s}/{d})%2=1", .{ kinds, @as(u64, 1) << kind });
         }
-        fn off(comptime kind: u5) []const u8 {
-            return std.fmt.comptimePrint("({s}/{d})%2=0", .{ kinds, @as(u64, 1) << kind });
-        }
     };
     const on = Kinds.on;
     return .{
-        "SELECT admission_position AS position,0 AS ordinal,1 AS kind,admission_id AS id FROM message_admission @index(message_admission_person) " ++
-            "WHERE session_ref=?1 AND " ++ sourced_input.personSql("message_admission") ++ " AND " ++ on(1) ++ " AND " ++ Kinds.off(11) ++ " AND " ++ range("admission_position", "0") ++
-            " UNION ALL SELECT admission_position,0,CASE WHEN " ++ sourced_input.personSql("message_admission") ++ " THEN 1 ELSE 11 END,admission_id FROM message_admission @index(message_admission_position) " ++
-            "WHERE session_ref=?1 AND " ++ on(11) ++ " AND (NOT " ++ sourced_input.personSql("message_admission") ++ " OR " ++ on(1) ++ ") AND " ++ range("admission_position", "0") ++
-            " UNION ALL SELECT session_position,0,CASE entry_kind WHEN 1 THEN 2 ELSE 3 END,source_admission_id FROM conversation_entry " ++
-            "WHERE session_ref=?1 AND (entry_kind=1 AND " ++ on(2) ++ " OR entry_kind=3 AND " ++ on(3) ++ ") AND " ++ range("session_position", "0") ++
+        "SELECT position,ordinal,kind,id FROM visible_admissions UNION ALL SELECT position,ordinal,kind,id FROM visible_users" ++
+            " UNION ALL SELECT e.session_position,0,3,e.source_admission_id FROM conversation_entry e @index(conversation_entry_activity_assistant) " ++
+            "WHERE e.session_ref=?1 AND e.entry_kind=3 AND " ++ on(3) ++ " AND " ++ range("e.session_position", "0") ++
             " UNION ALL SELECT session_position,0,4,NULL FROM model_output_item @index(model_output_call_history) " ++
             "WHERE session_ref=?1 AND item_kind=3 AND " ++ on(4) ++ " AND " ++ range("session_position", "0") ++ order,
         "SELECT position,ordinal,kind,NULL AS id FROM tool_completions" ++
@@ -245,10 +259,10 @@ fn anyActivityPosition(comptime position: []const u8, comptime ordinal: []const 
 const activity_item = blk: {
     const sources = activitySources(anyActivityPosition, all_activity_kinds, "");
     break :blk rsql.Read(.{
-        .sql = std.fmt.comptimePrint("WITH tool_completions AS ({s}), entries AS ({s}), completions AS ({s}), others AS ({s}), changes AS ({s}), " ++
+        .sql = std.fmt.comptimePrint("WITH tool_completions AS ({s}), visible_admissions AS ({s}), visible_users AS ({s}), entries AS ({s}), completions AS ({s}), others AS ({s}), changes AS ({s}), " ++
             "activity AS (SELECT position,ordinal,kind,id FROM entries UNION ALL SELECT position,ordinal,kind,id FROM completions UNION ALL SELECT position,ordinal,kind,id FROM others " ++
             "UNION ALL SELECT position,ordinal,kind,id FROM changes) " ++
-            "SELECT kind,id FROM activity WHERE position=?3 AND ordinal=?4 AND position<=?2", .{ activityToolSources(anyActivityPosition, all_activity_kinds, ""), sources[0], sources[1], sources[2], sources[3] }),
+            "SELECT kind,id FROM activity WHERE position=?3 AND ordinal=?4 AND position<=?2", .{ activityToolSources(anyActivityPosition, all_activity_kinds, ""), activityVisibleInputs(anyActivityPosition, all_activity_kinds, false), activityVisibleInputs(anyActivityPosition, all_activity_kinds, true), sources[0], sources[1], sources[2], sources[3] }),
         .Args = struct { session: []const u8, end: u64, position: u64, ordinal: u64 },
         .Row = struct { kind: u8, id: ?rsql.Positive },
         .cardinality = .optional,
@@ -268,8 +282,8 @@ fn ActivityPage(comptime forward: bool) type {
     const order = if (forward) " ORDER BY 1,2 LIMIT 17" else " ORDER BY 1 DESC,2 DESC LIMIT 17";
     const sources = activitySources(if (forward) Range.after else Range.before, if (forward) "?5" else "?4", order);
     return rsql.Read(.{
-        .sql = std.fmt.comptimePrint("WITH tool_completions AS ({s}), entries AS ({s}), completions AS ({s}), others AS ({s}), changes AS ({s}) SELECT position,ordinal FROM entries " ++
-            "UNION ALL SELECT position,ordinal FROM completions UNION ALL SELECT position,ordinal FROM others UNION ALL SELECT position,ordinal FROM changes{s}", .{ activityToolSources(if (forward) Range.after else Range.before, if (forward) "?5" else "?4", order), sources[0], sources[1], sources[2], sources[3], order }),
+        .sql = std.fmt.comptimePrint("WITH tool_completions AS ({s}), visible_admissions AS ({s}), visible_users AS ({s}), entries AS ({s}), completions AS ({s}), others AS ({s}), changes AS ({s}) SELECT position,ordinal FROM entries " ++
+            "UNION ALL SELECT position,ordinal FROM completions UNION ALL SELECT position,ordinal FROM others UNION ALL SELECT position,ordinal FROM changes{s}", .{ activityToolSources(if (forward) Range.after else Range.before, if (forward) "?5" else "?4", order), activityVisibleInputs(if (forward) Range.after else Range.before, if (forward) "?5" else "?4", false), activityVisibleInputs(if (forward) Range.after else Range.before, if (forward) "?5" else "?4", true), sources[0], sources[1], sources[2], sources[3], order }),
         .Args = if (forward) struct { session: []const u8, end: u64, position: u64, ordinal: u64, kinds: u64 } else struct { session: []const u8, position: u64, ordinal: u64, kinds: u64 },
         .Row = ActivityPageRow,
         .cardinality = .each,
@@ -405,7 +419,7 @@ fn runCounts(a: *ReadAccess) !void {
 const public_page = rsql.Read(.{
     .sql = public_tool_groups_sql ++
         "public AS (SELECT e.session_position AS position,0 AS ordinal,e.entry_kind AS kind,e.content_id " ++
-        "FROM conversation_entry e WHERE e.session_ref=?1 AND e.entry_kind IN (1,3) AND e.session_position<=?2 " ++
+        "FROM conversation_entry e WHERE e.session_ref=?1 AND e.entry_kind IN (1,3) AND " ++ visibleEntrySql("e") ++ " AND e.session_position<=?2 " ++
         "UNION ALL SELECT tool_groups.position,tool_call.call_ordinal+1,4," ++ tool_fulfillment.contentSql("tool_call", "action") ++ " " ++
         "FROM tool_groups JOIN model_tool_call tool_call ON tool_call.operation_id=tool_groups.operation_id " ++
         "LEFT JOIN action_operation action ON action.parent_operation_id=tool_call.operation_id AND action.call_ordinal=tool_call.call_ordinal " ++
@@ -604,7 +618,7 @@ pub const public_entry_joins = "LEFT JOIN turn t ON t.turn_id=e.turn_id " ++
 
 const public_entry = rsql.Read(.{
     .sql = publicEntryRead("e.content_id,CASE WHEN e.entry_kind=1 THEN m.admitted_at END AS admitted_at," ++
-        "CASE WHEN e.entry_kind=1 THEN m.sender_session_ref END AS sender,CASE WHEN e.entry_kind=1 THEN " ++ sourced_input.actionIdSql("m") ++ " END AS source_action,e.recorded_at", "", "WHERE e.session_ref=?1 AND e.session_position=?2 AND e.entry_kind IN(1,3)"),
+        "CASE WHEN e.entry_kind=1 THEN m.sender_session_ref END AS sender,CASE WHEN e.entry_kind=1 THEN " ++ sourced_input.actionIdSql("m") ++ " END AS source_action,e.recorded_at", "", "WHERE e.session_ref=?1 AND e.session_position=?2 AND e.entry_kind IN(1,3) AND " ++ visibleEntrySql("e")),
     .Args = struct { session: []const u8, position: u64 },
     .Row = struct { content_id: rsql.Positive, admitted_at: ?rsql.Positive, sender: ?SessionText, source_action: ?rsql.Positive, recorded_at: rsql.Positive, consistent: bool },
     .cardinality = .each,
