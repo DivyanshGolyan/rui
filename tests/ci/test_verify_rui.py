@@ -2658,7 +2658,7 @@ from pathlib import Path
 args = sys.argv[1:]
 with open(os.environ['PUBLISH_LOG'], 'a') as f: f.write(json.dumps(args) + '\\n')
 if args[:1] == ['api'] and '/pulls/' in args[1]:
-    print(json.dumps({'head': {'sha': os.environ['PUBLISH_HEAD']}}))
+    print(json.dumps({'state': os.environ.get('PUBLISH_STATE', 'open'), 'head': {'sha': os.environ['PUBLISH_HEAD']}}))
 """)
         gh.chmod(0o755)
         env = {**os.environ, "PATH": str(fake) + os.pathsep + os.environ["PATH"],
@@ -2694,6 +2694,18 @@ os.execv(os.environ['REAL_GIT'], [os.environ['REAL_GIT'], *args])
     def publish_run(self, out, env, *args):
         return subprocess.run([sys.executable, str(SCRIPT), "publish", str(out), "--pr", "1549", *args],
                               env=env, text=True, capture_output=True)
+
+    def test_publish_refuses_closed_pr(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            out = root / "frames"
+            self.comparison(out)
+            remote, log, env = self.publish_fixture(root)
+            env["PUBLISH_STATE"] = "closed"
+            result = self.publish_run(out, env)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("PR that is not open", result.stderr)
+            self.assertEqual(subprocess.run(["git", "-C", str(remote), "show-ref"], capture_output=True, text=True).stdout, "")
 
     def test_publish_selected_media_and_dispatch(self):
         with tempfile.TemporaryDirectory() as directory:

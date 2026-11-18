@@ -4,16 +4,18 @@ on:
     inputs:
       pr:
         description: Same-repository pull request number
-        required: true
+        required: false
         type: string
       head:
         description: Captured pull request head SHA
-        required: true
+        required: false
         type: string
       gen:
         description: Publication generation
-        required: true
+        required: false
         type: string
+  schedule:
+    - cron: '17 3 * * *'
   pull_request_target:
     types: [closed]
 
@@ -25,7 +27,7 @@ permissions:
 
 jobs:
   comment:
-    if: ${{ github.event_name == 'workflow_dispatch' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.pr != '' }}
     runs-on: ubuntu-24.04
     concurrency:
       group: screens-comment-${{ inputs.pr }}
@@ -84,7 +86,7 @@ jobs:
             fi
           done < <(jq -r '[.[].workflow_runs[]] | sort_by(.created_at) | reverse | .[].id' "$RUNNER_TEMP/check-runs.json")
   cleanup:
-    if: ${{ github.event_name == 'pull_request_target' }}
+    if: ${{ github.event_name == 'pull_request_target' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.pr == '') }}
     runs-on: ubuntu-24.04
     concurrency:
       group: pr-screens-writer
@@ -92,6 +94,7 @@ jobs:
       cancel-in-progress: false
     permissions:
       contents: write
+      pull-requests: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -99,12 +102,9 @@ jobs:
       - name: Remove closed PR captures
         env:
           GH_TOKEN: ${{ github.token }}
-          PR: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
-          gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" > "$RUNNER_TEMP/current-pr.json"
-          if ! jq -e '.state == "closed"' "$RUNNER_TEMP/current-pr.json" > /dev/null; then exit 0; fi
           export GIT_CONFIG_COUNT=1
           export GIT_CONFIG_KEY_0=http.extraheader
           export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
-          python3 tests/ci/screens_cleanup.py "$PR"
+          python3 tests/ci/screens_cleanup.py

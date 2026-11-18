@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Remove a closed PR's captures without overwriting concurrent publications."""
+"""Sweep closed PR captures and retired entries from the screens branch."""
 import argparse
+import json
 import os
 import re
 import subprocess
@@ -19,10 +20,30 @@ def tip():
     return remote.split()[0] if remote else None
 
 
-def cleanup(pr, before_push=None):
-    if not re.fullmatch(r'[1-9][0-9]*', str(pr)):
-        raise ValueError('invalid pull request number')
-    path = f'pr-{pr}'
+def pr_state(pr):
+    repository = os.environ['GITHUB_REPOSITORY']
+    result = subprocess.check_output(['gh', 'api', f'repos/{repository}/pulls/{pr}'], text=True)
+    state = json.loads(result)['state']
+    if state not in ('open', 'closed'):
+        raise ValueError(f'unexpected state for PR #{pr}: {state}')
+    return state
+
+
+def removable(sha, state_for_pr):
+    entries = subprocess.check_output(['git', 'ls-tree', '-z', sha]).split(b'\0')
+    paths = []
+    for entry in filter(None, entries):
+        metadata, name = entry.split(b'\t', 1)
+        path = os.fsdecode(name)
+        match = re.fullmatch(r'pr-([1-9][0-9]*)', path)
+        if metadata.split()[1] != b'tree' or not match:
+            paths.append(path)
+        elif state_for_pr(int(match.group(1))) == 'closed':
+            paths.append(path)
+    return paths
+
+
+def cleanup(state_for_pr=pr_state, before_push=None):
     env = os.environ.copy()
     env.update(GIT_AUTHOR_NAME='github-actions[bot]',
                GIT_AUTHOR_EMAIL='41898282+github-actions[bot]@users.noreply.github.com',
@@ -35,10 +56,11 @@ def cleanup(pr, before_push=None):
             if sha is None:
                 return
             git('fetch', '--no-tags', 'origin', sha)
-            if not git('ls-tree', sha, '--', path):
+            paths = removable(sha, state_for_pr)
+            if not paths:
                 return
             git('read-tree', sha, env=env)
-            git('rm', '-r', '-f', '--cached', '--ignore-unmatch', '--', path, env=env)
+            git('rm', '-r', '-f', '--cached', '--ignore-unmatch', '--', *(f':(literal){path}' for path in paths), env=env)
             tree = git('write-tree', env=env)
             commit = git('commit-tree', tree, '-m', 'Remove closed PR screen captures', env=env)
             if before_push:
@@ -50,19 +72,17 @@ def cleanup(pr, before_push=None):
             latest = tip()
             if latest == sha:
                 raise RuntimeError('cleanup push failed without a changed remote tip')
-        # A concurrent cleanup may have removed the folder on the final attempt.
         if latest is None:
             return
         git('fetch', '--no-tags', 'origin', latest)
-        if not git('ls-tree', latest, '--', path):
+        if not removable(latest, state_for_pr):
             return
         raise RuntimeError('cleanup could not update pr-screens after 5 attempts')
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('pr')
-    cleanup(parser.parse_args().pr)
+    argparse.ArgumentParser(description=__doc__).parse_args()
+    cleanup()
 
 
 if __name__ == '__main__':

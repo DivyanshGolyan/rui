@@ -51,16 +51,37 @@ def paths(origin):
     return git(origin, 'ls-tree', '-r', '--name-only', 'refs/heads/pr-screens').splitlines()
 
 
-@pytest.mark.parametrize('order', ['before', 'during', 'after'])
-def test_cleanup_preserves_publication_in_every_order(repos, order):
+def test_cleanup_keeps_open_and_removes_closed_and_legacy(repos):
     origin, writer = repos
-    if order == 'before':
-        publish(writer, 2)
-    cleanup.cleanup(1, before_push=(lambda attempt: publish(writer, 2) if attempt == 0 else None)
-                    if order == 'during' else None)
-    if order == 'after':
-        publish(writer, 2)
+    publish(writer, 2)
+    (writer / 'main').mkdir()
+    (writer / 'main' / 'capture').write_text('legacy')
+    (writer / 'stray').write_text('legacy')
+    (writer / 'pr-3').write_text('not a directory')
+    git(writer, 'add', '.')
+    git(writer, 'commit', '-qm', 'Legacy files')
+    git(writer, 'push', '-q', 'origin', 'HEAD:pr-screens')
+    cleanup.cleanup(lambda pr: 'closed' if pr == 1 else 'open')
     assert paths(origin) == ['pr-2/capture']
+    original = git(origin, 'rev-parse', 'refs/heads/pr-screens')
+    cleanup.cleanup(lambda pr: 'open')
+    assert git(origin, 'rev-parse', 'refs/heads/pr-screens') == original
+
+
+def test_cleanup_removes_late_publication_on_next_sweep(repos):
+    origin, writer = repos
+    cleanup.cleanup(lambda pr: 'closed')
+    publish(writer, 1)
+    cleanup.cleanup(lambda pr: 'closed')
+    assert paths(origin) == []
+
+
+@pytest.mark.parametrize('state,expected', [('open', ['pr-2/capture']), ('closed', [])])
+def test_cleanup_recomputes_after_concurrent_publication(repos, state, expected):
+    origin, writer = repos
+    cleanup.cleanup(lambda pr: 'closed' if pr == 1 else state,
+                    before_push=lambda attempt: publish(writer, 2) if attempt == 0 else None)
+    assert paths(origin) == expected
 
 
 def test_retries_are_bounded_and_preserve_each_publication(repos):
@@ -70,7 +91,7 @@ def test_retries_are_bounded_and_preserve_each_publication(repos):
         attempts.append(attempt)
         publish(writer, attempt + 2)
     with pytest.raises(RuntimeError, match='after 5 attempts'):
-        cleanup.cleanup(1, before_push=race)
+        cleanup.cleanup(lambda pr: 'closed' if pr == 1 else 'open', before_push=race)
     assert attempts == list(range(5))
     assert paths(origin) == [f'pr-{pr}/capture' for pr in range(1, 7)]
 
@@ -86,15 +107,8 @@ def test_concurrent_cleanup_on_last_attempt_is_success(repos):
             git(writer, 'rm', '-qr', 'pr-1')
             git(writer, 'commit', '-qm', 'Other cleanup')
             git(writer, 'push', '-q', 'origin', 'HEAD:pr-screens')
-    cleanup.cleanup(1, before_push=race)
+    cleanup.cleanup(lambda pr: 'closed' if pr == 1 else 'open', before_push=race)
     assert paths(origin) == [f'pr-{pr}/capture' for pr in range(2, 6)]
-
-
-def test_absent_folder_is_noop(repos):
-    origin, _ = repos
-    original = git(origin, 'rev-parse', 'refs/heads/pr-screens')
-    cleanup.cleanup(3)
-    assert git(origin, 'rev-parse', 'refs/heads/pr-screens') == original
 
 
 def test_push_failure_without_tip_change_fails(repos):
@@ -103,18 +117,36 @@ def test_push_failure_without_tip_change_fails(repos):
     hook.write_text('#!/bin/sh\nexit 1\n')
     os.chmod(hook, 0o755)
     with pytest.raises(RuntimeError, match='without a changed remote tip'):
-        cleanup.cleanup(1)
+        cleanup.cleanup(lambda pr: 'closed')
     assert paths(origin) == ['pr-1/capture']
 
 
 def test_absent_branch_is_noop(repos):
     origin, _ = repos
     git(origin, 'update-ref', '-d', 'refs/heads/pr-screens')
-    cleanup.cleanup(1)
+    cleanup.cleanup(lambda pr: 'closed')
     assert cleanup.tip() is None
 
 
-@pytest.mark.parametrize('pr', ['0', '-1', '../2', '1/other', '01', ''])
-def test_invalid_pr_is_rejected(repos, pr):
-    with pytest.raises(ValueError, match='invalid pull request'):
-        cleanup.cleanup(pr)
+def test_state_lookup_failure_leaves_branch_unchanged(repos):
+    origin, _ = repos
+    original = git(origin, 'rev-parse', 'refs/heads/pr-screens')
+    def fail(pr):
+        raise RuntimeError('API unavailable')
+    with pytest.raises(RuntimeError, match='API unavailable'):
+        cleanup.cleanup(fail)
+    assert git(origin, 'rev-parse', 'refs/heads/pr-screens') == original
+
+
+def test_pr_state_reads_rest_and_rejects_unknown_state(monkeypatch):
+    monkeypatch.setenv('GITHUB_REPOSITORY', 'owner/repo')
+    calls = []
+    def api(args, text):
+        calls.append(args)
+        return '{"state": "closed"}'
+    monkeypatch.setattr(subprocess, 'check_output', api)
+    assert cleanup.pr_state(42) == 'closed'
+    assert calls == [['gh', 'api', 'repos/owner/repo/pulls/42']]
+    monkeypatch.setattr(subprocess, 'check_output', lambda *args, **kwargs: '{"state": "unknown"}')
+    with pytest.raises(ValueError, match='unexpected state'):
+        cleanup.pr_state(42)

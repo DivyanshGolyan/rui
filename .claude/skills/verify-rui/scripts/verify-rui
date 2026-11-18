@@ -4182,6 +4182,8 @@ def cmd_publish(args):
         url = subprocess.check_output(["git", "-C", str(repo), "config", "--get", "remote.origin.url"], text=True).strip()
         repository = github_repository(url)
         pr = json.loads(gh("api", f"repos/{repository}/pulls/{args.pr}", cwd=repo))
+        if pr["state"] != "open":
+            raise ValueError("cannot publish captures for a PR that is not open")
         if pr["head"]["sha"] != head:
             raise ValueError("capture HEAD does not match PR head")
 
