@@ -19,6 +19,7 @@ const client = @import("client.zig");
 const protocol_reply = @import("protocol_reply.zig");
 const activity_reply = @import("activity_reply.zig");
 const protocol = @import("protocol.zig");
+const content_value = @import("content_value.zig");
 const Input = @import("SessionInput.zig");
 const Submission = @import("SessionSubmission.zig");
 const original_state = @import("submission_state.zig");
@@ -1018,7 +1019,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     self.app_content.hover_style = hover;
     self.app_content.colours = colours;
     self.app_content.method = self.app_caps.width;
-    self.app_content.welcome = self.line.read != null and self.line.folder != null and self.line.first_position == null and self.submission.messageText() == null;
+    self.app_content.welcome = self.line.read != null and self.line.folder != null and self.line.first == null and self.submission.messageText() == null;
     self.app_content.welcome_unicode = self.app_caps.unicode;
     self.app_content.welcome_quiet = quiet;
     const original_presentation = session_notice.presentation(self.reading.opening, self.app_consent.request != null, self.heldOriginal());
@@ -1157,7 +1158,7 @@ test "App Session retains the draft across a permission card arriving during pas
     var interrupted: client.Cancellation = .{};
     const self = try std.testing.allocator.create(Self);
     defer std.testing.allocator.destroy(self);
-    self.begin(init, "unused", "k7m2qx", "unused", .{ .scratch = page, .action = page, .inspection = page, .details = page, .actions = .{ page, page } }, undefined, undefined, undefined, screen, &interrupted, quiet_overview);
+    self.begin(init, "unused", "k7m2qx", "unused", .{ .scratch = page, .action = page, .inspection = page, .details = page, .actions = .{ page, page }, .parts = page }, undefined, undefined, undefined, screen, &interrupted, quiet_overview);
     const Hooks = struct {
         fn leave(_: *anyopaque, _: *vxfw.EventContext, _: Outcome) !void {
             return error.UnexpectedLeave;
@@ -1396,7 +1397,7 @@ test "App Session leaves from a permission card on Ctrl-C or Ctrl-D and keeps th
         var interrupted: client.Cancellation = .{};
         const self = try std.testing.allocator.create(Self);
         defer std.testing.allocator.destroy(self);
-        self.begin(init, "unused", "k7m2qx", "unused", .{ .scratch = page, .action = page, .inspection = page, .details = page, .actions = .{ page, page } }, undefined, undefined, undefined, screen, &interrupted, quiet_overview);
+        self.begin(init, "unused", "k7m2qx", "unused", .{ .scratch = page, .action = page, .inspection = page, .details = page, .actions = .{ page, page }, .parts = page }, undefined, undefined, undefined, screen, &interrupted, quiet_overview);
         const Hooks = struct {
             var left: ?Outcome = null;
             fn leave(_: *anyopaque, _: *vxfw.EventContext, outcome: Outcome) !void {
@@ -1457,7 +1458,7 @@ test "App Session link click leaves for the peer only where Esc would leave" {
     var interrupted: client.Cancellation = .{};
     const self = try std.testing.allocator.create(Self);
     defer std.testing.allocator.destroy(self);
-    self.begin(init, "unused", "k7m2qx", "unused", .{ .scratch = page, .action = page, .inspection = page, .details = page, .actions = .{ page, page } }, undefined, undefined, undefined, screen, &interrupted, quiet_overview);
+    self.begin(init, "unused", "k7m2qx", "unused", .{ .scratch = page, .action = page, .inspection = page, .details = page, .actions = .{ page, page }, .parts = page }, undefined, undefined, undefined, screen, &interrupted, quiet_overview);
     const Hooks = struct {
         var opened: ?[session_id.bytes]u8 = null;
         var left: ?Outcome = null;
@@ -4396,7 +4397,7 @@ test "permission resolved between the activity scan and Current keeps the fronte
     defer action.close(io);
     const inspection = try held.tmp.dir.createFile(io, "inspection", .{ .read = true });
     defer inspection.close(io);
-    self.files = .{ .scratch = scratch, .action = action, .inspection = inspection, .details = inspection, .actions = .{ inspection, inspection } };
+    self.files = .{ .scratch = scratch, .action = action, .inspection = inspection, .details = inspection, .actions = .{ inspection, inspection }, .parts = inspection };
     self.store = root;
     self.session = "k7m2qx";
     self.line.read = .{ .revision = 1, .end = 0 };
@@ -4416,7 +4417,7 @@ test "permission resolved between the activity scan and Current keeps the fronte
     try activity_reply.writePage(&page, &facts);
     try Host.respond(&listener, "/v1/activity-page", page.buffered());
     const resolved =
-        "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"delta\":\"full\",\"since\":null,\"profile\":\"current\",\"session\":{\"reference\":\"k7m2qx\",\"parent\":null,\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"gpt-5.5\",\"revision\":\"1\",\"tools\":[],\"loaded_tools\":[],\"permission_mode\":\"ask\",\"instructions\":{\"bytes\":\"0\",\"sha256\":\"0000000000000000000000000000000000000000000000000000000000000000\"},\"output_schema\":null,\"reasoning_effort\":null,\"reasoning_effort_override\":null,\"compaction_trigger\":null,\"context_estimate\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":null,\"created_at\":\"1\"},\"archive_state\":\"active\",\"pending_messages\":\"0\",\"work\":{\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"attention\":null,\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null},\"latest_outcome\":null},\"peers\":{\"from_person_at\":null},\"first_message\":null,\"selected_message\":null,\"recent_messages\":[],\"actions\":{\"count\":\"0\",\"unresolved\":[],\"resolved\":[]},\"rejected_calls\":{\"count\":\"0\",\"items\":[]},\"actionable_permissions\":[],\"execution\":{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"0\",\"scratch_used_bytes\":\"0\",\"unavailable\":[\"structured_output\"]}}";
+        "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"delta\":\"full\",\"since\":null,\"profile\":\"current\",\"session\":{\"reference\":\"k7m2qx\",\"parent\":null,\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"gpt-5.5\",\"revision\":\"1\",\"tools\":[],\"loaded_tools\":[],\"permission_mode\":\"ask\",\"instructions\":{\"type\":\"text\",\"bytes\":\"0\",\"sha256\":\"0000000000000000000000000000000000000000000000000000000000000000\"},\"output_schema\":null,\"reasoning_effort\":null,\"reasoning_effort_override\":null,\"compaction_trigger\":null,\"context_estimate\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":null,\"created_at\":\"1\"},\"archive_state\":\"active\",\"pending_messages\":\"0\",\"work\":{\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"attention\":null,\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null},\"latest_outcome\":null},\"peers\":{\"from_person_at\":null},\"first_message\":null,\"selected_message\":null,\"recent_messages\":[],\"actions\":{\"count\":\"0\",\"unresolved\":[],\"resolved\":[]},\"rejected_calls\":{\"count\":\"0\",\"items\":[]},\"actionable_permissions\":[],\"execution\":{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"0\",\"scratch_used_bytes\":\"0\",\"unavailable\":[\"structured_output\"]}}";
     try Host.respond(&listener, "/v1/inspect-session", resolved);
     try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(2)), self, struct {
         fn completed(frontend: *Self) !bool {
@@ -5467,7 +5468,7 @@ test "reader failure provenance keeps transport loss separate from local copy fa
                 var body = std.Io.Writer.fixed(&bytes);
                 const shape = protocol.conversation_page_reply;
                 try protocol.writeShape(&body, shape.head, .{1});
-                try protocol.writeShape(&body, shape.item(.assistant), .{ 1, 0, answer.len, protocol.contentDigest(answer) });
+                try protocol.writeShape(&body, shape.item(.assistant), .{ 1, 0, protocol.ContentValueJson.text(.{ .length = answer.len, .digest = protocol.contentDigest(answer) }) });
                 try protocol.writeShape(&body, shape.item_end ++ shape.last, .{});
                 try reply(page, "application/json", body.buffered().len, "", body.buffered());
             }
@@ -5832,7 +5833,7 @@ const ChromeFixture = struct {
                 return .{ .notice = ChromeFixture.overview_says, .stoppable = can_stop };
             }
         }.line;
-        fixture.self.begin(init_, "unused", "k7m2qx", "unused", .{ .scratch = page, .action = page, .inspection = page, .details = page, .actions = .{ page, page } }, undefined, undefined, undefined, fixture.screen, &fixture.interrupted, lender);
+        fixture.self.begin(init_, "unused", "k7m2qx", "unused", .{ .scratch = page, .action = page, .inspection = page, .details = page, .actions = .{ page, page }, .parts = page }, undefined, undefined, undefined, fixture.screen, &fixture.interrupted, lender);
         fixture.root = .{ .overview = empty_app_text.widget(), .list = empty_app_text.widget() };
         fixture.widget = fixture.self.attach(.{ .root = &fixture.root, .context = fixture.self, .leave = Hooks.leave, .copy = Hooks.copy, .on_open = Hooks.open }, .{ .depth = .none });
         fixture.self.reading.opening = false;
@@ -6757,7 +6758,7 @@ const FeedFixture = struct {
         const held = try HeldFrontend.createWithDrafts(id, drafts);
         errdefer held.destroy();
         const file = try held.tmp.dir.createFile(std.testing.io, "feed-page", .{ .read = true });
-        held.self.files = .{ .scratch = file, .inspection = file, .action = file, .details = file, .actions = .{ file, file } };
+        held.self.files = .{ .scratch = file, .inspection = file, .action = file, .details = file, .actions = .{ file, file }, .parts = file };
         return .{ .held = held, .file = file };
     }
     fn destroy(self: FeedFixture) void {
@@ -7030,7 +7031,7 @@ test "SessionFrontend feed reload restores keyed Ctrl-O target and replaces a pr
     const fixture = try FeedFixture.create();
     defer fixture.destroy();
     const held = fixture.held;
-    const target: View.Collapsed = .{ .source = .activity, .position = 40, .ordinal = 0, .content = .{ .length = 2000, .digest = @splat(7) }, .row = false };
+    const target: View.Collapsed = .{ .source = .activity, .position = 40, .ordinal = 0, .content = .{ .text = .{ .length = 2000, .digest = @splat(7) } }, .row = false };
     const summary = "› preview\n  " ++ View.Mark.summary ++ "┄ 9 more lines" ++ View.Mark.reset ++ "\n";
     try fixture.page(.opening, &.{ .{ .key = 40, .text = summary, .target = target }, .{ .key = 50, .text = "settled\n" } }, true, true);
     _ = try held.draw();
@@ -7288,7 +7289,7 @@ test "failed reply stale pre-admission scan must not authorize a fresh Ctrl-R af
                 var kind: []const u8 = "application/json";
                 if (std.mem.startsWith(u8, request[0..used], "POST /v1/activity-page ")) {
                     host.pages += 1;
-                    const reference: protocol.ActivityItem.Content = .{ .length = text.len, .digest = protocol.contentDigest(text) };
+                    const reference: content_value.Value = .{ .text = .{ .length = text.len, .digest = protocol.contentDigest(text) } };
                     var facts: protocol.ActivityFacts = .{ .end = 3, .direction = .backward, .count = 1, .queued = .{ .count = 1, .oldest_position = 3, .newest_admission = 37, .newest_position = 3 }, .work = .{ .revision = 2, .work = .{ .state = .{ .pending = .{ .since = 2 } } } } };
                     try facts.work.workspace.set("/");
                     facts.items[0] = .{ .position = if (position == 0) 3 else 1, .at = 1, .value = .{ .admission = .{ .admission = if (position == 0) 37 else 1, .key = .{}, .turn = null, .state = .queued, .content = reference, .admitted_at = 1 } } };
@@ -7780,7 +7781,7 @@ test "SessionFrontend capped answer Ctrl-O opens the whole authenticated source"
     defer scratch.close(io);
     const inspection = try held.tmp.dir.createFile(io, "inspection", .{ .read = true });
     defer inspection.close(io);
-    self.files = .{ .scratch = scratch, .action = inspection, .inspection = inspection, .details = inspection, .actions = .{ inspection, inspection } };
+    self.files = .{ .scratch = scratch, .action = inspection, .inspection = inspection, .details = inspection, .actions = .{ inspection, inspection }, .parts = inspection };
     self.store = root;
     self.session = "k7m2qx";
     self.line.read = .{ .revision = 1, .end = 1 };
@@ -7798,7 +7799,7 @@ test "SessionFrontend capped answer Ctrl-O opens the whole authenticated source"
     @memcpy(source[source.len - 12 ..], "WHOLE answer");
     var hash = protocol.contentHasher();
     hash.update(source);
-    const reference: protocol.ActivityItem.Content = .{ .length = source.len, .digest = hash.finalResult() };
+    const reference: content_value.Reference = .{ .length = source.len, .digest = hash.finalResult() };
     var facts: protocol.ActivityFacts = .{ .end = 1, .direction = .backward, .work = .{ .revision = 1, .work = .{ .state = .{ .idle = .{ .since = 1 } } } } };
     try facts.work.workspace.set("/");
     facts.items[0] = .{ .position = 1, .ordinal = 0, .at = 1, .value = .{ .assistant = .{ .content = reference, .final = true } } };
@@ -7820,7 +7821,7 @@ test "SessionFrontend capped answer Ctrl-O opens the whole authenticated source"
     try held.keys("\x0f");
     try held.settle();
     try std.testing.expect(self.expansion.queued == .ready);
-    try std.testing.expectEqualDeep(reference, self.expansion.queued.ready.target.message.content);
+    try std.testing.expectEqualDeep(content_value.Value{ .text = reference }, self.expansion.queued.ready.target.message.content);
     _ = try self.update();
     try std.testing.expectEqual(ReadPhase.message, self.reading.phase);
     try FakeHost.respond(&listener, "/v1/activity-content", "application/octet-stream", extra, source);
@@ -7850,7 +7851,7 @@ test "SessionFrontend tool row Ctrl-O opens saved output in place, closes it, an
     defer scratch.close(io);
     const inspection = try held.tmp.dir.createFile(io, "inspection", .{ .read = true });
     defer inspection.close(io);
-    self.files = .{ .scratch = scratch, .action = inspection, .inspection = inspection, .details = inspection, .actions = .{ inspection, inspection } };
+    self.files = .{ .scratch = scratch, .action = inspection, .inspection = inspection, .details = inspection, .actions = .{ inspection, inspection }, .parts = inspection };
     self.store = root;
     self.session = "k7m2qx";
     self.line.read = .{ .revision = 1, .end = 2 };
@@ -7868,7 +7869,7 @@ test "SessionFrontend tool row Ctrl-O opens saved output in place, closes it, an
     try description.set("List project files");
     var facts: protocol.ActivityFacts = .{ .end = 2, .direction = .backward, .work = .{ .revision = 1, .work = .{ .state = .{ .idle = .{ .since = 1 } } } } };
     try facts.work.workspace.set("/");
-    const tool: protocol.ActivityItem = .{ .position = 1, .ordinal = 1, .at = 1, .value = .{ .tool_result = .{ .content = .{ .length = saved.len, .digest = protocol.contentDigest(saved) }, .presentation = .{ .description = description, .code = .succeeded, .publication_position = 1 } } } };
+    const tool: protocol.ActivityItem = .{ .position = 1, .ordinal = 1, .at = 1, .value = .{ .tool_result = .{ .content = .{ .text = .{ .length = saved.len, .digest = protocol.contentDigest(saved) } }, .presentation = .{ .description = description, .code = .succeeded, .publication_position = 1 } } } };
     facts.items[0] = .{ .position = 2, .ordinal = 0, .at = 1, .value = .{ .assistant = .{ .content = .{ .length = answer.len, .digest = protocol.contentDigest(answer) }, .final = true } } };
     facts.items[1] = tool;
     facts.count = 2;
@@ -8266,7 +8267,7 @@ test "failed reply retry reader keeps every read failure at the shared settlemen
                 } else {
                     var facts: protocol.ActivityFacts = .{ .end = 3, .direction = .backward, .count = 1, .work = .{ .revision = 1, .work = .{ .state = .{ .idle = .{ .since = 1 } } } } };
                     try facts.work.workspace.set("/");
-                    const reference: protocol.ActivityItem.Content = .{ .length = text.len + @intFromBool(host.fault == .length), .digest = protocol.contentDigest(text) };
+                    const reference: content_value.Value = .{ .text = .{ .length = text.len + @intFromBool(host.fault == .length), .digest = protocol.contentDigest(text) } };
                     facts.items[0] = .{ .position = if (stage == .head) 3 else 2, .at = 1, .value = .{ .admission = .{ .admission = 2, .key = .{}, .turn = null, .state = .queued, .content = reference, .admitted_at = 1 } } };
                     if (stage == .head) {
                         var ending: protocol.ActivityItem.TurnEnded = .{ .session = .{ .bytes = "k7m2qx".*, .len = 6 }, .turn = 1, .operation = 1, .ending = .failed, .code = .{}, .content = null };
@@ -8511,7 +8512,7 @@ fn paginatedReplayCount() !void {
             try facts.work.workspace.set("/");
             var peer: protocol.NamedPeer = .{ .session = .{} };
             try peer.session.set("9f8e7d");
-            const content: protocol.ActivityItem.Content = .{ .length = 0, .digest = protocol.contentDigest("") };
+            const content: content_value.Value = .{ .text = .{ .length = 0, .digest = protocol.contentDigest("") } };
             for (facts.items[0..facts.count], 0..) |*item, i| {
                 const position = if (facts.direction == .backward) last - i else first + i;
                 item.* = .{ .position = position, .ordinal = 0, .at = 1, .value = if (position == 1) .{ .admission = .{ .admission = 1, .key = .{}, .turn = null, .state = .queued, .content = content, .admitted_at = 1 } } else .{ .sent = .{ .admission = position, .admitted_at = 1, .target = peer, .content = content } } };
@@ -8646,7 +8647,7 @@ test "SessionFrontend huge person source keeps the following short answer bottom
     defer scratch.close(io);
     const inspection = try held.tmp.dir.createFile(io, "person-answer-page", .{ .read = true });
     defer inspection.close(io);
-    self.files = .{ .scratch = scratch, .inspection = inspection, .action = inspection, .details = inspection, .actions = .{ inspection, inspection } };
+    self.files = .{ .scratch = scratch, .inspection = inspection, .action = inspection, .details = inspection, .actions = .{ inspection, inspection }, .parts = inspection };
     self.store = root;
     self.session = "k7m2qx";
     self.line.read = .{ .revision = 1, .end = 2 };
@@ -8662,8 +8663,8 @@ test "SessionFrontend huge person source keeps the following short answer bottom
     defer std.testing.allocator.free(person);
     @memset(person, 'x');
     const answer = "SHORT ANSWER done.";
-    const person_reference: protocol.ActivityItem.Content = .{ .length = person.len, .digest = protocol.contentDigest(person) };
-    const answer_reference: protocol.ActivityItem.Content = .{ .length = answer.len, .digest = protocol.contentDigest(answer) };
+    const person_reference: content_value.Value = .{ .text = .{ .length = person.len, .digest = protocol.contentDigest(person) } };
+    const answer_reference: content_value.Reference = .{ .length = answer.len, .digest = protocol.contentDigest(answer) };
     var facts: protocol.ActivityFacts = .{ .end = 2, .direction = .backward, .count = 2, .work = .{ .revision = 1, .work = .{ .state = .{ .idle = .{ .since = 1 } } } } };
     try facts.work.workspace.set("/");
     facts.items[0] = .{ .position = 2, .ordinal = 0, .at = 1, .value = .{ .assistant = .{ .content = answer_reference, .final = true } } };
@@ -8709,7 +8710,7 @@ test "SessionFrontend summary bounds keep Ctrl-O and clicks exact across sixteen
     const Domain = struct {
         const line_length = "┄ item 00\n".len;
         fn target(key: u64, index: usize) View.Collapsed {
-            return .{ .source = if (index % 2 == 0) .activity else .conversation, .position = key * 1000 + index, .ordinal = index, .content = .{ .length = 100 + index, .digest = @splat(@intCast(index)) }, .row = index % 2 != 0 };
+            return .{ .source = if (index % 2 == 0) .activity else .conversation, .position = key * 1000 + index, .ordinal = index, .content = .{ .text = .{ .length = 100 + index, .digest = @splat(@intCast(index)) } }, .row = index % 2 != 0 };
         }
         fn page(fixture: FeedFixture, key: u64, aggregate: bool) !void {
             const frontend = &fixture.held.self;
@@ -10607,7 +10608,7 @@ test "new and clear navigate without sending or changing the old chat and reject
         var drafts: session_drafts.Drafts = .{};
         const held = try HeldFrontend.createWithDrafts("k7m2qx", &drafts);
         defer held.destroy();
-        held.self.line = .{ .read = .{ .revision = 7, .end = 10 }, .effort = .high, .first_position = 1 };
+        held.self.line = .{ .read = .{ .revision = 7, .end = 10 }, .effort = .high, .first = .{ .position = 1, .content = .{ .text = .{ .length = 0, .digest = protocol.contentDigest("") } } } };
         try held.self.line.model.set("gpt-5.5");
         try seedFeed(held.screen, "OLD ANSWER\n");
         const work = held.self.live.work;
@@ -10877,7 +10878,7 @@ test "SUI-44 empty chat welcome is centred until the first message" {
         held.self.submission.intent = .{ .message = ticket };
         try std.testing.expect(std.mem.indexOf(u8, try held.shown(), subtitle) == null);
         held.self.submission.intent = null;
-        held.self.line.first_position = 1;
+        held.self.line.first = .{ .position = 1, .content = .{ .text = .{ .length = 0, .digest = protocol.contentDigest("") } } };
         held.self.line.folder = null;
         try std.testing.expect(std.mem.indexOf(u8, try held.shown(), subtitle) == null);
     };

@@ -20,6 +20,7 @@ const submission = @import("submission_state.zig");
 const TerminalText = @import("TerminalText.zig");
 const work_line = @import("work_line.zig");
 const utf8_validation = @import("utf8_validation.zig");
+const content_value = @import("content_value.zig");
 const unicode = @import("terminal_unicode");
 const gwidth = @import("terminal_width");
 
@@ -167,6 +168,8 @@ pub const First = struct {
     admission: u64,
 
     sender: ?Reference,
+    /// The Message's value, whose first display line names an unlabelled Session.
+    content: content_value.Value,
 };
 
 pub const Listed = struct {
@@ -213,6 +216,7 @@ pub const Listed = struct {
                 .position = message.position,
                 .admission = message.admission,
                 .sender = if (message.sender) |*sender| referenceOf(sender.session.slice()) else null,
+                .content = message.content,
             } else null,
             .from_person_at = row.peers.from_person_at,
             .last_line = if (row.last_line) |*last| .{ .position = last.position, .text = if (last.text) |*text| text.slice() else null } else null,
@@ -481,7 +485,7 @@ pub const ConversationInput = union(enum) {
 };
 pub const Conversed = struct { reference: Reference, work: Kind, input: ConversationInput };
 
-pub const Read = struct { reference: Reference, position: u64, admission: u64 };
+pub const Read = struct { reference: Reference, position: u64, admission: u64, content: content_value.Value };
 
 pub const Reads = struct {
     items: [max_first_line_reads]Read = undefined,
@@ -1817,7 +1821,7 @@ fn readFirstLines(state: *State, effects: *Effects) error{OutOfMemory}!void {
         const first = row.first orelse continue;
         if (row.label != null or row.line != .unread) continue;
         row.line = .requested;
-        reads.items[reads.len] = .{ .reference = row.reference, .position = first.position, .admission = first.admission };
+        reads.items[reads.len] = .{ .reference = row.reference, .position = first.position, .admission = first.admission, .content = first.content };
         reads.len += 1;
     }
     if (reads.len != 0) effects.add(.{ .read_first_lines = reads });
@@ -2931,6 +2935,8 @@ fn bounded(comptime capacity: usize, text: []const u8) Bounded(capacity) {
     return Bounded(capacity).from(text) catch unreachable;
 }
 
+const test_first: content_value.Value = .{ .text = .{ .length = 5, .digest = @splat(0xa1) } };
+
 const TestSession = struct {
     read_version: Token = testToken(0),
     archive_state: ArchiveState = .active,
@@ -2938,7 +2944,7 @@ const TestSession = struct {
     label: ?[]const u8 = null,
     workspace: []const u8 = "/home/d/code/rui",
     provider: Provider = .codex,
-    first: ?First = .{ .position = 1, .admission = 4, .sender = null },
+    first: ?First = .{ .position = 1, .admission = 4, .sender = null, .content = test_first },
     yours: bool = false,
     turn: ?u64 = null,
     first_action: ?u64 = null,
@@ -3187,7 +3193,7 @@ const mixed = [_]Listed{
     session("c3d4e5", .{ .retrying = .{ .since = test_now_s - 30, .due_at_ms = (test_now_s + 12) * 1000, .cause = bounded(session_work.max_code_bytes, "provider_temporary_error"), .attempt = 2 } }, .{ .label = "Audit permission paths" }),
     session("d4e5f6", .{ .pending = ago(5) }, .{ .label = "Trace Host shutdown order" }),
     session("e5f6g7", .{ .stopping = ago(8) }, .{ .label = "List unused build steps" }),
-    session("f6g7h8", .{ .working = ago(90) }, .{ .workspace = "/home/d/code/other", .first = .{ .position = 1, .admission = 9, .sender = "k7m2qx".* } }),
+    session("f6g7h8", .{ .working = ago(90) }, .{ .workspace = "/home/d/code/other", .first = .{ .position = 1, .admission = 9, .sender = "k7m2qx".*, .content = test_first } }),
     session("g7h8j9", .{ .idle = ago(2 * 3600) }, .{ .label = "Check macOS socket cleanup" }),
     session("m1n2p3", .{ .finished = ago(20 * 60) }, .{ .label = "Explain provider output parsing" }),
     session("n2p3q4", .{ .finished = ago(45 * 60) }, .{ .label = "Find the commit that broke WAL" }),
@@ -3196,8 +3202,8 @@ const mixed = [_]Listed{
     session("s6t7v8", .{ .finished = ago(2 * 86400) }, .{ .label = "Check the release notes", .workspace = "/srv/work" }),
     session("v8w9x0", .{ .finished = ago(3 * 86400) }, .{ .label = "Count flaky tests" }),
     session("w9x0y1", .{ .finished = ago(4 * 86400) }, .{ .label = "Map the CI shards" }),
-    session("t7v8w9", .{ .failed = .{ .since = test_now_s - 15 * 60, .code = bounded(session_work.max_code_bytes, "provider_output_invalid"), .resets_at = null } }, .{ .label = "Bisect the WAL regression", .first = .{ .position = 1, .admission = 2, .sender = "k7m2qx".* } }),
-    session("x0y1z2", .{ .stopped = .{ .since = test_now_s - 30 * 60, .cause = .stop } }, .{ .label = "Rename the session tables", .first = .{ .position = 1, .admission = 3, .sender = "zzzzzz".* } }),
+    session("t7v8w9", .{ .failed = .{ .since = test_now_s - 15 * 60, .code = bounded(session_work.max_code_bytes, "provider_output_invalid"), .resets_at = null } }, .{ .label = "Bisect the WAL regression", .first = .{ .position = 1, .admission = 2, .sender = "k7m2qx".*, .content = test_first } }),
+    session("x0y1z2", .{ .stopped = .{ .since = test_now_s - 30 * 60, .cause = .stop } }, .{ .label = "Rename the session tables", .first = .{ .position = 1, .admission = 3, .sender = "zzzzzz".*, .content = test_first } }),
     session("y1z2a3", .{ .failed = .{ .since = test_now_s - 50 * 60, .code = bounded(session_work.max_code_bytes, "provider_http_500"), .resets_at = null } }, .{ .label = "Retry the flaky upload" }),
 };
 
@@ -3875,7 +3881,7 @@ test "a first line arriving titles its unlabelled row" {
     _ = try step(&state, .{ .tick = test_now_s * 1000 });
     var reads: Reads = .{};
     for ([_]struct { *const [6]u8, u64 }{ .{ "f6g7h8", 9 }, .{ "h8q2mz", 4 }, .{ "p3q4r5", 4 } }) |read| {
-        reads.items[reads.len] = .{ .reference = read[0].*, .position = 1, .admission = read[1] };
+        reads.items[reads.len] = .{ .reference = read[0].*, .position = 1, .admission = read[1], .content = test_first };
         reads.len += 1;
     }
     try expectEffects(&.{.{ .read_first_lines = reads }}, try respond(&state, .full, testToken(1), &mixed));
@@ -3888,7 +3894,7 @@ test "a first line arriving titles its unlabelled row" {
     try expectScreenLine(&state, position(&state, "h8q2mz".*).? + 2, "   summarize yesterday's CI failures                                        12m");
     try expectEffects(&.{}, try refresh(&state, .changed, testToken(2), &.{session("h8q2mz", .{ .working = ago(0) }, .{ .yours = true })}));
     try std.testing.expectEqualStrings("summarize yesterday's CI failures", state.lineOf(state.find("h8q2mz".*).?).?);
-    const f6g7h8 = session("f6g7h8", .{ .idle = ago(0) }, .{ .workspace = "/home/d/code/other", .first = .{ .position = 1, .admission = 9, .sender = "k7m2qx".* } });
+    const f6g7h8 = session("f6g7h8", .{ .idle = ago(0) }, .{ .workspace = "/home/d/code/other", .first = .{ .position = 1, .admission = 9, .sender = "k7m2qx".*, .content = test_first } });
     try expectEffects(&.{}, try refresh(&state, .changed, testToken(3), &.{f6g7h8}));
     var next_turn = mixed;
     next_turn[1].turn = 2;
@@ -3901,9 +3907,9 @@ test "a first line arriving titles its unlabelled row" {
     try std.testing.expectEqualStrings("summarize yesterday's CI failures", state.lineOf(state.find("h8q2mz".*).?).?);
     try std.testing.expectEqual(FirstLineRead.unavailable, state.find("f6g7h8".*).?.line);
     var again: Reads = .{};
-    again.items[0] = .{ .reference = "f6g7h8".*, .position = 2, .admission = 12 };
+    again.items[0] = .{ .reference = "f6g7h8".*, .position = 2, .admission = 12, .content = test_first };
     again.len = 1;
-    try expectEffects(&.{.{ .read_first_lines = again }}, try refresh(&state, .changed, testToken(5), &.{session("f6g7h8", .{ .idle = ago(0) }, .{ .first = .{ .position = 2, .admission = 12, .sender = null } })}));
+    try expectEffects(&.{.{ .read_first_lines = again }}, try refresh(&state, .changed, testToken(5), &.{session("f6g7h8", .{ .idle = ago(0) }, .{ .first = .{ .position = 2, .admission = 12, .sender = null, .content = test_first } })}));
 }
 
 test "a first line with no answer is asked for again by the next listing" {
@@ -3912,7 +3918,7 @@ test "a first line with no answer is asked for again by the next listing" {
     _ = try step(&state, .{ .tick = test_now_s * 1000 });
     const rows = [_]Listed{session("h8q2mz", .{ .finished = ago(60) }, .{})};
     var reads: Reads = .{};
-    reads.items[0] = .{ .reference = "h8q2mz".*, .position = 1, .admission = 4 };
+    reads.items[0] = .{ .reference = "h8q2mz".*, .position = 1, .admission = 4, .content = test_first };
     reads.len = 1;
     try expectEffects(&.{.{ .read_first_lines = reads }}, try respond(&state, .full, testToken(1), &rows));
     try expectEffects(&.{}, try step(&state, .{ .first_line = .{ .reference = "h8q2mz".*, .admission = 4, .line = null, .unanswered = true } }));
@@ -4450,7 +4456,7 @@ test "bidi controls in a title cannot reorder a row" {
     const bidi = "\u{202e}\u{2066}\u{200f}\u{061c}";
     var state = try opened(&.{
         session("k7m2qx", .{ .working = ago(5) }, .{ .label = "Pay " ++ bidi ++ "evil" }),
-        session("t7v8w9", .{ .stopped = .{ .since = test_now_s - 30, .cause = .stop } }, .{ .label = "Next", .first = .{ .position = 1, .admission = 2, .sender = "k7m2qx".* } }),
+        session("t7v8w9", .{ .stopped = .{ .since = test_now_s - 30, .cause = .stop } }, .{ .label = "Next", .first = .{ .position = 1, .admission = 2, .sender = "k7m2qx".*, .content = test_first } }),
     });
     defer state.deinit();
     const text = try screenText(&state, 80, 24, .{});
@@ -5614,7 +5620,7 @@ test "empty Session projection retains full and delta metadata until any sender'
         try std.testing.expectEqual(@as(usize, 0), state.order.items.len);
         _ = try refresh(&state, .not_modified, testToken(2), &.{});
         try std.testing.expectEqual(@as(usize, 1), state.rows.items.len);
-        empty.first = .{ .position = 8, .admission = 9, .sender = sender };
+        empty.first = .{ .position = 8, .admission = 9, .sender = sender, .content = test_first };
         _ = try refresh(&state, .changed, testToken(3), &.{empty});
         try std.testing.expectEqual(@as(usize, 1), state.rows.items.len);
         try expectOrder(&state, &.{"Renamed"});
@@ -5696,7 +5702,7 @@ test "empty Session projection promotes listing metadata without rolling newer o
     _ = try step(&state, .{ .observed = .{ .reference = empty.reference, .read_version = testToken(4), .work = newest, .opening = false } });
     _ = try step(&state, .{ .conversation = null });
     try std.testing.expectEqual(@as(usize, 0), state.order.items.len);
-    empty.first = .{ .position = 8, .admission = 9, .sender = null };
+    empty.first = .{ .position = 8, .admission = 9, .sender = null, .content = test_first };
     _ = try refresh(&state, .changed, testToken(3), &.{empty});
     try expectOrder(&state, &.{"Promotion"});
     const row = state.find(empty.reference).?;
@@ -5768,7 +5774,7 @@ test "empty chat name and selection agree across listing arrival orders and firs
         try std.testing.expectEqual(@as(usize, 0), state.order.items.len);
         try std.testing.expect(Lines.named(&state) == null);
         var admitted = empty;
-        admitted.first = .{ .position = 1, .admission = 4, .sender = null };
+        admitted.first = .{ .position = 1, .admission = 4, .sender = null, .content = test_first };
         _ = try refresh(&state, .changed, testToken(4), &.{admitted});
         state.rows.items[0].line = .requested;
         _ = try step(&state, .{ .first_line = .{ .reference = admitted.reference, .admission = 4, .line = "The first admitted task" } });
@@ -6351,7 +6357,7 @@ test "OVM-1 overview marks and ages across states and spinner frames" {
         defer arena.deinit();
         const later: WorkState = .{ .retrying = .{ .since = test_now_s - 30, .due_at_ms = (test_now_s + 18) * 1000, .cause = bounded(session_work.max_code_bytes, "provider_temporary_http_429"), .attempt = 2 } };
         const beside_bash: WorkState = .{ .bash = .{ .since = test_now_s - 60, .call = 0, .description = bounded(session_work.max_description_bytes, "Run the logic tests"), .running = 1, .approvals = 1 } };
-        const started = First{ .position = 1, .admission = 4, .sender = "a5k1ng".* };
+        const started = First{ .position = 1, .admission = 4, .sender = "a5k1ng".*, .content = test_first };
         var state = try opened(&.{
             session("a5k1ng", .{ .approval = ago(120) }, .{ .label = "Fix flaky store test" }),
             session("b4sh01", beside_bash, .{ .label = "Asking beside Bash" }),

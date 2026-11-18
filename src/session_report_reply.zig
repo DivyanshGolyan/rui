@@ -100,10 +100,10 @@ pub fn Reply(comptime Capture: type) type {
                         ToolName{ .name = action.tool },
                         action.permission_revision,
                         action.authorization,
-                        TextReference.of(action.call_id),
+                        reference(action.call_id),
                     });
                     if (action.server) |server| try appendShape(capture, CurrentJson.Unresolved.server, .{ToolName{ .name = server }});
-                    try appendShape(capture, CurrentJson.Unresolved.tail, .{ TextReference.of(action.arguments), presentation(action.presentation) });
+                    try appendShape(capture, CurrentJson.Unresolved.tail, .{ reference(action.arguments), presentation(action.presentation) });
                 },
                 .resolved_actions => |action| try appendShape(capture, CurrentJson.Resolved.json_shape, .{
                     action.action,
@@ -111,7 +111,7 @@ pub fn Reply(comptime Capture: type) type {
                     action.call_ordinal,
                     action.code,
                     action.acceptance_position,
-                    TextReference.of(action.result),
+                    Reference{ .value = action.result },
                     presentation(action.presentation),
                 }),
                 .rejected_calls => |call| try appendShape(capture, CurrentJson.Rejected.json_shape, .{
@@ -119,10 +119,10 @@ pub fn Reply(comptime Capture: type) type {
                     call.call_ordinal,
                     call.code,
                     call.acceptance_position,
-                    TextReference.of(call.result),
-                    TextReference.of(call.name),
-                    TextReference.of(call.call_id),
-                    TextReference.of(call.arguments),
+                    reference(call.result),
+                    reference(call.name),
+                    reference(call.call_id),
+                    reference(call.arguments),
                     presentation(call.presentation),
                 }),
                 .actionable_permissions => |action| try appendShape(capture, CurrentJson.Actionable.json_shape, .{ action.action, action.permission_revision }),
@@ -342,7 +342,7 @@ fn status(accepted: bool) Status {
 }
 
 fn reference(content: session_report.Content) Reference {
-    return .{ .value = .{ .length = content.length, .digest = content.digest } };
+    return .text(.{ .length = content.length, .digest = content.digest });
 }
 
 fn presentation(value: tool_presentation.ToolPresentation) protocol.ToolPresentationJson {
@@ -380,24 +380,7 @@ pub const ExecutionJson = struct {
     pub const json_shape = .{ "{\"status\":\"partial\",\"dispatch_fenced\":", H.boolean, ",\"custody_occupied\":\"", H.decimal, "\",\"scratch_used_bytes\":\"", H.decimal, "\",\"unavailable\":[\"structured_output\"]}" };
 };
 
-const Reference = protocol.ContentJson;
-
-pub const TextReference = struct {
-    length: u64,
-    digest: [32]u8,
-
-    pub const openapi_name = "domainreportCurrentJsonTextReference";
-    pub const json_shape = protocol.content_reference_shape;
-    pub const max_json_bytes = protocol.shapeBytes(json_shape);
-
-    fn of(content: session_report.Content) TextReference {
-        return .{ .length = content.length, .digest = content.digest };
-    }
-
-    pub fn writeJson(self: *const TextReference, out: *std.Io.Writer) !void {
-        try protocol.writeShape(out, json_shape, .{ self.length, self.digest });
-    }
-};
+const Reference = protocol.ContentValueJson;
 
 pub const ToolName = struct {
     name: []const u8,
@@ -463,9 +446,9 @@ pub const CurrentJson = struct {
     pub const Unresolved = struct {
         pub const openapi_name = "domainreportCurrentJsonUnresolved";
         const head = .{ "{\"action\":\"", H.decimal, "\",\"parent_operation\":\"", H.decimal, "\",\"call_ordinal\":\"", H.decimal, "\",\"tool\":" };
-        const authorization = .{ ",\"permission_revision\":\"", H.decimal, "\",\"authorization\":\"", H{ .tag = session_report.Authorization }, "\",\"call_id\":", H{ .json = TextReference } };
+        const authorization = .{ ",\"permission_revision\":\"", H.decimal, "\",\"authorization\":\"", H{ .tag = session_report.Authorization }, "\",\"call_id\":", H{ .json = Reference } };
         const server = .{ ",\"server\":", H{ .json = ToolName } };
-        const tail = .{ ",\"arguments\":", H{ .json = TextReference }, ",\"presentation\":", H{ .json = protocol.ToolPresentationJson }, "}" };
+        const tail = .{ ",\"arguments\":", H{ .json = Reference }, ",\"presentation\":", H{ .json = protocol.ToolPresentationJson }, "}" };
         pub const openapi_shapes = .{
             head ++ .{ "\"", H{ .tag = built_in_tool.BuiltInTool }, "\"" } ++ authorization ++ tail,
             head ++ .{H{ .json = ToolName }} ++ authorization ++ server ++ tail,
@@ -474,11 +457,11 @@ pub const CurrentJson = struct {
     pub const Resolved = struct {
         pub const openapi_name = "domainreportCurrentJsonResolved";
         const max_code_bytes = maxTagBytes(tool_presentation.ToolPresentation.Code);
-        pub const json_shape = .{ "{\"action\":\"", H.decimal, "\",\"parent_operation\":\"", H.decimal, "\",\"call_ordinal\":\"", H.decimal, "\",\"code\":", H{ .string = max_code_bytes }, ",\"acceptance_position\":\"", H.decimal, "\",\"result\":", H{ .json = TextReference }, ",\"presentation\":", H{ .json = protocol.ToolPresentationJson }, "}" };
+        pub const json_shape = .{ "{\"action\":\"", H.decimal, "\",\"parent_operation\":\"", H.decimal, "\",\"call_ordinal\":\"", H.decimal, "\",\"code\":", H{ .string = max_code_bytes }, ",\"acceptance_position\":\"", H.decimal, "\",\"result\":", H{ .json = Reference }, ",\"presentation\":", H{ .json = protocol.ToolPresentationJson }, "}" };
     };
     pub const Rejected = struct {
         pub const openapi_name = "domainreportCurrentJsonRejected";
-        pub const json_shape = .{ "{\"parent_operation\":\"", H.decimal, "\",\"call_ordinal\":\"", H.decimal, "\",\"code\":", H{ .string = 32 }, ",\"acceptance_position\":\"", H.decimal, "\",\"result\":", H{ .json = TextReference }, ",\"name\":", H{ .json = TextReference }, ",\"call_id\":", H{ .json = TextReference }, ",\"arguments\":", H{ .json = TextReference }, ",\"presentation\":", H{ .json = protocol.ToolPresentationJson }, "}" };
+        pub const json_shape = .{ "{\"parent_operation\":\"", H.decimal, "\",\"call_ordinal\":\"", H.decimal, "\",\"code\":", H{ .string = 32 }, ",\"acceptance_position\":\"", H.decimal, "\",\"result\":", H{ .json = Reference }, ",\"name\":", H{ .json = Reference }, ",\"call_id\":", H{ .json = Reference }, ",\"arguments\":", H{ .json = Reference }, ",\"presentation\":", H{ .json = protocol.ToolPresentationJson }, "}" };
     };
     pub const Actions = struct {
         pub const openapi_name = "domainreportCurrentJsonActions";

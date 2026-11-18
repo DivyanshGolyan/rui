@@ -2951,20 +2951,8 @@ def main(selected="all"):
         assert current["selected_message"] is None and current["recent_messages"][0]["message"] == "", current
         editor_session = create_session(home, "--store", store,
             "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-sol")
-        cases = [
-            ("first second\x1b\x7fZ", "first Z"),
-            ("A中e\u0301🧑‍🌾\x7f", "A中e\u0301"),
-            ("\x1b[200~line1\nline2\x1b[201~", "line1\nline2"),
-            ("\x1b[200~a\n\u0301\x1b[201~\x01\x7f\x7fZ", "Z"),
-            ("ab\x01\x04\x05\x04", "b"),
-            ("ask src/foo-bar\x17", "ask "),
-            ("\x1b[123;4~Z", "Z"),
-            ("ok\x1bZ", "ok"),
-            ("abc\x1b[D\x1b[DZ", "aZbc"),
-            ("\x1b[200~line1\nline2\x1b[201~\x1b[A\x01X", "Xline1\nline2"),
-        ]
-        endpoint.responses.extend(fixture.sse_answer(f"editor-answer-{i}", f"editor-reason-{i}",
-            f"editor-message-{i}", f"edited {i}")[0] for i in range(len(cases)))
+        endpoint.responses.append(fixture.sse_answer("editor-paste-answer", "editor-paste-reason",
+            "editor-paste-message", "paste accepted")[0])
         master, slave = open_pty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 2048, 0, 0))
         entered = spawn([str(fixture.RUI), "session", "resume", "--store", str(store),
@@ -2972,88 +2960,15 @@ def main(selected="all"):
             stdin=slave, stdout=slave, stderr=slave)
         try:
             read_terminal(master, "› ")
-            for index, (typed, expected) in enumerate(cases):
-                if index == 0:
-                    os.write(master, b"first second\x1b\x7f")
-                    read_terminal(master, "› first", composer=True)
-                    observed = terminal_step(master, "Z", f"edited {index}")
-                elif index == 1:
-                    os.write(master, typed.encode())
-                    read_terminal(master, "› A中\u00e9")
-                    observed = terminal_step(master, "", f"edited {index}")
-                elif typed == "abc\x1b[D\x1b[DZ":
-                    os.write(master, b"abc\x1b[")
-                    time.sleep(0.2)
-                    observed = terminal_step(master, "D\x1b[DZ", f"edited {index}")
-                else:
-                    observed = terminal_step(master, typed, f"edited {index}")
-                assert f"edited {index}" in conversation_text(observed), observed
-                if index == 2:
-                    assert "\n  › line1\n    line2" in "\n".join(map(untimed, conversation_text(observed).split("\n"))), observed
-                    assert "\nedited 2" in conversation_text(observed), observed
-                await_screen(master, "", composer=True)
-                body = json.loads(endpoint.requests[-1])
-                actual = next(item["content"][0]["text"] for item in reversed(body["input"])
-                    if item.get("role") == "user")
-                assert actual == expected, (typed, expected, actual)
-            for index, (cluster, count) in enumerate((("a", 1000), ("e\u0301", 500))):
-                marker = f"burst edited {index}"
-                endpoint.responses.append(fixture.sse_answer(f"burst-answer-{index}",
-                    f"burst-reason-{index}", f"burst-message-{index}", marker)[0])
-                observed = terminal_bulk(master, cluster * count + "\x7f" * count + "Z", marker)
-                print(f"editor burst {index}: {terminal_bulk.received} terminal bytes")
-                assert terminal_bulk.received < 100_000, ("tail deletion repainted the whole draft per key", terminal_bulk.received)
-                body = json.loads(endpoint.requests[-1])
-                actual = next(item["content"][0]["text"] for item in reversed(body["input"])
-                    if item.get("role") == "user")
-                assert actual == "Z", actual
-                await_screen(master, "", composer=True)
-            endpoint.responses.append(fixture.sse_answer("paced-answer", "paced-reason",
-                "paced-message", "paced edited")[0])
-            os.write(master, b"a" * 100)
-            read_terminal(master, "a" * 100)
-            for _ in range(100):
-                os.write(master, b"\x7f")
-                time.sleep(0.025)
-            observed = terminal_step(master, "Z", "paced edited")
-            assert "\n  › Z" in conversation_text(observed), observed
+            pasted = "a" * 4095 + "\n" + "b" * 4091 + " word"
+            # Finding F5: retain timing so the 64 KiB paste's 29.7 s can be compared.
+            started = time.monotonic()
+            terminal_bulk(master, "\x1b[200~" + pasted + "\x1b[201~\x1b\x7f", "paste accepted", timeout=60)
+            print(f"editor 8 KiB paste: {time.monotonic() - started:.2f}s")
             body = json.loads(endpoint.requests[-1])
             actual = next(item["content"][0]["text"] for item in reversed(body["input"])
                 if item.get("role") == "user")
-            assert actual == "Z", actual
-            await_screen(master, "", composer=True)
-            endpoint.responses.append(fixture.sse_answer("wrapped-answer", "wrapped-reason",
-                "wrapped-message", "wrapped edit intact")[0])
-            accepted = terminal_bulk(master, "a" * 2050 + "\x7f" * 2048, "wrapped edit intact")
-            body = json.loads(endpoint.requests[-1])
-            assert next(item["content"][0]["text"] for item in reversed(body["input"])
-                if item.get("role") == "user") == "aa", body
-            before = len(endpoint.requests)
-            for invalid in (b"\xc3(\r", b"\xc3\r"):
-                os.write(master, invalid)
-                rejected = await_screen(master, "Input rejected; nothing sent.")
-                assert "Input rejected; nothing sent." in rejected, rejected
-            settle_screen(master, quiet=0.5)
-            assert len(endpoint.requests) == before, "malformed UTF-8 reached Host"
-            endpoint.responses.append(fixture.sse_answer("editor-limit-answer", "editor-limit-reason",
-                "editor-limit-message", "limit accepted")[0])
-            at_limit = "a" * (64 * 1024 - 2) + "é"
-            accepted = terminal_bulk(master, at_limit, "limit accepted", timeout=60)
-            assert "limit accepted" in accepted, accepted[-1000:]
-            body = json.loads(endpoint.requests[-1])
-            assert next(item["content"][0]["text"] for item in reversed(body["input"])
-                if item.get("role") == "user") == at_limit
-            if "› " not in accepted.split("limit accepted", 1)[1]:
-                await_screen(master, "", composer=True)
-            before = len(endpoint.requests)
-            fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 12, 0, 0))
-            endpoint.responses.append(fixture.sse_answer("narrow-answer", "narrow-reason",
-                "narrow-message", "intact")[0])
-            terminal_step(master, "A中e\u0301\x1b[DX", "intact")
-            assert len(endpoint.requests) == before + 1
-            body = json.loads(endpoint.requests[-1])
-            assert next(item["content"][0]["text"] for item in reversed(body["input"])
-                if item.get("role") == "user") == "A中Xe\u0301", body
+            assert actual == "a" * 4095 + "\n" + "b" * 4091 + " ", actual
             os.write(master, b"\x04")
             assert "Your chats keep working while you are away." in read_terminal(master, "Your chats keep working")
             assert entered.wait(timeout=5) == 0

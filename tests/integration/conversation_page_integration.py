@@ -77,8 +77,7 @@ def main():
         assert head.startswith(b"HTTP/1.1 200 "), head
         domain = b"rui/content/v1"
         assert item["content"] == {
-            "bytes": "10005", "sha256": hashlib.sha256(len(domain).to_bytes(8, "big") + domain + payload.encode()).hexdigest(),
-            "display": "omitted",
+            "type": "text", "bytes": "10005", "sha256": hashlib.sha256(len(domain).to_bytes(8, "big") + domain + payload.encode()).hexdigest(),
         }, item
         chunks = []
         start = 0

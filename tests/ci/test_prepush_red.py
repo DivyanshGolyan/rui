@@ -358,6 +358,24 @@ AssertionError
             cause = report_issue.Cause("a red", zig_test=test, zig_binary=binary)
             self.assertIsInstance(prepush.red_command(job("linux suites (full-callers)"), cause, AVAILABLE), prepush.Skipped)
 
+    def test_ci_40_logic_core_replay_uses_its_owner_for_each_reporting_binary(self):
+        graph = prepush.tree_graph()
+        cases = (
+            ("src/host_reply.zig", "host_reply.test.every reply renders its exact worst-case bound from the shape it writes",
+             ("test-logic_tests", "unit-native-tests", ""), "test-logic-only"),
+            ("src/ActivityBlock.zig", "ActivityBlock.test.a narrow or short activity tail keeps the clock and the oldest calls",
+             ("unit-native-tests", ""), "test-native"),
+        )
+        pr = job("linux pr")
+        pr["steps"] = [dict(name=prepush.PR_RUN_STEP, conclusion="failure")]
+        for path, test, binaries, target in cases:
+            for binary in binaries:
+                with self.subTest(path=path, binary=binary):
+                    cause = report_issue.Cause("failure", [path], zig_test=test, zig_binary=binary)
+                    self.assertEqual(prepush.red_command(pr, cause, AVAILABLE, graph=graph,
+                                                       compile_targets=("test-logic", "test-native")),
+                                     ["zig", "build", "-j1", target, f"-Dtest-filter={test}", "--summary", "line"])
+
     def test_mysql_only_and_conformance_rounds_are_explicit_in_every_unit_target(self):
         mixed = report_issue.Cause("mixed", ["src/store/tests/activity.zig"], zig_test="store.tests.activity.test.queued input")
         mysql_only = report_issue.Cause("mysql only", ["src/store/mysql_dialect_check.zig"], zig_test="store.mysql_dialect_check.test.migration")
@@ -394,7 +412,7 @@ AssertionError
                 self.assertIsInstance(unavailable[0][1], prepush.Skipped)
 
     def test_native_conformance_and_unknown_source_cannot_omit_live_obligations(self):
-        graph = type("Graph", (), {"live_conformance": {"src/session_view_store_tests.zig"}, "reached": {}})()
+        graph = type("Graph", (), {"cores": set(), "live_conformance": {"src/session_view_store_tests.zig"}, "reached": {}})()
         cause = report_issue.Cause("native mixed", ["src/session_view_store_tests.zig"], zig_test="session_view_store_tests.test.view", zig_binary="unit-native-tests")
         command = prepush.red_command(job("linux suites (test-native)"), cause, AVAILABLE, graph=graph)
         self.assertIsInstance(command, prepush.NeedsMySQL)
