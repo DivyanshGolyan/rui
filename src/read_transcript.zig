@@ -519,7 +519,7 @@ test "read_transcript core runner reads other Session outlines before full windo
     try std.testing.expect(try database.nextCoreWork(.{ .free_credit = .one, .mcp_open = true }) == null);
 }
 
-test "EXR-65 read_transcript renders parts entries" {
+test "EXR-66 read_transcript renders parts entries" {
     // A parts entry reads as its Text parts and one placeholder per Image, joined by newlines,
     // in the outline and in display-byte windows; a search hit names its part.
     var tmp = std.testing.tmpDir(.{});
