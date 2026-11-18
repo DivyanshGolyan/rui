@@ -128,8 +128,8 @@ test "earlier Action settlement remains authoritative after Session stop" {
             const action_binding = (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
 
             try std.testing.expectEqual(
-                ActionSettlement.effect,
-                try storage.settleActionAttempt(action_binding, .succeeded, "Original Bash result.", .{}),
+                ActionSettlement.Outcome.effect,
+                (try storage.settleActionAttempt(action_binding, .succeeded, "Original Bash result.", .{})).outcome,
             );
             const original_content_id = try store_testing.queryU64(&storage, "SELECT resolution_content_id FROM action_operation", .{});
             const original_content_count = try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{});
@@ -577,7 +577,7 @@ test "runner action seam covers selection admission input settlement stop and re
                             try std.testing.expectEqualSlices(u8, &protocol.contentDigest("{\"type\":\"object\"}"), &input.runner.mcp.input_schema.digest);
                         }
                         if (scenario == 0) {
-                            try std.testing.expectEqual(ActionSettlement.effect, try storage.settleActionAttempt(binding, .succeeded, expected_text, .{}));
+                            try std.testing.expectEqual(ActionSettlement.Outcome.effect, (try storage.settleActionAttempt(binding, .succeeded, expected_text, .{})).outcome);
                         } else {
                             try std.testing.expect(try storage.recoverOneUncertainAction(ActiveOperationFilter.empty()));
                         }
@@ -689,7 +689,7 @@ test "read_image exact permission frozen workspace capacity background and stop 
                 try std.testing.expect((try storage.admitActionAttempt(selected, 1234, .{})) == null);
                 var stop = try completeSessionStop("image-stop", session.slice());
                 try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
-                try std.testing.expectEqual(ActionSettlement.session_stop, try storage.settleActionAttempt(binding, .succeeded, "Image read finished.", .{}));
+                try std.testing.expectEqual(ActionSettlement.Outcome.session_stop, (try storage.settleActionAttempt(binding, .succeeded, "Image read finished.", .{})).outcome);
                 try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id WHERE a.action_id=?1 AND a.resolution_code='cancelled' AND c.digest=?2", .{ action_id, store_testing.Blob{ .bytes = &protocol.contentDigest("Stopped before this image read completed.") } }));
                 try std.testing.expectError(error.StaleActionAttemptBinding, storage.readActionExecutionInput(.read_image, binding, &input));
             }
@@ -740,7 +740,7 @@ test "Action read covers permission queue attempt and immutable final paging" {
                 try storage.readAction(&request, &result);
                 try std.testing.expect(result.status == .pending and result.status.pending == .attempted);
                 try std.testing.expectError(error.InvalidActionResult, storage.settleActionAttempt(binding, .succeeded, "", .{}));
-                try std.testing.expectEqual(ActionSettlement.effect, try storage.settleActionAttempt(binding, .succeeded, bytes, .{}));
+                try std.testing.expectEqual(ActionSettlement.Outcome.effect, (try storage.settleActionAttempt(binding, .succeeded, bytes, .{})).outcome);
                 try NativePromotion.expectCount(&storage, &tmp, session.slice(), "2");
                 try storage.readAction(&request, &result);
                 try std.testing.expect(result.status == .resolved);
@@ -951,7 +951,7 @@ test "native promotion keeps one attempted invocation and receipt while final in
             const covered_before = try NativePromotion.uncoveredBytes(&storage, session.slice(), receipt_position);
             const receipt_bytes = try store_testing.queryU64(&storage, "SELECT byte_length FROM content WHERE content_id=?1", .{receipt_content});
             try std.testing.expectEqual(receipt_bytes, uncovered_before - covered_before);
-            try std.testing.expectEqual(ActionSettlement.effect, try storage.settleActionAttempt(binding, .succeeded, "One invocation's final", .{}));
+            try std.testing.expectEqual(ActionSettlement.Outcome.effect, (try storage.settleActionAttempt(binding, .succeeded, "One invocation's final", .{})).outcome);
             try NativePromotion.expectCount(&storage, &tmp, session.slice(), "0");
             try std.testing.expectEqual(uncovered_before + "One invocation's final".len, try NativePromotion.uncoveredBytes(&storage, session.slice(), receipt_position - 1));
             try std.testing.expectEqual(covered_before + "One invocation's final".len, try NativePromotion.uncoveredBytes(&storage, session.slice(), receipt_position));
@@ -1518,7 +1518,7 @@ test "background owed stop suppresses final admission across settlement recovery
                 try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_stop WHERE session_ref=?1", .{child.slice()}));
                 switch (ending) {
                     .settle => {
-                        try std.testing.expectEqual(ActionSettlement.session_stop, try storage.settleActionAttempt(binding.?, .succeeded, "Final after parent stop", .{}));
+                        try std.testing.expectEqual(ActionSettlement.Outcome.session_stop, (try storage.settleActionAttempt(binding.?, .succeeded, "Final after parent stop", .{})).outcome);
                         try std.testing.expectError(error.StaleActionAttemptBinding, storage.settleActionAttempt(binding.?, .succeeded, "Duplicate", .{}));
                     },
                     .recover => {
@@ -1655,7 +1655,7 @@ test "background owed stop excludes person peer and previously admitted final in
                             const continuation = (try storage.admitModelAttempt(.tool_continuation, .{})).?.permit.binding;
                             try NativePromotion.finishModel(&storage, &tmp, continuation);
                         },
-                        .action_final => _ = try storage.settleActionAttempt(binding, .succeeded, "Final before stop", .{}),
+                        .action_final => _ = (try storage.settleActionAttempt(binding, .succeeded, "Final before stop", .{})).outcome,
                     }
                     const admissions = try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE session_ref=?1 AND turn_id IS NULL", .{child.slice()});
                     try std.testing.expect(admissions > 0);
@@ -1710,7 +1710,7 @@ test "native promotion owed stop refuses a foreground call and preserves an earl
                     try std.testing.expect(reply == .rejected);
                     try std.testing.expectEqual(@import("../../action_control.zig").Rejection.source_stopped, reply.rejected.code);
                 }
-                try std.testing.expectEqual(ActionSettlement.session_stop, try storage.settleActionAttempt(binding, .succeeded, "Stopped", .{}));
+                try std.testing.expectEqual(ActionSettlement.Outcome.session_stop, (try storage.settleActionAttempt(binding, .succeeded, "Stopped", .{})).outcome);
                 try std.testing.expect((try storage.admitNextModelAttempt(.{})) == null);
                 try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE source_action_id=?1", .{action}));
             }

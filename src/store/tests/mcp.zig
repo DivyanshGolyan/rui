@@ -264,7 +264,7 @@ test "MCP read-only ordering uses frozen offers and admits read waves between wr
                     }
                     try std.testing.expect((try storage.nextAction(.mcp, .{ .free_credit = .one, .mcp_open = true })) == null);
                     for (start..end) |index| {
-                        try std.testing.expectEqual(ActionSettlement.effect, try storage.settleActionAttempt(bindings[index], .succeeded, "done", .{}));
+                        try std.testing.expectEqual(ActionSettlement.Outcome.effect, (try storage.settleActionAttempt(bindings[index], .succeeded, "done", .{})).outcome);
                         if (index + 1 < end) try std.testing.expect((try storage.nextAction(.mcp, .{ .free_credit = .one, .mcp_open = true })) == null);
                     }
                     start = end;
@@ -351,10 +351,10 @@ test "MCP promotion keeps old frozen Operations eligible without hiding finite w
             phase = "finite Attempt";
             const finite_binding = (try storage.admitActionAttempt(selected_finite, 30_000, .{})).?.permit.binding;
             phase = "finite settlement";
-            try std.testing.expectEqual(ActionSettlement.effect, try storage.settleActionAttempt(finite_binding, .succeeded, "Finite result", .{}));
+            try std.testing.expectEqual(ActionSettlement.Outcome.effect, (try storage.settleActionAttempt(finite_binding, .succeeded, "Finite result", .{})).outcome);
             try std.testing.expect((try storage.nextAction(.mcp, .fromFree(2, true))) == null);
             phase = "old settlement";
-            try std.testing.expectEqual(ActionSettlement.effect, try storage.settleActionAttempt(old_binding, .succeeded, "Old background result", .{}));
+            try std.testing.expectEqual(ActionSettlement.Outcome.effect, (try storage.settleActionAttempt(old_binding, .succeeded, "Old background result", .{})).outcome);
             try std.testing.expectEqual(serialized, (try storage.nextAction(.mcp, .fromFree(1, true))).?.action_id);
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND attempt_ordinal=1 AND resolution_code='succeeded'", .{old}));
         }

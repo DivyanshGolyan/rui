@@ -5,7 +5,8 @@ const fenceDispatch = @import("server_host.zig").fenceDispatch;
 const store = @import("store.zig");
 const result_fault = @import("result_fault.zig");
 const tool_record = @import("tool_record.zig");
-const Value = @import("tool_result.zig").Value;
+const tool_result = @import("tool_result.zig");
+const Value = tool_result.Value;
 
 pub const Slot = struct {
     token: execution.CustodyToken,
@@ -26,14 +27,14 @@ const Settlement = union(enum) {
 
 pub const Delivered = enum { delivered, session_stop, lost, fenced };
 
-pub fn result(host: *Host, slot: Slot, profile: tool_record.Profile, code: store.ActionResolutionCode, value: Value) Delivered {
+pub fn result(host: *Host, slot: Slot, profile: tool_record.Profile, code: store.ActionResolutionCode, value: Value, retained: *tool_result.Result) Delivered {
     // Result uses this frozen profile for layout and retention before delivery.
     _ = profile;
-    return deliverAttempt(host, slot, code, value);
+    return deliverAttempt(host, slot, code, value, retained);
 }
 
 pub fn fixed(host: *Host, slot: Slot, code: store.ActionResolutionCode, text: []const u8) Delivered {
-    return deliverAttempt(host, slot, code, .{ .text = text });
+    return deliverAttempt(host, slot, code, .{ .text = text }, null);
 }
 
 pub fn message(host: *Host, slot: Slot, code: store.ActionResolutionCode, comptime fmt: []const u8, args: anytype) Delivered {
@@ -81,24 +82,27 @@ pub fn deliver(database: *store.Store, delivery: Delivery, code: store.ActionRes
     };
 }
 
-fn deliverAttempt(host: *Host, slot: Slot, code: store.ActionResolutionCode, value: Value) Delivered {
+fn deliverAttempt(host: *Host, slot: Slot, code: store.ActionResolutionCode, value: Value, retained: ?*tool_result.Result) Delivered {
+    var kept = false;
+    defer if (retained) |result_value| result_value.settleRetention(kept);
     if (!host.custody.claimTerminalDelivery(slot.token)) return .lost;
     const settlement = deliver(host.store, .{ .attempt = slot }, code, value, host.hooks.storeFaults(.action_result)) catch |err| {
         return fence(host, slot.publication_phase, .{ .store = err });
     };
+    kept = settlement.attempt.kept;
     return fromSettlement(settlement.attempt);
 }
 
 fn fromSettlement(settlement: store.ActionSettlement) Delivered {
-    return switch (settlement) {
+    return switch (settlement.outcome) {
         .effect => .delivered,
         .session_stop => .session_stop,
     };
 }
 
 test "shared settlement preserves session stop" {
-    try std.testing.expectEqual(Delivered.delivered, fromSettlement(.effect));
-    try std.testing.expectEqual(Delivered.session_stop, fromSettlement(.session_stop));
+    try std.testing.expectEqual(Delivered.delivered, fromSettlement(.{ .outcome = .effect, .kept = true }));
+    try std.testing.expectEqual(Delivered.session_stop, fromSettlement(.{ .outcome = .session_stop, .kept = false }));
 }
 
 // Runners may use Store reads and effect transactions, but settlement is owned

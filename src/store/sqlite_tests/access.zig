@@ -251,7 +251,7 @@ test "every transition dates its fact from the Host clock" {
     const action = (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
     var stop = try completeSessionStop("dated-stop", session.slice());
     try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
-    try std.testing.expectEqual(ActionSettlement.session_stop, try storage.settleActionAttempt(action, .succeeded, "Bash succeeded.", .{}));
+    try std.testing.expectEqual(ActionSettlement.Outcome.session_stop, (try storage.settleActionAttempt(action, .succeeded, "Bash succeeded.", .{})).outcome);
     const after: u64 = @intCast(@divFloor(try store_core.readUnixMilliseconds(std.testing.io), 1000));
 
     const Column = struct { table: []const u8, column: []const u8 };
