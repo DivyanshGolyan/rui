@@ -68,6 +68,23 @@ class RenderTest(unittest.TestCase):
         body = comment.render(data, 'o/r', 7, 'head', 'base', shots, [])
         self.assertIn('— / ![After](https://raw.githubusercontent.com/o/r/pr-screens/pr-7/head/small.png)', body)
 
+    def test_selected_unchanged_pair_and_recording_are_rendered(self):
+        before = {'files': {'png': 'baseline/frame.png', 'gif': 'baseline/recording one.gif'}}
+        after = {'files': {'png': 'frame.png', 'gif': 'recording.gif'}}
+        data = diff(same=[pair('screen', '140x40', before, after)], same_count=3)
+        body = comment.render(data, 'o/r', 7, 'head', 'base')
+        self.assertIn('0 changed, 0 new, 3 unchanged, 0 failed', body)
+        self.assertIn('### Selected screens', body)
+        self.assertIn('| screen |', body)
+        self.assertIn('![Before recording](https://raw.githubusercontent.com/o/r/pr-screens/pr-7/head/baseline/recording%20one.gif)', body)
+        self.assertIn('![After recording](https://raw.githubusercontent.com/o/r/pr-screens/pr-7/head/recording.gif)', body)
+        self.assertIn('/head/frame.png', body)
+
+    def test_recording_without_png_is_rendered(self):
+        body = comment.image({'files': {'gif': 'movie.gif'}}, 'o/r', 7, 'head', 'After')
+        self.assertIn('![After recording]', body)
+        self.assertIn('/head/movie.gif', body)
+
     def test_missing_images_are_handled(self):
         body = comment.render(diff(failed=[pair('failed', '46x30', None,
                                                {'ok': False, 'reason': None, 'files': {}})]),
@@ -90,7 +107,7 @@ class UpsertTest(unittest.TestCase):
         def api(method, path, body=None):
             calls.append((method, path, body))
             if '/pulls/' in path:
-                return {'state': 'open', 'head': {'sha': 'head'}}
+                return {'state': 'open', 'head': {'sha': 'head', 'repo': {'full_name': 'o/r'}}}
             if method == 'GET' and path.endswith('&page=1'):
                 return [{'id': i, 'body': 'other'} for i in range(100)]
             if method == 'GET':
@@ -107,17 +124,17 @@ class UpsertTest(unittest.TestCase):
         def api(method, path, body=None):
             calls.append((method, path, body))
             if '/pulls/' in path:
-                return {'state': 'open', 'head': {'sha': 'head'}}
+                return {'state': 'open', 'head': {'sha': 'head', 'repo': {'full_name': 'o/r'}}}
             return [] if method == 'GET' else {'id': 4}
         comment.upsert(api, 'o/r', 7, 'head', 'new')
         self.assertEqual(calls[-1], ('POST', 'repos/o/r/issues/7/comments', {'body': 'new'}))
 
     def test_refuses_stale_or_closed_pr(self):
-        for state, sha in [('closed', 'head'), ('open', 'new-head')]:
-            with self.subTest(state=state, sha=sha):
+        for state, sha, repo in [('closed', 'head', 'o/r'), ('open', 'new-head', 'o/r'), ('open', 'head', 'other/fork'), ('open', 'head', None)]:
+            with self.subTest(state=state, sha=sha, repo=repo):
                 def api(method, path, body=None):
                     if '/pulls/' in path:
-                        return {'state': state, 'head': {'sha': sha}}
+                        return {'state': state, 'head': {'sha': sha, 'repo': {'full_name': repo} if repo else None}}
                     self.assertEqual(method, 'GET')
                     return []
                 with self.assertRaises(ValueError):

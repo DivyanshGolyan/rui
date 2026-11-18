@@ -3,7 +3,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review, closed]
+    types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
     inputs:
       pr:
@@ -31,7 +31,6 @@ jobs:
       head: ${{ steps.select.outputs.head }}
       base: ${{ steps.select.outputs.base }}
       base_tip: ${{ steps.select.outputs.base_tip }}
-      close: ${{ steps.select.outputs.close }}
       started: ${{ steps.select.outputs.started }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -43,7 +42,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           EVENT: ${{ github.event_name }}
-          ACTION: ${{ github.event.action }}
           INPUT_PR: ${{ inputs.pr }}
           EVENT_PR: ${{ github.event.pull_request.number }}
         run: |
@@ -58,10 +56,6 @@ jobs:
           pr=${INPUT_PR:-$EVENT_PR}
           [[ "$pr" =~ ^[1-9][0-9]*$ ]]
           echo "pr=$pr" >> "$GITHUB_OUTPUT"
-          if [ "$ACTION" = closed ]; then
-            echo 'close=true' >> "$GITHUB_OUTPUT"
-            exit
-          fi
           gh api "repos/$GITHUB_REPOSITORY/pulls/$pr" > "$RUNNER_TEMP/pr.json"
           jq -e --arg repo "$GITHUB_REPOSITORY" '.state == "open" and .head.repo.full_name == $repo' "$RUNNER_TEMP/pr.json" > /dev/null
           head=$(jq -r .head.sha "$RUNNER_TEMP/pr.json")
@@ -639,39 +633,3 @@ jobs:
             python3 tests/ci/screens_comment.py --diff "$RUNNER_TEMP/merged/diff.json" --repo "$GITHUB_REPOSITORY" --pr "$PR" --head "$HEAD_SHA" --base "$BASE" --shots "$RUNNER_TEMP/merged/shots.json" --baseline-shots "$RUNNER_TEMP/baseline/shots.json" --capture-failures "$RUNNER_TEMP/capture-failures.json" --run-id "$GITHUB_RUN_ID"
           fi
           test "$CANDIDATE_OK" = true && test "$BASELINE_OK" = true
-  cleanup:
-    needs: select
-    if: ${{ needs.select.outputs.close == 'true' }}
-    runs-on: ubuntu-24.04
-    concurrency:
-      group: pr-screens-writer
-      queue: max
-      cancel-in-progress: false
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Remove closed PR captures
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR: ${{ needs.select.outputs.pr }}
-        run: |
-          set -euo pipefail
-          gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" > "$RUNNER_TEMP/current-pr.json"
-          if ! jq -e '.state == "closed"' "$RUNNER_TEMP/current-pr.json" > /dev/null; then exit 0; fi
-          remote=$(git ls-remote --refs origin refs/heads/pr-screens)
-          [ -n "$remote" ] || exit 0
-          remote_sha=${remote%%$'\t'*}
-          git fetch --no-tags origin "$remote_sha"
-          mkdir -p "$RUNNER_TEMP/published"
-          git archive "$remote_sha" | tar -x -C "$RUNNER_TEMP/published"
-          rm -rf "$RUNNER_TEMP/published/pr-$PR"
-          cd "$RUNNER_TEMP/published"
-          git init -q
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add .
-          git commit -qm 'Remove closed PR screen captures' --allow-empty
-          git -c "http.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)" push --force-with-lease="refs/heads/pr-screens:$remote_sha" "https://github.com/$GITHUB_REPOSITORY.git" HEAD:refs/heads/pr-screens

@@ -19,11 +19,15 @@ def text(value):
 def image(record, repo, pr, head, label):
     if not record:
         return '—'
-    path = record.get('files', {}).get('png')
-    if not path:
-        return '—'
-    url = f'https://raw.githubusercontent.com/{repo}/pr-screens/pr-{pr}/{head}/{quote(path, safe="/")}'
-    return f'![{label}]({url})'
+    files = record.get('files', {})
+    images = []
+    for kind, suffix in (('png', ''), ('gif', ' recording')):
+        path = files.get(kind)
+        if path:
+            url = f'https://raw.githubusercontent.com/{repo}/pr-screens/pr-{pr}/{head}/{quote(path, safe="/")}'
+            images.append(f'![{label}{suffix}]({url})')
+    return '<br>'.join(images) if images else '—'
+
 
 
 def render(diff, repo, pr, head, base, shots=(), baseline_shots=(), capture_failures=(), run_id=None):
@@ -47,15 +51,16 @@ def render(diff, repo, pr, head, base, shots=(), baseline_shots=(), capture_fail
                 reason = text(record.get('reason') or 'Capture failed')
                 sections.append(f"- **{text(pair['name'])} ({text(pair['size'])})**: {reason}  \n  {image(record, repo, pr, head, 'Last frame')}\n")
     rows = {}
-    for category in ('changed', 'new'):
-        for pair in groups[category]:
+    for category in ('changed', 'new', 'same'):
+        for pair in diff.get(category, []):
             rows.setdefault(pair['name'], {})[pair['size']] = pair
     current = {(r['name'], r['size']): r for r in shots}
     baseline = {(r['name'], r['size']): {**r, 'files': {
         ext: 'baseline/' + path for ext, path in r.get('files', {}).items()
     }} for r in baseline_shots}
     if rows:
-        sections.append('\n### Changed and new screens\n\n| State | 140x40 before / after | 46x30 before / after |\n| --- | --- | --- |\n')
+        title = 'Selected screens' if diff.get('same') else 'Changed and new screens'
+        sections.append(f'\n### {title}\n\n| State | 140x40 before / after | 46x30 before / after |\n| --- | --- | --- |\n')
         for name, sizes in sorted(rows.items()):
             cells = []
             for size in SIZES:
@@ -72,7 +77,8 @@ def render(diff, repo, pr, head, base, shots=(), baseline_shots=(), capture_fail
         sections.append('\n### Removed screens\n\n')
         for pair in groups['removed']:
             sections.append(f"- {text(pair['name'])} ({text(pair['size'])})\n")
-    sections.append(f"\n<details><summary>{diff['same_count']} unchanged captures</summary>\n\nOther unchanged captures are omitted.\n\n</details>\n")
+    unchanged_note = 'Other unchanged captures are omitted.' if diff.get('same') else 'Unchanged captures are omitted.'
+    sections.append(f"\n<details><summary>{diff['same_count']} unchanged captures</summary>\n\n{unchanged_note}\n\n</details>\n")
     note = '\n\n*Comment truncated; see the screenshot artifact for the full comparison.*\n'
     result = header
     for section in sections:
@@ -105,8 +111,9 @@ def upsert(api, repo, pr, head, body):
             break
         page += 1
     current = api('GET', f'repos/{repo}/pulls/{pr}')
-    if current['state'] != 'open' or current['head']['sha'] != head:
-        raise ValueError('pull request closed or head changed before screenshot comment update')
+    if (current['state'] != 'open' or current['head']['sha'] != head
+            or (current['head'].get('repo') or {}).get('full_name') != repo):
+        raise ValueError('pull request closed, head changed, or head is a fork before screenshot comment update')
     if target is not None:
         return api('PATCH', f'repos/{repo}/issues/comments/{target}', {'body': body})
     return api('POST', f'repos/{repo}/issues/{pr}/comments', {'body': body})
