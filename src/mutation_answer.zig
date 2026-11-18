@@ -37,7 +37,7 @@ pub const ContentReference = struct { bytes: u64, digest: [32]u8 };
 
 pub const Target = union(CommandKind) {
     configure,
-    message: struct { bytes: u64, digest: [32]u8, creates_session: bool = false },
+    message: struct { bytes: u64, digest: [32]u8, form: enum { text, parts } = .text, creates_session: bool = false },
     session_stop,
     session_archive: struct { archived: bool },
     model_interruption: struct { turn: u64, operation: u64 },
@@ -231,7 +231,7 @@ fn decide(comptime kind: CommandKind, comptime accepted: bool, comptime conflict
         try require(partial, ".input");
         const input = wire.input;
         var digest: [32]u8 = undefined;
-        if (!input.type.eql("text") or input.sha256.slice().len != 64) return error.InvalidResponse;
+        if (!input.type.eql(@tagName(target.message.form)) or input.sha256.slice().len != 64) return error.InvalidResponse;
         _ = std.fmt.hexToBytes(&digest, input.sha256.slice()) catch return error.InvalidResponse;
         const bytes = try decimalId(input.bytes, true);
         confirmed_input = .{ .bytes = bytes, .digest = digest };
@@ -586,4 +586,24 @@ test "mutation rejection preserves an empty original creation target" {
     const answer = try decodeForTest(@import("protocol.zig"), @import("command_reply.zig"), 200, body, "", .configure).answer;
     try std.testing.expect(answer.replayed);
     try std.testing.expectEqualStrings("invalid_configuration", answer.result.rejected.slice());
+}
+
+test "ADM-23 multipart mutation reply binds form and manifest identity" {
+    const current = @import("protocol.zig").wire_version;
+    const digest: [32]u8 = @splat(7);
+    const target: Target = .{ .message = .{ .bytes = 108, .digest = digest, .form = .parts } };
+    var body: [1024]u8 = undefined;
+    for ([_][]const u8{ "text", "parts" }) |form| {
+        const wire = try std.fmt.bufPrint(&body, "{{\"version\":\"{s}\",\"type\":\"message_reply\",\"answer\":{{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"admission\":\"7\"}},\"input\":{{\"type\":\"{s}\",\"bytes\":\"108\",\"sha256\":\"{s}\"}},\"queue\":{{\"status\":\"queued\",\"admission\":\"7\"}},\"execution\":{{\"status\":\"queued\"}}}}", .{ current, form, std.fmt.bytesToHex(digest, .lower) });
+        const result = decodeForTest(@import("protocol.zig"), @import("command_reply.zig"), 200, wire, "k7m2qx", target).answer;
+        if (std.mem.eql(u8, form, "parts")) {
+            try std.testing.expectEqual(@as(u64, 7), (try result).result.accepted.message.admission);
+            var changed = target;
+            changed.message.digest[0] ^= 1;
+            try std.testing.expectError(error.RequestBindingMismatch, decodeForTest(@import("protocol.zig"), @import("command_reply.zig"), 200, wire, "k7m2qx", changed).answer);
+            changed = target;
+            changed.message.bytes += 1;
+            try std.testing.expectError(error.RequestBindingMismatch, decodeForTest(@import("protocol.zig"), @import("command_reply.zig"), 200, wire, "k7m2qx", changed).answer);
+        } else try std.testing.expectError(error.InvalidResponse, result);
+    }
 }

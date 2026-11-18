@@ -36,6 +36,7 @@ pub const Option = struct {
     hex_grammar: ?[]const u8 = null,
     hidden: bool = false,
     repeated: bool = false,
+    ordered: bool = false,
 };
 pub fn value(comptime name: []const u8, argument: []const u8) Option {
     if (comptime std.mem.eql(u8, name, "action") or std.mem.eql(u8, name, "turn") or std.mem.eql(u8, name, "operation") or std.mem.eql(u8, name, "position"))
@@ -187,7 +188,7 @@ pub const Definition = struct {
 
     pub fn parseSyntax(self: Definition, args: []const []const u8, allocator: std.mem.Allocator, problem: *Refusal) Error!Parsed {
         problem.* = .{ .code = .memory_exhausted, .token = "argv", .option = false };
-        var parsed: Parsed = .{ .definition = self };
+        var parsed: Parsed = .{ .definition = self, .arguments = args };
         var hexed: u64 = 0;
         var literal = false;
         var index: usize = 0;
@@ -249,6 +250,7 @@ pub const Definition = struct {
                 problem.* = .{ .code = .option_value_missing, .token = option.name, .accepted = if (option.choices) |set| .{ .closed = set } else .{ .grammar = option.argument.? } };
                 return error.MissingArgumentValue;
             }
+            if (option.ordered) continue;
             if (option.repeated) {
                 if (parsed.repeat_count == parsed.repeats.len) {
                     problem.* = .{ .code = .option_repeat_limit, .token = option.name, .accepted = .{ .grammar = std.fmt.comptimePrint("at most {d} repeated option values", .{@as(Parsed, undefined).repeats.len}) } };
@@ -319,6 +321,8 @@ pub const decodeHex = @import("hex_value.zig").decodeIdentity;
 
 pub const Parsed = struct {
     definition: Definition,
+    arguments: []const []const u8 = &.{},
+
     values: [64]?[]const u8 = @splat(null),
     seen: u64 = 0,
     repeats: [16][]const u8 = undefined,
@@ -328,6 +332,37 @@ pub const Parsed = struct {
     positional_tail: ?[]const u8 = null,
     literal_positional: bool = false,
     help: bool = false,
+
+    pub const Ordered = struct {
+        name: []const u8,
+        value: []const u8,
+    };
+
+    pub const OrderedIterator = struct {
+        definition: Definition,
+        arguments: []const []const u8,
+        index: usize = 0,
+
+        pub fn next(self: *OrderedIterator) ?Ordered {
+            while (self.index < self.arguments.len) {
+                const arg = self.arguments[self.index];
+                self.index += 1;
+                if (std.mem.eql(u8, arg, "--")) return null;
+                if (!std.mem.startsWith(u8, arg, "--")) continue;
+                const option = self.definition.optionNamed(arg[2..]) orelse continue;
+                if (option.argument == null) continue;
+                if (self.index == self.arguments.len) return null;
+                const value_arg = self.arguments[self.index];
+                self.index += 1;
+                if (option.ordered) return .{ .name = option.name, .value = value_arg };
+            }
+            return null;
+        }
+    };
+
+    pub fn ordered(self: *const Parsed) OrderedIterator {
+        return .{ .definition = self.definition, .arguments = self.arguments };
+    }
 
     pub fn get(self: *const Parsed, comptime name: []const u8) ?[]const u8 {
         comptime checkOptionName(name);

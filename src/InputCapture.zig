@@ -28,6 +28,7 @@ const Pending = struct {
     offset: u64,
     length: u64,
     written: u64 = 0,
+    unknown_length: bool = false,
     hash: std.crypto.hash.sha2.Sha256 = content_string.hasher(),
     kind: union(enum) { text: Utf8, image: struct { scanner: media.Scanner, name: ?parts.Name } },
 };
@@ -61,6 +62,21 @@ pub fn begin(self: *InputCapture, kind: Incoming, length: u64) !void {
     self.pending = .{ .offset = self.length, .length = length, .kind = validator };
 }
 
+/// Begin a streamed text part whose length is not known until EOF. It uses
+/// the same bounded spool and UTF-8 validation as a known-length part.
+pub fn beginUnknownText(self: *InputCapture) !void {
+    try self.begin(.text, content_string.max_bytes);
+    self.pending.?.unknown_length = true;
+}
+
+/// Begin an image whose decoded length is known only after the wire string.
+/// The caller must validate its declared format with endImage before sealing.
+pub fn beginUnknownImage(self: *InputCapture) !void {
+    const available = self.limits.max_bytes -| self.raw_image_bytes;
+    try self.begin(.{ .image = .{} }, @min(available, content_string.max_bytes));
+    self.pending.?.unknown_length = true;
+}
+
 pub fn append(self: *InputCapture, bytes: []const u8, allowance: *usize, cancelled: bool) !usize {
     std.debug.assert(self.resources != null and self.state == .building);
     errdefer self.state = .failed;
@@ -68,7 +84,10 @@ pub fn append(self: *InputCapture, bytes: []const u8, allowance: *usize, cancell
     try self.io.checkCancel();
     const pending = if (self.pending) |*pending| pending else return error.NoInputPart;
     const count = @min(bytes.len, allowance.*, window_bytes);
-    if (count > pending.length - pending.written) return error.ContentChanged;
+    if (count > pending.length - pending.written) {
+        if (pending.unknown_length) return if (pending.kind == .image) error.ImageResourceLimit else error.ContentTooLarge;
+        return error.ContentChanged;
+    }
     if (count == 0) return 0;
     const selected = bytes[0..count];
     switch (pending.kind) {
@@ -91,13 +110,33 @@ pub fn append(self: *InputCapture, bytes: []const u8, allowance: *usize, cancell
 }
 
 pub fn end(self: *InputCapture) !void {
+    return self.finishPart(null);
+}
+
+/// Validate a wire-declared MIME after the image data and metadata arrive.
+pub fn endImage(self: *InputCapture, assertion: media.Format) !void {
+    errdefer self.state = .failed;
+    const pending = self.pending orelse return error.NoInputPart;
+    if (pending.kind != .image) return error.InvalidInputPart;
+    return self.finishPart(assertion);
+}
+
+fn finishPart(self: *InputCapture, assertion: ?media.Format) !void {
     std.debug.assert(self.resources != null and self.state == .building);
     errdefer self.state = .failed;
     const pending = if (self.pending) |*pending| pending else return error.NoInputPart;
-    if (pending.written != pending.length) return error.ContentChanged;
+    if (pending.unknown_length and pending.kind == .image and assertion == null) return error.InvalidInputPart;
+    if (pending.unknown_length) {
+        pending.length = pending.written;
+        if (pending.kind == .image) pending.kind.image.scanner.length = pending.written;
+    } else if (pending.written != pending.length) return error.ContentChanged;
     const kind: parts.Kind = switch (pending.kind) {
         .text => |*text| if (text.complete()) .text else return error.InvalidUtf8,
-        .image => |*image| .{ .image = .{ .media = try image.scanner.finish(), .name = image.name } },
+        .image => |*image| image: {
+            const metadata = try image.scanner.finish();
+            if (assertion) |expected| if (metadata.format != expected) return error.ImageMimeMismatch;
+            break :image .{ .image = .{ .media = metadata, .name = image.name } };
+        },
     };
     const record: parts.Record = .{ .offset = pending.offset, .identity = .{ .length = pending.length, .digest = pending.hash.finalResult(), .kind = kind } };
     var bytes: [parts.Record.byte_length]u8 = undefined;
@@ -477,4 +516,97 @@ test "input capture refuses a part beyond the maximum at begin" {
     try std.testing.expectError(error.TooManyInputParts, capture.begin(.text, 0));
     try std.testing.expectEqual(charged, used.load(.monotonic));
     try std.testing.expectEqual(@as(u32, parts.max_parts), capture.count);
+}
+
+test "ADM-22 streamed text capture matches known-length capture" {
+    const large: [window_bytes + 1]u8 = @splat('a');
+    for ([_][]const u8{ "", "text\x00雪\n", &large }) |value| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var used: std.atomic.Value(u64) = .init(0);
+        var known: InputCapture = undefined;
+        try testCapture(&known, tmp.dir, .{ .used = &used, .limit = 16384 });
+        defer known.close();
+        try known.begin(.text, value.len);
+        var at: usize = 0;
+        while (at < value.len) {
+            var allowance: usize = window_bytes;
+            at += try known.append(value[at..], &allowance, false);
+        }
+        try known.end();
+        const expected = try known.seal();
+        var streamed: InputCapture = undefined;
+        try testCapture(&streamed, tmp.dir, .{ .used = &used, .limit = 16384 });
+        defer streamed.close();
+        try streamed.beginUnknownText();
+        at = 0;
+        while (at < value.len) {
+            var allowance: usize = 1;
+            at += try streamed.append(value[at..], &allowance, false);
+        }
+        try streamed.end();
+        const actual = try streamed.seal();
+        try std.testing.expectEqualSlices(u8, &expected.digest, &actual.digest);
+        var cursor = actual.cursor();
+        const part = (try cursor.next()).?;
+        try std.testing.expectEqual(@as(u64, value.len), part.range.length);
+        try std.testing.expect((try cursor.next()) == null);
+    }
+}
+
+test "SH-52 streamed image capture validates actual bytes and late MIME" {
+    const jpeg = @embedFile("testing/fixtures/input-baseline.jpg");
+    for ([_]enum { accepted, wrong_mime, truncated, missing_mime }{ .accepted, .wrong_mime, .truncated, .missing_mime }) |scenario| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var used: std.atomic.Value(u64) = .init(0);
+        var capture: InputCapture = undefined;
+        try testCapture(&capture, tmp.dir, .{ .used = &used, .limit = 100000 });
+        defer capture.close();
+        try capture.beginUnknownImage();
+        const bytes = if (scenario == .truncated) jpeg[0 .. jpeg.len - 1] else jpeg;
+        var at: usize = 0;
+        while (at < bytes.len) {
+            var allowance: usize = 7;
+            at += try capture.append(bytes[at..], &allowance, false);
+        }
+        switch (scenario) {
+            .accepted => {
+                try capture.endImage(.jpeg);
+                const loan = try capture.seal();
+                var cursor = loan.cursor();
+                const part = (try cursor.next()).?;
+                try std.testing.expectEqual(@as(u64, jpeg.len), part.range.length);
+                try std.testing.expectEqual(media.Format.jpeg, part.kind.image.media.format);
+                try std.testing.expectEqualSlices(u8, &content_string.digest(jpeg), &part.range.digest);
+                try std.testing.expect((try cursor.next()) == null);
+            },
+            .wrong_mime => try std.testing.expectError(error.ImageMimeMismatch, capture.endImage(.png)),
+            .truncated => try std.testing.expectError(error.TruncatedImage, capture.endImage(.jpeg)),
+            .missing_mime => try std.testing.expectError(error.InvalidInputPart, capture.end()),
+        }
+        if (scenario != .accepted) try std.testing.expectEqual(.failed, capture.state);
+    }
+    for ([_]usize{ jpeg.len - 1, jpeg.len }) |limit| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var used: std.atomic.Value(u64) = .init(0);
+        var capture: InputCapture = undefined;
+        try testCapture(&capture, tmp.dir, .{ .used = &used, .limit = 100000 });
+        defer capture.close();
+        capture.limits.max_bytes = limit;
+        try capture.beginUnknownImage();
+        var at: usize = 0;
+        while (at < limit) {
+            var allowance: usize = @min(window_bytes, limit - at);
+            at += try capture.append(jpeg[at..limit], &allowance, false);
+        }
+        if (limit < jpeg.len) {
+            var allowance: usize = 1;
+            try std.testing.expectError(error.ImageResourceLimit, capture.append(jpeg[limit..], &allowance, false));
+        } else {
+            try capture.endImage(.jpeg);
+            _ = try capture.seal();
+        }
+    }
 }

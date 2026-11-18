@@ -6,6 +6,8 @@
 
 | id | level | invariant | seam that observes it | owner test | source |
 | --- | --- | --- | --- | --- | --- |
+| CLI-18 | Product | Native Message input refuses ambiguous or empty compositions and preserves scalar stdin bytes and implicit stdin order. | CLI and fake provider | `cli_image_integration.py:cli_rules` | docs/contracts/cli.md |
+| CLI-17 | Surface | Message operand flags retain their order and unknown or incomplete flags are refused. | CLI grammar parser | `CLI-17 preserve interleaving for start and send` | docs/contracts/cli.md |
 | CLI-1 | Surface | Help succeeds without Host, credentials, terminal or state changes for every documented command scope. | CLI parse/help output | `help_is_independent`: table root, resource and operation help with absent prerequisites; check output, status and untouched temporary state. | docs/contracts/cli.md:97 |
 | CLI-2 | Surface | Invalid invocation is refused before capture or transmission with a useful field-specific repair. | CLI parser and diagnostic | `CLI-2 invalid_input_is_local`: table duplicate, conflicting, unknown and missing operands, stdin conflicts, model syntax and part selectors; check refusal and repair before dispatch. | docs/contracts/cli.md:41, 76, 97 |
 | CLI-3 | Surface | Message and instruction stdin retains exact bytes and empty input has its documented meaning. | CLI parse/capture API | `stdin_content_is_exact`: table UTF-8, NUL, trailing newlines and empty Message/instructions; compare captured bytes or refusal. | docs/contracts/cli.md:76 |
