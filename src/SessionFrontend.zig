@@ -4635,10 +4635,20 @@ test "chat info opens from the chat line above the input at 140 and 46 columns a
 }
 
 test "chat footer background click and Alt-I share natural panel opening and Escape restores the feed" {
-    for ([_]u16{ 46, 140 }) |width| {
+    const picker = @import("model_picker.zig");
+    const entries = comptime blk: {
+        var result: [10]picker.Entry = undefined;
+        for (&result, 0..) |*entry, index| entry.* = .{
+            .id = if (index < 2) std.fmt.comptimePrint("luna-{d}", .{index}) else std.fmt.comptimePrint("model-{d}", .{index}),
+            .known = false, .catalogued = false, .providers = .initOne(.codex),
+        };
+        break :blk result;
+    };
+    const menu: picker.Menu = .{ .entries = &entries };
+    for ([_]vxfw.Size{ .{ .width = 140, .height = 40 }, .{ .width = 46, .height = 30 }, .{ .width = 46, .height = 18 } }) |size| {
         const held = try HeldFrontend.create();
         defer held.destroy();
-        held.size = .{ .width = width, .height = 40 };
+        held.size = .{ .width = size.width, .height = size.height };
         try seedFeed(held.screen, "earlier feed line\nlatest feed line\n");
         try captureInfo(held, "Fix retry deadline");
         try held.keys("kept draft\x1b[D");
@@ -4656,11 +4666,11 @@ test "chat footer background click and Alt-I share natural panel opening and Esc
         const base = clicked.children[0].surface;
         const panel = try held.drawnPanel(base);
         const draft = (try held.drawnInput(base));
-        try std.testing.expect(panel.origin.row > 0);
+        if (size.height >= 30) try std.testing.expect(panel.origin.row > 0);
         try std.testing.expectEqual(base.children[0].surface.size.height, draft.origin.row);
         try std.testing.expectEqual(draft.origin.row + 1, panel.origin.row);
         try std.testing.expectEqual(draft.origin.row + draft.surface.children[1].origin.row - 2, panel.origin.row + panel.surface.size.height);
-        try std.testing.expect((try rowWith(held, "latest feed line")) != null);
+        if (size.height >= 30) try std.testing.expect((try rowWith(held, "latest feed line")) != null);
         const footer_row: i16 = @intCast(draft.origin.row + draft.surface.children[1].origin.row);
         for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| try @import("testing/app_events.zig").mouse(&ctx, clicked, .{ .row = footer_row, .col = col, .button = .left, .mods = .{}, .type = kind });
         try std.testing.expect(held.self.info_open and !held.self.app_info.hasChoice());
@@ -4673,6 +4683,29 @@ test "chat footer background click and Alt-I share natural panel opening and Esc
         const keyed_panel = try held.drawnPanel(keyed.children[0].surface);
         try std.testing.expectEqual(panel.origin, keyed_panel.origin);
         try std.testing.expectEqual(panel.surface.size, keyed_panel.surface.size);
+        held.self.app_info.panel.selected = 4;
+        held.self.app_info.model_choice.open(&menu, .codex, "model-2");
+        const expanded_frame = try held.draw();
+        const expanded_input = try held.drawnInput(expanded_frame.children[0].surface);
+        const expanded_panel = try held.drawnPanel(expanded_frame.children[0].surface);
+        try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "kept draft") != null);
+        if (size.height >= 30) {
+            try std.testing.expectEqual(panel.origin.row - 8, expanded_panel.origin.row);
+            try std.testing.expectEqual(draft.origin.row + draft.surface.children[1].origin.row, expanded_input.origin.row + expanded_input.surface.children[1].origin.row);
+            try std.testing.expect((try rowWith(held, "latest feed line")) != null);
+            try held.keys("luna");
+            const filtered_frame = try held.draw();
+            const filtered_input = try held.drawnInput(filtered_frame.children[0].surface);
+            const filtered_panel = try held.drawnPanel(filtered_frame.children[0].surface);
+            try std.testing.expectEqual(panel.origin.row - 2, filtered_panel.origin.row);
+            try std.testing.expectEqual(@as(usize, 2), held.self.app_info.model_choice.hits.len);
+            try std.testing.expectEqual(draft.origin.row + draft.surface.children[1].origin.row, filtered_input.origin.row + filtered_input.surface.children[1].origin.row);
+        }
+        try held.keys("\x1b");
+        const restored = try held.draw();
+        const restored_panel = try held.drawnPanel(restored.children[0].surface);
+        try std.testing.expectEqual(panel.origin, restored_panel.origin);
+        try std.testing.expectEqual(panel.surface.size, restored_panel.surface.size);
         try held.keys("\x1b");
         try std.testing.expect(!held.self.info_open and held.left == null);
         try std.testing.expectEqualStrings("kept draft", held.self.input.composition().bytes);
