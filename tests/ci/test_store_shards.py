@@ -327,7 +327,7 @@ class LauncherTest(unittest.TestCase):
     def test_timeout_kills_and_reaps_active_process(self):
         pid_file = self.directory / "pid"
         self.script(f"import os, signal\nfrom pathlib import Path\nPath({str(pid_file)!r}).write_text(str(os.getpid()))\nprint('1/1 store.test.stalled...', end='', flush=True)\nsignal.pause()\n")
-        result = shards.execute(self.binary, [], os.environ, .2, "stalled")
+        result = shards.execute(self.binary, [], os.environ, 2, "stalled")
         self.assertEqual(result.status, 124)
         self.assertIn("deadline exceeded", result.diagnostic)
         with self.assertRaises(ProcessLookupError):
