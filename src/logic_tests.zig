@@ -178,6 +178,7 @@ const cores = .{
 };
 
 test {
+    _ = @import("credential_location.zig");
     _ = @import("testing/host_settings.zig");
     _ = @import("AnswerRenderer.zig");
     _ = @import("core_boundary.zig");

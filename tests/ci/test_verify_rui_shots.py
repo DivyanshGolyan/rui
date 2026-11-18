@@ -89,6 +89,7 @@ class ShotsTest(unittest.TestCase):
             def frames(child):
                 captured['only'] = child.only
                 captured['timing'] = child.timing
+                captured['shots_fixture'] = child.shots_fixture
                 captured['recipe'] = json.loads(Path(child.scenario).read_text())
                 Path(child.out, 'frames.json').write_text(json.dumps([{
                     'name': selected_name, 'size': '80x24', 'ok': False, 'reason': 'failed',
@@ -102,6 +103,7 @@ class ShotsTest(unittest.TestCase):
             self.assertEqual(error.exception.code, 1)
             self.assertEqual(captured['only'], selected_name)
             self.assertTrue(captured['timing'])
+            self.assertTrue(captured['shots_fixture'])
             self.assertIn('tree123:.claude/skills/verify-rui/scripts/frames.json', git.call_args.args[0])
             self.assertTrue(all(not s['record'] for s in captured['recipe']['states']))
             self.assertEqual(json.loads((out / 'shots.json').read_text())[0]['fingerprint'], 'abc')
@@ -332,6 +334,8 @@ class ShotsTest(unittest.TestCase):
                 class Terminal:
                     def __init__(self, *_args):
                         self.frame = types.SimpleNamespace(columns=80, lines=24)
+                    def settle_shot(self, **_kwargs):
+                        return self.frame
                     def close(self):
                         pass
                 def capture(_run, _terminal, out, state, size, reason):
@@ -357,7 +361,8 @@ class ShotsTest(unittest.TestCase):
                     'cmd_cleanup': cleanup, 'load_build': lambda _: {'source': '/repo', 'tree': 'tree',
                                                                       'screen_library': '/test'},
                     'require_screen': lambda _: None, 'FrameTerminal': Terminal, 'frame_upgrade_run': upgrade,
-                    'seed_cast': lambda *_: None, 'frame_initial_ready': lambda *_a, **_k: None,
+                    'seed_cast': lambda *_a, **_k: None, 'shots_fixture_env': lambda _path: {},
+                    'frame_initial_ready': lambda *_a, **_k: None,
                     'frame_drive_upgrade': lambda *_: None, 'frame_steps': lambda *_a, **_k: False,
                     'frame_upgrade_viewport': lambda *_: None, 'frame_ready': lambda *_a, **_k: None,
                     'frame_capture': capture, 'frame_upgrade_journey': lambda *_: None,
@@ -392,6 +397,64 @@ class ShotsTest(unittest.TestCase):
                         self.module['cmd_shots_merge'](args)
                     self.assertEqual(error.exception.code, 2)
                     self.assertFalse(Path(args.out).exists())
+
+    def test_shots_capture_the_frame_selected_under_the_settle_lock(self):
+        frames = self.module['run_frames']
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            scenario = {'sizes': ['140x40', '46x30'], 'states': [
+                {'name': 'screen', 'open': 'overview', 'first_frame': True, 'steps': []}]}
+            recipe = root / 'recipe.json'
+            recipe.write_text(json.dumps(scenario))
+            run = types.SimpleNamespace(root=root, home=root / 'home', evidence=root / 'evidence',
+                                        meta={'sha': 'abc', 'sessions': {}})
+            captured = []
+            calls = []
+            class Terminal:
+                def __init__(self, *_args):
+                    self.frame = types.SimpleNamespace(columns=140, lines=40, marker='startup')
+                    self.settles = 0
+                def settle_shot(self, **_kwargs):
+                    self.settles += 1
+                    calls.append(('settle', self.settles))
+                    selected = self.frame
+                    if self.settles > 1:
+                        # Model a new commit immediately after the lock is released.
+                        self.frame = types.SimpleNamespace(columns=selected.columns, lines=selected.lines,
+                                                           marker='later commit')
+                    return selected
+                def resize(self, size):
+                    self.frame = types.SimpleNamespace(columns=size[0], lines=size[1], marker='settled narrow')
+                def close(self):
+                    pass
+            def steps(_run, target, _steps, **_kwargs):
+                calls.append(('steps',))
+                target.frame = types.SimpleNamespace(columns=140, lines=40, marker='settled wide')
+                return False
+            def capture(_run, target, _out, state, size, reason):
+                captured.append(target.frame.marker)
+                return {'name': state['name'], 'size': f'{size[0]}x{size[1]}', 'files': {},
+                        'status': 'ok', 'ok': True, 'reason': reason, 'note': '', 'sha': 'abc'}
+            @contextlib.contextmanager
+            def upgrade(current, state, _build):
+                yield current, state, None
+            replacements = {'Run': lambda _: run, 'cmd_new': lambda _: print(root),
+                'cmd_cleanup': lambda _: None, 'load_build': lambda _: {'screen_library': '/test'},
+                'require_screen': lambda _: None, 'shots_fixture_env': lambda _: {},
+                'FrameTerminal': Terminal, 'frame_upgrade_run': upgrade,
+                'seed_cast': lambda *_a, **_k: None, 'frame_initial_ready': lambda *_a, **_k: None,
+                'frame_drive_upgrade': lambda *_: None, 'frame_steps': steps,
+                'frame_upgrade_viewport': lambda *_: None, 'frame_ready': lambda *_a, **_k: None,
+                'frame_capture': capture, 'frame_upgrade_journey': lambda *_: None,
+                'frame_host_suspension': lambda *_: None, 'frame_finish_held_upgrade': lambda *_: None,
+                'frames_index': lambda *_: None}
+            args = argparse.Namespace(sha='abc', scenario=str(recipe), sizes=None, only=None,
+                out=str(root / 'out'), no_png=True, keep=False, record=False, shots_fixture=True)
+            with patch.dict(frames.__globals__, replacements), patch.dict('os.environ'), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                frames(args)
+            self.assertEqual(captured, ['settled wide', 'settled narrow'])
+            self.assertEqual(calls, [('settle', 1), ('steps',), ('settle', 2), ('settle', 3)])
 
     def test_resize_failure_saves_last_committed_frame_and_timing(self):
         run_frames = self.module['run_frames']
@@ -433,7 +496,7 @@ class ShotsTest(unittest.TestCase):
                 replacements = {'Run': lambda _: run, 'cmd_new': lambda _: print(root),
                     'cmd_cleanup': lambda _: None, 'load_build': lambda _: {'screen_library': '/test'},
                     'require_screen': lambda _: None, 'FrameTerminal': Terminal,
-                    'frame_upgrade_run': upgrade, 'seed_cast': lambda *_: None,
+                    'frame_upgrade_run': upgrade, 'seed_cast': lambda *_a, **_k: None,
                     'frame_initial_ready': lambda *_a, **_k: None,
                     'frame_drive_upgrade': lambda *_: None, 'frame_steps': lambda *_a, **_k: False,
                     'frame_upgrade_viewport': lambda *_: None, 'frame_ready': lambda *_a, **_k: None,

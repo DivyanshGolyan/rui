@@ -10,6 +10,7 @@ Git history keeps earlier test specifications and dated results.
 
 ## Canonical gates
 
+- For what a test must be, invariant catalogs, and moving tests onto those rules, read [Test requirements](docs/verification/testing.md).
 - For test selection, fixture rules, composed gates, or caches, read [Canonical verification gates](docs/verification/gates.md).
 - For candidate admission, landing cadence, promotion, or release publication, read [Landing and release evidence](docs/verification/release.md).
 - For native platforms, resource campaigns, or release demonstrations, read [Native qualification and demonstrations](docs/verification/qualification.md).
