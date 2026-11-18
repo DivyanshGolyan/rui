@@ -5571,16 +5571,45 @@ test "raw image preparation streams canonical PNG into user and tool arrays" {
         "{\"type\":\"function_call_output\",\"call_id\":\"shot\\\"\",\"output\":[" ++ image_test_part ++
         ",{\"type\":\"input_text\",\"text\":\"observed\"}]}," ++
         "{\"type\":\"function_call_output\",\"call_id\":\"text-only\",\"output\":\"still a string\"}]";
+    const quoted_workspace = try std.json.Stringify.valueAlloc(std.testing.allocator, setup.workspace, .{});
+    defer std.testing.allocator.free(quoted_workspace);
+    const context = try std.fmt.allocPrint(std.testing.allocator, "{s}{s}{s}{s}{s}{s}", .{
+        context_parts[0], quoted_workspace[1 .. quoted_workspace.len - 1], context_parts[1],
+        session.slice(),  context_parts[2],                                context_parts[3],
+    });
+    defer std.testing.allocator.free(context);
+    const encoded_context = try std.json.Stringify.valueAlloc(std.testing.allocator, context, .{});
+    defer std.testing.allocator.free(encoded_context);
     for ([_]protocol.Codec{ .@"openai-responses/1", .@"openai-responses/2", .@"openai-responses/3" }) |codec| {
+        const top = "{\"model\":\"model-a\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"]";
+        const prefix = if (codec == .@"openai-responses/1")
+            try std.fmt.allocPrint(std.testing.allocator, "{s},\"instructions\":{s},\"input\":[", .{ top, encoded_context })
+        else
+            try std.fmt.allocPrint(std.testing.allocator, "{s},\"input\":[{{\"role\":\"developer\",\"content\":[{{\"type\":\"input_text\",\"text\":{s}}}]}},", .{ top, encoded_context });
+        defer std.testing.allocator.free(prefix);
+        const full_expected = try std.mem.concat(std.testing.allocator, u8, &.{ prefix, expected[1..] });
+        defer std.testing.allocator.free(full_expected);
         for ([_]usize{ 1, 2, 3, 5, 17, preparation_byte_allowance }) |allowance| {
             var used: std.atomic.Value(u64) = .init(0);
             var preparation: Preparation = undefined;
-            const content = try openRawImagePreparationWithDigestRecheck(&setup, binding, &preparation, &used, expected.len);
+            const content = try openRawImagePreparationWithDigestRecheck(&setup, binding, &preparation, &used, full_expected.len);
             defer if (preparation.state.active) preparation.cancel();
             preparation.settings.codec = codec;
-            preparation.carry = codecs.initialCarry(codec, null);
+            preparation.carry = codecs.initialCarry(codec, effortOf(preparation.settings.starting_effort));
             preparation.encoder = codecs.resumeFrom(preparation.carry);
-            try preparation.writer.write("[");
+            _ = preparation.loadSettingsItem();
+            try preparation.encodeItem();
+            try drainRawImageItem(&preparation, &setup.storage, preparation_byte_allowance);
+            preparation.state.stage = .instructions;
+            var bytes_left: usize = preparation_byte_allowance;
+            var items_left: usize = preparation_item_allowance;
+            for (0..2) |_| {
+                try std.testing.expect((try preparation.nextItem(&bytes_left, &items_left)) == .item);
+                try preparation.encodeItem();
+                try drainRawImageItem(&preparation, &setup.storage, preparation_byte_allowance);
+            }
+            try std.testing.expect(preparation.state.stage == .history_span);
+            try std.testing.expectEqual(prefix.len, preparation.writer.offset);
             const Item = struct { item: codec_abi.Item, handles: []const Handle = &.{} };
             for ([_]Item{
                 .{ .item = .{ .image_message_open = .user } },
@@ -5603,10 +5632,11 @@ test "raw image preparation streams canonical PNG into user and tool arrays" {
             preparation.state.stage = .end;
             const request = try drainLivePreparation(&preparation, &setup.storage, allowance, 1, 64);
             defer request.deinit(std.testing.io, preparation.writer.budget);
-            var bytes: [expected.len]u8 = undefined;
-            try std.testing.expectEqual(bytes.len, try request.file.readPositionalAll(std.testing.io, &bytes, 0));
-            try std.testing.expectEqualStrings(expected, &bytes);
-            try std.testing.expectEqual(@as(u64, expected.len), used.load(.monotonic));
+            const bytes = try std.testing.allocator.alloc(u8, full_expected.len);
+            defer std.testing.allocator.free(bytes);
+            try std.testing.expectEqual(bytes.len, try request.file.readPositionalAll(std.testing.io, bytes, 0));
+            try std.testing.expectEqualStrings(full_expected, bytes);
+            try std.testing.expectEqual(@as(u64, full_expected.len), used.load(.monotonic));
         }
     }
 }
@@ -5785,9 +5815,9 @@ test "a prepared request's bytes stay as pinned over pages, tool results and pag
     const Scenario = enum { pages, tool_results, bounds };
     const Pinned = struct {
         const digests = std.EnumArray(Scenario, *const [64]u8).init(.{
-            .pages = "f8ee1d1f3cc1713b73030cc47695cefd58a1d6c142b8c4dbd4bf06bcd09a630d",
-            .tool_results = "947f4e1b9af86a718b1a479de7b0164ac10d96df90d6169ebd0dc01bb6eee1d0",
-            .bounds = "e5f899f1ae9d8f293479af1cb79f68fb6f63acefaa7a58fcd3cc7dcdd0d753bf",
+            .pages = "e35c834b4c7c13652e2dc78cd22c71583ce9ef19266f5099869b7ffac741abc0",
+            .tool_results = "f84b0ff9e9b9798f67365d166add1f04fa9e2ee922eff7d74a4aa91c3aecdc95",
+            .bounds = "6c57cac5d8d2e211d9074f7794153d0f0f684acfaf61ebaef61ecfdfdd4b8d16",
         });
     };
     const testing = store.testing;
