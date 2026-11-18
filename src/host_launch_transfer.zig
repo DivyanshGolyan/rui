@@ -109,7 +109,7 @@ test "frozen launch input consumes EOF and closes valid malformed and truncated 
     settings.* = .{};
     defer settings.deinit();
     var failure: @import("start_report.zig").Failure = undefined;
-    var owned = try settings_handoff.freeze(gpa, "/frozen-input", settings, .automatic, &failure);
+    var owned = try settings_handoff.freeze(gpa, "/frozen-input", settings, .automatic, .none, &failure);
     defer owned.deinit(gpa);
     for ([_][]const u8{ owned.bytes, owned.bytes[0 .. owned.bytes.len - 1], "not a frame" }, 0..) |bytes, i| {
         var pipe = try Pipe.init();

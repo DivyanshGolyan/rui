@@ -1646,7 +1646,7 @@ pub fn freezeStart(init: std.process.Init, request: Spawn, settings: *hs.Setting
     const intent = try readStart(init, request, settings, failure);
     var canonical: [protocol.max_store_bytes]u8 = undefined;
     const directory = try platform.canonicalStoreDestination(init.io, request.dir, &canonical);
-    return settings_handoff.freeze(init.gpa, directory, settings, intent, failure);
+    return settings_handoff.freeze(init.gpa, directory, settings, intent, .none, failure);
 }
 
 pub fn decodeStart(init: std.process.Init, bytes: []const u8, selected: []const u8, settings: *hs.Settings, failure: *start_report.Failure) !ProviderIntent {
@@ -1655,7 +1655,7 @@ pub fn decodeStart(init: std.process.Init, bytes: []const u8, selected: []const 
     const intent = try settings_handoff.decode(bytes, directory, settings, init.gpa, checkPreset, failure);
     try detachedValue(settings, failure);
     try anchorPlacement(init, settings, directory, failure);
-    return intent;
+    return intent.intent;
 }
 
 pub fn intakeFrozen(init: std.process.Init, bytes: []const u8, selected: []const u8, settings: *hs.Settings, failure: *start_report.Failure) !void {

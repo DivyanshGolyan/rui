@@ -11,6 +11,7 @@ const http = @import("http1/request.zig");
 const endpoint_value = @import("endpoint_value.zig");
 const mysql_value = @import("mysql_url_value.zig");
 const MysqlValue = mysql_value.ValueWith(max_path_bytes);
+pub const MysqlDestination = mysql_value.Destination(max_path_bytes);
 
 pub const max_document_bytes = 1024 * 1024;
 pub const max_base_url_bytes = endpoint_value.max_endpoint_bytes;
