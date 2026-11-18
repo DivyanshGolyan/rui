@@ -204,6 +204,8 @@ def prove_case(root, name):
             home.mkdir()
             with terminal_process([str(fixture.RUI), "session", "resume", "--store", str(store), "--", session],
                                   env={**os.environ, "HOME": str(home)}) as (entered, master):
+                human.read_terminal(master, "continued", composer=True)
+                os.write(master, b"\x0f")
                 screen = human.read_terminal(master, "[image 1: PNG 1x1, 0.1 KB]", composer=True)
                 assert "continued" in screen, screen
                 human.terminal_step(master, "\x03", "Your chats keep working while you are away.")
