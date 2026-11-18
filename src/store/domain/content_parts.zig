@@ -272,12 +272,31 @@ pub const Cursor = struct {
         bytes: u64 = 0,
         text_bytes: u64 = 0,
         unknown_images: u64 = 0,
+        rule: ?@import("../../model_catalog.zig").ImageCostRule = null,
+        astra_tokens: u64 = 0,
+        astra_unknown: u64 = 0,
+        astra_impossible: u64 = 0,
+        gpt41_unknown: u64 = 0,
+        gpt41_tokens: u64 = 0,
 
         pub fn take(self: *Weight, part: Part) void {
             self.bytes +|= part.reference.length;
             switch (part.kind) {
                 .text => self.text_bytes +|= part.reference.length,
-                .image => self.unknown_images +|= 1,
+                .image => |image| {
+                    self.unknown_images +|= 1;
+                    if (self.rule) |rule| switch (rule) {
+                        .astra_auto => switch (@import("../../input_media.zig").astraAuto(image.media.width, image.media.height)) {
+                            .tokens => |tokens| self.astra_tokens +|= tokens,
+                            .impossible => self.astra_impossible +|= 1,
+                            .unknown => self.astra_unknown +|= 1,
+                        },
+                        .gpt41_auto => switch (@import("../../input_media.zig").gpt41Auto(image.media.width, image.media.height)) {
+                            .tokens => |tokens| self.gpt41_tokens +|= tokens,
+                            .impossible, .unknown => self.gpt41_unknown +|= 1,
+                        },
+                    };
+                },
             }
         }
     };
