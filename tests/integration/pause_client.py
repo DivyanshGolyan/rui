@@ -9,6 +9,7 @@ import queue
 import socket
 import struct
 import threading
+import time
 
 
 class PauseError(RuntimeError):
@@ -27,6 +28,7 @@ class PauseClient:
         self.sock = sock
         self.timeout = timeout
         self.lock = threading.Lock()
+        self.send_lock = threading.Lock()
         self.pending = {}
         self.next_seq = 1
         self.failure = None
@@ -84,6 +86,7 @@ class PauseClient:
                 self.pending.clear()
 
     def _call(self, op, **kwargs):
+        deadline = time.monotonic() + self.timeout
         event, result = threading.Event(), []
         with self.lock:
             if self.failure is not None:
@@ -93,15 +96,30 @@ class PauseClient:
             seq = self.next_seq
             self.next_seq += 1
             self.pending[seq] = (event, result)
+        frame = json.dumps(dict(seq=seq, op=op, **kwargs)).encode() + b"\n"
+        sent, send_error = threading.Event(), []
+
+        def send():
             try:
-                self.sock.sendall(json.dumps(dict(seq=seq, op=op, **kwargs)).encode() + b"\n")
+                with self.send_lock:
+                    self.sock.sendall(frame)
             except OSError as exc:
-                self.pending.pop(seq, None)
-                self.transport_failure = exc
-                raise PauseError("pause socket closed") from exc
-        if not event.wait(self.timeout):
+                send_error.append(exc)
+            finally:
+                sent.set()
+
+        threading.Thread(target=send, daemon=True).start()
+        if not sent.wait(max(0.0, deadline - time.monotonic())):
+            self._abandon(seq)
+            self._break_transport(TimeoutError(f"pause {op} send timed out"))
+            raise TimeoutError(f"pause {op} timed out")
+        if send_error:
+            self._abandon(seq)
+            self._break_transport(send_error[0])
+            raise PauseError("pause socket closed") from send_error[0]
+        if not event.wait(max(0.0, deadline - time.monotonic())):
+            self._abandon(seq)
             with self.lock:
-                self.pending.pop(seq, None)
                 failure = self.transport_failure
             if failure is not None:
                 raise PauseError("pause socket closed while child remains alive") from failure
@@ -114,6 +132,19 @@ class PauseClient:
         if response.get("err"):
             raise PauseError(response["err"])
         return response.get("arrival")
+
+    def _abandon(self, seq):
+        with self.lock:
+            self.pending.pop(seq, None)
+
+    def _break_transport(self, exc):
+        with self.lock:
+            if self.transport_failure is None:
+                self.transport_failure = exc
+        try:
+            self.sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
 
     def wait_child_exit(self, timeout=None):
         try:

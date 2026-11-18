@@ -1874,7 +1874,7 @@ fn stopSupersededBash(
     };
 }
 
-fn completeBash(host: *Host, slot: *ExecutionSlot) void {
+noinline fn completeBash(host: *Host, slot: *ExecutionSlot) void {
     const active = &slot.bash;
     const binding = active.binding;
     const profile = tool_record.Runner.bash.resultProfile(true);
@@ -1883,18 +1883,9 @@ fn completeBash(host: *Host, slot: *ExecutionSlot) void {
         return;
     };
     defer result.destroy();
-    const code = active.execution.writeResult(bashScratch(host), host.retention, result) catch |err| {
-        _ = failBash(host, slot, "Bash outcome materialization", err);
-        return;
-    };
-    const value = switch (result.finish()) {
-        .value => |value| value,
-        .failed => |failure| {
-            _ = tool_settle.fence(host, "Bash result finalization", failure.failure);
-            closeBashDelivery(host, slot);
-            return;
-        },
-    };
+    const materialized = materializeBashResult(host, slot, result) orelse return;
+    const code = materialized.code;
+    const value = materialized.value;
     pause(host, .{ .action_result = binding });
     // This blocking pause holds the shared execution loop until release.
     if (comptime test_pause.enabled) reachAction(host, .action_result_ready, binding);
@@ -1905,6 +1896,27 @@ fn completeBash(host: *Host, slot: *ExecutionSlot) void {
         .lost, .fenced => {},
     }
     closeBashDelivery(host, slot);
+}
+
+const MaterializedBashResult = struct {
+    code: store_module.ActionResolutionCode,
+    value: @import("tool_result.zig").Value,
+};
+
+/// Keeps output materialization's frame off the stack while the result settles.
+noinline fn materializeBashResult(host: *Host, slot: *ExecutionSlot, result: *@import("tool_result.zig").Result) ?MaterializedBashResult {
+    const code = slot.bash.execution.writeResult(bashScratch(host), host.retention, result) catch |err| {
+        _ = failBash(host, slot, "Bash outcome materialization", err);
+        return null;
+    };
+    return switch (result.finish()) {
+        .value => |value| .{ .code = code, .value = value },
+        .failed => |failure| {
+            _ = tool_settle.fence(host, "Bash result finalization", failure.failure);
+            closeBashDelivery(host, slot);
+            return null;
+        },
+    };
 }
 
 fn failBash(host: *Host, slot: *ExecutionSlot, phase: []const u8, err: anyerror) bool {
