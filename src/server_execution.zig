@@ -1,5 +1,8 @@
 const std = @import("std");
 const server_mcp = @import("server_mcp.zig");
+const tool_settle = @import("tool_settle.zig");
+const tool_record = @import("tool_record.zig");
+const server_read_image = @import("server_read_image.zig");
 const bash = @import("bash.zig");
 const codecs = @import("codecs.zig");
 const execution = @import("execution.zig");
@@ -381,7 +384,6 @@ const Workspace = struct {
     bash_input: store_module.ActionExecutionInput,
     bash_preparation: bash.Preparation,
     bash_prepared: bash.Prepared,
-    bash_outcome: bash.Outcome,
     event_data: output_decode.EventData,
     interpret: output_decode.Interpret,
     failure_after: usize,
@@ -390,29 +392,62 @@ const Workspace = struct {
     decode: output_decode.Decode,
     settlement: store_module.ValidatedOutput,
     listings: std.EnumArray(provider.ListingKind, ListingWork),
+    image_calls: server_read_image.Calls,
+    turn_state: execution_turn.State,
 };
 
-// Keep admission state within the existing mapped execution workspace pages.
-// Derive its previous shape rather than maintaining a second field inventory.
-const WorkspaceBeforeAdmission = blk: {
+// Shape of the removed in-workspace Bash outcome, used only to preserve and
+// check the original workspace allocation ceiling.
+const OriginalBashOutcome = struct {
+    code: store_module.ActionResolutionCode,
+    content: [bash.excerpt_bytes + 4096]u8,
+    content_len: usize,
+    tail: [bash.excerpt_bytes + 14]u8,
+};
+
+const WorkspaceBeforeBashResult = blk: {
     const fields = std.meta.fieldNames(Workspace);
-    var names: [fields.len - 1][:0]const u8 = undefined;
+    var names: [fields.len + 1][:0]const u8 = undefined;
+    var types: [names.len]type = undefined;
+    for (fields, 0..) |name, i| {
+        names[i] = name;
+        types[i] = @FieldType(Workspace, name);
+    }
+    names[fields.len] = "original_bash_outcome";
+    types[fields.len] = OriginalBashOutcome;
+    break :blk @Struct(.auto, null, &names, &types, &@splat(.{}));
+};
+
+// Keep admission and dispatch state within the original mapped workspace pages.
+// Exclude every added owner so its state cannot silently raise the baseline.
+const WorkspaceBeforeAdmissionAndDispatch = blk: {
+    const fields = std.meta.fieldNames(Workspace);
+    var names: [fields.len - 2][:0]const u8 = undefined;
     var types: [names.len]type = undefined;
     var next: usize = 0;
     for (fields) |name| {
-        if (std.mem.eql(u8, name, "model_admission")) continue;
+        if (std.mem.eql(u8, name, "model_admission") or
+            std.mem.eql(u8, name, "image_calls") or
+            std.mem.eql(u8, name, "turn_state")) continue;
         names[next] = name;
         types[next] = @FieldType(Workspace, name);
         next += 1;
     }
+    // The original baseline included Bash's in-workspace outcome. Its
+    // replacement is heap-owned; keep the original page ceiling while the
+    // actual workspace becomes smaller.
+    names[next] = "original_bash_outcome";
+    types[next] = OriginalBashOutcome;
     break :blk @Struct(.auto, null, &names, &types, &@splat(.{}));
 };
 
 comptime {
     const page = std.heap.page_size_min;
-    if (std.mem.alignForward(usize, @sizeOf(Workspace), page) > std.mem.alignForward(usize, @sizeOf(WorkspaceBeforeAdmission), page))
-        @compileError(std.fmt.comptimePrint("model admission preflight must fit existing workspace pages: {d} -> {d} bytes (state {d})", .{
-            @sizeOf(WorkspaceBeforeAdmission), @sizeOf(Workspace), @sizeOf(store_module.ModelAdmissionPreparation),
+    if (@sizeOf(Workspace) >= @sizeOf(WorkspaceBeforeBashResult))
+        @compileError("Bash result migration must reduce workspace allocation");
+    if (std.mem.alignForward(usize, @sizeOf(Workspace), page) > std.mem.alignForward(usize, @sizeOf(WorkspaceBeforeAdmissionAndDispatch), page))
+        @compileError(std.fmt.comptimePrint("admission and dispatch state must fit existing workspace pages: {d} -> {d} bytes", .{
+            @sizeOf(WorkspaceBeforeAdmissionAndDispatch), @sizeOf(Workspace),
         }));
 }
 
@@ -568,10 +603,12 @@ pub fn executionMain(host: *Host) void {
     if (reactor != null) host.scratch_budget = budget;
     defer host.scratch_budget = null;
     var mcp_calls: server_mcp.Calls = .{};
+    workspace.image_calls = .{};
+    defer workspace.image_calls.shutdown(host);
     defer shutdownExecution(host, slots, workspace);
     defer mcp_calls.shutdown(host);
 
-    var turn_state = execution_turn.State{ .capacity_was_full = slots.len == 0 };
+    workspace.turn_state = .{ .capacity_was_full = slots.len == 0 };
     var measurement: LifecycleMeasurement = .{};
     var heap_release: HeapRelease = .{};
     while (!host.executionEnding()) {
@@ -582,10 +619,11 @@ pub fn executionMain(host: *Host) void {
             .workspace = workspace,
             .measurement = &measurement,
             .mcp = &mcp_calls,
+            .images = &workspace.image_calls,
             .fenced = false,
         };
         host.dispatch_wake.reset();
-        switch (execution_turn.run(&turn_state, &native)) {
+        switch (execution_turn.run(&workspace.turn_state, &native)) {
             .continue_immediately => heap_release.worked = true,
             .wait => |kind| {
                 if (heap_release.due(slots, if (reactor) |active| active.listingPending() else false)) process.releaseFreeHeap();
@@ -625,6 +663,7 @@ const NativeTurn = struct {
     workspace: *Workspace,
     measurement: *LifecycleMeasurement,
     mcp: *server_mcp.Calls,
+    images: ?*server_read_image.Calls = null,
     fenced: bool,
     scheduled_retry: execution_turn.ScheduledRetry = .unknown,
 
@@ -715,7 +754,8 @@ const NativeTurn = struct {
             }
         }
         const mcp_progress = self.mcp.service(self.host);
-        return advanceBash(self.host, self.slots, self.workspace) or mcp_progress;
+        const image_progress = if (self.images) |images| images.service(self.host) else false;
+        return advanceBash(self.host, self.slots, self.workspace) or mcp_progress or image_progress;
     }
 
     pub fn advanceRetainedCleanup(self: *NativeTurn, observed: std.Io.Clock.Timestamp, retry_at: *std.Io.Clock.Timestamp) bool {
@@ -760,15 +800,15 @@ const NativeTurn = struct {
     }
 
     pub fn hasBash(self: *const NativeTurn) bool {
-        return slotsHaveBash(self.slots) or self.mcp.any();
+        return slotsHaveBash(self.slots) or self.mcp.any() or (if (self.images) |images| images.any() else false);
     }
 
     pub fn recoverUncertainAction(self: *NativeTurn) error{Fence}!bool {
-        const active_slots = ActiveSlots{ .slots = self.slots, .mcp = self.mcp };
+        const active_slots = ActiveSlots{ .slots = self.slots, .mcp = self.mcp, .images = self.images };
         const active_actions = store_module.ActiveOperationFilter{
             .context = &active_slots,
             .containsFn = activeActionContains,
-            .maximum_exclusions = self.slots.len + server_mcp.capacity,
+            .maximum_exclusions = self.host.custody.records.len,
         };
         return self.host.store.recoverOneUncertainAction(active_actions) catch |err| {
             fenceDispatch(self.host, "uncertain Action recovery", err);
@@ -802,7 +842,7 @@ const NativeTurn = struct {
     }
 
     pub fn runCoreAction(self: *NativeTurn) execution_turn.Admission {
-        return runNextCoreAction(self.host, self.mcp);
+        return runNextCoreAction(self.host, self.mcp, self.images);
     }
 
     pub noinline fn admitBash(self: *NativeTurn) execution_turn.Admission {
@@ -1259,6 +1299,7 @@ fn slotIsFree(slot: *const ExecutionSlot) bool {
 const ActiveSlots = struct {
     slots: []ExecutionSlot,
     mcp: ?*const server_mcp.Calls = null,
+    images: ?*const server_read_image.Calls = null,
 };
 
 fn activeOperationContains(context: *const anyopaque, operation_id: u64) bool {
@@ -1277,6 +1318,7 @@ fn activeOperationContains(context: *const anyopaque, operation_id: u64) bool {
 fn activeActionContains(context: *const anyopaque, action_id: u64) bool {
     const active: *const ActiveSlots = @ptrCast(@alignCast(context));
     if (active.mcp) |mcp| if (mcp.contains(action_id)) return true;
+    if (active.images) |images| if (images.contains(action_id)) return true;
     for (active.slots) |slot| switch (slot) {
         .bash_preparing => |value| if (value.binding.action_id == action_id) return true,
         .bash => |value| if (value.binding.action_id == action_id) return true,
@@ -1316,7 +1358,7 @@ fn advanceBash(host: *Host, slots: []ExecutionSlot, workspace: *Workspace) bool 
                 made_progress = failBash(host, slot, "Bash process service", err) or made_progress;
             }
             if (active.delivery == .open and service.retired) {
-                completeBash(host, slot, &workspace.bash_outcome);
+                completeBash(host, slot);
                 made_progress = true;
             }
             if (active.delivery == .closed and service.retired) {
@@ -1332,7 +1374,7 @@ fn advanceBash(host: *Host, slots: []ExecutionSlot, workspace: *Workspace) bool 
     return made_progress;
 }
 
-noinline fn runNextCoreAction(host: *Host, mcp: *server_mcp.Calls) execution_turn.Admission {
+noinline fn runNextCoreAction(host: *Host, mcp: *server_mcp.Calls, images: ?*server_read_image.Calls) execution_turn.Admission {
     const work = (host.store.nextCoreWork(host.custody.dispatchCapacity(!mcp.full())) catch |err| {
         fenceDispatch(host, "core tool selection", err);
         return .retry_later;
@@ -1340,6 +1382,7 @@ noinline fn runNextCoreAction(host: *Host, mcp: *server_mcp.Calls) execution_tur
     return switch (work) {
         .stop => |*owed| runOwedStop(host, owed),
         .mcp => |call| mcp.admit(host, call),
+        .read_image => |call| if (images) |calls| calls.admit(host, call) else .retry_later,
         .ending => |*owed| runOwedEnding(host, owed),
         .forward => |id| runSessionForward(host, id),
         .auto_deny => |decision| runMessageDecline(host, decision.action_id, decision.session.slice()),
@@ -1819,37 +1862,44 @@ fn stopSupersededBash(
     };
 }
 
-fn completeBash(host: *Host, slot: *ExecutionSlot, outcome: *bash.Outcome) void {
+fn completeBash(host: *Host, slot: *ExecutionSlot) void {
     const active = &slot.bash;
-    const token = active.token;
     const binding = active.binding;
-    const include_paths = active.execution.reserveOutput(host.retention) catch |err| {
-        _ = failBash(host, slot, "Bash output reservation", err);
+    const profile = tool_record.Runner.bash.resultProfile(true);
+    const result = @import("tool_result.zig").Result.create(host, binding.action_id, profile) catch |err| {
+        _ = failBash(host, slot, "Bash result allocation", err);
         return;
     };
-    active.execution.outcome(bashScratch(host), include_paths, outcome) catch |err| {
-        active.execution.releaseOutputReservation(host.retention);
+    defer result.destroy();
+    const code = active.execution.writeResult(bashScratch(host), host.retention, result) catch |err| {
         _ = failBash(host, slot, "Bash outcome materialization", err);
         return;
     };
+    const value = switch (result.finish()) {
+        .value => |value| value,
+        .failed => |failure| {
+            _ = tool_settle.fence(host, "Bash result finalization", failure.failure);
+            closeBashDelivery(host, slot);
+            return;
+        },
+    };
     pause(host, .{ .action_result = binding });
     testTransition(host, .action_result_ready, binding);
-    if (host.custody.claimTerminalDelivery(token)) {
-        const settlement = host.store.settleActionAttempt(binding, outcome.code, outcome.text(), host.hooks.storeFaults(.action_result)) catch |err| {
-            active.execution.releaseOutputReservation(host.retention);
-            _ = failBash(host, slot, "Bash result settlement", err);
-            return;
-        };
-        testTransition(host, .action_result_committed, binding);
-        if (settlement == .session_stop) active.execution.releaseOutputReservation(host.retention);
-    } else active.execution.releaseOutputReservation(host.retention);
+    const delivered = tool_settle.result(host, .{ .token = active.token, .binding = binding, .publication_phase = "Bash result settlement" }, profile, code, value);
+    switch (delivered) {
+        .delivered => {
+            result.keep();
+            testTransition(host, .action_result_committed, binding);
+        },
+        .session_stop => testTransition(host, .action_result_committed, binding),
+        .lost, .fenced => {},
+    }
     closeBashDelivery(host, slot);
 }
 
 fn failBash(host: *Host, slot: *ExecutionSlot, phase: []const u8, err: anyerror) bool {
-    fenceDispatch(host, phase, err);
+    _ = tool_settle.fence(host, phase, .{ .capture = err });
     if (slot.bash.delivery != .open) return false;
-    slot.bash.execution.releaseOutputReservation(host.retention);
     closeBashDelivery(host, slot);
     return true;
 }
@@ -1911,11 +1961,7 @@ fn settleActionFailure(
     code: store_module.ActionResolutionCode,
     result: []const u8,
 ) void {
-    if (!host.custody.claimTerminalDelivery(token)) return;
-    _ = host.store.settleActionAttempt(binding, code, result, host.hooks.storeFaults(.action_result)) catch |err| {
-        fenceDispatch(host, "Bash failure settlement", err);
-        return;
-    };
+    _ = tool_settle.fixed(host, .{ .token = token, .binding = binding, .publication_phase = "Bash failure settlement" }, code, result);
 }
 
 fn admitNewAttempt(
@@ -3589,9 +3635,7 @@ test "cleanup publication follows complete execution retirement" {
     };
     try test_poll.waitUntil(std.testing.io, deadline, service, bash_service.retired);
     try slot.bash.execution.checkRetired();
-    var outcome: bash.Outcome = undefined;
-    try slot.bash.execution.outcome(scratch, false, &outcome);
-    try std.testing.expectEqual(store_module.ActionResolutionCode.succeeded, outcome.code);
+    try std.testing.expectEqual(store_module.ActionResolutionCode.succeeded, slot.bash.execution.resultCode(scratch));
     try std.testing.expectEqual(@as(u64, 1), used.load(.acquire));
     boundary.token = token;
     boundary.observed = false;
@@ -4414,10 +4458,10 @@ test "provider metadata uses shared scratch reclamation without widening its lim
     var retention = output_retention.Queue.initialize(std.testing.io, root, root_budget, &entries);
     defer retention.cleanupAll();
 
-    var stdout = try tmp.dir.createFile(std.testing.io, "stdout", .{ .read = true });
-    var stderr_file = try tmp.dir.createFile(std.testing.io, "stderr", .{ .read = true });
-    try std.testing.expect(root_budget.charge(2));
-    const pair = (try retention.reservePair("stdout", 1, "stderr", 1)).?;
+    var stdout = output_retention.Spill.open(&retention, "stdout") orelse return error.TestUnexpectedResult;
+    var stderr_file = output_retention.Spill.open(&retention, "stderr") orelse return error.TestUnexpectedResult;
+    stdout.write("a");
+    stderr_file.write("b");
     var retained_metadata: ?named_scratch.Owner = null;
     var metadata = try output_format.OutputMetadataWriter.init(
         std.testing.io,
@@ -4434,9 +4478,10 @@ test "provider metadata uses shared scratch reclamation without widening its lim
     try std.testing.expectEqual(@as(u64, 2), used.load(.acquire));
     try std.testing.expectEqual(@as(usize, 2), retention.occupied());
 
-    stdout.close(std.testing.io);
-    stderr_file.close(std.testing.io);
-    try retention.publishPair(pair);
+    stdout.close();
+    stderr_file.close();
+    stdout.keep();
+    stderr_file.keep();
     try metadata.append(&.{ .tag = .usage, .start = 0, .length = 0 });
     try std.testing.expectEqual(@as(u64, 104), used.load(.acquire));
     try std.testing.expectEqual(@as(usize, 0), retention.occupied());

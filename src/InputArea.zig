@@ -7,11 +7,15 @@ const Self = @This();
 const empty: vxfw.Text = .{ .text = "" };
 const status_lines = @import("slash_commands.zig").short_result_lines;
 
+pub const Panel = union(enum) { inline_panel: vxfw.Widget, full: vxfw.Widget };
+
 composer: Composer,
 permission: ?*PermissionCard = null,
+panel: ?Panel = null,
 facts: vxfw.Widget = empty.widget(),
 status: ?vxfw.Widget = empty.widget(),
 facts_at: enum { top, bottom } = .top,
+bottom: ?*@import("draft_layout.zig").FixedBottom = null,
 
 pub fn widget(self: *Self) vxfw.Widget {
     return .{ .userdata = self, .drawFn = draw };
@@ -21,19 +25,30 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const self: *Self = @ptrCast(@alignCast(raw));
     const size = ctx.max.size();
     if (size.width == 0 or size.height == 0) return vxfw.Surface.init(ctx.cell_arena, self.widget(), .{});
-    const facts_rows: u16 = @min(1, size.height - 1);
-    const status_room: u16 = @min(status_lines, size.height -| 1 -| facts_rows);
+    const layout = @import("draft_layout.zig");
+    const status_room = layout.fixedBottom(size.height, status_lines, .chat).status_rows;
     const status = if (status_room == 0) null else if (self.status) |shown| status: {
         const drawn = try shown.draw(ctx.withConstraints(.{ .width = size.width }, .{ .width = size.width, .height = status_room }));
         break :status if (drawn.size.height == 0) null else drawn;
     } else null;
-    const footer_rows = facts_rows + if (status) |drawn| @min(drawn.size.height, status_room) else 0;
+    const bottom = layout.fixedBottom(size.height, if (status) |drawn| drawn.size.height else 0, .chat);
+    if (self.bottom) |shared| shared.* = bottom;
+    const facts_rows = bottom.footer_rows;
+    const footer_rows = facts_rows + bottom.status_rows;
     const children = try ctx.arena.alloc(vxfw.SubSurface, 1 + facts_rows + @intFromBool(status != null));
     const room = size.height - footer_rows;
-    const content = if (self.permission) |card|
+    self.composer.panel = if (self.panel) |panel| switch (panel) {
+        .inline_panel, .full => |widget_| widget_,
+    } else null;
+    self.composer.max_rows = @import("draft_layout.zig").cap(size.height);
+    const permission = if (self.panel) |panel| switch (panel) {
+        .inline_panel => self.permission,
+        .full => null,
+    } else self.permission;
+    const content = if (permission) |card|
         try card.drawInput(ctx.withConstraints(.{}, .{ .width = size.width, .height = room }), if (card.consent.row == .draft) self.composer.widget() else null)
     else
-        try self.composer.widget().draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = @min(room, @import("draft_layout.zig").cap(size.height) + 2) }));
+        try self.composer.widget().draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = room }));
     const row = ctx.withConstraints(.{ .width = size.width, .height = 1 }, .{ .width = size.width, .height = 1 });
     children[0] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = content };
     const status_rows = footer_rows - facts_rows;
@@ -199,7 +214,7 @@ test "InputArea approval has one document title above a choice between composer 
         try std.testing.expectEqualStrings("A", screen.readCell(3, choice).?.char.grapheme);
         try std.testing.expect(screen.readCell(3, choice).?.style.reverse);
         for (0..width) |col| for ([_]u16{ choice - 1, choice + 1 }) |row| {
-            try std.testing.expectEqualStrings("─", screen.readCell(@intCast(col), row).?.char.grapheme);
+            try std.testing.expectEqualStrings("┄", screen.readCell(@intCast(col), row).?.char.grapheme);
         };
         _ = consent.route(.printable);
         const drafting = try input.widget().draw(ctx);
@@ -229,7 +244,7 @@ test "InputArea has no empty status row below the footer" {
         const idle = try input.widget().draw(ctx);
         try std.testing.expectEqual(@as(u16, 4), idle.size.height);
         try std.testing.expectEqual(@as(usize, 2), idle.children.len);
-        try std.testing.expectEqualStrings("─", idle.children[0].surface.readCell(0, 2).char.grapheme);
+        try std.testing.expectEqualStrings("┄", idle.children[0].surface.readCell(0, 2).char.grapheme);
         try std.testing.expectEqual(@as(i17, 3), idle.children[1].origin.row);
 
         notice.text = "Copied 12 lines";

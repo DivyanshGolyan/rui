@@ -4,7 +4,6 @@ const Call = @import("Call.zig");
 const post = @import("post.zig");
 const result_text = @import("result_text.zig");
 const output_retention = @import("../output_retention.zig");
-const named_scratch = @import("../named_scratch.zig");
 const pages = @import("../os/pages.zig");
 const Allocator = std.mem.Allocator;
 const Running = @This();
@@ -22,11 +21,7 @@ pub const Input = struct {
     id: u64,
     server_name: []const u8,
     timeout_ms: u64,
-    bash_offered: bool,
-    retention: ?Retention = null,
 };
-
-pub const Retention = struct { queue: *output_retention.Queue, action_id: u64, attempt_ordinal: u64 };
 
 const State = union(enum) { active, init_failed: anyerror, done };
 
@@ -37,10 +32,8 @@ request: []u8,
 answer: []u8,
 server_name: []const u8,
 timeout_ms: u64,
-bash_offered: bool,
 deadline_ms: u64,
 state: State,
-retention: ?Retention,
 
 pub fn start(self: *Running, gpa: Allocator, input: Input, now_ms: u64) error{OutOfMemory}!void {
     self.* = .{
@@ -50,10 +43,8 @@ pub fn start(self: *Running, gpa: Allocator, input: Input, now_ms: u64) error{Ou
         .answer = &.{},
         .server_name = input.server_name,
         .timeout_ms = input.timeout_ms,
-        .bash_offered = input.bash_offered,
         .deadline_ms = now_ms +| input.timeout_ms,
         .state = .done,
-        .retention = input.retention,
     };
     errdefer self.deinit();
     self.scratch = try gpa.alloc(u8, input.arguments.len);
@@ -105,44 +96,32 @@ pub fn deadlineMs(self: *const Running) u64 {
     return self.deadline_ms;
 }
 
-pub fn service(self: *Running, now_ms: u64, out: *std.Io.Writer) !?result_text.Code {
+/// The returned ending borrows the answer allocation until deinit. The
+/// caller must render and settle it before releasing Running.
+pub fn poll(self: *Running, now_ms: u64) ?result_text.Ended {
     switch (self.state) {
         .done => return null,
-        .init_failed => |err| return try self.finish(out, .{ .not_sent = err }),
+        .init_failed => |err| return self.finish(.{ .not_sent = err }),
         .active => {},
     }
     if (now_ms >= self.deadline_ms) {
         const sent = self.call.requestSent();
-        self.call.deinit();
-        self.state = .done;
-        return try self.finish(out, .{ .timed_out = .{ .after_ms = self.timeout_ms, .sent = sent } });
+        return self.finish(.{ .timed_out = .{ .after_ms = self.timeout_ms, .sent = sent } });
     }
     const outcome = self.call.advance() catch |err| {
         const ending: result_text.Ending = if (err == error.AnswerTooLarge)
             .{ .oversized = self.call.answerPrefix() }
         else if (self.call.requestSent()) .{ .lost = err } else .{ .not_sent = err };
-        return try self.finish(out, ending);
+        return self.finish(ending);
     };
     if (outcome == .waiting) return null;
-    return try self.finish(out, .{ .outcome = outcome });
+    return self.finish(.{ .outcome = outcome });
 }
 
-fn finish(self: *Running, out: *std.Io.Writer, ending: result_text.Ending) !result_text.Code {
-    defer self.deinit();
-    const ended: result_text.Ended = .{ .server_name = self.server_name, .ended = ending };
-    const excerpt = try result_text.writeExcerpt(out, ended);
-    if (excerpt.omitted and self.bash_offered) {
-        if (self.retention) |retention| {
-            var name_buffer: [96]u8 = undefined;
-            const name = named_scratch.NumericName.@"mcp-output".format(&name_buffer, retention.action_id, retention.attempt_ordinal) catch unreachable;
-            if (retention.queue.writeFile(name, excerpt.total, ended, result_text.writeFull)) {
-                try out.print("\nFull output: {s}/{s}\n", .{ retention.queue.scratch_path, name });
-                return excerpt.code;
-            }
-        }
-        try out.writeAll("\nFull output was not retained.\n");
-    }
-    return excerpt.code;
+fn finish(self: *Running, ending: result_text.Ending) result_text.Ended {
+    if (self.state == .active) self.call.deinit();
+    self.state = .done;
+    return .{ .server_name = self.server_name, .ended = ending };
 }
 
 const Script = @import("test_server.zig");
@@ -162,25 +141,23 @@ fn testInput(port: u16) Input {
         .id = 7,
         .server_name = "test",
         .timeout_ms = 600_000,
-        .bash_offered = true,
     };
 }
 
 const Drive = struct {
     running: *Running,
-    out: *std.Io.Writer,
-    code: ?result_text.Code = null,
+    ended: ?result_text.Ended = null,
 
     fn step(self: *Drive) !bool {
-        self.code = try self.running.service(1, self.out);
-        return self.code != null;
+        self.ended = self.running.poll(1);
+        return self.ended != null;
     }
 };
 
-fn drive(running: *Running, out: *std.Io.Writer) !result_text.Code {
-    var context: Drive = .{ .running = running, .out = out };
+fn drive(running: *Running) !result_text.Ended {
+    var context: Drive = .{ .running = running };
     try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), &context, Drive.step);
-    return context.code.?;
+    return context.ended.?;
 }
 
 test "Running resolves socket replies and a peer closing after the request" {
@@ -207,11 +184,11 @@ test "Running resolves socket replies and a peer closing after the request" {
         defer script.stop();
         try running.start(gpa, testInput(script.port), 0);
         defer running.deinit();
-        var buffer: [512]u8 = undefined;
-        var out: std.Io.Writer = .fixed(&buffer);
-        try std.testing.expectEqual(case.code, try drive(running, &out));
-        try std.testing.expect(out.buffered().len > 0);
-        try std.testing.expectEqual(@as(usize, 0), running.answer.len);
+        const ended = try drive(running);
+        try std.testing.expectEqual(case.code, result_text.classify(ended.ended));
+        try std.testing.expectEqualStrings("test", ended.server_name);
+        try std.testing.expectEqual(@as(usize, max_answer_bytes), running.answer.len);
+        try std.testing.expectEqual(null, running.poll(1));
         try std.testing.expectEqual(@as(std.posix.fd_t, -1), running.fd());
         try std.testing.expectEqual(@as(i16, 0), running.events());
     }
@@ -224,13 +201,11 @@ test "Running reports nothing listening as not run and expired unsent calls as n
     const port = try @import("../socket_fixture.zig").refusedPort();
     try running.start(gpa, testInput(port), 0);
     defer running.deinit();
-    var buffer: [512]u8 = undefined;
-    var out: std.Io.Writer = .fixed(&buffer);
-    try std.testing.expectEqual(result_text.Code.spawn_failed, try drive(running, &out));
+    try std.testing.expectEqual(result_text.Code.spawn_failed, result_text.classify((try drive(running)).ended));
+    running.deinit();
     try running.start(gpa, testInput(port), 10);
-    out = .fixed(&buffer);
     try std.testing.expectEqual(@as(u64, 600_010), running.deadlineMs());
-    try std.testing.expectEqual(result_text.Code.spawn_failed, (try running.service(running.deadlineMs(), &out)).?);
+    try std.testing.expectEqual(result_text.Code.spawn_failed, result_text.classify(running.poll(running.deadlineMs()).?.ended));
 }
 
 test "Running records request preparation failures for the service path" {
@@ -245,9 +220,7 @@ test "Running records request preparation failures for the service path" {
     try running.start(gpa, input, 0);
     defer running.deinit();
     try std.testing.expectEqual(error.NoRoom, running.state.init_failed);
-    var buffer: [512]u8 = undefined;
-    var out: std.Io.Writer = .fixed(&buffer);
-    try std.testing.expectEqual(result_text.Code.spawn_failed, (try running.service(0, &out)).?);
+    try std.testing.expectEqual(result_text.Code.spawn_failed, result_text.classify(running.poll(0).?.ended));
 }
 
 test "Running deadline cancels a sent call and the holding peer observes close" {
@@ -259,34 +232,36 @@ test "Running deadline cancels a sent call and the holding peer observes close" 
     defer script.stop();
     try running.start(gpa, testInput(script.port), 0);
     defer running.deinit();
-    var buffer: [512]u8 = undefined;
-    var out: std.Io.Writer = .fixed(&buffer);
     const Sent = struct {
         running: *Running,
         script: *Script,
-        out: *std.Io.Writer,
         fn check(self: *@This()) !bool {
-            try std.testing.expectEqual(null, try self.running.service(1, self.out));
+            try std.testing.expectEqual(null, self.running.poll(1));
             return self.script.request_received.load(.acquire);
         }
     };
-    var sent: Sent = .{ .running = running, .script = &script, .out = &out };
+    var sent: Sent = .{ .running = running, .script = &script };
     try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), &sent, Sent.check);
-    try std.testing.expectEqual(result_text.Code.indeterminate, (try running.service(running.deadlineMs(), &out)).?);
+    try std.testing.expectEqual(result_text.Code.indeterminate, result_text.classify(running.poll(running.deadlineMs()).?.ended));
     try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), &script.connection_closed, test_poll.isSet);
+    try std.testing.expectEqual(@as(usize, max_answer_bytes), running.answer.len);
+    running.deinit();
     try std.testing.expectEqual(@as(usize, 0), running.answer.len);
 }
 
-test "Running oversized JSON and SSE answers retain evidence and release the call" {
+fn allocationFailureCase(gpa: Allocator) !void {
+    const running = try std.testing.allocator.create(Running);
+    defer std.testing.allocator.destroy(running);
+    try running.start(gpa, testInput(1), 0);
+    defer running.deinit();
+}
+
+test "Running start releases partial allocations on every OOM" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, allocationFailureCase, .{});
+}
+
+test "Running oversized JSON and SSE answers preserve borrowed evidence until release" {
     const gpa = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var root_buffer: [@import("../protocol.zig").max_store_bytes]u8 = undefined;
-    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
-    var used: std.atomic.Value(u64) = .init(0);
-    var entries: [1]output_retention.Entry = @splat(.{});
-    var queue = output_retention.Queue.initialize(std.testing.io, root, .{ .used = &used, .limit = max_answer_bytes + 1024 }, &entries);
-    defer queue.cleanupAll();
     const running = try gpa.create(Running);
     defer gpa.destroy(running);
     const response = try gpa.alloc(u8, max_answer_bytes + 1024);
@@ -313,174 +288,19 @@ test "Running oversized JSON and SSE answers retain evidence and release the cal
             var script: Script = .{ .reply = wire.buffered() };
             try script.start();
             defer script.stop();
-            var input = testInput(script.port);
-            input.retention = .{ .queue = &queue, .action_id = 17, .attempt_ordinal = 1 };
-            try running.start(gpa, input, 0);
+            try running.start(gpa, testInput(script.port), 0);
             defer running.deinit();
-            var out: std.Io.Writer.Allocating = .init(gpa);
-            defer out.deinit();
-            try std.testing.expectEqual(case.code, try drive(running, &out.writer));
-            try std.testing.expect(std.mem.indexOf(u8, out.written(), "4194304-byte limit") != null);
-            try std.testing.expect(std.mem.indexOf(u8, out.written(), case.prefix) != null);
-            try std.testing.expect(std.mem.indexOf(u8, out.written(), "Full output: ") != null);
-            const saved = try tmp.dir.readFileAlloc(std.testing.io, "mcp-output-17-1.tmp", gpa, .limited(max_answer_bytes + 1024));
-            defer gpa.free(saved);
-            const prefix_start = std.mem.indexOf(u8, saved, case.prefix).?;
-            try std.testing.expectEqualStrings(out.written()[0..result_text.excerpt_bytes], saved[0..result_text.excerpt_bytes]);
-            try std.testing.expectEqual(@as(usize, max_answer_bytes - @as(usize, if (sse and case.status != 200) 6 else 0)), saved.len - prefix_start);
-            try std.testing.expectEqual(@as(u64, saved.len), used.load(.acquire));
-            queue.cleanupAll();
-            try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
-            try std.testing.expectEqual(@as(usize, 0), running.answer.len);
+            const ended = try drive(running);
+            try std.testing.expectEqual(case.code, result_text.classify(ended.ended));
+            const answer = switch (ended.ended) {
+                .oversized => |value| value,
+                else => return error.ExpectedOversized,
+            };
+            try std.testing.expect(std.mem.indexOf(u8, answer.bytes, case.prefix) != null);
+            try std.testing.expect(answer.bytes.len > result_text.excerpt_bytes);
+            try std.testing.expectEqual(@as(usize, max_answer_bytes), running.answer.len);
             try std.testing.expectEqual(@as(std.posix.fd_t, -1), running.fd());
+            try std.testing.expectEqual(null, running.poll(1));
         }
-    }
-}
-
-fn allocationFailureCase(gpa: Allocator) !void {
-    const running = try std.testing.allocator.create(Running);
-    defer std.testing.allocator.destroy(running);
-    try running.start(gpa, testInput(1), 0);
-    defer running.deinit();
-}
-
-test "Running start releases partial allocations on every OOM" {
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, allocationFailureCase, .{});
-}
-
-test "Running terminal writer failure still cancels and frees the call" {
-    const gpa = std.testing.allocator;
-    const running = try gpa.create(Running);
-    defer gpa.destroy(running);
-    try running.start(gpa, testInput(1), 0);
-    defer running.deinit();
-    var out: std.Io.Writer = .fixed(&.{});
-    try std.testing.expectError(error.WriteFailed, running.service(running.deadlineMs(), &out));
-    try std.testing.expectEqual(@as(usize, 0), running.answer.len);
-    try std.testing.expectEqual(@as(std.posix.fd_t, -1), running.fd());
-}
-
-test "Running retains only omitted rendered MCP answers and preserves the excerpt" {
-    const gpa = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var root_buffer: [@import("../protocol.zig").max_store_bytes]u8 = undefined;
-    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
-    var used: std.atomic.Value(u64) = .init(0);
-    var entries: [4]output_retention.Entry = @splat(.{});
-    var queue = output_retention.Queue.initialize(std.testing.io, root, .{ .used = &used, .limit = max_answer_bytes }, &entries);
-    defer queue.cleanupAll();
-    const running = try gpa.create(Running);
-    defer gpa.destroy(running);
-    const Case = struct { length: usize, kind: enum { text, mixed_error, structured, rpc_error, refused } = .text };
-    for ([_]bool{ false, true }) |bash_offered| {
-        for ([_]Case{
-            .{ .length = 32 },
-            .{ .length = result_text.excerpt_bytes },
-            .{ .length = result_text.excerpt_bytes + 128 },
-            .{ .length = result_text.excerpt_bytes + 128, .kind = .mixed_error },
-            .{ .length = result_text.excerpt_bytes + 128, .kind = .structured },
-            .{ .length = result_text.excerpt_bytes + 128, .kind = .rpc_error },
-            .{ .length = result_text.excerpt_bytes + 128, .kind = .refused },
-        }) |case| {
-            const payload = try gpa.alloc(u8, case.length);
-            defer gpa.free(payload);
-            @memset(payload, 'x');
-            if (case.length > result_text.excerpt_bytes) @memcpy(payload[result_text.excerpt_bytes - 1 ..][0..2], "é");
-            const body = switch (case.kind) {
-                .text => try std.fmt.allocPrint(gpa, "{{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{{\"content\":[{{\"type\":\"text\",\"text\":\"{s}\"}}]}}}}", .{payload}),
-                .mixed_error => try std.fmt.allocPrint(gpa, "{{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{{\"isError\":true,\"content\":[{{\"type\":\"text\",\"text\":\"{s}\"}},{{\"type\":\"image\",\"data\":\"x\"}}]}}}}", .{payload}),
-                .structured => try std.fmt.allocPrint(gpa, "{{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{{\"content\":[],\"structuredContent\":{{\"data\":\"{s}\"}}}}}}", .{payload}),
-                .rpc_error => try std.fmt.allocPrint(gpa, "{{\"jsonrpc\":\"2.0\",\"id\":7,\"error\":{{\"code\":-1,\"message\":\"{s}\"}}}}", .{payload}),
-                .refused => try gpa.dupe(u8, payload),
-            };
-            defer gpa.free(body);
-            const full = switch (case.kind) {
-                .text, .refused => try std.fmt.allocPrint(gpa, "{s}{s}", .{ if (case.kind == .refused) "Outcome unknown: The MCP server answered HTTP 502. The call may or may not have run; it was not retried.\n" else "", payload }),
-                .mixed_error => try std.fmt.allocPrint(gpa, "The tool reported an error:\n{s}\n{{\"type\":\"image\",\"data\":\"x\"}}", .{payload}),
-                .structured => try std.fmt.allocPrint(gpa, "{{\"data\":\"{s}\"}}", .{payload}),
-                .rpc_error => try std.fmt.allocPrint(gpa, "The MCP server returned error -1: {s}", .{payload}),
-            };
-            defer gpa.free(full);
-            const wire = try std.fmt.allocPrint(gpa, "HTTP/1.1 {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\n\r\n{s}", .{ if (case.kind == .refused) "502 Bad Gateway" else "200 OK", if (case.kind == .refused) "text/plain" else "application/json", body.len, body });
-            defer gpa.free(wire);
-            var script: Script = .{ .reply = wire };
-            try script.start();
-            defer script.stop();
-            var input = testInput(script.port);
-            input.bash_offered = bash_offered;
-            input.retention = .{ .queue = &queue, .action_id = 17, .attempt_ordinal = 1 };
-            try running.start(gpa, input, 0);
-            defer running.deinit();
-            var out: std.Io.Writer.Allocating = .init(gpa);
-            defer out.deinit();
-            const expected_code: result_text.Code = switch (case.kind) {
-                .text, .structured => .succeeded,
-                .refused => .indeterminate,
-                else => .failed,
-            };
-            try std.testing.expectEqual(expected_code, try drive(running, &out.writer));
-            if (full.len <= result_text.excerpt_bytes) {
-                try std.testing.expectEqualStrings(full, out.written());
-                try std.testing.expectEqual(@as(usize, 0), queue.occupied());
-                try std.testing.expectError(error.FileNotFound, tmp.dir.openFile(std.testing.io, "mcp-output-17-1.tmp", .{}));
-            } else {
-                const kept = utf8_validation.scalarStart(full, result_text.excerpt_bytes);
-                var expected: std.Io.Writer.Allocating = .init(gpa);
-                defer expected.deinit();
-                try expected.writer.print("{s}\n[{d} more bytes not shown]", .{ full[0..kept], full.len - kept });
-                if (bash_offered) try expected.writer.print("\nFull output: {s}/mcp-output-17-1.tmp\n", .{root});
-                try std.testing.expectEqualStrings(expected.written(), out.written());
-                if (bash_offered) {
-                    const saved = try tmp.dir.readFileAlloc(std.testing.io, "mcp-output-17-1.tmp", gpa, .limited(max_answer_bytes));
-                    defer gpa.free(saved);
-                    try std.testing.expectEqualStrings(full, saved);
-                    try std.testing.expectEqual(@as(u64, full.len), used.load(.acquire));
-                    try std.testing.expectEqual(@as(usize, 1), queue.occupied());
-                    queue.cleanupAll();
-                    try std.testing.expectEqualStrings(expected.written(), out.written());
-                } else {
-                    try std.testing.expectEqual(@as(usize, 0), queue.occupied());
-                    try std.testing.expectError(error.FileNotFound, tmp.dir.openFile(std.testing.io, "mcp-output-17-1.tmp", .{}));
-                }
-            }
-            try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
-        }
-    }
-}
-
-test "Running reports optional MCP retention refusal without changing success" {
-    const gpa = std.testing.allocator;
-    const payload: [result_text.excerpt_bytes + 1]u8 = @splat('x');
-    const wire = Script.jsonReply("{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"" ++ payload ++ "\"}]}}");
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var root_buffer: [@import("../protocol.zig").max_store_bytes]u8 = undefined;
-    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
-    const running = try gpa.create(Running);
-    defer gpa.destroy(running);
-    const Reason = enum { absent, budget, capacity, reserved, sequence, create };
-    for (std.meta.tags(Reason)) |reason| {
-        var used: std.atomic.Value(u64) = .init(0);
-        var entries: [2]output_retention.Entry = @splat(.{});
-        var queue = output_retention.Queue.initialize(std.testing.io, root, .{ .used = &used, .limit = if (reason == .budget) 1 else max_answer_bytes }, if (reason == .capacity) &.{} else &entries);
-        defer queue.cleanupAll();
-        if (reason == .reserved) _ = try queue.reservePair("protected-out", 0, "protected-err", 0);
-        if (reason == .sequence) queue.next_sequence = std.math.maxInt(u64);
-        if (reason == .create) try tmp.dir.createDir(std.testing.io, "mcp-output-17-1.tmp", .default_dir);
-        defer if (reason == .create) tmp.dir.deleteDir(std.testing.io, "mcp-output-17-1.tmp") catch {};
-        var script: Script = .{ .reply = wire };
-        try script.start();
-        defer script.stop();
-        var input = testInput(script.port);
-        if (reason != .absent) input.retention = .{ .queue = &queue, .action_id = 17, .attempt_ordinal = 1 };
-        try running.start(gpa, input, 0);
-        defer running.deinit();
-        var out: std.Io.Writer.Allocating = .init(gpa);
-        defer out.deinit();
-        try std.testing.expectEqual(result_text.Code.succeeded, try drive(running, &out.writer));
-        try std.testing.expectEqualStrings(payload[0..result_text.excerpt_bytes] ++ "\n[1 more bytes not shown]\nFull output was not retained.\n", out.written());
-        try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
-        try std.testing.expectEqual(@as(usize, if (reason == .reserved) 2 else 0), queue.occupied());
     }
 }

@@ -84,22 +84,22 @@ const ConversationName = enum {
 };
 
 pub const conversation = Commands(ConversationName, .{
-    .archive = .{ .description = "archive this chat" },
+    .archive = .{ .description = "" },
     .clear = .{ .description = "start a new chat" },
     .copy = .{ .description = "copy the last answer", .argument = .{ .choice = copy_words } },
     .discard = .{ .listed = false },
-    .effort = .{ .description = "change effort", .argument = .effort },
-    .model = .{ .description = "change model" },
+    .effort = .{ .description = "", .argument = .effort },
+    .model = .{ .description = "" },
     .new = .{ .description = "start a new chat" },
-    .pin = .{ .description = "pin this chat" },
+    .pin = .{ .description = "" },
     .recover = .{ .argument = .{ .required = "KEY" }, .listed = false },
-    .@"reload-skills" = .{ .description = "reload skills" },
-    .rename = .{ .description = "rename this chat", .argument = .{ .required = "NAME" } },
+    .@"reload-skills" = .{ .description = "" },
+    .rename = .{ .description = "", .argument = .{ .required = "NAME" } },
     .requests = .{ .description = "recover a lost request" },
     .result = .{ .description = "show a saved answer", .argument = .{ .required = "KEY" } },
     .setup = .{ .description = "defaults for new chats", .argument = .{ .options = setup_options } },
     .unarchive = .{ .description = "restore this chat" },
-    .unpin = .{ .description = "unpin this chat" },
+    .unpin = .{ .description = "" },
 });
 
 fn slashed(text: []const u8) bool {
@@ -144,7 +144,7 @@ pub fn named(total: usize, rows: usize) usize {
     return if (total <= rows) total else if (rows >= 2) rows - 1 else rows;
 }
 
-pub const more = "+{d} more · type to narrow";
+pub const more = "{d} more";
 
 pub fn Commands(comptime N: type, comptime commands: std.enums.EnumFieldStruct(N, Command, null)) type {
     return struct {
@@ -856,4 +856,10 @@ test "command choices and options are names only and recovery stays unlisted" {
             try std.testing.expectEqualStrings("", entry.description);
         }
     }
+}
+
+test "overflow labels are count only" {
+    var buffer: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("5 more", try std.fmt.bufPrint(&buffer, more, .{5}));
+    try std.testing.expectEqualStrings("1 more", try std.fmt.bufPrint(&buffer, more, .{1}));
 }

@@ -24,9 +24,9 @@ first: usize = 0,
 /// Resolve the list's styles through the same screen roles as its surface.
 pub fn setCaps(self: *Self, caps: overview.Caps) void {
     self.caps = caps;
-    self.style = widget_style.of(caps, .{ .background = .input_surface });
-    self.quiet = widget_style.of(caps, .{ .colour = .quiet, .background = .input_surface });
-    self.matched = widget_style.of(caps, .{ .bold = true, .background = .input_surface });
+    self.style = widget_style.of(caps, .{ .background = .ground });
+    self.quiet = widget_style.of(caps, .{ .colour = .quiet, .background = .ground });
+    self.matched = widget_style.of(caps, .{ .bold = true, .background = .ground });
     self.hover_style = widget_style.of(caps, .{ .background = .hover });
 }
 
@@ -66,16 +66,11 @@ const Layout = struct {
 
     fn of(width: u16, height: u16, rows: usize) ?Layout {
         if (width <= 2 or height == 0 or rows == 0) return null;
-        const border: u16 = if (width >= 7 and height >= 3) 1 else 0;
-        const body: u16 = @intCast(@min(rows, height - 2 * border));
+        const body: u16 = @intCast(@min(rows, height));
         return .{
-            .panel = .{ .row = 0, .width = width, .height = body + 2 * border },
-            .content = .{ .row = border, .col = 2 * border, .width = width - 4 * border, .height = body },
+            .panel = .{ .row = 0, .width = width, .height = body },
+            .content = .{ .row = 0, .col = 0, .width = width, .height = body },
         };
-    }
-
-    fn bordered(self: Layout) bool {
-        return self.content.row != self.panel.row;
     }
 
     fn row(self: Layout, index: usize) Hover.Rect {
@@ -96,20 +91,6 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     @memset(surface.buffer, .{ .style = self.style });
     var screen: vaxis.Screen = .{ .width = width, .height = height, .width_method = self.caps.width, .buf = surface.buffer };
     const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = height, .screen = &screen };
-    if (placed.bordered()) {
-        const glyphs: [6][]const u8 = if (self.caps.unicode) .{ "┌", "┐", "└", "┘", "─", "│" } else .{ "+", "+", "+", "+", "-", "|" };
-        for (0..height) |row| for (0..width) |col| {
-            const glyph = if (row == 0)
-                (if (col == 0) glyphs[0] else if (col == width - 1) glyphs[1] else glyphs[4])
-            else if (row == height - 1)
-                (if (col == 0) glyphs[2] else if (col == width - 1) glyphs[3] else glyphs[4])
-            else if (col == 0 or col == width - 1)
-                glyphs[5]
-            else
-                continue;
-            surface.writeCell(@intCast(col), @intCast(row), .{ .char = .{ .grapheme = glyph, .width = 1 }, .style = self.quiet });
-        };
-    }
     const body = window.child(.{ .x_off = @intCast(placed.content.col), .y_off = @intCast(placed.content.row), .width = placed.content.width, .height = placed.content.height });
     const list = &shown.list;
     const count = commands.named(list.count, placed.content.height);
@@ -143,7 +124,8 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     }
     if (count < list.count and count < placed.content.height) {
         const label = try std.fmt.allocPrint(ctx.arena, commands.more, .{list.count - count});
-        _ = body.child(.{ .y_off = @intCast(count), .height = 1 }).printSegment(.{ .text = label, .style = self.quiet }, .{ .wrap = .none });
+        const bounds = RowInset.bounds(placed.content.width);
+        _ = body.child(.{ .x_off = @intCast(bounds.start), .y_off = @intCast(count), .width = bounds.width(), .height = 1 }).printSegment(.{ .text = label, .style = self.quiet }, .{ .wrap = .none });
     }
     return surface;
 }
@@ -226,20 +208,20 @@ test "Palette hover is transient and clicks activate only visible command rows" 
     defer arena.deinit();
     const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 5 }, .cell_size = .{} };
     const initial = try palette.widget().draw(draw_ctx);
-    try std.testing.expect(!initial.readCell(2, 2).style.reverse);
+    try std.testing.expect(!initial.readCell(2, 1).style.reverse);
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
     try palette.widget().handleEvent(&ctx, .mouse_enter);
-    const motion: vaxis.Mouse = .{ .row = 2, .col = 2, .button = .none, .mods = .{}, .type = .motion };
+    const motion: vaxis.Mouse = .{ .row = 1, .col = 2, .button = .none, .mods = .{}, .type = .motion };
     try palette.widget().handleEvent(&ctx, .{ .mouse = motion });
     const hovered = try palette.widget().draw(draw_ctx);
-    try std.testing.expect(!hovered.readCell(2, 2).style.reverse);
-    try std.testing.expectEqual(vaxis.Style.Underline.single, hovered.readCell(2, 2).style.ul_style);
-    try std.testing.expectEqual(widget_style.of(palette.caps, .{ .background = .selection }), hovered.readCell(2, 1).style);
-    try std.testing.expectEqual(palette.style.fg, hovered.readCell(2, 2).style.fg);
+    try std.testing.expect(!hovered.readCell(2, 1).style.reverse);
+    try std.testing.expectEqual(vaxis.Style.Underline.single, hovered.readCell(2, 1).style.ul_style);
+    try std.testing.expectEqual(widget_style.of(palette.caps, .{ .background = .selection }), hovered.readCell(2, 0).style);
+    try std.testing.expectEqual(palette.style.fg, hovered.readCell(2, 1).style.fg);
     palette.hover_style = .{ .bg = .{ .index = 5 } };
     const coloured = try palette.widget().draw(draw_ctx);
-    for (2..78) |col| try std.testing.expectEqual(vaxis.Color{ .index = 5 }, coloured.readCell(@intCast(col), 2).style.bg);
-    try std.testing.expectEqual(widget_style.of(palette.caps, .{ .background = .selection }), coloured.readCell(2, 1).style);
+    for (0..80) |col| try std.testing.expectEqual(vaxis.Color{ .index = 5 }, coloured.readCell(@intCast(col), 1).style.bg);
+    try std.testing.expectEqual(widget_style.of(palette.caps, .{ .background = .selection }), coloured.readCell(2, 0).style);
     try std.testing.expectEqual(@as(usize, 0), shown.highlight);
     try std.testing.expect(selected.index == null);
     try std.testing.expectEqual(vaxis.Mouse.Shape.pointer, ctx.cmds.items[ctx.cmds.items.len - 1].set_mouse_shape);
@@ -254,7 +236,7 @@ test "Palette hover is transient and clicks activate only visible command rows" 
     shown.revision = 7;
     try palette.widget().handleEvent(&ctx, .mouse_leave);
     const left = try palette.widget().draw(draw_ctx);
-    try std.testing.expectEqual(initial.readCell(2, 2).style, left.readCell(2, 2).style);
+    try std.testing.expectEqual(initial.readCell(2, 1).style, left.readCell(2, 1).style);
     try std.testing.expectEqual(vaxis.Mouse.Shape.default, ctx.cmds.items[ctx.cmds.items.len - 1].set_mouse_shape);
     shown.highlight = shown.list.count - 1;
     _ = try palette.widget().draw(draw_ctx.withConstraints(.{}, .{ .width = 80, .height = 1 }));
@@ -284,9 +266,12 @@ test "Palette selection uses the shared ink wash for plain and matching cells in
             var menu: slash_menu.Menu = .{ .shown = commands.Shown.next(null, 1, commands.conversation.listed()) };
             const shown = &menu.shown.?;
             shown.list.count = 2;
+            shown.list.entries[0].description = "retained description";
             shown.list.entries[0].matches = .{ .name = .{ .start = 1, .len = 3 }, .description = .{ .start = 0, .len = 2 } };
             var palette: Self = .{ .menu = &menu, .on_select = Select.select };
             palette.setCaps(caps);
+            try std.testing.expectEqual(widget_style.of(caps, .{}), palette.style);
+            try std.testing.expectEqual(widget_style.of(caps, .{ .colour = .quiet }), palette.quiet);
             var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
             defer arena.deinit();
             const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 4 }, .cell_size = .{} };
@@ -294,17 +279,16 @@ test "Palette selection uses the shared ink wash for plain and matching cells in
             const strong = widget_style.of(caps, .{ .bold = true, .background = .selection });
             const column = shown.list.descriptionColumn();
             // Moving onto the selected row never replaces its ink wash with hover.
-            for ([_]i17{ 1, 2 }) |pointed| {
+            for ([_]i17{ 0, 1 }) |pointed| {
                 palette.hover.point = .{ .col = 2, .row = pointed };
                 const surface = try palette.widget().draw(ctx);
-                for (2..78) |col| {
-                    const marked = (col >= 5 and col < 8) or (col >= column + 4 and col < column + 6);
-                    try std.testing.expectEqual(if (marked) strong else plain, surface.readCell(@intCast(col), 1).style);
+                for (0..80) |col| {
+                    const marked = (col >= 3 and col < 6) or (col >= column + 2 and col < column + 4);
+                    try std.testing.expectEqual(if (marked) strong else plain, surface.readCell(@intCast(col), 0).style);
                 }
-                try std.testing.expectEqual(depth == .none, surface.readCell(2, 1).style.reverse);
-                const other = if (pointed == 2) Hover.look(palette.style, palette.hover_style) else palette.style;
-                try std.testing.expectEqual(other, surface.readCell(2, 2).style);
-                for ([_]u16{ 0, 79 }) |col| try std.testing.expectEqual(palette.quiet, surface.readCell(col, 1).style);
+                try std.testing.expectEqual(depth == .none, surface.readCell(2, 0).style.reverse);
+                const other = if (pointed == 1) Hover.look(palette.style, palette.hover_style) else palette.style;
+                try std.testing.expectEqual(other, surface.readCell(2, 1).style);
             }
         };
     }
@@ -322,21 +306,21 @@ test "Palette renders every chat command and description in the same normal styl
         defer arena.deinit();
         const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 24 }, .cell_size = .{} };
         const surface = try palette.widget().draw(ctx);
-        try std.testing.expectEqual(case[1].len + 2, surface.size.height);
+        try std.testing.expectEqual(case[1].len, surface.size.height);
         for (case[1], 0..) |expected, row| {
             var text: [256]u8 = undefined;
             var used: usize = 0;
-            for (surface.buffer[(row + 1) * 80 + 4 ..][0..72]) |cell| {
+            for (surface.buffer[row * 80 + 2 ..][0..76]) |cell| {
                 @memcpy(text[used..][0..cell.char.grapheme.len], cell.char.grapheme);
                 used += cell.char.grapheme.len;
             }
             const line = std.mem.trimEnd(u8, text[0..used], " ");
             try std.testing.expect(std.mem.startsWith(u8, line, expected));
-            try std.testing.expect(shown.list.entries[row].description.len != 0);
+            if (shown.list.entries[row].description.len == 0) try std.testing.expectEqualStrings(expected, line);
             try std.testing.expect(std.mem.indexOf(u8, line, shown.list.entries[row].description[0..@min(20, shown.list.entries[row].description.len)]) != null);
             if (shown.list.entries[row].description.len != 0) {
-                try std.testing.expect(!surface.readCell(2, @intCast(row + 1)).style.dim);
-                try std.testing.expectEqual(surface.readCell(2, @intCast(row + 1)).style, surface.readCell(@intCast(shown.list.descriptionColumn() + 2), @intCast(row + 1)).style);
+                try std.testing.expect(!surface.readCell(0, @intCast(row)).style.dim);
+                try std.testing.expectEqual(surface.readCell(0, @intCast(row)).style, surface.readCell(@intCast(shown.list.descriptionColumn() + 2), @intCast(row)).style);
             }
         }
     }
@@ -441,8 +425,8 @@ test "Palette panel keeps every selected row visible across tiny bounds budgets 
                     var palette: Self = .{
                         .menu = &menu,
                         .caps = caps,
-                        .style = widget_style.of(caps, .{ .background = .input_surface }),
-                        .quiet = widget_style.of(caps, .{ .colour = .quiet, .background = .input_surface }),
+                        .style = widget_style.of(caps, .{ .background = .ground }),
+                        .quiet = widget_style.of(caps, .{ .colour = .quiet, .background = .ground }),
                         .max_height = @intCast(budget),
                         .on_select = Select.select,
                     };
@@ -454,9 +438,8 @@ test "Palette panel keeps every selected row visible across tiny bounds budgets 
                         try std.testing.expectEqual(@as(usize, 0), palette.hover.targets.len);
                         continue;
                     }
-                    const framed = width >= 7 and available >= 3;
-                    const inset: u16 = if (framed) 2 else 0;
-                    const top: u16 = if (framed) 1 else 0;
+                    const inset: u16 = 0;
+                    const top: u16 = 0;
                     const body = @min(shown.list.count, available - 2 * top);
                     const count = if (shown.list.count <= body) body else if (body >= 2) body - 1 else body;
                     try std.testing.expectEqual(.drawn, shown.seen);
@@ -479,33 +462,13 @@ test "Palette panel keeps every selected row visible across tiny bounds budgets 
                         try std.testing.expectEqual(width - 2 * inset, rect.width);
                         try std.testing.expectEqual(@as(u16, 1), rect.height);
                     }
-                    if (framed) {
-                        try std.testing.expectEqualStrings(if (unicode) "┌" else "+", surface.readCell(0, 0).char.grapheme);
-                        try std.testing.expectEqualStrings(if (unicode) "┐" else "+", surface.readCell(width - 1, 0).char.grapheme);
-                        try std.testing.expectEqualStrings(if (unicode) "└" else "+", surface.readCell(0, surface.size.height - 1).char.grapheme);
-                        try std.testing.expectEqualStrings(if (unicode) "┘" else "+", surface.readCell(width - 1, surface.size.height - 1).char.grapheme);
-                        for (1..surface.size.height - 1) |edge_row| {
-                            for ([_]u16{ 0, width - 1 }) |col| {
-                                const cell = surface.readCell(col, @intCast(edge_row));
-                                try std.testing.expectEqualStrings(if (unicode) "│" else "|", cell.char.grapheme);
-                                try std.testing.expect(!cell.style.reverse);
-                            }
-                        }
-                        for (1..width - 1) |col| {
-                            for ([_]u16{ 0, surface.size.height - 1 }) |edge_row| {
-                                const cell = surface.readCell(@intCast(col), edge_row);
-                                try std.testing.expectEqualStrings(if (unicode) "─" else "-", cell.char.grapheme);
-                                try std.testing.expectEqual(palette.quiet, cell.style);
-                            }
-                        }
-                    }
                 }
             };
         }
     }
 }
 
-test "Palette border padding and overflow consume clicks without activating rows" {
+test "Palette full-width rows activate and overflow consumes clicks" {
     const Selected = struct {
         pick: ?commands.Shown.Pick = null,
         fn select(raw: *anyopaque, _: *vxfw.EventContext, pick: commands.Shown.Pick) !void {
@@ -513,7 +476,7 @@ test "Palette border padding and overflow consume clicks without activating rows
             self.pick = pick;
         }
     };
-    for ([_]bool{ false, true }) |unicode| {
+    for ([_]bool{ false, true }) |unicode| for ([_]u16{ 140, 46 }) |width| {
         var selected: Selected = .{};
         var menu: slash_menu.Menu = .{ .shown = commands.Shown.next(null, 7, commands.conversation.listed()) };
         const shown = &menu.shown.?;
@@ -521,7 +484,7 @@ test "Palette border padding and overflow consume clicks without activating rows
         var palette: Self = .{ .menu = &menu, .caps = .{ .unicode = unicode }, .userdata = &selected, .on_select = Selected.select };
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
-        const surface = try palette.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 5 }, .cell_size = .{} });
+        const surface = try palette.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 5 }, .cell_size = .{} });
         var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
         shown.move(false);
         for (0..surface.size.height) |row| for (0..surface.size.width) |col| {
@@ -529,16 +492,17 @@ test "Palette border padding and overflow consume clicks without activating rows
             ctx.consume_event = false;
             try palette.widget().handleEvent(&ctx, .{ .mouse = .{ .row = @intCast(row), .col = @intCast(col), .button = .left, .type = .press, .mods = .{} } });
             try std.testing.expect(ctx.consume_event);
-            const named_row = row >= 1 and row < 3 and col >= 2 and col < 38;
+            const named_row = row < 4;
             try std.testing.expectEqual(named_row, palette.hover.pointing);
             if (named_row) {
-                try std.testing.expectEqual(palette.first + row - 1, selected.pick.?.index);
+                try std.testing.expectEqual(palette.first + row, selected.pick.?.index);
                 try std.testing.expectEqual(@as(u64, 7), selected.pick.?.revision);
             } else try std.testing.expectEqual(null, selected.pick);
         };
-        try std.testing.expectEqualStrings("+", surface.readCell(2, 3).char.grapheme);
-        try std.testing.expectEqual(palette.quiet, surface.readCell(2, 3).style);
-    }
+        const label = try std.fmt.allocPrint(arena.allocator(), commands.more, .{shown.list.count - 4});
+        try std.testing.expectEqualStrings(label[0..1], surface.readCell(2, 4).char.grapheme);
+        try std.testing.expectEqual(palette.quiet, surface.readCell(2, 4).style);
+    };
 }
 
 test "Palette publishes menu picks and keeps the drawn identity across wheel movement" {
@@ -560,10 +524,10 @@ test "Palette publishes menu picks and keeps the drawn identity across wheel mov
     const drawn = menu.drawn_pick.?;
     try std.testing.expectEqual(commands.Shown.Pick{ .index = 0, .revision = 7, .source = 23 }, drawn);
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-    try palette.widget().handleEvent(&ctx, .{ .mouse = .{ .button = .wheel_down, .type = .press, .mods = .{}, .row = 1, .col = 2 } });
+    try palette.widget().handleEvent(&ctx, .{ .mouse = .{ .button = .wheel_down, .type = .press, .mods = .{}, .row = 0, .col = 2 } });
     try std.testing.expectEqual(@as(usize, 1), shown.highlight);
     try std.testing.expectEqual(drawn, menu.drawn_pick.?);
-    try palette.widget().handleEvent(&ctx, .{ .mouse = .{ .button = .left, .type = .press, .mods = .{}, .row = 1, .col = 2 } });
+    try palette.widget().handleEvent(&ctx, .{ .mouse = .{ .button = .left, .type = .press, .mods = .{}, .row = 0, .col = 2 } });
     try std.testing.expectEqual(drawn, selected.pick.?);
     _ = try palette.widget().draw(draw_ctx);
     try std.testing.expectEqual(shown.pick(1), menu.drawn_pick.?);
@@ -571,6 +535,6 @@ test "Palette publishes menu picks and keeps the drawn identity across wheel mov
     try std.testing.expectEqual(null, menu.drawn_pick);
     menu.reset();
     selected.pick = null;
-    try palette.widget().handleEvent(&ctx, .{ .mouse = .{ .button = .left, .type = .press, .mods = .{}, .row = 1, .col = 2 } });
+    try palette.widget().handleEvent(&ctx, .{ .mouse = .{ .button = .left, .type = .press, .mods = .{}, .row = 0, .col = 2 } });
     try std.testing.expectEqual(null, selected.pick);
 }

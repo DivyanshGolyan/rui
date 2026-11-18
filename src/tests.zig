@@ -1,5 +1,10 @@
 test {
     _ = @import("InputCapture.zig");
+    _ = @import("image_intake.zig");
+    _ = @import("image_file_source.zig");
+    _ = @import("read_image_arguments.zig");
+    _ = @import("os/read_image_file.zig");
+    _ = @import("server_read_image.zig");
     _ = @import("host_start.zig");
     _ = @import("host_launch_transfer.zig");
     _ = @import("server_mcp_settings.zig");
@@ -82,6 +87,9 @@ test {
     _ = @import("http1/Exchange.zig");
     _ = @import("mcp/Call.zig");
     _ = @import("mcp/result_text.zig");
+    _ = @import("mcp/result_text_golden_test.zig");
+    _ = @import("tool_result.zig");
+    _ = @import("tool_settle.zig");
     _ = @import("mcp/Running.zig");
     _ = @import("mcp/servers.zig");
     _ = @import("mcp/Listing.zig");

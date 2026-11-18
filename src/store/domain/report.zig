@@ -26,6 +26,7 @@ const rsql = @import("../rsql.zig");
 const store_access = @import("../access.zig");
 const Store = store_core.Store;
 const action_domain = @import("action.zig");
+const sourced_input = @import("sourced_input.zig");
 const command_domain = @import("command.zig");
 const configuration_domain = @import("configuration.zig");
 const content_domain = @import("content.zig");
@@ -240,7 +241,7 @@ pub const FirstCandidates = struct {
 };
 
 pub const person_message_sql = "SELECT admitted_at FROM message_admission @index(message_admission_person) " ++
-    "WHERE session_ref=?1 AND sender_session_ref IS NULL AND source_action_id IS NULL ORDER BY admission_position DESC LIMIT 1";
+    "WHERE session_ref=?1 AND " ++ sourced_input.personSql("message_admission") ++ " ORDER BY admission_position DESC LIMIT 1";
 
 pub const person_message = rsql.Read(.{
     .sql = person_message_sql,
@@ -507,6 +508,10 @@ fn WorkLatest(comptime Args: type, comptime session: []const u8) type {
     return rsql.Read(.{
         .sql = "SELECT t.turn_id,t.operation_id,t.input_cutoff,t.outcome_code,t.outcome_content_id,t.outcome_at,t.outcome_position," ++
             "coalesce(o.resolution_code,o.last_failure_code) AS operation_code,o.retry_due_at_ms,o.attempt_ordinal,o.attempt_at,o.retry_scheduled_at,o.resolved_at," ++
+            "(" ++ command_domain.unresolvedModelOperationSql("o") ++ " AND " ++ command_domain.currentModelOperationSql("o", "t") ++ ") AS interruptible," ++
+            "CASE WHEN EXISTS(SELECT 1 FROM session_stop WHERE selected_turn_id=t.turn_id) THEN (" ++
+            command_domain.pendingMessageAfterStopSql(session) ++ " OR " ++
+            "(" ++ obligation.firstChildSql(session, "") ++ " IS NOT NULL)) ELSE 0 END AS stop_remaining," ++
             "(SELECT @payload(content) FROM content WHERE content_id=o.resolution_content_id AND byte_length<=" ++ std.fmt.comptimePrint("{d}", .{Quota.max_bytes}) ++
             " AND t.outcome_code NOT IN ('completed','cancelled')) AS diagnostic," ++
             "(SELECT stopped_at FROM session_stop @index(session_stop_turn) WHERE selected_turn_id=t.turn_id ORDER BY position LIMIT 1) AS stopped_at " ++
@@ -532,6 +537,8 @@ const WorkLatestRow = struct {
     attempt_at: ?rsql.Positive,
     retry_scheduled_at: ?rsql.Positive,
     resolved_at: ?rsql.Positive,
+    interruptible: bool,
+    stop_remaining: bool,
     diagnostic: ?rsql.Blob(Quota.max_bytes),
     stopped_at: ?rsql.Positive,
 };
@@ -540,8 +547,9 @@ fn firstApprovalSql(comptime session: []const u8) []const u8 {
     return "SELECT approval.action_id FROM action_operation approval " ++
         "JOIN model_operation source_operation ON source_operation.operation_id=approval.parent_operation_id " ++
         "JOIN turn source_turn ON source_turn.turn_id=source_operation.turn_id " ++
-        "WHERE approval.session_ref=" ++ session ++ " AND approval.authorized=0 AND approval.resolution_code IS NULL AND " ++
-        action_domain.eligibleSql("approval", "source_operation", "source_turn") ++ " ORDER BY approval.action_id LIMIT 1";
+        "WHERE approval.session_ref=" ++ session ++ " AND " ++
+        action_domain.externalDecisionEligibleSql("approval", "source_turn") ++ " AND " ++
+        "NOT " ++ action_domain.actionStoppedSql("approval", "source_operation") ++ " ORDER BY approval.action_id LIMIT 1";
 }
 
 test "optional approval index does not change MySQL prepared slots or tokens" {
@@ -812,6 +820,8 @@ pub const WorkRead = struct {
             .operation_id = row.operation_id.get(),
             .input_cutoff = row.input_cutoff.get(),
             .stopped_at = optional(row.stopped_at),
+            .interruptible = row.interruptible,
+            .stop_remaining = row.stop_remaining,
             .op = undefined,
         };
         if (row.resolved_at) |at| {

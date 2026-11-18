@@ -10,6 +10,7 @@ import threading
 
 import model_fixture as fixture
 import codex_fixture
+from terminal_screen import split_pane_row
 from host_process import dispose_all, screen_fixture_root, stop_process, wait_for
 from terminal_process import COLUMNS, ROWS, answers_to, close_pty, open_pty, spawn
 from terminal_screen import ScreenCapture
@@ -129,12 +130,13 @@ class World:
                                        and "Type a task" in frame and "enter open" not in frame
                                        and screen.capture.draft("", 2),
                                        "the wide launch chat beside the list")
-                assert "│" in launched, launched
+                assert any(split_pane_row(row)[1] for row in launched.splitlines()), launched
                 if not keep_launch:
                     screen.keys(b"\x1b")
             if not keep_launch:
                 screen.wait(lambda frame: "+ New Session" in frame and "Settings" in frame
-                            and "Type a task" not in frame and "│" not in frame,
+                            and "Type a task" not in frame
+                            and not any(split_pane_row(row)[1] for row in frame.splitlines()),
                             "the full overview and its pinned rows")
             yield screen
             if process.poll() is None:

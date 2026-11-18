@@ -791,7 +791,7 @@ const ArgumentSource = struct {
 pub fn renderPermissionArguments(io: std.Io, scratch: std.Io.File, sink: anytype, colour: bool, tool: *const ActionTool) !void {
     return switch (try tool.runner()) {
         .bash => request(io, scratch, sink, colour),
-        .mcp => mcpRequest(io, scratch, sink, colour, tool),
+        .mcp, .read_image => toolRequest(io, scratch, sink, colour, tool),
         .core, .provider => error.InvalidObservation,
     };
 }
@@ -818,7 +818,7 @@ pub fn bashCommand(io: std.Io, scratch: std.Io.File, tool: *const ActionTool, bu
     return if (shown) buffer[0..leading.len] else null;
 }
 
-fn mcpRequest(io: std.Io, scratch: std.Io.File, sink: anytype, colour: bool, tool: *const ActionTool) !void {
+fn toolRequest(io: std.Io, scratch: std.Io.File, sink: anytype, colour: bool, tool: *const ActionTool) !void {
     var buffer: [4096]u8 = undefined;
     var reader = scratch.reader(io, &buffer);
     try sink.feed("\n");
@@ -834,8 +834,10 @@ fn mcpRequest(io: std.Io, scratch: std.Io.File, sink: anytype, colour: bool, too
     }
     try indented.feed("\nTool: ");
     try indented.feed(tool.name.slice());
-    try indented.feed("\nServer: ");
-    try indented.feed(tool.server.?.slice());
+    if (tool.server) |server| {
+        try indented.feed("\nServer: ");
+        try indented.feed(server.slice());
+    }
     try indented.feed("\nArguments:\n");
     var lines: Indented(*Indented(@TypeOf(sink))) = .{ .sink = &indented, .prefix = content_mark, .marks_empty = true, .line_start = true };
     var escaped: Escaped(@TypeOf(&lines)) = .{ .sink = &lines, .text = .{ .mode = .multiline } };
@@ -1640,6 +1642,31 @@ test "hosted calls draw as adjacent tool rows across outcomes" {
         "✓ Search “zig 0.17”\n✓ Open ziglang.org/x\n× Find “Io” in ziglang.org/x\n✓ Search the web\n",
         joined.bytes[0..joined.length],
     );
+}
+
+test "read_image approval displays the exact path arguments without a server" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const scratch = try tmp.dir.createFile(std.testing.io, "arguments", .{ .read = true });
+    defer scratch.close(std.testing.io);
+    try scratch.writePositionalAll(std.testing.io, "{\"path\":\"image.png\"}", 0);
+    const Sink = struct {
+        bytes: [2048]u8 = undefined,
+        length: usize = 0,
+        pub fn feed(self: *@This(), text: []const u8) !void {
+            @memcpy(self.bytes[self.length..][0..text.len], text);
+            self.length += text.len;
+        }
+    };
+    var sink: Sink = .{};
+    var tool: ActionTool = .{ .name = .{}, .description = .{}, .server = null };
+    try tool.name.set("read_image");
+    try tool.description.set("Read image");
+    try renderPermissionArguments(std.testing.io, scratch, &sink, false, &tool);
+    const rendered = sink.bytes[0..sink.length];
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "Tool: read_image") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "{\"path\":\"image.png\"}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "Server:") == null);
 }
 
 test "MCP approval uses the saved description and renders exact arguments with Allow once and Deny" {

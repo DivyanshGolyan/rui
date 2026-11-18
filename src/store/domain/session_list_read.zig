@@ -8,6 +8,7 @@ const session_archive = @import("../../session_archive.zig");
 const session_id = @import("../../session_id.zig");
 const session_list = @import("../../session_list.zig");
 const session_line = @import("../../session_line.zig");
+const session_work = @import("../../session_work.zig");
 const tool_name = @import("../../tool_name.zig");
 const tool_presentation = @import("../../tool_presentation.zig");
 const workspace_path = @import("../../workspace_path.zig");
@@ -375,7 +376,7 @@ fn readRollups(a: *ReadAccess, request: *const session_list.ListSessions, refere
             const work = try read.work(row.created_at.get(), now_ms);
             total.subtree_state_change_at = @max(total.subtree_state_change_at, try stateChangeAt(.of(row), read, work));
             total.descendant_count = std.math.add(u64, total.descendant_count, 1) catch return error.CorruptStore;
-            if (work.state.needsDecision()) total.descendant_needs_you_count = std.math.add(u64, total.descendant_needs_you_count, 1) catch return error.CorruptStore;
+            if (session_work.group(work) == .needs_you) total.descendant_needs_you_count = std.math.add(u64, total.descendant_needs_you_count, 1) catch return error.CorruptStore;
         }
         if (page.count <= session_list.session_list_page_size) break;
         after_origin = page.rows[count - 1].origin.slice()[0..change_ring.id_bytes].*;

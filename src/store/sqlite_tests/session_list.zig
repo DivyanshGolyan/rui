@@ -178,7 +178,7 @@ test "a person's Message next to a position is a one-row page of admission rows,
     {
         const entry = try store_core.enter(&storage, .none);
         defer entry.release();
-        try store_testing.sqlite_only.exec(&storage, "UPDATE message_admission SET sender_session_ref=?1,sender_position=1000000 WHERE command_key='from-peer'", .{peer.slice()});
+        try store_testing.sqlite_only.exec(&storage, "UPDATE message_admission SET sender_session_ref=?1,sender_position=1000000,source_kind=2 WHERE command_key='from-peer'", .{peer.slice()});
         try touchForTesting(&storage, session.slice());
         try touchForTesting(&storage, peer.slice());
     }
@@ -401,11 +401,53 @@ test "a list page of mixed work takes its deepest row's rounds, and a pass per r
     defer report.deinit();
     var bytes: [8192]u8 = undefined;
     const read = try report.read(0, bytes[0..@intCast(@min(report.length, bytes.len))]);
-    for ([_][]const u8{ "\"kind\":\"idle\"", "\"kind\":\"finished\"", "\"kind\":\"stopped\"", "\"kind\":\"approval\"" }) |kind|
+    for ([_][]const u8{ "\"state\":{\"kind\":\"idle\"", "\"state\":{\"kind\":\"finished\"", "\"state\":{\"kind\":\"stopped\"", "\"state\":{\"kind\":\"approval\"" }) |kind|
         std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, bytes[0..read], kind)) catch |err| {
             std.debug.print("{s}\n", .{bytes[0..read]});
             return err;
         };
     try std.testing.expectEqual(9, rounds);
     try std.testing.expectEqual(1 + 1 + 8 + 6 + 6 + 4 + 2 + 2 + 6, a.passes);
+}
+
+test "a stopping Turn with queued work adds no list read rounds or passes" {
+    const Costs = struct {
+        fn read(storage: *Store, tmp: *std.testing.TmpDir) !struct { rounds: u32, passes: usize } {
+            var root: [protocol.max_store_bytes]u8 = undefined;
+            const length = try tmp.dir.realPath(std.testing.io, &root);
+            var used = std.atomic.Value(u64).init(0);
+            var capture: report_domain.SessionReportCapture = .{ .io = std.testing.io, .writer = null, .budget = .{ .used = &used, .limit = 1024 * 1024 } };
+            try capture.create(root[0..length], 1, false);
+            defer capture.deinit();
+            const entry = try store_core.enter(storage, .none);
+            defer entry.release();
+            var a: reads_domain.ReadAccess = .open(&entry);
+            defer a.deinit();
+            const before = storage.testing_content_work.rounds;
+            var reply: session_list_reply.Reply(report_domain.SessionReportCapture) = .{ .capture = &capture };
+            try session_list_read_domain.readSessionList(&a, &.{}, &reply);
+            return .{ .rounds = storage.testing_content_work.rounds - before, .passes = a.passes };
+        }
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try TestingWorkShape.awaiting.make(&storage, &tmp, "stopping-list-cost");
+    const action = try store_testing.queryU64(&storage, "SELECT min(action_id) FROM action_operation WHERE session_ref=?1", .{session.slice()});
+    var allow: protocol.PermissionDecisionCommand = .{ .session = session, .action_id = action, .decision = .allow_once };
+    try allow.key.set("stopping-list-allow");
+    try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
+    _ = (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?;
+    const running = try Costs.read(&storage, &tmp);
+    var stop = try completeSessionStop("stopping-list-stop", session.slice());
+    try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+    try submitTestMessage(&storage, &tmp, "stopping-list-file", "stopping-list-queued", session.slice(), "new work");
+    const stopping = try Costs.read(&storage, &tmp);
+    try std.testing.expectEqual(running.rounds, stopping.rounds);
+    try std.testing.expectEqual(running.passes, stopping.passes);
+    const request: protocol.ActivityPage = .{ .session = session };
+    const work = (try store_core.activityPageForTesting(&storage, request)).work.work;
+    try std.testing.expect(work.state == .stopping and work.actions.stop);
 }
