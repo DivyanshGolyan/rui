@@ -3152,7 +3152,7 @@ test "archive badges follow only completed server snapshots and stay distinct fr
     }
 }
 
-test "the queued row shows what waits until it is taken, whatever the work is doing" {
+fn queuedProjection() !void {
     const some: protocol.Queued = .{ .count = 2, .oldest_position = 30, .newest_admission = 9, .newest_position = 34 };
     const Case = struct { queued: protocol.Queued, state: protocol.WorkState, line: ?u64 = 9, count: u64 = 2, shown: bool };
     var line: queued_line.Line = .{ .len = 0 };
@@ -5978,7 +5978,7 @@ test "App Session shows running calls in order above the input, with +N more run
     try std.testing.expect(ChromeFixture.find(&idle, "⠹") == null and ChromeFixture.find(&idle, "+") == null);
 }
 
-test "App Session shows the newest waiting Message as ◌ [N ·] its first line, without the word queued" {
+fn queuedPresentation() !void {
     var fixture: ChromeFixture = undefined;
     try fixture.init();
     defer fixture.deinit();
@@ -6001,7 +6001,7 @@ test "App Session shows the newest waiting Message as ◌ [N ·] its first line,
     try std.testing.expect(ChromeFixture.find(&(try fixture.rows()), "◌") == null);
 }
 
-test "SessionFrontend optimistic submission keeps input rows fixed" {
+fn optimisticInputRows() !void {
     for ([_]u16{ 46, 140 }) |width| {
         var fixture: ChromeFixture = undefined;
         try fixture.init();
@@ -6072,7 +6072,7 @@ test "App Session accepted message refresh keeps the next draft intact without p
     try std.testing.expect(ChromeFixture.find(&shown, "› accepted original") != null);
 }
 
-test "App Session frame after Enter shows the optimistic Message and clears the composer" {
+fn optimisticEnteredFrame() !void {
     var fixture: ChromeFixture = undefined;
     try fixture.init();
     defer fixture.deinit();
@@ -6880,7 +6880,7 @@ test "SessionFrontend feed opens full bottom aligned and page round trip is an i
     try std.testing.expectEqualStrings(initial, try held.shown());
 }
 
-test "SessionFrontend feed banks held PgUp across a fill and live arrivals keep the held rows still" {
+fn heldScrollArrivals() !void {
     const fixture = try FeedFixture.create();
     defer fixture.destroy();
     const held = fixture.held;
@@ -7557,7 +7557,7 @@ test "failed reply retry gesture waits behind a reader and drops every supersede
     }
 }
 
-test "SessionFrontend backward fill supplies the scan replay boundary through the production handoff" {
+fn backwardReplayHandoff() !void {
     for ([_][]const u8{ "", "› queued\n" }) |pending| {
         const fixture = try FeedFixture.create();
         defer fixture.destroy();
@@ -7581,7 +7581,7 @@ test "SessionFrontend backward fill supplies the scan replay boundary through th
     }
 }
 
-test "SessionFrontend scan after provisional eviction appends without an obsolete replay boundary" {
+fn provisionalEvictionReplay() !void {
     const fixture = try FeedFixture.create();
     defer fixture.destroy();
     const held = fixture.held;
@@ -8381,7 +8381,7 @@ test "failed reply retry settlement propagates transport errors and unexpected a
     }
 }
 
-test "SessionFrontend fixed and growing end replay cycles count arrivals once across reader pages" {
+fn paginatedReplayCount() !void {
     const Host = struct {
         fn respond(listener: *std.Io.net.Server, bytes: []const u8, content: bool) !void {
             const io = std.testing.io;
@@ -10785,7 +10785,7 @@ test "SUI-29 empty chat welcome is centred until the first message" {
     };
 }
 
-test "Settings printable handoff keeps the retained draft and quiets its prompt" {
+pub fn sui4DraftHandoff() !void {
     for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |escape| {
         const held = try HeldFrontend.create();
         defer held.destroy();
@@ -10804,4 +10804,27 @@ test "Settings printable handoff keeps the retained draft and quiets its prompt"
         _ = try held.draw();
         try std.testing.expect(held.self.app_input.composer.caret);
     };
+}
+
+test "SUI-17 activity tail and new-entry projection" {
+    const cases = [_]*const fn () anyerror!void{
+        FeedView.testActivityTail,
+        queuedProjection,
+        queuedPresentation,
+        heldScrollArrivals,
+        backwardReplayHandoff,
+        provisionalEvictionReplay,
+        paginatedReplayCount,
+    };
+    for (cases) |case| try case();
+}
+
+test "SUI-19 message and composer layout" {
+    const cases = [_]*const fn () anyerror!void{
+        FeedView.testMessageLayout,
+        @import("Composer.zig").testMessageLayout,
+        optimisticInputRows,
+        optimisticEnteredFrame,
+    };
+    for (cases) |case| try case();
 }

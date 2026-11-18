@@ -191,7 +191,7 @@ pub const Settings = struct {
     }
 };
 
-test "SUI-30 chat tabs paint and accept only their visible cells" {
+fn sui30TabsGeometry() !void {
     var state: overview_view.State = undefined;
     try state.init(std.testing.allocator, .{ .cwd = "/w", .home = "/h" });
     defer state.deinit();
@@ -237,7 +237,7 @@ test "SUI-30 chat tabs paint and accept only their visible cells" {
     };
 }
 
-test "sidebar bottom separates Settings memory and update targets across geometry and states" {
+pub fn sui4BottomControls() !void {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const status = @import("upgrade_status.zig");
@@ -280,7 +280,7 @@ test "sidebar bottom separates Settings memory and update targets across geometr
     };
 }
 
-test "sidebar Settings word alone responds to hover and repeated clicks" {
+pub fn sui4WordBounds() !void {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     for ([_]u16{ 8, 12, 15, 46, 140 }) |width| {
@@ -338,7 +338,7 @@ test "Session pin alternate gestures never activate New Session or Settings" {
     };
 }
 
-test "SUI-30 session tab shade matches word hit bounds under hover" {
+fn sui30TabsTint() !void {
     var state: overview_view.State = undefined;
     try state.init(std.testing.allocator, .{ .cwd = "/w", .home = "/h" });
     defer state.deinit();
@@ -370,4 +370,12 @@ test "SUI-30 session tab shade matches word hit bounds under hover" {
         try std.testing.expectEqual(focus, state.selected);
         try std.testing.expectEqual(filter, state.archive);
     };
+}
+
+test "SUI-30 chat tabs paint and accept only their visible cells" {
+    const cases = [_]*const fn () anyerror!void{
+        sui30TabsGeometry,
+        sui30TabsTint,
+    };
+    for (cases) |case| try case();
 }

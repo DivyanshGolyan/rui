@@ -479,7 +479,7 @@ fn settingsKey(state: *State, facts: Facts, key: Input.Key) Effects {
     return .{};
 }
 
-test "Root input routing over every layer, main pane, settings state and input" {
+pub fn sui4RootRouting() !void {
     const LayerCase = enum { main, settings, sign_in_over_main, sign_in_over_settings };
     const Page = enum { plain, keys_open, choice_open, model_filter, upgrade_cancellable };
     const Event = enum { printable, pasted_printable, enter, pasted_enter, escape, ctrl_g, ctrl_c, paste_start, paste_end, click, pasted_click, wheel, key_release, colors, focus_out, open_settings, show_main, open_sign_in, close_sign_in, signed_in };
@@ -796,7 +796,7 @@ test "App input Tab never activates or edits and paste cannot traverse" {
     try std.testing.expectEqual(Target.settings_row, currentFocus(state));
 }
 
-test "App input model choice Tab domain retains its candidate in the filter and excludes hidden rows" {
+pub fn sui4ChoiceFocus() !void {
     const hits = [_]usize{ 3, 7, 11 };
     for (0..4) |index| for ([_]bool{ false, true }) |reverse| {
         var focus: ChoiceFocus = if (index == 0) .{ .filter = 99 } else .{ .row = hits[index - 1] };
@@ -811,7 +811,7 @@ test "App input model choice Tab domain retains its candidate in the filter and 
     try std.testing.expect(focus == .filter);
 }
 
-test "App input paste completion routes to the same owner for every focus and paste shape" {
+pub fn sui4PasteOwnership() !void {
     for ([_]bool{ false, true }) |wide| for ([_]bool{ false, true }) |session_open| for ([_]bool{ false, true }) |list_focused| for ([_][]const u8{ "", "\n", "text" }) |paste| {
         var state: State = .{ .area = if (list_focused) .list else .main };
         const facts: Facts = .{ .wide = wide, .session_open = session_open };

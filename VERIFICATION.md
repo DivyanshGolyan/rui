@@ -37,7 +37,7 @@ Run `zig build test-logic -Dtest-filter='initial presentation core'` and `zig bu
 
 ## Feed inset and activity spacing
 
-Run the `tool exit field`, `user band padding domain`, and `FeedView activity gap follows` native owner domains, plus the session-chrome integration group. Capture before and after User bands and activity at 140×40 and 46×30 with verify-rui. These frames establish renderer output, not physical input.
+Run native owners `SUI-4`, `SUI-17`, `SUI-19` and `SUI-30`, plus the overview and session-chrome integration groups. Capture before and after User bands and activity at 140×40 and 46×30 with verify-rui. These frames establish renderer output, not physical input.
 
 ## Contract index
 

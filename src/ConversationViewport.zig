@@ -1716,7 +1716,7 @@ test "quote body extraction metadata leaves grapheme layout and visual styles un
     };
 }
 
-test "tool exit field aligns quietly and truncates only the label across scripts widths colours and splits" {
+fn toolExitInsets() !void {
     const View = @import("session_view.zig");
     const Sink = struct {
         writer: *std.Io.Writer,
@@ -1772,7 +1772,7 @@ test "tool exit field aligns quietly and truncates only the label across scripts
     };
 }
 
-test "tool exit field keeps ASCII headings readable without colour and open output directly below" {
+fn toolExitAscii() !void {
     var document: Sized(256, true) = .{};
     try document.append(tool_fold.heading_marker ++ "x Run tests" ++ tool_fold.exit_open ++ "exit 127" ++ TerminalText.link_close ++ "\n" ++ tool_fold.output_marker ++ "    saved output\n");
     try document.prepare();
@@ -1794,7 +1794,7 @@ test "tool exit field keeps ASCII headings readable without colour and open outp
     }
 }
 
-test "timestamp owner covers first same minute new minute and intervening tool rows at both widths" {
+fn timestampChanges() !void {
     const cases = [_]struct { previous: ?[]const u8, tool: bool, current: []const u8, shown: bool }{
         .{ .previous = null, .tool = false, .current = "08:00", .shown = true },
         .{ .previous = "08:00", .tool = false, .current = "08:00", .shown = false },
@@ -1828,7 +1828,7 @@ test "timestamp owner covers first same minute new minute and intervening tool r
     }
 }
 
-test "user band fills wrapped rows and summaries without tinting the next tool row" {
+fn wrappedBand() !void {
     var document: Sized(512, true) = .{};
     try document.append(TerminalText.user_message_on ++ "\x1b[90m›\x1b[39m \x1b[2ma long user message spanning several rows\x1b[0m\n  \x1b[2;8m┄ 3 more lines\x1b[0m\n" ++ TerminalText.user_message_off ++ "  Ran tool\n");
     for ([_]bool{ false, true }) |colour| {
@@ -1854,7 +1854,7 @@ test "user band fills wrapped rows and summaries without tinting the next tool r
     }
 }
 
-test "whole user message provenance tints empty bodies and rejects italics without tinting peers" {
+fn bandProvenance() !void {
     var document: Sized(256, true) = .{};
     try document.append(TerminalText.user_message_on ++ "\x1b[90m›\x1b[39m \x1b[0m\n\x1b[3mupright\x1b[0m\n" ++ TerminalText.user_message_off ++ "\x1b[2;8m← Received message from peer\x1b[0m\n");
     var screen: TestScreen = undefined;
@@ -1870,7 +1870,7 @@ test "whole user message provenance tints empty bodies and rejects italics witho
     };
 }
 
-test "user band provenance includes blank and wrapped message lines only" {
+fn bandLines() !void {
     const cases = [_]struct { body: []const u8, lines: usize, wraps: bool }{
         .{ .body = "› \n", .lines = 1, .wraps = false },
         .{ .body = "\n", .lines = 1, .wraps = false },
@@ -1911,7 +1911,7 @@ test "user band provenance includes blank and wrapped message lines only" {
     try std.testing.expectEqual(@as(@TypeOf(unfinished.lineKind(0, null)), .plain), unfinished.lineKind(unfinished.length, null));
 }
 
-test "user band padding domain retains rows and source text" {
+fn bandPadding() !void {
     const testing = std.testing;
     for ([_]u16{ 46, 140 }) |width| for ([_]u8{ 0, 1, 2 }) |depth| for ([_]bool{ false, true }) |unicode_caps| {
         const method: Method = if (unicode_caps) .unicode else .wcwidth;
@@ -1979,7 +1979,7 @@ test "user band padding domain retains rows and source text" {
     };
 }
 
-test "baseline user band shape at requested widths" {
+fn legacyBandShape() !void {
     for ([_]u16{ 46, 140 }) |width| {
         var document: Sized(1024, true) = .{ .sidenotes = true };
         try document.append("\x1b[90m›\x1b[39m \x1b[8m14:20\x1b[0mshort\n");
@@ -1998,4 +1998,15 @@ test "baseline user band shape at requested widths" {
         try std.testing.expectEqualStrings("s", screen.screen.readCell(2, 0).?.char.grapheme);
         try std.testing.expectEqualStrings("1", screen.screen.readCell(width - 5, 0).?.char.grapheme);
     }
+}
+
+pub fn testMessageLayout() !void {
+    try toolExitInsets();
+    try toolExitAscii();
+    try timestampChanges();
+    try wrappedBand();
+    try bandProvenance();
+    try bandLines();
+    try bandPadding();
+    try legacyBandShape();
 }

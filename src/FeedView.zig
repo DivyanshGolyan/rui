@@ -576,7 +576,7 @@ fn testCell(surface: vxfw.Surface, row: usize, col: usize) []const u8 {
     return surface.buffer[row * surface.size.width + col].char.grapheme;
 }
 
-test "FeedView bottom alignment and scroll round trip include the activity tail away from end" {
+fn activityScrollRoundTrip() !void {
     const window = try testWindow();
     defer std.testing.allocator.destroy(window);
     try window.append(&.{.{ .key = .{ .position = 10 }, .text = .{ .bytes = "0\n1\n2\n3\n4\n5\n6\n7\n8\n9\na\nb\n" } }});
@@ -1249,7 +1249,7 @@ fn appendQuoteTestRow(window: *Window, position: u64, bytes: []const u8) !void {
     try window.append(&.{.{ .key = .{ .position = position }, .text = resident.Text.fromDocument(&document) }});
 }
 
-test "FeedView optimistic multiline band and attached note stay inside the viewport with or without colour" {
+fn optimisticBand() !void {
     for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |colour| {
         const window = try testWindow();
         defer std.testing.allocator.destroy(window);
@@ -1280,7 +1280,7 @@ test "FeedView optimistic multiline band and attached note stay inside the viewp
     };
 }
 
-test "FeedView maximum original and escaped preview remain bounded and scroll without oversized surfaces" {
+fn boundedPreview() !void {
     const bytes = try std.testing.allocator.alloc(u8, SessionInput.capacity);
     defer std.testing.allocator.free(bytes);
     @memset(bytes, 0x1b);
@@ -1336,7 +1336,7 @@ test "FeedView canonical failure annotation is exact-key frame decoration rather
     }
 }
 
-test "FeedView separates consecutive padded messages on the chat ground" {
+fn consecutiveBands() !void {
     for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |colour| {
         const window = try testWindow();
         defer std.testing.allocator.destroy(window);
@@ -1374,8 +1374,8 @@ test "FeedView separates consecutive padded messages on the chat ground" {
     };
 }
 
-test "FeedView activity gap follows pending and canonical user bands" {
-    for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |colour| for ([_]u8{ 0, 1, 2, 3, 4 }) |kind| {
+fn activityGap() !void {
+    for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |colour| for ([_]u8{ 0, 1, 2, 3, 4, 5 }) |kind| {
         const window = try testWindow();
         defer std.testing.allocator.destroy(window);
         if (kind == 1 or kind == 2 or kind == 4) {
@@ -1386,12 +1386,12 @@ test "FeedView activity gap follows pending and canonical user bands" {
         }
         const activity: vxfw.Text = .{ .text = "Thinking" };
         var anchor: Feed = .{};
-        var view: Self = .{ .window = window, .anchor = &anchor, .colour = colour, .style = .{ .bg = .{ .index = 8 } }, .colours = .{ .user_band = .{ .index = 10 } }, .tail = if (kind >= 3) null else activity.widget(), .pending = if (kind == 0) .{ .text = "hello" } else null };
+        var view: Self = .{ .window = window, .anchor = &anchor, .colour = colour, .style = .{ .bg = .{ .index = 8 } }, .colours = .{ .user_band = .{ .index = 10 } }, .tail = if (kind >= 3) null else activity.widget(), .pending = if (kind == 0 or kind == 5) .{ .text = "hello" } else null };
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         const frame = try testFrame(&view, arena.allocator(), width, 8);
         const gap: u32 = if (kind == 0 or kind == 1) 1 else 0;
-        try std.testing.expectEqual(@as(u32, if (kind == 0) 3 else 0) + gap + @as(u32, if (kind >= 3) 0 else 1), window.tail_rows);
+        try std.testing.expectEqual(@as(u32, if (kind == 0 or kind == 5) 3 else 0) + gap + @as(u32, if (kind >= 3) 0 else 1), window.tail_rows);
         if (gap != 0) {
             try std.testing.expectEqual(@as(usize, 1), frame.children.len);
             const row: usize = @intCast(frame.children[0].origin.row - 1);
@@ -1406,4 +1406,16 @@ test "FeedView activity gap follows pending and canonical user bands" {
         }
         _ = try testFrame(&view, arena.allocator(), width, 2);
     };
+}
+
+pub fn testActivityTail() !void {
+    try activityScrollRoundTrip();
+    try activityGap();
+}
+
+pub fn testMessageLayout() !void {
+    try optimisticBand();
+    try boundedPreview();
+    try consecutiveBands();
+    try viewport.testMessageLayout();
 }

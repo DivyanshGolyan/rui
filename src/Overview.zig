@@ -4292,7 +4292,7 @@ test "Footer notices fit or truncate on the right without adding rows; persisten
     }
 }
 
-test "Settings Keys opens from the overview and Esc returns to settings" {
+fn sui4NestedKeys() !void {
     for ([_]u16{ 46, 140 }) |width| {
         const rig = try openListed();
         defer rig.close();
@@ -5291,7 +5291,7 @@ test "App root navigation shows and focuses the main pane before every Session s
     }
 }
 
-test "App settings Enter reaches Root at both widths with and without a retained Session" {
+fn sui4SettingsEntry() !void {
     const Settings = struct {
         var dir: std.Io.Dir = undefined;
         var files: u8 = 0;
@@ -5966,7 +5966,7 @@ test "bare CSI and SS3 arrows move between view tabs through the existing key ta
     };
 }
 
-test "App settings Model keeps every named app binding live while filter text stays local" {
+fn sui4ModelKeys() !void {
     for (std.enums.values(keymap.Key)) |key| for (key_encodings.get(key)) |bytes| {
         if (std.mem.eql(u8, bytes, "\x1b")) continue;
         errdefer std.debug.print("settings Model key={s} bytes={x}\n", .{ @tagName(key), bytes });
@@ -5989,7 +5989,7 @@ test "App settings Model keeps every named app binding live while filter text st
     };
 }
 
-test "App settings Model filters live choices and saves the next Session at both widths" {
+fn sui4ModelFilter() !void {
     for ([_]u16{ 140, 46 }) |width| for ([_][]const u8{ "codex", "openai" }) |provider| for ([_][]const u8{ "gpt-6-luna", "future-chat" }) |id| {
         errdefer std.debug.print("Model width={d} provider={s} id={s}\n", .{ width, provider, id });
         var tmp = std.testing.tmpDir(.{});
@@ -6191,7 +6191,7 @@ test "chat info Archive backend forwards exact core ledger admission through the
     };
 }
 
-test "Overview mouse Settings hover persists across frames and never changes selection or focus" {
+fn sui4Hover() !void {
     const rig = try openListed();
     defer rig.close();
     var plain = try rig.shown(80, 24);
@@ -7390,7 +7390,7 @@ test "empty New Session owner upgrade handoff preserves model draft and caret th
     try std.testing.expectEqual(@as(usize, 1), EmptySessionOwner.count);
 }
 
-test "Overview forwards captured covered pane and paste without rereading newer Root state" {
+fn sui4CapturedPaste() !void {
     const rig = try openOverview();
     defer rig.close();
     const overview = rig.overview;
@@ -7660,7 +7660,7 @@ test "creation preference read failure is retained through repair and ordinary r
     try std.testing.expectEqualStrings("bypass", Seen.now.creation.permission_mode.slice());
 }
 
-test "App Settings pointer leaves the empty row inert and opens the word" {
+fn sui4Pointer() !void {
     for ([_]u16{ 46, 140 }) |width| {
         const rig = try openListed();
         defer rig.close();
@@ -7681,7 +7681,7 @@ test "App Settings pointer leaves the empty row inert and opens the word" {
     }
 }
 
-test "App overview Tab projection is list then Settings and Settings Enter uses the drawn identity" {
+fn sui4Tab() !void {
     for ([_]u16{ 46, 140 }) |width| {
         const rig = try openListed();
         defer rig.close();
@@ -8627,4 +8627,25 @@ test "narrow empty chat exit retains every list row through spinner repaints and
         }
         try std.testing.expect(changed);
     }
+}
+
+test "SUI-4 Settings focus navigation and retained draft" {
+    const cases = [_]*const fn () anyerror!void{
+        sui4SettingsEntry,
+        sui4NestedKeys,
+        sui4ModelKeys,
+        sui4ModelFilter,
+        sui4Hover,
+        sui4CapturedPaste,
+        sui4Pointer,
+        sui4Tab,
+        OverviewLines.sui4WordBounds,
+        OverviewLines.sui4BottomControls,
+        SessionFrontend.sui4DraftHandoff,
+        @import("Composer.zig").sui4InactivePrompt,
+        @import("app_input.zig").sui4ChoiceFocus,
+        @import("app_input.zig").sui4PasteOwnership,
+        @import("app_input.zig").sui4RootRouting,
+    };
+    for (cases) |case| try case();
 }
