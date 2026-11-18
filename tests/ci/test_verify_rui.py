@@ -1971,6 +1971,56 @@ while True:
                     self.assertFalse(predicate(types.SimpleNamespace(completed=screen.replace(close, ""))))
         self.helper["frame_initial_ready"](types.SimpleNamespace(wait=check))
 
+    def test_readiness_wording_domain_uses_one_compatibility_owner(self):
+        owner = self.helper["frame_wording"]
+        contains = self.helper["frame_wording_contains"]
+        groups = [
+            ("What shall we work on?", "Type a task"),
+            ("+ New chat", "+ New Session"),
+            ("○ New chat", "○ New Session"),
+            ("Chats  Archived", "Sessions  Archived"),
+            ("Welcome to Rui", "Sign in to Rui"),
+            ("Sign in to begin.", "Choose an account."),
+            ("Close", "[ Close ]"),
+            ("No chats yet.", "No unarchived Sessions.", "No Sessions yet."),
+            ("No archived chats", "No archived Sessions"),
+            ("The model's reply didn't come through", "Model reply unreadable"),
+            ("That didn't work", "Something went wrong"),
+            ("Your chats keep working while you are away.", "Detached. Host work continues."),
+        ]
+        for group in groups:
+            for expected in group:
+                for displayed in group:
+                    with self.subTest(expected=expected, displayed=displayed):
+                        self.assertIn(displayed, owner(expected))
+                        self.assertTrue(contains(expected, f"prefix {displayed} suffix"))
+                        self.assertFalse(contains(expected, "unrelated text"))
+                        results = []
+                        def wait(predicate, _description, *_args, **_kwargs):
+                            results.append(bool(predicate(types.SimpleNamespace(completed=displayed))))
+                        terminal = types.SimpleNamespace(wait=wait)
+                        self.helper["frame_wait"](None, terminal, expected)
+                        self.helper["frame_wait"](None, terminal, expected, absent=True)
+                        self.assertEqual(results, [True, False])
+        self.assertEqual(owner("a user draft"), {"a user draft"})
+        self.assertFalse(contains("different user draft", "a user draft"))
+        for first, shown in (("+ New chat", "+ New Session"),
+                             ("What shall we work on?", "Type a task"),
+                             ("Welcome to Rui", "Sign in to Rui")):
+            def wait(predicate, _description, **_kwargs):
+                self.assertTrue(predicate(types.SimpleNamespace(completed=f" + New Session\n Settings\n {shown}")))
+            self.helper["frame_initial_ready"](types.SimpleNamespace(wait=wait), first)
+        for expected, displayed in (("No chats yet.", "No unarchived Sessions."),
+                                    ("What shall we work on?", "Type a task")):
+            state = {"name": "compat", "steps": [], "expect": [expected], "absent": []}
+            self.helper["frame_ready"](types.SimpleNamespace(wait=lambda pred, *_a, **_kw:
+                self.assertTrue(pred(types.SimpleNamespace(completed=displayed)))), state)
+            self.assertIsNone(self.helper["frame_row_failure"]({"expect_last": expected}, displayed))
+            self.assertIsNone(self.helper["frame_row_failure"]({"expect_next": {expected: expected}}, displayed + "\n" + displayed))
+            state["expect"], state["absent"] = [], [expected]
+            self.helper["frame_ready"](types.SimpleNamespace(wait=lambda pred, *_a, **_kw:
+                self.assertFalse(pred(types.SimpleNamespace(completed=displayed)))), state)
+
     def test_initial_readiness_requires_complete_guided_account_controls(self):
         modal = (
             '                                  ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n'
@@ -2209,6 +2259,22 @@ while True:
                         self.assertEqual(self.helper["frame_background_failure"](
                             {"expect_background": {"missing": "#" + color}}, frame),
                             "missing background specimen 'missing'")
+
+    def test_old_and_new_placeholder_capture_checks_real_background_cells(self):
+        for expected, displayed in (("› What shall we work on?", "› Type a task"),
+                                    ("› Type a task", "› What shall we work on?")):
+            for bad in (False, True):
+                with self.subTest(expected=expected, displayed=displayed, bad=bad), tempfile.TemporaryDirectory() as temp:
+                    cells = tuple(Cell(char, None, False, bg="000000" if bad and index == len(displayed) - 1 else "121933")
+                                  for index, char in enumerate(displayed))
+                    frame = Frame(46, 30, Cursor(2, 3), False, (cells,), "121933", "d4cebf", "d4cebf")
+                    state = {"name": "input", "steps": [], "expect": [expected],
+                             "expect_background": {expected: "#121933"}}
+                    result = self.helper["frame_capture"](types.SimpleNamespace(meta={"sha": "a" * 40}),
+                        types.SimpleNamespace(frame=frame), Path(temp), state, (46, 30), None)
+                    self.assertEqual(result["ok"], not bad)
+                    if bad:
+                        self.assertIn("must have background", result["reason"])
 
     def test_style_expectations_validate_and_check_only_the_span_inside_its_row(self):
         for value in ([], [{"text": "/new", "bold": True}], [{"text": "new", "within": "› /new", "foreground": "#ABCDEF"}]):
@@ -3091,14 +3157,14 @@ class UpgradeFramesTest(unittest.TestCase):
         for rule, junction, bar in (("─", "┼", "│"), ("-", "+", "|")):
             boundary = rule * 12 + junction + rule * 20
             self.assertEqual(split(boundary), (rule * 12, junction, rule * 20))
-            for draft in ("What shall we work on?", "retained │ draft | content + more"):
+            for draft in ("What shall we work on?", "Type a task", "retained │ draft | content + more"):
                 lines = [" witness".ljust(12) + bar + " witness │ content",
                          "".ljust(12) + bar + " " + rule * 20, "".ljust(12) + bar + " › " + draft,
                          boundary, "".ljust(12) + bar + " model · low"]
                 screen = "\n".join(lines)
                 with self.subTest(junction=junction, draft=draft):
                     self.assertTrue(ready(screen, "witness"))
-                    self.assertEqual(ready(screen, empty=True), draft == "What shall we work on?")
+                    self.assertEqual(ready(screen, empty=True), draft in ("What shall we work on?", "Type a task"))
                     self.assertFalse(ready(screen, "missing witness"))
                     for before in (False, True):
                         marker = "! Couldn't reach GitHub; nothing changed" if before else "Update failed"
@@ -3106,7 +3172,7 @@ class UpgradeFramesTest(unittest.TestCase):
                         def wait(predicate, _description):
                             accepted.append(predicate(types.SimpleNamespace(completed=marker + "\n" + screen)))
                         settle(types.SimpleNamespace(wait=wait), before)
-                        self.assertEqual(accepted, [draft == "What shall we work on?"])
+                        self.assertEqual(accepted, [draft in ("What shall we work on?", "Type a task")])
         self.assertTrue(ready("witness | content\n ───────\n › retained | draft\n ───────\n model · low", "witness"))
 
     def test_sidebar_rule_junctions_and_legacy_vertical_endings(self):
@@ -3184,7 +3250,7 @@ class UpgradeFramesTest(unittest.TestCase):
         settle = self.helper["frame_failure_settled"]
         for split in (False, True):
             for rule, bar, junction in (("─", "│", "┼"), ("-", "|", "+")):
-                for draft in ("What shall we work on?", "retained draft"):
+                for draft in ("What shall we work on?", "Type a task", "retained draft"):
                     prefix = " ".ljust(20) + bar if split else ""
                     top = prefix + " " + rule * 20
                     bottom = rule * 20 + junction + rule * 20 if split else " " + rule * 20
@@ -3196,7 +3262,7 @@ class UpgradeFramesTest(unittest.TestCase):
                             results = []
                             settle(types.SimpleNamespace(wait=lambda pred, _description: results.append(
                                 pred(types.SimpleNamespace(completed=marker + "\n" + screen)))), before)
-                            self.assertEqual(results, [draft == "What shall we work on?"])
+                            self.assertEqual(results, [draft in ("What shall we work on?", "Type a task")])
                             root = Path(directory)
                             selected = root / ".local/bin/rui"
                             notice = "\nUpgraded to 0.78.10000" if before else ""
@@ -3209,6 +3275,30 @@ class UpgradeFramesTest(unittest.TestCase):
                                  patch.dict(drive.__globals__, {"frame_wait": lambda *_a, **_k: None, "frame_steps": lambda *_a, **_k: None}):
                                 drive(run, terminal, state, (None, None, "0.78.10000"))
                             self.assertTrue(results[-1])
+
+    def test_upgrade_driving_accepts_old_and_new_empty_composers_on_both_sides(self):
+        drive = self.helper["frame_drive_upgrade"]
+        for side in ("before", "after"):
+            for placeholder in ("Type a task", "What shall we work on?"):
+                for upgrade in ("current", "available", "updating", "failure"):
+                    with self.subTest(side=side, placeholder=placeholder, upgrade=upgrade), tempfile.TemporaryDirectory() as directory:
+                        chat = ("! Couldn't reach GitHub; nothing changed\n"
+                                "couldn't reach GitHub\nUpdate failed\n · publishing\nUpdating…\n"
+                                f"  ┄┄┄┄┄┄┄┄┄\n  › {placeholder}\n  ┄┄┄┄┄┄┄┄┄\n model · low")
+                        seen = []
+                        def wait(predicate, description, *_args, **_kwargs):
+                            seen.append(description)
+                            self.assertTrue(predicate(types.SimpleNamespace(completed=chat)), description)
+                        terminal = types.SimpleNamespace(wait=wait)
+                        run = types.SimpleNamespace(home=Path(directory))
+                        releases = types.SimpleNamespace(version="0.78.10000", requests=["/releases/tag/v0.78.10000"])
+                        state = {"upgrade": upgrade, "comparison_side": side}
+                        gate = object() if upgrade == "updating" else None
+                        with patch.dict(drive.__globals__, {"frame_steps": lambda *_a, **_kw: None}):
+                            drive(run, terminal, state, (releases, gate, "0.78.10000"))
+                        self.assertTrue(any("What shall we work on?" in name for name in seen))
+                        if upgrade == "failure":
+                            self.assertTrue(any("failed Upgrade" in name for name in seen))
 
     def test_narrow_upgrade_resize_reveals_the_list_without_closing_chat_specimens(self):
         reveal = self.helper["frame_upgrade_viewport"]
