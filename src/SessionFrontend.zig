@@ -6797,7 +6797,7 @@ fn firstRows(text: []const u8, count: usize) []const u8 {
     return text[0..end];
 }
 
-test "SessionFrontend draws a mid-Turn submission once before and after it is taken" {
+test "SUI-17 SessionFrontend draws queued and taken Messages once across work" {
     for ([_]u16{ 46, 140 }) |width| {
         const fixture = try FeedFixture.create();
         defer fixture.destroy();
@@ -6820,9 +6820,23 @@ test "SessionFrontend draws a mid-Turn submission once before and after it is ta
         const queued = try fixture.held.shown();
         try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, queued, "waiting one"));
         try std.testing.expect(std.mem.indexOf(u8, queued, "◌ waiting one") != null);
-        try fixture.page(.scan, &.{.{ .key = 11, .text = "› waiting one\n", .message_key = @splat('K') }}, true, true);
+        self.live.work.state = .{ .working = .{ .since = 1, .compaction = true } };
+        const compacting = try fixture.held.shown();
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, compacting, "waiting one"));
+        try std.testing.expect(std.mem.indexOf(u8, compacting, "◌ waiting one") != null);
+        try std.testing.expect(std.mem.indexOf(u8, compacting, "Compacting") != null);
+        try fixture.page(.scan, &.{.{ .key = 11, .text = "× Tool call · rejected\n" }}, true, true);
+        self.live.queued = .{ .count = 1, .oldest_position = 10, .newest_admission = 1, .newest_position = 10 };
+        self.live.queued_line = .{ .admission = 1, .line = .{} };
+        try self.live.queued_line.?.line.set("waiting one");
         self.live.work.state = .{ .working = .{ .since = 1 } };
-        self.live.queued = .{ .count = 1, .oldest_position = 12, .newest_admission = 2, .newest_position = 12 };
+        const rejected = try fixture.held.shown();
+        try std.testing.expect(std.mem.indexOf(u8, rejected, "Tool call · rejected") != null);
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, rejected, "waiting one"));
+        try std.testing.expect(std.mem.indexOf(u8, rejected, "◌ waiting one") != null);
+        try fixture.page(.scan, &.{.{ .key = 12, .text = "› waiting one\n", .message_key = @splat('K') }}, true, true);
+        self.live.work.state = .{ .working = .{ .since = 1 } };
+        self.live.queued = .{ .count = 1, .oldest_position = 13, .newest_admission = 2, .newest_position = 13 };
         self.live.queued_line = .{ .admission = 2, .line = .{} };
         try self.live.queued_line.?.line.set("waiting two");
         const taken = try fixture.held.shown();
@@ -8505,7 +8519,6 @@ test "SessionFrontend fixed and growing end replay cycles count arrivals once ac
                 try activity_reply.writePage(&ending_out, &endings);
                 try respond(listener, ending_out.buffered(), false);
             }
-            if (first == 1) try respond(listener, "", true);
             try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(2)), frontend, struct {
                 fn complete(self: *Self) bool {
                     return self.reader.completed();
