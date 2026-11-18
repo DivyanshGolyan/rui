@@ -160,7 +160,8 @@ func TestMissingPhysicalFootprintCannotQualifyPortableSample(t *testing.T) {
 	}
 }
 
-func TestExpectedCapacityRequestDigest(t *testing.T) {
+func TestCI80CapacityRequestDigestOracle(t *testing.T) {
+	// CI-80
 	for _, test := range []struct {
 		workspace string
 		store     string
@@ -182,9 +183,6 @@ func TestExpectedCapacityRequestDigest(t *testing.T) {
 			t.Fatal("request oracle ignored the configuration's Workspace")
 		}
 	}
-}
-
-func TestExpectedCapacityRequestDigestDeveloperBaseline(t *testing.T) {
 	const workspace, session, key = "/workspace\"\n雪", "k7m2qx", "capacity-1-0"
 	body := `{"model":"gpt-6-luna","parallel_tool_calls":true,"store":false,"stream":true,"include":["reasoning.encrypted_content"],"reasoning":{"effort":"medium"},"input":[{"role":"developer","content":[{"type":"input_text","text":` + measurement.JSONString(measurement.ModelInstructions(workspace, session, "gpt-6-luna")) + `}]},{"role":"user","content":[{"type":"input_text","text":"capacity-1-0"}]}],"tools":[],"text":{"verbosity":"low"}}`
 	bodyDigest := sha256.Sum256([]byte(body))

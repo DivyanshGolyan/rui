@@ -76,10 +76,9 @@ class RoundTripHistoryTests(unittest.TestCase):
                 del reasoning["created_by"]
                 histories[index] = [*request["input"][1:], reasoning, message]
 
-    def test_complete_history(self):
+    def test_ci_82_round_trip_history_oracle_rejects_corruption(self):
+        # CI-82
         transport.assert_round_trip_history(self.streams, 2, 3, self.answers, self.sessions)
-
-    def test_corrupted_history_keeps_latest_prompt_but_must_fail(self):
         baseline, *original = json.loads(self.streams[-1][3])["input"]
         mutations = {
             "omit_all_history": original[-1:],
@@ -103,7 +102,6 @@ class RoundTripHistoryTests(unittest.TestCase):
                 with self.assertRaisesRegex(AssertionError, "history"):
                     transport.assert_round_trip_history(corrupted, 2, 3, self.answers, self.sessions)
 
-    def test_missing_or_wrong_baseline_fails(self):
         for replacement in ([], [json.loads(self.streams[-2][3])["input"][0]]):
             corrupted = list(self.streams)
             address, stream, text, body = corrupted[-1]

@@ -20,7 +20,8 @@ import (
 	"github.com/shirou/gopsutil/v4/process"
 )
 
-func TestModelInstructionsMatchPythonEncoding(t *testing.T) {
+func TestCI78QualificationPromptEncoding(t *testing.T) {
+	// CI-78
 	fixtures, err := filepath.Abs("../../integration")
 	if err != nil {
 		t.Fatal(err)
@@ -51,6 +52,30 @@ sys.stdout.buffer.write(model_instructions(sys.argv[2] + "\0", store=sys.argv[3]
 				t.Fatalf("Go request instructions differ from Python encoding oracle:\ngot: %q\nwant: %q", got, want)
 			}
 		})
+	}
+	for _, tc := range []struct {
+		body, want string
+		valid      bool
+	}{
+		{`{"instructions":"baseline","input":[]}`, "baseline", true},
+		{`{"input":[{"role":"developer","content":[{"type":"input_text","text":"baseline"}]}]}`, "baseline", true},
+		{`{"input":[{"role":"user","content":[{"text":"x"}]}]}`, "", false},
+		{`{"instructions":null,"input":[]}`, "", false},
+	} {
+		got, err := RequestSystemPrompt([]byte(tc.body))
+		if (err == nil) != tc.valid || got != tc.want {
+			t.Fatalf("%s: got %q, %v", tc.body, got, err)
+		}
+	}
+	prompt := "quoted\" slash\\ newline\n control\x01 雪"
+	want := `{"role":"developer","content":[{"type":"input_text","text":"quoted\" slash\\ newline\n control\u0001 雪"}]}`
+	got := DeveloperInstructionItem(prompt)
+	if got != want {
+		t.Fatalf("developer item = %s, want %s", got, want)
+	}
+	read, err := RequestSystemPrompt([]byte(`{"input":[` + got + `]}`))
+	if err != nil || read != prompt {
+		t.Fatalf("round trip = %q, %v", read, err)
 	}
 }
 
@@ -787,35 +812,5 @@ func TestHostArgumentsUseOrderedSettingsAndExactProviders(t *testing.T) {
 		if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
 			t.Fatalf("endpoint %q: got %q, want %q", endpoint, got, want)
 		}
-	}
-}
-
-func TestRequestSystemPrompt(t *testing.T) {
-	for _, tc := range []struct {
-		body, want string
-		valid      bool
-	}{
-		{`{"instructions":"baseline","input":[]}`, "baseline", true},
-		{`{"input":[{"role":"developer","content":[{"type":"input_text","text":"baseline"}]}]}`, "baseline", true},
-		{`{"input":[{"role":"user","content":[{"text":"x"}]}]}`, "", false},
-		{`{"instructions":null,"input":[]}`, "", false},
-	} {
-		got, err := RequestSystemPrompt([]byte(tc.body))
-		if (err == nil) != tc.valid || got != tc.want {
-			t.Fatalf("%s: got %q, %v", tc.body, got, err)
-		}
-	}
-}
-
-func TestDeveloperInstructionItem(t *testing.T) {
-	prompt := "quoted\" slash\\ newline\n control\x01 雪"
-	want := `{"role":"developer","content":[{"type":"input_text","text":"quoted\" slash\\ newline\n control\u0001 雪"}]}`
-	got := DeveloperInstructionItem(prompt)
-	if got != want {
-		t.Fatalf("developer item = %s, want %s", got, want)
-	}
-	read, err := RequestSystemPrompt([]byte(`{"input":[` + got + `]}`))
-	if err != nil || read != prompt {
-		t.Fatalf("round trip = %q, %v", read, err)
 	}
 }

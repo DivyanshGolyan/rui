@@ -426,7 +426,7 @@ fn legacyImageDomain(codec: protocol.Codec, compact: bool, out: *std.Io.Writer) 
     }, out);
 }
 
-test "additive image requests preserve their codec wire bytes" {
+test "CM-44 complete request encoding preserves pinned wire bytes" {
     for ([_]protocol.Codec{ .@"openai-responses/1", .@"openai-responses/2", .@"openai-responses/3" }) |codec| {
         for ([_]bool{ false, true }) |compact| {
             var buffer: [8192]u8 = undefined;
