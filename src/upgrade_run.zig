@@ -495,7 +495,7 @@ pub fn ending(f: Facts, stopping: bool) status.Ended {
         const hosts = hostsOf(f);
         if (!activation.clientSafe(hosts.own)) return .{ .incompatible = receipt.selected };
         const restarted = hosts.counts.restarted != 0;
-        if (!receipt.changed and !restarted) return if (order(receipt.selected, f.release.?.ok) == .gt)
+        if (!receipt.changed and !restarted) return if (receipt.selected.order(f.release.?.ok) == .gt)
             .{ .superseded = receipt.selected }
         else
             .{ .up_to_date = receipt.selected };
