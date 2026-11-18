@@ -9,7 +9,8 @@ import subprocess
 import sys
 import tarfile
 
-from conflict_alert import github
+from conflict_alert import github, pages
+from screens_comment import MARKER
 
 
 def summary_sketch(body):
@@ -152,6 +153,28 @@ def live_body(env_body) -> str:
     return body
 
 
+def sticky_screen_evidence() -> bool:
+    """Accept a bot screenshot comment only for the current PR head."""
+    repo, number = os.environ.get("GITHUB_REPOSITORY"), os.environ.get("PR_NUMBER")
+    if not repo or not number:
+        return False
+    try:
+        head = github("GET", f"repos/{repo}/pulls/{number}")["head"]["sha"]
+        if not isinstance(head, str) or not head:
+            return False
+        for comment in pages(github, f"repos/{repo}/issues/{number}/comments?"):
+            body = comment.get("body")
+            if (comment.get("user", {}).get("login") == "github-actions[bot]"
+                    and isinstance(body, str) and MARKER in body
+                    and re.search(r"^Head: `" + re.escape(head) + r"`[ \t]*$", body, re.M)
+                    and any(re.search(r"!\[[^\]\n]*\]\(https?://[^\s)]+\)", line)
+                            for line in visible_lines(body))):
+                return True
+    except (OSError, subprocess.CalledProcessError, KeyError, TypeError, ValueError, AttributeError) as error:
+        print(f"Could not read screen comments from GitHub ({error}).")
+    return False
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("base", nargs="?", default=os.environ.get("BASE"))
@@ -160,6 +183,8 @@ def main():
     body = live_body(os.environ.get("PR_BODY", ""))
     if args.screens:
         reason = screen_refusal(body)
+        if reason and sticky_screen_evidence():
+            reason = None
     else:
         if not args.base:
             parser.error("provide BASE as an argument or environment variable")
