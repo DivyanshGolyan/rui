@@ -15,7 +15,7 @@ test("follow polls attached tree work after the root Turn ended and yields a for
             return Buffer.from(JSON.stringify({
                 delta: "full", since: String(pages), end: String(pages), more: false,
                 queued: { count: "0" },
-                work: { state: { kind: "working", since: "1" }, turn: "1", operation: "1", first_action: null },
+                work: { attention: null, group: "working", actions: { stop: false, interrupt: null, decide: null }, state: { kind: "working", since: "1" }, turn: "1", operation: "1", first_action: null },
                 items: pages === 1 ? [{ position: "1", ordinal: "0", at: "1", value: { turn_ended: { session: "r00t00", turn: "1", ending: "done", content: null } } }]
                     : pages === 2 ? []
                     : [{ position: "2", ordinal: "0", at: "2", value: { approval_requested: { session: "ch1ld1", action: "2", operation: "2", call_ordinal: "0", description: "Fetch page", tool: "fetch_page", server: "docs" } } }],
@@ -49,7 +49,7 @@ test("follow crosses an ending-publication gap and the owed Message's next Turn"
             return Buffer.from(JSON.stringify({
                 delta: "full", since: String(pages), end: String(pages), more: false,
                 queued: { count: "0" },
-                work: { state: { kind: pages < 5 ? "working" : "finished", since: "1" }, turn: pages < 4 ? "1" : "3", operation: null, first_action: null },
+                work: { attention: null, group: "working", actions: { stop: false, interrupt: null, decide: null }, state: { kind: pages < 5 ? "working" : "finished", since: "1" }, turn: pages < 4 ? "1" : "3", operation: null, first_action: null },
                 items: pages === 2 || pages === 4 ? [] : [{ position: String(pages), ordinal: "0", at: "1", value: { turn_ended: { session, turn, ending: "done", content: null } } }],
             }));
         },

@@ -75,6 +75,7 @@ test "every function that enters the Store has a round budget" {
         @embedFile("../domain/configuration.zig"),
         @embedFile("../domain/content.zig"),
         @embedFile("../domain/content_parts.zig"),
+        @embedFile("../domain/public_parts.zig"),
         @embedFile("../domain/find_tools.zig"),
         @embedFile("../domain/historical.zig"),
         @embedFile("../domain/history_floor.zig"),
@@ -97,6 +98,7 @@ test "every function that enters the Store has a round budget" {
         @embedFile("../mysql_literal.zig"),
         @embedFile("../mysql_row.zig"),
         @embedFile("../rsql.zig"),
+        @embedFile("../rsql_table.zig"),
         @embedFile("../schema.zig"),
         @embedFile("../sqlite.zig"),
         @embedFile("../testing.zig"),
@@ -174,6 +176,9 @@ test "each Store entry point takes its round budget on its common path" {
             try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
             var meter: RoundMeter = .{ .storage = &storage };
+            meter.start();
+            _ = try storage.publishRetryCrossings(0, 1);
+            meter.stop(.publishRetryCrossings);
             meter.start();
             try storage.saveModelFacts(&.{.{ .id = "catalog-budget", .context_window = null, .efforts = .{}, .openai_listed = true }}, null);
             meter.stop(.saveModelFacts);
@@ -274,6 +279,16 @@ test "each Store entry point takes its round budget on its common path" {
         fn compoundTurn(storage: *Store, tmp: *std.testing.TmpDir, meter: *RoundMeter) !void {
             const session = try configureTestSession(storage, "budget-compound");
             try store_testing.submitTestMessageParts(storage, tmp, "budget-compound-message", session.slice(), &.{ .{ .bytes = "first" }, .{ .bytes = "second" } });
+            const observed = try store_testing.observeCommandForTesting(storage, "budget-compound-message");
+            const identity = observed.kind.message.?.content;
+            const content_id = try store_testing.queryU64(storage, "SELECT content_id FROM message_admission WHERE command_key=?1", .{"budget-compound-message"});
+            const cursor_map = try @import("../../os/pages.zig").Mapped(@import("../domain/content_parts.zig").Cursor).map();
+            defer cursor_map.unmap();
+            cursor_map.value.init(try content_domain.Value.of(content_id, 1, identity.length, identity.digest));
+            try std.testing.expect(try storage.observeCommandPart(cursor_map.value)); // bounded raw window
+            meter.start();
+            try std.testing.expect(try storage.observeCommandPart(cursor_map.value)); // bounded index page
+            meter.stop(.observeCommandPart);
             const PressureRead = @import("../domain/model_admission.zig").PartsPressure.Read;
             const pressure_map = try @import("../../os/pages.zig").Mapped(PressureRead).map();
             defer pressure_map.unmap();
@@ -282,6 +297,15 @@ test "each Store entry point takes its round budget on its common path" {
             meter.start();
             try std.testing.expect(!try storage.advancePartsPressure(pressure_map.value));
             meter.stop(.advancePartsPressure);
+            const admission = try store_testing.queryU64(storage, "SELECT admission_id FROM message_admission WHERE session_ref=?1", .{session.slice()});
+            var public_reader = try @import("../domain/public_parts.zig").Reader.init(session, .{ .message = admission });
+            defer public_reader.deinit();
+            meter.start();
+            try std.testing.expect((try storage.readPublicParts(&public_reader)) == .pending);
+            meter.stop(.readPublicParts);
+            meter.start();
+            _ = try storage.openPublicPart(session.slice(), .{ .message = admission }, 1, 0);
+            meter.stop(.openPublicPart);
             const binding = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
             var view: TestingPage = undefined;
             view.open(storage, binding);

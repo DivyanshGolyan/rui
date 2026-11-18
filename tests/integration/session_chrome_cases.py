@@ -148,7 +148,7 @@ def composing(screen, draft):
     bounds = composer_bounds(screen)
     expected = {(" › " + draft).rstrip()}
     if not draft:
-        expected.add(" › Type a task")
+        expected.add(" › What shall we work on?")
     return (bounds is not None and bounds[1] == bounds[0] + 2
             and shown[bounds[0] + 1].rstrip() in expected)
 
@@ -188,16 +188,16 @@ def activity_case():
         master, caller, _ = chrome.open(session, lambda screen: "SEED-ANSWER" in screen)
         try:
             idle = settle_screen(master, quiet=0.5)
-            assert footer(idle).strip().startswith("‹ ") and "ctrl+x stop" not in footer(idle) and "⠹" not in idle, idle
+            assert footer(idle).strip().startswith("‹ ") and "ctrl+x stop" not in footer(idle) and "◝" not in idle, idle
             os.write(master, b"HOLD-QUESTION\r")
             release.set()
-            running = chrome.frame(master, b"", lambda screen: "⠹ Held call · " in screen)
+            running = chrome.frame(master, b"", lambda screen: "◝ Held call · " in screen)
             bottom = feed_bottom(running)
             tail = transcript_rows(running)[bottom - 1:bottom]
-            assert [line for line in transcript_rows(running)[:bottom] if line.startswith(("⠹", "◌"))] == tail, running
-            assert tail == [tail[-1]] and tail[-1].startswith("⠹ Held call · "), running
-            assert transcript_rows(running)[bottom - 1].startswith("⠹ Held call · ") and not rows(running)[bottom].strip(), running
-            assert tail[-1].removeprefix("⠹ Held call · ").rstrip("s").isdigit(), running
+            assert [line for line in transcript_rows(running)[:bottom] if line.startswith(("◝", "◌"))] == tail, running
+            assert tail == [tail[-1]] and tail[-1].startswith("◝ Held call · "), running
+            assert transcript_rows(running)[bottom - 1].startswith("◝ Held call · ") and not rows(running)[bottom].strip(), running
+            assert tail[-1].removeprefix("◝ Held call · ").rstrip("s").isdigit(), running
             last = footer(running)
             assert last.strip().startswith("‹ ") and last.endswith("ctrl+x stop") and len(last.rstrip()) == 80, running
             for index in range(3):
@@ -205,23 +205,23 @@ def activity_case():
                 count = f"{index + 1} · " if index else ""
                 waiting = chrome.frame(master, b"", lambda screen, count=count, index=index:
                     f"◌ {count}WAITING-{index}" in screen and composing(screen, "")
-                    and all(screen.count(f"› WAITING-{i}") == 1
-                        and screen.count(f"second line {i}") == 1 for i in range(index + 1)))
+                    and all(f"› WAITING-{i}" not in screen
+                        and f"second line {i}" not in screen for i in range(index + 1)))
                 assert "Sending" not in waiting, waiting
             bottom = feed_bottom(waiting)
             tail = transcript_rows(waiting)[bottom - 2:bottom]
-            assert [line for line in transcript_rows(waiting)[:bottom] if line.startswith(("⠹", "◌"))] == tail, waiting
-            assert tail[-2].startswith("⠹ Held call · ") and tail[-1] == "◌ 3 · WAITING-2", waiting
+            assert [line for line in transcript_rows(waiting)[:bottom] if line.startswith(("◝", "◌"))] == tail, waiting
+            assert tail[-2].startswith("◝ Held call · ") and tail[-1] == "◌ 3 · WAITING-2", waiting
             assert transcript_rows(waiting)[bottom - 1] == "◌ 3 · WAITING-2" and not rows(waiting)[bottom].strip(), waiting
             assert "queued" not in waiting.lower(), waiting
             for index in range(3):
-                assert waiting.count(f"› WAITING-{index}") == 1, waiting
-                assert waiting.count(f"second line {index}") == 1, waiting
-            assert waiting.index("› WAITING-0") < waiting.index("› WAITING-1") < waiting.index("› WAITING-2"), waiting
+                assert f"› WAITING-{index}" not in waiting, waiting
+                assert f"second line {index}" not in waiting, waiting
+            assert waiting.count("WAITING-2") == 1, waiting
             assert footer(waiting).endswith("ctrl+x stop"), waiting
             (chrome.workspace / "release").write_text("")
             done = chrome.frame(master, b"", lambda screen: "HELD-DONE" in screen
-                and "◌" not in screen and "⠹" not in screen, timeout=30)
+                and "◌" not in screen and "◝" not in screen, timeout=30)
             assert footer(done).strip().startswith("‹ ") and "ctrl+x stop" not in footer(done), done
             order = [done.count(f"› WAITING-{i}") for i in range(3)]
             assert order == [1, 1, 1], done
@@ -231,7 +231,103 @@ def activity_case():
         finally:
             release.set()
             (chrome.workspace / "release").write_text("")
-    print("session chrome: the running call and its clock, ◌ 3 · the newest waiting Message, ctrl+x stop; full waiting Messages stay visible once before and after completion", flush=True)
+    print("session chrome: the running call and its clock, ◌ 3 · the newest waiting Message, ctrl+x stop; waiting Messages appear only in the queue until applied, then once as bands", flush=True)
+
+
+
+def thinking_queue_case():
+    for width, height in ((140, 40), (46, 30)):
+        first_release, next_release = threading.Event(), threading.Event()
+        first = fixture.sse_answer("thinking-first", "r1", "m1", "FIRST-DONE")[0]
+        second = fixture.sse_answer("thinking-second", "r2", "m2", "SECOND-DONE")[0]
+        with Chrome("rui-thinking-queue.", [(first, first_release), (second, next_release)]) as chrome:
+            session = chrome.session()
+            master, caller, _ = chrome.open(session, lambda screen: True, columns=width, height=height)
+            try:
+                working = chrome.frame(master, b"FIRST-QUESTION\r", lambda screen:
+                    "Thinking" in screen and "FIRST-QUESTION" in screen)
+                assert "MIDTURN-HI" not in working, working
+                queued = chrome.frame(master, b"MIDTURN-HI\r", lambda screen:
+                    "◌ MIDTURN-HI" in screen and composing(screen, ""))
+                assert "Thinking" in queued, queued
+                assert queued.count("MIDTURN-HI") == 1 and "› MIDTURN-HI" not in queued, queued
+                first_release.set()
+                taken = chrome.frame(master, b"", lambda screen:
+                    "FIRST-DONE" in screen and "› MIDTURN-HI" in screen and "Thinking" in screen, timeout=30)
+                assert taken.count("MIDTURN-HI") == 1 and "◌ MIDTURN-HI" not in taken, taken
+                next_release.set()
+                done = chrome.frame(master, b"", lambda screen: "SECOND-DONE" in screen, timeout=30)
+                assert done.count("MIDTURN-HI") == 1 and "◌ MIDTURN-HI" not in done, done
+                chrome.leave(master, caller)
+            finally:
+                first_release.set()
+                next_release.set()
+    print("session chrome: a mid-Thinking submission is queued once, then shown once as a taken Message at both sizes", flush=True)
+
+
+def rejected_tool_thinking_queue_case():
+    for width, height in ((140, 40), (46, 30)):
+        next_release, final_release = threading.Event(), threading.Event()
+        calls = fixture.sse_tool_calls("rejected-thinking", [("unavailable_tool", "unknown-call", "{}")])
+        answer = fixture.sse_answer("rejected-after", "r1", "m1", "AFTER-REJECTION")[0]
+        final = fixture.sse_answer("rejected-final", "r2", "m2", "FINAL-ANSWER")[0]
+        with Chrome("rui-rejected-thinking.", [calls, (answer, next_release), (final, final_release)]) as chrome:
+            session = chrome.session()
+            master, caller, _ = chrome.open(session, lambda screen: True, columns=width, height=height)
+            try:
+                chrome.frame(master, b"FIRST-QUESTION\r", lambda screen:
+                    "Tool call · rejected" in screen and "Thinking" in screen, timeout=30)
+                initial = chrome.frame(master, b"MIDTURN-HI\r", lambda screen:
+                    "◌ MIDTURN-HI" in screen and composing(screen, ""))
+                assert initial.count("MIDTURN-HI") == 1 and "› MIDTURN-HI" not in initial, initial
+                for keys, draft in ((b"x", "x"), (b"\x7f", ""), (b"y", "y"), (b"\x7f", "")):
+                    stable = chrome.frame(master, keys, lambda screen:
+                        composing(screen, draft) and re.search(r"Thinking · \d+s", screen), timeout=15)
+                    assert "Tool call · rejected" in stable and stable.count("MIDTURN-HI") == 1, stable
+                    assert "◌ MIDTURN-HI" in stable and "› MIDTURN-HI" not in stable, stable
+                next_release.set()
+                taken = chrome.frame(master, b"", lambda screen:
+                    "AFTER-REJECTION" in screen and "› MIDTURN-HI" in screen and "Thinking" in screen, timeout=30)
+                assert taken.count("MIDTURN-HI") == 1 and "◌ MIDTURN-HI" not in taken, taken
+                final_release.set()
+                chrome.frame(master, b"", lambda screen: "FINAL-ANSWER" in screen, timeout=30)
+                chrome.leave(master, caller)
+            finally:
+                next_release.set()
+                final_release.set()
+    print("session chrome: rejected tool and resumed Thinking keep a queued follow-up once until taken at both sizes", flush=True)
+
+
+
+def rejection_after_queued_send_case():
+    for width, height in ((140, 40), (46, 30)):
+        first_release, next_release = threading.Event(), threading.Event()
+        calls = fixture.sse_tool_calls("queued-before-rejection", [("unavailable_tool", "unknown-call", "{}")])
+        answer = fixture.sse_answer("after-queued-rejection", "r1", "m1", "FINAL-ANSWER")[0]
+        with Chrome("rui-queued-before-rejection.", [(calls, first_release), (answer, next_release)]) as chrome:
+            session = chrome.session()
+            master, caller, _ = chrome.open(session, lambda screen: True, columns=width, height=height)
+            try:
+                chrome.frame(master, b"FIRST-QUESTION\r", lambda screen: "Thinking" in screen)
+                queued = chrome.frame(master, b"MIDTURN-HI\r", lambda screen:
+                    "◌ MIDTURN-HI" in screen and composing(screen, ""))
+                assert queued.count("MIDTURN-HI") == 1 and "› MIDTURN-HI" not in queued, queued
+                first_release.set()
+                taken = chrome.frame(master, b"", lambda screen:
+                    "Tool call · rejected" in screen and "Thinking" in screen and "› MIDTURN-HI" in screen, timeout=30)
+                assert taken.count("MIDTURN-HI") == 1 and "◌ MIDTURN-HI" not in taken, taken
+                for keys, draft in ((b"x", "x"), (b"\x7f", ""), (b"y", "y"), (b"\x7f", "")):
+                    stable = chrome.frame(master, keys, lambda screen:
+                        composing(screen, draft) and re.search(r"Thinking · \d+s", screen), timeout=15)
+                    assert "› MIDTURN-HI" in stable and stable.count("MIDTURN-HI") == 1, stable
+                    assert "◌ MIDTURN-HI" not in stable, stable
+                next_release.set()
+                chrome.frame(master, b"", lambda screen: "FINAL-ANSWER" in screen, timeout=30)
+                chrome.leave(master, caller)
+            finally:
+                first_release.set()
+                next_release.set()
+    print("session chrome: a rejected tool after a queued send preserves one representation as work continues", flush=True)
 
 
 def send_state_case():
@@ -368,7 +464,7 @@ def scroll_marker_case():
         assert len(chrome.endpoint.requests) == requests, "scrolling sent input"
         os.write(master, b"\x15HOLD-QUESTION\r")
         release.set()
-        chrome.frame(master, b"", lambda screen: "⠹ Held call · " in screen)
+        chrome.frame(master, b"", lambda screen: "◝ Held call · " in screen)
         held = chrome.frame(master, b"\x1b[1;2A", lambda screen: marker(screen) == "↓")
         (chrome.workspace / "release").write_text("")
         counted = chrome.frame(master, b"", lambda screen: (marker(screen) or "").endswith(" new"), timeout=30)
@@ -493,11 +589,11 @@ def pages_case():
             chrome.frame(master, b"", lambda screen: latest(screen, "SEED-ANSWER"))
             os.write(master, b"HOLD-QUESTION\r")
             release.set()
-            chrome.frame(master, b"", lambda screen: "⠹ Held call · " in screen)
+            chrome.frame(master, b"", lambda screen: "◝ Held call · " in screen)
             working = chat_info_open(master)
             assert rows(working)[-1].endswith("esc"), working
             returned = chrome.frame(master, b"\x1b", lambda screen:
-                                    "⠹ Held call · " in screen and marker(screen) is None
+                                    "◝ Held call · " in screen and marker(screen) is None
                                     and footer(screen).endswith("ctrl+x stop")
                                     and "esc close" not in screen)
             assert footer(returned).endswith("ctrl+x stop"), returned
@@ -586,6 +682,30 @@ def info_natural_height_case():
     print("session chrome: natural-height info leaves saved feed above; Model grows/shrinks by its rows; model/effort clicks keep feed and draft; the footer and Alt-I share one transition", flush=True)
 
 
+def approval_glyph_domain():
+    # APPROVAL-3: the terminal carries locale selection into the Action read.
+    with Chrome("rui-chrome-approval-glyph.", []) as chrome:
+        session = chrome.session(permission="ask")
+        chrome.endpoint.responses.append(fixture.sse_tool_calls("glyph", [
+            ("bash", "glyph-call", json.dumps({
+                "cmd": "printf done", "description": "Review approval glyph", "timeout_ms": None}))]))
+        request = admit(chrome.home, "session", "send", "--to", session, input="Review this")["request"]
+        fixture.wait_for(lambda: fixture.observe(chrome.store, request)["state"] == "waiting_for_permission", "pending request")
+        for locale, glyph in (("C", "?"), ("C.UTF-8", "●")):
+            for width, height in ((140, 40), (46, 30)):
+                master, slave = open_pty(width, height)
+                chrome.descriptors += [master, slave]
+                caller = spawn([str(fixture.RUI), "session", "resume", "--", session],
+                    env={**os.environ, "HOME": str(chrome.home), "LC_ALL": locale}, cwd=str(chrome.workspace),
+                    stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+                chrome.callers.append(caller)
+                title = f"{glyph} Review approval glyph"
+                shown = chrome.frame(master, b"", lambda screen: title in screen and "Allow once" in screen)
+                assert title in shown and ("●" if glyph == "?" else "?") + " Review approval glyph" not in shown, shown
+                chrome.detach(master, caller)
+    print("session chrome: approval headings match the terminal locale at both widths", flush=True)
+
+
 def approval_overflow_case():
     with Chrome("rui-chrome-approval-overflow.", []) as chrome:
         for count in (40, 3):
@@ -642,9 +762,9 @@ def opening_case():
             for index in range(2):
                 admit(chrome.home, "session", "send", "--to", session, input=f"WAITING-{index}")
             release.set()
-            master, caller, opened = chrome.open(session, lambda screen: "◌ 2 · WAITING-1" in screen and "⠹ Held call · " in screen)
+            master, caller, opened = chrome.open(session, lambda screen: "◌ 2 · WAITING-1" in screen and "◝ Held call · " in screen)
             tail = tail_rows(opened)
-            assert tail[-2].startswith("⠹ Held call · ") and tail[-1] == "◌ 2 · WAITING-1", opened
+            assert tail[-2].startswith("◝ Held call · ") and tail[-1] == "◌ 2 · WAITING-1", opened
             assert footer(opened).endswith("ctrl+x stop"), opened
             (chrome.workspace / "release").write_text("")
             chrome.frame(master, b"", lambda screen: latest(screen, "HELD-DONE") and "◌" not in screen, timeout=30)
@@ -718,16 +838,20 @@ def keys_case():
             assert all(not line.strip() for line in pane_rows[used_rows:]), keys
             for absent in ("/help", "Ctrl-X twice", "shift+enter or ctrl+j", "Commands", "Marks", "Esc returns", "↑↓ · enter change · esc close", "‹ Rui · settings", 'ctrl+g', 'ctrl+d', 'ctrl+n', 'ctrl+end', 'ctrl+c/d', 'pgup/pgdn', 'first session', 'latest / last', 'scroll / select'):
                 assert absent not in keys, (width, absent, keys)
-            settings = chrome.frame(master, b"\rx\x1b", lambda screen: "Notifications" in screen and "Version" in screen)
+            settings = chrome.frame(master, b"\r\x1b", lambda screen: "Notifications" in screen and "Version" in screen)
             assert "earlier message" not in settings, settings
             if width == 140:
                 chrome.frame(master, b"\x1b", lambda screen:
                              latest(screen, "KEYS-ANSWER") and composing(screen, "")
                              and "Rui · settings" not in screen)
+                chrome.frame(master, gesture, lambda screen: "Notifications" in screen and "Version" in screen)
+                chrome.frame(master, b"x", lambda screen: latest(screen, "KEYS-ANSWER") and composing(screen, "x")
+                             and "Notifications" not in screen)
+                chrome.frame(master, b"\x7f", lambda screen: composing(screen, ""))
             else:
                 chrome.frame(master, b"\x1b", lambda screen: "Settings" in screen and "Rui · settings" not in screen and not any(line.startswith(" ‹ ") for line in rows(screen)))
             chrome.leave(master, caller)
-    print("session chrome: Settings > Keys shows src/keymap.zig's reference rows aligned, paired at 140 columns and one column at 46; Enter/text are inert and Esc returns one layer, preserving a wide conversation", flush=True)
+    print("session chrome: Settings > Keys shows src/keymap.zig's reference rows aligned, paired at 140 columns and one column at 46; Enter is inert, Esc returns one layer, and printable input returns to the wide conversation", flush=True)
 
 
 def keys_reference():
@@ -762,9 +886,13 @@ def main():
     send_state_case()
     send_recovery_case()
     activity_case()
+    thinking_queue_case()
+    rejected_tool_thinking_queue_case()
+    rejection_after_queued_send_case()
     scroll_marker_case()
     pages_case()
     info_natural_height_case()
+    approval_glyph_domain()
     approval_overflow_case()
     opening_case()
     notice_case()

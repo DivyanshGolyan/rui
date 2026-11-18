@@ -18,6 +18,15 @@ RUI = pathlib.Path(sys.argv[1]).resolve()
 ROOT = pathlib.Path.cwd()
 
 
+def request_system_prompt(request):
+    if "instructions" in request:
+        return request["instructions"]
+    first = request["input"][0]
+    text = first["content"][0]["text"]
+    assert first == {"role": "developer", "content": [{"type": "input_text", "text": text}]}, first
+    return text
+
+
 MODEL_CONTEXT_PARTS = (pathlib.Path(__file__).resolve().parents[2] / "src" / "model_instructions.txt").read_text().split("{}")
 
 
@@ -500,7 +509,7 @@ def host_arguments(store, endpoint, *extra, accelerated_retries=True, active_cap
     return args
 
 
-def start_host(store, endpoint, *extra, accelerated_retries=True, active_capacity=1, observations=None, stderr_pipe=None):
+def start_host(store, endpoint, *extra, accelerated_retries=True, active_capacity=1, observations=None, stderr_pipe=None, pause=None):
     args = host_arguments(
         store,
         endpoint,
@@ -512,6 +521,7 @@ def start_host(store, endpoint, *extra, accelerated_retries=True, active_capacit
         args,
         observations=observations,
         stderr_pipe=stderr_pipe,
+        pause=pause,
         required_fields=(
             {"execution": "enabled", "nghttp2": "1.70.0"}
             if endpoint is not None

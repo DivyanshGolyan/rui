@@ -81,10 +81,8 @@ def main():
             if path.is_file():
                 data = path.read_bytes()
                 assert url.encode() not in data and password.encode() not in data, "login reached a runtime file"
-        if os_semantics.PROC_FS:
-            for name in ("cmdline", "environ"):
-                data = pathlib.Path(f"/proc/{child.pid}/{name}").read_bytes()
-                assert url.encode() not in data and password.encode() not in data, f"login reached {name}"
+        for name, data in (os_semantics.launch_records(child.pid) or {}).items():
+            assert url.encode() not in data and password.encode() not in data, f"login reached {name}"
 
     def close(child):
         host_process.close_stdin(child)

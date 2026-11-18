@@ -33,7 +33,7 @@ fn hostToolSet(digests: *[records.len][32]u8) tools.HostToolSet {
     return .{ .records = &records, .digests = digests };
 }
 
-fn propose(storage: *core.Store, tmp: *std.testing.TmpDir, comptime runner: tools.Runner) !@import("../../bounded.zig").Bounded(@import("../../session_id.zig").max_reference_bytes) {
+pub fn propose(storage: *core.Store, tmp: *std.testing.TmpDir, comptime runner: tools.Runner) !@import("../../bounded.zig").Bounded(@import("../../session_id.zig").max_reference_bytes) {
     var workspace: [protocol.max_workspace_bytes]u8 = undefined;
     var configure = try testing.completeConfiguration("action-parts-config", "", try testing.canonicalCwd(std.testing.io, &workspace), "model-a");
     const name = if (runner == .bash) "bash" else "fetch_page";

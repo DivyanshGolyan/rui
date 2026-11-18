@@ -5,6 +5,8 @@ const wire_request = @import("wire_request.zig");
 const core = @import("core_tools.zig");
 const storage = @import("store.zig");
 const utf8_validation = @import("utf8_validation.zig");
+const content_value = @import("content_value.zig");
+const part_text = @import("part_text.zig");
 
 const window_bytes = 16 * 1024;
 
@@ -130,16 +132,113 @@ fn findEntry(store: *storage.Store, page: *protocol.ActivityFacts, request: *pro
     }
 }
 
-fn contentOf(item: *const protocol.ActivityItem) ?protocol.ActivityItem.Content {
+fn contentOf(item: *const protocol.ActivityItem) ?content_value.Value {
     return switch (item.value) {
         .admission, .user, .received => |message| message.content,
-        .assistant => |assistant| assistant.content,
+        .assistant => |assistant| .{ .text = assistant.content },
         .tool_result => |result| result.content,
         .sent => |sent| sent.content,
-        .turn_ended => |ended| ended.content,
+        .turn_ended => |ended| if (ended.content) |reference| .{ .text = reference } else null,
         else => null,
     };
 }
+
+/// An entry's value as its display text: a text value's own bytes, or a parts value's
+/// Text parts and image placeholders laid out by `part_text`.
+const Shown = union(enum) {
+    text: storage.ContentLocation,
+    parts: StoreParts,
+
+    fn open(store: *storage.Store, arena: std.mem.Allocator, session: []const u8, item: *const protocol.ActivityItem, value: content_value.Value) !Shown {
+        return switch (value) {
+            .text => .{ .text = try store.openActivityContent(try contentRequest(arena, session, item)) },
+            .parts => |parts| .{ .parts = try StoreParts.collect(store, arena, session, parts) },
+        };
+    }
+
+    fn length(self: *Shown) !u64 {
+        return switch (self.*) {
+            .text => |location| location.reference.length,
+            .parts => |*parts| {
+                parts.next_index = 0;
+                return part_text.length(parts);
+            },
+        };
+    }
+
+    /// At most `maximum` display bytes from `offset`.
+    fn read(self: *Shown, arena: std.mem.Allocator, offset: u64, maximum: usize) ![]const u8 {
+        switch (self.*) {
+            .text => |location| return readLocation(arena, location, offset, maximum),
+            .parts => |*parts| {
+                const total = try self.length();
+                if (offset > total) return error.InvalidOffset;
+                var sink: Collect = .{ .bytes = try arena.alloc(u8, @intCast(@min(maximum, total - offset))) };
+                parts.next_index = 0;
+                _ = try part_text.write(parts, .{ .start = offset, .length = sink.bytes.len }, &sink);
+                if (sink.len != sink.bytes.len) return error.ShortCanonicalRead;
+                return sink.bytes;
+            },
+        }
+    }
+
+    const Collect = struct {
+        bytes: []u8,
+        len: usize = 0,
+
+        pub fn feed(self: *Collect, bytes: []const u8) !void {
+            @memcpy(self.bytes[self.len..][0..bytes.len], bytes);
+            self.len += bytes.len;
+        }
+    };
+};
+
+/// The certified part list of a Session-scoped owner, read whole from the Store, as a
+/// `part_text` source; Text part slices are read through the indexed part route.
+const StoreParts = struct {
+    store: *storage.Store,
+    arena: std.mem.Allocator,
+    session: []const u8,
+    owner: content_value.Owner,
+    parts: []const content_value.Part,
+    next_index: usize = 0,
+
+    pub const Stop = void;
+
+    fn collect(store: *storage.Store, arena: std.mem.Allocator, session: []const u8, value: content_value.Value.Parts) !StoreParts {
+        var bounded: @FieldType(storage.PublicParts.Reader, "session") = .{};
+        try bounded.set(session);
+        var reader = try storage.PublicParts.Reader.init(bounded, value.owner);
+        defer reader.deinit();
+        var parts: std.ArrayList(content_value.Part) = .empty;
+        while (true) switch (try store.readPublicParts(&reader)) {
+            .pending => {},
+            .certified => |certified| if (!std.meta.eql(certified.identity, value.identity)) return error.CorruptStore,
+            .part => |part| try parts.append(arena, part),
+            .done => break,
+        };
+        return .{ .store = store, .arena = arena, .session = session, .owner = value.owner, .parts = parts.items };
+    }
+
+    fn images(self: *const StoreParts) usize {
+        var count: usize = 0;
+        for (self.parts) |part| count += @intFromBool(part.kind == .image);
+        return count;
+    }
+
+    pub fn next(self: *StoreParts) !?content_value.Part {
+        if (self.next_index == self.parts.len) return null;
+        defer self.next_index += 1;
+        return self.parts[self.next_index];
+    }
+
+    pub fn text(self: *StoreParts, part: content_value.Part, start: u64, count: u64, sink: anytype) !?void {
+        const location = try self.store.openPublicPart(self.session, self.owner, part.ordinal, start);
+        if (!std.meta.eql(location.reference, part.reference)) return error.CorruptStore;
+        try sink.feed(try readLocation(self.arena, location, start, @intCast(count)));
+        return null;
+    }
+};
 
 fn contentRequest(arena: std.mem.Allocator, session: []const u8, item: *const protocol.ActivityItem) !*protocol.ReadActivityContent {
     const request = try arena.create(protocol.ReadActivityContent);
@@ -201,12 +300,19 @@ fn outline(store: *storage.Store, arena: std.mem.Allocator, session: []const u8,
         .approval_requested => |requested| if (!std.mem.eql(u8, requested.session.slice(), session)) try out.print(" agent {s}", .{requested.session.slice()}),
         else => {},
     }
-    if (contentOf(item)) |content| {
-        try out.print(" {d} bytes", .{content.length});
+    if (contentOf(item)) |value| {
+        var parts: ?Shown = null;
+        switch (value) {
+            .text => |reference| try out.print(" {d} bytes", .{reference.length}),
+            .parts => {
+                parts = try Shown.open(store, arena, session, item, value);
+                try out.print(" {d} parts, {d} images", .{ parts.?.parts.parts.len, parts.?.parts.images() });
+            },
+        }
         if (item.value == .assistant and item.value.assistant.final) try out.writeAll(", final");
         if (item.value != .tool_result) {
-            const request = try contentRequest(arena, session, item);
-            const bytes = try readLocation(arena, try store.openActivityContent(request), 0, 100);
+            var shown = parts orelse try Shown.open(store, arena, session, item, value);
+            const bytes = try shown.read(arena, 0, 100);
             const line = bytes[0 .. std.mem.indexOfAny(u8, bytes, "\r\n") orelse bytes.len];
             try out.writeAll(": ");
             try std.json.Stringify.value(utf8_validation.wholePrefix(line) orelse "", .{}, out);
@@ -217,7 +323,6 @@ fn outline(store: *storage.Store, arena: std.mem.Allocator, session: []const u8,
 }
 
 fn full(store: *storage.Store, arena: std.mem.Allocator, session: []const u8, item: *const protocol.ActivityItem, offset: u64, out: *std.Io.Writer) !void {
-    const request = try contentRequest(arena, session, item);
     var text: []const u8 = undefined;
     var total: u64 = undefined;
     if (item.value == .call) {
@@ -245,10 +350,10 @@ fn full(store: *storage.Store, arena: std.mem.Allocator, session: []const u8, it
             @memcpy(bytes[written..][0..piece.len], piece);
         }
         text = bytes;
-    } else if (contentOf(item)) |_| {
-        const location = try store.openActivityContent(request);
-        total = location.reference.length;
-        text = try readLocation(arena, location, offset, window_bytes);
+    } else if (contentOf(item)) |value| {
+        var shown = try Shown.open(store, arena, session, item, value);
+        total = try shown.length();
+        text = try shown.read(arena, offset, window_bytes);
     } else {
         if (offset != 0) return error.InvalidOffset;
         return outline(store, arena, session, item, out);

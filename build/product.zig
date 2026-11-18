@@ -5,7 +5,41 @@ const darwin = @import("darwin.zig");
 pub fn configurePauses(b: *std.Build, compile: *std.Build.Step.Compile, enabled: bool) void {
     const options = b.addOptions();
     options.addOption(bool, "test_pauses", enabled);
+    const statements = rsqlTable(b);
+    options.addOption([]const u8, "rsql_inputs", statements.inputs);
+    options.addOption(bool, "rsql_collect", statements.collect);
     compile.root_module.addOptions("build_options", options);
+}
+
+/// The files src/store/rsql.zig's comptime check and render read. Their contents fingerprint the
+/// generated statement table (src/store/rsql_table.zig): an edit to any of them makes every entry
+/// miss until tests/ci/rsql_table.py regenerates it.
+pub const rsql_table_inputs = [_][]const u8{ "src/store/rsql.zig", "src/store/schema.zig", "src/provider_name.zig", "src/change_ring.zig" };
+
+const RsqlTable = struct { inputs: []const u8, collect: bool };
+var rsql_table: ?RsqlTable = null;
+
+fn rsqlTable(b: *std.Build) RsqlTable {
+    if (rsql_table) |known| return known;
+    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    for (rsql_table_inputs) |path| {
+        const contents = b.root.root_dir.handle.readFileAlloc(b.graph.io, b.pathJoin(&.{ b.root.sub_path, path }), b.allocator, .limited(64 * 1024 * 1024)) catch
+            std.debug.panic("cannot read statement table input {s}", .{path});
+        hash.update(path);
+        hash.update(&.{0});
+        hash.update(contents);
+        hash.update(&.{0});
+    }
+    const digest = hash.finalResult();
+    const inputs = b.fmt("{x}", .{digest[0..16]});
+    const table = b.root.root_dir.handle.readFileAlloc(b.graph.io, b.pathJoin(&.{ b.root.sub_path, "src/store/rsql_table.zig" }), b.allocator, .limited(64 * 1024 * 1024)) catch "";
+    if (std.mem.indexOf(u8, table, b.fmt("pub const inputs = \"{s}\";", .{inputs})) == null)
+        std.log.warn("src/store/rsql_table.zig was generated from other inputs, so every Store statement compiles on the slow comptime path; run python3 tests/ci/rsql_table.py generate", .{});
+    rsql_table = .{
+        .inputs = inputs,
+        .collect = b.option(bool, "rsql-collect", "Build Store statements on the comptime path and export them for tests/ci/rsql_table.py") orelse false,
+    };
+    return rsql_table.?;
 }
 
 pub fn configureUnitRoot(b: *std.Build, compile: *std.Build.Step.Compile, target: std.Build.ResolvedTarget, pinned: ?PinnedTransport) void {
@@ -48,7 +82,15 @@ pub fn addIntegrationRui(
     pr_ci: bool,
     identity: BuildIdentity,
 ) *std.Build.Step.Compile {
-    const executable = addRuiWithIdentity(b, target, .ReleaseSafe, name, pinned_transport, identity, false);
+    return withPrBackend(addRuiWithIdentity(b, target, .ReleaseSafe, name, pinned_transport, identity, false), pr_ci);
+}
+
+/// The pause-enabled integration product, on the same PR backend as the other integration products.
+pub fn addPauseIntegrationRui(b: *std.Build, target: std.Build.ResolvedTarget, name: []const u8, pinned_transport: ?PinnedTransport, pr_ci: bool) *std.Build.Step.Compile {
+    return withPrBackend(addPauseRui(b, target, .ReleaseSafe, name, pinned_transport), pr_ci);
+}
+
+fn withPrBackend(executable: *std.Build.Step.Compile, pr_ci: bool) *std.Build.Step.Compile {
     if (pr_ci) executable.use_llvm = false;
     return executable;
 }
@@ -160,7 +202,8 @@ fn configureTransportWithIdentity(
     const optimize = compile.root_module.optimize.?;
     const url = addUrl(b);
     compile.root_module.addImport("url", url);
-    const tls_client = addTlsClient(b, target, optimize, maybe_pinned, url) orelse return;
+    const os = useOs(b, compile.root_module);
+    const tls_client = addTlsClient(b, target, optimize, maybe_pinned, url, os) orelse return;
     compile.root_module.addImport("tls_client", tls_client);
     compile.root_module.addImport("h2", addH2(b, target, optimize, maybe_pinned, test_poll, tls_client));
 }
@@ -173,12 +216,36 @@ pub fn addUrl(b: *std.Build) *std.Build.Module {
     return b.createModule(.{ .root_source_file = b.path("src/url.zig") });
 }
 
+/// The platform owner (`src/os/os.zig`). A file belongs to a single module,
+/// so every module of one compile shares one instance.
+pub fn addOs(b: *std.Build) *std.Build.Module {
+    return b.createModule(.{ .root_source_file = b.path("src/os/os.zig") });
+}
+
+/// `module`'s "os" import, added on first use.
+pub fn useOs(b: *std.Build, module: *std.Build.Module) *std.Build.Module {
+    if (module.import_table.get("os")) |os| return os;
+    const os = addOs(b);
+    module.addImport("os", os);
+    return os;
+}
+
+/// The platform owner as the root of its own test binary.
+pub fn addOsRoot(b: *std.Build, target: std.Build.ResolvedTarget) *std.Build.Module {
+    const module = addOs(b);
+    module.resolved_target = target;
+    module.optimize = .ReleaseSafe;
+    module.link_libc = true;
+    return module;
+}
+
 pub fn addTlsClient(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     maybe_pinned: ?PinnedTransport,
     url: *std.Build.Module,
+    os: *std.Build.Module,
 ) ?*std.Build.Module {
     if (!transportEnabled(target)) return null;
     const module = b.createModule(.{
@@ -188,6 +255,7 @@ pub fn addTlsClient(
         .link_libc = true,
     });
     module.addImport("url", url);
+    module.addImport("os", os);
     const bindings = addBindings(b, module, "openssl_c",
         \\#include <openssl/ssl.h>
         \\#include <openssl/err.h>
@@ -219,6 +287,7 @@ pub fn addH2(
         .link_libc = true,
     });
     module.addImport("url", tls_client.import_table.get("url").?);
+    module.addImport("os", tls_client.import_table.get("os").?);
     module.addImport("test_poll", test_poll);
     module.addImport("tls_client", tls_client);
     const bindings = addBindings(b, module, "h2_c",
@@ -376,6 +445,7 @@ fn addBindings(b: *std.Build, module: *std.Build.Module, name: []const u8, heade
 }
 
 pub fn configurePosix(b: *std.Build, module: *std.Build.Module) void {
+    _ = useOs(b, module);
     _ = addBindings(b, module, "posix",
         \\#undef _FORTIFY_SOURCE
         \\#include <unistd.h>

@@ -284,6 +284,8 @@ noinline fn clientCommand(init: std.process.Init, command: cli_args.Command, par
         .session_unpin => try pinSession(init, parsed, false),
         .session_interrupt_model => try interruptModel(init, parsed),
         .session_read_conversation => try readConversation(init, parsed),
+        .session_list_parts => try readPublicParts(init, parsed, .message, false),
+        .session_read_part => try readPublicParts(init, parsed, .message, true),
         .session_resume => try resumeSession(init, parsed),
         .request_inspect => try observe(init, parsed),
         .request_wait => try waitRequest(init, parsed),
@@ -299,6 +301,8 @@ noinline fn clientCommand(init: std.process.Init, command: cli_args.Command, par
         .action_deny => try decideAction(init, parsed, .deny),
         .action_read_call_id => try readActionContent(init, parsed, .call_id),
         .action_read_arguments => try readActionContent(init, parsed, .arguments),
+        .action_list_parts => try readPublicParts(init, parsed, .action, false),
+        .action_read_part => try readPublicParts(init, parsed, .action, true),
         .store_schema => {
             if (!std.mem.eql(u8, parsed.get("engine").?, "mysql")) return error.InvalidArguments;
             const store_schema = @import("store.zig");
@@ -1086,7 +1090,7 @@ fn hostSettings(init: std.process.Init, command: cli_args.Command, parsed: *cons
     var failure: start_report.Failure = undefined;
     if (parsed.has(settings_handoff.input_option) or (parsed.has(settings_handoff.check_option) and !parsed.has("check"))) {
         failure = .init(.settings_invalid, "private launch protocol requires its matching check or start entry");
-        return writeRefusal(init.io, &failure, .invalid);
+        return writeAttemptRefusal(init.io, if (command == .host_settings) .check else .save, &failure, .invalid);
     }
     var output: std.Io.File.Writer = .init(.stdout(), init.io, &.{});
     if (command == .host_settings and parsed.has("paths")) return host_start.listPaths(&output.interface);
@@ -1097,14 +1101,14 @@ fn hostSettings(init: std.process.Init, command: cli_args.Command, parsed: *cons
         defer settings.deinit();
         if (parsed.has(settings_handoff.check_option)) {
             var frozen = host_start.freezeStart(init, .{ .dir = selected, .settings_file = parsed.get("settings"), .assignments = parsed.all("set") }, settings, &failure) catch |err| {
-                if (err == error.SettingsInvalid) return writeRefusal(init.io, &failure, .invalid);
+                if (err == error.SettingsInvalid) return writeAttemptRefusal(init.io, .check, &failure, .invalid);
                 return err;
             };
             defer frozen.deinit(init.gpa);
             settings.deinit();
-            _ = try admitHost(init, .{ .frozen = frozen.bytes }, selected, settings, &failure, .detached);
+            _ = try admitHost(init, .{ .frozen = frozen.bytes }, selected, settings, &failure, .detached, .check);
             try std.Io.File.stdout().writeStreamingAll(init.io, frozen.bytes);
-        } else _ = try admitHost(init, .{ .layered = parsed }, selected, settings, &failure, .detached);
+        } else _ = try admitHost(init, .{ .layered = parsed }, selected, settings, &failure, .detached, .check);
         return;
     }
     const result = if (command == .host_settings)
@@ -1112,7 +1116,7 @@ fn hostSettings(init: std.process.Init, command: cli_args.Command, parsed: *cons
     else
         host_start.savedEdit(init, selected, parsed.positional.?, if (command == .host_set) parsed.positional_tail.? else null, &failure);
     result catch |err| {
-        if (err == error.SettingsInvalid) return writeRefusal(init.io, &failure, caller_exit.knownError(err));
+        if (err == error.SettingsInvalid) return writeAttemptRefusal(init.io, if (command == .host_settings) .check else .save, &failure, caller_exit.knownError(err));
         return err;
     };
 }
@@ -1282,7 +1286,7 @@ fn startHost(init: std.process.Init, selected: []const u8, assignments: []const 
 }
 
 fn reportHostLaunch(io: std.Io, result: *const HostLaunchResult, quiet: bool, overrides: bool, shown: usize) !void {
-    if (result.outcome == .failed and result.wait == null) if (result.outcome.failed.refusal) |*refusal| return writeRefusal(io, refusal, .invalid);
+    if (result.outcome == .failed) if (result.outcome.failed.refusal) |*refusal| return writeRefusal(io, refusal, if (result.wait == null) .invalid else caller_exit.knownError(result.outcome.failed.cause.err));
     var bytes: [host_launch.max_report_bytes]u8 = undefined;
     var writer = std.Io.Writer.fixed(&bytes);
     try host_launch.writeDiagnostics(result, &writer, shown);
@@ -1925,7 +1929,7 @@ test "relaunch replacement failure retains departure and deletes the handoff wit
     var bytes: [4096]u8 = undefined;
     const text = bytes[0..try output.readPositionalAll(io, &bytes, 0)];
     try std.testing.expect(std.mem.startsWith(u8, text, request.receipt));
-    try std.testing.expect(std.mem.indexOf(u8, text, "Detached. Host work continues.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Your chats keep working while you are away.") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "k7m2qx") != null);
     try std.testing.expect(std.mem.endsWith(u8, text, "rui: The new Rui could not be started.\n"));
 }
@@ -2129,8 +2133,8 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
         };
         defer frozen.deinit(init.gpa);
         tuning.admitted_directory = selected;
-        break :frozen try admitHost(init, .{ .frozen = frozen.bytes }, selected, settings, &preparation_failure, .detached);
-    } else try admitHost(init, .{ .layered = parsed }, selected, settings, &preparation_failure, .foreground);
+        break :frozen try admitHost(init, .{ .frozen = frozen.bytes }, selected, settings, &preparation_failure, .detached, .start);
+    } else try admitHost(init, .{ .layered = parsed }, selected, settings, &preparation_failure, .foreground, .start);
     var failure: ?start_report.Failure = null;
     return finishServe(io, host_start.shutdownPolicy(settings), host_start.storeKind(settings), &failure, server.serve(io, std.heap.c_allocator, selected, prepared, tuning, &failure));
 }
@@ -2139,19 +2143,19 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
 /// then Store selection and preparation. Refusals are reported here.
 const HostAdmissionSource = union(enum) { layered: *const cli_args.Parsed, frozen: []const u8 };
 
-fn admitHost(init: std.process.Init, source: HostAdmissionSource, selected: []const u8, settings: *host_settings.Settings, failure: *start_report.Failure, admission: host_start.Admission) !host_settings.Prepared {
+fn admitHost(init: std.process.Init, source: HostAdmissionSource, selected: []const u8, settings: *host_settings.Settings, failure: *start_report.Failure, admission: host_start.Admission, attempt: host_start.Attempt) !host_settings.Prepared {
     const intake = switch (source) {
         .layered => |parsed| host_start.intake(init, parsed, selected, settings, failure, admission),
         .frozen => |bytes| host_start.intakeFrozen(init, bytes, selected, settings, failure),
     };
     intake catch |err| {
-        if (err == error.SettingsInvalid) return writeRefusal(init.io, failure, caller_exit.knownError(err));
+        if (err == error.SettingsInvalid) return writeAttemptRefusal(init.io, attempt, failure, caller_exit.knownError(err));
         return err;
     };
-    return finishHostAdmission(init, selected, settings, failure);
+    return finishHostAdmission(init, selected, settings, failure, attempt);
 }
 
-fn finishHostAdmission(init: std.process.Init, selected: []const u8, settings: *host_settings.Settings, failure: *start_report.Failure) !host_settings.Prepared {
+fn finishHostAdmission(init: std.process.Init, selected: []const u8, settings: *host_settings.Settings, failure: *start_report.Failure, attempt: host_start.Attempt) !host_settings.Prepared {
     const served = providers.fromSettings(settings);
     if (try served.proxyRefusal(std.heap.c_allocator)) |reason| {
         stderr.diagnostic("rui: https_proxy/HTTPS_PROXY {s}; Rui tunnels only through an http:// proxy. The Host did not start.\n", .{reason});
@@ -2159,7 +2163,7 @@ fn finishHostAdmission(init: std.process.Init, selected: []const u8, settings: *
         return error.Reported;
     }
     return host_start.admitSelected(init, selected, settings, failure) catch |err| {
-        if (err == error.SettingsInvalid) return writeRefusal(init.io, failure, caller_exit.knownError(err));
+        if (err == error.SettingsInvalid) return writeAttemptRefusal(init.io, attempt, failure, caller_exit.knownError(err));
         return err;
     };
 }
@@ -2271,8 +2275,12 @@ test "public Host starter preserves every typed refusal before and after waiting
 }
 
 noinline fn writeRefusal(io: std.Io, failure: *const start_report.Failure, status: caller_exit.Status) error{Reported} {
+    return writeAttemptRefusal(io, .start, failure, status);
+}
+
+fn writeAttemptRefusal(io: std.Io, attempt: host_start.Attempt, failure: *const start_report.Failure, status: caller_exit.Status) error{Reported} {
     recordExit(status);
-    host_start.report(io, failure);
+    host_start.report(io, attempt, failure);
     return error.Reported;
 }
 
@@ -2473,6 +2481,27 @@ fn messageWithStep(init: std.process.Init, parsed: *const cli_args.Parsed, confi
         return error.InvalidSession;
     }
     var input = client.MessageInput{ .store = "", .session = destination, .text_path = "-", .configuration = if (configuration) |value| value.input else null };
+    var iterator = parsed.ordered();
+    var count: usize = 0;
+    while (iterator.next()) |_| {
+        count += 1;
+        if (count > @import("input_parts.zig").max_parts) return error.TooManyInputParts;
+    }
+    if (count != 0) {
+        const operands = try init.arena.allocator().alloc(client.MessageOperand, count);
+        iterator = parsed.ordered();
+        var n: usize = 0;
+        while (iterator.next()) |item| : (n += 1) {
+            operands[n] = if (std.mem.eql(u8, item.name, "text"))
+                .{ .text = item.value }
+            else if (std.mem.eql(u8, item.name, "text-file"))
+                .{ .text_file = item.value }
+            else
+                .{ .image = item.value };
+        }
+        input.operands = operands;
+    }
+
     const address = init.environ_map.get("RUI_ADDRESS");
     const sender_store = init.environ_map.get("RUI_STORE");
     const handle = init.environ_map.get("RUI_SENDER_HANDLE");
@@ -2612,7 +2641,7 @@ test "chat info inspection takes Session facts from Current and detects changes"
     defer file.close(io);
     const listed = try tmp.dir.createFile(io, "actions", .{ .read = true });
     defer listed.close(io);
-    const report = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"delta\":\"full\",\"since\":null,\"profile\":\"current\",\"archive_state\":\"active\",\"session\":{\"reference\":\"k7m2qx\",\"parent\":null,\"workspace\":\"/home/d/w\",\"provider\":\"openai\",\"model\":\"gpt-6.1-sol\",\"revision\":\"3\",\"tools\":[\"bash\",\"find_tools\",\"lookup\",\"none\"],\"loaded_tools\":[\"find_tools\",\"none\"],\"permission_mode\":\"ask\",\"instructions\":{\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"},\"output_schema\":null,\"reasoning_effort\":\"high\",\"reasoning_effort_override\":\"high\",\"compaction_trigger\":\"1000\",\"context_estimate\":\"310\",\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":\"lane four\",\"created_at\":\"1\"},\"pending_messages\":\"0\",\"work\":{\"state\":{\"kind\":\"finished\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"attention\":{\"kind\":\"finished\",\"turn\":\"0\",\"step\":\"18446744073709551615\"},\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null},\"latest_outcome\":null},\"peers\":{\"from_person_at\":null},\"first_message\":null,\"selected_message\":\"m1\",\"recent_messages\":[{\"turn\":\"1\",\"message\":\"m1\",\"outcome\":\"completed\"}],\"actions\":{\"count\":\"0\",\"unresolved\":[],\"resolved\":[]},\"rejected_calls\":{\"count\":\"0\",\"items\":[]},\"actionable_permissions\":[],\"execution\":{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"0\",\"scratch_used_bytes\":\"0\",\"unavailable\":[\"structured_output\"]}}";
+    const report = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"delta\":\"full\",\"since\":null,\"profile\":\"current\",\"archive_state\":\"active\",\"session\":{\"reference\":\"k7m2qx\",\"parent\":null,\"workspace\":\"/home/d/w\",\"provider\":\"openai\",\"model\":\"gpt-6.1-sol\",\"revision\":\"3\",\"tools\":[\"bash\",\"find_tools\",\"lookup\",\"none\"],\"loaded_tools\":[\"find_tools\",\"none\"],\"permission_mode\":\"ask\",\"instructions\":{\"type\":\"text\",\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"},\"output_schema\":null,\"reasoning_effort\":\"high\",\"reasoning_effort_override\":\"high\",\"compaction_trigger\":\"1000\",\"context_estimate\":\"310\",\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":\"lane four\",\"created_at\":\"1\"},\"pending_messages\":\"0\",\"work\":{\"state\":{\"kind\":\"finished\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"attention\":{\"kind\":\"finished\",\"turn\":\"0\",\"step\":\"18446744073709551615\"},\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null},\"latest_outcome\":null},\"peers\":{\"from_person_at\":null},\"first_message\":null,\"selected_message\":\"m1\",\"recent_messages\":[{\"turn\":\"1\",\"message\":\"m1\",\"outcome\":\"completed\"}],\"actions\":{\"count\":\"0\",\"unresolved\":[],\"resolved\":[]},\"rejected_calls\":{\"count\":\"0\",\"items\":[]},\"actionable_permissions\":[],\"execution\":{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"0\",\"scratch_used_bytes\":\"0\",\"unavailable\":[\"structured_output\"]}}";
     try file.writePositionalAll(io, report, 0);
     var reply = try protocol_reply.CurrentReply.decode(io, file, "k7m2qx", .{ .report = .{ .bytes = report.len } });
     const taken = try std.testing.allocator.create([2]status_page.Session);
@@ -2662,7 +2691,7 @@ fn takeStatus(taken: *status_page.Session, current: *const protocol_reply.Curren
     };
     taken.tools = settings.tools.names;
     taken.loaded_tools = settings.loaded_tools.names;
-    taken.instructions = settings.instructions.bytes.value != 0;
+    taken.instructions = settings.instructions.value.identity().length != 0;
     taken.compaction_trigger = if (settings.compaction_trigger) |tokens| tokens.value else null;
     taken.compaction_override = settings.compaction_trigger_override != null;
     taken.context_estimate = if (settings.context_estimate.value orelse null) |estimate| estimate.value else null;
@@ -3158,7 +3187,7 @@ fn stopAllSessions(init: std.process.Init, parsed: *const cli_args.Parsed) !void
             return err;
         };
         for (page.rows[0..page.count]) |*row| {
-            if (!overview_view.rules.get(row.work.state).stoppable) continue;
+            if (!row.work.actions.stop) continue;
             const session = row.reference.slice();
             asked += 1;
             stderr.diagnostic("rui: stopping {s}\n", .{session});
@@ -3448,6 +3477,61 @@ fn inspect(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
             try writeCommandReply(io, command_reply, .stdout);
             return error.HostInvocationFailed;
         },
+    }
+}
+
+/// `list-parts` prints the owner's certified part list once it decodes whole;
+/// `read-part` streams one part's exact bytes, checked against that list.
+/// Either writes nothing to stdout when it fails.
+fn readPublicParts(init: std.process.Init, parsed: *const cli_args.Parsed, kind: protocol.content_value.Owner.Kind, read_part: bool) !void {
+    const io = init.io;
+    const session = parsed.get("session").?;
+    const owner: protocol.content_value.Owner = switch (kind) {
+        .message => .{ .message = (try parsed.number(u64, "admission")).? },
+        .action => .{ .action = (try parsed.number(u64, "action")).? },
+    };
+    var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const store = try selectedStore(init, parsed.get("store"), &selected_buffer);
+    const caller: client.Requests = .{ .io = io };
+    const file = try renderScratch(init);
+    defer file.close(io);
+    var reply_buffer: client.ReplyBuffer = .{};
+    const reply = caller.readPublicParts(store, session, owner, file, &reply_buffer) catch |err| return readTransportFailure(io, store, err);
+    const list = switch (try protocol_reply.PublicPartsReply.decode(io, file, reply, .{ .session = session, .owner = owner })) {
+        .list => |list| list,
+        .failure => |failure| {
+            try writeReadFailure(io, failure, session, .stderr);
+            return readFailureError(failure);
+        },
+    };
+    if (!read_part) {
+        var output: JsonOutput = undefined;
+        const writer = output.init(io, .stdout);
+        var file_reader = file.reader(io, &.{});
+        var input: [protocol.content_window_bytes]u8 = undefined;
+        var body = file_reader.interface.limited(.limited64(list.bytes), &input);
+        _ = try body.interface.streamRemaining(writer);
+        try writer.writeByte('\n');
+        return output.finish();
+    }
+    const ordinal = (try parsed.number(u32, "part")).?;
+    if (ordinal >= list.count) {
+        // The certified list has no such part: report it as the Host's part read would.
+        var missing: protocol_reply.ReadFailure = .{ .status = 409, .diagnostic = .{ .type = .{}, .code = .{} } };
+        try missing.diagnostic.type.set(@tagName(protocol.ErrorType.parts_unavailable));
+        try missing.diagnostic.code.set("ContentNotFound");
+        try writeReadFailure(io, missing, session, .stderr);
+        return readFailureError(missing);
+    }
+    const iterator = try init.gpa.create(protocol_reply.PartIterator);
+    defer init.gpa.destroy(iterator);
+    try list.iterator(iterator);
+    const part = while (try iterator.next()) |part| {
+        if (part.ordinal == ordinal) break part;
+    } else return error.InvalidResponse;
+    if (caller.readPublicPartContent(store, session, owner, part, std.Io.File.stdout()) catch |err| return readTransportFailure(io, store, err)) |failure| {
+        try writeReadFailure(io, failure, session, .stderr);
+        return readFailureError(failure);
     }
 }
 
@@ -3881,8 +3965,9 @@ fn writeMutationJson(writer: *std.Io.Writer, reply: protocol_reply.MutationReply
     }
     try writer.writeByte('}');
     if (reply.target == .message and answer.result != .conflict) {
-        const input = answer.input orelse protocol_reply.CommandObservation.ContentReference{ .bytes = reply.target.message.bytes, .digest = reply.target.message.digest };
-        try writer.print(",\"input\":{{\"type\":\"text\",\"bytes\":\"{d}\",\"sha256\":\"{s}\"}}", .{ input.bytes, std.fmt.bytesToHex(input.digest, .lower) });
+        const input = answer.input orelse protocol_reply.CommandObservation.InputReference{ .form = reply.target.message.form, .content = .{ .bytes = reply.target.message.bytes, .digest = reply.target.message.digest } };
+        try writer.writeAll(",\"input\":");
+        try input.writeJson(writer);
         if (answer.result == .accepted) try writer.print(",\"queue\":{{\"status\":\"queued\",\"admission\":\"{d}\"}}", .{answer.result.accepted.message.admission});
     }
     if (reply.target == .session_stop) try writer.print(",\"completion\":{{\"status\":\"{s}\"}}", .{if (answer.result == .accepted) @tagName(answer.result.accepted.session_stop.completion) else "unavailable"});
@@ -4958,7 +5043,7 @@ test "CLI boundary classifies local failures with repair lines and exits" {
         .{ .err = error.HomeUnavailable, .code = .home_unavailable, .exit = 6, .phrase = "Set HOME to your absolute home directory" },
         .{ .err = error.InvalidModel, .code = .model_id_malformed, .exit = 2, .phrase = "1-256 printable non-space ASCII bytes" },
         .{ .err = error.InteractiveTerminalRequired, .code = .terminal_required, .exit = 2, .phrase = "terminal input and output with cursor addressing" },
-        .{ .err = error.EmptyMessageInput, .code = .message_empty, .exit = 2, .phrase = "Pipe or redirect a nonempty Message" },
+        .{ .err = error.EmptyMessageInput, .code = .message_empty, .exit = 2, .phrase = "Provide nonempty Message text or an image" },
         .{ .err = error.EnvironmentTooLarge, .code = .environment_too_large, .exit = 2, .phrase = "Unset or shorten the largest variables" },
         .{ .err = error.Unexpected, .code = .internal_unexpected, .exit = 1, .phrase = "report this code with the command" },
         .{ .err = error.CrossStorePeerSend, .code = .internal_unexpected, .exit = 1, .phrase = "internal fault" },

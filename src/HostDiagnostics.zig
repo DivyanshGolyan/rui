@@ -59,8 +59,12 @@ pub fn close(self: *Self) void {
 }
 
 pub fn record(self: *Self, phase: []const u8, detail: []const u8) void {
+    self.recordAs("startup", phase, detail);
+}
+
+pub fn recordAs(self: *Self, classification: []const u8, phase: []const u8, detail: []const u8) void {
     if (self.failure != null) return;
-    self.write(phase, detail) catch |err| {
+    self.write(classification, phase, detail) catch |err| {
         self.failure = err;
         self.reportFailure();
     };
@@ -71,10 +75,10 @@ pub fn reportFailure(self: *Self) void {
         stderr.print("rui: diagnostic writer unavailable ({s}); no Host work was changed\n", .{@errorName(err)});
 }
 
-fn write(self: *Self, phase: []const u8, detail: []const u8) !void {
+fn write(self: *Self, classification: []const u8, phase: []const u8, detail: []const u8) !void {
     var bytes: [max_record_bytes]u8 = undefined;
     const time = std.Io.Clock.Timestamp.now(self.io, .real).raw.nanoseconds;
-    const record_bytes = std.fmt.bufPrint(&bytes, "{{\"time_ns\":{d},\"classification\":\"startup\",\"phase\":\"{s}\",\"detail\":\"{s}\"}}\n", .{ time, phase, detail }) catch return error.DiagnosticRecordTooLong;
+    const record_bytes = std.fmt.bufPrint(&bytes, "{{\"time_ns\":{d},\"classification\":\"{s}\",\"phase\":\"{s}\",\"detail\":\"{s}\"}}\n", .{ time, classification, phase, detail }) catch return error.DiagnosticRecordTooLong;
     if (self.file == null or self.length + record_bytes.len > self.file_cap) try self.rotate();
     try self.file.?.writePositionalAll(self.io, record_bytes, self.length);
     self.length += record_bytes.len;

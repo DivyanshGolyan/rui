@@ -16,7 +16,7 @@ engine fixtures of src/store/testing.zig:
   `store_testing.withoutForeignKeys(S, T)` per line;
 - `failAtStepForTesting(S.database, table)` becomes `store_testing.failReadsOf(S, table)`.
 T must be string literals joined by `++`, and must not name a SQLite
-mechanism (`store_testing.fixtureTextError`, whose word lists this
+mechanism (`rsql.fixtureTextError`, whose word lists this
 reads). Any other form is left alone, so the item keeps
 its SQLite name and moves.
 
@@ -152,8 +152,8 @@ def rsql_words():
 
 
 REFUSED_WORD = re.compile(
-    r"\b(?:" + "|".join(rsql_words() + zig_strings("src/store/testing.zig", "fixture_sqlite_words")) + r")\b|"
-    r"\b(?:" + "|".join(zig_strings("src/store/testing.zig", "fixture_sqlite_prefixes")) + r")\w*|"
+    r"\b(?:" + "|".join(rsql_words() + zig_strings("src/store/rsql.zig", "fixture_sqlite_words")) + r")\b|"
+    r"\b(?:" + "|".join(zig_strings("src/store/rsql.zig", "fixture_sqlite_prefixes")) + r")\w*|"
     r"\bAS\s+TEXT\b", re.I)
 
 

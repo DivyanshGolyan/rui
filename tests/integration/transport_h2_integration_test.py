@@ -58,12 +58,15 @@ class RoundTripHistoryTests(unittest.TestCase):
         self.streams = []
         self.answers = {}
         histories = [[], []]
+        self.sessions = ["k7m2qx", "k7m2qy"]
         for wave in range(3):
             for index in range(2):
                 text = f"h2-2-{wave}-{index}"
                 stream = len(self.streams) * 2 + 1
                 user = {"role": "user", "content": [{"type": "input_text", "text": text}]}
-                request = {"input": [*histories[index], user]}
+                prompt = transport.dispatch.model_instructions(transport.dispatch.ROOT, store=None, session=self.sessions[index], model="gpt-6-sol")
+                baseline = {"role": "developer", "content": [{"type": "input_text", "text": prompt}]}
+                request = {"input": [baseline, *histories[index], user]}
                 self.streams.append(("connection", stream, text, json.dumps(request).encode()))
                 answer = h2_fixture.observed_shape_answer(text)
                 self.answers[text] = answer.encode()
@@ -71,19 +74,18 @@ class RoundTripHistoryTests(unittest.TestCase):
                     f"response-{stream}", f"reasoning-{stream}", f"message-{stream}", answer,
                 )
                 del reasoning["created_by"]
-                histories[index] = [*request["input"], reasoning, message]
+                histories[index] = [*request["input"][1:], reasoning, message]
 
-    def test_complete_history(self):
-        transport.assert_round_trip_history(self.streams, 2, 3, self.answers)
-
-    def test_corrupted_history_keeps_latest_prompt_but_must_fail(self):
-        original = json.loads(self.streams[-1][3])["input"]
+    def test_ci_82_round_trip_history_oracle_rejects_corruption(self):
+        # CI-82
+        transport.assert_round_trip_history(self.streams, 2, 3, self.answers, self.sessions)
+        baseline, *original = json.loads(self.streams[-1][3])["input"]
         mutations = {
             "omit_all_history": original[-1:],
             "omit_oldest_turn": original[3:],
             "duplicate_item": [original[0], *original],
             "reorder_output": [original[0], original[2], original[1], *original[3:]],
-            "other_session": [json.loads(self.streams[-2][3])["input"][0], *original[1:]],
+            "other_session": [json.loads(self.streams[-2][3])["input"][1], *original[1:]],
             "extra_item": [*original, original[1]],
         }
         for name, position, field in (("alter_answer", 2, "content"), ("alter_reasoning", 1, "encrypted_content")):
@@ -96,9 +98,16 @@ class RoundTripHistoryTests(unittest.TestCase):
                 self.assertEqual(latest, self.streams[-1][2])
                 corrupted = list(self.streams)
                 address, stream, text, _ = corrupted[-1]
-                corrupted[-1] = (address, stream, text, json.dumps({"input": items}).encode())
+                corrupted[-1] = (address, stream, text, json.dumps({"input": [baseline, *items]}).encode())
                 with self.assertRaisesRegex(AssertionError, "history"):
-                    transport.assert_round_trip_history(corrupted, 2, 3, self.answers)
+                    transport.assert_round_trip_history(corrupted, 2, 3, self.answers, self.sessions)
+
+        for replacement in ([], [json.loads(self.streams[-2][3])["input"][0]]):
+            corrupted = list(self.streams)
+            address, stream, text, body = corrupted[-1]
+            corrupted[-1] = (address, stream, text, json.dumps({"input": [*replacement, *json.loads(body)["input"][1:]]}).encode())
+            with self.assertRaisesRegex(AssertionError, "history"):
+                transport.assert_round_trip_history(corrupted, 2, 3, self.answers, self.sessions)
 
 
 class ShapedWorkTests(unittest.TestCase):
@@ -168,7 +177,7 @@ class ShapedWorkTests(unittest.TestCase):
             stack.enter_context(patch.object(transport, "closed_host_request", side_effect=request))
             stack.enter_context(patch.object(transport.dispatch, "wait_for", side_effect=lambda predicate, *args, **kwargs: predicate()))
             stack.enter_context(patch.object(transport, "open_descriptors", side_effect=descriptors))
-            stack.enter_context(patch.object(transport, "host_physical_peak", return_value=123456))
+            stack.enter_context(patch.object(transport.os_semantics, "physical_footprint_peak", return_value=123456))
             with self.assertRaisesRegex(RuntimeError, "wave 2 failed"):
                 transport.round_trip(pathlib.Path("/fixture"), endpoint, 1, pathlib.Path("/fixture/ca"))
             stop.assert_called_once()

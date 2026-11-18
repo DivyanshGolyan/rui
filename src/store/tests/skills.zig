@@ -488,7 +488,7 @@ test "inline skills a peer Session's Message may list the recipient's skills" {
             };
             try std.testing.expectEqualStrings("skills-peer-accept", received.key.slice());
             try std.testing.expectEqualStrings(sender.slice(), received.sender.?.session.slice());
-            try std.testing.expectEqualSlices(u8, &protocol.contentDigest(authored), &received.content.digest);
+            try std.testing.expectEqualSlices(u8, &protocol.contentDigest(authored), &received.content.text.digest);
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_skill k JOIN message_admission m ON m.admission_id=k.admission_id JOIN content c ON c.content_id=k.content_id WHERE m.command_key='skills-peer-accept' AND k.position=1 AND k.name='demo' AND c.digest=?1", .{store_testing.Blob{ .bytes = &protocol.contentDigest(body) }}));
         }
     }.run);
@@ -799,7 +799,7 @@ test "inline skills keep the typed text once and project each bound skill as its
             try std.testing.expect(reply == .accepted);
             try std.testing.expectEqualSlices(u8, &protocol.contentDigest(typed), &reply.accepted.content.digest);
             const page = try store_core.activityPageForTesting(&storage, .{ .session = session, .kinds = .initOne(.admission) });
-            try std.testing.expectEqualSlices(u8, &protocol.contentDigest(typed), &page.items[0].value.admission.content.digest);
+            try std.testing.expectEqualSlices(u8, &protocol.contentDigest(typed), &page.items[0].value.admission.content.text.digest);
             try std.testing.expectEqual(@as(u64, 7), try store_testing.queryU64(&storage, "SELECT count(DISTINCT content_id) FROM message_skill", .{}));
             _ = (try storage.admitNextModelAttempt(.{})).?;
             const Entry = struct { kind: u64, skill: u64, name: []const u8, bytes: []const u8 };
@@ -1010,6 +1010,56 @@ test "the skill tool resolves an invocation or a failed capture with its text, a
                 try expectContent(&storage, try testingContentReference(&storage, result_id), expected.text);
             }
             try std.testing.expect(!storage.isFenced());
+        }
+    }.run);
+}
+
+test "SH-59 compound skills submission commits and rolls back with its callback" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            const Capture = @import("../../InputCapture.zig");
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var used: std.atomic.Value(u64) = .init(0);
+            var capture: Capture = undefined;
+            const spool = try tmp.dir.createFile(std.testing.io, "compound-skills-spool", .{ .read = true });
+            const index = try tmp.dir.createFile(std.testing.io, "compound-skills-index", .{ .read = true });
+            try tmp.dir.deleteFile(std.testing.io, "compound-skills-spool");
+            try tmp.dir.deleteFile(std.testing.io, "compound-skills-index");
+            capture.init(std.testing.io, spool, index, .{ .used = &used, .limit = 10000 });
+            defer capture.close();
+            for ([_][]const u8{ "first", "second" }) |bytes| {
+                try capture.begin(.text, bytes.len);
+                var available = bytes.len;
+                _ = try capture.append(bytes, &available, false);
+                try capture.end();
+            }
+            const loan = try capture.seal();
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const config = try completeConfiguration("compound-skills", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
+            var command: wire_request.MessageCommand = .{ .key = config.key, .configuration = config.configuration };
+            const captured: skills_fixture_domain.MessageCapture = .{ .bound = &.{.{ .name = "demo", .bytes = "captured skill body" }} };
+            var commits: shared_fixtures.TestingCommits = .{};
+            const baseline = try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{});
+            const failed = try storage.submitMessagePartsCapturedSkills(&command, loan, commits.callback(), &skills_fixture_initial, &captured, .{ .before_commit = true });
+            try std.testing.expect(failed == .infrastructure_failure);
+            try std.testing.expectEqual(@as(usize, 0), commits.count);
+            try storage.close();
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            try std.testing.expectEqual(baseline, try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
+            try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{}));
+            try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_skill", .{}));
+            const accepted = try storage.submitMessagePartsCapturedSkills(&command, loan, commits.callback(), &skills_fixture_initial, &captured, .{});
+            try std.testing.expect(accepted == .accepted and !accepted.accepted.replayed);
+            try std.testing.expectEqual(@as(usize, 1), commits.count);
+            try std.testing.expectEqual(accepted.accepted.admission_id, commits.calls[0].admission_id);
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_skill_catalog", .{}));
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_skill", .{}));
+            try std.testing.expect((try storage.submitMessagePartsCapturedSkills(&command, loan, commits.callback(), &skills_fixture_initial, &captured, .{})).accepted.replayed);
+            try std.testing.expectEqual(@as(usize, 1), commits.count);
         }
     }.run);
 }

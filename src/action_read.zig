@@ -16,7 +16,7 @@ pub const PendingState = enum { waiting_approval, queued, attempted };
 pub const Resolution = struct {
     position: u64,
     code: Bounded(outcome_code.max_bytes),
-    content: struct { length: u64, digest: [32]u8 },
+    content: @import("content_value.zig").Value,
 };
 pub const Window = struct {
     offset: u64,

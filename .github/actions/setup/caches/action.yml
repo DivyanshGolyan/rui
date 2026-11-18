@@ -36,22 +36,33 @@ runs:
       run: |
         set -euo pipefail
         identity="$RUNNER_TEMP/rui-native-tools.txt"
-        {
-          uname -sm
-          cc --version
-          make --version
-          perl -v
-          if [ "$(uname -s)" = Darwin ]; then
+        # Only tools whose output Zig's own cache cannot see: build_transport.sh
+        # runs perl Configure and make. On Linux it compiles with zig cc, and Zig
+        # hashes the target and glibc version itself, so the identity names
+        # versions, never Ubuntu package revisions that change with each runner
+        # image (a mixed fleet would otherwise split the cache in two). macOS
+        # compiles with Apple clang against the selected SDK, so all of it counts.
+        if [ "$(uname -s)" = Darwin ]; then
+          {
+            uname -sm
+            cc --version
+            make --version
+            perl -v
             xcodebuild -version
             xcrun --sdk macosx --show-sdk-path
             xcrun --sdk macosx --show-sdk-version
             xcrun --sdk macosx --show-sdk-build-version
-          else
-            cat /etc/os-release
-            ldd --version
-            ld --version
-          fi
-        } > "$identity"
+          } > "$identity"
+        else
+          (
+            . /etc/os-release
+            uname -sm
+            echo "$ID $VERSION_ID"
+            getconf GNU_LIBC_VERSION
+            make --version | sed -n 1p
+            perl -e 'print "perl $^V\n"'
+          ) > "$identity"
+        fi
         cat "$identity"
         echo "identity=$(shasum -a 256 "$identity" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
         # The build runner is compiled for the host CPU, which varies between
@@ -74,7 +85,7 @@ runs:
       # Restore order: this part at these dependencies, this part across a
       # repin, then the same v3 and v2 part during migration, then maintenance's
       # v2 baseline at these dependencies, which
-      # seeds parts main never saves (codegen). Baseline's seed is its own
+      # seeds a part with no snapshot of its own yet. Baseline's seed is its own
       # first prefix, so it is left empty, and actions/cache drops empty keys.
       run: |
         set -euo pipefail

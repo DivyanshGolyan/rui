@@ -34,7 +34,7 @@ FUNCTIONAL_CORES = "src/logic_tests.zig"
 STACK_FRAMES_GATE = "tests/ci/stack_frames.json"
 
 MODULES = {
-    "url": "src/url.zig",
+    "url": "src/url.zig", "os": "src/os/os.zig",
     "test_poll": "src/testing/poll.zig", "h2": "src/h2/h2.zig", "tls_client": "src/tls_client/tls_client.zig", "rui_client": CALLER, "client": CALLER,
     "mysql_connection": "src/store/wire/mysql_connection.zig", "preferences": "src/preferences.zig",
     "codex_credentials": "src/codex_credentials.zig", "AnswerRenderer": "src/AnswerRenderer.zig",
@@ -64,6 +64,11 @@ FIXTURES = {
     "admission-debug-integration": ((I + "admission_integration.sh",), (), ()),
     "dispatch-integration": ((I + "dispatch_integration.py",), (), ("src/model_adapter.zig", *MODEL)),
     "dispatch-debug-integration": ((I + "dispatch_integration.py",), (), ()),
+    "cli-image-integration": ((I + "cli_image_integration.py",), (),
+                              (CALLER, HOST, "src/InputCapture.zig", "src/image_intake.zig")),
+    "public-parts-integration": ((I + "public_parts_integration.py",), ("src/store/tests/public_parts.zig",),
+                                 ("src/store/domain/public_parts.zig", "src/protocol.zig", "src/protocol_reply.zig",
+                                  "src/cli_args.zig", RUI, HOST)),
     "read-image-integration": ((I + "read_image_integration.py",), (),
                                ("src/server_read_image.zig", "src/os/read_image_file.zig", "src/input_media.zig")),
     "bash-integration": ((I + "bash_integration.py",), (), BASH),
@@ -94,6 +99,8 @@ FIXTURES = {
                                  (I + "mysql_launch_admin.zig",),
                                  ("src/host_settings.zig", "src/host_start.zig", "src/server_mcp_settings.zig", "src/mysql_url.zig", "src/mcp/Running.zig", "src/mcp/servers.zig")),
     "ts-client": ((I + "host_process.py", "clients/ts/test/settings-host.test.ts"), (), ("src/host_settings.zig",)),
+    "pause-socket-test": ((I + "pause_socket_test.py", I + "pause_client.py"), ("src/pause_socket_fixture.zig",),
+                          ("src/testing/pause.zig", "src/testing/pause_socket.zig")),
     "request-wait-integration": ((I + "request_wait_integration.py", I + "attached_creation_cases.py"), (),
                                  (CALLER, "src/request_wait.zig", "src/server_host.zig", "src/cli_args.zig", "src/serve_grammar.zig",
                                   "src/caller_error.zig", "src/caller_exit.zig")),
@@ -105,16 +112,17 @@ FIXTURES = {
     "activity-integration": ((I + "activity_integration.py",), (I + "activity_client.zig",), (CALLER, HOST)),
     "host-status-integration": ((I + "host_status_integration.py",), (I + "host_status_actor.zig",), (CALLER, HOST)),
     "host-stop-integration": ((I + "host_stop_integration.py",), (I + "host_status_actor.zig",),
-                              (CALLER, "src/HostLifecycle.zig", "src/server_host.zig")),
+                              (CALLER, "src/HostLifecycle.zig", "src/host_activation.zig", "src/server_host.zig")),
     "host-launch-integration": ((I + "host_launch_integration.py",), (),
-                                ("src/HostLifecycle.zig", "src/descriptor_capacity.zig", "src/os/descriptor_limit.zig", "src/serve_grammar.zig")),
+                                ("src/HostLifecycle.zig", "src/host_activation.zig", "src/descriptor_capacity.zig", "src/os/descriptor_limit.zig",
+                                 "src/serve_grammar.zig")),
     "descriptor-capacity-integration": ((I + "descriptor_capacity_integration.py",), (),
                                         ("src/descriptor_capacity.zig", "src/os/descriptor_limit.zig")),
     "host-allocator-integration": ((I + "host_allocator_test.py",), (), ("src/os/process.zig",)),
     "host-process-test": ((I + "host_process_test.py",), (), ()),
     "installer-integration": ((I + "installer_integration.py",), (),
                               ("src/Installation.zig", "src/installation_path.zig", "src/release_candidate.zig")),
-    "upgrade-integration": ((I + "upgrade_integration.py",), (), (UPGRADE, "src/HostLifecycle.zig", "src/Installation.zig")),
+    "upgrade-integration": ((I + "upgrade_integration.py",), (), (UPGRADE, "src/HostLifecycle.zig", "src/host_activation.zig", "src/Installation.zig")),
     "terminal-restoration-integration": ((I + "terminal_restoration_integration.py",), ("src/terminal_notice_test.zig",),
                                          ("src/SessionFrontend.zig", "src/TerminalApp.zig", "src/TerminalEditor.zig")),
     "canonical-failure-integration": ((I + "canonical_failure_integration.py",), (),
@@ -320,7 +328,7 @@ def tree_uncommon_texts(candidates):
 CLI_GRAMMAR = ("src/cli_grammar.zig", "src/cli_option_names.zig", "src/serve_grammar.zig")
 
 UPGRADE_PATHS = (UPGRADE, "src/installation_path.zig", "src/TerminalEditor.zig", "src/Installation.zig", "src/release_candidate.zig",
-                 "src/HostLifecycle.zig", "src/host_identity.zig",
+                 "src/HostLifecycle.zig", "src/host_activation.zig", "src/host_identity.zig",
                  "src/host_identity.c", "src/stderr.zig", "src/host_launch.c",
                  "src/cli.zig", "src/cli_args.zig", *CLI_GRAMMAR, "src/client.zig", "src/slash_commands.zig",
                  "src/Overview.zig", "src/overview_view.zig", "src/SessionFrontend.zig",
@@ -334,7 +342,7 @@ INSTALLER_PATHS = ("tests/integration/installer_integration.py", "tests/ci/fake_
                    "src/fetch_dependencies.sh", "release/*", "install.sh", "build.zig", "build.zig.zon")
 
 UPGRADE_CHECK_PATHS = (UPGRADE, "src/Installation.zig", "src/installation_path.zig", "src/release_candidate.zig",
-                       "src/HostLifecycle.zig", "src/host_identity.*", "src/host_launch.c",
+                       "src/HostLifecycle.zig", "src/host_activation.zig", "src/host_identity.*", "src/host_launch.c",
                        "src/store/migration_*", "install.sh", "release/*", "build.zig", "build.zig.zon",
                        "tests/integration/previous_release_upgrade.py", ".github/workflows/previous-release-upgrade.yml")
 
@@ -402,6 +410,12 @@ CONTENT_RULES = {
 
 RENDERER_HARNESSES = ("tests/integration/input_equivalence.py",)
 
+# What the build itself reads beyond the import graph: the build scripts, dependency pins and
+# fetch, the compiler and cache setup, and the CI producer that writes the zig command.
+BOOTSTRAP_INPUTS = ("build.zig", "build.zig.zon", "install.sh", "src/fetch_dependencies.sh", "src/build_*",
+                    "src/*.patch", ".agents/setup", ".github/actions/setup/action.yml", "screen-emulator/*",
+                    "tests/ci/build_artifact.py", "tests/ci/cache_snapshot.py")
+
 RULES = (
     (INSTALLER_PATHS, ("installer-integration",), ("installer-integration",),
      "Installer: real publication and PATH boundary"),
@@ -413,9 +427,9 @@ RULES = (
      "Shipped model facts and the models.dev token-walk parser, without production callers"),
     (("src/model_list.zig",), ("codex-h2-integration",), ("codex-h2-integration",),
      "Provider model lists: the Host's fetch and the wire reply follow"),
-    (RENDERER_HARNESSES, (), (), "Renderer harnesses: only the nonblocking renderer contracts run them"),
+    (RENDERER_HARNESSES, (), (), "Renderer harnesses: only the promotion renderer contracts run them"),
     (("src/openapi*.zig", "openapi.json"), ("test",), ("test",),
-     "The wire contract: openapi.json must equal what the wire types emit"),
+     "WIR-4 published request schemas and generated wire contract"),
     (("clients/ts/*",), ("ts-client",), ("ts-client",), "The TypeScript client and its launch of a real Host"),
     (("tests/integration/mcp_sdk/*",), ("settings-integration", "ts-client"), ("settings-integration", "ts-client"),
      "The MCP SDK servers a settings document starts"),
@@ -469,8 +483,7 @@ RULES = (
      ("server-delivery-integration",), ("server-delivery-integration",), "Real reply inactivity and Host drain"),
     (("tests/integration/canonical_failure_integration.py", "build.zig"),
      ("canonical-failure-integration",), ("canonical-failure-integration",), "Canonical failure caller oracle"),
-    (("build.zig", "build.zig.zon", "install.sh", "src/fetch_dependencies.sh", "src/build_*", "src/*.patch", ".agents/setup",
-      ".github/actions/setup/action.yml", "screen-emulator/*", "tests/ci/build_artifact.py", "tests/ci/cache_snapshot.py"),
+    (BOOTSTRAP_INPUTS,
      ("check-full", "admission-debug-integration", "test-full"),
      ("check-full", "admission-debug-integration", "test-full"),
      "Build, dependency or bootstrap inputs"),
@@ -481,6 +494,18 @@ RULES = (
     (("release/publish.sh",), ("host-status-integration",), ("host-status-integration",),
      "Installer report reads the CLI's defaults and Host status JSON"),
 )
+
+RULES += ((('src/host_reply.zig', 'src/command_reply.zig', 'src/command_spec.zig',
+            'src/store/domain/command.zig', 'src/session_skills.zig'),
+           ('request-wait-integration', 'skills-integration'), (),
+           'Message input identity and skill binding remain valid through admission and recovery'),)
+
+RULES += ((("src/InputCapture.zig", "src/client.zig", "src/mutation_answer.zig", "src/cli_args.zig", "src/cli_grammar.zig"),
+           ("test-native", "cli-image-integration", "human-cli-integration", "request-wait-integration", "read-image-integration",
+            "session-list-integration", "dispatch-integration", "codex-integration"),
+           ("test-native", "cli-image-integration", "human-cli-integration", "request-wait-integration", "read-image-integration",
+            "session-list-integration", "dispatch-integration", "codex-integration"),
+           "Ordered message capture, recovery and provider delivery invariants"),)
 
 LIVE_MYSQL_DIALECT_TARGETS = frozenset({"test", "test-store", "check", "check-full"})
 LIVE_POSTGRES_TARGETS = frozenset({"test-pg", "check", "check-full"})
@@ -552,7 +577,7 @@ CHECK_COVERS = {
     "read-image-integration", "bash-owner-integration", "bash-lifecycle-integration", "bash-recovery-integration",
     "bash-integration", "bash-environment-integration", "codex-integration", "control-integration",
     "host-status-integration", "host-launch-integration", "host-stop-integration",
-    "descriptor-capacity-integration", "request-wait-integration",
+    "descriptor-capacity-integration", "request-wait-integration", "pause-socket-test",
     "activity-integration", "preference-policy-integration", "session-list-integration",
     "peer-integration", "sender-identity-integration", "conversation-page-integration",
     "host-allocator-integration", "host-process-test", "human-cli-integration", "model-picker-integration",
@@ -618,12 +643,16 @@ def matches(path, patterns):
 
 
 def mysql_provisioning(targets, part, platform, mysql_suites):
+    """Which live engine servers a Linux shard starts."""
     targets = set(targets)
-    dialect = platform == "linux" and bool(
+    linux = platform == "linux"
+    dialect = linux and bool(
         targets & (LIVE_MYSQL_DIALECT_TARGETS - {"check-full"})
         or "check-full" in targets and part != "callers")
-    return {"live_mysql": platform == "linux" and (dialect or bool(targets & mysql_suites)),
-            "mysql_dialect": dialect}
+    return {"live_mysql": linux and (dialect or bool(targets & mysql_suites)),
+            "mysql_dialect": dialect,
+            "live_postgres": linux and bool(targets & (LIVE_POSTGRES_TARGETS - {"check-full"})
+                                            or "check-full" in targets and part != "callers")}
 
 
 def live_mysql_suites(targets, mysql_suites):
@@ -636,10 +665,10 @@ def live_mysql_suites(targets, mysql_suites):
 def covers(target, targets) -> bool:
     """Whether a selected target executes target's checks.
 
-    check-full deliberately excludes stack-frames; promotion adds it separately.
+    check-full deliberately excludes stack-frames and rsql-table; promotion adds them separately.
     """
     broader = {"test": {"test-native", "test-store"},
-               "check": CHECK_COVERS | {"stack-frames"},
+               "check": CHECK_COVERS | {"stack-frames", "rsql-table"},
                "check-full": CHECK_COVERS | {"check"}, **FIXTURE_COVERS}
     return target in targets or any(target in broader.get(selected, ()) for selected in targets)
 
@@ -657,8 +686,48 @@ def normalize(targets: set) -> set:
     return {target for target in checks if not covers(target, checks - {target})}
 
 
+# The PR tier runs unit roots and the fixtures whose own sources changed; everything else,
+# including every whole-suite gate and live-server suite, runs on main and in promotion.
+WHOLE_SUITE_GATES = frozenset({"check", "check-full", "test", "test-full"})
+PR_UNIT_ROOTS = frozenset({"test-native", "test-store", "test-logic", "test-h2", "test-pg"})
+# Store unit tests run on a PR only for a change to the Store itself.
+STORE_PATHS = ("src/store.zig", "src/store/*")
+
+
+def own_fixture(target, paths):
+    """Whether the diff touches the fixture's own script, executable or FIXTURES owner."""
+    scripts, executables, owners = FIXTURES[target]
+    return any(matches(path, (*scripts, *executables, *owners)) for path in paths)
+
+
+def fast_tier(targets, paths, bootstrap_only=False):
+    """The PR tier of a raw (unnormalized) selection.
+
+    It keeps the unit roots the diff reaches (a whole-suite gate becomes
+    `test-native` and `test-logic`, or only `test-logic` when bootstrap inputs
+    alone selected it; `test-store` only for Store paths) and the fixtures
+    whose own sources the diff touches. A fixture the diff reaches only
+    through imports runs on main and in promotion, never on the PR.
+    """
+    targets = set(targets)
+    fast = targets & PR_UNIT_ROOTS
+    if targets & WHOLE_SUITE_GATES:
+        # A bootstrap-only change still compiles and runs one Store-free root through the
+        # changed setup and producer; the Store-reaching binaries run on main.
+        fast |= {"test-logic"} if bootstrap_only else {"test-native", "test-logic"}
+    if not any(matches(path, STORE_PATHS) for path in paths):
+        fast.discard("test-store")
+    fast |= {target for target in targets & FIXTURES.keys() - PR_UNIT_ROOTS - {"mysql-wire-integration"}
+             if own_fixture(target, paths)}
+    for broad, covered in FIXTURE_COVERS.items():
+        if broad in fast:
+            fast -= covered
+    return sorted(fast)
+
+
 def select(paths, phase, available, graph=None, contents=None, fixture_literals=None):
     graph = graph or tree_graph()
+    changed = list(paths)
     build_paths = [BUILD_HUB if BUILD_MODULES.get(path) == BUILD_HUB else path for path in paths]
     # A core imported by the build still needs its own boundary tests.
     paths = list(dict.fromkeys([*build_paths, *(path for path in paths if path in graph.cores)]))
@@ -773,6 +842,14 @@ def select(paths, phase, available, graph=None, contents=None, fixture_literals=
                    ({"installer-integration"} if any(matches(path, INSTALLER_PATHS) for path in paths) else set())
                    if targets else set())
         native_targets = set()
+    whole_suite_gates = sorted(targets & WHOLE_SUITE_GATES)
+    # A build module that build.zig imports (BUILD_MODULES' hub) is build input like build.zig.
+    bootstrap = [path for path in changed
+                 if matches(BUILD_HUB if BUILD_MODULES.get(path) == BUILD_HUB else path, BOOTSTRAP_INPUTS)]
+    product = [path for path in changed if path not in bootstrap]
+    bootstrap_only = bool(whole_suite_gates and bootstrap) and not (
+        product and select(product, phase, available, graph, contents, fixture_literals)["whole_suite_gates"])
+    fast_targets = fast_tier(targets, paths, bootstrap_only)
     targets = normalize(targets)
     native_targets = normalize(native_targets)
     mysql_suites = live_mysql_suites(targets, graph.live_mysql)
@@ -788,7 +865,8 @@ def select(paths, phase, available, graph=None, contents=None, fixture_literals=
     missing = (targets | native_targets) - available
     if missing:
         raise ValueError(f"Selected targets absent from the build: {sorted(missing)}")
-    return {"phase": phase, "targets": sorted(targets),
+    return {"phase": phase, "targets": sorted(targets), "fast_targets": fast_targets,
+            "whole_suite_gates": whole_suite_gates,
             "mysql_suites": sorted(graph.live_mysql),
             "server_targets": sorted((targets & live_targets) | ({"test"} if "test" in targets and "test-store" in live_targets else set())),
             "live_needs": sorted(([root, reason] for root, reason in live_needs), key=lambda need: (need[0] or "", need[1])),
@@ -815,15 +893,6 @@ def changed_paths(base, head):
     return [p.decode("utf-8", "surrogateescape") for p in raw.split(b"\0") if p], base_commit
 
 
-def merged_base(base, ref, head="HEAD"):
-    merges = subprocess.check_output(["git", "rev-list", "--merges", "--parents", f"{base}..{head}"], text=True)
-    for line in merges.splitlines():
-        for parent in line.split()[2:]:
-            if subprocess.run(["git", "merge-base", "--is-ancestor", parent, ref]).returncode == 0:
-                return True
-    return False
-
-
 def revision_text(commit, path):
     shown = subprocess.run(["git", "show", f"{commit}:{path}"], capture_output=True, text=True,
                            encoding="utf-8", errors="surrogateescape")
@@ -834,7 +903,6 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base", required=True)
     parser.add_argument("--head", default="HEAD")
-    parser.add_argument("--branch-head", default="", help="PR branch head whose main-merge history requires all-unit compilation")
     parser.add_argument("--phase", choices=("development", "review"), default="review")
     args = parser.parse_args()
     available = set(build_files.steps())
@@ -845,9 +913,6 @@ def main():
                               for path in paths
                               if path.startswith("src/") or path == FIXTURE_TABLE
                               or any(matches(path, patterns) for patterns, _ in CONTENT_RULES.values())})
-    if args.branch_head:
-        branch_base = subprocess.check_output(["git", "merge-base", args.branch_head, base], text=True).strip()
-        result["unit_compile_required"] |= merged_base(branch_base, base, args.branch_head)
     result["base"] = base
     result["head"] = head
     print(json.dumps(result, indent=2))

@@ -20,9 +20,9 @@ import select_tests
 ROOT = prepush.ROOT
 
 SOURCE_CHECKS = {"tests/ci: test_import_architecture.py", "tests/ci: test_provider_locality.py",
-                 "tests/ci: test_wire_version.py", "tests/ci: test_harness_contracts.py",
+                 "tests/ci: test_wire_version.py", "tests/ci: test_flake_sources.py",
                  "tests/ci: test_platform_boundary.py", "tests/ci: test_fixture_literals.py"}
-FIXTURE_CHECKS = {"tests/ci: test_wire_version.py", "tests/ci: test_harness_contracts.py",
+FIXTURE_CHECKS = {"tests/ci: test_wire_version.py", "tests/ci: test_flake_sources.py",
                   "tests/ci: test_platform_boundary.py", "tests/ci: test_store_schema_fixtures.py",
                   "tests/ci: test_fixture_literals.py"}
 
@@ -178,6 +178,26 @@ class PrepushTest(unittest.TestCase):
                 self.assertNotIn("client locality", commands)
                 self.assertNotIn("tests/ci: test_client_locality.py", commands)
 
+    def test_sleep_policy_selects_the_moved_owner(self):
+        for path in ("src/store/creator_tests.zig", "tests/integration/host_process.py"):
+            with self.subTest(path=path):
+                checks = prepush.policy_tests([path])
+                self.assertIn("SleepOrderingTest.test_tree_matches_the_shrink_only_allowlist",
+                              checks["test_flake_sources.py"])
+                self.assertNotIn("SleepOrderingTest.test_tree_matches_the_shrink_only_allowlist",
+                                 checks.get("test_harness_contracts.py", set()))
+
+    def test_flake_sources_run_for_scanned_inputs_and_deletions(self):
+        for path in ("src/example.zig", "build.zig", "tests/integration/example.py", "clients/ts/test/example.test.ts",
+                     "tests/ci/flake_sources.json", "tests/ci/flake_sources.py"):
+            with self.subTest(path=path):
+                commands = dict(prepush.checks([path], AVAILABLE, "BASE", "quick"))
+                self.assertEqual(commands["flake sources"],
+                                 [sys.executable, "-B", "tests/ci/flake_sources.py"])
+        self.assertNotIn("flake sources", self.commands(["docs/example.md"]))
+        policy = (Path(__file__).resolve().parents[2] / ".github/actions/policy/checks.sh").read_text()
+        self.assertIn(" python3 -B tests/ci/flake_sources.py\n", policy)
+
     def test_deleted_files_select_owner_checks_not_file_tools(self):
         commands = self.commands(["src/cli_args.zig"], deleted=["src/cli_args.zig"])
         self.assertIn("caller errors", commands)
@@ -298,29 +318,6 @@ class PrepushTest(unittest.TestCase):
         self.git("add", "-A")
         self.git("commit", "-qm", message)
         return self.git("rev-parse", "HEAD")
-
-    def test_merged_base_finds_only_a_merge_of_a_commit_the_base_reaches(self):
-        self.git("init", "-q", "-b", "main")
-        self.commit("a", "1\n", "root")
-        self.git("checkout", "-qb", "feature")
-        self.commit("b", "1\n", "feature")
-        self.git("checkout", "-q", "main")
-        self.commit("a", "2\n", "main moves")
-        self.git("checkout", "-qb", "other", "feature")
-        self.commit("c", "1\n", "other")
-        self.git("checkout", "-q", "feature")
-
-        def merged():
-            with contextlib.chdir(self.root):
-                return select_tests.merged_base(self.git("merge-base", "HEAD", "main"), "main")
-
-        self.assertFalse(merged(), "no merge")
-        self.git("merge", "-q", "--no-ff", "-m", "merge other", "other")
-        self.assertFalse(merged(), "a merge of a branch main does not reach")
-        self.git("merge", "-q", "--no-ff", "-m", "merge main", "main")
-        self.assertTrue(merged(), "a merge of main")
-        self.commit("b", "2\n", "after the merge")
-        self.assertTrue(merged(), "commits after the merge keep it in history")
 
     def receipt_repository(self):
         self.git("init", "-q")

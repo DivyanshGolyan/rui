@@ -166,7 +166,7 @@ On Host threads:
 ## Review
 
 Codex is the code review; request `@codex review for duplicated authority and braided concerns, and against the PR's Summary shape and against the linked issue's goal; group symptoms by owner` when production or operational changes invalidate the previous review.
-[Landing](docs/agents/landing.md#publish-and-merge) owns ready publication, clean review evidence and its reuse exceptions.
+[Landing](docs/agents/landing.md#publish-and-merge) owns draft-first publication, clean review evidence and its reuse exceptions.
 The [Code Review Rules](AGENTS.md#code-review-rules) own how it groups and orders its findings; the rules it applies stay here.
 The author's own reviews are design reviews of the approved design, and a redesign when fixes keep producing new findings.
 Reviewers apply the rules below and the [product tenets](docs/verification/gates.md#product-tenets).
@@ -240,7 +240,7 @@ Drive fault injection through production transitions.
 Unit tests may inspect owner internals; integration and qualification must assert durable owner-boundary outcomes rather than timing, scheduler order, private representation or fixture-only authority.
 A concurrent test peer records what it observed before it replies or exits, so cancelling or joining it once the code under test returns cannot change the result; check this by temporarily delaying each peer read, reply and exit.
 Order test actors with a gate or event, never a sleep.
-Tests wait for a condition only through `wait_for` in `tests/integration/host_process.py` or `waitUntil` in `src/testing/poll.zig`, which accept only a check that finishes before the deadline; `tests/ci/test_harness_contracts.py` counts every other sleep in a fixture, a Zig `test` block or a test-only Zig file against a shrink-only allowlist.
+Tests wait for a condition only through `wait_for` in `tests/integration/host_process.py` or `waitUntil` in `src/testing/poll.zig`, which accept only a check that finishes before the deadline; `tests/ci/flake_sources.py` counts every other sleep in a fixture, a Zig `test` block or a test-only Zig file against a shrink-only allowlist.
 
 Shared fixture owners hold the I/O and platform cases that broke fixtures before, and `tests/ci` lints name the owner when a fixture bypasses one: Store fixture SQL passes the Store's own statement grammar (`rsql.fixtureError`), a child's stdin closes through `host_process.close_stdin`, a refusing TCP port comes from `socket_fixture.refusedPort`, a `std.testing.tmpDir` a test chmods or lists opens with `.iterate = true`, and trust in a fixture CA goes explicitly through `--set network.caFile=PATH` or the settings document's `network.caFile`, or through `os_semantics.system_trust` on Linux only.
 A fixture module, one with a main block or one that `build.zig` or `check.sh` launches, imports no other: fixtures share helpers through library modules such as `control_fixture.py`, and cases another script also runs live in a `*_cases.py` library behind a thin entry script.

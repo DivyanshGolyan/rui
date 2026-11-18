@@ -7,6 +7,8 @@ ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = (("tests/integration", (".py", ".sh")),)
 TOOL_LIST_SCANNED = (("src", (".zig",)), ("tests", (".py", ".sh", ".zig", ".go")))
 TOOL_OWNER = "src/built_in_tool.zig"
+# Generated from the statements' own text, which reads the list from TOOL_OWNER at compile time.
+STATEMENT_TABLE = "src/store/rsql_table.zig"
 PROSE_WORDS = 5
 SMALLEST_NUMBER = 1000
 SMALLEST_WINDOW = 100_000
@@ -35,6 +37,8 @@ def owned_numbers(root):
             numbers[value] = f"DEFAULTS.{name}"
     for provider, tokens in defaults.provider_compaction_triggers.items():
         numbers[tokens] = f"DEFAULTS.provider_compaction_triggers[{provider!r}]"
+    for key, tokens in defaults.model_compaction_triggers.items():
+        numbers[tokens] = f"DEFAULTS.model_compaction_triggers[{key!r}]"
     models = [(model, repr(model)) for model, row in owner.CATALOG.items()
               if row.openai_listed and owner.context_window(model) >= SMALLEST_WINDOW]
     for model, spelled in [(defaults.recommended_model, "DEFAULTS.recommended_model"), (None, "an unlisted model")] + models:
@@ -112,7 +116,7 @@ def built_in_tools(root):
 def tool_list_findings(root, tools):
     quoted = [re.compile(rf"""["']{tool}["']""") for tool in tools]
     findings = []
-    for path, lines in files(root, TOOL_LIST_SCANNED, skip=(TOOL_OWNER,)):
+    for path, lines in files(root, TOOL_LIST_SCANNED, skip=(TOOL_OWNER, STATEMENT_TABLE)):
         for number, line in enumerate(lines, 1):
             if all(pattern.search(line) for pattern in quoted):
                 findings.append(f"{path}:{number}: {line.strip()[:120]}")
@@ -184,7 +188,8 @@ class FixtureLiteralsTest(unittest.TestCase):
         finally:
             sys.path.remove(str(ROOT / "tests/integration"))
         numbers = owned_numbers(ROOT)
-        for owned in (*DEFAULTS.provider_compaction_triggers.values(), context_window(DEFAULTS.recommended_model)):
+        for owned in (*DEFAULTS.provider_compaction_triggers.values(), *DEFAULTS.model_compaction_triggers.values(),
+                      context_window(DEFAULTS.recommended_model)):
             self.assertIn(owned, numbers)
         self.assertTrue(catalog_prose(ROOT))
         self.assertTrue(built_in_tools(ROOT))

@@ -170,7 +170,7 @@ class PlatformBoundaryTest(unittest.TestCase):
         self.assertTrue(select(["src/cli.zig"], "review", AVAILABLE)["mac_required"])
         for path in ("src/HostLifecycle.zig", "src/host_coordinator.zig",
                      "src/host_restart_all.zig", "src/host_start.zig", "src/host_identity.zig", "src/upgrade.zig",
-                     "src/upgrade_process.zig", "tests/integration/upgrade_integration.py"):
+                     "src/upgrade_process.zig"):
             self.assertTrue(select([path], "review", AVAILABLE)["mac_required"], path)
 
     def test_python_scan_ignores_comments_strings_and_attributes(self):
@@ -268,11 +268,14 @@ class PlatformBoundaryTest(unittest.TestCase):
         for path in ("src/client.zig", "src/os/socket.zig", "tests/integration/os_semantics.py", "src/host_launch.c",
                      "src/build_transport.sh", "tests/integration/session_list_release_probe.c",
                      ".github/workflows/qualify-macos.yml", "install.sh", "build/darwin.zig", "tests/ci/build_artifact.py",
-                     "src/os/process.zig", "src/os/descriptor_limit.zig", "src/h2/Connection.zig",
-                     "src/h2/testing/Peer.zig", "tests/integration/terminal_process.py",
+                     "src/os/process.zig", "src/os/descriptor_limit.zig", "src/os/Waker.zig",
+                     "tests/integration/terminal_process.py",
                      "tests/integration/terminal_leader.py", "tests/integration/terminal_restoration_cases.py"):
             self.assertTrue(mac_path(path), path)
-        for path in ("src/session_view.zig", "src/server.zig", "tests/integration/dispatch_integration.py",
+        for path in ("src/session_view.zig", "src/server.zig", "src/h2/Connection.zig", "src/h2/testing/Peer.zig",
+                     "tests/integration/dispatch_integration.py",
+                     "tests/integration/upgrade_integration.py", "tests/integration/host_launch_integration.py",
+                     "tests/integration/terminal_process_test.py",
                      ".github/workflows/check.yml", "README.md",
                      "build.zig", "build.zig.zon", ".github/actions/setup/action.yml", "tests/ci/qualification.py"):
             self.assertFalse(mac_path(path), path)
@@ -285,7 +288,7 @@ class PlatformBoundaryTest(unittest.TestCase):
         self.assertTrue(select(["tests/integration/terminal_leader.py"], "review", AVAILABLE)["mac_required"])
         self.assertFalse(select(["src/os/socket.zig"], "development", AVAILABLE)["mac_required"])
 
-    def test_ci_producer_darwin_policy_requires_native_on_ready_prs(self):
+    def test_ci_producer_darwin_policy_requires_native_in_promotion_not_on_prs(self):
         from ci_plan import plan
         from docs_only import ChangeKind
 
@@ -295,22 +298,30 @@ class PlatformBoundaryTest(unittest.TestCase):
                         <= set(selected["native_targets"]))
         ready = plan(selected, event_name="pull_request", draft=False,
                      promotion=False, change_kind=ChangeKind.NORMAL).outputs
-        self.assertTrue(ready["native"])
-        self.assertEqual(ready["native_targets"], selected["native_targets"])
+        self.assertFalse(ready["native"], "the PR tier runs no macOS")
+        self.assertEqual(ready["change_kind"], "normal")
+        promoted = plan(selected, event_name="workflow_dispatch", draft=False,
+                        promotion=True, change_kind=ChangeKind.NORMAL).outputs
+        self.assertTrue(promoted["native"])
+        self.assertIn("check-full", promoted["native_targets"])
         draft = plan(selected, event_name="pull_request", draft=True,
                      promotion=False, change_kind=ChangeKind.NORMAL).outputs
         self.assertFalse(draft["native"])
         self.assertEqual(draft["native_targets"], [])
         self.assertFalse(select(["tests/ci/build_artifact.py"], "development", AVAILABLE)["mac_required"])
 
-    def test_client_process_observation_keeps_native_mac_upgrade_on_ready_prs(self):
+    def test_client_process_observation_keeps_native_mac_upgrade_in_promotion(self):
         from ci_plan import plan
         from docs_only import ChangeKind
         selection = select(["src/client.zig"], "review", AVAILABLE)
-        result = plan(selection, event_name="pull_request", draft=False,
-                      promotion=False, change_kind=ChangeKind.NORMAL)
-        self.assertTrue(result.outputs["native"])
-        self.assertIn("upgrade-integration", result.outputs["native_targets"])
+        self.assertTrue(selection["mac_required"])
+        ready = plan(selection, event_name="pull_request", draft=False,
+                     promotion=False, change_kind=ChangeKind.NORMAL)
+        self.assertFalse(ready.outputs["native"])
+        promoted = plan(selection, event_name="workflow_dispatch", draft=False,
+                        promotion=True, change_kind=ChangeKind.NORMAL)
+        self.assertTrue(promoted.outputs["native"])
+        self.assertIn("upgrade-integration", promoted.outputs["native_targets"])
 
     def test_linux_gate_requires_the_macos_type_check(self):
         self.assertIn("typecheck-macos", AVAILABLE)

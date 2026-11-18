@@ -302,8 +302,10 @@ pub fn firstMessage(row: anytype, first: u64) error{ CorruptStore, InputPartsNot
         .admission = (row.first_admission orelse return error.CorruptStore).get(),
         .admitted_at = (row.first_admitted_at orelse return error.CorruptStore).get(),
         .sender = row.first_sender,
-        .length = row.first_length orelse return error.CorruptStore,
-        .digest = row.first_digest orelse return error.CorruptStore,
+        .content = .{ .text = .{
+            .length = row.first_length orelse return error.CorruptStore,
+            .digest = row.first_digest orelse return error.CorruptStore,
+        } },
     };
 }
 
@@ -507,7 +509,7 @@ const work_latest = WorkLatest(struct { session: []const u8 }, "?1");
 fn WorkLatest(comptime Args: type, comptime session: []const u8) type {
     return rsql.Read(.{
         .sql = "SELECT t.turn_id,t.operation_id,t.input_cutoff,t.outcome_code,t.outcome_content_id,t.outcome_at,t.outcome_position," ++
-            "coalesce(o.resolution_code,o.last_failure_code) AS operation_code,o.retry_due_at_ms,o.attempt_ordinal,o.attempt_at,o.retry_scheduled_at,o.resolved_at," ++
+            "o.purpose AS compaction,coalesce(o.resolution_code,o.last_failure_code) AS operation_code,o.retry_due_at_ms,o.attempt_ordinal,o.attempt_at,o.retry_scheduled_at,o.resolved_at," ++
             "(" ++ command_domain.unresolvedModelOperationSql("o") ++ " AND " ++ command_domain.currentModelOperationSql("o", "t") ++ ") AS interruptible," ++
             "CASE WHEN EXISTS(SELECT 1 FROM session_stop WHERE selected_turn_id=t.turn_id) THEN (" ++
             command_domain.pendingMessageAfterStopSql(session) ++ " OR " ++
@@ -531,6 +533,7 @@ const WorkLatestRow = struct {
     outcome_content_id: ?rsql.Positive,
     outcome_at: ?rsql.Positive,
     outcome_position: ?rsql.Positive,
+    compaction: bool,
     operation_code: ?Code,
     retry_due_at_ms: ?u64,
     attempt_ordinal: ?rsql.Positive,
@@ -819,6 +822,7 @@ pub const WorkRead = struct {
             .turn_id = row.turn_id.get(),
             .operation_id = row.operation_id.get(),
             .input_cutoff = row.input_cutoff.get(),
+            .compaction = row.compaction,
             .stopped_at = optional(row.stopped_at),
             .interruptible = row.interruptible,
             .stop_remaining = row.stop_remaining,

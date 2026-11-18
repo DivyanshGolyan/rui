@@ -33,7 +33,7 @@ function narrowed(entry: FeedEntry): void {
 			const tool: string | null = entry.tool;
 			const server: string | null = entry.server;
 			void [description, tool, server];
-			const fields: [Schemas["ActivityItemContent"], Schemas["ActivityItemContent"], Schemas["ActivityItemContent"]] = entry.fields;
+			const fields: [Schemas["ContentValue"], Schemas["ContentValue"], Schemas["ContentValue"]] = entry.fields;
 			// @ts-expect-error Only top-level camelCase keys are exposed.
 			void entry.call_ordinal;
 			// @ts-expect-error Calls do not have the text-bearing row's extras.
@@ -53,7 +53,7 @@ function narrowed(entry: FeedEntry): void {
 			// @ts-expect-error The wire session field is exposed as sessionId.
 			void entry.session;
 			const ending: "done" | "context_full" | "provider_refused" | "provider_unavailable" | "stopped" | "interrupted" | "failed" = entry.ending;
-			const content: Schemas["ActivityItemContent"] | null = entry.content;
+			const content: Schemas["ContentValue"] | null = entry.content;
 			void [sessionId, ending, content];
 			break;
 		}
@@ -133,13 +133,13 @@ test("feed entry types narrow to each generated kind", () => { void narrowed; })
 
 test("feed camelCases only row keys, preserving nested wire values and content references", async () => {
 	const presentation = { description: "tool", code: "succeeded", publication_position: "7" };
-	const content = { bytes: "2", sha256: "hash" };
+	const content = { type: "text", bytes: "2", sha256: "hash" } as const;
 	const rows = [
 		{ position: "1", ordinal: "0", at: "1", value: { tool_result: { content, presentation } } },
 		{ position: "2", ordinal: "0", at: "1", value: { hosted_call: { presentation } } },
 		{ position: "3", ordinal: "0", at: "1", value: { approval_requested: { session: "ch1ld1", action: "8", operation: "9", call_ordinal: "10" } } },
 	];
-	const link: Link = { exchange: async (path) => path === "/v1/activity-content" ? Buffer.from("ok") : Buffer.from(JSON.stringify({ delta: "full", since: null, items: rows, more: false, end: "3" })) };
+	const link: Link = { exchange: async (path) => path === "/v1/activity-content" ? Buffer.from("ok") : Buffer.from(JSON.stringify({ work: { attention: null, group: "done", actions: { stop: false, interrupt: null, decide: null } }, delta: "full", since: null, items: rows, more: false, end: "3" })) };
 	const entries = [];
 	for await (const entry of listActivity(link, "s")) entries.push(entry);
 	assert.ok(entries[0]?.kind === "tool_result");
@@ -167,7 +167,7 @@ test("failed sends retain null targets, identity and cursor continuation without
 			assert.equal(path, "/v1/activity-page", "failed sends must not fetch activity content");
 			requests.push(JSON.parse(build("/store")) as Schemas["ActivityPageRequest"]);
 			assert.ok(requests.length <= rows.length, "pagination must finish after both refusals");
-			return Buffer.from(JSON.stringify({
+			return Buffer.from(JSON.stringify({ work: { attention: null, group: "done", actions: { stop: false, interrupt: null, decide: null } },
 				delta: "full", since: null, items: [rows[requests.length - 1]],
 				more: requests.length === 1, end: "9",
 			}));
@@ -219,7 +219,7 @@ function fakeSession(state: Schemas["WorkStateJson"]["kind"] = "idle", queued = 
 			pages++;
 			const items = deliver ? [{ position: String(pages), ordinal: "0", at: "1", value: { stop: { key: "k", turn: null, cutoff: "1", completion: "completed" } } }] : [];
 			deliver = false;
-			return Buffer.from(JSON.stringify({ delta: "full", since: null, items, more: false, end: String(pages), queued: { count: queued }, work: { state: { kind: state } } }));
+			return Buffer.from(JSON.stringify({ delta: "full", since: null, items, more: false, end: String(pages), queued: { count: queued }, work: { attention: null, group: "working", actions: { stop: false, interrupt: null, decide: null }, state: { kind: state } } }));
 		},
 	};
 	return { link, pages: () => pages };
@@ -416,10 +416,10 @@ test("follow retains its exhausted cursor and backoff across not_modified, and c
 	t.mock.timers.enable({ apis: ["setTimeout"] });
 	const requests: Schemas["ActivityPageRequest"][] = [];
 	const replies = [
-		{ delta: "full", since: "token-a", items: [], more: false, end: "9", queued: { count: "0" }, work: { state: { kind: "working" } } },
+		{ delta: "full", since: "token-a", items: [], more: false, end: "9", queued: { count: "0" }, work: { attention: null, group: "working", actions: { stop: false, interrupt: null, decide: null }, state: { kind: "working" } } },
 		{ version: WIRE_VERSION, type: "activity_page", delta: "not_modified", since: "token-b" },
-		{ delta: "full", since: null, items: [], more: false, end: "12", queued: { count: "0" }, work: { state: { kind: "working" } } },
-		{ delta: "full", since: "token-c", items: [{ position: "13", ordinal: "2", at: "1", value: { stop: { key: "k", turn: null, cutoff: "1", completion: "completed" } } }], more: false, end: "14", queued: { count: "0" }, work: { state: { kind: "working" } } },
+		{ delta: "full", since: null, items: [], more: false, end: "12", queued: { count: "0" }, work: { attention: null, group: "working", actions: { stop: false, interrupt: null, decide: null }, state: { kind: "working" } } },
+		{ delta: "full", since: "token-c", items: [{ position: "13", ordinal: "2", at: "1", value: { stop: { key: "k", turn: null, cutoff: "1", completion: "completed" } } }], more: false, end: "14", queued: { count: "0" }, work: { attention: null, group: "working", actions: { stop: false, interrupt: null, decide: null }, state: { kind: "working" } } },
 	];
 	const link: Link = { exchange: async (_path, body) => {
 		requests.push(JSON.parse(body("store")) as Schemas["ActivityPageRequest"]);
@@ -466,7 +466,7 @@ for (const follow of [false, true]) {
 			const position = first ? "2" : "3";
 			return Buffer.from(JSON.stringify({ delta: "full", since: "token", more: first, end: "9",
 				items: [{ position, ordinal: "1", at: "1", value: { stop: { key: "k", turn: null, cutoff: "1", completion: "completed" } } }],
-				queued: { count: "0" }, work: { state: { kind: "working" } },
+				queued: { count: "0" }, work: { attention: null, group: "working", actions: { stop: false, interrupt: null, decide: null }, state: { kind: "working" } },
 			}));
 		} };
 		const feed = listActivity(link, "s", { follow, signal: controller.signal });
@@ -490,7 +490,7 @@ test("a refused effort change retains its revision and inline provider text", as
     const row = { position: "4", ordinal: "0", at: "9", value: { session_changed: { revision: "2", field: "reasoning_effort_refused", provider_text: "unsupported_value: high is not supported" } } };
     const link: Link = { exchange: async (path) => {
         assert.equal(path, "/v1/activity-page");
-        return Buffer.from(JSON.stringify({ delta: "full", since: null, items: [row], more: false, end: "4" }));
+        return Buffer.from(JSON.stringify({ work: { attention: null, group: "done", actions: { stop: false, interrupt: null, decide: null } }, delta: "full", since: null, items: [row], more: false, end: "4" }));
     } };
     const entries = [];
     for await (const entry of listActivity(link, "ses123")) entries.push(entry);
@@ -506,7 +506,7 @@ test("a refused effort change retains its revision and inline provider text", as
 
 test("call and approval mapping preserves saved facts and readContent opens original JSON", async () => {
     const facts = { description: "Fetch saved page", tool: "fetch_page", server: "docs" };
-    const reference = { bytes: "2", sha256: "hash" };
+    const reference = { type: "text", bytes: "2", sha256: "hash" } as const;
     const rows: Schemas["ActivityItem"][] = [
         { position: "1", ordinal: "0", at: "1", value: { call: { operation: "2", turn: "1", call_ordinal: "0", action: "3", rejection: null, fields: [reference, reference, reference], ...facts } } },
         { position: "2", ordinal: "0", at: "1", value: { call: { operation: "2", turn: "1", call_ordinal: "1", action: "4", rejection: null, fields: [reference, reference, reference], description: "Print saved line", tool: "bash", server: null } } },
@@ -519,7 +519,7 @@ test("call and approval mapping preserves saved facts and readContent opens orig
             reads.push(JSON.parse(build("/store")));
             return Buffer.from(original);
         }
-        return Buffer.from(JSON.stringify({ delta: "full", since: null, items: rows, more: false, end: "2" }));
+        return Buffer.from(JSON.stringify({ work: { attention: null, group: "done", actions: { stop: false, interrupt: null, decide: null } }, delta: "full", since: null, items: rows, more: false, end: "2" }));
     } };
     const session = new Session(link, "r00t00");
     const entries: FeedEntry[] = [];
@@ -544,7 +544,7 @@ test("interrupt remembers the last feed page target on its own handle", async ()
 		requests.push(path);
 		if (path === "/v1/activity-page") return Buffer.from(JSON.stringify({
 			delta: "full", items: [], more: false, end: "0", since: null,
-			work: { actions: { interrupt: target } },
+			work: { attention: null, group: "working", actions: { stop: false, decide: null, interrupt: target } },
 		}));
 		assert.deepEqual(JSON.parse(build("store")).target, { session: "s", turn: "8", operation: "21" });
 		return Buffer.from(JSON.stringify({ answer: { status: "accepted" } }));
@@ -563,7 +563,7 @@ test("feed observations belong to the handle that read them", async () => {
 	const link: Link = { async exchange(path) {
 		paths.push(path);
 		return Buffer.from(JSON.stringify({ delta: "full", items: [], more: false, end: "0", since: null,
-			work: { actions: { interrupt: { turn: "2", operation: "3" } } } }));
+			work: { attention: null, group: "working", actions: { stop: false, decide: null, interrupt: { turn: "2", operation: "3" } } } }));
 	} };
 	const reader = new Session(link, "s");
 	const other = new Session(link, "s");

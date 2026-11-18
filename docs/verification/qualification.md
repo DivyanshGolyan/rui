@@ -5,7 +5,7 @@
 ## Hosted qualification
 
 [Linux qualification](../../.github/workflows/qualify-linux.yml) runs full native gates in isolated jobs on demand, including credentials, measurement checks and long witnesses.
-CI has no scheduled workflows.
+CI's only scheduled workflow is [Qualify main](release.md#qualify-main), which runs the promotion tier on `main`.
 Full native and resource campaigns remain available through manual qualification on both platforms.
 [report_issue.py](../../tests/ci/report_issue.py) remains an on-demand tool for recording failure signatures from full job logs.
 A signature names the failing fixture and assertion, a Zig test, or a gate's own error.
@@ -131,13 +131,11 @@ Measure the Rui CLI and helpers separately from the Host target.
 ## Release demonstrations
 
 `upgrade-integration` builds `rui-upgrade-release-fixture` from the current production sources with a synthetic release version and the actual source revision.
-Its focused `download` selector checks IPv4 recovery at release discovery, checksum retrieval, and archive download with a PATH-local curl fixture.
-Successful attempts use real curl against the loopback release server. Failed attempts inject exit codes without changing DNS settings.
-The cases check one retry, the final diagnostic after both attempts fail, IPv4 reuse within an upgrade, normal selection on the next run, and unchanged installations after failure.
-HTTP, certificate, connection-refusal, file-write, and signal failures do not retry. A partial archive from the first attempt must not corrupt the verified replacement.
+Its focused `download` selector runs the terminal recovery case with a PATH-local curl fixture: successful attempts use real curl against the loopback release server, and a failed attempt injects an exit code without changing DNS settings.
 The terminal recovery case activates the Settings Version row, waits at archive preparation, then checks native Host restart and unchanged credentials.
 Deliberate PATH guidance retains the old terminal client. The case checks its success status, terminal restoration, and final installation receipt rather than assuming no other same-user Hosts exist.
-`download_policy.zig` tests every exit code and both address-family modes around the minimum remaining budget.
+The discovery cases keep one real curl 403 at release discovery, reported as `upgrade_download_failed` with curl's own last line.
+`download_policy.zig` owns the rest at the Module level: curl's confined argument list for every request kind, fixture origin and address family (SH-61); one IPv4 retry only for exit 6 or 28 with the connection budget left, over every exit code, a signal and both families, and the attempt sequence of a whole run across discovery, checksums and archive, including IPv4 reuse within a run and normal selection on the next (SH-44); and the final diagnostic, which is only the last line of the last attempt (SH-62).
 `upgrade_process.zig` native tests check a decreasing budget across attempts, no retry after a transfer deadline, and no child after cancellation or an expired deadline.
 
 The historical Host-info profiles include wire 17, wire 16 (v0.72.0), wire 15 (v0.71.0) and wire 14 (v0.70.0), with all provider routes required. Parser, framing, discovery and exact-instance lifecycle tests exercise them alongside wires 13 and 9; ordinary readiness remains current-wire only.
@@ -149,6 +147,7 @@ It also restarts a retained managed source Host onto a newly selected managed so
 The lifecycle suite checks a released selection can activate a retained managed source Host through the same version and exact-instance rules. It also upgrades with two managed Hosts on different Stores and an application-owned Host: both eligible instances/PIDs must change, the unsupported Host must remain with its reason, and the pre-install warning must name all three Stores. An unreadable socket after successful publication must contribute a failed result and `host_restart_failed` exit 6 without rolling back the binary. A Host replacing the initial one during download must be included by fresh post-publication discovery.
 UpgradeJob status tests cross candidate below/equal/above the receipt target, installed/unchanged publication and restarted/already-current/incompatible/unconfirmed Hosts; status bar, Settings and relaunch text must all use the receipt target. Preparation remains version-neutral, and cancellation/discovery/transport failures cannot substitute the candidate. Installation owner tests assert the no-downgrade winner's receipt version and retain it after its executable disappears.
 Upgrade domain tests cross every `ActivationOutcome` tag with selected/other Store and installed/unchanged publication: only selected-Store incompatibility blocks that client, guidance from any Store survives, and result rendering embeds the shared restart-all report exactly.
+`host_activation.zig` owns how every outcome counts, whether it leaves guidance and whether it keeps the client safe, folded over a batch with the client's own Store, other Stores, unlocated entries and batch failures (SH-60); `host_restart_all` and `upgrade` read those answers.
 `host_restart_all` native unit tests cover every activation outcome (including a verified pinned launch with an incompatible client, counted as restarted with selected-client advice rather than readiness), every limitation and every failed/unconfirmed stage; platform/client tests cover runtime filtering and missing directories.
 The discovery boundary covers missing socket paths, stale refused sockets without hints, live saturated backlogs (immediate refusal on Darwin, pending on Linux) and connected unreadable peers; none grants absence authority without a verified Store lease observation.
 `Host information` decoder unit tests cover current and pre-ChatGPT same-wire replies, every explicit provider route, absent `chatgpt` as `unserved`, required older fields and malformed/unknown/duplicate fields; released wire-9 facts retain their strict profile.

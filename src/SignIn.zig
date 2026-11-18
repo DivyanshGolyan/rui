@@ -812,7 +812,7 @@ fn apply(self: *Self, ctx: *vxfw.EventContext, effect: core.Effect) !void {
         .copy_text => |text| try self.copyClipboard(ctx, text),
         .open => |link_| {
             const init_ = self.init orelse return;
-            const command = @import("os/os.zig").linkOpener(init_.environ_map) orelse {
+            const command = @import("os").linkOpener(init_.environ_map) orelse {
                 self.issue = "No browser opener is available. Open the displayed URL manually.";
                 return;
             };
@@ -936,7 +936,7 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
 
 const Button = struct { label: []const u8, control: core.Control, action: ?core.Action };
 fn button(buttons: *std.ArrayList(Button), alloc: std.mem.Allocator, label: []const u8, control: core.Control, action: ?core.Action) !void {
-    try buttons.append(alloc, .{ .label = try std.fmt.allocPrint(alloc, "[ {s} ]", .{label}), .control = control, .action = action });
+    try buttons.append(alloc, .{ .label = if (std.mem.eql(u8, label, "Close")) try alloc.dupe(u8, label) else try std.fmt.allocPrint(alloc, "[ {s} ]", .{label}), .control = control, .action = action });
 }
 const Row = struct { label: []const u8, value: []const u8 = "", control: ?core.Control = null, action: ?core.Action = null, caret: ?u16 = null };
 fn append(rows: *std.ArrayList(Row), alloc: std.mem.Allocator, label: []const u8, value: []const u8, control: ?core.Control, action: ?core.Action) !void {
@@ -997,7 +997,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     var code_field: ?usize = null;
     const a = ctx.arena;
     const title: []const u8 = switch (self.state.page) {
-        .account => "Sign in to Rui",
+        .account => "Welcome to Rui",
         .method => "ChatGPT account",
         .api => "Connect with an API key",
         .browser => "Continue in your browser",
@@ -1044,7 +1044,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
             if (self.form) |mapped| {
                 const form = mapped.value;
                 const field_width = Panel.valueWidth(width) -| 1;
-                try append(&rows, a, "Scope", "Selected Host. New Sessions here only.", null, null);
+                try append(&rows, a, "Scope", "Selected Host. New chats here only.", null, null);
                 try appendEditor(&rows, ctx, if (form.endpointEdit() == .unchanged and !std.mem.endsWith(u8, form.original.endpoint.slice(), "/responses")) "Endpoint (kept)" else "Base URL", &form.base, .base, field_width, "HTTPS base URL");
                 try appendEditor(&rows, ctx, "API key", &form.key, .key, field_width, if (form.original.reusable()) "Existing source (type to replace)" else "Paste your API key");
                 try appendEditor(&rows, ctx, "Model ID", &form.model, .model, field_width, "Required for custom services");
@@ -1084,7 +1084,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         },
         .pending => {
             try append(&rows, a, "Saved", "The serving Host may still use old settings.", null, null);
-            try append(&rows, a, "Warning", "Pause interrupts ALL Sessions on this Store.", null, null);
+            try append(&rows, a, "Warning", "Pause interrupts ALL chats on this Store.", null, null);
             const pause_command = try hostCommand(a, "pause", self.target.slice());
             const start_command = try hostCommand(a, "start", self.target.slice());
             try appendWrapped(&rows, ctx, "Copy pause cmd", pause_command, .pause_command, .{ .command = pause_command }, width);
@@ -1096,7 +1096,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
             try button(&buttons, a, "Return", .close, .close);
         },
         .connected => {
-            try append(&rows, a, "Connected", "This terminal is configured for new Sessions.", null, null);
+            try append(&rows, a, "Connected", "This terminal is configured for new chats.", null, null);
             try button(&buttons, a, "Close", .close, .close);
         },
     }
@@ -1121,9 +1121,9 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         }
     }
     var footer_surface: ?vxfw.Surface = null;
-    if (width > 6) {
+    if (width > 6 and self.state.page == .device) {
         const footer = try a.create(vxfw.Text);
-        footer.* = .{ .text = if (self.state.page == .device) "Tab / Shift-Tab move. Enter chooses.\nC copies code. Esc back." else "Tab / Shift-Tab move. Enter chooses. Esc back.", .style = self.quiet, .width_basis = .parent };
+        footer.* = .{ .text = "C copies code. Esc back.", .style = self.quiet, .width_basis = .parent };
         const natural = try footer.draw(ctx.withConstraints(.{}, .{ .width = width - 6 }));
         if (natural.size.height + 3 <= size.height) footer_surface = natural;
     }
@@ -1132,7 +1132,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     rule_caps.unicode = self.unicode;
     var panel: Panel = .{
         .title = title,
-        .subtitle = if (self.state.page == .account) "Choose an account. Credentials stay out of conversations." else null,
+        .subtitle = if (self.state.page == .account) "Sign in to begin. Your sign-in never enters a chat." else null,
         .unicode = self.unicode,
         .fields = fields,
         .actions = labels,
@@ -1624,11 +1624,11 @@ test "Sign-in choices subtitle footer and action buttons keep separate drawn key
         const text = try testingText(account, ctx.alloc);
         try std.testing.expectEqual(@as(usize, 3), page.drawn.hits.len);
         try std.testing.expect(std.mem.indexOf(u8, text, "Choose account") == null and std.mem.indexOf(u8, text, "Navigation") == null);
-        try std.testing.expect(std.mem.indexOf(u8, text, "Choose an account.") != null and std.mem.indexOf(u8, text, "Tab / Shift-Tab") != null);
-        try std.testing.expectEqual(@as(usize, 2), account.children[0].surface.children.len);
+        try std.testing.expect(std.mem.indexOf(u8, text, "Sign in to begin.") != null and std.mem.indexOf(u8, text, "Tab / Shift-Tab") == null);
+        try std.testing.expectEqual(@as(usize, 1), account.children[0].surface.children.len);
         const button_hit = page.drawn.hits[2];
         try std.testing.expect(button_hit.action == .close and button_hit.row > page.drawn.hits[1].row + 1);
-        try std.testing.expectEqualStrings("[", account.children[0].surface.readCell(@intCast(button_hit.start - account.children[0].origin.col), @intCast(button_hit.row - account.children[0].origin.row)).char.grapheme);
+        try std.testing.expectEqualStrings("C", account.children[0].surface.readCell(@intCast(button_hit.start - account.children[0].origin.col), @intCast(button_hit.row - account.children[0].origin.row)).char.grapheme);
         try testingSend(&page, &ctx, "\t\t\r", width, 30);
         try std.testing.expectEqual(@as(usize, 1), owner.closed);
         _ = try testingDraw(&page, ctx.alloc, width, 30);
@@ -1646,7 +1646,7 @@ test "Sign-in choices subtitle footer and action buttons keep separate drawn key
             .{ .page = .{ .saving = .key }, .labels = &.{"[ Back ]"}, .controls = &.{.back} },
             .{ .page = .{ .failed = .{ .failure = .expired, .retry = .device } }, .labels = &.{ "[ Retry ]", "[ Back ]" }, .controls = &.{ .retry, .back } },
             .{ .page = .pending, .labels = &.{ "[ Recheck ]", "[ Back ]", "[ Return ]" }, .controls = &.{ .recheck, .back, .close } },
-            .{ .page = .connected, .labels = &.{"[ Close ]"}, .controls = &.{.close} },
+            .{ .page = .connected, .labels = &.{"Close"}, .controls = &.{.close} },
         };
         for (cases) |case| {
             page.state.page = case.page;

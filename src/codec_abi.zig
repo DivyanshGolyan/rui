@@ -9,7 +9,6 @@ pub const ObservedHeaders = struct {
 
 pub const ItemKind = enum(u8) {
     settings,
-    instructions,
     message,
     output_open,
     output_part,
@@ -20,6 +19,7 @@ pub const ItemKind = enum(u8) {
     declare_open,
     declared_tool,
     declare_close,
+    history_start,
     history_end,
     compaction_trigger,
     tools_start,
@@ -37,14 +37,14 @@ pub const ItemKind = enum(u8) {
 
     pub fn resumes(self: ItemKind) bool {
         return switch (self) {
-            .image_message_open, .image_tool_open, .message, .output_open, .tool_result, .operation, .effort_update, .declare_open, .history_end => true,
+            .image_message_open, .image_tool_open, .message, .output_open, .tool_result, .operation, .effort_update, .declare_open, .history_start, .history_end => true,
             else => false,
         };
     }
 
     pub fn endsElement(self: ItemKind) bool {
         return switch (self) {
-            .image_message_close, .image_tool_close, .message, .output_close, .tool_result, .operation, .effort_update, .declare_close => true,
+            .image_message_close, .image_tool_close, .message, .output_close, .tool_result, .operation, .effort_update, .declare_close, .history_start => true,
             else => false,
         };
     }
@@ -59,7 +59,6 @@ pub const PartArray = enum(u8) { none = 0, content = 1, summary = 2 };
 
 pub const Item = union(ItemKind) {
     settings: Settings,
-    instructions,
     message: Author,
     output_open: struct {
         kind: OutputKind,
@@ -74,6 +73,7 @@ pub const Item = union(ItemKind) {
     declare_open,
     declared_tool,
     declare_close,
+    history_start,
     history_end,
     compaction_trigger,
     tools_start,

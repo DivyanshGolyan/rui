@@ -65,7 +65,7 @@ test "InputArea keeps facts below the composer when a notice replaces the status
     const facts: vxfw.RichText = .{ .text = &.{.{ .text = "new Session · gpt-6.1-sol · high · ~/rui" }}, .softwrap = false, .width_basis = .parent };
     var status: vxfw.RichText = .{ .text = &.{.{ .text = "enter sends" }}, .softwrap = false, .width_basis = .parent };
     var input: Self = .{
-        .composer = .{ .editor = &editor, .placeholder = "Type a task" },
+        .composer = .{ .editor = &editor, .placeholder = "What shall we work on?" },
         .facts = facts.widget(),
         .status = status.widget(),
     };
@@ -188,7 +188,7 @@ test "InputArea approval has one document title above a choice between composer 
     var bytes = "kept draft".*;
     var editor: @import("DraftEditor.zig") = .initText(&bytes, &bytes, 4);
     var consent: @import("ActionConsent.zig") = .{};
-    const document: vxfw.Text = .{ .text = "? Record thirty progress steps\n$ set -eu\n│ printf 'step 01'" };
+    const document: vxfw.Text = .{ .text = "● Record thirty progress steps\n$ set -eu\n│ printf 'step 01'" };
     var card: PermissionCard = .{ .consent = &consent, .body = document.widget(), .userdata = &owner, .on_decision = Owner.decide };
     var input: Self = .{ .composer = .{ .editor = &editor }, .permission = &card };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
@@ -208,7 +208,7 @@ test "InputArea approval has one document title above a choice between composer 
         try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text.written(), "Record thirty progress steps"));
         const choice = card.choice_row.?;
         try std.testing.expect(choice > 2);
-        try std.testing.expectEqualStrings("?", screen.readCell(2, 0).?.char.grapheme);
+        try std.testing.expectEqualStrings("●", screen.readCell(2, 0).?.char.grapheme);
         try std.testing.expectEqualStrings("$", screen.readCell(2, 1).?.char.grapheme);
         try std.testing.expectEqualStrings("›", screen.readCell(1, choice).?.char.grapheme);
         try std.testing.expectEqualStrings("A", screen.readCell(3, choice).?.char.grapheme);

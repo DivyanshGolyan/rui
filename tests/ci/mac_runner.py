@@ -42,8 +42,9 @@ def decide(event_name, event, actor, triggering_actor, repository, inputs, switc
     if switch == "off":
         return HOSTED, "Hosted macOS is selected because RUI_MAC_RUNNER is off."
     inputs = _object(inputs)
-    if _enabled(inputs.get("promotion")) or _enabled(inputs.get("compile_only")):
-        return HOSTED, "Hosted macOS is required for promotion and compile-only runs."
+    # Promotion routes like any trusted dispatch; compile-only main builds publish hosted caches.
+    if _enabled(inputs.get("compile_only")):
+        return HOSTED, "Hosted macOS is required for compile-only runs."
     admitted, reason = admission(event_name, event, actor, triggering_actor, repository)
     if not admitted:
         return HOSTED, reason

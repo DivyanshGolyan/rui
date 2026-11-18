@@ -38,6 +38,7 @@ pub const ConfigureReply = union(enum) {
 };
 
 pub const AcceptedMessage = struct {
+    form: @import("input_parts.zig").Form = .bytes,
     replayed: bool,
     admission_id: u64,
     content: ContentReference,
@@ -45,6 +46,7 @@ pub const AcceptedMessage = struct {
 };
 
 pub const RejectedMessage = struct {
+    form: @import("input_parts.zig").Form = .bytes,
     replayed: bool,
     code: message_admission.Rejection,
     message: ?@import("tool_record.zig").HostToolSet.MissingTool = null,
@@ -157,7 +159,7 @@ pub const PublicConversationItem = struct {
     position: u64,
     ordinal: u64,
     kind: conversation_read.ConversationItemKind,
-    content: ContentReference,
+    content: @import("content_value.zig").Value,
     presentation: ?tool_presentation.ToolPresentation = null,
     admitted_at: ?u64 = null,
     sender: ?protocol.NamedPeer = null,
@@ -173,6 +175,7 @@ pub const PublicConversationPage = struct {
 };
 
 pub const MessageObservation = struct {
+    form: @import("input_parts.zig").Form = .bytes,
     content: ContentReference,
     queue: ?AcceptedMessageQueue = null,
     admitted_at: u64 = 0,

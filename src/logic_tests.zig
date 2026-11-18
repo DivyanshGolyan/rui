@@ -22,6 +22,7 @@ const cores = .{
     .{ "BashLifecycle.zig", @import("BashLifecycle.zig") },
     .{ "bounded.zig", @import("bounded.zig") },
     .{ "built_in_tool.zig", @import("built_in_tool.zig") },
+    .{ "byte_size.zig", @import("byte_size.zig") },
     .{ "call_classification.zig", @import("call_classification.zig") },
     .{ "caller_error.zig", @import("caller_error.zig") },
     .{ "caller_exit.zig", @import("caller_exit.zig") },
@@ -46,6 +47,7 @@ const cores = .{
     .{ "configuration_admission.zig", @import("configuration_admission.zig") },
     .{ "configure_input.zig", @import("configure_input.zig") },
     .{ "content_string.zig", @import("content_string.zig") },
+    .{ "content_value.zig", @import("content_value.zig") },
     .{ "conversation_read.zig", @import("conversation_read.zig") },
     .{ "deadline.zig", @import("deadline.zig") },
     .{ "descriptor_capacity.zig", @import("descriptor_capacity.zig") },
@@ -61,6 +63,7 @@ const cores = .{
     .{ "find_tools_words.zig", @import("find_tools_words.zig") },
     .{ "hex_value.zig", @import("hex_value.zig") },
     .{ "home_path.zig", @import("home_path.zig") },
+    .{ "host_activation.zig", @import("host_activation.zig") },
     .{ "host_reply.zig", @import("host_reply.zig") },
     .{ "host_restart.zig", @import("host_restart.zig") },
     .{ "host_settings.zig", @import("host_settings.zig") },
@@ -108,6 +111,7 @@ const cores = .{
     .{ "overview_style.zig", @import("overview_style.zig") },
     // Includes the on-demand Lines projection and its fixture domain.
     .{ "overview_view.zig", @import("overview_view.zig") },
+    .{ "part_text.zig", @import("part_text.zig") },
     .{ "path_list.zig", @import("path_list.zig") },
     .{ "preset_value.zig", @import("preset_value.zig") },
     .{ "process_memory.zig", @import("process_memory.zig") },
@@ -287,16 +291,16 @@ test "the overview core reads session list pages as the client decodes them" {
         std.debug.assert(overview_view.max_page_rows == protocol.session_list_page_size);
     }
     var page: protocol_reply.SessionListPage = .{ .count = 2, .delta = .changed, .since = .{ .instance = @splat(7), .generation = 42 }, .next = .{ .since = null, .changed = .{ .through = 41, .after_reference = "r4t9vw".* } } };
-    page.rows[0] = .{ .read_version = page.since, .work = .{ .state = .{ .approval = .{ .since = 1_792_925_300 } } }, .peers = .{ .from_person_at = 1_792_925_001 } };
+    page.rows[0] = .{ .read_version = page.since, .work = .{ .state = .{ .approval = .{ .since = 1_792_925_300 } }, .attention = .{ .kind = .approval, .turn = 0, .step = 0 }, .group = .needs_you }, .peers = .{ .from_person_at = 1_792_925_001 } };
     try page.rows[0].reference.set("k7m2qx");
     try page.rows[0].workspace.set("/home/d/code/rui");
     page.rows[0].label = .{};
     try page.rows[0].label.?.set("Review PR 412");
-    page.rows[0].first_message = .{ .position = 1, .admission = 4, .admitted_at = 1_792_925_001, .sender = null, .content = .{ .length = 5, .digest = @splat(0xaa) } };
+    page.rows[0].first_message = .{ .position = 1, .admission = 4, .admitted_at = 1_792_925_001, .sender = null, .content = .{ .text = .{ .length = 5, .digest = @splat(0xaa) } } };
     page.rows[1] = .{ .read_version = page.since, .work = .{ .state = .{ .stopped = .{ .since = 1_792_925_400, .cause = .stop } } } };
     try page.rows[1].reference.set("r4t9vw");
     try page.rows[1].workspace.set("/srv/work");
-    page.rows[1].first_message = .{ .position = 1, .admission = 9, .admitted_at = 1_792_925_002, .sender = .{ .session = .{} }, .content = .{ .length = 3, .digest = @splat(0xbb) } };
+    page.rows[1].first_message = .{ .position = 1, .admission = 9, .admitted_at = 1_792_925_002, .sender = .{ .session = .{} }, .content = .{ .text = .{ .length = 3, .digest = @splat(0xbb) } } };
     try page.rows[1].first_message.?.sender.?.session.set("k7m2qx");
 
     var traversal = protocol_reply.SessionTraversal.init(.{ .instance = @splat(7), .generation = 40 });
@@ -311,7 +315,7 @@ test "the overview core reads session list pages as the client decodes them" {
     try std.testing.expectEqualStrings("/home/d/code/rui", started.workspace);
     try std.testing.expectEqualStrings("Review PR 412", started.label.?);
     try std.testing.expectEqual(page.rows[0].work.state, started.state);
-    try std.testing.expectEqual(overview_view.First{ .position = 1, .admission = 4, .sender = null }, started.first.?);
+    try std.testing.expectEqualDeep(overview_view.First{ .position = 1, .admission = 4, .sender = null, .content = .{ .text = .{ .length = 5, .digest = @splat(0xaa) } } }, started.first.?);
     try std.testing.expectEqual(@as(?u64, 1_792_925_001), started.from_person_at);
     const delegated = read.rows[1];
     try std.testing.expectEqual(@as(?[]const u8, null), delegated.label);
@@ -410,7 +414,7 @@ fn benchmarkRows(rows: []overview_view.Listed, now_s: u64, shift: u64) void {
             .provider = .codex,
             .label = if (at % 3 == 0) null else "Find why the store tests fail on the second run",
             .state = state,
-            .first = .{ .position = 1, .admission = at + 1, .sender = null },
+            .first = .{ .position = 1, .admission = at + 1, .sender = null, .content = .{ .text = .{ .length = 5, .digest = @splat(0xaa) } } },
             .from_person_at = if (at % 10 == 0) since else null,
         };
     }
