@@ -524,6 +524,11 @@ test "additive image inputs use typed parts and preserve whole-element carry" {
         try std.testing.expectEqualStrings("user", user.get("role").?.string);
         const parts = user.get("content").?.array.items;
         try std.testing.expectEqual(@as(usize, 4), parts.len);
+        // Every text part must be original text: no image placeholder or pseudo-image text.
+        for (parts[0..3], [_][]const u8{ "", "What is in this screenshot?", "" }) |part, text| {
+            try std.testing.expectEqualStrings("input_text", part.object.get("type").?.string);
+            try std.testing.expectEqualStrings(text, part.object.get("text").?.string);
+        }
         try std.testing.expectEqualStrings("", parts[0].object.get("text").?.string);
         try std.testing.expectEqualStrings("", parts[2].object.get("text").?.string);
         try std.testing.expectEqualStrings("input_image", parts[3].object.get("type").?.string);
@@ -535,6 +540,7 @@ test "additive image inputs use typed parts and preserve whole-element carry" {
         const observed = tool.get("output").?.array.items;
         try std.testing.expectEqual(@as(usize, 3), observed.len);
         try std.testing.expectEqualStrings("input_text", observed[0].object.get("type").?.string);
+        try std.testing.expectEqualStrings("Observed browser screenshot", observed[0].object.get("text").?.string);
         try std.testing.expectEqualStrings("input_image", observed[1].object.get("type").?.string);
         try std.testing.expectEqualStrings("data:image/png;base64," ++ additive_base64, observed[1].object.get("image_url").?.string);
         try std.testing.expectEqualStrings("auto", observed[1].object.get("detail").?.string);

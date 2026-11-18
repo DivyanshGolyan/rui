@@ -1,3 +1,4 @@
+const credential_location = @import("credential_location.zig");
 const std = @import("std");
 const hs = @import("host_settings.zig");
 const settings_handoff = @import("host_settings_handoff.zig");
@@ -411,7 +412,7 @@ fn matchConnectionSource(init: std.process.Init, expected: *const ConnectionInfo
 fn defaultKeySource(init: std.process.Init, key: *hs.Secret(.provider_saved)) !void {
     if (key.source != .default) return;
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const path = api_key.path(init.environ_map, &path_buffer) catch |err| return if (err == error.HomeRequired) error.HomeUnavailable else err;
+    const path = credential_location.default(init.environ_map, .openai, &path_buffer) catch |err| return if (err == error.HomeRequired) error.HomeUnavailable else err;
     key.source = .{ .file = .{} };
     try key.source.file.text.set(path);
 }
@@ -466,12 +467,12 @@ fn defaultProviders(init: std.process.Init, settings: *hs.Settings, failure: *st
         var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const usable = switch (comptime provider.facts().credential) {
             .sign_in => if (comptime provider.facts().model_list == .catalog) true else usable: {
-                const path = provider_login.credentialPath(init, provider, &path_buffer, false) catch break :usable false;
+                const path = credential_location.default(init.environ_map, provider, &path_buffer) catch break :usable false;
                 const status = codex_auth.localStatus(path, codex_auth.nowSeconds(init.io)) catch break :usable false;
                 break :usable status == .configured or status == .renewal_due;
             },
             .api_key => usable: {
-                const path = api_key.path(init.environ_map, &path_buffer) catch break :usable false;
+                const path = credential_location.default(init.environ_map, .openai, &path_buffer) catch break :usable false;
                 break :usable api_key.present(path) catch false;
             },
         };
@@ -607,7 +608,7 @@ pub fn resolveProviders(init: std.process.Init, settings: *hs.Settings, failure:
                 .sign_in => if (!entry.unauthenticated.value) {
                     if (entry.credential_file == null) {
                         var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-                        const path = provider_login.credentialPath(init, provider, &path_buffer, false) catch |err| return if (err == error.HomeRequired) error.HomeUnavailable else err;
+                        const path = credential_location.default(init.environ_map, provider, &path_buffer) catch |err| return if (err == error.HomeRequired) error.HomeUnavailable else err;
                         entry.credential_file = .{};
                         try entry.credential_file.?.text.set(path);
                     }
@@ -703,6 +704,33 @@ fn initForTest(arena: *std.heap.ArenaAllocator, env: *std.process.Environ.Map) s
     return .{ .minimal = .{ .args = .{ .vector = &.{} }, .environ = .empty }, .arena = arena, .gpa = std.testing.allocator, .io = std.testing.io, .environ_map = env, .preopens = .empty };
 }
 
+test "sign-in leaf overrides environment location before dispatch" {
+    inline for (.{ .codex, .chatgpt }) |provider| {
+        for ([_]bool{ false, true }) |leaf| {
+            for ([_]bool{ false, true }) |named| {
+                var environment: std.process.Environ.Map = .init(std.testing.allocator);
+                defer environment.deinit();
+                try environment.put("HOME", "/home/fixture");
+                if (named) try environment.put(credential_location.variable(provider), "/named/credential");
+                var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+                defer arena.deinit();
+                const init = initForTest(&arena, &environment);
+                const settings = try std.testing.allocator.create(hs.Settings);
+                defer std.testing.allocator.destroy(settings);
+                settings.* = .{};
+                defer settings.deinit();
+                var failure: start_report.Failure = undefined;
+                try hs.apply(settings, arena.allocator(), "{\"providers\":{}}", .file, checkPreset, &failure);
+                try assign(settings, arena.allocator(), "providers." ++ @tagName(provider), "{}", &failure);
+                if (leaf) try assign(settings, arena.allocator(), "providers." ++ @tagName(provider) ++ ".credentialFile", "/explicit/credential", &failure);
+                try resolveProviders(init, settings, &failure);
+                const expected = if (leaf) "/explicit/credential" else if (named) "/named/credential" else "/home/fixture/.config/rui/" ++ @tagName(provider) ++ ".json";
+                try std.testing.expectEqualStrings(expected, @field(settings.providers.entries, @tagName(provider)).?.credential_file.?.slice());
+            }
+        }
+    }
+}
+
 test "Host start resolves environment private file and saved credential sources" {
     const gpa = std.testing.allocator;
     var environment: std.process.Environ.Map = .init(gpa);
@@ -729,7 +757,7 @@ test "Host start resolves environment private file and saved credential sources"
     const path = try std.fmt.allocPrint(arena.allocator(), "{s}/private/openai.key", .{root[0..try tmp.dir.realPath(std.testing.io, &root)]});
     try api_key.install(path, "file-key");
     try assign(settings, arena.allocator(), "providers.openai.key", "null", &failure);
-    try environment.put(api_key.path_variable, path);
+    try environment.put(credential_location.variable(.openai), path);
     try environment.put("RUI_CODEX_CREDENTIAL_FILE", "/tmp/./codex-\xff.json");
     try environment.put("RUI_CHATGPT_CREDENTIAL_FILE", "/tmp/./chatgpt-\xff.json");
     try assign(settings, arena.allocator(), "providers.codex", "{}", &failure);
@@ -2139,7 +2167,7 @@ test "Host start guided connection isolates two Stores preserves providers and f
     var key: api_key.Key = .{};
     defer key.wipe();
     var key_path: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    try std.testing.expect(try api_key.read(try api_key.path(&environment, &key_path), &key));
+    try std.testing.expect(try api_key.read(try credential_location.default(&environment, .openai, &key_path), &key));
     try std.testing.expectEqualStrings("global-key-kept", key.slice());
     try std.testing.expect(try api_key.read(first.saved.key_file.slice(), &key));
     try std.testing.expectEqualStrings("first-private-key", key.slice());
@@ -2216,7 +2244,8 @@ test "Host start guided connection materializes automatic routes and reuses the 
     try std.testing.expect(try api_key.read(second.saved.key_file.slice(), &key));
     try std.testing.expectEqualStrings("from-environment", key.slice());
     var browser_path: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const browser = try provider_login.credentialPath(init, .chatgpt, &browser_path, true);
+    try provider_login.createConfigDirectory(init.io, home);
+    const browser = try credential_location.default(init.environ_map, .chatgpt, &browser_path);
     const record = try init.gpa.create(credentials.Record);
     defer init.gpa.destroy(record);
     record.* = .{ .generation = 0, .account_id = .{}, .id_token = .{}, .access_token = .{}, .refresh_token = .{}, .expires_at = 4_102_444_800, .refreshed_at = 1 };
@@ -2317,7 +2346,7 @@ test "Host start guided connection distinguishes key sync settings sync and reta
             }
         }
         var key_path: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        try std.testing.expect(!try api_key.present(try api_key.path(&environment, &key_path)));
+        try std.testing.expect(!try api_key.present(try credential_location.default(&environment, .openai, &key_path)));
     }
 }
 
@@ -2368,7 +2397,7 @@ test "Host start guided reuse refuses source-only and auth-only supersession bef
         defer key.wipe();
         try std.testing.expect(try api_key.read(first.saved.key_file.slice(), &key));
         try std.testing.expectEqualStrings("first-key", key.slice());
-        try std.testing.expect(try api_key.read(try api_key.path(&env, &path_buffer), &key));
+        try std.testing.expect(try api_key.read(try credential_location.default(&env, .openai, &path_buffer), &key));
         try std.testing.expectEqualStrings("global-key-kept", key.slice());
         var directory = try std.Io.Dir.cwd().openDir(init.io, dir, .{ .iterate = true });
         defer directory.close(init.io);
@@ -2405,7 +2434,7 @@ test "Host start guided reuse refuses endpoint-only supersession with unchanged 
         const init = initForTest(&arena, &env);
         try provider_login.key(init, "global-key-kept");
         var key_path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const key_path = try api_key.path(&env, &key_path_buffer);
+        const key_path = try credential_location.default(&env, .openai, &key_path_buffer);
         const dir = try std.fs.path.join(arena.allocator(), &.{ home, "host" });
         var failure: start_report.Failure = undefined;
         try savedEdit(init, dir, "providers", "{\"openai\":{}}", &failure);
@@ -2482,7 +2511,7 @@ test "Host start guided reuse admits equivalent automatic omitted endpoint and d
         try std.testing.expectEqualStrings(providers.endpoint(.openai), admitted.endpoint.slice());
         if (source == .explicit_file) {
             var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-            try savedEdit(init, dir, "providers.openai.key", try std.fmt.allocPrint(arena.allocator(), "file:{s}", .{try api_key.path(&env, &path_buffer)}), &failure);
+            try savedEdit(init, dir, "providers.openai.key", try std.fmt.allocPrint(arena.allocator(), "file:{s}", .{try credential_location.default(&env, .openai, &path_buffer)}), &failure);
         }
         const saved_connection = try saveConnection(init, dir, .{ .unchanged = admitted.endpoint.slice() }, .{ .existing = &admitted }, "custom-model", Gate.yes);
         try std.testing.expect(saved_connection == .saved);

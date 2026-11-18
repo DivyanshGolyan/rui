@@ -405,7 +405,7 @@ def host_child_violations(root=ROOT):
 # Process environment is not a second Host configuration surface.  Dynamic
 # settings-selected secret resolution and retired-name refusal are intake, not
 # post-intake reads. The launch gates are test synchronization, not settings.
-HOST_ENV_ALLOW = frozenset("HOME TMPDIR PATH HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy SSL_CERT_FILE SSL_CERT_DIR CURL_CA_BUNDLE RUI_OPENAI_KEY_FILE RUI_CODEX_CREDENTIAL_FILE RUI_CHATGPT_CREDENTIAL_FILE".split())
+HOST_ENV_ALLOW = frozenset("HOME TMPDIR PATH HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy SSL_CERT_FILE SSL_CERT_DIR CURL_CA_BUNDLE".split())
 HOST_LAUNCH_TEST_GATES = frozenset(("RUI_TEST_HOST_AFTER_FREEZE_GATE", "RUI_TEST_HOST_STORE_LOCKED_GATE"))
 
 
@@ -437,11 +437,38 @@ def host_environment_violations(root=ROOT):
     return found
 
 
+
+# A credential location is owned once. Imports permit callers to use an alias,
+# while literal checks also cover intake and client files, not only Host adapters.
+CREDENTIAL_LOCATION_CALLERS = frozenset(("host_start.zig", "cli.zig", "provider_login.zig", "HostLifecycle.zig"))
+CREDENTIAL_VARIABLE = re.compile(r"RUI_[A-Z0-9_]+_(?:CREDENTIAL|KEY)_FILE\Z")
+
+
+def credential_location_violations(root=ROOT):
+    found = []
+    for path in sorted((root / "src").rglob("*.zig")):
+        if path.name == "credential_location.zig":
+            continue
+        relative = path.relative_to(root).as_posix()
+        for token in production(lex(path.read_text())):
+            value = unquote(token.text)
+            if value is None:
+                continue
+            if CREDENTIAL_VARIABLE.fullmatch(value):
+                found.append(f"{relative}:{token.line}: credential variable must be named by credential_location")
+            if Path(value).name == "credential_location.zig" and path.parent != root / "src":
+                found.append(f"{relative}:{token.line}: credential location import not allowed")
+            elif Path(value).name == "credential_location.zig" and path.name not in CREDENTIAL_LOCATION_CALLERS:
+                found.append(f"{relative}:{token.line}: credential location import not allowed")
+    return found
+
+
 def violations(root=ROOT):
     derived = facts(root)
     return ([hit for path in surfaces(root)
              for hit in scan(path.read_text(), path.relative_to(root).as_posix(), derived)]
-            + running_source_violations(root) + host_child_violations(root) + host_environment_violations(root))
+            + running_source_violations(root) + host_child_violations(root) + host_environment_violations(root)
+            + credential_location_violations(root))
 
 
 if __name__ == "__main__":
