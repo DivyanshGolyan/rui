@@ -107,8 +107,6 @@ pub const Hooks = struct {
         action_result: store_module.ActionAttemptBinding,
         model_result: store_module.AttemptBinding,
         preparation_advanced,
-        bash_exit_observed,
-        shutdown_signalled,
     };
 
     pub const Hold = struct {
@@ -239,7 +237,6 @@ pub const Tuning = struct {
             hooks.pauses.getPtr(.action_result).delay_ms = delay;
             hooks.pauses.getPtr(.model_result).delay_ms = delay;
         }
-        hooks.pauses.getPtr(.model_result).gate_path = parsed.get("test-model-result-gate-path");
         hooks.retry_recovery_gate_path = parsed.get("test-retry-recovery-gate-path");
         hooks.inspection_reply.gate_path = parsed.get("test-inspection-reply-gate-path");
         if (try parsed.number(i64, "test-inspection-reply-delay-ms")) |delay| hooks.inspection_reply.delay_ms = delay;
@@ -253,8 +250,6 @@ pub const Tuning = struct {
         if (try parsed.number(c_int, "test-observation-state-fd")) |fd| hooks.observation_state_fd = fd;
         if (parsed.get("test-observation-plan")) |plan| hooks.observation_plan = std.meta.stringToEnum(TestObservation.Plan, plan) orelse
             return error.InvalidTestObservationPlan;
-        hooks.pauses.getPtr(.bash_exit_observed).gate_path = parsed.get("test-bash-observed-exit-gate-path");
-        hooks.pauses.getPtr(.shutdown_signalled).gate_path = parsed.get("test-shutdown-signalled-gate-path");
         hooks.bash_reclaim_gate_path = parsed.get("test-bash-cleanup-gate-path");
         const control_gate_keys = parsed.get("test-control-gate-keys");
         const control_gate_path = parsed.get("test-control-gate-path");
@@ -968,15 +963,14 @@ noinline fn writeActionDeadlineTrace(
 
 pub fn pause(host: *Host, point: Hooks.Pause) void {
     const hold = host.hooks.pauses.get(point);
-    if (hold.delay_ms == 0 and hold.gate_path == null) return;
+    if (hold.delay_ms == 0) return;
     switch (point) {
         .action_launch => |binding| traceAction(host, "prepared_before_handoff", binding),
         .model_launch => |binding| traceOperation(host, "prepared_before_handoff", binding),
         .action_result => |binding| traceAction(host, "sealed_before_settlement", binding),
         .model_result => |binding| traceOperation(host, "sealed_before_settlement", binding),
-        .preparation_advanced, .bash_exit_observed, .shutdown_signalled => {},
+        .preparation_advanced => {},
     }
-    if (hold.gate_path) |path| waitAtTestGate(host, path);
     if (hold.delay_ms != 0) host.io.sleep(.fromMilliseconds(hold.delay_ms), .awake) catch {};
 }
 
@@ -1000,32 +994,6 @@ pub fn bashReclaimHeld(host: *Host, binding: store_module.ActionAttemptBinding, 
     if (testGateActive(host, path)) return true;
     if (!attempted) traceAction(host, "cleanup_release_observed", binding);
     return false;
-}
-
-pub fn waitAtTestGate(host: *Host, path: []const u8) void {
-    // Release is a byte or persistent EOF after unlink/sole-writer close.
-    // macOS does not broadcast EOF to all already-blocked FIFO reads. Keep
-    // reads nonblocking so every waiter observes the shared release fact,
-    // including an opener that resolved the name before it was unlinked.
-    const fd = std.posix.openat(std.posix.AT.FDCWD, path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true, .CLOEXEC = true }, 0) catch return;
-    var gate: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = true } };
-    defer gate.close(host.io);
-    var release: [1]u8 = undefined;
-    var waiting_traced = false;
-    while (true) {
-        _ = std.posix.read(fd, &release) catch |err| switch (err) {
-            error.WouldBlock => {
-                if (!waiting_traced) {
-                    traceSubject(host, "test_gate_waiting", "path", path);
-                    waiting_traced = true;
-                }
-                std.Io.sleep(host.io, .fromMilliseconds(10), .awake) catch return;
-                continue;
-            },
-            else => return,
-        };
-        return;
-    }
 }
 
 pub fn testGateActive(host: *Host, path: []const u8) bool {

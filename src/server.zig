@@ -1161,8 +1161,8 @@ fn serveOpened(
         };
         socket_owned = false;
         _ = host.advance(.draining);
-        if (comptime test_pause.enabled) pause_owner.close();
         execution_thread.join();
+        if (comptime test_pause.enabled) pause_owner.close();
     }
     try writeReadiness(&lease.paths, host.instance, active_capacity, intake_capacity, descriptor_requirement, descriptor_limit_text, retention_entries.len, served.any());
     stderr.release();
@@ -4714,7 +4714,7 @@ test "SH-51 a read the Store refuses without fencing leaves the Host serving" {
     try std.testing.expect(storage.isFenced() and !host.launchAllowed());
 }
 
-test "SH-52 a dispatch fence records its reason in the Host diagnostics file" {
+test "SH-53 a dispatch fence records its reason in the Host diagnostics file" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

@@ -622,13 +622,17 @@ def matches(path, patterns):
     return included and not any(fnmatch.fnmatchcase(path, pattern[1:]) for pattern in patterns if pattern.startswith("!"))
 
 
-def mysql_provisioning(targets, part, platform, mysql_suites):
+def mysql_provisioning(targets, part, platform, mysql_suites, *, live=True):
+    """Which live engine servers a shard starts; the PR tier (live=False) starts none."""
     targets = set(targets)
-    dialect = platform == "linux" and bool(
+    linux = live and platform == "linux"
+    dialect = linux and bool(
         targets & (LIVE_MYSQL_DIALECT_TARGETS - {"check-full"})
         or "check-full" in targets and part != "callers")
-    return {"live_mysql": platform == "linux" and (dialect or bool(targets & mysql_suites)),
-            "mysql_dialect": dialect}
+    return {"live_mysql": linux and (dialect or bool(targets & mysql_suites)),
+            "mysql_dialect": dialect,
+            "live_postgres": linux and bool(targets & (LIVE_POSTGRES_TARGETS - {"check-full"})
+                                            or "check-full" in targets and part != "callers")}
 
 
 def live_mysql_suites(targets, mysql_suites):
@@ -660,6 +664,41 @@ def normalize(targets: set) -> set:
     if "check-full" in checks:
         checks.discard("check")
     return {target for target in checks if not covers(target, checks - {target})}
+
+
+# The PR tier: whole-suite gates, the LLVM frame gate and live-server suites run in promotion only.
+WHOLE_SUITE_GATES = frozenset({"check", "check-full", "test", "test-full"})
+PROMOTION_ONLY = frozenset({"stack-frames", "mysql-wire-integration"})
+# Fixtures over ~3 minutes alone run on a PR only when the diff touches their own sources.
+SLOW_FIXTURES = frozenset({"upgrade-integration", "human-cli-integration"})
+# Store unit tests run on a PR only for a change to the Store itself.
+STORE_PATHS = ("src/store.zig", "src/store/*")
+
+
+def fast_tier(targets, paths):
+    """The PR tier of a raw (unnormalized) selection.
+
+    Whole-suite gates become the native unit root; selected short fixtures and
+    unit roots stay; `test-logic` runs whenever any product target was selected.
+    Store unit tests stay only when the diff reaches the Store, on SQLite alone.
+    """
+    targets = set(targets)
+    if not targets:
+        return []
+    fast = targets - WHOLE_SUITE_GATES - PROMOTION_ONLY
+    if targets & WHOLE_SUITE_GATES:
+        fast.add("test-native")
+    if not any(matches(path, STORE_PATHS) for path in paths):
+        fast.discard("test-store")
+    for target in SLOW_FIXTURES & fast:
+        scripts, executables, owners = FIXTURES[target]
+        if not any(matches(path, (*scripts, *executables, *owners)) for path in paths):
+            fast.discard(target)
+    fast.add("test-logic")
+    for broad, covered in FIXTURE_COVERS.items():
+        if broad in fast:
+            fast -= covered
+    return sorted(fast)
 
 
 def select(paths, phase, available, graph=None, contents=None, fixture_literals=None):
@@ -778,6 +817,7 @@ def select(paths, phase, available, graph=None, contents=None, fixture_literals=
                    ({"installer-integration"} if any(matches(path, INSTALLER_PATHS) for path in paths) else set())
                    if targets else set())
         native_targets = set()
+    fast_targets = fast_tier(targets, paths)
     targets = normalize(targets)
     native_targets = normalize(native_targets)
     mysql_suites = live_mysql_suites(targets, graph.live_mysql)
@@ -793,7 +833,7 @@ def select(paths, phase, available, graph=None, contents=None, fixture_literals=
     missing = (targets | native_targets) - available
     if missing:
         raise ValueError(f"Selected targets absent from the build: {sorted(missing)}")
-    return {"phase": phase, "targets": sorted(targets),
+    return {"phase": phase, "targets": sorted(targets), "fast_targets": fast_targets,
             "mysql_suites": sorted(graph.live_mysql),
             "server_targets": sorted((targets & live_targets) | ({"test"} if "test" in targets and "test-store" in live_targets else set())),
             "live_needs": sorted(([root, reason] for root, reason in live_needs), key=lambda need: (need[0] or "", need[1])),
