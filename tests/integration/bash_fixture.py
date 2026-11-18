@@ -9,7 +9,7 @@ import subprocess
 import sys
 import threading
 
-from host_process import dispose_all, HostDiagnostics
+from host_process import dispose_all, HostDiagnostics, PauseGate
 import model_fixture as fixture
 
 
@@ -243,11 +243,6 @@ def stage_action(state, store, name, command, stdin=None):
         dispose_owner_case(host, endpoint, endpoint_thread)
 
 
-def open_gate(path):
-    os.mkfifo(path)
-    return os.open(path, os.O_RDWR | os.O_NONBLOCK)
-
-
 def start_case(state, name, transition, command, stdin="x"):
     store = state / f"{name}-store"
     marker = state / f"{name}-effect"
@@ -258,16 +253,13 @@ def start_case(state, name, transition, command, stdin="x"):
     endpoint = fixture.SuccessEndpoint(responses)
     thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
     thread.start()
-    gate_path = state / f"{name}-gate"
-    keeper = open_gate(gate_path)
+    keeper = PauseGate(transition)
     host = fixture.start_host(
         store,
         f"http://127.0.0.1:{endpoint.server_port}/responses",
         "--test-phase-trace",
-        "--test-transition",
-        transition.replace("_", "-"),
-        "--test-transition-gate-path",
-        gate_path,
+        observations="recovery",
+        pause=keeper,
     )
     diagnostics = HostDiagnostics(host)
     session = configure(state, store, f"{name}-configure", permission="bypass")
@@ -280,7 +272,7 @@ def finish_case(original_host, recovered_host, keeper, endpoint, thread):
     errors = []
     for dispose in (lambda: fixture.stop_host(original_host) if original_host is not None else None,
                     lambda: fixture.stop_host(recovered_host) if recovered_host is not None else None,
-                    lambda: os.close(keeper), endpoint.shutdown, endpoint.server_close,
+                    keeper.close, endpoint.shutdown, endpoint.server_close,
                     lambda: thread.join(timeout=5)):
         try:
             dispose()

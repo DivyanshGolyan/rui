@@ -80,6 +80,15 @@ jobs:
       # Setup's restat ran before this restore and only over the candidate's
       # caches. Without it Zig 0.17.1 misses every restored input
       # (tests/ci/zig_cache_restat.c) and rebuilds the pinned release whole.
+      # A cache miss above would make the previous build fetch its packages
+      # live, and codeberg outages then fail the gate (#1759). Packages are
+      # content-addressed, so the candidate's restored copies of any shared
+      # hash (translate-c, aro, ...) serve the previous release unchanged.
+      - name: Seed the previous release's packages from the candidate's
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/previous-release/zig-pkg"
+          cp -Rn zig-pkg/. "$RUNNER_TEMP/previous-release/zig-pkg/"
       - name: Reuse the restored previous-release compilation at new inodes
         run: |
           set -euo pipefail

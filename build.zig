@@ -112,6 +112,17 @@ pub fn build(b: *std.Build) void {
     const production_safe = product.addRui(b, target, .ReleaseSafe, "rui-release-safe-check", pinned_transport);
     const release_safe = if (pr_ci) product.addIntegrationRui(b, target, "rui-pr-check", pinned_transport, pr_ci, product.buildIdentity(b)) else production_safe;
     const debug = product.addRui(b, target, .Debug, "rui-debug-check", pinned_transport);
+    const pause_rui = product.addPauseIntegrationRui(b, target, "rui-pause-check", pinned_transport, pr_ci);
+    const pause_fixture = b.addExecutable(.{
+        .name = "pause-socket-fixture",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/pause_socket_fixture.zig"),
+            .target = target,
+            .optimize = .ReleaseSafe,
+            .link_libc = true,
+        }),
+    });
+    product.configurePauses(b, pause_fixture, true);
     const screen_emulator = screen_module.addScreenEmulator(b, ci, ci_mode);
     const screen = screen_emulator.library;
     const screen_emulator_step = b.step("screen-emulator", "Install the PTY screen observer's libghostty-vt, for harnesses outside build steps");
@@ -401,7 +412,7 @@ pub fn build(b: *std.Build) void {
         "Run the documented Debug artifact through configuration/message recovery",
     );
     debug_integration_step.dependOn(&debug_integration.step);
-    fixtures_module.add(b, screen, ci.path(release_safe), ci.path(debug));
+    fixtures_module.add(b, screen, ci.path(release_safe), ci.path(debug), ci.path(pause_rui), ci.path(pause_fixture));
 
     const check_step = b.step(
         "check",
@@ -420,6 +431,8 @@ pub fn build(b: *std.Build) void {
     const release_small = product.addRui(b, target, .ReleaseSmall, "rui-release-small-check", pinned_transport);
     const fast_integrations = screen_module.screenCommand(b, screen, &.{"env"});
     fast_integrations.addPrefixedFileArg("RUI_TEST_MYSQL_ADMIN=", ci.path(mysql_launch_admin));
+    fast_integrations.addPrefixedFileArg("RUI_TEST_PAUSE_BINARY=", ci.path(pause_rui));
+    fast_integrations.addPrefixedFileArg("RUI_TEST_PAUSE_SOCKET_BINARY=", ci.path(pause_fixture));
     fast_integrations.addArg("sh");
     fast_integrations.addFileArg(b.path("tests/integration/check.sh"));
     fast_integrations.addFileArg(ci.path(release_safe));
@@ -460,6 +473,8 @@ pub fn build(b: *std.Build) void {
     const check_part = b.option(unit_module.Part, "check-part", "Isolated full-check part (default all)") orelse .all;
     const process_integrations = screen_module.screenCommand(b, screen, &.{"env"});
     process_integrations.addPrefixedFileArg("RUI_TEST_MYSQL_ADMIN=", ci.path(mysql_launch_admin));
+    process_integrations.addPrefixedFileArg("RUI_TEST_PAUSE_BINARY=", ci.path(pause_rui));
+    process_integrations.addPrefixedFileArg("RUI_TEST_PAUSE_SOCKET_BINARY=", ci.path(pause_fixture));
     process_integrations.addArg("sh");
     process_integrations.addFileArg(b.path("tests/integration/check.sh"));
     process_integrations.addFileArg(ci.path(release_safe));

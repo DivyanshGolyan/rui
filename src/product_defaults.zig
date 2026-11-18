@@ -51,6 +51,12 @@ pub const provider_compaction_triggers = [_]struct { provider: []const u8, token
     .{ .provider = "codex", .tokens = 244800 },
 };
 
+pub const model_compaction_triggers = [_]struct { provider: []const u8, model: []const u8, tokens: u64 }{
+    .{ .provider = "codex", .model = "gpt-6.1-sol", .tokens = 450000 },
+    .{ .provider = "codex", .model = "gpt-6.1-terra", .tokens = 450000 },
+    .{ .provider = "codex", .model = "gpt-6.2-sol", .tokens = 450000 },
+};
+
 pub const unlisted_context_window: u64 = 128000;
 
 pub const output_reservation: u64 = 0;
@@ -71,6 +77,12 @@ test "approved product defaults" {
     try std.testing.expectEqual(@as(usize, 1), provider_compaction_triggers.len);
     try std.testing.expectEqualStrings("codex", provider_compaction_triggers[0].provider);
     try std.testing.expectEqual(@as(u64, 244800), provider_compaction_triggers[0].tokens);
+    try std.testing.expectEqual(@as(usize, 3), model_compaction_triggers.len);
+    for (model_compaction_triggers, [_][]const u8{ "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6.2-sol" }) |entry, model| {
+        try std.testing.expectEqualStrings("codex", entry.provider);
+        try std.testing.expectEqualStrings(model, entry.model);
+        try std.testing.expectEqual(@as(u64, 450000), entry.tokens);
+    }
     try std.testing.expectEqual(@as(u64, 128000), unlisted_context_window);
     try std.testing.expectEqual(@as(u64, 0), output_reservation);
 }
