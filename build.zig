@@ -359,7 +359,7 @@ pub fn build(b: *std.Build) void {
     host_status_step.dependOn(&host_status_integration.step);
 
     const upgrade_release = product.addIntegrationRui(b, target, "rui-upgrade-release-fixture", pinned_transport, pr_ci, .{
-        .version = b.fmt("0.{d}.10000", .{@import("src/store/schema.zig").schema_version}),
+        .version = b.fmt("0.{d}.10000", .{product.schemaVersion(b)}),
         .revision = product.buildIdentity(b).revision,
     });
     // Keep PR archive work representative of stripped Linux release payloads.
