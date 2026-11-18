@@ -1362,7 +1362,7 @@ fn advanceBash(host: *Host, slots: []ExecutionSlot, workspace: *Workspace) bool 
             }
             if (service.leader_observed_with_open_pipes) {
                 traceAction(host, "bash_leader_observed_with_open_pipes", active.binding);
-                pause(host, .bash_exit_observed);
+                if (comptime test_pause.enabled) reachAction(host, .action_bash_exit_observed, active.binding);
             }
             if (service.fault) |err| {
                 made_progress = failBash(host, slot, "Bash process service", err) or made_progress;
@@ -2619,6 +2619,12 @@ noinline fn completeSuccessfulTransfer(host: *Host, workspace: *Workspace, activ
     };
     const validated = &accepted.output;
     traceOperation(host, "validation_completed", owner.binding);
+    if (comptime test_pause.enabled) if (host.pause_owner) |controller| {
+        _ = controller.reach(.model_result_ready, .{
+            .operation = owner.binding.operation_id,
+            .attempt = owner.binding.attempt_ordinal,
+        }) catch {};
+    };
     pause(host, .{ .model_result = owner.binding });
     if (!host.custody.claimTerminalDelivery(owner.token)) return .cleanup;
     var settlement_trace = SettlementTrace.init(host, owner.binding);
@@ -2707,7 +2713,9 @@ fn shutdownExecution(host: *Host, slots: []ExecutionSlot, workspace: *Workspace)
             finishCustodyNow(host, slot);
         },
     };
-    pause(host, .shutdown_signalled);
+    if (comptime test_pause.enabled) if (host.pause_owner) |owner| {
+        _ = owner.reach(.host_shutdown_signalled, .{}) catch {};
+    };
     var retained_cleanup_at = std.Io.Clock.Timestamp.now(host.io, .awake);
     while (hasOwnedSlots(slots)) {
         var made_progress = advanceBash(host, slots, workspace);
