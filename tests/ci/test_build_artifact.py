@@ -455,7 +455,7 @@ class PrModeTest(unittest.TestCase):
         build = build_files.source()
         integration = build.split("pub fn addIntegrationRui(", 1)[1]
         integration = integration.split("\n}", 1)[0]
-        self.assertIn("addRuiWithIdentity(b, target, .ReleaseSafe, name, pinned_transport, identity)", integration)
+        self.assertIn("addRuiWithIdentity(b, target, .ReleaseSafe, name, pinned_transport, identity, false)", integration)
         self.assertIn("if (pr_ci) executable.use_llvm = false;", integration)
         self.assertEqual(build.count("use_llvm = false;"), 1)
         self.assertNotIn("release_safe.use_llvm", build)
@@ -465,7 +465,7 @@ class PrModeTest(unittest.TestCase):
                 self.assertIn(f'product.addIntegrationRui(b, target, "{name}", pinned_transport, pr_ci,', build)
         self.assertIn('product.addRui(b, target, .ReleaseSafe, "rui-release-safe-check", pinned_transport)', build)
         ordinary = build.split("pub fn addRui(", 1)[1].split("\n}", 1)[0]
-        self.assertIn("addRuiWithIdentity(b, target, optimize, name, pinned_transport, buildIdentity(b))", ordinary)
+        self.assertIn("addRuiWithIdentity(b, target, optimize, name, pinned_transport, buildIdentity(b), false)", ordinary)
         identity = build.split("fn addRuiWithIdentity(", 1)[1].split("\n}", 1)[0]
         self.assertNotIn("use_llvm", identity)
 
