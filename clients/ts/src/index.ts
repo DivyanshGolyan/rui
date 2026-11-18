@@ -16,6 +16,7 @@ export {
 	type SessionSpec,
 	type SessionSummary,
 	type SessionStatus,
+	type InterruptTarget,
 	type SessionUpdate,
 	type WriteOptions,
 } from "./sessions.ts";

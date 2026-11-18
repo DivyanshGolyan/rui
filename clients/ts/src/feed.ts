@@ -1,5 +1,5 @@
 
-import type { Link } from "./sessions.ts";
+import type { InterruptTarget, Link } from "./sessions.ts";
 import { WIRE_VERSION } from "./transport.ts";
 import type { components } from "./wire.ts";
 
@@ -167,7 +167,7 @@ function pause(ms: number | undefined, signal: AbortSignal | undefined): Promise
 	});
 }
 
-export async function* listActivity(link: Link, session: string, options: ListActivityOptions = {}): AsyncGenerator<FeedEntry, void, undefined> {
+export async function* listActivity(link: Link, session: string, options: ListActivityOptions = {}, observe?: (target: InterruptTarget | null) => void): AsyncGenerator<FeedEntry, void, undefined> {
 	const kinds = options.kinds === undefined ? FEED_KINDS : FEED_KINDS.filter((kind) => options.kinds?.includes(kind));
 	let position = "0";
 	let ordinal: string | null = null;
@@ -192,6 +192,7 @@ export async function* listActivity(link: Link, session: string, options: ListAc
 			if (page.delta === "not_modified") {
 				since = page.since;
 			} else {
+				observe?.(page.work?.actions?.interrupt ?? null);
 				for (const row of page.items) {
 					if (signal?.aborted) return;
 					const { entry, reference } = entryOf(row);
