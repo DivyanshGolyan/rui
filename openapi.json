@@ -17309,6 +17309,63 @@
               "final"
             ],
             "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "version": {
+                "const": "21"
+              },
+              "type": {
+                "const": "action_read"
+              },
+              "session": {
+                "type": "string",
+                "maxLength": 128,
+                "x-rui-max-bytes": 128
+              },
+              "action": {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              "state": {
+                "const": "resolved"
+              },
+              "final": {
+                "type": "object",
+                "properties": {
+                  "position": {
+                    "$ref": "#/components/schemas/Decimal"
+                  },
+                  "code": {
+                    "type": "string",
+                    "maxLength": 96,
+                    "x-rui-max-bytes": 96
+                  },
+                  "content": {
+                    "$ref": "#/components/schemas/ContentValue"
+                  },
+                  "window": {
+                    "type": "null"
+                  }
+                },
+                "required": [
+                  "position",
+                  "code",
+                  "content",
+                  "window"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "version",
+              "type",
+              "session",
+              "action",
+              "state",
+              "final"
+            ],
+            "additionalProperties": false
           }
         ]
       },

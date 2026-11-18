@@ -4135,6 +4135,21 @@ export interface components {
                     text: string;
                 };
             };
+        } | {
+            /** @constant */
+            version: "21";
+            /** @constant */
+            type: "action_read";
+            session: string;
+            action: components["schemas"]["Decimal"];
+            /** @constant */
+            state: "resolved";
+            final: {
+                position: components["schemas"]["Decimal"];
+                code: string;
+                content: components["schemas"]["ContentValue"];
+                window: null;
+            };
         };
         ReadActionRequest: {
             /** @constant */

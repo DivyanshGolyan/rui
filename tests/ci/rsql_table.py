@@ -1,0 +1,173 @@
+"""Generate or check the Store statement table, src/store/rsql_table.zig.
+
+    python3 tests/ci/rsql_table.py generate   rewrite the table from a collect build
+    python3 tests/ci/rsql_table.py check      fail when the checked-in table differs from a collect build
+    python3 tests/ci/rsql_table.py fingerprint  fail when the table records other inputs than the files hold (cheap; policy)
+    (either takes --zig PATH, the compiler to build with; default zig on PATH)
+
+A collect build (-Drsql-collect=true) compiles the product and the unit roots on rsql's comptime path, and every
+statement exports one record of what that path produced. This script reads the records back from the binaries
+and writes them as the table rsql.Read and rsql.Write look statements up in. Linux only: it reads ELF symbols.
+"""
+import hashlib
+import os
+import re
+import struct
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+TABLE = ROOT / "src/store/rsql_table.zig"
+TARGETS = "test-native,test-store,session-list-integration"
+PREFIX = b"rsqlstmt_"
+REGENERATE = "python3 tests/ci/rsql_table.py generate"
+
+
+def fingerprint(root):
+    """build/product.zig's fingerprint of the files rsql_table_inputs names, which that file owns."""
+    names = re.search(r"pub const rsql_table_inputs = \[_\]\[\]const u8\{([^}]*)\}", (root / "build/product.zig").read_text())
+    if names is None:
+        raise ValueError("build/product.zig declares no rsql_table_inputs")
+    digest = hashlib.sha256()
+    for name in re.findall(r'"([^"]+)"', names[1]):
+        digest.update(name.encode() + b"\0" + (root / name).read_bytes() + b"\0")
+    return digest.digest()[:16].hex()
+
+
+def recorded(root):
+    found = re.search(r'^pub const inputs = "([0-9a-f]*)";$', (root / "src/store/rsql_table.zig").read_text(), re.M)
+    return found[1] if found else None
+
+
+def fingerprint_error(root):
+    expected = fingerprint(root)
+    if recorded(root) == expected:
+        return None
+    return (f"src/store/rsql_table.zig records inputs {recorded(root)!r}, but the files rsql_table_inputs names hash to "
+            f"{expected!r}: every Store statement would compile on the slow comptime path. Run `{REGENERATE}` and commit it")
+
+
+def elf_records(data):
+    """Bytes of every defined rsqlstmt_* symbol of a 64-bit little-endian ELF image."""
+    if data[:4] != b"\x7fELF" or data[4] != 2 or data[5] != 1:
+        return []
+    shoff, = struct.unpack_from("<Q", data, 0x28)
+    shentsize, shnum = struct.unpack_from("<HH", data, 0x3A)
+    sections = [struct.unpack_from("<IIQQQQIIQQ", data, shoff + i * shentsize) for i in range(shnum)]
+    found = []
+    for _, kind, _, _, offset, size, link, _, _, entsize in sections:
+        if kind not in (2, 11):  # SHT_SYMTAB, SHT_DYNSYM
+            continue
+        strings = sections[link]
+        for at in range(offset, offset + size, entsize):
+            name_at, _, _, index, value, length = struct.unpack_from("<IBBHQQ", data, at)
+            name_start = strings[4] + name_at
+            if not data.startswith(PREFIX, name_start) or index == 0 or index >= len(sections):
+                continue
+            _, home_kind, _, address, home_offset, _, _, _, _, _ = sections[index]
+            if home_kind == 8:  # SHT_NOBITS
+                continue
+            start = home_offset + value - address
+            found.append(data[start:start + length])
+    return found
+
+
+def literal(raw):
+    return '"' + "".join(chr(c) if 0x20 <= c < 0x7F and c not in (0x22, 0x5C) else "\\x%02x" % c for c in raw) + '"'
+
+
+def slot(text):
+    if text == "n":
+        return ".now"
+    if text[0] == "a":
+        return ".{ .argument = %d }" % int(text[1:])
+    return ".{ .served = .%s }" % text[1:]
+
+
+def render(records):
+    """The table's source text for a set of records; one line per statement text, sorted."""
+    entries = {}
+    fingerprints = set()
+    for record in records:
+        if not record.endswith(b"\x1c"):
+            raise ValueError(f"unterminated record {record[:80]!r}")
+        _, sql, signature, sqlite, parts, slots, uses_now, shape, inputs = record[:-1].split(b"\x1f")
+        fingerprints.add(inputs)
+        entry = entries.setdefault(sql, dict(parts=parts, slots=slots, uses_now=uses_now, shape=shape, variants={}))
+        if (entry["parts"], entry["slots"], entry["uses_now"], entry["shape"]) != (parts, slots, uses_now, shape):
+            raise ValueError(f"one statement text rendered two ways: {sql[:120]!r}")
+        if entry["variants"].setdefault(signature, sqlite) != sqlite:
+            raise ValueError(f"one statement and signature rendered two SQLite texts: {sql[:120]!r}")
+    if len(fingerprints) > 1:
+        raise ValueError(f"the binaries were built from different table inputs: {sorted(fingerprints)}")
+    inputs = fingerprints.pop().decode() if fingerprints else ""
+    lines = [
+        "//! Generated by tests/ci/rsql_table.py from a collect build; do not edit. Regenerate with",
+        f"//! `{REGENERATE}`. Each line holds one statement text: rsql.zig serves it only while",
+        "//! its signature and `inputs` match, so a stale line costs compile time, never a different render.",
+        'const rsql = @import("rsql.zig");',
+        "",
+        f"pub const inputs = {literal(inputs.encode())};",
+        "",
+        "pub const entries = struct {",
+    ]
+    body = []
+    for sql in sorted(entries):
+        entry = entries[sql]
+        variants = ", ".join(".{ .signature = %s, .sqlite = %s }" % (literal(s), literal(t)) for s, t in sorted(entry["variants"].items()))
+        parts = ", ".join(literal(p) for p in entry["parts"].split(b"\x1e"))
+        slots = ", ".join(slot(s) for s in entry["slots"].decode().split(",") if s)
+        shape = entry["shape"].decode()
+        body.append(
+            f"    pub const @{literal(sql)}: rsql.TableEntry = .{{ .variants = &.{{ {variants} }}, "
+            f".mysql = .{{ .parts = &.{{ {parts} }}, .slots = &.{{ {slots} }} }}, "
+            f".facts = .{{ .uses_now = {'true' if entry['uses_now'] == b'1' else 'false'}, .shape = .{shape}, "
+            f".single_row = {'true' if shape == 'select_one' else 'false'} }} }};")
+    if body:
+        lines += body + ["};"]
+    else:
+        lines[-1] += "};"
+    return "\n".join(lines) + "\n", len(entries)
+
+
+def collect(zig):
+    with tempfile.TemporaryDirectory(prefix="rsql-table-") as prefix:
+        command = [zig, "build", "ci-build", "-Dpr-ci=true", "-Drsql-collect=true", f"-Dci-targets={TARGETS}",
+                   "-Dci-part=all", "--prefix", prefix]
+        subprocess.run(command, cwd=ROOT, check=True)
+        records = set()
+        for binary in sorted((Path(prefix) / "bin").iterdir()):
+            records.update(elf_records(binary.read_bytes()))
+    if not records:
+        raise SystemExit("the collect build exported no statements")
+    return records
+
+
+def main(argv):
+    zig = "zig"
+    if len(argv) == 3 and argv[1] == "--zig":
+        argv, zig = argv[:1], argv[2]
+    if argv == ["fingerprint"]:
+        error = fingerprint_error(ROOT)
+        print(error or "src/store/rsql_table.zig records the current inputs", file=sys.stderr if error else sys.stdout)
+        return 1 if error else 0
+    if argv not in (["generate"], ["check"]):
+        raise SystemExit(__doc__)
+    text, count = render(collect(zig))
+    text = subprocess.run([zig, "fmt", "--stdin"], input=text, capture_output=True, text=True, check=True).stdout
+    if argv == ["generate"]:
+        TABLE.write_text(text)
+        print(f"{TABLE.relative_to(ROOT)}: {count} statements")
+        return 0
+    if TABLE.read_text() != text:
+        print(f"{TABLE.relative_to(ROOT)} differs from what the comptime path renders; run `{REGENERATE}` and commit it",
+              file=sys.stderr)
+        return 1
+    print(f"{TABLE.relative_to(ROOT)}: {count} statements, as the comptime path renders them")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

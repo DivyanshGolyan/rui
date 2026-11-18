@@ -123,7 +123,7 @@ pub const routes = [_]Route{
         .kind = .read_action,
         .summary = "Reads one Session-owned Action's status and one bounded final-result window without waiting or consuming it.",
         .variants = &.{variant(protocol.read_action_request.head ++ .{Optional(protocol.read_action_request.offset)} ++ protocol.read_action_request.tail, .{})},
-        .reply = jsonReply(.{ protocol.action_read_reply.head ++ protocol.action_read_reply.pending, protocol.action_read_reply.head ++ protocol.action_read_reply.final }),
+        .reply = jsonReply(.{ protocol.action_read_reply.head ++ protocol.action_read_reply.pending, protocol.action_read_reply.head ++ protocol.action_read_reply.final, protocol.action_read_reply.head ++ protocol.action_read_reply.parts }),
     },
     .{
         .path = "/v1/observe-command",
@@ -1741,18 +1741,27 @@ fn publishedReplyExamples() !void {
     out.clearRetainingCapacity();
     var facts: protocol.ActivityFacts = .{ .end = 9, .count = 4 };
     const three: protocol.content_value.Reference = .{ .length = 3, .digest = @splat(1) };
+    var read_image: @FieldType(protocol.ToolPresentation, "description") = .{};
+    try read_image.?.set("Read image");
     facts.items[0] = .{ .position = 1, .at = 7, .value = .{ .admission = .{ .admission = 1, .key = .{}, .turn = null, .state = .queued, .content = .{ .text = three }, .admitted_at = 7 } } };
     facts.items[1] = .{ .position = 2, .ordinal = 1, .at = 8, .value = .{ .turn_ended = .{ .session = .{ .bytes = "k7m2qx".*, .len = 6 }, .turn = 1, .operation = 1, .ending = @fromBackingInt(@intCast(0)), .code = .{}, .content = null } } };
     facts.items[2] = .{ .position = 3, .at = 8, .value = .{ .user = .{ .admission = 2, .key = .{}, .turn = 2, .state = .applied, .content = .{ .parts = .{ .identity = three, .owner = .{ .message = 2 } } }, .admitted_at = 8 } } };
-    facts.items[3] = .{ .position = 4, .ordinal = 1, .at = 8, .value = .{ .tool_result = .{ .content = .{ .parts = .{ .identity = three, .owner = .{ .action = std.math.maxInt(i64) } } }, .presentation = .{ .description = .{}, .code = .succeeded, .publication_position = 4 } } } };
+    facts.items[3] = .{ .position = 4, .ordinal = 1, .at = 8, .value = .{ .tool_result = .{ .content = .{ .parts = .{ .identity = three, .owner = .{ .action = std.math.maxInt(i64) } } }, .presentation = .{ .description = read_image, .code = .succeeded, .publication_position = 4 } } } };
     facts.work.work.state = .{ .failed = .{ .since = 3, .code = .{}, .resets_at = 4 } };
     try activity_reply.writePage(&out.writer, &facts);
     try Case.check(schemas, "ActivityPageReply", out.written(), a);
     for ([_][]const u8{ "{\"type\":\"text\",\"bytes\":\"3\",", "\"owner\":{\"message\":\"2\"}}", "\"owner\":{\"action\":\"9223372036854775807\"}}" }) |member| {
         try std.testing.expect(std.mem.indexOf(u8, out.written(), member) != null);
     }
-    const decoded = try protocol_reply.ActivityPage.parse(out.written(), .{});
-    for (facts.items[0..4], decoded.facts.items[0..4]) |want, got| try std.testing.expectEqualDeep(want.value, got.value);
+    var values: protocol.ActivityFacts = .{ .end = 9, .count = 3, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
+    try values.work.workspace.set("/w");
+    values.items[0] = facts.items[0];
+    values.items[1] = facts.items[2];
+    values.items[2] = facts.items[3];
+    var encoded: std.Io.Writer.Allocating = .init(a);
+    try activity_reply.writePage(&encoded.writer, &values);
+    const decoded = try protocol_reply.ActivityPage.parse(encoded.written(), .{});
+    for (values.items[0..3], decoded.facts.items[0..3]) |want, got| try std.testing.expectEqualDeep(want.value, got.value);
 
     out.clearRetainingCapacity();
     const row: protocol.SessionRow = .{ .tools = try .of(&.{"bash"}), .label = .{} };

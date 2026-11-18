@@ -284,7 +284,7 @@ test "read_action and stop_action return verified typed Resolution references wi
                         try std.testing.expectEqualStrings(try std.fmt.allocPrint(arena, "{d}", .{resolution.position}), final.get("position").?.string);
                         try std.testing.expectEqualStrings(try std.fmt.allocPrint(arena, "{d}", .{resolution.content.parts.identity.length}), final.get("content").?.object.get("bytes").?.string);
                         try std.testing.expectEqualStrings(&std.fmt.bytesToHex(resolution.content.parts.identity.digest, .lower), final.get("content").?.object.get("sha256").?.string);
-                        try std.testing.expectEqualStrings(try std.fmt.allocPrint(arena, "{d}", .{input.binding.action_id}), final.get("content").?.object.get("owner").?.object.get("action").?.string);
+                        try std.testing.expectEqualStrings(try std.fmt.allocPrint(arena, "{d}", .{selected.action_id}), final.get("content").?.object.get("owner").?.object.get("action").?.string);
                     }
                     try std.testing.expectEqual(content_id, try storage.testing.queryU64(&database, "SELECT resolution_content_id FROM action_operation WHERE action_id=?1", .{selected.action_id}));
                     try std.testing.expectEqual(@as(u64, 0), try storage.testing.queryU64(&database, "SELECT count(*) FROM action_stop WHERE target_action_id=?1", .{selected.action_id}));
