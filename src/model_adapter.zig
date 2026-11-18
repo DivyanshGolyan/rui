@@ -6665,7 +6665,7 @@ test "old text request retries unchanged across later image message and final ac
         const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{setup.root});
         try setup.storage.close();
         try setup.storage.open(std.testing.io, database, setup.root);
-        const retry = (try @import("store/tests.zig").admitRetryForTesting(&setup.storage)).?.permit.binding;
+        const retry = (try store.admitRetryForTesting(&setup.storage)).?.permit.binding;
         try std.testing.expectEqual(original.operation_id, retry.operation_id);
         const after = try prepareMemoForTesting(&setup, retry, null, .{});
         defer std.testing.allocator.free(after.bytes);
