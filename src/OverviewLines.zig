@@ -49,18 +49,19 @@ pub const SessionControls = struct {
         const width = @import("widgets/RowInset.zig").contentWidth(ctx.max.width.?);
         const lines = try overview_view.controls(ctx.arena, self.state, width, self.caps);
         const rows = try ctx.arena.create([]const GroupedList.Row);
-        const projected = try ctx.arena.alloc(GroupedList.Row, lines.len);
-        for (lines, projected) |line, *row| {
+        const projected = try ctx.arena.alloc(GroupedList.Row, lines.len + 1);
+        for (lines, projected[0..lines.len]) |line, *row| {
             const regions = try ctx.arena.alloc(GroupedList.Region, line.regions.len);
             for (line.regions, regions) |region, *target| target.* = .{ .start = region.start, .end = region.end, .target = region.target, .selected = region.selected };
             row.* = .{ .segments = line.segments, .target = line.target, .regions = regions };
         }
+        projected[lines.len] = .{ .segments = &.{} };
         rows.* = projected;
         self.row.rows = .of(rows);
         self.row.selected = if (self.state.selected == .new_session) 0 else null;
         self.row.caps = self.caps;
         self.row.on_press = .{ .userdata = self.userdata, .pressed = self.on_click };
-        var surface = try self.row.widget().draw(ctx.withConstraints(.{}, .{ .width = ctx.max.width.?, .height = @min(2, ctx.max.height.?) }));
+        var surface = try self.row.widget().draw(ctx.withConstraints(.{}, .{ .width = ctx.max.width.?, .height = @min(3, ctx.max.height.?) }));
         surface.widget = self.widget();
         return surface;
     }
@@ -185,11 +186,12 @@ test "SUI-30 chat tabs paint and accept only their visible cells" {
     var state: overview_view.State = undefined;
     try state.init(std.testing.allocator, .{ .cwd = "/w", .home = "/h" });
     defer state.deinit();
-    for ([_]bool{ false, true }) |sidebar| for ([_]bool{ false, true }) |unicode| for (0..27) |raw_width| for ([_]u16{ 0, 1, 2 }) |height| {
+    for ([_]bool{ false, true }) |sidebar| for ([_]bool{ false, true }) |unicode| for ([_]overview_view.ArchiveFilter{ .active, .archived }) |filter| for (0..27) |raw_width| for ([_]u16{ 0, 1, 2, 3, 4 }) |height| {
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         const width: u16 = if (raw_width == 25) 46 else if (raw_width == 26) 140 else @intCast(raw_width);
         state.conversing = if (sidebar) "aaaaaa".* else null;
+        state.archive = filter;
         var clicks: Clicks = .{};
         var controls: SessionControls = .{ .state = &state, .caps = .{ .unicode = unicode }, .userdata = &clicks, .on_click = Clicks.take };
         const draw: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = height }, .cell_size = .{} };
@@ -209,7 +211,13 @@ test "SUI-30 chat tabs paint and accept only their visible cells" {
                 " ";
             try std.testing.expectEqualStrings(expected, screen.readCell(@intCast(col), 1).?.char.grapheme);
         };
+        if (height >= 3) for (0..width) |col| try std.testing.expectEqualStrings(" ", screen.readCell(@intCast(col), 2).?.char.grapheme);
         var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        if (height >= 3) {
+            clicks.got = null;
+            try controls.widget().handleEvent(&events, .{ .mouse = .{ .col = 5, .row = 2, .button = .left, .type = .press, .mods = .{} } });
+            try std.testing.expectEqual(null, clicks.got);
+        }
         for (0..141) |col| {
             clicks.got = null;
             events.consume_event = false;
