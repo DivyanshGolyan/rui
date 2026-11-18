@@ -4594,7 +4594,7 @@ test "successful reader pages and final stop preserve bytes in provider continua
     const digest = std.fmt.bytesToHex(protocol.contentDigest(text), .lower);
     const first_text = try std.json.Stringify.valueAlloc(arena, text[0..4096], .{});
     const second_text = try std.json.Stringify.valueAlloc(arena, text[4096..], .{});
-    const action_template = "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"action_read\",\"session\":\"{s}\",\"action\":\"{d}\",\"state\":\"resolved\",\"final\":{{\"position\":\"{d}\",\"code\":\"succeeded\",\"content\":{{\"bytes\":\"{d}\",\"sha256\":\"{s}\"}},\"window\":{{\"offset\":\"{d}\",\"next\":\"{d}\",\"more\":{s},\"text\":{s}}}}}}}";
+    const action_template = "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"action_read\",\"session\":\"{s}\",\"action\":\"{d}\",\"state\":\"resolved\",\"final\":{{\"position\":\"{d}\",\"code\":\"succeeded\",\"content\":{{\"bytes\":\"{d}\",\"sha256\":\"{s}\"}},\"window\":{{\"offset\":\"{d}\",\"next\":\"{d}\",\"more\":{s},\"text\":{s}}}}},\"values\":{{\"items\":[],\"next\":\"0\",\"more\":false}}}}";
     const expected_first = try std.fmt.allocPrint(arena, action_template, .{ session.slice(), target, final.position, text.len, &digest, @as(usize, 0), @as(usize, 4096), "true", first_text });
     const expected = [_][]const u8{
         expected_first,
@@ -4671,7 +4671,7 @@ test "late completion after stop preserves cancelled bytes in provider continuat
     const final = read.status.resolved.resolution;
     const text = "Action was stopped.";
     const digest = std.fmt.bytesToHex(protocol.contentDigest(text), .lower);
-    const expected = try std.fmt.allocPrint(arena, "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"action_read\",\"session\":\"{s}\",\"action\":\"{d}\",\"state\":\"resolved\",\"final\":{{\"position\":\"{d}\",\"code\":\"cancelled\",\"content\":{{\"bytes\":\"{d}\",\"sha256\":\"{s}\"}},\"window\":{{\"offset\":\"0\",\"next\":\"{d}\",\"more\":false,\"text\":\"Action was stopped.\"}}}}}}", .{ session.slice(), target, final.position, text.len, &digest, text.len });
+    const expected = try std.fmt.allocPrint(arena, "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"action_read\",\"session\":\"{s}\",\"action\":\"{d}\",\"state\":\"resolved\",\"final\":{{\"position\":\"{d}\",\"code\":\"cancelled\",\"content\":{{\"bytes\":\"{d}\",\"sha256\":\"{s}\"}},\"window\":{{\"offset\":\"0\",\"next\":\"{d}\",\"more\":false,\"text\":\"Action was stopped.\"}}}},\"values\":{{\"items\":[],\"next\":\"0\",\"more\":false}}}}", .{ session.slice(), target, final.position, text.len, &digest, text.len });
     const result_id = try store.testing.sqlite_only.queryU64(&setup.storage, "SELECT resolution_content_id FROM action_operation WHERE action_id=?1", .{stop.binding.action_id});
     const reference = try store.testingContentReference(&setup.storage, result_id);
     const bytes = try arena.alloc(u8, @intCast(reference.length));
