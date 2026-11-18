@@ -1,10 +1,10 @@
 # Overview and session list
 
-Overview lists saved chats under **Sessions**, with **+ New Session**, **Archived** and **Settings** always within reach. At wide launch the list sits beside a focused empty chat; at narrow launch the full overview opens. A wide chat keeps the same list beside its messages. The list shows names, work marks and elapsed times.
+Overview lists saved chats under **Sessions**, with **+ New chat**, **Archived** and **Settings** always within reach. At wide launch the list sits beside a focused empty chat; at narrow launch the full overview opens. A wide chat keeps the same list beside its messages. The list shows names, work marks and elapsed times.
 
 ## Sub-features
 
-- Up/Down select rows. Home selects **+ New Session**; End selects **Settings**. Enter opens the selection. Right opens a selected chat.
+- Up/Down select rows. Home selects **+ New chat**; End selects **Settings**. Enter opens the selection. Right opens a selected chat.
 - Long lists show **↑**, **↓** and **more**. Long names fit within their row.
 - Finished and working chats without a message from you appear dimmer. Chats needing approval stay prominent.
 - Left from an empty draft focuses the list beside a wide chat. Right on the open row returns to its input. Clicking the list or chat also moves focus.

@@ -6,6 +6,9 @@ pub const Point = enum {
     action_before_handoff,
     action_result_ready,
     action_result_committed,
+    model_result_ready,
+    action_bash_exit_observed,
+    host_shutdown_signalled,
 
     pub fn wireName(self: Point) []const u8 {
         return switch (self) {
@@ -13,6 +16,9 @@ pub const Point = enum {
             .action_before_handoff => "action.before_handoff",
             .action_result_ready => "action.result_ready",
             .action_result_committed => "action.result_committed",
+            .model_result_ready => "model.result_ready",
+            .action_bash_exit_observed => "action.bash_exit_observed",
+            .host_shutdown_signalled => "host.shutdown_signalled",
         };
     }
 };

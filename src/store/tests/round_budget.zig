@@ -74,6 +74,7 @@ test "every function that enters the Store has a round budget" {
         @embedFile("../domain/configuration.zig"),
         @embedFile("../domain/content.zig"),
         @embedFile("../domain/content_parts.zig"),
+        @embedFile("../domain/public_parts.zig"),
         @embedFile("../domain/find_tools.zig"),
         @embedFile("../domain/historical.zig"),
         @embedFile("../domain/history_floor.zig"),
@@ -284,6 +285,12 @@ test "each Store entry point takes its round budget on its common path" {
             meter.start();
             try std.testing.expect(!try storage.advancePartsPressure(pressure_map.value));
             meter.stop(.advancePartsPressure);
+            const admission = try store_testing.queryU64(storage, "SELECT admission_id FROM message_admission WHERE session_ref=?1", .{session.slice()});
+            var public_reader = try @import("../domain/public_parts.zig").Reader.init(session, .{ .message = admission });
+            defer public_reader.deinit();
+            meter.start();
+            try std.testing.expect((try storage.readPublicParts(&public_reader)) == .pending);
+            meter.stop(.readPublicParts);
             const binding = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
             var view: TestingPage = undefined;
             view.open(storage, binding);

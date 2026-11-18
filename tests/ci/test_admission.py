@@ -44,9 +44,9 @@ def step_script(text, name):
 
 def documentation_env():
     return dict(CHANGE_KIND='documentation', POLICY_RESULT='skipped', MACOS_RESULT='skipped',
-                UPGRADE_RESULT='skipped', NATIVE='false', UPGRADE='false', TARGETS='[]', NATIVE_TARGETS='[]',
+                NATIVE='false', TARGETS='[]', NATIVE_TARGETS='[]',
                 LINUX_MATRIX='{"include": []}', MACOS_MATRIX='{"include": []}',
-                LINUX_SPLIT='false', MACOS_SPLIT='false', CODEGEN='false', LINUX_MEMORY='false')
+                LINUX_SPLIT='false', MACOS_SPLIT='false', LINUX_MEMORY='false')
 
 
 @cache
@@ -179,8 +179,8 @@ class AdmissionTest(unittest.TestCase):
 
     def admission(self, **changes):
         env = dict(CHANGE_KIND='normal', DRAFT='false', PLAN_RESULT='success', POLICY_RESULT='success',
-                   LINUX_RESULT='success', MACOS_RESULT='success', UPGRADE_RESULT='success',
-                   NATIVE='true', UPGRADE='true', CACHE_SELECTED='false', CACHE_RESULT='skipped')
+                   LINUX_RESULT='success', MACOS_RESULT='success',
+                   NATIVE='true', CACHE_SELECTED='false', CACHE_RESULT='skipped')
         env.update(changes)
         script = step_script(job(CHECK.read_text(), 'admission'), 'Require candidate acceptance')
         return subprocess.run(['bash', '-c', script], env=dict(os.environ, **env),
@@ -191,7 +191,7 @@ class AdmissionTest(unittest.TestCase):
         self.assertEqual(self.admission(CACHE_SELECTED='true', CACHE_RESULT='success').returncode, 0)
 
     def test_each_required_part_rejects_pending_cancelled_failed_skipped_or_missing(self):
-        for part in ('PLAN_RESULT', 'POLICY_RESULT', 'LINUX_RESULT', 'MACOS_RESULT', 'UPGRADE_RESULT'):
+        for part in ('PLAN_RESULT', 'POLICY_RESULT', 'LINUX_RESULT', 'MACOS_RESULT'):
             for result in ('queued', 'pending', 'in_progress', 'cancelled', 'failure', 'skipped', ''):
                 with self.subTest(part=part, result=result):
                     self.assertNotEqual(self.admission(**{part: result}).returncode, 0)
@@ -201,21 +201,17 @@ class AdmissionTest(unittest.TestCase):
             self.assertNotEqual(self.admission(DRAFT=value).returncode, 0)
         for value in ('', 'unknown'):
             self.assertNotEqual(self.admission(NATIVE=value).returncode, 0)
-            self.assertNotEqual(self.admission(UPGRADE=value).returncode, 0)
 
-    def test_mac_and_upgrade_admit_only_their_exact_selection(self):
-        for native, upgrade in (('false', 'false'), ('true', 'false'), ('false', 'true')):
-            env = dict(NATIVE=native, UPGRADE=upgrade,
-                       MACOS_RESULT='success' if native == 'true' else 'skipped',
-                       UPGRADE_RESULT='success' if upgrade == 'true' else 'skipped')
-            with self.subTest(native=native, upgrade=upgrade):
+    def test_mac_admits_only_its_exact_selection(self):
+        for native in ('false', 'true'):
+            env = dict(NATIVE=native, MACOS_RESULT='success' if native == 'true' else 'skipped')
+            with self.subTest(native=native):
                 self.assertEqual(self.admission(**env).returncode, 0)
-            for key, selected in (('MACOS_RESULT', native), ('UPGRADE_RESULT', upgrade)):
-                for result in ('success', 'skipped', 'failure', 'cancelled', 'in_progress', ''):
-                    if result == env[key]:
-                        continue
-                    with self.subTest(native=native, upgrade=upgrade, key=key, result=result):
-                        self.assertNotEqual(self.admission(**dict(env, **{key: result})).returncode, 0)
+            for result in ('success', 'skipped', 'failure', 'cancelled', 'in_progress', ''):
+                if result == env['MACOS_RESULT']:
+                    continue
+                with self.subTest(native=native, result=result):
+                    self.assertNotEqual(self.admission(**dict(env, MACOS_RESULT=result)).returncode, 0)
 
     def test_cache_selection_has_no_unknown_or_unexpected_skips(self):
         for selected, results in (
@@ -262,8 +258,8 @@ class AdmissionTest(unittest.TestCase):
     def test_documentation_linux_requires_exact_skips_and_controls(self):
         script = step_script(job(CHECK.read_text(), 'linux'), 'Require every selected Linux part')
         env = dict(DRAFT_RUN='false', CHANGE_KIND='documentation', PLAN_RESULT='success', POLICY_RESULT='skipped',
-                   TARGETS='[]', COMPILE_TARGETS='[]', SPLIT='false', CODEGEN='false', BUILD_RESULT='skipped',
-                   UNIT_RESULT='skipped', CODEGEN_RESULT='skipped', NATIVE_RESULT='skipped',
+                   TARGETS='[]', COMPILE_TARGETS='[]', SPLIT='false', BUILD_RESULT='skipped',
+                   UNIT_RESULT='skipped', NATIVE_RESULT='skipped',
                    TYPECHECK='false', TYPECHECK_RESULT='skipped', COMPILE_ONLY='false')
 
         def run(values):
@@ -286,8 +282,8 @@ class AdmissionTest(unittest.TestCase):
     def test_linux_legacy_default_cannot_admit_an_explicit_unknown_kind(self):
         script = step_script(job(CHECK.read_text(), 'linux'), 'Require every selected Linux part')
         env = dict(DRAFT_RUN='false', PLAN_RESULT='success', POLICY_RESULT='success', TARGETS='[]', COMPILE_TARGETS='[]', SPLIT='false',
-                   CODEGEN='false', BUILD_RESULT='skipped', UNIT_RESULT='skipped',
-                   CODEGEN_RESULT='skipped', NATIVE_RESULT='skipped', TYPECHECK='false', TYPECHECK_RESULT='skipped',
+                   BUILD_RESULT='skipped', UNIT_RESULT='skipped',
+                   NATIVE_RESULT='skipped', TYPECHECK='false', TYPECHECK_RESULT='skipped',
                    COMPILE_ONLY='false')
         self.assertEqual(subprocess.run(['bash', '-euc', script], env=env).returncode, 0)
         for kind in ('', 'docs', 'unknown'):
@@ -302,9 +298,8 @@ class AdmissionTest(unittest.TestCase):
         self.assertIn("needs.plan.outputs.change_kind == 'normal'", policy)
         self.assertIn("needs.plan.outputs.draft_run == 'false'", policy)
         self.assertIn('draft_run: ${{ steps.select.outputs.draft_run }}', job(text, 'plan'))
-        for name in ('policy', 'linux', 'previous_release_upgrade'):
+        for name in ('policy', 'linux'):
             self.assertNotIn('github.event.pull_request.draft', job(text, name))
-        self.assertIn("needs.plan.outputs.upgrade == 'true'", job(text, 'previous_release_upgrade'))
         for name in ('macos_build', 'macos_suites', 'macos'):
             self.assertIn("needs.plan.outputs.native == 'true'", job(text, name))
         for name in ('plan', 'linux', 'admission'):
@@ -352,7 +347,7 @@ class AdmissionTest(unittest.TestCase):
     def test_admission_always_runs_for_every_pr_and_waits_for_required_parts(self):
         text = job(CHECK.read_text(), 'admission')
         self.assertIn("if: ${{ always() && github.event_name == 'pull_request' }}", text)
-        required = ('plan', 'policy', 'linux', 'macos', 'previous_release_upgrade', 'cache_execution')
+        required = ('plan', 'policy', 'linux', 'macos', 'cache_execution')
         needs = re.search(r'(?m)^    needs: \[(.*?)\]$', text)[1].split(', ')
         self.assertCountEqual(needs, required)
         for name in required:
@@ -389,22 +384,16 @@ class AdmissionTest(unittest.TestCase):
         self.assertIn('CANDIDATE_REF: ${{ github.sha }}', job(text, 'plan'))
         self.assertNotIn('refs/pull/', text)
 
-    def test_reusable_upgrade_runs_linux_on_prs_and_both_platforms_in_promotion(self):
-        caller = job(CHECK.read_text(), 'previous_release_upgrade')
-        self.assertIn("""systems: '["ubuntu-24.04"]'""", caller)
+    def test_upgrade_runs_both_platforms_in_promotion_and_never_on_prs(self):
+        self.assertNotIn('uses: ./.github/workflows/previous-release-upgrade.yml', CHECK.read_text())
         promotion = job(PROMOTE.read_text(), 'upgrade')
         self.assertIn('uses: ./.github/workflows/previous-release-upgrade.yml', promotion)
-        self.assertNotIn('systems:', promotion)
-        self.assertIn('uses: ./.github/workflows/previous-release-upgrade.yml', caller)
-        self.assertIn('candidate-ref: ${{ needs.plan.outputs.candidate_ref }}', caller)
-        self.assertIn("github.event_name == 'pull_request'", caller)
-        self.assertNotIn('github.event.pull_request.draft', caller)
         text = UPGRADE.read_text()
+        self.assertNotIn('pull_request', text)
         self.assertIn('  workflow_call:', text)
         self.assertIn('      candidate-ref:', text)
         upgrade = job(text, 'upgrade')
-        self.assertIn("""os: ${{ fromJSON(inputs.systems || '["ubuntu-24.04", "macos-15"]') }}""", upgrade)
-        self.assertIn("""default: '["ubuntu-24.04", "macos-15"]'""", text)
+        self.assertIn('os: [ubuntu-24.04, macos-15]', upgrade)
         self.assertIn('ref: ${{ inputs.candidate-ref || github.sha }}', upgrade)
         self.assertIn('python3 -B tests/integration/previous_release_upgrade.py "$RUNNER_TEMP/previous-release" .', upgrade)
         script = step_script(upgrade, 'Validate immutable candidate')
@@ -483,7 +472,7 @@ class CandidatePlanTest(unittest.TestCase):
             with self.subTest(upgrade=upgrade), PlanFixture() as fixture:
                 fixture.write(schema, after)
                 output = fixture.plan(self, candidate=fixture.commit())
-                self.assertEqual(output['upgrade'], upgrade)
+                self.assertIn(f'"upgrade_required": {upgrade}', (fixture.root / 'summary').read_text())
                 self.assertEqual(set(json.loads(output['linux_compile_targets'])) - set(json.loads(output['targets'])), {'test'})
                 self.assertIn('test-store', json.loads(output['targets']))
                 self.assertNotIn('test', json.loads(output['targets']))
@@ -497,9 +486,53 @@ class CandidatePlanTest(unittest.TestCase):
             self.assertEqual(output[key], '[]', key)
         for key in ('linux_matrix', 'macos_matrix'):
             self.assertEqual(output[key], '{"include": []}', key)
-        for key in ('native', 'upgrade', 'retry', 'linux_split', 'macos_split', 'linux_codegen',
+        for key in ('native', 'retry', 'linux_split', 'macos_split',
                     'linux_memory', 'cache_execution', 'typecheck_macos'):
             self.assertEqual(output[key], 'false', key)
+
+    # CI-1: written as literals, independent of select_tests' tier constants.
+    PR_TIER_NEVER = {'check', 'check-full', 'test', 'test-full', 'stack-frames', 'mysql-wire-integration'}
+    PR_TIER_CASES = {
+        'documentation': (['README.md'], set(), set()),
+        'tests/ci only': (['tests/ci/select_tests.py'], set(), set()),
+        'unreached source': (['src/future_owner.zig'], {'test-logic', 'test-native'}, set()),
+        'slow fixture owner': (['src/Upgrade.zig'], {'test-logic', 'upgrade-integration'}, set()),
+        'build hub': (['build.zig'],
+                      {'admission-debug-integration', 'canonical-failure-integration', 'codex-h2-integration',
+                       'current-facts-integration', 'installer-integration', 'login-signal-integration',
+                       'server-delivery-integration', 'test-logic', 'test-native', 'transport-h2-integration'}, set()),
+        'portable core': (['src/request_encoding.zig'], {'test-logic', 'test-native', 'dispatch-integration'},
+                          {'test-store', 'human-cli-integration', 'upgrade-integration'}),
+        'Store': (['src/store.zig'], {'test-logic', 'test-native', 'test-store', 'dispatch-debug-integration'},
+                  {'human-cli-integration', 'upgrade-integration'}),
+        'Mac path': (['src/client.zig'], {'test-logic', 'test-native', 'human-cli-integration', 'request-wait-integration'},
+                     {'test-store', 'upgrade-integration'}),
+    }
+
+    def test_ready_candidate_runs_its_pr_tier_and_promotion_the_full_selection(self):
+        from ci_plan import plan
+        from docs_only import ChangeKind
+        available = set(build_files.steps())
+        exact = {'documentation', 'tests/ci only', 'unreached source', 'slow fixture owner', 'build hub'}
+        for name, (paths, required, forbidden) in self.PR_TIER_CASES.items():
+            with self.subTest(case=name):
+                selected = select(paths, 'review', available)
+
+                def run(event, draft=False, promotion=False):
+                    return plan(selected, event_name=event, draft=draft, promotion=promotion,
+                                change_kind=ChangeKind.NORMAL).outputs
+                ready = set(run('pull_request')['targets'])
+                if name in exact:
+                    self.assertEqual(ready, required)
+                else:
+                    self.assertLessEqual(required, ready)
+                self.assertFalse(ready & (forbidden | self.PR_TIER_NEVER), sorted(ready & (forbidden | self.PR_TIER_NEVER)))
+                self.assertEqual(run('pull_request', draft=True)['targets'], [])
+                self.assertEqual(run('workflow_dispatch')['targets'], selected['targets'])
+                promoted = set(run('workflow_dispatch', promotion=True)['targets'])
+                self.assertLessEqual({'check-full', 'test-logic', 'admission-debug-integration', 'stack-frames'}, promoted)
+                from select_tests import covers
+                self.assertEqual([t for t in selected['targets'] if not covers(t, promoted)], [])
 
     def test_executed_plan_uses_pinned_tree_and_recomputes_after_base_change(self):
         with PlanFixture() as fixture:
@@ -578,7 +611,6 @@ def plan(selection, *, event_name, draft, promotion, change_kind, compile_only):
             empty = fixture.plan(self)
             self.assertEqual(empty['change_kind'], 'normal')
             self.assertEqual(empty['native'], 'false')
-            self.assertEqual(empty['upgrade'], 'false')
             (fixture.repo / 'README.md').unlink()
             deleted = fixture.commit()
             self.assert_documentation_plan(fixture.plan(self, candidate=deleted))
@@ -597,8 +629,8 @@ def plan(selection, *, event_name, draft, promotion, change_kind, compile_only):
             candidate = fixture.commit()
             output = fixture.plan(self, candidate=candidate)
             results = dict(plan='success', policy='skipped', linux='success', macos='skipped',
-                           previous_release_upgrade='skipped', cache_execution='skipped',
-                           linux_build='skipped', linux_build_unit='skipped', linux_codegen='skipped',
+                           cache_execution='skipped',
+                           linux_build='skipped', linux_build_unit='skipped',
                            linux_suites='skipped', macos_typecheck='skipped')
             for name, script in (('linux', linux), ('admission', admission)):
                 result = self.aggregate(workflow, name, script, output, results)
@@ -636,8 +668,8 @@ def plan(selection, *, event_name, draft, promotion, change_kind, compile_only):
             self.assertEqual(draft['draft_run'], 'true')
             self.assert_quick_plan(draft)
             results = {name: 'skipped' for name in (
-                'policy', 'macos', 'previous_release_upgrade', 'cache_execution',
-                'linux_build', 'linux_build_unit', 'linux_codegen', 'linux_suites', 'macos_typecheck')}
+                'policy', 'macos', 'cache_execution',
+                'linux_build', 'linux_build_unit', 'linux_suites', 'macos_typecheck')}
             results.update(plan='success', linux='success')
             self.assertEqual(self.aggregate(workflow, 'linux', linux, draft, results, draft=True).returncode, 0)
             refused = self.aggregate(workflow, 'admission', admission, draft, results, draft=True)
@@ -652,17 +684,15 @@ def plan(selection, *, event_name, draft, promotion, change_kind, compile_only):
                             linux_build='success' if has_targets else 'skipped',
                             linux_suites='success' if has_targets else 'skipped',
                             linux_build_unit='success' if ready['linux_split'] == 'true' else 'skipped',
-                            linux_codegen='success' if ready['linux_codegen'] == 'true' else 'skipped',
                             macos_typecheck='success' if ready['typecheck_macos'] == 'true' else 'skipped')
             self.assertEqual(self.aggregate(workflow, 'linux', linux, ready, selected).returncode, 0)
-            for part in ('policy', 'linux_build', 'linux_build_unit', 'linux_codegen', 'linux_suites', 'macos_typecheck'):
+            for part in ('policy', 'linux_build', 'linux_build_unit', 'linux_suites', 'macos_typecheck'):
                 if selected[part] == 'success':
                     with self.subTest(skipped=part):
                         self.assertNotEqual(self.aggregate(workflow, 'linux', linux, ready,
                             dict(selected, **{part: 'skipped'})).returncode, 0)
             accepted = dict(selected,
                 macos='success' if ready['native'] == 'true' else 'skipped',
-                previous_release_upgrade='success' if ready['upgrade'] == 'true' else 'skipped',
                 cache_execution='success' if ready['cache_execution'] == 'true' else 'skipped')
             result = self.aggregate(workflow, 'admission', admission, ready, accepted)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -694,7 +724,7 @@ def plan(selection, *, event_name, draft, promotion, change_kind, compile_only):
             self.assertEqual(output['linux_matrix'], '{"include": []}')
             self.assertEqual(output['linux_split'], 'false')
             results = dict(plan='success', policy='success', linux_build='success',
-                           linux_build_unit='skipped', linux_codegen='skipped',
+                           linux_build_unit='skipped',
                            linux_suites='skipped', macos_typecheck='skipped')
             self.assertEqual(self.aggregate(workflow, 'linux', linux, output, results).returncode, 0)
             for status in ('skipped', 'failure', 'cancelled', ''):
@@ -713,7 +743,7 @@ def plan(selection, *, event_name, draft, promotion, change_kind, compile_only):
         for targets in ([], ['test-native']):
             for required in (False, True):
                 source = dict(select([], 'review', set(build_files.steps())), targets=targets,
-                              unit_compile_required=required)
+                              fast_targets=targets, unit_compile_required=required)
                 output = plan(source, event_name='pull_request', draft=False,
                               promotion=False, change_kind=ChangeKind.NORMAL).outputs
                 encoded = {key: json.dumps(value) if not isinstance(value, str) else value
@@ -750,8 +780,7 @@ def plan(selection, *, event_name, draft, promotion, change_kind, compile_only):
             output = fixture.plan(self, candidate=candidate, event='push', compile_only=True)
             self.assertEqual(output['compile_only'], 'true')
             self.assertEqual(json.loads(output['targets']), ['check', 'test-logic'])
-            built = {name: 'skipped' for name in ('policy', 'macos', 'previous_release_upgrade', 'cache_execution',
-                                                  'linux_codegen', 'linux_suites')}
+            built = {name: 'skipped' for name in ('policy', 'macos', 'cache_execution', 'linux_suites')}
             built.update(plan='success', linux_build='success', linux_build_unit='success',
                          macos_typecheck='success')
             result = self.aggregate(workflow, 'linux', linux, output, built)
@@ -871,16 +900,10 @@ class ReleaseFlowTest(unittest.TestCase):
     def test_promotion_step_lists_name_each_check_once_with_a_fresh_output(self):
         upgrade = self.step_list(job(UPGRADE.read_text(), 'upgrade'))
         self.assertEqual([name for name, _ in upgrade],
-                         ['current-upgrade', 'running-upgrade', 'previous-upgrade'])
+                         ['startup', 'current-upgrade', 'running-upgrade', 'previous-upgrade'])
         self.assertIn('previous_release_upgrade.py --running-host', dict(upgrade)['running-upgrade'])
         self.assertIn('$RUNNER_TEMP/previous-running-release', dict(upgrade)['running-upgrade'])
-        body = job(UPGRADE.read_text(), 'upgrade')
-        self.assertIn("HOST_LAUNCH: ${{ github.event_name != 'pull_request' }}", body)
-        startup = steps.parse(shlex.split(body.split("startup=(", 2)[2].split(")\n", 1)[0])[0])
-        self.assertEqual(startup[0], 'startup')
-        self.assertIn('zig build host-launch-integration', startup[1])
-        upgrade.append(startup)
-        self.assertLess(body.index('${startup[@]+"${startup[@]}"}'), body.index("'current-upgrade="))
+        self.assertIn('zig build host-launch-integration', dict(upgrade)['startup'])
         contracts = self.step_list(job(RENDERER.read_text(), 'contracts'))
         self.assertEqual([name for name, _ in contracts],
                          ['selftest', 'pty', 'ghostty', 'controls', 'recovery'])

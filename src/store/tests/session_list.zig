@@ -138,7 +138,7 @@ test "Session list pages accepted creation order with exact workspace and fixed 
     }.run);
 }
 
-test "SUI-45 host_retry_work_version" {
+test "SUI-47 host_retry_work_version" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});

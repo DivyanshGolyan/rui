@@ -65,13 +65,23 @@ const traceOperationControl = server_host.traceOperationControl;
 const traceActionControl = server_host.traceActionControl;
 const traceActionControlOutcome = server_host.traceActionControlOutcome;
 const traceActionDeadline = server_host.traceActionDeadline;
-const testTransition = server_host.testTransition;
+const test_pause = @import("testing/pause.zig");
 const traceTransfer = server_host.traceTransfer;
 const pause = server_host.pause;
 const bashReclaimHeld = server_host.bashReclaimHeld;
 const retryRecoveryHeld = server_host.retryRecoveryHeld;
 const retryRecovered = server_host.retryRecovered;
 const observeUnprocessedCompletions = server_host.observeUnprocessedCompletions;
+
+fn reachAction(host: *Host, point: test_pause.Point, binding: store_module.ActionAttemptBinding) void {
+    if (comptime test_pause.enabled) if (host.pause_owner) |owner| {
+        _ = owner.reach(point, .{
+            .operation = binding.parent_operation_id,
+            .action = binding.action_id,
+            .attempt = @import("attempt.zig").action_attempt_ordinal,
+        }) catch {};
+    };
+}
 
 const AttemptOwner = struct {
     token: execution.CustodyToken = undefined,
@@ -1361,7 +1371,7 @@ fn advanceBash(host: *Host, slots: []ExecutionSlot, workspace: *Workspace) bool 
             }
             if (service.leader_observed_with_open_pipes) {
                 traceAction(host, "bash_leader_observed_with_open_pipes", active.binding);
-                pause(host, .bash_exit_observed);
+                if (comptime test_pause.enabled) reachAction(host, .action_bash_exit_observed, active.binding);
             }
             if (service.fault) |err| {
                 made_progress = failBash(host, slot, "Bash process service", err) or made_progress;
@@ -1667,7 +1677,8 @@ fn admitBashAttempt(
         fenceDispatch(host, "Bash custody attachment", err);
         return .admitted;
     };
-    testTransition(host, .action_attempt_admitted, action_binding);
+    // This blocking pause holds the shared execution loop until release.
+    if (comptime test_pause.enabled) reachAction(host, .action_attempt_committed, action_binding);
     const input = &workspace.bash_input;
     host.store.readActionExecutionInput(.bash, action_binding, input) catch |err| {
         settleActionFailure(host, token, action_binding, .storage_failed, "Bash input could not be read.");
@@ -1764,7 +1775,8 @@ fn discardBashResources(
 fn launchPreparedBash(host: *Host, slot: *ExecutionSlot, prepared: *bash.Prepared) void {
     const token = slot.bash_preparing.token;
     const action_binding = slot.bash_preparing.binding;
-    testTransition(host, .prepared_before_handoff, action_binding);
+    // This blocking pause holds the shared execution loop until release.
+    if (comptime test_pause.enabled) reachAction(host, .action_before_handoff, action_binding);
     pause(host, .{ .action_launch = action_binding });
     if (!host.launchAllowed()) {
         discardBashResources(host, slot, prepared.takeCleanup());
@@ -1871,7 +1883,7 @@ fn stopSupersededBash(
     };
 }
 
-fn completeBash(host: *Host, slot: *ExecutionSlot) void {
+noinline fn completeBash(host: *Host, slot: *ExecutionSlot) void {
     const active = &slot.bash;
     const binding = active.binding;
     const profile = tool_record.Runner.bash.resultProfile(true);
@@ -1880,26 +1892,40 @@ fn completeBash(host: *Host, slot: *ExecutionSlot) void {
         return;
     };
     defer result.destroy();
-    const code = active.execution.writeResult(bashScratch(host), host.retention, result) catch |err| {
-        _ = failBash(host, slot, "Bash outcome materialization", err);
-        return;
-    };
-    const value = switch (result.finish()) {
-        .value => |value| value,
-        .failed => |failure| {
-            _ = tool_settle.fence(host, "Bash result finalization", failure.failure);
-            closeBashDelivery(host, slot);
-            return;
-        },
-    };
+    const materialized = materializeBashResult(host, slot, result) orelse return;
+    const code = materialized.code;
+    const value = materialized.value;
     pause(host, .{ .action_result = binding });
-    testTransition(host, .action_result_ready, binding);
+    // This blocking pause holds the shared execution loop until release.
+    if (comptime test_pause.enabled) reachAction(host, .action_result_ready, binding);
     const delivered = tool_settle.result(host, .{ .token = active.token, .binding = binding, .publication_phase = "Bash result settlement" }, profile, code, value, result);
     switch (delivered) {
-        .delivered, .session_stop => testTransition(host, .action_result_committed, binding),
+        // This blocking pause holds the shared execution loop until release.
+        .delivered, .session_stop => if (comptime test_pause.enabled) reachAction(host, .action_result_committed, binding),
         .lost, .fenced => {},
     }
     closeBashDelivery(host, slot);
+}
+
+const MaterializedBashResult = struct {
+    code: store_module.ActionResolutionCode,
+    value: @import("tool_result.zig").Value,
+};
+
+/// Keeps output materialization's frame off the stack while the result settles.
+noinline fn materializeBashResult(host: *Host, slot: *ExecutionSlot, result: *@import("tool_result.zig").Result) ?MaterializedBashResult {
+    const code = slot.bash.execution.writeResult(bashScratch(host), host.retention, result) catch |err| {
+        _ = failBash(host, slot, "Bash outcome materialization", err);
+        return null;
+    };
+    return switch (result.finish()) {
+        .value => |value| .{ .code = code, .value = value },
+        .failed => |failure| {
+            _ = tool_settle.fence(host, "Bash result finalization", failure.failure);
+            closeBashDelivery(host, slot);
+            return null;
+        },
+    };
 }
 
 fn failBash(host: *Host, slot: *ExecutionSlot, phase: []const u8, err: anyerror) bool {
@@ -2602,6 +2628,12 @@ noinline fn completeSuccessfulTransfer(host: *Host, workspace: *Workspace, activ
     };
     const validated = &accepted.output;
     traceOperation(host, "validation_completed", owner.binding);
+    if (comptime test_pause.enabled) if (host.pause_owner) |controller| {
+        _ = controller.reach(.model_result_ready, .{
+            .operation = owner.binding.operation_id,
+            .attempt = owner.binding.attempt_ordinal,
+        }) catch {};
+    };
     pause(host, .{ .model_result = owner.binding });
     if (!host.custody.claimTerminalDelivery(owner.token)) return .cleanup;
     var settlement_trace = SettlementTrace.init(host, owner.binding);
@@ -2690,7 +2722,9 @@ fn shutdownExecution(host: *Host, slots: []ExecutionSlot, workspace: *Workspace)
             finishCustodyNow(host, slot);
         },
     };
-    pause(host, .shutdown_signalled);
+    if (comptime test_pause.enabled) if (host.pause_owner) |owner| {
+        _ = owner.reach(.host_shutdown_signalled, .{}) catch {};
+    };
     var retained_cleanup_at = std.Io.Clock.Timestamp.now(host.io, .awake);
     while (hasOwnedSlots(slots)) {
         var made_progress = advanceBash(host, slots, workspace);
@@ -3666,32 +3700,12 @@ test "cleanup publication follows complete execution retirement" {
 }
 
 test "Bash releases both spills after lost custody or fenced settlement" {
-    // The result-ready transition runs after both capture files are adopted and
-    // before custody is claimed. Observe it without holding up the Host.
-    const Boundary = struct {
-        queue: *output_retention.Queue,
-        used: *std.atomic.Value(u64),
-        directory: std.Io.Dir,
-        stdout_name: protocol.Bounded(96),
-        stderr_name: protocol.Bounded(96),
-        saw_spills: bool = false,
-
-        fn now(context: ?*anyopaque, clock: std.Io.Clock) std.Io.Timestamp {
-            const self: *@This() = @ptrCast(@alignCast(context.?));
-            if (self.queue.occupied() == 2 and self.used.load(.acquire) == 48_000) {
-                const stdout = self.directory.statFile(std.testing.io, self.stdout_name.slice(), .{}) catch null;
-                const stderr_file = self.directory.statFile(std.testing.io, self.stderr_name.slice(), .{}) catch null;
-                var stdout_reserved = false;
-                var stderr_reserved = false;
-                for (self.queue.entries) |entry| {
-                    if (entry.state != .reserved) continue;
-                    stdout_reserved = stdout_reserved or std.mem.eql(u8, entry.name.slice(), self.stdout_name.slice());
-                    stderr_reserved = stderr_reserved or std.mem.eql(u8, entry.name.slice(), self.stderr_name.slice());
-                }
-                if (stdout_reserved and stderr_reserved and stdout != null and stderr_file != null and stdout.?.size == 24_000 and stderr_file.?.size == 24_000)
-                    self.saw_spills = true;
-            }
-            return clock.now(std.testing.io);
+    // EXR-54
+    const Completion = struct {
+        host: *Host,
+        slot: *ExecutionSlot,
+        fn run(self: *@This()) void {
+            completeBash(self.host, self.slot);
         }
     };
     for ([_]enum { lost, fenced }{ .lost, .fenced }) |outcome| {
@@ -3797,16 +3811,33 @@ test "Bash releases both spills after lost custody or fenced settlement" {
             try std.testing.expectEqual(tool_settle.Delivered.delivered, tool_settle.fixed(&host, .{ .token = token, .binding = binding, .publication_phase = "prior result" }, .succeeded, "prior result"));
         } else host.hooks.failures.insert(.result_before_commit);
 
-        var boundary: Boundary = .{ .queue = &retention, .used = &host.scratch_used, .directory = tmp.dir, .stdout_name = stdout_name, .stderr_name = stderr_name };
-        var vtable = std.testing.io.vtable.*;
-        vtable.now = Boundary.now;
-        host.io = .{ .userdata = &boundary, .vtable = &vtable };
-        host.hooks.phase_trace = true;
-        var gate_path: [platform.max_scratch_path_bytes]u8 = undefined;
-        host.hooks.transition = .{ .transition = .action_result_ready, .path = try std.fmt.bufPrint(&gate_path, "{s}/absent-result-gate", .{root}) };
-        completeBash(&host, &slot);
-        host.io = std.testing.io;
-        try std.testing.expect(boundary.saw_spills);
+        var owner = test_pause.PauseController.init(std.testing.io, std.heap.c_allocator);
+        defer owner.deinit();
+        try owner.arm(.{ .point = .action_result_ready });
+        host.pause_owner = &owner;
+        var completion: Completion = .{ .host = &host, .slot = &slot };
+        const thread = try std.Thread.spawn(.{}, Completion.run, .{&completion});
+        var joined = false;
+        defer {
+            owner.close();
+            if (!joined) thread.join();
+        }
+        const arrival = try owner.wait(.{ .point = .action_result_ready });
+        try std.testing.expectEqual(@as(usize, 2), retention.occupied());
+        try std.testing.expectEqual(@as(u64, 48_000), host.scratch_used.load(.acquire));
+        for ([_]protocol.Bounded(96){ stdout_name, stderr_name }) |name| {
+            const stat = try tmp.dir.statFile(std.testing.io, name.slice(), .{});
+            try std.testing.expectEqual(@as(u64, 24_000), stat.size);
+            var reserved = false;
+            for (retention.entries) |entry| {
+                if (entry.state == .reserved and std.mem.eql(u8, entry.name.slice(), name.slice())) reserved = true;
+            }
+            try std.testing.expect(reserved);
+        }
+        try owner.release(arrival.id, .proceed);
+        thread.join();
+        joined = true;
+        host.pause_owner = null;
         try std.testing.expect(slot == .bash and slot.bash.delivery == .closed);
         try host.custody.checkDetached(token, .{ .action = binding });
         try std.testing.expectEqual(outcome == .lost, host.launchAllowed());
