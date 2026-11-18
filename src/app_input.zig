@@ -206,6 +206,7 @@ pub const Input = union(enum) {
         named: ?keymap.Key,
         /// Enter as the line editor reads it.
         enter: bool = false,
+        printable: bool = false,
     };
     pub const Mouse = enum { click, list_click, chat_click, wheel, motion };
 };
@@ -355,7 +356,7 @@ fn stepInner(state: *State, facts: Facts, input: Input) Effects {
     }
     if (input == .mouse and (input.mouse == .click or input.mouse == .list_click or input.mouse == .chat_click) and state.pasting) return .{ .route = .swallow };
     if (state.layer == .sign_in) return .{ .route = .sign_in };
-    if (input == .key and state.layer == .settings) return settingsKey(state, facts.settings, input.key);
+    if (input == .key and state.layer == .settings) return settingsKey(state, facts, input.key);
     if (state.layer == .main and !state.pasting and input == .key and !(facts.frame.modal and facts.session_open) and (input.key.named == .alt_up or input.key.named == .alt_down))
         return .{ .route = .{ .overview = .{ .under = .main, .pasted = false, .wide = facts.wide } } };
     if (input == .key and !state.pasting and !facts.frame.modal) {
@@ -456,7 +457,8 @@ fn focusChat(state: *State) Effects {
 
 const app_keys: Effects.Route = .{ .overview = .{ .under = .settings, .pasted = false } };
 
-fn settingsKey(state: *State, page: Facts.Settings, key: Input.Key) Effects {
+fn settingsKey(state: *State, facts: Facts, key: Input.Key) Effects {
+    const page = facts.settings;
     if (state.pasting) return if (page.takes_paste) .{} else .{ .route = .swallow };
     const closes = key.named == .escape or key.named == .ctrl_g;
     if (closes and page.keys_open) return .{ .page = .close_keys, .route = .swallow, .redraw = true };
@@ -466,6 +468,12 @@ fn settingsKey(state: *State, page: Facts.Settings, key: Input.Key) Effects {
         var closed = navigated(state.layer, .reset);
         closed.route = .swallow;
         return closed;
+    }
+    if (key.printable and facts.session_open and !page.takes_key) {
+        state.layer = .main;
+        state.area = .main;
+        state.field = .input;
+        return .{ .page = .reset, .focus = .main, .field = .input, .route = .{ .session = .{ .under = .main, .pasted = false } }, .redraw = true };
     }
     if (!page.takes_key) return .{ .route = app_keys, .redraw = true };
     return .{};
@@ -524,7 +532,8 @@ test "Root input routing over every layer, main pane, settings state and input" 
         .{ .layers = &.{.main}, .sessions = &.{false}, .events = &.{ .printable, .enter, .escape, .ctrl_g, .ctrl_c }, .effects = overview(false) },
         .{ .layers = &.{.settings}, .pages = &.{.model_filter}, .events = &.{ .pasted_printable, .pasted_enter, .printable }, .effects = .{} },
         .{ .layers = &.{.settings}, .pages = &.{ .plain, .keys_open, .choice_open, .upgrade_cancellable }, .events = &.{ .pasted_printable, .pasted_enter }, .effects = .{ .route = .swallow } },
-        .{ .layers = &.{.settings}, .pages = &.{ .plain, .keys_open, .choice_open, .upgrade_cancellable }, .events = &.{.printable}, .effects = .{ .route = app_keys, .redraw = true } },
+        .{ .layers = &.{.settings}, .sessions = &.{false}, .pages = &.{ .plain, .keys_open, .choice_open, .upgrade_cancellable }, .events = &.{.printable}, .effects = .{ .route = app_keys, .redraw = true } },
+        .{ .layers = &.{.settings}, .sessions = &.{true}, .pages = &.{ .plain, .keys_open, .choice_open, .upgrade_cancellable }, .events = &.{.printable}, .effects = .{ .page = .reset, .focus = .main, .field = .input, .route = .{ .session = .{ .under = .main, .pasted = false } }, .redraw = true }, .layer = .main },
         .{ .layers = &.{.settings}, .events = &.{.enter}, .effects = .{} },
         .{ .layers = &.{.settings}, .events = &.{.ctrl_c}, .effects = .{ .route = app_keys, .redraw = true } },
         .{ .layers = &.{.settings}, .pages = &.{.keys_open}, .events = &closing, .effects = .{ .page = .close_keys, .route = .swallow, .redraw = true } },
@@ -572,7 +581,8 @@ test "Root input routing over every layer, main pane, settings state and input" 
         }
         fn input(event: Event) Input {
             return switch (event) {
-                .printable, .pasted_printable, .enter, .pasted_enter => .{ .key = .{ .named = null } },
+                .printable, .pasted_printable => .{ .key = .{ .named = null, .printable = true } },
+                .enter, .pasted_enter => .{ .key = .{ .named = null } },
                 .escape => .{ .key = .{ .named = .escape } },
                 .ctrl_g => .{ .key = .{ .named = .ctrl_g } },
                 .ctrl_c => .{ .key = .{ .named = .ctrl_c } },

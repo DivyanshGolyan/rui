@@ -1001,7 +1001,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     };
     const facts_style = quiet;
     self.app_screen.style = normal;
-    self.app_input.composer.caret = self.app_hooks.root.input.mainFocused() and !self.info_open and !self.app_info.standaloneOpen() and self.app_hooks.root.input.field == .input;
+    self.app_input.composer.caret = self.app_hooks.root.input.layer == .main and self.app_hooks.root.input.mainFocused() and !self.info_open and !self.app_info.standaloneOpen() and self.app_hooks.root.input.field == .input;
     self.app_input.composer.setCaps(self.app_caps);
     self.app_input.composer.placeholder = if (self.line.read != null and self.line.folder != null) "What shall we work on?" else "";
     self.app_input.composer.editor = &self.input.editors[self.input.active];
@@ -10782,5 +10782,26 @@ test "SUI-29 empty chat welcome is centred until the first message" {
         held.self.line.first_position = 1;
         held.self.line.folder = null;
         try std.testing.expect(std.mem.indexOf(u8, try held.shown(), subtitle) == null);
+    };
+}
+
+test "Settings printable handoff keeps the retained draft and quiets its prompt" {
+    for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |escape| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        held.size = .{ .width = width, .height = 30 };
+        held.root.size = .{ .width = width, .height = 30 };
+        try held.keys("draft");
+        held.self.input.editors[held.self.input.active].setCursor(2);
+        var ctx = held.context();
+        try held.root.openSettings(&ctx);
+        _ = try held.draw();
+        try std.testing.expect(!held.self.app_input.composer.caret);
+        try held.keys(if (escape) "\x1b" else "x");
+        try std.testing.expectEqual(@import("app_input.zig").Layer.main, held.root.input.layer);
+        try std.testing.expectEqualStrings(if (escape) "draft" else "drxaft", held.self.input.composition().bytes);
+        try std.testing.expectEqual(@as(usize, if (escape) 2 else 3), held.self.input.composition().cursor);
+        _ = try held.draw();
+        try std.testing.expect(held.self.app_input.composer.caret);
     };
 }

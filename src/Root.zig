@@ -219,7 +219,7 @@ pub fn closeSession(self: *Self, ctx: *vxfw.EventContext) !void {
 fn capture(raw: *anyopaque, ctx: *vxfw.EventContext, routed: vxfw.Event) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     var input: app_input.Input = switch (routed) {
-        .key_press => |key| .{ .key = .{ .named = @import("keypress.zig").named(key), .enter = @import("keypress.zig").isEnter(key) } },
+        .key_press => |key| .{ .key = .{ .named = @import("keypress.zig").named(key), .enter = @import("keypress.zig").isEnter(key), .printable = @import("keypress.zig").classify(key) == .text } },
         .paste_start => .paste_start,
         .paste_end => .paste_end,
         .mouse => |mouse| .{ .mouse = switch (mouse.button) {
