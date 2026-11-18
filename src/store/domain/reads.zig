@@ -38,7 +38,6 @@ const store_access = @import("../access.zig");
 const turn_domain = @import("turn.zig");
 const AttemptBinding = store_core.AttemptBinding;
 const ContentLocation = content_domain.ContentLocation;
-const ContentMetadata = content_domain.ContentMetadata;
 const ContentReference = content_domain.ContentReference;
 const CurrentConfiguration = configuration_domain.CurrentConfiguration;
 const TurnOutcome = turn_domain.TurnOutcome;
@@ -703,7 +702,6 @@ const PublicContentRead = struct {
         read.content.value = try content_parts.publicValue(&read.metadata, read.content.owner);
     }
 };
-
 
 fn publicConversationContent(a: *ReadAccess, session: []const u8, position: u64, ordinal: u64) !PublicContent {
     var read: PublicContentRead = .{ .position = position, .ordinal = ordinal };
