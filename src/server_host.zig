@@ -4,6 +4,7 @@ const cli_grammar = @import("cli_grammar.zig");
 const serve_grammar = @import("serve_grammar.zig");
 const core_tools = @import("core_tools.zig");
 const TestObservation = @import("TestObservation.zig");
+const HostDiagnostics = @import("HostDiagnostics.zig");
 const trace_native = @import("posix");
 const bash = @import("bash.zig");
 const environment = @import("environment.zig");
@@ -366,6 +367,8 @@ pub const Host = struct {
     trace_sequence: u64 = 0,
     trace_lost: std.atomic.Value(bool) = .init(false),
     test_observation: ?*TestObservation = null,
+    /// Attached after readiness, when the Host's stderr may be /dev/null; launch_mutex guards writes.
+    diagnostics: ?*HostDiagnostics = null,
     last_unprocessed_completions: ?u64 = null,
 
     pub fn launchAllowed(self: *const Host) bool {
@@ -386,6 +389,23 @@ pub const Host = struct {
         const previous = self.phase.load(.monotonic);
         if (@backingInt(target) > @backingInt(previous)) self.phase.store(target, .release);
         return previous;
+    }
+
+    /// Advances like `advance`, and records the reason when this call made the transition.
+    pub fn fence(self: *Host, target: Phase, phase: []const u8, err: anyerror) Phase {
+        self.launch_mutex.lockUncancelable(self.io);
+        defer self.launch_mutex.unlock(self.io);
+        const previous = self.phase.load(.monotonic);
+        if (@backingInt(target) <= @backingInt(previous)) return previous;
+        self.phase.store(target, .release);
+        if (self.diagnostics) |writer| writer.recordAs(@tagName(target), phase, @errorName(err));
+        return previous;
+    }
+
+    pub fn attachDiagnostics(self: *Host, writer: *HostDiagnostics) void {
+        self.launch_mutex.lockUncancelable(self.io);
+        defer self.launch_mutex.unlock(self.io);
+        self.diagnostics = writer;
     }
 
     pub fn stopAsked(self: *Host) bool {
@@ -561,7 +581,7 @@ pub const BashWork = union {
 };
 
 pub fn fenceDispatch(host: *Host, phase: []const u8, err: anyerror) void {
-    if (host.advance(.stopping) == .stopping) return;
+    if (host.fence(.stopping, phase, err) == .stopping) return;
     stderr.print("rui: dispatch fenced after {s} failure: {s}\nHost cannot safely continue; wait for shutdown before restarting this Store. Use saved request handles; do not resubmit uncertain work.\n", .{ phase, @errorName(err) });
     wakeListener(host);
 }
@@ -571,7 +591,7 @@ pub fn wakeListener(host: *Host) void {
 }
 
 pub fn retainDispatchFence(host: *Host, phase: []const u8, err: anyerror) void {
-    _ = host.advance(.fenced);
+    _ = host.fence(.fenced, phase, err);
     stderr.print("rui: dispatch fenced after {s} failure: {s}\nNew work is blocked; retained cleanup is still owned. Inspect saved requests; do not resubmit uncertain work.\n", .{ phase, @errorName(err) });
 }
 
