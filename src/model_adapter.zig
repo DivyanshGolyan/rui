@@ -5579,6 +5579,12 @@ test "raw image preparation streams canonical PNG into user and tool arrays" {
     try setup.init();
     defer setup.close();
     const session = try setup.configure("image-codec-config");
+    const effort = (try setup.storage.inspectSessionForTesting(session.slice())).reasoning_effort;
+    const reasoning = if (effort) |value|
+        try std.fmt.allocPrint(std.testing.allocator, ",\"reasoning\":{{\"effort\":\"{s}\"}}", .{@tagName(value)})
+    else
+        try std.testing.allocator.dupe(u8, "");
+    defer std.testing.allocator.free(reasoning);
     try setup.submit("raw-png", "raw-png", session.slice(), image_test_png);
     var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
     const binding = try admitted.permit.consume();
@@ -5599,9 +5605,9 @@ test "raw image preparation streams canonical PNG into user and tool arrays" {
     for ([_]protocol.Codec{ .@"openai-responses/1", .@"openai-responses/2", .@"openai-responses/3" }) |codec| {
         const top = "{\"model\":\"model-a\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"]";
         const prefix = if (codec == .@"openai-responses/1")
-            try std.fmt.allocPrint(std.testing.allocator, "{s},\"instructions\":{s},\"input\":[", .{ top, encoded_context })
+            try std.fmt.allocPrint(std.testing.allocator, "{s}{s},\"instructions\":{s},\"input\":[", .{ top, reasoning, encoded_context })
         else
-            try std.fmt.allocPrint(std.testing.allocator, "{s},\"input\":[{{\"role\":\"developer\",\"content\":[{{\"type\":\"input_text\",\"text\":{s}}}]}},", .{ top, encoded_context });
+            try std.fmt.allocPrint(std.testing.allocator, "{s}{s},\"input\":[{{\"role\":\"developer\",\"content\":[{{\"type\":\"input_text\",\"text\":{s}}}]}},", .{ top, reasoning, encoded_context });
         defer std.testing.allocator.free(prefix);
         const full_expected = try std.mem.concat(std.testing.allocator, u8, &.{ prefix, expected[1..] });
         defer std.testing.allocator.free(full_expected);
