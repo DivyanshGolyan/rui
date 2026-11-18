@@ -1778,12 +1778,13 @@ fn arrange(state: *State) error{OutOfMemory}!void {
 
 fn counts(state: *const State) Counts {
     var result: Counts = .{};
-    for (state.rows.items) |*row| if (visible(state, row)) switch (rules.get(shownKind(state, row)).mark) {
+    for (state.rows.items) |*row| if (visible(state, row)) switch (ordering(state, row)) {
         .needs_you => result.needs_you += 1,
-        .active => result.working += 1,
+        .working => result.working += 1,
         .queued => result.queued += 1,
-        .failed => result.failed += 1,
-        .waiting, .finished, .stopped, .newer, .none => {},
+        .done => if (row.state == .failed) {
+            result.failed += 1;
+        },
     };
     return result;
 }
