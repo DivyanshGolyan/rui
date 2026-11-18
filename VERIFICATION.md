@@ -35,7 +35,13 @@ Run `zig build test-logic -Dtest-filter='initial presentation core'` and `zig bu
 
 `GroupedList row inset is stable for selection hover and plain rows` checks shared row bounds at zero, narrow and wide widths in direct, indexed and no colour. Run the touched list, overview, panel, model-choice and palette owners, and remove the inset as a negative control. Capture before and after list and panel frames in day and night at 140×40 and 46×30 through verify-rui; these are renderer evidence, not physical-terminal evidence.
 
+## Feed inset and activity spacing
+
+Run native owners `SUI-4`, `SUI-17`, `SUI-19` and `SUI-30`, plus the overview and session-chrome integration groups. Capture before and after User bands and activity at 140×40 and 46×30 with verify-rui. These frames establish renderer output, not physical input.
+
 ## Contract index
+
+The [Session UI invariant catalog](docs/invariants/session-ui.md) names the screen-seam owners for the welcome and chat tabs.
 
 ARCHITECTURE owns behavior; tests own cases.
 Quoted names are Zig filters: `zig build test -Dtest-filter='model revisions'`.

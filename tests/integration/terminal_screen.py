@@ -490,12 +490,12 @@ class ScreenCapture:
         line = "".join(cell.data for cell in cells[origin:]).rstrip()
         margin = 1 if line.startswith(" ") and not prompt.startswith(" ") else 0
         matches = line[margin:] == (prompt + unicodedata.normalize("NFC", text)).rstrip()
-        if not text and prompt in ("› ", "> ") and line[margin:] == prompt + "Type a task":
+        if not text and prompt in ("› ", "> ") and line[margin:] == prompt + "What shall we work on?":
             mark = cells[origin + margin]
             start = origin + margin + len(prompt)
             matches = caret == len(prompt) and all(
                 (cell.fg, cell.fg_rgb, cell.faint) != (mark.fg, mark.fg_rgb, mark.faint)
-                for cell in cells[start:start + len("Type a task")])
+                for cell in cells[start:start + len("What shall we work on?")])
         return (not self.synchronized and self.generation > 0
                 and "Opening…" not in self.completed
                 and cursor.x - origin == caret + margin

@@ -332,3 +332,36 @@ test "selection contrasts with sent bands and padding at both widths" {
         }
     };
 }
+
+fn testBandCopy() !void {
+    const testing = std.testing;
+    for ([_]u16{ 46, 140 }) |width| for ([_]u8{ 0, 1, 2 }) |depth| for ([_]bool{ false, true }) |unicode_caps| {
+        const method: vaxis.gwidth.Method = if (unicode_caps) .unicode else .wcwidth;
+        var document: viewport.Sized(1024, true) = .{ .sidenotes = true, .width_method = method };
+        try document.append(TerminalText.user_message_on ++ "› \x1b[8m14:20\x1b[0mshort\n" ++ TerminalText.user_message_off ++
+            TerminalText.user_message_on ++ "› ");
+        const count: usize = if (width == 46) 75 else 265;
+        for (0..count) |_| try document.append("x");
+        try document.append("\n" ++ TerminalText.user_message_off);
+        try document.prepare();
+        const layout: viewport.Layout = .{ .width = width, .method = method };
+        var cells: [140 * 12]vaxis.Cell = @splat(.{});
+        var screen: vaxis.Screen = .{ .width = width, .height = 12, .width_method = method, .buf = cells[0 .. @as(usize, width) * 12] };
+        const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 12, .screen = &screen };
+        const band: vaxis.Color = if (depth == 1) .{ .index = 8 } else .{ .rgb = .{ 10, 20, 30 } };
+        const ground: vaxis.Style = .{ .bg = .{ .index = 1 } };
+        window.fill(.{ .style = ground });
+        _ = document.draw(window, .{}, true, true, ground, .{ .user_band = band, .no_depth = depth == 0 });
+        const content_row: RowFor(@TypeOf(document)) = .{ .document = &document, .cells = cells[width..][0..width], .line = 0 };
+        const cap_row: RowFor(@TypeOf(document)) = .{ .document = &document, .cells = cells[2 * @as(usize, width) ..][0..width], .line = document.selectionLine(layout, .{ .row = 2 }) };
+        const result = try copy(testing.allocator, &document, .of(content_row.spot(4), cap_row.spot(width)));
+        try testing.expect(result == .text);
+        defer testing.allocator.free(result.text.bytes);
+        try testing.expectEqualStrings("short", result.text.bytes);
+    };
+}
+
+test "SUI-34 user message bands retain padded rows and selectable source text" {
+    try viewport.testBandPadding();
+    try testBandCopy();
+}

@@ -171,7 +171,7 @@ def chat_footer_row(screen):
 
 
 def composer_empty(screen, y):
-    return composer_line(screen, y) in (" ›", " >", " › Type a task", " > Type a task")
+    return composer_line(screen, y) in (" ›", " >", " › What shall we work on?", " > What shall we work on?")
 
 
 def composer_ready(screen, x, y):
@@ -209,7 +209,7 @@ def keyed_frame(master, keys, accept, timeout=15):
 
 
 def overview_title(frame):
-    return "   + New Session" in frame and "     Settings" in frame and "Type a task" not in frame
+    return "   + New chat" in frame and "     Settings" in frame and "What shall we work on?" not in frame
 
 
 def overview_frame(master, accept, keys=b"", timeout=15, *, ready=True):
@@ -219,7 +219,7 @@ def overview_frame(master, accept, keys=b"", timeout=15, *, ready=True):
 
 
 def open_new_chat(master, timeout=15):
-    return keyed_frame(master, b"\x1b[H\r", lambda screen, x, y: "Type a task" in screen
+    return keyed_frame(master, b"\x1b[H\r", lambda screen, x, y: "What shall we work on?" in screen
                        and composer_ready(screen, x, y), timeout)
 
 
@@ -231,7 +231,7 @@ def panel_frame(master, accept, keys=b"", timeout=15):
 def assert_chat_info_layout(screen, *, context=None):
     rows = screen.split("\n")
     contents = [pane_content(row) for row in rows]
-    footers = [index for index, row in enumerate(contents) if row.endswith("esc")]
+    footers = [index for index, row in enumerate(contents) if re.search(r"(?:^|\s)esc$", row)]
     assert footers == [chat_footer_row(screen)], ("one plain panel footer after the input", screen)
     assert " · info" not in screen and "esc close" not in screen, screen
     assert "alt+i info" not in screen, ("live chat footer must be substituted", screen)
