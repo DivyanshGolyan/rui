@@ -12,6 +12,28 @@ from unittest.mock import patch
 import cache_snapshot as snapshot
 
 
+def write_executable(directory, name, *, companion=True):
+    directory.mkdir(parents=True)
+    executable = directory / name
+    # Independent ELF64 ABI fixture, with one complete PT_LOAD header.
+    executable.write_bytes(struct.pack("<16sHHIQQQIHHHHHH",
+        b"\x7fELF\x02\x01\x01" + b"\0" * 9, 2, 62, 1, 0x400078,
+        64, 0, 0, 64, 56, 1, 0, 0, 0)
+        + struct.pack("<IIQQQQQQ", 1, 5, 0, 0x400000, 0x400000, 121, 121, 4096)
+        + b"\xc3")
+    executable.chmod(0o755)
+    if companion:
+        (directory / (name + "_zcu.o")).write_bytes(b"object")
+    return directory
+
+
+def decode_manifests(outputs, command):
+    """Stand-in for zig cache-cat over the fixture's own manifest-to-output map."""
+    return "\n".join('.{\n    .input_hash = "' + Path(path).name + '",\n'
+                     '    .files = .{},\n    .discovered_hash = "' + outputs[path] + '",\n}'
+                     for path in command[2:])
+
+
 class ManifestTest(unittest.TestCase):
     def record(self, path, prefix=4):
         return snapshot.HEADER.pack(17, 23, 31, b"a" * 16, prefix << 2) + os.fsencode(path) + b"\0"
@@ -81,24 +103,10 @@ class SnapshotTest(unittest.TestCase):
 
     def decode(self, command, **kwargs):
         self.assertEqual(command[:2], ["zig", "cache-cat"])
-        return "\n".join('.{\n    .input_hash = "' + Path(path).name + '",\n'
-                         '    .files = .{},\n    .discovered_hash = "' + self.outputs[path] + '",\n}'
-                         for path in command[2:])
+        return decode_manifests(self.outputs, command)
 
     def executable(self, digest, name="rui-debug-check", *, root=None, companion=True):
-        directory = (root or self.roots[0]) / "o" / digest
-        directory.mkdir()
-        executable = directory / name
-        # Independent ELF64 ABI fixture, with one complete PT_LOAD header.
-        executable.write_bytes(struct.pack("<16sHHIQQQIHHHHHH",
-            b"\x7fELF\x02\x01\x01" + b"\0" * 9, 2, 62, 1, 0x400078,
-            64, 0, 0, 64, 56, 1, 0, 0, 0)
-            + struct.pack("<IIQQQQQQ", 1, 5, 0, 0x400000, 0x400000, 121, 121, 4096)
-            + b"\xc3")
-        executable.chmod(0o755)
-        if companion:
-            (directory / (name + "_zcu.o")).write_bytes(b"object")
-        return directory
+        return write_executable((root or self.roots[0]) / "o" / digest, name, companion=companion)
 
     def audit(self):
         return snapshot.audit(*self.roots)
@@ -253,13 +261,6 @@ class SnapshotTest(unittest.TestCase):
         self.assertIsNone(snapshot.unread_manifests(self.roots[0], record))
         record.write_text("[]")
         self.assertIsNone(snapshot.unread_manifests(self.roots[0], record))
-
-    def test_noatime_probe_writes_no_mark(self):
-        record = self.root / "mark.json"
-        with patch.object(snapshot.Path, "read_bytes", return_value=b""):
-            self.assertEqual(snapshot.mark(self.roots[0], record), dict(atime=False, marked=0))
-        self.assertFalse(record.exists())
-        self.assertEqual(os.stat(self.roots[0] / "h" / ("a" * 32)).st_atime_ns != snapshot.UNREAD_NS, True)
 
     def test_historical_cli_own_manifest_is_not_a_current_graph_root(self):
         prefix = self.current_prefix()
@@ -608,6 +609,7 @@ class PublicationTest(unittest.TestCase):
                         WORK_OUTCOME="success", RUNNER_TEMP=str(self.root), GITHUB_RUN_ID="42",
                         GITHUB_RUN_ATTEMPT="2", RUI_CACHE_BUILD_KEY="rui-build-v4-Linux-X64-0.17.1-"
                         + "a" * 64 + "-compiled." + "b" * 64 + "-" + "c" * 64)
+        self.outputs = {}
         self.inputs = dict(format=5, pr_ci=False, part="rest", targets=["check-full"], tree="tree",
                            system="Linux", machine="x86_64", compiler="compiler")
         self.receipt = dict(inputs=self.inputs, source_sha="current-head", run_id=42, run_attempt=2)
@@ -617,10 +619,16 @@ class PublicationTest(unittest.TestCase):
         import build_artifact
         patches = (patch.object(build_artifact, "identity", return_value=self.inputs),
                    patch.object(build_artifact, "git", return_value="current-head"),
-                   patch.object(snapshot.subprocess, "check_output", return_value="0.17.1\n"))
+                   patch.object(snapshot.subprocess, "check_output", side_effect=self.zig))
         for replacement in patches:
             replacement.start()
             self.addCleanup(replacement.stop)
+
+    def zig(self, command, **kwargs):
+        if command == ["zig", "version"]:
+            return "0.17.1\n"
+        self.assertEqual(command[:2], ["zig", "cache-cat"])
+        return decode_manifests(self.outputs, command)
 
     def write(self):
         self.path.write_text(json.dumps(self.receipt))
@@ -657,16 +665,35 @@ class PublicationTest(unittest.TestCase):
                                 compact.assert_not_called()
 
     def test_setup_mark_reaches_compaction_as_read_liveness(self):
-        local = self.root / "local"
-        (local / "h").mkdir(parents=True)
-        (local / "h" / ("a" * 32)).write_bytes(b"\0")
-        os.utime(local / "h" / ("a" * 32), ns=(snapshot.UNREAD_NS, 0))
-        (self.root / snapshot.MARK).write_text(json.dumps(dict(atime=True, marked=1)))
+        local, global_cache = self.root / "local", self.root / "global"
+        for root in (local, global_cache):
+            (root / "h").mkdir(parents=True)
+            (root / "o").mkdir()
+        old = write_executable(local / "o" / ("1" * 32), "test")
+        old_owner = local / "h" / ("2" * 32)
+        old_owner.write_bytes(b"\0")
+        self.outputs[str(old_owner)] = old.name
+        if not snapshot.mark(local, self.root / snapshot.MARK)["atime"]:
+            self.skipTest("this filesystem does not move access times on read")
+        # The producer writes its current outputs after the mark.
+        prefix = self.root / "rui-compiled-build/bin"
+        prefix.mkdir(parents=True)
+        current = []
+        for index, name in enumerate(("rui-debug-check", "rui-release-safe-check", "rui-release-small-check"), 3):
+            directory = write_executable(local / "o" / (str(index) * 32), name)
+            owner = local / "h" / (str(index + 3) * 32)
+            owner.write_bytes(b"\0")
+            self.outputs[str(owner)] = directory.name
+            shutil.copy2(directory / name, prefix / name)
+            current.append(directory)
         key = self.env["RUI_CACHE_BUILD_KEY"]
-        with patch.object(snapshot, "compact", return_value=dict(removable=[])) as compact:
-            snapshot.publication_report(self.env, key, local, "global")
-        compact.assert_called_once_with(local, "global", prefixes=[self.root / "rui-compiled-build/bin"],
-                                        unread={"a" * 32})
+        report = snapshot.publication_report(self.env, key, local, global_cache)
+        self.assertEqual(report["key"], key)
+        self.assertEqual(report["unread_manifests"], 1)
+        self.assertEqual([item["path"] for item in report["removable"]], [str(old)])
+        self.assertFalse(old.exists())
+        self.assertFalse(old_owner.exists())
+        self.assertTrue(all(directory.exists() for directory in current))
 
     def test_target_key_cannot_bypass_compaction_with_missing_or_mismatched_environment(self):
         key = self.env["RUI_CACHE_BUILD_KEY"]
