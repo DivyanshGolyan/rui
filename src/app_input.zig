@@ -603,7 +603,6 @@ pub fn sui4RootRouting() !void {
     };
     var used: [rows.len]bool = @splat(false);
     for (all_layers) |layer| for ([_]bool{ false, true }) |session| for (all_pages) |page| for (std.enums.values(Event)) |event| {
-        errdefer std.debug.print("layer={s} session={} page={s} event={s}\n", .{ @tagName(layer), session, @tagName(page), @tagName(event) });
         var matched: ?usize = null;
         for (rows, 0..) |row, index| {
             if (!Case.has(LayerCase, row.layers, layer) or !Case.has(bool, row.sessions, session) or !Case.has(Page, row.pages, page) or !Case.has(Event, row.events, event)) continue;
@@ -647,7 +646,6 @@ pub fn sui4RootRouting() !void {
     };
     var state: State = .{ .layer = .settings };
     for (straddles, 0..) |expected, index| {
-        errdefer std.debug.print("straddling paste step {d}\n", .{index});
         try std.testing.expectEqual(expected.effects, step(&state, Case.facts(false, .plain, .enter), expected.input));
         try std.testing.expectEqual(Case.layer(expected.layer), state.layer);
         try std.testing.expectEqual(expected.pasting, state.pasting);
