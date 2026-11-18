@@ -699,7 +699,7 @@ def plan(selection, *, event_name, draft, promotion, change_kind, compile_only):
         for targets in ([], ['test-native']):
             for required in (False, True):
                 source = dict(select([], 'review', set(build_files.steps())), targets=targets,
-                              unit_compile_required=required)
+                              fast_targets=targets, unit_compile_required=required)
                 output = plan(source, event_name='pull_request', draft=False,
                               promotion=False, change_kind=ChangeKind.NORMAL).outputs
                 encoded = {key: json.dumps(value) if not isinstance(value, str) else value
