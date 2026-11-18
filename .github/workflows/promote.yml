@@ -59,6 +59,9 @@ jobs:
     with:
       base: ${{ needs.batch.outputs.base }}
       promotion: true
+    # Only the runner-status token, so promotion's Mac routing can see rui-mac.
+    secrets:
+      MAC_RUNNER_STATUS_TOKEN: ${{ secrets.MAC_RUNNER_STATUS_TOKEN }}
   upgrade:
     needs: batch
     if: ${{ needs.batch.outputs.size != '0' }}

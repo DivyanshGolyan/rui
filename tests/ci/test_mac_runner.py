@@ -219,6 +219,19 @@ class AdapterTest(unittest.TestCase):
                 else:
                     self.assertFalse((temp / "args").exists())
 
+    def test_promotion_passes_only_the_status_token_to_its_routing(self):
+        check = (ROOT / ".github/workflows/check.yml").read_text()
+        call = check.split("  workflow_call:\n", 1)[1].split("\npermissions:", 1)[0]
+        self.assertIn("    secrets:\n", call)
+        self.assertRegex(call, r"(?m)^      MAC_RUNNER_STATUS_TOKEN:\n        required: false$")
+        promote = (ROOT / ".github/workflows/promote.yml").read_text()
+        selected = re.search(r"(?ms)^  selected:\n(.*?)(?=^  [a-z_]+:|\Z)", promote)[1]
+        self.assertIn("uses: ./.github/workflows/check.yml", selected)
+        secrets = selected.split("    secrets:\n", 1)[1]
+        self.assertEqual([line.strip() for line in secrets.splitlines() if line.strip()],
+                         ["MAC_RUNNER_STATUS_TOKEN: ${{ secrets.MAC_RUNNER_STATUS_TOKEN }}"],
+                         "promotion passes the status token alone, never inherit")
+
     def test_allowlist_cli(self):
         result = subprocess.run([sys.executable, str(ROOT / "tests/ci/mac_runner.py"), "allowlist"],
                                 capture_output=True, text=True, check=True)

@@ -278,7 +278,7 @@ The allowlist lives in [mac_runner.py](../../tests/ci/mac_runner.py).
 Fork PRs, including NimishGolyan/rui, stay hosted.
 A promotion dispatched by an allowlisted actor routes by the same rule, so hosted macOS capacity no longer gates a release; its Mac suite jobs then share the one runner, and their measurements are not comparable with hosted VMs.
 Compile-only main builds (which publish main's caches), the promotion's previous-release upgrade and cache-execution checks, and the Release builds (cold, released bytes) keep their hosted runners.
-The routing job reads `GET /repos/{repo}/actions/runners` with the repository secret `MAC_RUNNER_STATUS_TOKEN`, a fine-grained PAT limited to this repository with Administration: read.
+The routing job reads `GET /repos/{repo}/actions/runners` with the repository secret `MAC_RUNNER_STATUS_TOKEN`, a fine-grained PAT limited to this repository with Administration: read; Promote passes only that secret to its Selected checks call.
 An online `rui-mac` selects the Mac when idle or when its queued jobs are fewer than hosted queued jobs plus one if at least five hosted jobs are running; ties select `macos-15`. If queue data is unavailable, only an idle Mac is selected; unavailable runner status, an offline runner or `RUI_MAC_RUNNER=off` selects hosted macOS.
 This is a snapshot, not a reservation: after choosing the Mac, jobs queue for its one runner process; a later disconnect does not reroute that run.
 The Mac restores caches but never publishes them to GitHub.
