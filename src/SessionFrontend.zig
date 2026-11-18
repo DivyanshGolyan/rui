@@ -10740,7 +10740,7 @@ test "consent and full panels compose across adoption, nested choices, and draft
     };
 }
 
-test "TUI-1 empty chat welcome is centred until the first message" {
+test "SUI-29 empty chat welcome is centred until the first message" {
     for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |unicode| {
         const held = try HeldFrontend.create();
         defer held.destroy();

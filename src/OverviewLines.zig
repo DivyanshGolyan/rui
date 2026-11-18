@@ -181,7 +181,7 @@ pub const Settings = struct {
     }
 };
 
-test "TUI-2 chat tabs paint and accept only their visible cells" {
+test "SUI-30 chat tabs paint and accept only their visible cells" {
     var state: overview_view.State = undefined;
     try state.init(std.testing.allocator, .{ .cwd = "/w", .home = "/h" });
     defer state.deinit();

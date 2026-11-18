@@ -1,6 +1,7 @@
 //! Upgrade owns the transition, not Host admission or child argv. Both the
 //! precondition and replacement execute the target's public settings/starter.
 const std = @import("std");
+const credential_location = @import("credential_location.zig");
 const settings_handoff = @import("host_settings_handoff.zig");
 const client = @import("client.zig");
 const protocol = @import("protocol.zig");
@@ -150,7 +151,7 @@ fn restartableEnvironment(environment: []const []const u8) bool {
         const name = entry[0..equals];
         const value = entry[equals + 1 ..];
         if (std.mem.startsWith(u8, name, "LD_") or std.mem.startsWith(u8, name, "DYLD_")) return false;
-        for ([_][]const u8{ "HOME", "TMPDIR", "RUI_CODEX_CREDENTIAL_FILE", "RUI_OPENAI_KEY_FILE", "SSL_CERT_FILE" }) |path_name| {
+        for ([_][]const u8{ "HOME", "TMPDIR", "SSL_CERT_FILE" } ++ credential_location.variables) |path_name| {
             if (std.mem.eql(u8, name, path_name) and value.len != 0 and !std.fs.path.isAbsolute(value)) return false;
         }
         if (std.mem.eql(u8, name, "SSL_CERT_DIR")) {
@@ -489,6 +490,14 @@ test "upgrade replacement proof accepts adopted target version but not old insta
     try std.testing.expect(!replacementMatches(&plan, facts, .{ .schema = 75, .patch = 9 }, target));
     try facts.store.set("other-store");
     try std.testing.expect(!replacementMatches(&plan, facts, target, target));
+}
+
+test "all credential location variables must be restartable paths" {
+    inline for (credential_location.variables) |name| {
+        try std.testing.expect(!restartableEnvironment(&.{name ++ "=relative"}));
+        try std.testing.expect(restartableEnvironment(&.{name ++ "=/absolute"}));
+        try std.testing.expect(restartableEnvironment(&.{name ++ "="}));
+    }
 }
 
 test "upgrade target capability exception is the witnessed release not a future version threshold" {
