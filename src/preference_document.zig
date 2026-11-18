@@ -244,10 +244,15 @@ test "CLI-23 an edit changes only what it names" {
     const efforts: [3]@FieldType(Edit, "reasoning_effort") = .{ .keep, .clear, .{ .set = .high } };
     const permissions: [3]@FieldType(Edit, "permission_mode") = .{ .keep, .clear, .{ .set = .bypass } };
     for ([_][]const u8{ "", "codex", "retired" }) |original_provider| {
-        var before: Values = .{ .notifications = false, .reasoning_effort = .low, .permission_mode = .ask };
-        try before.store.set("/old");
-        try before.provider.set(original_provider);
-        if (original_provider.len != 0) try before.model.set("old-model");
+        var before: Values = .{};
+        if (original_provider.len != 0) {
+            before.notifications = false;
+            before.reasoning_effort = .low;
+            before.permission_mode = .ask;
+            try before.store.set("/old");
+            try before.provider.set(original_provider);
+            try before.model.set("old-model");
+        }
         for ([_]provider_selection.Readiness{ .configured, .renewal_due, .missing, .refresh_required, .credential_error }) |state| {
             const states: Readinesses = .initFill(state);
             for (stores) |store| for (providers) |provider| for (models) |model| for (notifications) |notification| for (efforts) |effort| for (permissions) |permission| {
@@ -262,7 +267,7 @@ test "CLI-23 an edit changes only what it names" {
                     continue;
                 }
                 const result = try apply(before, edit, if (store == .set) "/new" else null, &states);
-                try std.testing.expectEqualStrings(if (store == .set) "/new" else "/old", result.store.slice());
+                try std.testing.expectEqualStrings(if (store == .set) "/new" else before.store.slice(), result.store.slice());
                 try std.testing.expectEqualStrings(chosen, result.provider.slice());
                 const kept_model = if (provider == .keep or std.mem.eql(u8, original_provider, chosen) or (std.mem.eql(u8, original_provider, "codex") and std.mem.eql(u8, chosen, "chatgpt"))) before.model.slice() else "";
                 try std.testing.expectEqualStrings(switch (model) {
@@ -270,14 +275,14 @@ test "CLI-23 an edit changes only what it names" {
                     .clear => "",
                     .set => "new-model",
                 }, result.model.slice());
-                try std.testing.expectEqual(notification orelse false, result.notifications);
+                try std.testing.expectEqual(notification orelse before.notifications, result.notifications);
                 try std.testing.expectEqual(switch (effort) {
-                    .keep => @as(?model_capability.ReasoningEffort, .low),
+                    .keep => before.reasoning_effort,
                     .clear => null,
                     .set => .high,
                 }, result.reasoning_effort);
                 try std.testing.expectEqual(switch (permission) {
-                    .keep => @as(?PermissionMode, .ask),
+                    .keep => before.permission_mode,
                     .clear => null,
                     .set => .bypass,
                 }, result.permission_mode);
