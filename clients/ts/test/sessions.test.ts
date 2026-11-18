@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { once } from "node:events";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { createServer, type Http2ServerResponse, type ServerHttp2Session } from "node:http2";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { setTimeout as sleep } from "node:timers/promises";
 
 import { Rui, RuiRequestError, type AgentSpec, type HostSettings } from "../src/index.ts";
 import { WIRE_VERSION } from "../src/transport.ts";
@@ -285,5 +288,55 @@ test("create parent inherits binding and refuses widening as field-specific requ
 		}
 	} finally {
 		await rui.close();
+	}
+});
+
+test("replaying an interruption cannot cut a later model call", { skip, timeout: 30_000 }, async (t) => {
+	const root = realpathSync(mkdtempSync(join(tmpdir(), "rui-ts-interrupt-")));
+	t.after(() => rmSync(root, { recursive: true, force: true }));
+	const connections = new Set<ServerHttp2Session>();
+	const responses: Http2ServerResponse[] = [];
+	const provider = createServer((request, response) => {
+		request.resume();
+		request.on("end", () => {
+			if (request.url !== "/responses") { response.writeHead(200); response.end('{"data":[]}'); return; }
+			responses.push(response);
+			response.writeHead(200, { "content-type": "text/event-stream" });
+		});
+	});
+	provider.on("session", (connection) => { connections.add(connection); connection.on("close", () => connections.delete(connection)); });
+	provider.listen(0, "127.0.0.1");
+	await once(provider, "listening");
+	const address = provider.address();
+	assert.ok(address && typeof address !== "string");
+	let rui: Rui | undefined;
+	const until = async (condition: () => Promise<boolean>) => {
+		const deadline = Date.now() + 15_000;
+		while (!(await condition())) { if (Date.now() >= deadline) throw new Error("timed out waiting for model call"); await sleep(50); }
+	};
+	try {
+		rui = await Rui.connect({ store: { sqlite: { dir: join(root, "store") } },
+			providers: { codex: { endpoint: `http://127.0.0.1:${address.port}/responses`, unauthenticated: true } },
+		}, { binary: binary ?? "rui" });
+		const session = await rui.sessions.create({ provider: "codex", model: "gpt-6-sol", effort: "low", compactAt: 100000,
+			workspace: root, tools: [], permissionMode: "ask" }, { idempotencyKey: "session" });
+		await session.send("first", { idempotencyKey: "first" });
+		await until(async () => responses.length >= 1 && (await session.status()).interruptTarget !== null);
+		const first = (await session.status()).interruptTarget;
+		assert.ok(first);
+		await session.interrupt(first, { key: "interrupt" });
+		await session.send("second", { idempotencyKey: "second" });
+		await until(async () => { const current = (await session.status()).interruptTarget; return responses.length >= 2 && current !== null && current.operation !== first.operation; });
+		await session.interrupt(first, { key: "interrupt" });
+		const item = { type: "message", id: "done", status: "completed", role: "assistant", phase: "final_answer", content: [{ type: "output_text", text: "second completed", annotations: [] }] };
+		const events = [ { type: "response.output_item.added", output_index: 0, item: { type: "message", id: item.id } },
+			{ type: "response.output_item.done", output_index: 0, item },
+			{ type: "response.completed", response: { id: "done-response", status: "completed", output: [item] } } ];
+		responses[1]!.end(events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("") + "data: [DONE]\n\n");
+		let completed = false;
+		await until(async () => { for await (const entry of session.listActivity()) if (entry.kind === "assistant" && entry.text === "second completed") completed = true; return completed; });
+		assert.equal(responses.length, 2);
+	} finally {
+		try { await rui?.close(); } finally { for (const connection of connections) connection.destroy(); await new Promise<void>((resolve) => provider.close(() => resolve())); }
 	}
 });
