@@ -6,7 +6,7 @@
     (either takes --zig PATH, the compiler to build with; default zig on PATH)
 
 A collect build (-Drsql-collect=true) compiles the product and the unit roots on rsql's comptime path, and every
-statement and every Store test fixture text exports one record of what that path produced. This script reads the records back from the binaries
+statement, Store test fixture text and schema value exports what that path produced. This script reads the records back from the binaries
 and writes them as the table rsql.Read and rsql.Write look statements up in. Linux only: it reads ELF symbols.
 """
 import hashlib
@@ -110,7 +110,19 @@ def fixture(record, fixtures):
     return inputs
 
 
-HANDLERS = {b"read": ("statements", statement), b"write": ("statements", statement), b"fixture": ("fixtures", fixture)}
+def schema_value(record, schema):
+    """schema, value name, payload, inputs; migration texts are exported separately."""
+    _, name, payload, inputs = record
+    name = name.decode()
+    if schema.setdefault(name, payload) != payload:
+        raise ValueError(f"the schema value {name} rendered two ways")
+    return inputs
+
+
+HANDLERS = {
+    b"read": ("statements", statement), b"write": ("statements", statement),
+    b"fixture": ("fixtures", fixture), b"schema": ("schema", schema_value),
+}
 
 
 def block(name, lines):
@@ -153,6 +165,29 @@ def render(records):
         f"pub const inputs = {literal(inputs.encode())};",
         "",
     ] + block("entries", entries) + [""] + block("fixtures", fixture_lines)
+    schema = found["schema"]
+    prefix = "mysql_migrations_"
+    migrations = {}
+    for name in list(schema):
+        if not name.startswith(prefix):
+            continue
+        suffix = name.removeprefix(prefix)
+        if not suffix.isascii() or not suffix.isdigit() or str(int(suffix)) != suffix:
+            raise ValueError(f"invalid MySQL migration text index {suffix!r}")
+        migrations[int(suffix)] = schema.pop(name)
+    if migrations:
+        if set(migrations) != set(range(len(migrations))):
+            raise ValueError("the collect build omitted a MySQL migration text")
+        joined = b"\x1d".join(migrations[index] for index in range(len(migrations)))
+        if schema.setdefault("mysql_migrations", joined) != joined:
+            raise ValueError("MySQL migration texts rendered two ways")
+    # mysqlMigrationTexts ends with the empty current-version text. Every earlier suffix
+    # contains the final metadata update, so the terminator also detects a missing tail.
+    if "mysql_migrations" in schema:
+        texts = schema["mysql_migrations"].split(b"\x1d")
+        if texts[-1] != b"" or any(not text for text in texts[:-1]):
+            raise ValueError("the collect build omitted or duplicated a MySQL migration text")
+    lines += schema_lines(schema)
     return "\n".join(lines) + "\n", len(statements), len(fixtures)
 
 
@@ -188,6 +223,37 @@ def table_error(checked_in: str, rendered: str) -> tuple[str | None, int, int]:
                                          for name in checked_fixtures.keys() & fresh_fixtures.keys()):
         return error, missing, unused
     return None, missing, unused
+
+
+
+SCHEMA_VALUES = ("sqlite_objects", "mysql_objects", "sqlite_ddl", "mysql_ddl", "mysql_migrations", "digest")
+
+
+def schema_lines(schema):
+    """schema.zig's generated values, which it serves under the same `inputs` as the statements."""
+    if set(schema) != set(SCHEMA_VALUES):
+        raise ValueError(f"the collect build exported schema values {sorted(schema)}, not {sorted(SCHEMA_VALUES)}")
+
+    def objects(payload):
+        items = []
+        for item in payload.split(b"\x1d") if payload else []:
+            kind, name, sql = item.split(b"\x1e")
+            items.append(".{ .kind = .%s, .name = %s, .sql = %s }" % (kind.decode(), literal(name), literal(sql)))
+        return "&.{ " + ", ".join(items) + " }"
+
+    texts = ", ".join(literal(text) for text in schema["mysql_migrations"].split(b"\x1d"))
+    return [
+        "",
+        "pub const schema = struct {",
+        '    const Object = @import("schema.zig").Object;',
+        f"    pub const sqlite_objects: []const Object = {objects(schema['sqlite_objects'])};",
+        f"    pub const mysql_objects: []const Object = {objects(schema['mysql_objects'])};",
+        f"    pub const sqlite_ddl = {literal(schema['sqlite_ddl'])};",
+        f"    pub const mysql_ddl = {literal(schema['mysql_ddl'])};",
+        f"    pub const mysql_migrations = [_][:0]const u8{{ {texts} }};",
+        f"    pub const digest: u64 = {int(schema['digest'])};",
+        "};",
+    ]
 
 
 def collect(zig):
