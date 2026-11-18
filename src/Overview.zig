@@ -1942,7 +1942,7 @@ fn fixtureWork(value: protocol.session_work.Work) protocol.session_work.Work {
     served.served_attention = protocol.session_work.attention(served);
     served.served_group = protocol.session_work.group(served);
     served.actions.stop = switch (served.served_group.?) {
-        .needs_you, .serveding, .queued => true,
+        .needs_you, .working, .queued => true,
         .done => false,
     };
     served.actions.decide = if (served.served_group.? == .needs_you) served.first_action else null;
