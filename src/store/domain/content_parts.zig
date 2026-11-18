@@ -413,13 +413,6 @@ pub fn publicValue(row: *const content.content_metadata.Row, owner: ?content_val
     };
 }
 
-/// A text-only reader's projection: the exact bytes identity, or `ContentIsParts`.
-pub fn textValue(row: *const content.content_metadata.Row) error{ CorruptStore, ContentIsParts }!content_value.Reference {
-    if (row.private) return error.CorruptStore;
-    if (try parts.Form.decode(row.form) == .parts) return error.ContentIsParts;
-    return .{ .length = row.byte_length, .digest = row.digest };
-}
-
 test "INS-12 publicValue projects every form and owner without Store access" {
     const digest: [32]u8 = @splat(7);
     for ([_]bool{ false, true }) |private| for ([_]u8{ 0, 1, 2 }) |form| for ([_]?content_value.Owner{ null, .{ .message = 3 }, .{ .action = 4 } }) |owner| {
@@ -432,6 +425,5 @@ test "INS-12 publicValue projects every form and owner without Store access" {
         const value = try projected;
         try std.testing.expectEqualDeep(content_value.Reference{ .length = 9, .digest = digest }, value.identity());
         if (form == 0) try std.testing.expect(value == .text) else try std.testing.expectEqualDeep(owner.?, value.parts.owner);
-        if (form == 0) try std.testing.expectEqualDeep(value.text, try textValue(&row)) else try std.testing.expectError(error.ContentIsParts, textValue(&row));
     };
 }
