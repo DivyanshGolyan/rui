@@ -302,7 +302,7 @@ pub const Definition = struct {
     pub const Error = error{ DuplicateArgument, UnknownArgument, MissingArgumentValue, ConflictingArguments, InvalidArguments, InvalidInstructionsSource, InvalidHexIdentity, InvalidOptionValue, OutOfMemory };
 };
 
-fn validateValue(option: Option, text: []const u8, refusal: *Refusal) Definition.Error!void {
+fn validateValue(option: Option, text: []const u8, refusal: *Refusal) error{InvalidOptionValue}!void {
     if (option.choices) |set| {
         for (set) |tag| if (std.mem.eql(u8, tag, text)) return;
         refusal.* = .{ .code = .choice_unsupported, .token = option.name, .value = text, .accepted = .{ .closed = set } };
@@ -399,7 +399,7 @@ pub const Parsed = struct {
         return self.repeats[first..end];
     }
 
-    pub fn validateValues(self: *const Parsed, refusal: *Refusal) Definition.Error!void {
+    pub fn validateValues(self: *const Parsed, refusal: *Refusal) error{ InvalidOptionValue, InvalidInstructionsSource, ConflictingArguments }!void {
         if (self.help) return;
         if (self.get("instructions")) |source| {
             if (!std.mem.eql(u8, source, "-")) {

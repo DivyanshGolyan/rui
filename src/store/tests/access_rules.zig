@@ -77,6 +77,7 @@ test "Store entry points queue and fence only through canonical access" {
         @embedFile("../sqlite.zig"),
         @embedFile("../testing.zig"),
         @embedFile("../queue.zig"),
+        @embedFile("../write_batch.zig"),
         @embedFile("../transition.zig"),
     };
     const test_sources = .{
