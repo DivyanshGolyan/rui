@@ -194,6 +194,7 @@ style: vaxis.Style = .{},
 quiet: vaxis.Style = .{},
 selection_style: vaxis.Style = .{ .reverse = true },
 unicode: bool = true,
+caps: @import("overview_view.zig").Caps = .{},
 form: ?pages.Mapped(Form) = null,
 issue: ?[]const u8 = null,
 paste: Paste = .none,
@@ -1127,6 +1128,8 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         if (natural.size.height + 3 <= size.height) footer_surface = natural;
     }
     const footer_height = if (footer_surface) |surface| surface.size.height else @as(u16, 0);
+    var rule_caps = self.caps;
+    rule_caps.unicode = self.unicode;
     var panel: Panel = .{
         .title = title,
         .subtitle = if (self.state.page == .account) "Choose an account. Credentials stay out of conversations." else null,
@@ -1140,7 +1143,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         .ground = self.style,
         .selection = self.selection_style,
         .quiet = self.quiet,
-        .rule_style = self.quiet,
+        .rule = @import("widget_style.zig").line(rule_caps, .horizontal),
         .scroll = self.scroll,
     };
     const panel_surface = try panel.widget().draw(ctx.withConstraints(.{}, .{ .width = width, .height = size.height - footer_height }));
@@ -1852,7 +1855,7 @@ test "Sign-in both OAuth methods retry published Host failures without authentic
 }
 
 test "Sign-in whole joined receipt survives screen settlement and departure reports exactly once" {
-    const Case = enum { refused, os_launch, timeout, warning, pending, activation_error };
+    const Case = enum { refused, os_launch, timeout, success, pending, activation_error };
     const Worker = struct {
         fn finish(_: *anyopaque, _: *ClientTask) !void {}
     };
@@ -1869,7 +1872,7 @@ test "Sign-in whole joined receipt survives screen settlement and departure repo
             .os_launch => .failed(.os_launch, error.HostLaunchFailed),
             .timeout => .failed(.readiness_timeout, error.HostReadinessUnconfirmed),
             .activation_error => null,
-            .warning, .pending => .{ .outcome = .{ .ready = .{ .facts = .{ .store = answer.store, .instance = @splat(1), .active_capacity = 4, .started_at = 1, .custody_occupied = 0, .paused = false, .capabilities = .{ .bash = true, .providers = .{ .codex = .unserved, .openai = .key_file, .chatgpt = .unserved } } }, .adopted = case == .pending } }, .warning = .invalid_openai_base_url },
+            .success, .pending => .{ .outcome = .{ .ready = .{ .facts = .{ .store = answer.store, .instance = @splat(1), .active_capacity = 4, .started_at = 1, .custody_occupied = 0, .paused = false, .capabilities = .{ .bash = true, .providers = .{ .codex = .unserved, .openai = .key_file, .chatgpt = .unserved } } }, .adopted = case == .pending } } },
         };
         answer.pending = case == .pending;
         if (answer.launch) |*launch| {
@@ -1915,17 +1918,16 @@ test "Sign-in whole joined receipt survives screen settlement and departure repo
             .os_launch => error.HostLaunchFailed,
             .timeout, .activation_error => error.HostReadinessUnconfirmed,
             .pending => error.ConnectionNotActive,
-            .warning => null,
+            .success => null,
         };
         if (expected) |err| try std.testing.expectError(err, ended) else try ended;
         const text = report.written();
         try std.testing.expectEqual(defaults_failed, std.mem.indexOf(u8, text, "UnsupportedPreferencesVersion") != null);
         switch (case) {
-            .refused, .timeout, .warning, .pending => try std.testing.expect(std.mem.indexOf(u8, text, "retained child transcript") != null),
+            .refused, .timeout, .success, .pending => try std.testing.expect(std.mem.indexOf(u8, text, "retained child transcript") != null),
             .os_launch => try std.testing.expect(std.mem.indexOf(u8, text, "OS error 13") != null),
             .activation_error => try std.testing.expect(std.mem.indexOf(u8, text, "HostReadinessUnconfirmed") != null),
         }
-        if (case == .warning or case == .pending) try std.testing.expect(std.mem.indexOf(u8, text, host_launch.invalid_base_url) != null);
         try std.testing.expect(page.task.thread == null and page.form == null and page.outcome == null);
         const count = text.len;
         try page.stopTo(&report.writer);
@@ -2047,7 +2049,6 @@ test "Sign-in replacement retains whole prior launch and cleanup receipts across
         try rig.env.put("LATER", @tagName(later));
         var answer = try testingActivation(page.init.?);
         answer.launch = .failed(.child_refused, error.HostStartupFailed);
-        answer.launch.?.warning = .invalid_openai_base_url;
         const marker = "first attempt diagnostic marker\n";
         @memcpy(answer.launch.?.startup_bytes[0..marker.len], marker);
         answer.launch.?.startup_len = marker.len;
@@ -2083,7 +2084,7 @@ test "Sign-in replacement retains whole prior launch and cleanup receipts across
         var report: std.Io.Writer.Allocating = .init(rig.arena.allocator());
         try std.testing.expectError(error.UnsupportedPreferencesVersion, page.stopTo(&report.writer));
         const text = report.written();
-        for ([_][]const u8{ marker, "UnsupportedPreferencesVersion", host_launch.invalid_base_url, "/synthetic owned/.openai-retained.key", "InjectedCredentialWriteFailure", "AccessDenied" }) |needle| {
+        for ([_][]const u8{ marker, "UnsupportedPreferencesVersion", "/synthetic owned/.openai-retained.key", "InjectedCredentialWriteFailure", "AccessDenied" }) |needle| {
             try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, needle));
         }
         try std.testing.expect(page.receipts == null and page.outcome == null);
@@ -2136,7 +2137,7 @@ test "Sign-in receipt admission retains old metadata on quota create and append 
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, report.written(), "LoginExpired"));
 }
 
-test "Sign-in native departure fully acknowledged successful warning remains successful after create cap or append refusal" {
+test "Sign-in native departure fully acknowledged successful launch remains successful after create cap or append refusal" {
     const Refusal = enum { create, cap, append };
     const Hooks = struct {
         fn unavailable(_: std.process.Init) !std.Io.File {
@@ -2144,7 +2145,6 @@ test "Sign-in native departure fully acknowledged successful warning remains suc
         }
     };
     const marker = "successful operation diagnostic marker\n";
-    const warning = host_launch.invalid_base_url ++ "; this Host starts without OpenAI.\n";
     for (std.enums.values(Refusal)) |refusal| {
         var rig: BrowserRig = undefined;
         try rig.open();
@@ -2152,7 +2152,7 @@ test "Sign-in native departure fully acknowledged successful warning remains suc
         const page = &rig.page;
         defer page.deinit();
         var answer = try testingActivation(page.init.?);
-        answer.launch = .{ .outcome = .{ .ready = .{ .facts = .{ .store = answer.store, .instance = @splat(1), .active_capacity = 4, .started_at = 1, .custody_occupied = 0, .paused = false, .capabilities = .{ .bash = true, .providers = .{ .codex = .unserved, .openai = .key_file, .chatgpt = .unserved } } } } }, .warning = .invalid_openai_base_url };
+        answer.launch = .{ .outcome = .{ .ready = .{ .facts = .{ .store = answer.store, .instance = @splat(1), .active_capacity = 4, .started_at = 1, .custody_occupied = 0, .paused = false, .capabilities = .{ .bash = true, .providers = .{ .codex = .unserved, .openai = .key_file, .chatgpt = .unserved } } } } } };
         @memcpy(answer.launch.?.startup_bytes[0..marker.len], marker);
         answer.launch.?.startup_len = marker.len;
         const outcome: Outcome = .{ .published = .{ .defaults = {}, .activation = answer } };
@@ -2175,7 +2175,7 @@ test "Sign-in native departure fully acknowledged successful warning remains suc
                     break;
                 };
                 committed += 1;
-                try std.testing.expect(committed <= max_deferred_bytes / (warning.len + marker.len));
+                try std.testing.expect(committed <= max_deferred_bytes / marker.len);
                 page.outcome = outcome;
             },
             .append => {
@@ -2191,9 +2191,9 @@ test "Sign-in native departure fully acknowledged successful warning remains suc
         const fd: ?std.posix.fd_t = if (page.receipts) |kept| kept.file.handle else null;
         if (page.receipts) |kept| try std.testing.expect(kept.first_failure == null and kept.reported == 0);
         var expected: std.Io.Writer.Allocating = .init(rig.arena.allocator());
-        for (0..committed) |_| try expected.writer.writeAll(warning ++ marker);
+        for (0..committed) |_| try expected.writer.writeAll(marker);
         try expected.writer.print("Replacement sign-in was not started: previous report could not be retained ({s}).\n", .{@errorName(cause)});
-        try expected.writer.writeAll(warning ++ marker);
+        try expected.writer.writeAll(marker);
         const output = try rig.tmp.dir.createFile(page.init.?.io, "native-departure", .{ .read = true });
         defer output.close(page.init.?.io);
         const saved_stderr = std.c.dup(2);

@@ -4451,6 +4451,233 @@ test "read_action uses the frozen configured offer and returns one provider tool
     try std.testing.expectEqual(@as(u64, 1), try store.testing.sqlite_only.queryU64(&setup.storage, "SELECT count(*) FROM model_tool_call WHERE operation_id=?1 AND rejection_code='unknown_tool'", .{binding.operation_id}));
 }
 
+test "core reader failures retain exact bytes in provider continuation" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    const session = try setup.configure("reader-errors-codec");
+    var configure: wire_request.ConfigureCommand = .{};
+    configure.session = session;
+    try configure.key.set("reader-errors-offer");
+    configure.configuration.tools = try .of(&.{ "read_action", "read_transcript" });
+    try std.testing.expect(try setup.storage.configure(&configure, .{}) == .accepted);
+    try setup.submit("reader-errors-input", "reader-errors-input", session.slice(), "inspect");
+    var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+    var binding = try admitted.permit.consume();
+    try settleItemsForTesting(&setup, binding, "reader-errors-calls", &.{
+        "{\"type\":\"function_call\",\"id\":\"read-item\",\"call_id\":\"read-call\",\"name\":\"read_action\",\"arguments\":\"{}\"}",
+        "{\"type\":\"function_call\",\"id\":\"transcript-item\",\"call_id\":\"transcript-call\",\"name\":\"read_transcript\",\"arguments\":\"{\\\"offset\\\":1}\"}",
+        "{\"type\":\"function_call\",\"id\":\"stop-item\",\"call_id\":\"stop-call\",\"name\":\"stop_action\",\"arguments\":\"{}\"}",
+    });
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    for (0..3) |_| {
+        const action = (try setup.storage.nextCoreWork(.{ .free_credit = .none, .mcp_open = false })).?.action;
+        switch (action.tool) {
+            .read_action => try @import("read_action_tool.zig").run(&setup.storage, arena.allocator(), &action, .{}),
+            .read_transcript => try @import("read_transcript.zig").run(&setup.storage, arena.allocator(), &action, .{}),
+            .stop_action => try @import("stop_action_tool.zig").run(&setup.storage, arena.allocator(), &action, .{}),
+            else => return error.UnexpectedTool,
+        }
+    }
+    admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+    binding = try admitted.permit.consume();
+    const next = try prepareMemoForTesting(&setup, binding, null, .{});
+    defer std.testing.allocator.free(next.bytes);
+    const request = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), next.bytes, .{});
+    var seen: usize = 0;
+    for (request.object.get("input").?.array.items) |item| {
+        const kind = item.object.get("type") orelse continue;
+        if (!std.mem.eql(u8, kind.string, "function_call_output")) continue;
+        const call_id = item.object.get("call_id").?.string;
+        const expected = if (std.mem.eql(u8, call_id, "read-call"))
+            "Rui could not read the Action: action is required."
+        else if (std.mem.eql(u8, call_id, "transcript-call"))
+            "Rui could not read the transcript: offset is only accepted with full."
+        else if (std.mem.eql(u8, call_id, "stop-call"))
+            "Rui could not stop the Action: expected an object containing only action."
+        else
+            return error.UnexpectedCall;
+        try std.testing.expectEqualStrings(expected, item.object.get("output").?.string);
+        seen += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 3), seen);
+}
+
+test "successful reader pages and final stop preserve bytes in provider continuation" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const session = try setup.configure("reader-pages-wire");
+    var configure: wire_request.ConfigureCommand = .{};
+    configure.session = session;
+    try configure.key.set("reader-pages-tools");
+    configure.configuration.tools = try .of(&.{ "bash", "read_action", "read_transcript" });
+    try std.testing.expect(try setup.storage.configure(&configure, .{}) == .accepted);
+    try setup.submit("reader-pages-input", "reader-pages-input", session.slice(), "run and read");
+    const first = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try settleItemsForTesting(&setup, first, "reader-pages-target", &.{
+        "{\"type\":\"function_call\",\"id\":\"target-item\",\"call_id\":\"target-call\",\"name\":\"bash\",\"arguments\":\"{\\\"cmd\\\":\\\"true\\\",\\\"description\\\":\\\"Held\\\"}\"}",
+    });
+    const target = try store.testing.sqlite_only.queryU64(&setup.storage, "SELECT action_id FROM action_operation WHERE parent_operation_id=?1", .{first.operation_id});
+    var background: @import("command_input.zig").ActionBackgroundCommand = .{ .session = session, .action_id = target };
+    try background.key.set("reader-pages-background");
+    try std.testing.expect(setup.storage.backgroundAction(.{ .command = &background }, .{}) == .accepted);
+    const effect = (try setup.storage.admitNextActionAttempt(.fromFree(2, true), 30_000, .{})).?.permit.binding;
+    const repeats = @import("action_read.zig").window_bytes / 3 + 3;
+    const text = "a" ++ @as([3 * repeats]u8, @bitCast(@as([repeats][3]u8, @splat("雪".*))));
+    _ = try setup.storage.settleActionAttempt(effect, .succeeded, text, .{});
+    const second = (try setup.storage.admitModelAttempt(.message, .{})).?.permit.binding;
+
+    const other = try setup.configure("reader-pages-other");
+    const long = try arena.alloc(u8, 16 * 1024 + 64);
+    @memset(long, 'x');
+    @memcpy(long[16383..][0..4], "😀");
+    try setup.submit("reader-pages-other-input", "reader-pages-other-input", other.slice(), long);
+    const page = try arena.create(protocol.ActivityFacts);
+    try setup.storage.activityPage(&.{ .session = other, .direction = .backward }, page);
+    try std.testing.expectEqual(@as(usize, 1), page.count);
+    const position = page.items[0].position;
+    const args = [_][]const u8{
+        try std.fmt.allocPrint(arena, "{{\"action\":\"{d}\"}}", .{target}),
+        try std.fmt.allocPrint(arena, "{{\"action\":\"{d}\",\"offset\":\"4096\"}}", .{target}),
+        try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"full\":\"{d}.0\"}}", .{ other.slice(), position }),
+        try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"full\":\"{d}.0\",\"offset\":16383}}", .{ other.slice(), position }),
+        try std.fmt.allocPrint(arena, "{{\"action\":\"{d}\"}}", .{target}),
+    };
+    const names = [_][]const u8{ "read_action", "read_action", "read_transcript", "read_transcript", "stop_action" };
+    var calls: [args.len]store.TestingCall = undefined;
+    for (&calls, args, names, 0..) |*call, arguments, name, index| {
+        const quoted = try std.json.Stringify.valueAlloc(arena, arguments, .{});
+        const id = try std.fmt.allocPrint(arena, "page-{d}", .{index});
+        call.* = .{ .item_id = id, .name = name, .encoded_call_id = id, .decoded_call_id = id, .encoded_arguments = quoted[1 .. quoted.len - 1], .decoded_arguments = arguments };
+    }
+    try store.settleCallsForTesting(&setup.storage, &setup.tmp, second, "reader-pages-calls", &calls);
+    var action_ids: [args.len]u64 = undefined;
+    for (args, names, 0..) |arguments, name, index| {
+        const action = (try setup.storage.nextCoreWork(.fromFree(2, true))).?.action;
+        const actual_args = try arena.alloc(u8, @intCast(action.arguments.length));
+        try setup.storage.readCoreArguments(&action, actual_args);
+        try std.testing.expectEqualStrings(arguments, actual_args);
+        action_ids[index] = action.binding.action_id;
+        if (std.mem.eql(u8, name, "read_action")) {
+            try @import("read_action_tool.zig").run(&setup.storage, arena, &action, .{});
+        } else if (std.mem.eql(u8, name, "read_transcript")) {
+            try @import("read_transcript.zig").run(&setup.storage, arena, &action, .{});
+        } else {
+            try @import("stop_action_tool.zig").run(&setup.storage, arena, &action, .{});
+        }
+    }
+    var read: @import("action_read.zig").Read = undefined;
+    try setup.storage.readAction(&.{ .session = session, .action_id = target }, &read);
+    const final = read.status.resolved.resolution;
+    const digest = std.fmt.bytesToHex(protocol.contentDigest(text), .lower);
+    const first_text = try std.json.Stringify.valueAlloc(arena, text[0..4096], .{});
+    const second_text = try std.json.Stringify.valueAlloc(arena, text[4096..], .{});
+    const action_template = "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"action_read\",\"session\":\"{s}\",\"action\":\"{d}\",\"state\":\"resolved\",\"final\":{{\"position\":\"{d}\",\"code\":\"succeeded\",\"content\":{{\"bytes\":\"{d}\",\"sha256\":\"{s}\"}},\"window\":{{\"offset\":\"{d}\",\"next\":\"{d}\",\"more\":{s},\"text\":{s}}}}}}}";
+    const expected_first = try std.fmt.allocPrint(arena, action_template, .{ session.slice(), target, final.position, text.len, &digest, @as(usize, 0), @as(usize, 4096), "true", first_text });
+    const expected = [_][]const u8{
+        expected_first,
+        try std.fmt.allocPrint(arena, action_template, .{ session.slice(), target, final.position, text.len, &digest, @as(usize, 4096), text.len, "false", second_text }),
+        try std.fmt.allocPrint(arena, "Entry {d}.0 admission, bytes 0 to 16383 of {d}:\n{s}\nMore: call read_transcript with {s}.\n", .{ position, long.len, long[0..16383], args[3] }),
+        try std.fmt.allocPrint(arena, "Entry {d}.0 admission, bytes 16383 to {d} of {d}:\n{s}", .{ position, long.len, long.len, long[16383..] }),
+        expected_first,
+    };
+    const third = (try setup.storage.admitModelAttempt(.tool_continuation, .{})).?.permit.binding;
+    const request = try prepareMemoForTesting(&setup, third, null, .{});
+    defer std.testing.allocator.free(request.bytes);
+    const parsed = try std.json.parseFromSliceLeaky(std.json.Value, arena, request.bytes, .{});
+    var seen: [args.len]bool = @splat(false);
+    for (parsed.object.get("input").?.array.items) |item| {
+        const kind = item.object.get("type") orelse continue;
+        if (!std.mem.eql(u8, kind.string, "function_call_output")) continue;
+        const id = item.object.get("call_id").?.string;
+        for (calls, 0..) |call, index| {
+            if (!std.mem.eql(u8, id, call.decoded_call_id)) continue;
+            try std.testing.expect(!seen[index]);
+            seen[index] = true;
+            const result_id = try store.testing.sqlite_only.queryU64(&setup.storage, "SELECT resolution_content_id FROM action_operation WHERE action_id=?1", .{action_ids[index]});
+            const reference = try store.testingContentReference(&setup.storage, result_id);
+            const bytes = try arena.alloc(u8, @intCast(reference.length));
+            var reader: store.ContentReader = undefined;
+            reader.open(try setup.storage.openContent(reference));
+            defer reader.close();
+            try std.testing.expectEqual(bytes.len, try reader.readRange(0, bytes));
+            try std.testing.expectEqualStrings(expected[index], bytes);
+            try std.testing.expectEqualStrings(expected[index], item.object.get("output").?.string);
+        }
+    }
+    for (seen) |found| try std.testing.expect(found);
+}
+
+test "late completion after stop preserves cancelled bytes in provider continuation" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const session = try setup.configure("stop-race-wire");
+    var configure: wire_request.ConfigureCommand = .{};
+    configure.session = session;
+    try configure.key.set("stop-race-tools");
+    configure.configuration.tools = try .of(&.{ "bash", "read_action" });
+    try std.testing.expect(try setup.storage.configure(&configure, .{}) == .accepted);
+    try setup.submit("stop-race-input", "stop-race-input", session.slice(), "run and stop");
+    const first = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try settleItemsForTesting(&setup, first, "stop-race-target", &.{
+        "{\"type\":\"function_call\",\"id\":\"target-item\",\"call_id\":\"target-call\",\"name\":\"bash\",\"arguments\":\"{\\\"cmd\\\":\\\"true\\\",\\\"description\\\":\\\"Held\\\"}\"}",
+    });
+    const target = try store.testing.sqlite_only.queryU64(&setup.storage, "SELECT action_id FROM action_operation WHERE parent_operation_id=?1", .{first.operation_id});
+    var background: @import("command_input.zig").ActionBackgroundCommand = .{ .session = session, .action_id = target };
+    try background.key.set("stop-race-background");
+    try std.testing.expect(setup.storage.backgroundAction(.{ .command = &background }, .{}) == .accepted);
+    const effect = (try setup.storage.admitNextActionAttempt(.fromFree(2, true), 30_000, .{})).?.permit.binding;
+    const second = (try setup.storage.admitModelAttempt(.tool_continuation, .{})).?.permit.binding;
+    const args = try std.fmt.allocPrint(arena, "{{\"action\":\"{d}\"}}", .{target});
+    const quoted = try std.json.Stringify.valueAlloc(arena, args, .{});
+    const calls = [_]store.TestingCall{.{ .item_id = "stop-item", .name = "stop_action", .encoded_call_id = "stop-call", .decoded_call_id = "stop-call", .encoded_arguments = quoted[1 .. quoted.len - 1], .decoded_arguments = args }};
+    try store.settleCallsForTesting(&setup.storage, &setup.tmp, second, "stop-race-call", &calls);
+    const stop = (try setup.storage.nextCoreWork(.fromFree(2, true))).?.action;
+    try std.testing.expect(stop.tool == .stop_action);
+    try @import("stop_action_tool.zig").run(&setup.storage, arena, &stop, .{});
+    try std.testing.expect((try setup.storage.actionSupersededByStop(effect)) != null);
+    _ = try setup.storage.settleActionAttempt(effect, .succeeded, "late result", .{});
+    const resumed = (try setup.storage.nextCoreWork(.fromFree(2, true))).?.action;
+    try std.testing.expectEqual(stop.binding.action_id, resumed.binding.action_id);
+    try @import("stop_action_tool.zig").run(&setup.storage, arena, &resumed, .{});
+    var read: @import("action_read.zig").Read = undefined;
+    try setup.storage.readAction(&.{ .session = session, .action_id = target }, &read);
+    const final = read.status.resolved.resolution;
+    const text = "Action was stopped.";
+    const digest = std.fmt.bytesToHex(protocol.contentDigest(text), .lower);
+    const expected = try std.fmt.allocPrint(arena, "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"action_read\",\"session\":\"{s}\",\"action\":\"{d}\",\"state\":\"resolved\",\"final\":{{\"position\":\"{d}\",\"code\":\"cancelled\",\"content\":{{\"bytes\":\"{d}\",\"sha256\":\"{s}\"}},\"window\":{{\"offset\":\"0\",\"next\":\"{d}\",\"more\":false,\"text\":\"Action was stopped.\"}}}}}}", .{ session.slice(), target, final.position, text.len, &digest, text.len });
+    const result_id = try store.testing.sqlite_only.queryU64(&setup.storage, "SELECT resolution_content_id FROM action_operation WHERE action_id=?1", .{stop.binding.action_id});
+    const reference = try store.testingContentReference(&setup.storage, result_id);
+    const bytes = try arena.alloc(u8, @intCast(reference.length));
+    var reader: store.ContentReader = undefined;
+    reader.open(try setup.storage.openContent(reference));
+    defer reader.close();
+    try std.testing.expectEqual(bytes.len, try reader.readRange(0, bytes));
+    try std.testing.expectEqualStrings(expected, bytes);
+    const third = (try setup.storage.admitModelAttempt(.tool_continuation, .{})).?.permit.binding;
+    const request = try prepareMemoForTesting(&setup, third, null, .{});
+    defer std.testing.allocator.free(request.bytes);
+    const parsed = try std.json.parseFromSliceLeaky(std.json.Value, arena, request.bytes, .{});
+    var count: usize = 0;
+    for (parsed.object.get("input").?.array.items) |item| {
+        const kind = item.object.get("type") orelse continue;
+        if (!std.mem.eql(u8, kind.string, "function_call_output")) continue;
+        if (!std.mem.eql(u8, item.object.get("call_id").?.string, "stop-call")) continue;
+        try std.testing.expectEqualStrings(expected, item.object.get("output").?.string);
+        count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), count);
+}
+
 test "a full rebuild must begin with the Session's prefix seal" {
     var setup: PreparationTestSetup = undefined;
     try setup.init();

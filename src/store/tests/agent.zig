@@ -192,11 +192,11 @@ test "a start_agent call fails and starts nothing when its key is taken or its t
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, failed_sql, .{ taken.binding.action_id, store_testing.Blob{ .bytes = &protocol.contentDigest("Rui could not start the agent: its command key is already taken. Nothing was started.") } }));
 
             const unreadable = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
-            const diagnostic = "Skill missing is not in the new Session's catalog.";
+            const diagnostic = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx雪 trailing";
             const captured: skills_fixture_domain.MessageCapture = .{ .failed = .{ .code = .skill_file_unavailable, .bytes = diagnostic } };
             try std.testing.expect(try core_tools.checkStartAgent(arena.allocator(), arguments, start) == .accepted);
             try std.testing.expect(try storage.startAgentWithInitialSkills(unreadable.binding, parent.slice(), start.task, start.attached, &start.configuration, null, null, &captured, .{}) == .failed);
-            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, failed_sql, .{ unreadable.binding.action_id, store_testing.Blob{ .bytes = &protocol.contentDigest(diagnostic ++ " Nothing was started.") } }));
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, failed_sql, .{ unreadable.binding.action_id, store_testing.Blob{ .bytes = &protocol.contentDigest("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\xe9 Nothing was started.") } }));
 
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{}));
 
@@ -482,8 +482,8 @@ test "core call writes roll back on injected faults and save every bound skill" 
             const arguments = try std.fmt.bufPrint(&arguments_buffer, "{{\"id\":\"{s}\",\"text\":\"hello\"}}", .{receiver.slice()});
             var encoded_buffer: [192]u8 = undefined;
             const encoded = try std.fmt.bufPrint(&encoded_buffer, "{{\\\"id\\\":\\\"{s}\\\",\\\"text\\\":\\\"hello\\\"}}", .{receiver.slice()});
-            var calls: [5]TestingCall = undefined;
-            for (&calls, [_][]const u8{ "send", "fail", "succeed", "taken", "owed" }) |*call, name| call.* = .{ .item_id = name, .name = "message_agent", .encoded_call_id = name, .decoded_call_id = name, .encoded_arguments = encoded, .decoded_arguments = arguments };
+            var calls: [6]TestingCall = undefined;
+            for (&calls, [_][]const u8{ "send", "fail", "succeed", "detail", "taken", "owed" }) |*call, name| call.* = .{ .item_id = name, .name = "message_agent", .encoded_call_id = name, .decoded_call_id = name, .encoded_arguments = encoded, .decoded_arguments = arguments };
             try settleCallsForTesting(&storage, &tmp, model, "faults-calls", &calls);
             const injected = [_]struct { Faults, anyerror }{
                 .{ .{ .content_import = true }, error.InjectedContentImportFailure },
@@ -517,6 +517,13 @@ test "core call writes roll back on injected faults and save every bound skill" 
                 const result_id = try store_testing.queryU64(&storage, "SELECT resolution_content_id FROM action_operation WHERE action_id=?1", .{call.binding.action_id});
                 try expectContent(&storage, try testingContentReference(&storage, result_id), expected.result);
             }
+
+            const detail = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
+            const long_diagnostic = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx雪 trailing";
+            const failed_capture: skills_fixture_domain.MessageCapture = .{ .failed = .{ .code = .skill_file_unavailable, .bytes = long_diagnostic } };
+            try std.testing.expectEqual(command_domain.AgentDelivery.failed, try storage.deliverAgentMessageBound(detail.binding, receiver.slice(), "hello", &failed_capture, .{}));
+            const detail_digest = protocol.contentDigest("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\xe9 Nothing was sent.");
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id WHERE a.action_id=?1 AND a.resolution_code='failed' AND c.digest=?2", .{ detail.binding.action_id, store_testing.Blob{ .bytes = &detail_digest } }));
 
             const taken = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
             var key_buffer: [128]u8 = undefined;

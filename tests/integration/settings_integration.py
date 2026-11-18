@@ -167,19 +167,16 @@ def flag_start_failures(root):
     credential = {"RUI_CODEX_CREDENTIAL_FILE": str(root / "c.json"), "RUI_CHATGPT_CREDENTIAL_FILE": str(root / "c.json")}
     absent = {"RUI_OPENAI_KEY_FILE": str(root / "absent")}
     openai = ["--set", 'providers={"openai":{}}']
+    fixture_openai = ["--set", f"providers.openai.endpoint={endpoint}"]
     unchanged = [
-        (["--test-openai-fixture-endpoint", endpoint], {}, 1, "internal_unexpected", ""),
-        (["--test-openai-fixture-endpoint", endpoint], absent, 6, "sign_in_required", NO_KEY),
-        (["--test-openai-fixture-endpoint", endpoint], {"RUI_OPENAI_KEY_FILE": str(key)}, 1, "internal_unexpected", ""),
-        (["--test-openai-fixture-endpoint", endpoint], {"RUI_OPENAI_KEY_FILE": str(bad_key)}, 1, "internal_unexpected", ""),
-        (["--test-openai-fixture-endpoint", endpoint, *openai], absent, 6, "sign_in_required", NO_KEY),
+        (fixture_openai, {}, 6, "sign_in_required", NO_KEY),
+        (fixture_openai, absent, 6, "sign_in_required", NO_KEY),
+        (fixture_openai, {"RUI_OPENAI_KEY_FILE": str(key)}, 1, "internal_unexpected", ""),
+        (fixture_openai, {"RUI_OPENAI_KEY_FILE": str(bad_key)}, 1, "internal_unexpected", ""),
         (openai, {}, 6, "sign_in_required", NO_KEY),
         (openai, {"HOME": None}, 6, "home_unavailable", ""),
         (["--set", 'providers={"codex":{}}'], {"HOME": None}, 6, "home_unavailable", ""),
         (["--set", 'providers={"chatgpt":{}}'], {"HOME": None}, 6, "home_unavailable", ""),
-        (["--test-codex-fixture-endpoint", endpoint], {}, 1, "internal_unexpected", ""),
-        (["--test-chatgpt-fixture-endpoint", endpoint], {}, 1, "internal_unexpected", ""),
-        (["--test-chatgpt-fixture-endpoint", "http://127.0.0.1:9/other"], credential, 2, "invocation_invalid", ""),
         (["--set", f"providers.openai.endpoint={endpoint}", "--set", "providers.openai.unauthenticated=true"],
          {"HTTPS_PROXY": "https://proxy.example:1"}, 6, None, PROXY),
     ]
@@ -197,7 +194,6 @@ def flag_start_failures(root):
         unchanged.append((flags, {}, 2, "host_option_retired", ""))
     leaf = [
         (["--set", "providers.codex.endpoint=ftp://127.0.0.1/responses"], {}, "providers.codex.endpoint: must be a valid HTTPS or loopback HTTP endpoint"),
-        (["--test-codex-fixture-endpoint", "ftp://x/responses"], credential, "providers.codex.endpoint: must be a valid HTTPS or loopback HTTP endpoint"),
         (["--set", "tools.bash.path="], {}, "tools.bash.path: must be an absolute path"),
         (["--set", 'providers={"bogus":{}}'], {}, "providers.bogus: unknown provider"),
         (["--set", "tools.bash.timeoutMs=0"], {}, "tools.bash.timeoutMs: integer is outside its bounds"),
@@ -230,6 +226,20 @@ def flag_start_failures(root):
         assert json.loads(done.stdout) == {"rui_start_error": {"code": "settings_invalid", "message": message}}, (flags, done)
 
 
+def token_endpoint_refusals(root):
+    """All Host admission doors name a forbidden token target before serving."""
+    for door in ("serve", "start", "check"):
+        directory = root / ("bad-token-" + door)
+        command = [RUI, "host", "settings", "--check"] if door == "check" else [RUI, "host", door]
+        command += ["--store", str(directory), "--set", "providers.chatgpt.endpoint=http://127.0.0.1:9/responses",
+                    "--set", "providers.chatgpt.credentialFile=/tmp/fixture-signin.json",
+                    "--set", "providers.chatgpt.tokenEndpoint=https://other.example/token"]
+        result = subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
+        assert result.returncode != 0, (door, result)
+        assert "providers.chatgpt.tokenEndpoint" in result.stdout + result.stderr, (door, result)
+        assert not (directory / "rui.sock").exists(), (door, result)
+
+
 def main(network, ci):
     root = host_process.canonical_fixture_root(tempfile.mkdtemp(prefix="rui-launch-"))
     store = root / "store"
@@ -252,6 +262,7 @@ def main(network, ci):
 
     source_modes(root, good)
     flag_start_failures(root)
+    token_endpoint_refusals(root)
 
     other = root / "other"
     other.mkdir(mode=0o700)

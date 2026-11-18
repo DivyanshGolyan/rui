@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from host_settings_locality import ROOT, declaration_members, facts, scan, surfaces, violations, vocabulary, running_source_violations, host_child_violations
+from host_settings_locality import ROOT, declaration_members, facts, scan, surfaces, violations, vocabulary, running_source_violations, host_child_violations, host_environment_violations
 
 
 class HostSettingsLocalityTest(unittest.TestCase):
@@ -136,6 +136,16 @@ fn read(settings: *SessionSettings) void { _ = settings.tools; }
         self.assertNotIn('src/host_settings.zig', paths)
         self.assertNotIn('src/h2/Engine.zig', paths)
         self.assertNotIn('clients/ts/src/settings.ts', paths)
+
+    def test_host_environment_allowlist_and_mutation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "src").mkdir()
+            path = root / "src/providers.zig"
+            path.write_text('fn f(environ: Env) void { _ = environ.get("HOME"); }\n')
+            self.assertEqual(host_environment_violations(root), [])
+            path.write_text(path.read_text() + 'fn x(environ: Env) void { _ = environ.get("RUI_X"); }\n')
+            self.assertIn('src/providers.zig:2:', host_environment_violations(root)[0])
 
     def test_real_file_mutation_is_red_then_reverted(self):
         with tempfile.TemporaryDirectory() as directory:

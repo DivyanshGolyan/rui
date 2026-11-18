@@ -34,7 +34,7 @@ def catalog_unusable_proxy_run():
                 host, ready = start_ready_process([
                     "sh", "-c", 'log=$1; shift; exec "$@" 2>"$log"', "rui-catalog-proxy", log,
                     *fixture.host_arguments(store, None, active_capacity=capacity),
-                    "--test-models-dev-url", "https://127.0.0.1:1/api.json",
+                    "--set", "models.catalogUrl=https://127.0.0.1:1/api.json",
                 ], env=env, required_fields={"execution": "unavailable", "active_capacity": str(capacity)})
                 diagnostic = b"rui: models.dev catalog unavailable (HttpsProxySchemeUnsupported); the saved catalog stands\n"
                 for _ in range(3):
@@ -50,7 +50,7 @@ def catalog_unusable_proxy_run():
             assert stderr in (b"", diagnostic), stderr
         required = subprocess.run([
             *fixture.host_arguments(root / "required-provider", "http://127.0.0.1:1/responses"),
-            "--test-models-dev-url", "https://127.0.0.1:1/api.json",
+            "--set", "models.catalogUrl=https://127.0.0.1:1/api.json",
         ], env=env, capture_output=True, text=True, timeout=10)
         assert required.returncode != 0, required
         assert required.stdout == "", required
@@ -89,7 +89,7 @@ def catalog_unusable_trust_run():
         host, ready = start_ready_process([
             "sh", "-c", 'log=$1; shift; exec "$@" 2>"$log"', "rui-catalog-trust", log,
             *fixture.host_arguments(store, f"http://127.0.0.1:{endpoint.server_port}/responses"),
-            "--test-models-dev-url", "https://127.0.0.1:1/api.json",
+            "--set", "models.catalogUrl=https://127.0.0.1:1/api.json",
         ], env={**os.environ, **os_semantics.system_trust(root / "missing-ca.pem")},
             required_fields={"execution": "enabled", "nghttp2": "1.70.0"})
         diagnostic = b"rui: models.dev catalog unavailable (InvalidSslCertFile); the saved catalog stands\n"
@@ -132,6 +132,8 @@ def catalog_unusable_trust_run():
 
 if __name__ == "__main__":
     host_process.enter()
+    paths = subprocess.run([fixture.RUI, "host", "settings", "--paths"], capture_output=True, text=True, timeout=15, check=True)
+    assert any(line.startswith("models.catalogUrl\t") for line in paths.stdout.splitlines()), paths.stdout
     catalog_unusable_proxy_run()
     if os_semantics.SSL_CERT_FILE_TRUST:
         catalog_unusable_trust_run()

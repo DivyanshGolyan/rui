@@ -1093,7 +1093,6 @@ fn hostSettings(init: std.process.Init, command: cli_args.Command, parsed: *cons
         defer std.heap.c_allocator.destroy(settings);
         settings.* = .{};
         defer settings.deinit();
-        var fixtures: providers.Fixtures = .{};
         if (parsed.has(settings_handoff.check_option)) {
             var frozen = host_start.freezeStart(init, .{ .dir = selected, .settings_file = parsed.get("settings"), .assignments = parsed.all("set") }, settings, &failure) catch |err| {
                 if (err == error.SettingsInvalid) return writeRefusal(init.io, &failure, .invalid);
@@ -1101,9 +1100,9 @@ fn hostSettings(init: std.process.Init, command: cli_args.Command, parsed: *cons
             };
             defer frozen.deinit(init.gpa);
             settings.deinit();
-            _ = try admitHost(init, .{ .frozen = frozen.bytes }, selected, settings, &fixtures, &failure, .detached);
+            _ = try admitHost(init, .{ .frozen = frozen.bytes }, selected, settings, &failure, .detached);
             try std.Io.File.stdout().writeStreamingAll(init.io, frozen.bytes);
-        } else _ = try admitHost(init, .{ .layered = parsed }, selected, settings, &fixtures, &failure, .detached);
+        } else _ = try admitHost(init, .{ .layered = parsed }, selected, settings, &failure, .detached);
         return;
     }
     const result = if (command == .host_settings)
@@ -2038,8 +2037,6 @@ fn preflightNewSession(io: std.Io, destination: []const u8, saved: bool) !void {
     } else platform.validateStoreDestination(io, destination) catch |err| return storeFailure(err);
 }
 
-const invalid_base_url = host_launch.invalid_base_url;
-
 const provider_labels = joinedProviders(", ");
 const provider_choices = joinedProviders("|");
 
@@ -2113,7 +2110,7 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     defer std.heap.c_allocator.destroy(settings);
     settings.* = .{};
     defer settings.deinit();
-    var tuning = try server.Tuning.fromOptions(parsed, init.environ_map.get("RUI_TEST_MODELS_DEV_URL"));
+    var tuning = try server.Tuning.fromOptions(parsed);
     tuning.home = init.environ_map.get("HOME");
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const selected = try selectedStore(init, parsed.get("store"), &selected_buffer);
@@ -2130,8 +2127,8 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
         };
         defer frozen.deinit(init.gpa);
         tuning.admitted_directory = selected;
-        break :frozen try admitHost(init, .{ .frozen = frozen.bytes }, selected, settings, &tuning.fixtures, &preparation_failure, .detached);
-    } else try admitHost(init, .{ .layered = parsed }, selected, settings, &tuning.fixtures, &preparation_failure, .foreground);
+        break :frozen try admitHost(init, .{ .frozen = frozen.bytes }, selected, settings, &preparation_failure, .detached);
+    } else try admitHost(init, .{ .layered = parsed }, selected, settings, &preparation_failure, .foreground);
     var failure: ?start_report.Failure = null;
     return finishServe(io, host_start.shutdownPolicy(settings), host_start.storeKind(settings), &failure, server.serve(io, std.heap.c_allocator, selected, prepared, tuning, &failure));
 }
@@ -2140,26 +2137,26 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
 /// then Store selection and preparation. Refusals are reported here.
 const HostAdmissionSource = union(enum) { layered: *const cli_args.Parsed, frozen: []const u8 };
 
-fn admitHost(init: std.process.Init, source: HostAdmissionSource, selected: []const u8, settings: *host_settings.Settings, fixtures: *providers.Fixtures, failure: *start_report.Failure, admission: host_start.Admission) !host_settings.Prepared {
+fn admitHost(init: std.process.Init, source: HostAdmissionSource, selected: []const u8, settings: *host_settings.Settings, failure: *start_report.Failure, admission: host_start.Admission) !host_settings.Prepared {
     const intake = switch (source) {
-        .layered => |parsed| host_start.intake(init, parsed, selected, settings, fixtures, failure, admission),
-        .frozen => |bytes| host_start.intakeFrozen(init, bytes, selected, settings, fixtures.*, failure),
+        .layered => |parsed| host_start.intake(init, parsed, selected, settings, failure, admission),
+        .frozen => |bytes| host_start.intakeFrozen(init, bytes, selected, settings, failure),
     };
     intake catch |err| {
         if (err == error.SettingsInvalid) return writeRefusal(init.io, failure, caller_exit.knownError(err));
         return err;
     };
-    return finishHostAdmission(init, selected, settings, fixtures.*, failure);
+    return finishHostAdmission(init, selected, settings, failure);
 }
 
-fn finishHostAdmission(init: std.process.Init, selected: []const u8, settings: *host_settings.Settings, fixtures: providers.Fixtures, failure: *start_report.Failure) !host_settings.Prepared {
-    const served = providers.fromSettings(settings, fixtures);
+fn finishHostAdmission(init: std.process.Init, selected: []const u8, settings: *host_settings.Settings, failure: *start_report.Failure) !host_settings.Prepared {
+    const served = providers.fromSettings(settings);
     if (try served.proxyRefusal(std.heap.c_allocator)) |reason| {
         stderr.diagnostic("rui: https_proxy/HTTPS_PROXY {s}; Rui tunnels only through an http:// proxy. The Host did not start.\n", .{reason});
         recordExit(.environment);
         return error.Reported;
     }
-    return host_start.admitSelected(init, selected, settings, fixtures, failure) catch |err| {
+    return host_start.admitSelected(init, selected, settings, failure) catch |err| {
         if (err == error.SettingsInvalid) return writeRefusal(init.io, failure, caller_exit.knownError(err));
         return err;
     };
@@ -4452,7 +4449,7 @@ test "fresh instruction validation renders both source and stdin conflict refusa
 }
 
 const LaunchFixture = struct {
-    const Scenario = enum { success, os_error, refusal, timeout, invalid_url, missing_key, already_ready, closed, full, identity, competitor, competitor_pending, competitor_absent, competitor_died, incompatible, access, interrupted, migration_success, migration_timeout, migration_both, migration_eof, migration_final };
+    const Scenario = enum { success, os_error, refusal, timeout, missing_key, already_ready, closed, full, identity, competitor, competitor_pending, competitor_absent, competitor_died, incompatible, access, interrupted, migration_success, migration_timeout, migration_both, migration_eof, migration_final };
     scenario: Scenario,
     launches: usize = 0,
     observations: usize = 0,
@@ -4500,7 +4497,7 @@ const LaunchFixture = struct {
         if (self.scenario == .incompatible) return .incompatible;
         if (self.scenario == .access) return .access_failure;
         const ready = self.scenario == .already_ready or (self.launches != 0 and switch (self.scenario) {
-            .success, .invalid_url, .missing_key, .competitor, .migration_final => true,
+            .success, .missing_key, .competitor, .migration_final => true,
             .competitor_pending => self.reads >= 2,
             .migration_success => self.reads >= 21,
             .migration_both => self.reads >= 2,
@@ -4585,12 +4582,11 @@ const LaunchFixture = struct {
             @memset(bytes, 'x');
             return @intCast(bytes.len);
         }
-        if (self.reads == 1 and (self.scenario == .success or self.scenario == .invalid_url or self.scenario == .missing_key)) return -@as(isize, @backingInt(std.posix.E.AGAIN));
+        if (self.reads == 1 and (self.scenario == .success or self.scenario == .missing_key)) return -@as(isize, @backingInt(std.posix.E.AGAIN));
         const text = switch (self.scenario) {
             .refusal => if (self.reads == 1) refusal else "",
             .identity => if (self.reads == 1) identity else "",
             .competitor, .competitor_pending, .competitor_absent, .competitor_died => if (self.reads == 1) competitor else "",
-            .invalid_url => if (self.reads == 2) invalid_base_url ++ "; this Host starts without OpenAI.\n" else "",
             .success, .missing_key => if (self.reads == 2) note else "",
             else => "",
         };
@@ -4631,7 +4627,6 @@ test "Host launch owner returns one result for terminal and screen across its wh
         .{ .scenario = .os_error, .kind = .os_launch, .err = error.HostLaunchFailed, .words = "could not start", .terminal = "OS error 13" },
         .{ .scenario = .refusal, .kind = .store_format, .err = error.HostStartupFailed, .words = "needs a compatible Rui", .terminal = LaunchFixture.refusal },
         .{ .scenario = .timeout, .kind = .readiness_timeout, .err = error.HostReadinessUnconfirmed, .words = "start timed out", .terminal = "readiness unconfirmed after 10 seconds" },
-        .{ .scenario = .invalid_url, .success = true, .words = "OpenAI URL invalid", .terminal = invalid_base_url },
         .{ .scenario = .missing_key, .success = true, .terminal = LaunchFixture.note },
         .{ .scenario = .already_ready, .success = true },
         .{ .scenario = .closed, .kind = .child_closed, .err = error.HostStartupFailed, .words = "quit on start", .terminal = "Child closed its startup channel" },
@@ -4657,7 +4652,6 @@ test "Host launch owner returns one result for terminal and screen across its wh
         errdefer std.debug.print("scenario={s} caller={s}\n", .{ @tagName(case.scenario), @tagName(surface) });
         var environment = std.process.Environ.Map.init(std.testing.allocator);
         defer environment.deinit();
-        if (case.scenario == .invalid_url or case.scenario == .missing_key or case.scenario == .already_ready) try environment.put(providers.openai_base_url_variable, "http://invalid.example");
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena.deinit();
         var init: std.process.Init = undefined;
@@ -4754,7 +4748,6 @@ test "Host launch owner returns one result for terminal and screen across its wh
             if (fixture.migration_announced or case.scenario == .migration_final) try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, HostStartupWait.migrating_tag));
             if (fixture.migrated_deadline != null) try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, HostStartupWait.migrated_tag));
             if (case.scenario == .competitor or case.scenario == .competitor_pending) try std.testing.expect(std.mem.indexOf(u8, text, "store_locked") == null);
-            if (case.scenario == .already_ready or case.scenario == .missing_key) try std.testing.expect(std.mem.indexOf(u8, text, invalid_base_url) == null);
         } else {
             try std.testing.expectEqual(@as(usize, 0), out_length);
             try std.testing.expectEqual(@as(usize, 0), diagnostic_length);
@@ -5302,12 +5295,10 @@ test "Host launch activation preserves refusal timeout warnings and an unserved 
         terminal: []const u8,
         words: []const u8,
         retry: bool = true,
-        warning: bool = false,
     };
     const cases = [_]Case{
         .{ .scenario = .refusal, .kind = .store_format, .terminal = LaunchFixture.refusal, .words = "Host needs a compatible Rui", .retry = false },
         .{ .scenario = .timeout, .kind = .readiness_timeout, .terminal = "do not kill or reclaim an uncertain owner", .words = "Host start timed out" },
-        .{ .scenario = .invalid_url, .provider = .codex, .terminal = invalid_base_url, .words = "OpenAI URL invalid", .retry = false, .warning = true },
         .{ .scenario = .already_ready, .openai = false, .kind = .provider_unserved, .terminal = "does not serve the selected provider", .words = "Host does not serve this provider", .retry = false },
         .{ .scenario = .incompatible, .kind = .incompatible, .terminal = "does not speak this rui's protocol", .words = "Host different Rui version", .retry = false },
     };
@@ -5325,7 +5316,6 @@ test "Host launch activation preserves refusal timeout warnings and an unserved 
         var environment: std.process.Environ.Map = .init(std.testing.allocator);
         defer environment.deinit();
         try environment.put("HOME", home);
-        if (case.warning) try environment.put(providers.openai_base_url_variable, "http://invalid.example");
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         const argv = [_][*:0]const u8{"rui"};
@@ -5346,7 +5336,6 @@ test "Host launch activation preserves refusal timeout warnings and an unserved 
         try std.testing.expectEqual(true, activation.launch != null);
         const launch = &activation.launch.?;
         try std.testing.expectEqual(case.kind == null, launch.outcome == .ready);
-        try std.testing.expectEqual(case.warning, launch.warning != null);
         if (case.kind) |kind| {
             try std.testing.expectEqual(kind, launch.outcome.failed.cause.kind);
             if (kind != .incompatible) try std.testing.expectEqualStrings(store, launch.outcome.failed.store.slice());

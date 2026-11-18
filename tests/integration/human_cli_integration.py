@@ -595,7 +595,7 @@ def conversation_wait_oracles():
     for wide in (False, True):
         def rows(answer, draft="", listed=marker):
             chat = ["", answer, "⠹ Waiting" if answer != marker else "", "› " + draft]
-            return ([f"{left:20}│ {right}" for left, right in zip(
+            return ([f"{left:20}┆ {right}" for left, right in zip(
                 ("+ New Session", listed, "", ""), chat)] if wide else [" " + row for row in chat])
 
         pending, complete = rows("edited 1"), rows(marker)
@@ -1363,8 +1363,8 @@ def renderer_cases():
         master, writer = os.pipe()
         try:
             tty = Terminal(master, None, None)
-            os.write(writer, terminal_frame(["   + New Session │", "    edited 2      │ edited 1", "                  │ ⠹ Waiting"])
-                + terminal_frame(["   + New Session │", "    edited 2      │ edited 2", "                  │ ›"]))
+            os.write(writer, terminal_frame(["   + New Session ┆", "    edited 2      ┆ edited 1", "                  ┆ ⠹ Waiting"])
+                + terminal_frame(["   + New Session ┆", "    edited 2      ┆ edited 2", "                  ┆ ›"]))
             observed = tty.wait("edited 2", after=0)
             assert "\nedited 2" in conversation_text(observed), observed
         finally:
@@ -1684,7 +1684,7 @@ def provider_line_cases():
         url = f"http://127.0.0.1:{endpoint.server_port}/responses"
         host, _ = host_process.start_ready_process(
             [fixture.RUI, "host", "serve", "--store", store,
-             "--test-codex-fixture-endpoint", url, "--test-openai-fixture-endpoint", url],
+             "--set", f"providers.codex.endpoint={url}", "--set", f"providers.openai.endpoint={url}"],
             env={**os.environ, "RUI_OPENAI_KEY_FILE": str(host_key), "RUI_CODEX_CREDENTIAL_FILE": str(host_codex)},
             required_fields={"execution": "enabled", "nghttp2": "1.70.0"})
         no_tty = state / "no-tty"
