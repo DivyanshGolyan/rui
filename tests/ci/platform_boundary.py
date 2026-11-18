@@ -28,7 +28,6 @@ MAC_PATHS = (
     "src/upgrade.zig", "src/upgrade_process.zig",
     "tests/integration/upgrade_integration.py", "src/store/mysql_testing.zig",
     "tests/integration/activity_integration.py", "tests/integration/bash_fixture.py",
-    "tests/integration/codex_credential_integration.py", "tests/integration/codex_integration.py",
     "tests/integration/conversation_page_fixture.py",
     "tests/integration/live_engines.py", "tests/integration/proc_sample.py",
     "tests/integration/server_delivery_integration.py", "tests/integration/session_list_fixture.py",
