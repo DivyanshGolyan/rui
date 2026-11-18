@@ -24,7 +24,38 @@ pub const Progress = struct {
         if (self) |value| value.report(value.context, stage);
     }
 };
-pub const Limitation = enum { inaccessible, incompatible, ownership_unconfirmed, application_owned, configuration_unavailable, target_capability };
+pub const Limitation = enum {
+    inaccessible,
+    incompatible,
+    ownership_status,
+    ownership_observation,
+    ownership_directory_unavailable,
+    ownership_directory_mismatch,
+    ownership_confirmation,
+    application_owned,
+    configuration_unavailable,
+    target_capability,
+};
+
+/// Classify the facts acquired at each ownership check without reading a clock.
+/// Deadlines and I/O errors are resolved by the observing client before this call.
+pub const OwnershipCheck = union(enum) {
+    status: protocol_reply.HostStatus,
+    observation: bool,
+    directory: ?struct { canonical: []const u8, observed: []const u8 },
+    confirmation: bool,
+};
+pub fn ownershipLimitation(check: OwnershipCheck) ?Limitation {
+    return switch (check) {
+        .status => |status| if (status == .owned_unavailable) .ownership_status else null,
+        .observation => |ok| if (ok) null else .ownership_observation,
+        .directory => |paths| if (paths) |p|
+            (if (std.mem.eql(u8, p.canonical, p.observed)) null else .ownership_directory_mismatch)
+        else
+            .ownership_directory_unavailable,
+        .confirmation => |ok| if (ok) null else .ownership_confirmation,
+    };
+}
 pub const ActivationOutcome = union(enum) {
     not_needed,
     superseded,
@@ -102,11 +133,11 @@ pub fn observe(allocator: std.mem.Allocator, io: std.Io, home: []const u8, direc
     try process.check(cancellation);
     switch (client.hostStatus(io, directory)) {
         .unavailable => return .absent,
-        .owned_unavailable => return .{ .unsupported = .ownership_unconfirmed },
+        .owned_unavailable => return .{ .unsupported = ownershipLimitation(.{ .status = .owned_unavailable }).? },
         .access_failure => return .{ .unsupported = .inaccessible },
         .incompatible, .ready => {},
     }
-    const observed = client.observeHostForUpgrade(io, directory, null) catch return .{ .unsupported = .ownership_unconfirmed };
+    const observed = client.observeHostForUpgrade(io, directory, null) catch return .{ .unsupported = ownershipLimitation(.{ .observation = false }).? };
     var snapshot = identity.snapshot(allocator, observed.pid) catch return .{ .unsupported = .configuration_unavailable };
     var owned = true;
     defer if (owned) snapshot.deinit(allocator);
@@ -122,11 +153,11 @@ pub fn observe(allocator: std.mem.Allocator, io: std.Io, home: []const u8, direc
     // Placement already canonicalizes selectors; compare the same fact here,
     // without changing settings-file or assignment byte spellings.
     var directory_buffer: [protocol.max_store_bytes]u8 = undefined;
-    const canonical_directory = platform.canonicalStoreDestination(io, sources.request.dir, &directory_buffer) catch return .{ .unsupported = .ownership_unconfirmed };
-    if (!std.mem.eql(u8, canonical_directory, observed.directory())) return .{ .unsupported = .ownership_unconfirmed };
+    const canonical_directory = platform.canonicalStoreDestination(io, sources.request.dir, &directory_buffer) catch return .{ .unsupported = ownershipLimitation(.{ .directory = null }).? };
+    if (ownershipLimitation(.{ .directory = .{ .canonical = canonical_directory, .observed = observed.directory() } })) |reason| return .{ .unsupported = reason };
     sources.request.dir = try sources.arena.allocator().dupe(u8, canonical_directory);
-    const confirmed = client.observeHostForUpgradeProfile(io, directory, observed.profile, null) catch return .{ .unsupported = .ownership_unconfirmed };
-    if (!sameHost(observed, confirmed) or (identity.generation(observed.pid) catch 0) != snapshot.started) return .{ .unsupported = .ownership_unconfirmed };
+    const confirmed = client.observeHostForUpgradeProfile(io, directory, observed.profile, null) catch return .{ .unsupported = ownershipLimitation(.{ .confirmation = false }).? };
+    if (ownershipLimitation(.{ .confirmation = sameHost(observed, confirmed) and (identity.generation(observed.pid) catch 0) == snapshot.started })) |reason| return .{ .unsupported = reason };
     owned = false;
     source_owned = false;
     return .{ .managed = .{ .observed = observed, .snapshot = snapshot, .sources = sources, .version = version } };
@@ -541,4 +572,21 @@ test "upgrade running sources wipe on success and every allocation failure" {
         }
     };
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.exercise, .{});
+}
+
+test "SH-49 ownership checks identify the refused observation" {
+    const cases = [_]struct { check: OwnershipCheck, expected: ?Limitation }{
+        .{ .check = .{ .status = .owned_unavailable }, .expected = .ownership_status },
+        .{ .check = .{ .status = .unavailable }, .expected = null },
+        .{ .check = .{ .status = .incompatible }, .expected = null },
+        .{ .check = .{ .status = .access_failure }, .expected = null },
+        .{ .check = .{ .observation = false }, .expected = .ownership_observation },
+        .{ .check = .{ .observation = true }, .expected = null },
+        .{ .check = .{ .directory = null }, .expected = .ownership_directory_unavailable },
+        .{ .check = .{ .directory = .{ .canonical = "/a", .observed = "/b" } }, .expected = .ownership_directory_mismatch },
+        .{ .check = .{ .directory = .{ .canonical = "/a", .observed = "/a" } }, .expected = null },
+        .{ .check = .{ .confirmation = false }, .expected = .ownership_confirmation },
+        .{ .check = .{ .confirmation = true }, .expected = null },
+    };
+    for (cases) |case| try std.testing.expectEqual(case.expected, ownershipLimitation(case.check));
 }

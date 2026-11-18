@@ -455,9 +455,13 @@ class PrModeTest(unittest.TestCase):
         build = build_files.source()
         integration = build.split("pub fn addIntegrationRui(", 1)[1]
         integration = integration.split("\n}", 1)[0]
-        self.assertIn("addRuiWithIdentity(b, target, .ReleaseSafe, name, pinned_transport, identity, false)", integration)
-        self.assertIn("if (pr_ci) executable.use_llvm = false;", integration)
+        self.assertIn("withPrBackend(addRuiWithIdentity(b, target, .ReleaseSafe, name, pinned_transport, identity, false), pr_ci)", integration)
+        pause = build.split("pub fn addPauseIntegrationRui(", 1)[1].split("\n}", 1)[0]
+        self.assertIn("withPrBackend(addPauseRui(b, target, .ReleaseSafe, name, pinned_transport), pr_ci)", pause)
+        backend = build.split("fn withPrBackend(", 1)[1].split("\n}", 1)[0]
+        self.assertIn("if (pr_ci) executable.use_llvm = false;", backend)
         self.assertEqual(build.count("use_llvm = false;"), 1)
+        self.assertIn('product.addPauseIntegrationRui(b, target, "rui-pause-check", pinned_transport, pr_ci)', build)
         self.assertNotIn("release_safe.use_llvm", build)
         self.assertNotIn("pub fn addRuiWithIdentity", build)
         for name in ("rui-pr-check", "rui-upgrade-release-fixture"):

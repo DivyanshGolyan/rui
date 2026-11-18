@@ -241,12 +241,13 @@ def tier_two(state):
 
 
 def restarted_bash(state):
-    case = recovery.start_case(state, "wait-restart", "action_result_ready",
+    # EXR-48
+    case = recovery.start_case(state, "wait-restart", "action.result_ready",
                                lambda marker: f"cat >> {marker}", stdin="x")
     store, marker, endpoint, thread, keeper, original, diagnostics, session = case
     recovered = None
     try:
-        diagnostics.wait("action_result_ready", action="1")
+        keeper.wait(action=1)
         assert marker.read_text() == "x", "Bash effect must precede the crash"
         fixture.crash_host(original, state, "wait-restart-crash", diagnostics)
         recovered = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
