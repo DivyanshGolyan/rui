@@ -89,7 +89,7 @@ fn writeSlot(comptime Args: type, comptime slot: rsql.Slot, args: *const Args, b
     }
 }
 
-pub fn valueLength(comptime T: type, value: T) Error!usize {
+fn valueLength(comptime T: type, value: T) Error!usize {
     if (T == []const u8) return textLength(value.len);
     if (T == rsql.Positive) return std.fmt.count("{d}", .{value.get()});
     if (T == rsql.Bytes) return bytesLength(value.bytes.len);
@@ -105,7 +105,7 @@ pub fn valueLength(comptime T: type, value: T) Error!usize {
     };
 }
 
-pub fn writeValue(comptime T: type, value: T, w: *std.Io.Writer) std.Io.Writer.Error!void {
+fn writeValue(comptime T: type, value: T, w: *std.Io.Writer) std.Io.Writer.Error!void {
     if (T == []const u8) return writeText(value, w);
     if (T == rsql.Positive) return w.print("{d}", .{value.get()});
     if (T == rsql.Bytes) return writeBytes(value.bytes, w);

@@ -801,7 +801,7 @@ fn fixtureText(comptime text: [:0]const u8) [:0]const u8 {
 
 pub fn exec(storage: *Store, comptime sql: [:0]const u8, args: anytype) !void {
     _ = fixtureText(sql);
-    if (storage.engine == .mysql) return mysql_testing.exec(storage, comptime mysql_testing.template(sql), args);
+    if (storage.engine == .mysql) return mysql_testing.exec(storage, sql, args);
     return sqliteExec(storage.sqliteDatabase(), sql, args);
 }
 
@@ -819,7 +819,7 @@ pub fn setLegacyNullEffortForTesting(storage: *Store, session: []const u8) !void
 
 pub fn queryU64(storage: *Store, comptime sql: [:0]const u8, args: anytype) !u64 {
     _ = fixtureText(sql);
-    if (storage.engine == .mysql) return mysql_testing.queryU64(storage, comptime mysql_testing.template(sql), args);
+    if (storage.engine == .mysql) return mysql_testing.queryU64(storage, sql, args);
     return sqliteQueryU64(storage.sqliteDatabase(), sql, args);
 }
 
@@ -890,7 +890,7 @@ pub fn zeroContent(storage: *Store, comptime ids: [:0]const u8) !void {
     _ = fixtureText("UPDATE content_chunk SET bytes=zeroblob(length(bytes)) WHERE content_id IN (" ++ ids ++ ")");
     const sql = "UPDATE content SET payload=zeroblob(byte_length) WHERE content_id IN (" ++ ids ++ ")";
     if (comptime fixtureTextError(sql)) |message| @compileError(message ++ ": " ++ sql);
-    if (storage.engine == .mysql) return mysql_testing.exec(storage, comptime mysql_testing.template("UPDATE content_chunk SET bytes=zeroblob(length(bytes)) WHERE content_id IN (" ++ ids ++ ")"), .{});
+    if (storage.engine == .mysql) return mysql_testing.exec(storage, "UPDATE content_chunk SET bytes=zeroblob(length(bytes)) WHERE content_id IN (" ++ ids ++ ")", .{});
     return sqliteExec(storage.sqliteDatabase(), sql, .{});
 }
 
