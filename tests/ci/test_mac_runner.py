@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -324,8 +325,8 @@ class HookTest(unittest.TestCase):
         source = (ROOT / "tests/ci/mac-runner/job-started.sh").read_text()
         loader = source.split('policy_path = ', 1)[1].split('admission = policy["admission"]', 1)[0]
         loader = 'policy_path = ' + loader + 'admission = policy["admission"]'
-        unsafe = 'sys.path.insert(0, str(Path(sys.argv[1]).parent))\nfrom mac_runner import admission'
-        accept = 'def admission(*args): return True, "Accepted."\n'
+        unsafe = 'sys.path.insert(0, str(Path(sys.argv[1]).parent))\nfrom mac_runner import RUNNER_USER as runner_user, admission'
+        accept = 'RUNNER_USER = "nobody"\ndef admission(*args): return True, "Accepted."\n'
         for collision in ("package", "bytecode"):
             with self.subTest(collision=collision), tempfile.TemporaryDirectory() as directory:
                 temp = Path(directory)
@@ -408,6 +409,47 @@ class HookTest(unittest.TestCase):
                 with self.assertRaises(SystemExit):
                     exec(compile(source, "hook", "exec"), {"__name__": "hook"})
                 du.assert_not_called()
+
+    def test_hook_clears_leftovers_only_as_the_runner_account(self):
+        source = (ROOT / "tests/ci/mac-runner/job-started.sh").read_text().split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+        with tempfile.TemporaryDirectory() as directory:
+            temp = Path(directory)
+            allowlist = temp / "allowlist"
+            (temp / "mac_runner.py").write_text((ROOT / "tests/ci/mac_runner.py").read_text())
+            allowlist.write_text("\n".join(mac_runner.ALLOWLIST))
+            event = temp / "event"
+            event.write_text(json.dumps({"repository": {"full_name": REPO}, "sender": {"login": TRUSTED}}))
+            env = {"GITHUB_REPOSITORY": REPO, "GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_ACTOR": TRUSTED,
+                   "GITHUB_TRIGGERING_ACTOR": TRUSTED, "GITHUB_EVENT_PATH": str(event)}
+            # launchd 1 -> service 10 -> listener 20 -> worker 30 -> hook bash 40 -> hook python 50;
+            # 60 is a leftover Host, 70 its child, 80 a leftover started by launchd.
+            table = "1 0\n10 1\n20 10\n30 20\n40 30\n60 1\n70 60\n80 1\n"
+
+            def ps_or_du(argv, **_kwargs):
+                result = unittest.mock.Mock()
+                result.stdout = table if argv[0] == "/bin/ps" else "1\t.\n"
+                return result
+
+            for user, cleared in [(mac_runner.RUNNER_USER, True), ("someone", False)]:
+                leftover = temp / "tmp" / "rui-upgrade-x" / "locked"
+                leftover.mkdir(parents=True)
+                (leftover / "file").write_text("x")
+                leftover.chmod(0o500)
+                (temp / "tmp" / "loose").write_text("x")
+                with self.subTest(user=user), patch.dict(os.environ, env), \
+                        patch.object(sys, "argv", ["hook", str(allowlist)]), \
+                        patch("pathlib.Path.home", return_value=temp), \
+                        patch("pwd.getpwuid", return_value=unittest.mock.Mock(pw_name=user)), \
+                        patch("subprocess.run", side_effect=ps_or_du), patch("os.getpid", return_value=50), \
+                        patch("os.getppid", return_value=40), patch("os.kill") as kill:
+                    exec(compile(source, "hook", "exec"), {"__name__": "hook"})
+                    killed = sorted(call.args[0] for call in kill.call_args_list)
+                    self.assertEqual(killed, [60, 70, 80] if cleared else [])
+                    self.assertEqual(sorted(path.name for path in (temp / "tmp").iterdir()),
+                                     [] if cleared else ["loose", "rui-upgrade-x"])
+                if not cleared:
+                    leftover.chmod(0o700)
+                    shutil.rmtree(temp / "tmp")
 
 
 class RegistrationTest(unittest.TestCase):

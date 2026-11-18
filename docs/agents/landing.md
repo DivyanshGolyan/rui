@@ -11,18 +11,20 @@ The description lists every behavior change in the diff, small ones included, so
 PRs changing `src/` follow [Shape before code](../../CODING_STANDARDS.md#shape-before-code); the plan checks the description, and review checks the shape.
 Every PR commit states its actual test commands and results.
 Open every PR with `python3 tests/ci/open_pr.py open --title TITLE --body-file FILE`, which reports overlapping work and opens it ready for review.
-Selected CI and the opener's `@codex review` request start together on the published candidate.
+Selected CI and automatic Codex review start together on a ready candidate.
+The opener requests `@codex review` only for drafts; Codex also reviews automatically when a draft is marked ready and on each push to a ready PR.
 Use `python3 tests/ci/open_pr.py ready` for an older draft once its published head matches the clean committed checkout.
 New PRs need no draft conversion, so the same unchanged candidate does not run heavy checks twice merely to become ready.
 Codex is clean when its latest `codex-review-state:v1` summary names the reviewed head and reports no unresolved findings.
 A "no major issues" receipt alone is not clean, and an earlier review thread stays open until its author resolves it.
 After a fix push, resolve each earlier thread that the fix answered.
-Keep clean Codex evidence through unchanged semantics as permitted below; request `@codex review` when a production or operational change invalidates it.
+Keep clean Codex evidence through unchanged semantics as permitted below; a production or operational change invalidates it and receives an automatic review on push to a ready PR.
 A fix whose diff since Codex's clean review changes only test files or blocks (`tests/**/test_*.py`, integration fixtures and their data, `*_test.zig`/test-only Zig roots, or `test "..."` blocks in source) merges once `admission` is green, without another Codex review.
 Documentation-only edits that preserve the reviewed contract also reuse the clean review, with the semantic comparison recorded in the PR.
 Two more changes merge on green `admission` without another Codex review: a commit that only applies the Store format renumber `tests/ci/schema_number.py` computes, and a pure revert of the one merged PR that broke `main`.
 Any other non-test change, including CI, build, release or other operational scripts (the rest of `tests/ci/`, workflows and `build.zig`), needs Codex clean on the new head again.
 Performance changes include A/B numbers.
+For same-repository UI PRs, [screens CI](../../.github/workflows/screens.yml) also posts a sticky comment comparing the PR head with its merge base at both terminal sizes. It captures automatically, lists failures and reports unchanged counts; it does not yet satisfy the description requirement enforced by admission. Maintainers can dispatch the workflow with a PR number to exercise the same capture path.
 Every UI PR embeds actual-implementation screenshots or a screen recording in its description before it is merge-ready.
 Use [verify-rui](../../.claude/skills/verify-rui/SKILL.md) and the [feature map](../../.claude/skills/verify-rui/features/README.md) to select states for the changed screens.
 Build both pinned revisions, then run `$V frames HEAD --before BASE --only <states for the changed screens> --sizes 140x40,46x30 --record` and `$V publish DIR --pr N [--ssh HOST]` (set `V=.claude/skills/verify-rui/scripts/verify-rui`).
@@ -31,7 +33,7 @@ The publisher selects changed/new PNGs and GIFs, attaches them through `gh pr ed
 The upload machine requires gh **2.104.0+**, a classic PAT or gh OAuth token, and repository push access. The command fails clearly if those are missing, and reads back partial uploads before refusing them; inspect the body before retrying.
 Cloud threads use `$V publish DIR --pr N --ssh rui-box`, after `bash /mnt/project-files/rui-dev/rui-box-up.sh THREAD-NAME` establishes the SSH alias if needed. The same upload worker runs on the box, using its credentials, after staging only selected media in a fresh directory that is removed afterward. Omit `--ssh` when running on the box itself.
 Cloud writes filter image embeds and the proxy blocks the CLI's GraphQL lookup. **After images have been attached, every later body edit must run on the box too**: copy the file there, then `ssh rui-box 'gh pr edit N -R OWNER/REPO --body-file /path/on/box/body.md'`. Writing the body from a container through REST, open_pr.py or MCP would break its images again.
-Open the PR to obtain its number, then publish before the next push. `Require PR Shape` runs on opened/synchronize/reopened/ready_for_review; body edits do not trigger it. If the opening run failed before upload, manually rerun the failed jobs after publishing; PR Shape reads the current body, falling back to the event payload if that read fails.
+Open the PR to obtain its number, then publish the frames. Screens are required by `admission` for merge; the build and tests run without them. After publishing, rerun only the failed `admission` job: it reads the current body, falling back to the event payload if that read fails. Body edits do not trigger a run.
 The check accepts a line that, after leading whitespace, starts with `![`, `<img` or `<video` and contains a `https://github.com/user-attachments/` URL outside fenced code and HTML comments. The publisher emits each attachment on its own labelled line. Inline-code examples, reference images, non-attachments images, bare URLs and repository page links do not pass. A change that provably draws nothing different may instead carry `No screen change: <nonempty reason>` on its own line.
 It derives UI paths from Overview's production import closure minus Host dependencies and test owners, including the base tree for deleted files, and also covers verify-rui's `frames.json`.
 For interaction changes, show the sequence with a recording or labelled before/after screenshots. State the source revision, terminal surface and limits, retain raw capture provenance, and exclude secrets.

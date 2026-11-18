@@ -324,15 +324,39 @@ pub const start_agent_record: Record = .{
 
 pub const web_search_record: Record = .{ .name = "web_search", .owner = .provider };
 
+pub const read_image_record: Record = .{
+    .name = "read_image",
+    .owner = .rui,
+    .description = "Read a PNG or JPEG image from a regular file on the Host. Relative paths resolve in the Session Workspace; absolute paths may name other Host-local files. Returns a saved image observation. URLs and special files are not supported.",
+    .input_schema = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":4096}},\"required\":[\"path\"],\"additionalProperties\":false}",
+};
+
+/// Largest result excerpt allowance used by any supported runner.
+pub const max_result_excerpt_bytes: u32 = 20_000;
+
+pub const Profile = struct { excerpt_bytes: u32, retain: bool };
+
 pub const Runner = enum {
     bash,
+    read_image,
     core,
     mcp,
     provider,
 
+    /// The offer comes from the frozen tool set of the model operation.
+    pub fn resultProfile(self: Runner, bash_offered: bool) Profile {
+        return switch (self) {
+            .bash => .{ .excerpt_bytes = max_result_excerpt_bytes, .retain = true },
+            .mcp => .{ .excerpt_bytes = 10_000, .retain = bash_offered },
+            .read_image => .{ .excerpt_bytes = 0, .retain = false },
+            .core, .provider => unreachable,
+        };
+    }
+
     pub fn beforeAdmissionStopText(self: Runner) []const u8 {
         return switch (self) {
             .bash => @import("bash_action_text.zig").stopped_before_admission,
+            .read_image => @import("action_text.zig").stopped_before_admission,
             .mcp => @import("mcp/action_text.zig").stopped_before_admission,
             .core => @import("action_text.zig").stopped_before_admission,
             .provider => unreachable,
@@ -342,6 +366,7 @@ pub const Runner = enum {
     pub fn stoppedText(self: Runner, _: anytype, result: []const u8) []const u8 {
         return switch (self) {
             .bash => @import("bash_action_text.zig").stopped_before_admission,
+            .read_image => "Stopped before this image read completed.",
             .mcp => result,
             .core, .provider => unreachable,
         };
@@ -350,6 +375,7 @@ pub const Runner = enum {
     pub fn indeterminateText(self: Runner) []const u8 {
         return switch (self) {
             .bash => @import("bash_action_text.zig").indeterminate,
+            .read_image => "The Host stopped before saving this image read result. The read may have completed; it was not automatically repeated.",
             .mcp => @import("mcp/action_text.zig").indeterminate,
             .core, .provider => unreachable,
         };
@@ -371,6 +397,7 @@ pub const built_in_rows = std.enums.EnumArray(Tool, BuiltInRow).init(.{
     .find_tools = .{ .record = &find_tools_record, .runner = .core },
     .message_agent = .{ .record = &message_agent_record, .runner = .core },
     .read_action = .{ .record = &read_action_record, .runner = .core },
+    .read_image = .{ .record = &read_image_record, .runner = .read_image },
     .read_transcript = .{ .record = &read_transcript_record, .runner = .core },
     .skill = .{ .record = &skill_record, .runner = .core },
     .start_agent = .{ .record = &start_agent_record, .runner = .core },
@@ -502,5 +529,26 @@ test "MCP missing tools tool set resolution covers every empty-server combinatio
             if (mask & (@as(usize, 1) << @intCast(index)) == 0) try std.testing.expectEqualStrings(server, empty.next().?);
         }
         try std.testing.expectEqual(@as(?[]const u8, null), empty.next());
+    }
+}
+
+test "result profiles follow runner and frozen Bash offer" {
+    for ([_]bool{ false, true }) |offer| {
+        try std.testing.expectEqualDeep(Profile{ .excerpt_bytes = 20_000, .retain = true }, Runner.bash.resultProfile(offer));
+        try std.testing.expectEqualDeep(Profile{ .excerpt_bytes = 10_000, .retain = offer }, Runner.mcp.resultProfile(offer));
+        try std.testing.expectEqualDeep(Profile{ .excerpt_bytes = 0, .retain = false }, Runner.read_image.resultProfile(offer));
+    }
+}
+
+test "all result profiles fit the shared excerpt maximum" {
+    inline for (std.meta.tags(Runner)) |runner| {
+        switch (runner) {
+            .core, .provider => {}, // These do not use the Result route.
+            .bash, .mcp, .read_image => {
+                for ([_]bool{ false, true }) |offer| {
+                    try std.testing.expect(runner.resultProfile(offer).excerpt_bytes <= max_result_excerpt_bytes);
+                }
+            },
+        }
     }
 }

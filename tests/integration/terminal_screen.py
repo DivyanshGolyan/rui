@@ -442,9 +442,17 @@ class ScreenCapture:
             return False
         cursor = self.screen.cursor
         cells = self.completed_cells[cursor.y]
+        from human_cli_fixture import split_pane_row
+        row = "".join(cell.data for cell in cells[:cursor.x])
+        sidebar, divider, _ = split_pane_row(row)
+        remaining = len(sidebar) + len(divider)
         origin = 0
-        if "".join(cell.data for cell in cells[:2]) not in (" ›", " >"):
-            origin = next((at + 1 for at, cell in enumerate(cells[:cursor.x]) if cell.data == "│"), 0)
+        if divider:
+            for at, cell in enumerate(cells[:cursor.x]):
+                remaining -= len(cell.data)
+                if remaining <= 0:
+                    origin = at + 1
+                    break
         line = "".join(cell.data for cell in cells[origin:]).rstrip()
         margin = 1 if line.startswith(" ") and not prompt.startswith(" ") else 0
         matches = line[margin:] == (prompt + unicodedata.normalize("NFC", text)).rstrip()

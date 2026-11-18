@@ -288,8 +288,8 @@ test "a reference is checked when its row is written, not at commit" {
             var sql: [320]u8 = undefined;
             try sqlite.exec(database, try std.fmt.bufPrintSentinel(
                 &sql,
-                "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admitted_at) " ++
-                    "SELECT 1000,session_ref,'{s}',instructions_content_id,1 FROM session WHERE session_ref='{s}'",
+                "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admitted_at,source_kind) " ++
+                    "SELECT 1000,session_ref,'{s}',instructions_content_id,1,1 FROM session WHERE session_ref='{s}'",
                 .{ command_key, session_ref },
                 0,
             ));

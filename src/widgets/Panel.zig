@@ -32,6 +32,8 @@ title: []const u8,
 subtitle: ?[]const u8 = null,
 body: struct { top: u16 = 2, height: u16 = 0 } = .{},
 natural_height: bool = false,
+top_rule: bool = true,
+show_title: bool = true,
 unicode: bool = true,
 title_widget: ?vxfw.Widget = null,
 action_gap: u16 = 0,
@@ -219,14 +221,16 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     self.custom_origin = 0;
     self.custom_height = 0;
     self.hover.targets = &.{};
+    const title_row: u16 = @intFromBool(self.top_rule);
+    const base_header: u16 = title_row + @as(u16, @intFromBool(self.show_title));
     const bottom_padding: u16 = @intFromBool(self.natural_height and available.height > 3);
     var subtitle_surface: ?vxfw.Surface = null;
-    if (self.subtitle) |text| if (available.width > 3 and available.height > 4 + bottom_padding) {
+    if (self.subtitle) |text| if (available.width > 3 and available.height > base_header + 2 + bottom_padding) {
         const subtitle = try ctx.arena.create(vxfw.Text);
         subtitle.* = .{ .text = text, .style = self.quiet, .width_basis = .parent };
-        subtitle_surface = try subtitle.draw(ctx.withConstraints(.{}, .{ .width = available.width - 3, .height = available.height - 4 - bottom_padding }));
+        subtitle_surface = try subtitle.draw(ctx.withConstraints(.{}, .{ .width = available.width - 3, .height = available.height - base_header - 2 - bottom_padding }));
     };
-    const header: u16 = 2 + if (subtitle_surface) |surface| surface.size.height + 1 else @as(u16, 0);
+    const header: u16 = base_header + if (subtitle_surface) |surface| surface.size.height + 1 else @as(u16, 0);
     const available_body = available.height -| header -| bottom_padding;
     var custom_surface: ?vxfw.Surface = null;
     if (available.width > 0) if (self.custom_choice) |choice| if (available_body > 1) {
@@ -245,14 +249,15 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         self.body.height = 0;
         return surface;
     }
-    for (0..size.width) |col| surface.writeCell(@intCast(col), 0, .{ .char = .{ .grapheme = if (self.unicode) "─" else "-", .width = 1 }, .style = self.rule_style });
-    if (size.height == 1) return surface;
-    _ = paint(ctx, surface, try displayText(ctx.arena, self.title, self.unicode), 1, 1, self.title_style);
+    if (self.top_rule) for (0..size.width) |col| surface.writeCell(@intCast(col), 0, .{ .char = .{ .grapheme = if (self.unicode) "─" else "-", .width = 1 }, .style = self.rule_style });
     var children: std.array_list.Managed(vxfw.SubSurface) = .init(ctx.arena);
-    if (self.title_widget) |title_widget| if (size.width > 1) {
-        try children.append(.{ .origin = .{ .row = 1, .col = 1 }, .surface = try title_widget.draw(ctx.withConstraints(.{}, .{ .width = size.width - 1, .height = 1 })) });
-    };
-    if (subtitle_surface) |surface_| try children.append(.{ .origin = .{ .row = 2, .col = 3 }, .surface = surface_ });
+    if (self.show_title and size.height > title_row) {
+        _ = paint(ctx, surface, try displayText(ctx.arena, self.title, self.unicode), 1, title_row, self.title_style);
+        if (self.title_widget) |title_widget| if (size.width > 1) {
+            try children.append(.{ .origin = .{ .row = title_row, .col = 1 }, .surface = try title_widget.draw(ctx.withConstraints(.{}, .{ .width = size.width - 1, .height = 1 })) });
+        };
+    }
+    if (subtitle_surface) |surface_| try children.append(.{ .origin = .{ .row = base_header, .col = 3 }, .surface = surface_ });
     const body_height = self.body.height;
     if (body_height == 0) {
         surface.children = children.items;
@@ -831,6 +836,9 @@ pub const KeyList = struct {
     fields: []const Field,
     ground: vaxis.Style = .{},
     strong: vaxis.Style = .{ .bold = true },
+    row_offset: usize = 0,
+    total_rows: usize = 0,
+    viewport_height: usize = 0,
 
     pub fn widget(self: *KeyList) vxfw.Widget {
         return .{ .userdata = self, .drawFn = drawReference };
@@ -855,8 +863,13 @@ pub const KeyList = struct {
         const right_width = margin + key_widths[1] + key_gap + value_widths[1];
         const columns: usize = if (self.fields.len > 1 and left_width + column_gap + right_width <= size.width) 2 else 1;
         if (columns == 1) key_widths[0] = @max(key_widths[0], key_widths[1]);
+        self.total_rows = (self.fields.len + columns - 1) / columns;
+        self.viewport_height = size.height;
+        self.row_offset = @min(self.row_offset, self.total_rows -| self.viewport_height);
         for (self.fields, 0..) |field, index| {
-            const row = index / columns;
+            const logical_row = index / columns;
+            if (logical_row < self.row_offset) continue;
+            const row = logical_row - self.row_offset;
             if (row >= size.height) break;
             const column = index % columns;
             const start = if (column == 0) 0 else left_width + column_gap;
@@ -1121,4 +1134,65 @@ test "Panel subtitle and visible field projection share actual bounded body geom
     panel.scroll = 0;
     _ = try panel.widget().draw(ctx);
     try std.testing.expectEqual(@as(?u16, 2), panel.fieldRow(0));
+}
+
+test "Panel optional title row moves fields and preserves top rule" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 12 }, .cell_size = .{} };
+    var panel: Self = .{ .title = "Title", .natural_height = true, .fields = &.{.{ .label = "Field", .value = "Value" }} };
+    for ([_]bool{ false, true }) |rule| {
+        panel.top_rule = rule;
+        panel.show_title = true;
+        const titled = try panel.widget().draw(ctx);
+        const titled_height = titled.size.height;
+        panel.show_title = false;
+        const compact = try panel.widget().draw(ctx);
+        try std.testing.expectEqual(titled_height - 1, compact.size.height);
+        try std.testing.expectEqual(@as(?u16, @intFromBool(rule)), panel.fieldRow(0));
+        try std.testing.expectEqualStrings("F", compact.readCell(3, @intFromBool(rule)).char.grapheme);
+        if (rule) try std.testing.expectEqualStrings("─", compact.readCell(0, 0).char.grapheme);
+    }
+}
+
+test "Panel hosted top rule option preserves title subtitle and bounded field targets" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 12 }, .cell_size = .{} };
+    var fixture: Fixture = .{};
+    var panel: Self = .{
+        .title = "Settings",
+        .subtitle = "Choose an account.",
+        .natural_height = true,
+        .top_rule = false,
+        .fields = &.{.{ .label = "Account", .value = "ChatGPT" }},
+        .userdata = &fixture,
+        .on_activate = Fixture.activateRow,
+    };
+    const hosted = try panel.widget().draw(ctx);
+    try std.testing.expectEqualStrings("S", hosted.readCell(1, 0).char.grapheme);
+    try std.testing.expectEqualStrings(" ", hosted.readCell(0, 0).char.grapheme);
+    try std.testing.expectEqual(@as(?u16, 3), panel.fieldRow(0));
+    try std.testing.expectEqual(@as(i17, 1), hosted.children[0].origin.row);
+    var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    try panel.widget().handleEvent(&events, .{ .mouse = .{ .col = 45, .row = 3, .button = .left, .type = .press, .mods = .{} } });
+    try std.testing.expectEqual(@as(?usize, 0), fixture.activated);
+    panel.top_rule = true;
+    const standalone = try panel.widget().draw(ctx);
+    try std.testing.expectEqualStrings("─", standalone.readCell(0, 0).char.grapheme);
+    try std.testing.expectEqual(hosted.size.height + 1, standalone.size.height);
+    panel.top_rule = false;
+    for ([_]u16{ 0, 1, 2, 3, 46 }) |width| for (0..8) |height| {
+        const drawn = try panel.widget().draw(ctx.withConstraints(.{}, .{ .width = width, .height = @intCast(height) }));
+        for (panel.targets) |target| try std.testing.expect(target.row < drawn.size.height and target.start < target.end and target.end <= drawn.size.width);
+        for (drawn.children) |child| {
+            try std.testing.expect(child.origin.row >= 0 and child.origin.col >= 0);
+            try std.testing.expect(child.origin.row + child.surface.size.height <= drawn.size.height);
+            try std.testing.expect(child.origin.col + child.surface.size.width <= drawn.size.width);
+        }
+    };
+    panel.subtitle = null;
+    const compact = try panel.widget().draw(ctx.withConstraints(.{}, .{ .width = 46, .height = 2 }));
+    try std.testing.expectEqual(@as(?u16, 1), panel.fieldRow(0));
+    try std.testing.expectEqualStrings("A", compact.readCell(3, 1).char.grapheme);
 }
