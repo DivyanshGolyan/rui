@@ -106,7 +106,6 @@ pub const Hooks = struct {
         model_launch: store_module.AttemptBinding,
         action_result: store_module.ActionAttemptBinding,
         model_result: store_module.AttemptBinding,
-        preparation_advanced,
     };
 
     pub const Hold = struct {
@@ -260,7 +259,6 @@ pub const Tuning = struct {
         if (try parsed.number(u64, "test-request-scratch-limit")) |limit| limits.request_scratch_limit_bytes = limit;
         if (try parsed.number(usize, "test-request-preparation-byte-allowance")) |allowance| limits.request_preparation_byte_allowance = allowance;
         if (try parsed.number(usize, "test-request-preparation-item-allowance")) |allowance| limits.request_preparation_item_allowance = allowance;
-        if (try parsed.number(i64, "test-request-preparation-advance-delay-ms")) |delay| hooks.pauses.getPtr(.preparation_advanced).delay_ms = delay;
         if ((control_gate_keys == null) != (control_gate_path == null)) return error.IncompleteControlGate;
         if (control_gate_keys) |keys| hooks.control_gate = .{ .keys = keys, .path = control_gate_path.? };
         return tuning;
@@ -303,7 +301,6 @@ test "the hidden serve options narrow a Host" {
     try std.testing.expectEqual(@as(i64, 10_000), held.hooks.pauses.get(.model_launch).delay_ms);
     try std.testing.expectEqual(@as(i64, 5), held.hooks.pauses.get(.action_result).delay_ms);
     try std.testing.expectEqual(@as(i64, 5), held.hooks.pauses.get(.model_result).delay_ms);
-    try std.testing.expectEqual(@as(i64, 0), held.hooks.pauses.get(.preparation_advanced).delay_ms);
     try std.testing.expectError(error.InvalidRetryWaits, tuningFor(&.{ "--test-retry-waits-ms", "1,2" }));
 
     try std.testing.expectError(error.IncompleteControlGate, tuningFor(&.{ "--test-control-gate-keys", "k" }));
@@ -969,7 +966,6 @@ pub fn pause(host: *Host, point: Hooks.Pause) void {
         .model_launch => |binding| traceOperation(host, "prepared_before_handoff", binding),
         .action_result => |binding| traceAction(host, "sealed_before_settlement", binding),
         .model_result => |binding| traceOperation(host, "sealed_before_settlement", binding),
-        .preparation_advanced => {},
     }
     if (hold.delay_ms != 0) host.io.sleep(.fromMilliseconds(hold.delay_ms), .awake) catch {};
 }
