@@ -332,6 +332,11 @@ test "SUI-12 typed bytes give the draft and caret" {
     try std.testing.expectEqual(KeyOutcome.submit, stream.send(&editor, "Z\r"));
     try std.testing.expectEqualStrings("Z", editor.text());
     editor = .init(&storage);
+    for (0..500) |_| _ = stream.send(&editor, "e\u{301}");
+    for (0..500) |_| _ = stream.send(&editor, "\x7f");
+    try std.testing.expectEqual(KeyOutcome.submit, stream.send(&editor, "Z\r"));
+    try std.testing.expectEqualStrings("Z", editor.text());
+    editor = .init(&storage);
     for (0..2050) |_| _ = stream.send(&editor, "a");
     for (0..2048) |_| _ = stream.send(&editor, "\x7f");
     try std.testing.expectEqual(KeyOutcome.submit, stream.send(&editor, "\r"));
@@ -349,6 +354,14 @@ test "SUI-12 typed bytes give the draft and caret" {
     try std.testing.expectEqual(KeyOutcome.submit, stream.send(&editor, "\r"));
     try std.testing.expectEqual(KeyOutcome{ .refused = .overflow }, stream.send(&editor, "a\x7f\r"));
     try std.testing.expectEqual(@as(usize, 65536), editor.text().len);
+    editor = .init(&storage);
+    for (0..65534) |_| _ = stream.send(&editor, "a");
+    try std.testing.expectEqual(KeyOutcome.submit, stream.send(&editor, "é\r"));
+    try std.testing.expectEqual(@as(usize, 65536), editor.text().len);
+    editor = .init(&storage);
+    for (0..65535) |_| _ = stream.send(&editor, "a");
+    try std.testing.expectEqual(KeyOutcome{ .refused = .overflow }, stream.send(&editor, "é\x7f\r"));
+    try std.testing.expectEqual(@as(usize, 65535), editor.text().len);
 }
 
 test "modified kitty text cannot become an ordinary permission choice" {
