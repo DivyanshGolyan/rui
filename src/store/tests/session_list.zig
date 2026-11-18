@@ -191,6 +191,7 @@ test "SUI-30 host_retry_work_version" {
             const activity = try store_core.activityPageForTesting(&storage, request);
             try std.testing.expectEqual(crossing.generation, activity.work.read_version.generation);
             try std.testing.expect(activity.work.work.state == .pending);
+            try std.testing.expectEqual(@import("../../session_work.zig").Group.queued, protocol.SessionWork.fromCore(activity.work.work).group);
             const unchanged = try storage.publishRetryCrossings(due, due + 1);
             try std.testing.expectEqual(crossing.generation, unchanged.generation);
             storage.io.vtable = &before;
