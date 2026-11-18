@@ -180,7 +180,7 @@ pub fn build(b: *std.Build) void {
 
     const cli_image_integration = b.addSystemCommand(&.{ "python3", "-B" });
     cli_image_integration.addFileArg(b.path("tests/integration/cli_image_integration.py"));
-    cli_image_integration.addFileArg(ci.path(release_safe));
+    cli_image_integration.addFileArg(release_safe);
     b.step("cli-image-integration", "Run ordered CLI image capture through provider fixtures").dependOn(&cli_image_integration.step);
 
     const session_list_client = b.addExecutable(.{

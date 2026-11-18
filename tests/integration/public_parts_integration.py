@@ -43,13 +43,14 @@ def INS_10_public_part_selection(store, seed, values):
                              "--session", seed["session"], "--action", seed["action"]],
                             capture_output=True, timeout=15)
     assert result.returncode != 0 and not result.stdout, (result.stdout, result.stderr)
-    # Keyed observation answers the Store's ordinary refusal of a compound input as its error record;
-    # the Host keeps serving (SH-51).
-    result = subprocess.run([str(fixture.RUI), "request", "inspect", "--store", str(store),
-                             "--key", "cli-mixed-message"], capture_output=True, timeout=15)
-    assert result.returncode != 0, (result.stdout, result.stderr)
-    assert json.loads(result.stdout) == {"key": "cli-mixed-message", "error": {
-        "status": 500, "type": "observation_error", "code": "InputPartsNotSupported"}}, result.stdout
+    # Keyed observation of a compound Message reports its parts form (CLI-19 owns identity agreement);
+    # the Host keeps serving.
+    observation = fixture.command("request", "inspect", "--store", str(store),
+                                  "--key", "cli-mixed-message")["observation"]
+    assert (observation["status"], observation["kind"], observation["target"]) == (
+        "accepted", "message", seed["session"]), observation
+    assert observation["queue"]["admission"] == seed["admission"], observation
+    assert observation["input"]["type"] == "parts", observation
     assert fixture.command("host", "status", "--store", str(store))["status"] == "ready"
 
 
