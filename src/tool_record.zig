@@ -16,10 +16,11 @@ pub const message_agent_schema = "{\"type\":\"object\",\"properties\":{" ++
 pub const find_tools_description = "Find and load tools available to this Session but not yet loaded. Give one to eight space-separated search words, at most 64 bytes each; a tool matches any word in its name or description, ignoring ASCII case. Loads at most eight matches in name order. Loaded tools become available on your next request.";
 pub const find_tools_schema = "{\"type\":\"object\",\"properties\":{\"words\":{\"type\":\"string\",\"description\":\"One to eight search words separated by ASCII spaces; each word is at most 64 bytes.\"}},\"required\":[\"words\"],\"additionalProperties\":false}";
 
-pub const read_action_description = "Read an Action in your own Session by its decimal action ID. Pending Actions report waiting_approval, queued or attempted. A resolved Action returns its immutable final Resolution and up to 4096 UTF-8 bytes, with byte offsets and a more flag. Continue with the returned next offset; reading never consumes or stops the Action. This is polling, not a subscription.";
+pub const read_action_description = "Read an Action in your own Session by its decimal action ID. Pending Actions report waiting_approval, queued or attempted. A resolved Action returns its immutable final Resolution and up to 4096 UTF-8 bytes, with byte offsets and a more flag. Continue with the returned next offset; reading never consumes or stops the Action. Published values are returned in pages; pass the returned values.next as after to continue. This is polling, not a subscription.";
 pub const read_action_schema = "{\"type\":\"object\",\"properties\":{" ++
     "\"action\":{\"type\":\"string\",\"pattern\":\"^[1-9][0-9]*$\",\"maxLength\":19,\"description\":\"Action ID in your own Session; positive decimal, at most 9223372036854775807.\"}," ++
     std.fmt.comptimePrint("\"offset\":{{\"type\":\"string\",\"pattern\":\"^(0|[1-9][0-9]*)$\",\"maxLength\":10,\"description\":\"UTF-8 byte cursor, at most {d}; omitted means zero. Pending Actions require zero.\"}}", .{@import("content_string.zig").max_bytes}) ++
+    ",\"after\":{\"type\":\"string\",\"pattern\":\"^(0|[1-9][0-9]*)$\",\"maxLength\":19,\"description\":\"Return values after this ordinal; omitted means zero.\"}" ++
     "},\"required\":[\"action\"],\"additionalProperties\":false}";
 
 pub const stop_action_description = "Stop an Action in your own Session by its decimal Action ID. Returns its final Resolution once it has ended.";
