@@ -24,6 +24,33 @@ const forward_domain = @import("forward.zig");
 const ContentReference = content_domain.ContentReference;
 const Faults = store_core.Faults;
 
+fn handleSql(comptime projection: []const u8, comptime extra: []const u8) []const u8 {
+    return "SELECT " ++ projection ++ " FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
+        "JOIN session s ON s.session_ref=action.session_ref WHERE action.sender_handle=?1 AND action.attempt_ordinal=1 " ++ extra ++ " LIMIT 1";
+}
+
+pub const live_by_handle = rsql.Read(.{
+    .sql = handleSql("action.action_id,s.session_ref,s.workspace_key,s.next_position,action.background_position IS NOT NULL AS background,action.resolution_code IS NOT NULL AS resolved," ++ actionStoppedSql("action", "operation") ++ " AS stopped", ""),
+    .Args = struct { handle: []const u8 },
+    .Row = struct { action_id: rsql.Positive, session: rsql.SessionHead, background: bool, resolved: bool, stopped: bool },
+    .cardinality = .optional,
+});
+
+pub const peer_by_handle = rsql.Read(.{
+    .sql = handleSql("s.session_ref,s.workspace_key,s.next_position", "AND action.resolution_code IS NULL AND NOT " ++ actionStoppedSql("action", "operation")),
+    .Args = struct { handle: []const u8 },
+    .Row = struct { session: rsql.SessionHead },
+    .cardinality = .optional,
+});
+
+pub fn liveByHandle(a: anytype, handle: []const u8, result: anytype) void {
+    if (@TypeOf(result) == *peer_by_handle.Result) {
+        a.read(peer_by_handle, .{ .handle = handle }, result);
+    } else {
+        a.read(live_by_handle, .{ .handle = handle }, result);
+    }
+}
+
 const action_attempted_sql = std.fmt.comptimePrint("attempt_ordinal={d}", .{attempt.action_attempt_ordinal});
 
 fn callNameSql(comptime test_sql: []const u8) []const u8 {
