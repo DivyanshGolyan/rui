@@ -504,10 +504,10 @@ pub fn fixtureTemplate(comptime text: []const u8) Template {
 /// The MySQL rendering of a text mysql_testing sends: the table's fixture entry for it, else
 /// mysqlRendering. An entry holds what mysqlRendering produced under the same inputs.
 pub fn sentTemplate(comptime text: []const u8) Template {
-    return comptime served(statement_table, text) orelse mysqlTemplate(text);
+    return comptime servedFixture(statement_table, text) orelse mysqlTemplate(text);
 }
 
-fn served(comptime table: type, comptime text: []const u8) ?Template {
+fn servedFixture(comptime table: type, comptime text: []const u8) ?Template {
     comptime {
         if (collecting() or !std.mem.eql(u8, table.inputs, inputs()) or !@hasDecl(table.fixtures, text)) return null;
         return @field(table.fixtures, text);
@@ -516,7 +516,7 @@ fn served(comptime table: type, comptime text: []const u8) ?Template {
 
 fn fixtureFrom(comptime table: type, comptime text: []const u8) MysqlRendering {
     comptime {
-        if (served(table, text)) |template| return .{ .rendered = template };
+        if (servedFixture(table, text)) |template| return .{ .rendered = template };
         const rendering = fixtureRendering(text);
         if (collecting() and rendering == .rendered) _ = Exported("fixture\x1f" ++ text ++ "\x1f" ++ templateRecord(rendering.rendered) ++ "\x1f" ++ inputs() ++ "\x1c");
         return rendering;
