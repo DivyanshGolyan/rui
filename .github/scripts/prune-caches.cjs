@@ -34,8 +34,12 @@ module.exports = async function pruneCaches({github, context, core}) {
       obsolete.push(cache);
       continue;
     }
-    // Unfinished v4 cannot evict any generation's usable fallback.
-    const retentionGroup = compiledVersion === null ? group : `v${compiledVersion}/${group}`;
+    // Unfinished v4 cannot evict any generation's usable fallback. Each native
+    // tool identity keeps its own newest snapshot: while GitHub rolls out a
+    // runner image, jobs on either image restore only their own identity.
+    const versioned = compiledVersion === null ? group : `v${compiledVersion}/${group}`;
+    const tools = toolIdentity(cache.key);
+    const retentionGroup = tools === null ? versioned : `${versioned}@${tools}`;
     if (retained.has(retentionGroup)) obsolete.push(cache);
     retained.add(retentionGroup);
   }
@@ -56,6 +60,13 @@ module.exports = async function pruneCaches({github, context, core}) {
     }
   }
 };
+
+// The native tool identity that build and build-runner keys carry after the
+// compiler version (.github/actions/setup/caches/action.yml).
+function toolIdentity(key) {
+  const match = /^rui-(?:build-v[234]|runner-v2)-(?:Linux-X64|macOS-ARM64)-0\.17\.[0-9]+-([a-f0-9]{64})-/.exec(key);
+  return match ? match[1] : null;
+}
 
 function mainGroup(key) {
   const partial = /^(.*)-partial-[1-9][0-9]*-[1-9][0-9]*$/.exec(key);

@@ -95,12 +95,7 @@ pub fn installable(f: Facts) bool {
 pub fn holdsRelease(f: Facts) bool {
     if (!installable(f)) return false;
     const release = f.release orelse return false;
-    return release == .ok and order(f.selection.?.ok.released, release.ok) != .lt;
-}
-
-fn order(a: Version, b: Version) std.math.Order {
-    const schema = std.math.order(a.schema, b.schema);
-    return if (schema == .eq) std.math.order(a.patch, b.patch) else schema;
+    return release == .ok and f.selection.?.ok.released.order(release.ok) != .lt;
 }
 
 /// `f` with the fact that the pending effect would fill set to failed.
