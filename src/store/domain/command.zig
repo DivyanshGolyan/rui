@@ -612,7 +612,7 @@ pub const DeliverAgentMessage = struct {
         else if (t.saved != null)
             "Rui could not send this Message: its command key is already taken. Nothing was sent."
         else if (unreadable) |failure|
-            std.fmt.bufPrint(&t.result_buffer, "{s} Nothing was sent.", .{failure.bytes[0..@min(failure.bytes.len, 120)]}) catch unreachable
+            std.fmt.bufPrint(&t.result_buffer, "{s} Nothing was sent.", .{@import("../../excerpt.zig").bytePrefix(failure.bytes, 120)}) catch unreachable
         else
             std.fmt.bufPrint(&t.result_buffer, "Delivered to {s}.", .{target}) catch unreachable;
         t.outcome = .ofBytes(t.result, false);
@@ -859,7 +859,7 @@ pub const StartAgent = struct {
             return t.fail(r, std.fmt.bufPrint(buffer, "Rui could not start the agent ({s}). Nothing was started.", .{@tagName(code)}) catch unreachable);
         }
         if (t.input.captured) |value| if (value.* == .failed)
-            return t.fail(r, std.fmt.bufPrint(buffer, "{s} Nothing was started.", .{value.failed.bytes[0..@min(value.failed.bytes.len, 150)]}) catch unreachable);
+            return t.fail(r, std.fmt.bufPrint(buffer, "{s} Nothing was started.", .{@import("../../excerpt.zig").bytePrefix(value.failed.bytes, 150)}) catch unreachable);
         t.later = .{ .saved = undefined };
         return t.validate(r, null);
     }

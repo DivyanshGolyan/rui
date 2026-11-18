@@ -73,8 +73,8 @@ test "Action settlement atomically yields to an earlier Session stop" {
         (try store_testing.observeCommandForTesting(&storage, "settlement-stop")).kind.session_stop.?.completion,
     );
     try std.testing.expectEqual(
-        ActionSettlement.session_stop,
-        try storage.settleActionAttempt(action_binding, .succeeded, "Bash succeeded.", .{}),
+        ActionSettlement.Outcome.session_stop,
+        (try storage.settleActionAttempt(action_binding, .succeeded, "Bash succeeded.", .{})).outcome,
     );
     try std.testing.expectEqual(
         protocol.SessionStopCompletion.completed,
@@ -112,7 +112,7 @@ test "a stale Action settlement leaves the Store byte-identical" {
     }
     const settled = (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
     const open = (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
-    try std.testing.expectEqual(ActionSettlement.effect, try storage.settleActionAttempt(settled, .succeeded, "Bash succeeded.", .{}));
+    try std.testing.expectEqual(ActionSettlement.Outcome.effect, (try storage.settleActionAttempt(settled, .succeeded, "Bash succeeded.", .{})).outcome);
 
     const Snapshot = struct {
         database: []u8,
@@ -196,7 +196,7 @@ test "a stale Action settlement leaves the Store byte-identical" {
 
     const position = try store_testing.sqlite_only.queryU64(&storage, "SELECT next_position FROM session", .{});
     const content_id = storage.identities().next.get(.content_id);
-    try std.testing.expectEqual(ActionSettlement.effect, try storage.settleActionAttempt(open, .failed, "A later result is stored.", .{}));
+    try std.testing.expectEqual(ActionSettlement.Outcome.effect, (try storage.settleActionAttempt(open, .failed, "A later result is stored.", .{})).outcome);
     try std.testing.expectEqual(position, try store_testing.sqlite_only.queryU64(&storage, "SELECT acceptance_position FROM action_operation WHERE resolution_code='failed'", .{}));
     try std.testing.expectEqual(content_id, try store_testing.sqlite_only.queryU64(&storage, "SELECT resolution_content_id FROM action_operation WHERE resolution_code='failed'", .{}));
 }
