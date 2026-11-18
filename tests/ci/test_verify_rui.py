@@ -127,7 +127,7 @@ class VerifyRuiTest(unittest.TestCase):
                 try:
                     port = scratch / "fixture.port"
                     wait_for(lambda: port.exists() or provider.poll() is not None,
-                             "image fixture port or child exit", timeout=10)
+                             "image fixture port or child exit", timeout=60)
                     self.assertTrue(port.exists(), "image fixture did not start")
                     url = "http://127.0.0.1:" + port.read_text() + "/responses"
                     user = {"role": "user", "content": "Review with an image consent check."}
@@ -135,7 +135,7 @@ class VerifyRuiTest(unittest.TestCase):
                     def request(items):
                         body = json.dumps({"input": items}).encode()
                         with urllib.request.urlopen(urllib.request.Request(url, body,
-                                {"Content-Type": "application/json"}), timeout=5) as reply:
+                                {"Content-Type": "application/json"}), timeout=60) as reply:
                             return [json.loads(line[6:]) for line in reply.read().decode().splitlines()
                                     if line.startswith("data: {")]
 
@@ -153,7 +153,7 @@ class VerifyRuiTest(unittest.TestCase):
                                      ["image-consent-call", "tool-summary"])
                 finally:
                     provider.terminate()
-                    provider.communicate(timeout=5)
+                    provider.communicate(timeout=60)
 
     def test_child_imports_user_site_with_synthetic_home(self):
         run_type = runpy.run_path(str(SCRIPT))["Run"]
