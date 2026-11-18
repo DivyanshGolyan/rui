@@ -811,12 +811,25 @@ comptime {
     ));
 }
 
+const mysql_migration_metadata = "UPDATE store_meta SET meta_value='" ++ format_text ++ "' WHERE meta_key='format';\n";
+
 pub fn mysqlMigration(comptime from: u32) [:0]const u8 {
     return comptime blk: {
         if (from < migration_baseline or from - migration_baseline >= migrations.len)
             @compileError(std.fmt.comptimePrint("migrations: no step moves a Store from {d}", .{from}));
+        const index = from - migration_baseline;
+        if (rsql.generatedSchema()) |generated| {
+            const text = generated.mysql_migrations[index];
+            const suffix = if (index + 1 == generated.mysql_migrations.len - 1)
+                mysql_migration_metadata
+            else
+                generated.mysql_migrations[index + 1];
+            if (suffix.len > text.len) @compileError("generated MySQL migration suffix is too long");
+            const terminated = text[0 .. text.len - suffix.len] ++ "\x00";
+            break :blk terminated[0 .. terminated.len - 1 :0];
+        }
         var text: []const u8 = "";
-        for (migrations[from - migration_baseline].mysql) |statement| text = text ++ statement ++ ";\n";
+        for (migrations[index].mysql) |statement| text = text ++ statement ++ ";\n";
         const terminated = text ++ "\x00";
         break :blk terminated[0..text.len :0];
     };
@@ -833,12 +846,11 @@ fn mysqlMigrationTexts() [schema_version - migration_baseline + 1][:0]const u8 {
         if (rsql.generatedSchema()) |generated| break :blk generated.mysql_migrations;
         var result: [schema_version - migration_baseline + 1][:0]const u8 = undefined;
         result[result.len - 1] = "";
-        const metadata = "UPDATE store_meta SET meta_value='" ++ format_text ++ "' WHERE meta_key='format';\n";
         var index = result.len - 1;
         while (index > 0) {
             index -= 1;
             const text = mysqlMigration(migration_baseline + index) ++
-                (if (index + 1 == result.len - 1) metadata else result[index + 1]);
+                (if (index + 1 == result.len - 1) mysql_migration_metadata else result[index + 1]);
             const terminated = text ++ "\x00";
             result[index] = terminated[0..text.len :0];
         }
@@ -846,12 +858,31 @@ fn mysqlMigrationTexts() [schema_version - migration_baseline + 1][:0]const u8 {
     };
 }
 
-test "store schema --from prints every remaining MySQL migration then sets the format once" {
+test "SH-8 MySQL schema export emits bootstrap and requested migrations" {
+    var bootstrap_output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer bootstrap_output.deinit();
+    for (objects(.mysql)) |object| {
+        try bootstrap_output.writer.writeAll(object.sql);
+        try bootstrap_output.writer.writeAll(";\n");
+    }
+    try std.testing.expectEqualStrings(bootstrap_output.written(), ddl(.mysql));
+    inline for (migrations) |step| {
+        var expected: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer expected.deinit();
+        for (step.mysql) |statement| {
+            try expected.writer.writeAll(statement);
+            try expected.writer.writeAll(";\n");
+        }
+        try std.testing.expectEqualStrings(expected.written(), mysqlMigration(step.from));
+    }
     for (migration_baseline..schema_version + 1) |from| {
         var expected: std.Io.Writer.Allocating = .init(std.testing.allocator);
         defer expected.deinit();
         inline for (migrations) |step| {
-            if (step.from >= from) try expected.writer.writeAll(mysqlMigration(step.from));
+            if (step.from >= from) for (step.mysql) |statement| {
+                try expected.writer.writeAll(statement);
+                try expected.writer.writeAll(";\n");
+            };
         }
         if (from < schema_version) try expected.writer.print(
             "UPDATE store_meta SET meta_value='{d}' WHERE meta_key='format';\n",
