@@ -332,17 +332,21 @@ test("create parent is a create-only relation in the shared wire spec", async ()
 
 
 test("Action reads preserve identity and byte cursor without mutation", async () => {
-	const requests: { path: string; body: unknown }[] = [];
+	// ARD-4
 	const action = "9007199254740993";
-	const link: Link = {
-		async exchange(path, build) {
-			requests.push({ path, body: JSON.parse(build("store")) });
-			return Buffer.from(JSON.stringify({ version: WIRE_VERSION, type: "action_read", session: "session", action, state: "queued", final: null }));
-		},
-	};
-	const session = new Session(link, "session");
-	await session.readAction(action, "16383");
-	assert.deepEqual(requests, [{ path: "/v1/read-action", body: { version: WIRE_VERSION, kind: "read_action", store: "store", session: "session", action, offset: "16383" } }]);
+	for (const [offset, after, more] of [["0", "0", false], ["16383", "9007199254740995", true]] as const) {
+		const values = { items: [{ ordinal: "9007199254740996", key: "k", text: "雪" }], next: "9007199254740996", more };
+		const link: Link = {
+			async exchange(path, build) {
+				assert.equal(path, "/v1/read-action");
+				assert.deepEqual(JSON.parse(build("store")), { version: WIRE_VERSION, kind: "read_action", store: "store", session: "session", action, offset, after });
+				return Buffer.from(JSON.stringify({ version: WIRE_VERSION, type: "action_read", session: "session", action, state: "queued", final: null, values }));
+			},
+		};
+		const session = new Session(link, "session");
+		const result = offset === "0" ? await session.readAction(action) : await session.readAction(action, offset, after);
+		assert.deepEqual(result.values, values);
+	}
 });
 
 

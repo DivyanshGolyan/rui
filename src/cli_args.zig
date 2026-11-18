@@ -104,7 +104,7 @@ pub const Command = enum {
             .action_background => .{ .resource = .action, .name = "background", .description = "Release the original tool call with an immutable receipt and let this same Action continue under its Session. Read completion with action read; no automatic final input or model wake is delivered.", .options = destination ++ session ++ action ++ capture, .mutation = true, .requires = need_action },
             .action_allow => .{ .resource = .action, .name = "allow", .description = "Admit permission to run this exact inspected Action once; the Host revalidates its target.", .options = destination ++ session ++ action ++ capture, .mutation = true, .requires = need_action },
             .action_deny => .{ .resource = .action, .name = "deny", .description = "Admit denial of this exact inspected Action.", .options = destination ++ session ++ action ++ capture, .mutation = true, .requires = need_action },
-            .action_read => .{ .resource = .action, .name = "read", .description = "Read an Action's status and one final-result window; --offset continues at a returned byte cursor. Does not wait or consume.", .options = destination ++ session ++ action ++ &[_]Option{numeric("offset", "BYTES", 0, @import("content_string.zig").max_bytes, .count_malformed)}, .requires = need_action },
+            .action_read => .{ .resource = .action, .name = "read", .description = "Read an Action and published values; --offset continues final bytes and --after continues value ordinals. Does not wait or consume.", .options = destination ++ session ++ action ++ &[_]Option{ numeric("offset", "BYTES", 0, @import("content_string.zig").max_bytes, .count_malformed), numeric("after", "ORDINAL", 0, std.math.maxInt(i64), .count_malformed) }, .requires = need_action },
             .action_read_call_id => .{ .resource = .action, .name = "read-call-id", .description = "Stream the exact saved Action call ID bytes.", .options = destination ++ session ++ action, .requires = need_action },
             .action_read_arguments => .{ .resource = .action, .name = "read-arguments", .description = "Stream the exact saved Action argument bytes.", .options = destination ++ session ++ action, .requires = need_action },
             .action_list_parts => .{ .resource = .action, .name = "list-parts", .description = "List the certified parts of an Action Resolution's parts value as JSON.", .options = destination ++ session ++ action, .requires = need_action },
@@ -642,6 +642,20 @@ test "typed choices share enum names with help and refuse unknown values" {
     }
 }
 
+test "Action read accepts a bounded value ordinal cursor" {
+    // ARD-6
+    for ([_][]const u8{ "0", "1", "9223372036854775807" }) |valid| {
+        var storage: [1024]u8 = undefined;
+        const parsed = try testParse(Command.action_read.definition(), &.{ "--after", valid }, &storage);
+        try std.testing.expectEqualStrings(valid, parsed.get("after").?);
+    }
+    for ([_][]const u8{ "12x", "-1", "+1", "1_0", "", "9223372036854775808", "18446744073709551616" }) |invalid| {
+        const refusal = try expectRefusal(.action_read, &.{ "--after", invalid }, .count_malformed, "after");
+        try std.testing.expectEqualStrings(invalid, refusal.value.?);
+        try std.testing.expect(std.mem.indexOf(u8, refusal.accepted.?.grammar, "0") != null);
+        try std.testing.expect(std.mem.indexOf(u8, refusal.accepted.?.grammar, "9223372036854775807") != null);
+    }
+}
 const NumericCase = struct { command: Command, name: []const u8, code: caller_error.Code, low: []const u8, high: []const u8 };
 
 test "numeric options reject malformed decimals and state their accepted range" {

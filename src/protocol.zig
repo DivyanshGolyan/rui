@@ -1405,12 +1405,13 @@ fn ParserOf(comptime Custody: type) type {
         }
 
         fn parseReadAction(self: *Parser, out: *@import("action_read.zig").Request, members: *Members) !void {
-            const Field = enum { session, action, offset };
+            const Field = enum { session, action, offset, after };
             var seen: std.enums.EnumSet(Field) = .empty;
             while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
                 .session => try self.readSmallString(&out.session),
                 .action => out.action_id = try self.readCanonicalU64(),
                 .offset => out.offset = try self.readCanonicalU64(),
+                .after => out.after = try self.readCanonicalU64(),
             };
             try require(Field, seen, &.{ .session, .action });
         }
@@ -2141,7 +2142,8 @@ pub const read_action_request = struct {
     pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"read_action\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"action\":\"", Hole.decimal, "\"" };
     pub const offset = .{ ",\"offset\":\"", Hole.decimal, "\"" };
     pub const tail = .{"}"};
-    pub const all = head ++ offset ++ tail;
+    pub const after = .{ ",\"after\":\"", Hole.decimal, "\"" };
+    pub const all = head ++ offset ++ after ++ tail;
 };
 
 pub const read_action_arguments_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"read_action_arguments\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"action\":\"", Hole.decimal, "\"}" };
@@ -2425,10 +2427,14 @@ pub const action_stop_reply = struct {
 
 pub const action_read_reply = struct {
     pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"action_read\",\"session\":", session_hole, ",\"action\":\"", Hole.decimal, "\"," };
-    pub const pending = .{ "\"state\":\"", Hole{ .tag = @import("action_read.zig").PendingState }, "\",\"final\":null}" };
-    pub const final = .{ "\"state\":\"resolved\",\"final\":{\"position\":\"", Hole.decimal, "\",\"code\":", Hole{ .string = max_code_bytes }, ",\"content\":", Hole{ .json = ContentValueJson }, ",\"window\":{\"offset\":\"", Hole.decimal, "\",\"next\":\"", Hole.decimal, "\",\"more\":", Hole.boolean, ",\"text\":", Hole{ .string = content_window_bytes }, "}}}" };
-    pub const parts = .{ "\"state\":\"resolved\",\"final\":{\"position\":\"", Hole.decimal, "\",\"code\":", Hole{ .string = max_code_bytes }, ",\"content\":", Hole{ .json = ContentValueJson }, ",\"window\":null}}" };
-    pub const max_bytes = maxShapeBytes(.{ head ++ pending, head ++ final, head ++ parts });
+    pub const pending = .{ "\"state\":\"", Hole{ .tag = @import("action_read.zig").PendingState }, "\",\"final\":null" };
+    pub const final = .{ "\"state\":\"resolved\",\"final\":{\"position\":\"", Hole.decimal, "\",\"code\":", Hole{ .string = max_code_bytes }, ",\"content\":", Hole{ .json = ContentValueJson }, ",\"window\":{\"offset\":\"", Hole.decimal, "\",\"next\":\"", Hole.decimal, "\",\"more\":", Hole.boolean, ",\"text\":", Hole{ .string = content_window_bytes }, "}}" };
+    pub const parts = .{ "\"state\":\"resolved\",\"final\":{\"position\":\"", Hole.decimal, "\",\"code\":", Hole{ .string = max_code_bytes }, ",\"content\":", Hole{ .json = ContentValueJson }, ",\"window\":null}" };
+    pub const item = .{ "{\"ordinal\":\"", Hole.decimal, "\",\"key\":", Hole{ .string = 128 }, ",\"text\":", Hole{ .string = @import("action_read.zig").page_bytes }, "}" };
+    pub const values_head = ",\"values\":{\"items\":";
+    pub const values_tail = .{ ",\"next\":\"", Hole.decimal, "\",\"more\":", Hole.boolean, "}}" };
+    // The total text budget is shared by all items, rather than repeated per item.
+    pub const max_bytes = maxShapeBytes(.{ head ++ pending, head ++ final, head ++ parts }) + values_head.len + 2 + jsonListBytes(@import("action_read.zig").page_items, shapeBytes(item) - 6 * @import("action_read.zig").page_bytes) + 6 * @import("action_read.zig").page_bytes + shapeBytes(values_tail);
 };
 
 pub const MessageUnknownOutcome = message_observation.MessageUnknownOutcome;
@@ -3532,6 +3538,7 @@ test "session pin parser requires an explicit desired value and binds semantic r
 }
 
 test "Action read request preserves canonical identity and optional cursor" {
+    // ARD-2
     const head = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"read_action\",\"store\":\"s\",\"session\":\"k7m2qx\",\"action\":\"42\"";
     inline for (.{ "}", ",\"offset\":\"0\"}", ",\"offset\":\"16383\"}" }, .{ 0, 0, 16383 }) |tail, offset| {
         var source: MetadataSource = .{ .input = head ++ tail };
@@ -3539,7 +3546,27 @@ test "Action read request preserves canonical identity and optional cursor" {
         const request = (try parseForTest(&parser)).read_action;
         try std.testing.expectEqual(@as(u64, 42), request.action_id);
         try std.testing.expectEqual(@as(u64, offset), request.offset);
+        try std.testing.expectEqual(@as(u64, 0), request.after);
         try std.testing.expectEqualStrings("k7m2qx", request.session.slice());
+    }
+    {
+        var source: MetadataSource = .{ .input = head ++ ",\"offset\":\"9\",\"after\":\"16\"}" };
+        var parser = Tested.Parser{ .source = &source };
+        const request = (try parseForTest(&parser)).read_action;
+        try std.testing.expectEqual(@as(u64, 9), request.offset);
+        try std.testing.expectEqual(@as(u64, 16), request.after);
+    }
+    {
+        var source: MetadataSource = .{ .input = head ++ ",\"after\":\"18446744073709551615\",\"offset\":\"0\"}" };
+        var parser = Tested.Parser{ .source = &source };
+        const request = (try parseForTest(&parser)).read_action;
+        try std.testing.expectEqual(std.math.maxInt(u64), request.after);
+        try std.testing.expectEqual(@as(u64, 0), request.offset);
+    }
+    inline for (.{ ",\"after\":\"01\"}", ",\"after\":\"-1\"}", ",\"after\":\"18446744073709551616\"}" }) |tail| {
+        var source: MetadataSource = .{ .input = head ++ tail };
+        var parser = Tested.Parser{ .source = &source };
+        try std.testing.expectError(error.InvalidIdentity, parseForTest(&parser));
     }
     inline for (.{ ",\"offset\":\"01\"}", ",\"offset\":\"-1\"}", ",\"offset\":\"18446744073709551616\"}" }) |tail| {
         var source: MetadataSource = .{ .input = head ++ tail };

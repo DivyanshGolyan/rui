@@ -17313,6 +17313,52 @@
               },
               "final": {
                 "type": "null"
+              },
+              "values": {
+                "type": "object",
+                "properties": {
+                  "items": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "ordinal": {
+                          "$ref": "#/components/schemas/Decimal"
+                        },
+                        "key": {
+                          "type": "string",
+                          "maxLength": 128,
+                          "x-rui-max-bytes": 128
+                        },
+                        "text": {
+                          "type": "string",
+                          "maxLength": 16384,
+                          "x-rui-max-bytes": 16384
+                        }
+                      },
+                      "required": [
+                        "ordinal",
+                        "key",
+                        "text"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "maxItems": 16,
+                    "uniqueItems": false
+                  },
+                  "next": {
+                    "$ref": "#/components/schemas/Decimal"
+                  },
+                  "more": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "items",
+                  "next",
+                  "more"
+                ],
+                "additionalProperties": false
               }
             },
             "required": [
@@ -17321,7 +17367,8 @@
               "session",
               "action",
               "state",
-              "final"
+              "final",
+              "values"
             ],
             "additionalProperties": false
           },
@@ -17393,6 +17440,52 @@
                   "window"
                 ],
                 "additionalProperties": false
+              },
+              "values": {
+                "type": "object",
+                "properties": {
+                  "items": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "ordinal": {
+                          "$ref": "#/components/schemas/Decimal"
+                        },
+                        "key": {
+                          "type": "string",
+                          "maxLength": 128,
+                          "x-rui-max-bytes": 128
+                        },
+                        "text": {
+                          "type": "string",
+                          "maxLength": 16384,
+                          "x-rui-max-bytes": 16384
+                        }
+                      },
+                      "required": [
+                        "ordinal",
+                        "key",
+                        "text"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "maxItems": 16,
+                    "uniqueItems": false
+                  },
+                  "next": {
+                    "$ref": "#/components/schemas/Decimal"
+                  },
+                  "more": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "items",
+                  "next",
+                  "more"
+                ],
+                "additionalProperties": false
               }
             },
             "required": [
@@ -17401,7 +17494,8 @@
               "session",
               "action",
               "state",
-              "final"
+              "final",
+              "values"
             ],
             "additionalProperties": false
           },
@@ -17450,6 +17544,52 @@
                   "window"
                 ],
                 "additionalProperties": false
+              },
+              "values": {
+                "type": "object",
+                "properties": {
+                  "items": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "ordinal": {
+                          "$ref": "#/components/schemas/Decimal"
+                        },
+                        "key": {
+                          "type": "string",
+                          "maxLength": 128,
+                          "x-rui-max-bytes": 128
+                        },
+                        "text": {
+                          "type": "string",
+                          "maxLength": 16384,
+                          "x-rui-max-bytes": 16384
+                        }
+                      },
+                      "required": [
+                        "ordinal",
+                        "key",
+                        "text"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "maxItems": 16,
+                    "uniqueItems": false
+                  },
+                  "next": {
+                    "$ref": "#/components/schemas/Decimal"
+                  },
+                  "more": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "items",
+                  "next",
+                  "more"
+                ],
+                "additionalProperties": false
               }
             },
             "required": [
@@ -17458,7 +17598,8 @@
               "session",
               "action",
               "state",
-              "final"
+              "final",
+              "values"
             ],
             "additionalProperties": false
           }
@@ -17487,6 +17628,9 @@
             "$ref": "#/components/schemas/Decimal"
           },
           "offset": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "after": {
             "$ref": "#/components/schemas/Decimal"
           }
         },
