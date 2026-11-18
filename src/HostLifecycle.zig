@@ -311,7 +311,7 @@ fn verifyPass(init: std.process.Init, allocator: std.mem.Allocator, plan: *const
     defer if (after) |*peer| peer.deinit(allocator);
     var facts: client.ReplacementFacts = undefined;
     // The probe borrows Store bytes from both answers until the pass ends.
-    var own: client.HostStatus = undefined;
+    var own: protocol_reply.HostStatus = undefined;
     while (true) switch (activation.verdict(probe)) {
         .read => |read| switch (read) {
             .before => probe.before = if (client.observeUpgradePeer(allocator, init.io, directory, until)) |peer| peer: {
