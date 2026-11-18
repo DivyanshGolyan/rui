@@ -208,6 +208,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/action-publish": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Publishes one value from the running Action identified by its sender handle. */
+        post: operations["actionPublish"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/read-action": {
         parameters: {
             query?: never;
@@ -541,6 +558,22 @@ export interface components {
             key: string;
             session: string;
             action: components["schemas"]["Decimal"];
+        };
+        ActionPublishReply: {
+            action_id: components["schemas"]["Decimal"];
+            ordinal: components["schemas"]["Decimal"];
+            admission_id: components["schemas"]["Decimal"] | null;
+            replayed: boolean;
+        };
+        ActionPublishRequest: {
+            /** @constant */
+            version: "21";
+            /** @constant */
+            kind: "action_publish";
+            store: string;
+            handle: string;
+            key: string;
+            value: string;
         };
         ActionStopConflictReply: {
             /** @constant */
@@ -4100,6 +4133,44 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ActionStopConflictReply"] | components["schemas"]["ErrorReply"];
+                };
+            };
+            /** @description A refusal or failure. */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorReply"];
+                };
+            };
+        };
+    };
+    actionPublish: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description The wire version this document describes. Any other version is refused. */
+                "X-Rui-Wire-Version": components["parameters"]["WireVersion"];
+                /** @description The Host instance (from host-info) the request is meant for; a different instance refuses it. */
+                "X-Rui-Host-Instance"?: components["parameters"]["HostInstance"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ActionPublishRequest"];
+            };
+        };
+        responses: {
+            /** @description The reply. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ActionPublishReply"];
                 };
             };
             /** @description A refusal or failure. */

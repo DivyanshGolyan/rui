@@ -219,6 +219,18 @@ pub const Requests = struct {
         return readReportResponse(self, fd, sink, reply_buffer);
     }
 
+    pub fn publishAction(self: Requests, store_path: []const u8, handle: []const u8, key: []const u8, text: []const u8, sink: anytype, reply_buffer: *ReplyBuffer) !protocol_reply.ReportReply {
+        try self.check();
+        if (key.len == 0 or key.len > protocol.max_key_bytes or !std.unicode.utf8ValidateSlice(key)) return error.InvalidKey;
+        if (handle.len > 32 or text.len > protocol.max_action_value_bytes or !std.unicode.utf8ValidateSlice(text)) return error.InvalidTarget;
+        const paths = try resolveClientPaths(self.io, store_path);
+        var body: protocol.FixedJsonBuffer(protocol.shapeBytes(protocol.action_publish_request)) = .{};
+        try body.appendShape(protocol.action_publish_request, .{ paths.store_identity.slice(), handle, key, text });
+        const fd = try openRead(self, &paths, "/v1/action-publish", body.slice());
+        defer closeSocket(self.io, fd);
+        return readReportResponse(self, fd, sink, reply_buffer);
+    }
+
     pub fn readAction(self: Requests, store_path: []const u8, session: []const u8, action_id: u64, offset: u64, sink: anytype, reply_buffer: *ReplyBuffer) !protocol_reply.ReportReply {
         reply_buffer.len = 0;
         try self.check();

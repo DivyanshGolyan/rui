@@ -57,7 +57,7 @@ No reply queue, worker, payload copy or new persistent state is introduced.
 ### Public Conversation pages
 
 The separate `conversation_page` Host read is a filtered projection of canonical applied User entries, assistant text and completed Tool Results; it does not change Current/Full reports or persist a transcript.
-Pending input, instruction updates, model-output items (including private reasoning and encrypted continuation), proposals and partial tool groups are outside this projection.
+Action values, pending input, instruction updates, model-output items (including private reasoning and encrypted continuation), proposals and partial tool groups are outside this projection.
 Full retains its complete inventory; Action inspection remains the exact approval-target read.
 A missing Session or malformed/stale cursor fails without changing work.
 
@@ -145,7 +145,7 @@ Proposal metadata grants no authorization: a later approval still binds the fres
 
 Session activity is a separate projection of eleven row kinds, not Conversation repurposed as an inventory: a person's or script's Message admission (`admission`), a sourced input (`received`, naming either its peer `sender` or its background `source_action`), applied User entry, assistant text, immutable Tool Call, complete-group Tool Result, hosted call, terminal Turn outcome, accepted Session stop, sent Message and refused send.
 `received` mirrors `sent` for peer Messages and records final Action input with its Action identity; it split from `admission` on 2026-11-03 so a page can list a person's Messages alone (design thread on Rui's core and plug-in points).
-Activity and public Conversation retain `source_action` as a nullable Action ID alongside the shared Resolution content reference. Terminal history labels that input `Background Action <id>`; person-only admission queries exclude it.
+Activity and public Conversation retain `source_action` as a nullable Action ID alongside the shared Resolution content reference for background finals; person-only admission queries exclude them. Action values add no Activity admission, received or User rows and no public Conversation rows; their provenance and model input remain in canonical history.
 Admission, stop, send, refusal and every terminal outcome claim the existing Session sequence in their owning transaction, and each also records its commit time there.
 No copied log or second frontier exists; this schema change follows the [Store format policy](store.md#store-format-and-upgrades).
 A refused send's `send_failed.target` is required and nullable: it names the canonical attempted peer, including an unknown Session, or is null when the saved attempt has no valid Session reference.
@@ -299,7 +299,7 @@ A page's cost does not grow with the Session's history.
 Each source of rows (Message admissions, User and assistant entries, Tool Calls, rejected calls and Action results by their acceptance, Turn outcomes, Session stops and refused sends) is read through an index on its Session and position: a range seek from the cursor in the page's direction that stops after 17 rows, the three groups merged and cut to the page plus one.
 A Tool Result's group is judged only for the positions on the page, and a single row resolves by the same seeks at its own position.
 A forward page's live call activity reads only the calls accepted after the page, and those still waiting.
-A Store test holds an opening page and a forward page to equal SQLite VM steps after 10 and 10,000 earlier rows.
+Store tests hold opening and forward pages to equal SQLite VM steps after 10 and 10,000 earlier rows, including hidden Action values.
 
 `POST /v1/activity-content` takes `kind:"activity_content"`, `session`, decimal-string `position` and `ordinal`, resolving the public row and provenance again.
 Admissions, applied input, assistant text, complete Tool Results and outcome content (a completed Turn's answer or a failed one's report) stream completely once under the whole-stream reader/framing/failure contract above; calls and approval requests stream their original arguments JSON, and stops and contentless outcomes have no byte value.

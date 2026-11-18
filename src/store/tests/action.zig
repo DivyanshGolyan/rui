@@ -1274,7 +1274,7 @@ test "background final input joins the next Turn boundary without changing an in
                     }
                     if (entry.source_action) |source| {
                         try std.testing.expectEqual(action, source.id);
-                        try std.testing.expectEqualStrings(session.slice(), source.session.slice());
+                        try std.testing.expectEqualStrings(session.slice(), &source.session);
                         var reader: store_testing.TestingReader = undefined;
                         try page.openContent(entry.content.?, &reader);
                         defer reader.close();
@@ -1975,6 +1975,376 @@ test "EXR-10 an Action read projects a compound Resolution as its owned parts va
                 try std.testing.expectError(error.InvalidCursor, storage.readAction(&request, &result));
                 try std.testing.expect(!storage.isFenced());
             }
+        }
+    }.run);
+}
+
+const ValueRowCounts = struct {
+    content: u64,
+    commands: u64,
+    admissions: u64,
+    values: u64,
+
+    fn read(storage: *Store) !ValueRowCounts {
+        return .{
+            .content = try store_testing.queryU64(storage, "SELECT count(*) FROM content", .{}),
+            .commands = try store_testing.queryU64(storage, "SELECT count(*) FROM core_command", .{}),
+            .admissions = try store_testing.queryU64(storage, "SELECT count(*) FROM message_admission", .{}),
+            .values = try store_testing.queryU64(storage, "SELECT count(*) FROM action_value", .{}),
+        };
+    }
+};
+
+test "APV-4 publication rollback leaves no partial rows" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            for ([_]bool{ false, true }) |background| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                const session = try shared_fixtures.configureTestSessionWithMode(&storage, "values-session", "bypass");
+                const action_id = if (background) try NativePromotion.promoted(&storage, &tmp, session.slice()) else try NativePromotion.propose(&storage, &tmp, session.slice());
+                const binding = (try storage.admitNextActionAttempt(.fromFree(2, true), 30_000, .{})).?.permit.binding;
+                var input: action_domain.ActionExecutionInput = undefined;
+                try storage.readActionExecutionInput(.bash, binding, &input);
+                const handle = input.sender_handle.slice();
+                const before_rollback = try ValueRowCounts.read(&storage);
+                try std.testing.expectError(error.InjectedCommitFailure, storage.publishActionValueForTesting(handle, "rollback", "rollback payload", .{ .before_commit = true }));
+                try std.testing.expectEqual(before_rollback, try ValueRowCounts.read(&storage));
+                try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_value WHERE action_id=?1", .{action_id}));
+            }
+        }
+    }.run);
+}
+
+test "APV-5 publication keys replay or conflict across sender lifecycle" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            for ([_]bool{ false, true }) |background| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                const session = try shared_fixtures.configureTestSessionWithMode(&storage, "values-session", "bypass");
+                const action_id = if (background) try NativePromotion.promoted(&storage, &tmp, session.slice()) else try NativePromotion.propose(&storage, &tmp, session.slice());
+                const binding = (try storage.admitNextActionAttempt(.fromFree(2, true), 30_000, .{})).?.permit.binding;
+                var input: action_domain.ActionExecutionInput = undefined;
+                try storage.readActionExecutionInput(.bash, binding, &input);
+                const handle = input.sender_handle.slice();
+                const first = try storage.publishActionValue(handle, "first", "one");
+                try std.testing.expect(first == .accepted);
+                const before_replay = try ValueRowCounts.read(&storage);
+                const replay = try storage.publishActionValue(handle, "first", "one");
+                try std.testing.expect(replay == .accepted and replay.accepted.replayed);
+                try std.testing.expectEqual(action_id, replay.accepted.action_id);
+                try std.testing.expectEqual(first.accepted.ordinal, replay.accepted.ordinal);
+                try std.testing.expectEqual(first.accepted.admission_id, replay.accepted.admission_id);
+                try std.testing.expectEqual(before_replay, try ValueRowCounts.read(&storage));
+                try std.testing.expect((try storage.publishActionValue(handle, "first", "different")).refused == .conflict);
+                try std.testing.expectEqual(before_replay, try ValueRowCounts.read(&storage));
+                if (background) {
+                    for (1..32) |index| {
+                        var key_buffer: [32]u8 = undefined;
+                        const key = try std.fmt.bufPrint(&key_buffer, "value-{d}", .{index});
+                        try std.testing.expect((try storage.publishActionValue(handle, key, "pending")) == .accepted);
+                    }
+                }
+                var stop = try completeSessionStop("values-stop", session.slice());
+                try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+                const stopped_counts = try ValueRowCounts.read(&storage);
+                try std.testing.expect((try storage.publishActionValue(handle, "first", "one")).accepted.replayed);
+                try std.testing.expectEqual(stopped_counts, try ValueRowCounts.read(&storage));
+                try storage.revokeActionSender(binding);
+                const retired_counts = try ValueRowCounts.read(&storage);
+                try std.testing.expect((try storage.publishActionValue(handle, "first", "one")).accepted.replayed);
+                try std.testing.expect((try storage.publishActionValue(handle, "first", "different")).refused == .conflict);
+                try std.testing.expectEqual(retired_counts, try ValueRowCounts.read(&storage));
+            }
+            {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                const session = try shared_fixtures.configureTestSessionWithMode(&storage, "values-resolved", "bypass");
+                _ = try NativePromotion.promoted(&storage, &tmp, session.slice());
+                const binding = (try storage.admitNextActionAttempt(.fromFree(2, true), 30_000, .{})).?.permit.binding;
+                var input: action_domain.ActionExecutionInput = undefined;
+                try storage.readActionExecutionInput(.bash, binding, &input);
+                const handle = input.sender_handle.slice();
+                const first = try storage.publishActionValue(handle, "saved", "value");
+                try std.testing.expect(first == .accepted);
+                _ = try storage.settleActionAttempt(binding, .succeeded, "done", .{});
+                const resolved_counts = try ValueRowCounts.read(&storage);
+                const replay = try storage.publishActionValue(handle, "saved", "value");
+                try std.testing.expect(replay == .accepted and replay.accepted.replayed);
+                try std.testing.expectEqual(first.accepted.action_id, replay.accepted.action_id);
+                try std.testing.expectEqual(first.accepted.ordinal, replay.accepted.ordinal);
+                try std.testing.expectEqual(first.accepted.admission_id, replay.accepted.admission_id);
+                try std.testing.expectEqual(resolved_counts, try ValueRowCounts.read(&storage));
+            }
+        }
+    }.run);
+}
+
+test "APV-12 publication receipts identify foreground and background values" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            for ([_]bool{ false, true }) |background| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                const session = try shared_fixtures.configureTestSessionWithMode(&storage, "values-session", "bypass");
+                const action_id = if (background) try NativePromotion.promoted(&storage, &tmp, session.slice()) else try NativePromotion.propose(&storage, &tmp, session.slice());
+                const binding = (try storage.admitNextActionAttempt(.fromFree(2, true), 30_000, .{})).?.permit.binding;
+                var input: action_domain.ActionExecutionInput = undefined;
+                try storage.readActionExecutionInput(.bash, binding, &input);
+                const handle = input.sender_handle.slice();
+                const first = try storage.publishActionValue(handle, "first", "one");
+                try std.testing.expect(first == .accepted);
+                try std.testing.expectEqual(action_id, first.accepted.action_id);
+                try std.testing.expectEqual(@as(u64, 1), first.accepted.ordinal);
+                try std.testing.expectEqual(background, first.accepted.admission_id != null);
+                try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT c.form FROM action_value v JOIN content c ON c.content_id=v.content_id WHERE v.action_id=?1", .{action_id}));
+                try std.testing.expectEqual(@as(u64, if (background) 1 else 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_value WHERE action_id=?1 AND admission_id IS NOT NULL", .{action_id}));
+            }
+        }
+    }.run);
+}
+
+test "APV-6 oversized values leave no partial rows" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            for ([_]bool{ false, true }) |background| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                const session = try shared_fixtures.configureTestSessionWithMode(&storage, "values-session", "bypass");
+                const action_id = if (background) try NativePromotion.promoted(&storage, &tmp, session.slice()) else try NativePromotion.propose(&storage, &tmp, session.slice());
+                const binding = (try storage.admitNextActionAttempt(.fromFree(2, true), 30_000, .{})).?.permit.binding;
+                var input: action_domain.ActionExecutionInput = undefined;
+                try storage.readActionExecutionInput(.bash, binding, &input);
+                const handle = input.sender_handle.slice();
+                try std.testing.expect((try storage.publishActionValue(handle, "first", "one")) == .accepted);
+                const before_oversized = try ValueRowCounts.read(&storage);
+                const oversized: [16 * 1024 + 1]u8 = @splat('x');
+                try std.testing.expect((try storage.publishActionValue(handle, "oversized", &oversized)).refused == .too_large);
+                try std.testing.expectEqual(before_oversized, try ValueRowCounts.read(&storage));
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_value WHERE action_id=?1", .{action_id}));
+            }
+        }
+    }.run);
+}
+
+test "APV-7 background backlog refuses overflow without partial rows" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try shared_fixtures.configureTestSessionWithMode(&storage, "values-session", "bypass");
+            const action_id = try NativePromotion.promoted(&storage, &tmp, session.slice());
+            const binding = (try storage.admitNextActionAttempt(.fromFree(2, true), 30_000, .{})).?.permit.binding;
+            var input: action_domain.ActionExecutionInput = undefined;
+            try storage.readActionExecutionInput(.bash, binding, &input);
+            const handle = input.sender_handle.slice();
+            try std.testing.expect((try storage.publishActionValue(handle, "first", "one")) == .accepted);
+            for (1..32) |index| {
+                var key_buffer: [32]u8 = undefined;
+                const key = try std.fmt.bufPrint(&key_buffer, "value-{d}", .{index});
+                try std.testing.expect((try storage.publishActionValue(handle, key, "pending")) == .accepted);
+            }
+            const before_overflow = try ValueRowCounts.read(&storage);
+            try std.testing.expect((try storage.publishActionValue(handle, "overflow", "overflow payload")).refused == .backlog_full);
+            try std.testing.expectEqual(before_overflow, try ValueRowCounts.read(&storage));
+            try std.testing.expectEqual(@as(u64, 32), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_value WHERE action_id=?1", .{action_id}));
+        }
+    }.run);
+}
+
+test "APV-8 stopped and retired senders reject new values" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            for ([_]bool{ false, true }) |background| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                const session = try shared_fixtures.configureTestSessionWithMode(&storage, "values-session", "bypass");
+                const action_id = if (background) try NativePromotion.promoted(&storage, &tmp, session.slice()) else try NativePromotion.propose(&storage, &tmp, session.slice());
+                const binding = (try storage.admitNextActionAttempt(.fromFree(2, true), 30_000, .{})).?.permit.binding;
+                var input: action_domain.ActionExecutionInput = undefined;
+                try storage.readActionExecutionInput(.bash, binding, &input);
+                const handle = input.sender_handle.slice();
+                try std.testing.expect((try storage.publishActionValue(handle, "first", "one")) == .accepted);
+                if (background) {
+                    for (1..32) |index| {
+                        var key_buffer: [32]u8 = undefined;
+                        const key = try std.fmt.bufPrint(&key_buffer, "value-{d}", .{index});
+                        try std.testing.expect((try storage.publishActionValue(handle, key, "pending")) == .accepted);
+                    }
+                }
+                const before_stop = try store_testing.queryU64(&storage, "SELECT count(*) FROM action_value WHERE action_id=?1", .{action_id});
+                var stop = try completeSessionStop("values-stop", session.slice());
+                try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+                const stopped_counts = try ValueRowCounts.read(&storage);
+                try std.testing.expect((try storage.publishActionValue(handle, "after-stop", "stopped payload")).refused == .stopped);
+                try std.testing.expectEqual(stopped_counts, try ValueRowCounts.read(&storage));
+                try std.testing.expectEqual(before_stop, try store_testing.queryU64(&storage, "SELECT count(*) FROM action_value WHERE action_id=?1", .{action_id}));
+                try storage.revokeActionSender(binding);
+                const retired_counts = try ValueRowCounts.read(&storage);
+                try std.testing.expect((try storage.publishActionValue(handle, "new", "unknown payload")).refused == .unknown_handle);
+                try std.testing.expectEqual(retired_counts, try ValueRowCounts.read(&storage));
+            }
+        }
+    }.run);
+}
+
+test "APV-9 resolved Actions reject fresh publications" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try shared_fixtures.configureTestSessionWithMode(&storage, "values-resolved", "bypass");
+            const action_id = try NativePromotion.promoted(&storage, &tmp, session.slice());
+            const binding = (try storage.admitNextActionAttempt(.fromFree(2, true), 30_000, .{})).?.permit.binding;
+            var input: action_domain.ActionExecutionInput = undefined;
+            try storage.readActionExecutionInput(.bash, binding, &input);
+            const handle = input.sender_handle.slice();
+            try std.testing.expect((try storage.publishActionValue(handle, "saved", "value")) == .accepted);
+            _ = try storage.settleActionAttempt(binding, .succeeded, "done", .{});
+            try std.testing.expect((try storage.publishActionValue(handle, "fresh", "value")).refused == .unknown_handle);
+            // Exercise a resolved row with a still-present handle separately from normal retirement.
+            try store_testing.exec(&storage, "UPDATE action_operation SET sender_handle=?1 WHERE action_id=?2", .{ handle, action_id });
+            const resolved_counts = try ValueRowCounts.read(&storage);
+            try std.testing.expect((try storage.publishActionValue(handle, "fresh", "resolved payload")).refused == .resolved);
+            try std.testing.expectEqual(resolved_counts, try ValueRowCounts.read(&storage));
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_value WHERE action_id=?1", .{action_id}));
+        }
+    }.run);
+}
+
+test "APV-10 public pages omit Action values while preserving other inputs" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try shared_fixtures.configureTestSessionWithMode(&storage, "value-provenance", "bypass");
+            const action_id = try NativePromotion.promoted(&storage, &tmp, session.slice());
+            const binding = (try storage.admitNextActionAttempt(.fromFree(2, true), 30_000, .{})).?.permit.binding;
+            var input: action_domain.ActionExecutionInput = undefined;
+            try storage.readActionExecutionInput(.bash, binding, &input);
+            for (0..20) |index| {
+                var key_buffer: [32]u8 = undefined;
+                const key = try std.fmt.bufPrint(&key_buffer, "value-{d}", .{index});
+                try std.testing.expect((try storage.publishActionValue(input.sender_handle.slice(), key, "hidden value")) == .accepted);
+            }
+            for (0..20) |index| {
+                var key_buffer: [32]u8 = undefined;
+                const key = try std.fmt.bufPrint(&key_buffer, "visible-person-{d}", .{index});
+                try submitTestMessage(&storage, &tmp, key, key, session.slice(), "visible person");
+            }
+            const peer_text = "visible peer";
+            const file = try tmp.dir.createFile(std.testing.io, "visible-peer", .{ .read = true });
+            try file.writeStreamingAll(std.testing.io, peer_text);
+            try file.sync(std.testing.io);
+            var peer = try store_testing.completeMessage("visible-peer", session.slice(), file, peer_text);
+            defer peer.removeTemporaryContent(std.testing.io) catch unreachable;
+            peer.sender = .{ .store = storage.selector, .session = session };
+            peer.sender_handle = input.sender_handle;
+            try std.testing.expect(storage.submitMessageWithModel(&peer, null, .{}) == .accepted);
+            _ = try storage.settleActionAttempt(binding, .succeeded, "visible final", .{});
+
+            const queued = try store_core.activityPageForTesting(&storage, .{ .session = session, .kinds = .initOne(.received) });
+            try std.testing.expectEqual(@as(usize, 2), queued.count);
+            var peer_queued = false;
+            var final_queued = false;
+            for (queued.items[0..queued.count]) |item| {
+                const message = item.value.received;
+                try std.testing.expect(message.state == .queued);
+                if (message.sender != null) peer_queued = true;
+                if (message.source_action != null and message.source_action.? == action_id) final_queued = true;
+            }
+            try std.testing.expect(peer_queued and final_queued);
+            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            const hidden_admission = try store_testing.queryU64(&storage, "SELECT min(admission_position) FROM message_admission WHERE session_ref=?1 AND source_kind=4", .{session.slice()});
+            const hidden_entry = try store_testing.queryU64(&storage, "SELECT min(e.session_position) FROM conversation_entry e JOIN message_admission m ON m.admission_id=e.source_admission_id WHERE m.session_ref=?1 AND m.source_kind=4", .{session.slice()});
+            try std.testing.expectError(error.ContentNotFound, storage.openActivityContent(&.{ .session = session, .position = hidden_admission }));
+            try std.testing.expectError(error.ContentNotFound, storage.openActivityContent(&.{ .session = session, .position = hidden_entry }));
+            try std.testing.expectError(error.ContentNotFound, storage.openPublicConversationContent(&.{ .session = session, .position = hidden_entry }));
+
+            for ([_]@FieldType(protocol.ActivityPage, "direction"){ .forward, .backward }) |direction| {
+                var request: protocol.ActivityPage = .{ .session = session, .direction = direction, .kinds = .initMany(&.{ .admission, .received, .user }), .limit = 3 };
+                var person_count: usize = 0;
+                var peer_count: usize = 0;
+                var final_count: usize = 0;
+                var pages: usize = 0;
+                while (true) {
+                    const page = try store_core.activityPageForTesting(&storage, request);
+                    pages += 1;
+                    for (page.items[0..page.count]) |item| {
+                        const message = switch (item.value) {
+                            .admission, .received, .user => |value| value,
+                            else => unreachable,
+                        };
+                        try std.testing.expect(!std.mem.eql(u8, &message.content.identity().digest, &protocol.contentDigest("hidden value")));
+                        if (std.mem.eql(u8, &message.content.identity().digest, &protocol.contentDigest("visible person"))) person_count += 1;
+                        if (message.sender != null) peer_count += 1;
+                        if (message.source_action != null and message.source_action.? == action_id) final_count += 1;
+                    }
+                    if (!page.more) break;
+                    try std.testing.expectEqual(@as(usize, 3), page.count);
+                    request.end = page.end;
+                    request.position = page.items[page.count - 1].position;
+                    request.ordinal = page.items[page.count - 1].ordinal;
+                }
+                try std.testing.expect(pages > 1);
+                try std.testing.expectEqual(@as(usize, 40), person_count);
+                try std.testing.expectEqual(@as(usize, 2), peer_count);
+                try std.testing.expectEqual(@as(usize, 2), final_count);
+            }
+            var conversation: protocol.ConversationPage = .{ .session = session };
+            var person_count: usize = 0;
+            var peer_count: usize = 0;
+            var final_count: usize = 0;
+            var pages: usize = 0;
+            while (true) {
+                const page = try store_core.publicConversationPageForTesting(&storage, conversation);
+                pages += 1;
+                for (page.items[0..page.count]) |item| {
+                    try std.testing.expect(!std.mem.eql(u8, &item.content.identity().digest, &protocol.contentDigest("hidden value")));
+                    if (std.mem.eql(u8, &item.content.identity().digest, &protocol.contentDigest("visible person"))) person_count += 1;
+                    if (item.sender != null) peer_count += 1;
+                    if (item.source_action != null and item.source_action.? == action_id) final_count += 1;
+                }
+                if (!page.more) break;
+                try std.testing.expectEqual(@as(usize, 16), page.count);
+                conversation.end = page.end;
+                conversation.before_position = page.items[page.count - 1].position;
+                conversation.before_ordinal = page.items[page.count - 1].ordinal;
+            }
+            try std.testing.expect(pages > 1);
+            try std.testing.expectEqual(@as(usize, 20), person_count);
+            try std.testing.expectEqual(@as(usize, 1), peer_count);
+            try std.testing.expectEqual(@as(usize, 1), final_count);
+            try std.testing.expectError(error.InvalidCursor, store_core.publicConversationPageForTesting(&storage, .{ .session = session, .end = conversation.end, .before_position = hidden_entry }));
+            try NativePromotion.finishModel(&storage, &tmp, model);
         }
     }.run);
 }

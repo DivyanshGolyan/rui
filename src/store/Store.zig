@@ -772,6 +772,18 @@ pub const Store = struct {
         return self.noteControl(transition.apply(self, command_domain.DecidePermission, .{ .command = command, .denial_reason = "declined: a new message arrived; ask again if still needed" }, faults) catch .infrastructure_failure);
     }
 
+    pub fn publishActionValue(self: *Store, handle: []const u8, key: []const u8, payload: []const u8) !@import("domain/action_value.zig").Result {
+        return self.queue().write(publishActionValueHeld, .{ self, handle, key, payload, Faults{} });
+    }
+
+    pub fn publishActionValueForTesting(self: *Store, handle: []const u8, key: []const u8, payload: []const u8, faults: Faults) !@import("domain/action_value.zig").Result {
+        return self.queue().write(publishActionValueHeld, .{ self, handle, key, payload, faults });
+    }
+
+    fn publishActionValueHeld(self: *Store, handle: []const u8, key: []const u8, payload: []const u8, faults: Faults) !@import("domain/action_value.zig").Result {
+        return transition.apply(self, @import("domain/action_value.zig").Publish, .{ .handle = handle, .key = key, .bytes = payload }, faults);
+    }
+
     pub fn backgroundAction(self: *Store, source: action_control_domain.Control.Source, faults: Faults) @import("../action_control.zig").Reply {
         EntryTrace.fromControl(faults.control_trace).mark(.requested);
         return self.queue().write(backgroundActionHeld, .{ self, source, faults });

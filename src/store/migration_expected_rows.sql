@@ -55,10 +55,10 @@ INSERT INTO model_interruption_command(command_key,session_ref,turn_id,operation
 INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,purpose,compaction_trigger,output_reservation,reasoning_effort,output_item_count,attempt_ordinal,auth_refresh_claimed,retry_due_at_ms,last_failure_code,resolution_code,resolution_content_id,response_id,model_evidence,request_id,usage_uncached_tokens,usage_cache_read_tokens,usage_cache_write_tokens,usage_output_tokens,interrupted_by_command_key,attempt_at,retry_scheduled_at,resolved_at,tool_set_id,context_window) VALUES
 (1,1,'d8mv7p',1,1,3,0,115200,0,NULL,1,1,0,NULL,NULL,'answer',5,NULL,X'01000000000000',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,1793781720,4,128000),
 (2,2,'brhkcj',1,2,3,0,115200,0,NULL,2,1,0,NULL,NULL,'tool_proposals',NULL,NULL,X'01000000000000',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,1793781720,2,128000);
-INSERT INTO conversation_entry(session_ref,entry_ordinal,session_position,entry_kind,turn_id,source_admission_id,source_revision,source_operation_id,source_item_ordinal,content_id,recorded_at) VALUES
-('brhkcj',1,2,1,2,2,NULL,NULL,NULL,6,1793781720),
-('d8mv7p',1,2,1,1,1,NULL,NULL,NULL,2,1793781720),
-('d8mv7p',2,4,3,1,NULL,NULL,1,0,5,1793781720);
+INSERT INTO conversation_entry(session_ref,entry_ordinal,session_position,entry_kind,turn_id,source_admission_id,source_kind,source_revision,source_operation_id,source_item_ordinal,content_id,recorded_at) VALUES
+('brhkcj',1,2,1,2,2,1,NULL,NULL,NULL,6,1793781720),
+('d8mv7p',1,2,1,1,1,1,NULL,NULL,NULL,2,1793781720),
+('d8mv7p',2,4,3,1,NULL,NULL,NULL,1,0,5,1793781720);
 INSERT INTO model_output_item(operation_id,item_ordinal,session_ref,session_position,item_kind,message_content_id,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,phase,extras_content_id,part_count,description,call_failed) VALUES
 (1,0,'d8mv7p',4,2,5,1,X'39dbe3cba52908fdb3610df812d007a7fc134eea8803b34a97e9aa229d815fae',0,0,4,1,NULL,0),
 (2,0,'brhkcj',4,3,NULL,1,X'0fdadc71d7984bbccd4a62ba37f7193aa30afb66119760165a70058d4aea629d',0,0,7,0,NULL,0),
