@@ -764,7 +764,9 @@ def detached_settings_checks(root, env):
             assert checked.returncode == 0 and not checked.stdout, (name, checked)
         else:
             assert checked.returncode == 2, (name, checked)
-            assert not checked.stdout and "[settings_invalid]" in checked.stderr and reason in checked.stderr, (name, checked)
+            failure = json.loads(checked.stdout)["rui_start_error"]
+            assert failure["code"] == "settings_invalid" and reason in failure["message"], (name, checked)
+            assert "[settings_invalid]" in checked.stderr and reason in checked.stderr, (name, checked)
         assert not matching_processes(directory), (name, checked)
     for arguments, reason in (
             (("--settings", "-"), "no stdin"),
@@ -773,7 +775,9 @@ def detached_settings_checks(root, env):
             (("--set", "interface.lifetime=stdin"), "no stdin")):
         checked = host_command(env, "settings", "--check", "--store", directory, *arguments)
         assert checked.returncode == 2, (arguments, checked)
-        assert not checked.stdout and "[settings_invalid]" in checked.stderr and reason in checked.stderr, checked
+        failure = json.loads(checked.stdout)["rui_start_error"]
+        assert failure["code"] == "settings_invalid" and reason in failure["message"], checked
+        assert "[settings_invalid]" in checked.stderr and reason in checked.stderr, checked
     # No database, diagnostics or lease was created by a check.
     assert {path.name for path in directory.iterdir()} == original_files
     assert json.loads((directory / "host.json").read_text()) == {"providers": {}}
@@ -1445,7 +1449,7 @@ def saved_path_refusal(root, env):
     saved.write_text(json.dumps({"providers": {"openai": {"key": {"env": "PR7C_ABSENT_KEY"}}}}))
     before = saved.read_bytes()
     edit = host_command(env, "set", "--store", directory, "tools.bash.path", "relative/bash")
-    assert edit.returncode == 2 and not edit.stdout and saved.read_bytes() == before, edit
+    assert edit.returncode == 2 and json.loads(edit.stdout)["rui_start_error"] == failure and saved.read_bytes() == before, edit
     assert edit.stderr.split(": ", 2)[2] == start.stderr.split(": ", 2)[2], (edit, start)
     after = run_start(directory, env)
     assert after.returncode == 1 and "tools.bash.path" not in after.stderr, after

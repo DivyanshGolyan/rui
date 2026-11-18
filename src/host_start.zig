@@ -583,7 +583,7 @@ pub fn writeSentence(writer: *std.Io.Writer, attempt: Attempt, failure: *const s
 
 pub noinline fn report(io: std.Io, attempt: Attempt, failure: *const start_report.Failure) void {
     var buffer: [start_report.max_line_bytes]u8 = undefined;
-    if (attempt == .start) std.Io.File.stdout().writeStreamingAll(io, start_report.line(failure, &buffer)) catch {};
+    std.Io.File.stdout().writeStreamingAll(io, start_report.line(failure, &buffer)) catch {};
     var writer = std.Io.Writer.fixed(&buffer);
     writeSentence(&writer, attempt, failure) catch unreachable;
     const sentence = writer.buffered();
@@ -1001,10 +1001,9 @@ test "Host start pipe file and assignment admissions report every code on both s
                         Probe.used = .{ 0, 0 };
                         Probe.attempted = .{ false, false };
                         report(io, attempt, &failure);
-                        try std.testing.expectEqual(attempt == .start, Probe.attempted[0]);
+                        try std.testing.expect(Probe.attempted[0]);
                         try std.testing.expect(Probe.attempted[1]);
-                        if (attempt == .start and refused != 0) try std.testing.expectEqualStrings("{\"rui_start_error\":{\"code\":\"" ++ @tagName(code) ++ "\",\"message\":" ++ message.json ++ "}}\n", Probe.output[0][0..Probe.used[0]]);
-                        if (attempt != .start) try std.testing.expectEqual(@as(usize, 0), Probe.used[0]);
+                        if (refused != 0) try std.testing.expectEqualStrings("{\"rui_start_error\":{\"code\":\"" ++ @tagName(code) ++ "\",\"message\":" ++ message.json ++ "}}\n", Probe.output[0][0..Probe.used[0]]);
                         const prefix = switch (attempt) {
                             .start => "the Host did not start",
                             .save => "the setting was not saved",
