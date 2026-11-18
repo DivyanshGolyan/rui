@@ -1362,6 +1362,7 @@ fn advanceBash(host: *Host, slots: []ExecutionSlot, workspace: *Workspace) bool 
             }
             if (service.leader_observed_with_open_pipes) {
                 traceAction(host, "bash_leader_observed_with_open_pipes", active.binding);
+                if (comptime test_pause.enabled) reachAction(host, .action_bash_exit_observed, active.binding);
                 pause(host, .bash_exit_observed);
             }
             if (service.fault) |err| {
