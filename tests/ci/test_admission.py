@@ -490,6 +490,50 @@ class CandidatePlanTest(unittest.TestCase):
                     'linux_memory', 'cache_execution', 'typecheck_macos'):
             self.assertEqual(output[key], 'false', key)
 
+    # CI-1: written as literals, independent of select_tests' tier constants.
+    PR_TIER_NEVER = {'check', 'check-full', 'test', 'test-full', 'stack-frames', 'mysql-wire-integration'}
+    PR_TIER_CASES = {
+        'documentation': (['README.md'], set(), set()),
+        'tests/ci only': (['tests/ci/select_tests.py'], set(), set()),
+        'unreached source': (['src/future_owner.zig'], {'test-logic', 'test-native'}, set()),
+        'slow fixture owner': (['src/Upgrade.zig'], {'test-logic', 'upgrade-integration'}, set()),
+        'build hub': (['build.zig'],
+                      {'admission-debug-integration', 'canonical-failure-integration', 'codex-h2-integration',
+                       'current-facts-integration', 'installer-integration', 'login-signal-integration',
+                       'server-delivery-integration', 'test-logic', 'test-native', 'transport-h2-integration'}, set()),
+        'portable core': (['src/request_encoding.zig'], {'test-logic', 'test-native', 'dispatch-integration'},
+                          {'test-store', 'human-cli-integration', 'upgrade-integration'}),
+        'Store': (['src/store.zig'], {'test-logic', 'test-native', 'test-store', 'dispatch-debug-integration'},
+                  {'human-cli-integration', 'upgrade-integration'}),
+        'Mac path': (['src/client.zig'], {'test-logic', 'test-native', 'human-cli-integration', 'request-wait-integration'},
+                     {'test-store', 'upgrade-integration'}),
+    }
+
+    def test_ready_candidate_runs_its_pr_tier_and_promotion_the_full_selection(self):
+        from ci_plan import plan
+        from docs_only import ChangeKind
+        available = set(build_files.steps())
+        exact = {'documentation', 'tests/ci only', 'unreached source', 'slow fixture owner', 'build hub'}
+        for name, (paths, required, forbidden) in self.PR_TIER_CASES.items():
+            with self.subTest(case=name):
+                selected = select(paths, 'review', available)
+
+                def run(event, draft=False, promotion=False):
+                    return plan(selected, event_name=event, draft=draft, promotion=promotion,
+                                change_kind=ChangeKind.NORMAL).outputs
+                ready = set(run('pull_request')['targets'])
+                if name in exact:
+                    self.assertEqual(ready, required)
+                else:
+                    self.assertLessEqual(required, ready)
+                self.assertFalse(ready & (forbidden | self.PR_TIER_NEVER), sorted(ready & (forbidden | self.PR_TIER_NEVER)))
+                self.assertEqual(run('pull_request', draft=True)['targets'], [])
+                self.assertEqual(run('workflow_dispatch')['targets'], selected['targets'])
+                promoted = set(run('workflow_dispatch', promotion=True)['targets'])
+                self.assertLessEqual({'check-full', 'test-logic', 'admission-debug-integration', 'stack-frames'}, promoted)
+                from select_tests import covers
+                self.assertEqual([t for t in selected['targets'] if not covers(t, promoted)], [])
+
     def test_executed_plan_uses_pinned_tree_and_recomputes_after_base_change(self):
         with PlanFixture() as fixture:
             fixture.write('src/history_memo.zig', 'changed owner\n')

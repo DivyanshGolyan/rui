@@ -720,51 +720,6 @@ class SelectionTest(unittest.TestCase):
                           if mysql_provisioning([target], "all", "linux", set())["live_postgres"]},
                          LIVE_POSTGRES_TARGETS)
 
-    def test_pr_fast_tier_over_change_classes(self):
-        from ci_plan import plan
-        from docs_only import ChangeKind
-        from select_tests import PROMOTION_ONLY, SLOW_FIXTURES, STORE_PATHS, WHOLE_SUITE_GATES
-        cases = {
-            "documentation": (["README.md"], set(), set()),
-            "tests/ci only": (["tests/ci/select_tests.py"], set(), set()),
-            "portable core": (["src/request_encoding.zig"], {"test-logic"}, {"test-store", "human-cli-integration"}),
-            "Store": (["src/store.zig"], {"test-logic", "test-native", "test-store"}, set()),
-            "Mac path": (["src/client.zig"], {"test-logic", "test-native", "human-cli-integration"},
-                         {"upgrade-integration", "test-store"}),
-            "build hub": (["build.zig"], {"test-logic", "test-native"},
-                          {"human-cli-integration", "upgrade-integration", "test-store"}),
-            "unreached source": (["src/future_owner.zig"], {"test-logic", "test-native"}, set()),
-            "slow fixture's own owner": (["src/Upgrade.zig"], {"upgrade-integration"}, set()),
-        }
-        for name, (paths, present, absent) in cases.items():
-            with self.subTest(case=name):
-                selected = select(paths, "review", AVAILABLE)
-                fast = set(selected["fast_targets"])
-                self.assertLessEqual(present, fast)
-                self.assertFalse(fast & (absent | WHOLE_SUITE_GATES | PROMOTION_ONLY))
-                if not selected["targets"]:
-                    self.assertEqual(fast, set())
-                for slow in SLOW_FIXTURES & fast:
-                    scripts, executables, owners = FIXTURES[slow]
-                    self.assertTrue(any(matches(path, (*scripts, *executables, *owners)) for path in paths))
-                if "test-store" in fast:
-                    self.assertTrue(any(matches(path, STORE_PATHS) for path in paths))
-                outputs = {}
-                for event, draft, promotion in (("pull_request", True, False), ("pull_request", False, False),
-                                                ("workflow_dispatch", False, False), ("workflow_dispatch", False, True)):
-                    outputs[event, draft, promotion] = plan(selected, event_name=event, draft=draft, promotion=promotion,
-                                                            change_kind=ChangeKind.NORMAL).outputs
-                self.assertEqual(outputs["pull_request", True, False]["targets"], [])
-                ready = outputs["pull_request", False, False]
-                self.assertEqual(ready["targets"], selected["fast_targets"])
-                for row in ready["linux_matrix"]["include"]:
-                    self.assertFalse(row["live_mysql"] or row["mysql_dialect"] or row["live_postgres"], row)
-                self.assertEqual(outputs["workflow_dispatch", False, False]["targets"], selected["targets"])
-                self.assertIn("check-full", outputs["workflow_dispatch", False, True]["targets"])
-                compiled = plan(selected, event_name="push", draft=False, promotion=False,
-                                change_kind=ChangeKind.NORMAL, compile_only=True).outputs
-                self.assertEqual(compiled["targets"], ["check", "test-logic"])
-
     def test_portable_owner_does_not_require_full_suite(self):
         result = select(["src/request_encoding.zig"], "review", AVAILABLE)
         self.assertIn("test-logic", result["targets"])
