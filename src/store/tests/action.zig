@@ -746,8 +746,8 @@ test "Action read covers permission queue attempt and immutable final paging" {
                 try std.testing.expect(result.status == .resolved);
                 const first = result.status.resolved;
                 try std.testing.expectEqualStrings("succeeded", first.resolution.code.slice());
-                try std.testing.expectEqual(bytes.len, first.resolution.content.length);
-                try std.testing.expectEqualSlices(u8, &protocol.contentDigest(bytes), &first.resolution.content.digest);
+                try std.testing.expectEqual(bytes.len, first.resolution.content.text.length);
+                try std.testing.expectEqualSlices(u8, &protocol.contentDigest(bytes), &first.resolution.content.text.digest);
                 try std.testing.expectEqualSlices(u8, bytes[0..first.window.next], first.window.text.slice());
                 try std.testing.expect(first.window.more == (bytes.len > status.window_bytes));
                 try std.testing.expect(std.unicode.utf8ValidateSlice(first.window.text.slice()));
@@ -1291,8 +1291,8 @@ test "background final input joins the next Turn boundary without changing an in
                     .received, .user => |message| if (message.source_action) |source| {
                         try std.testing.expectEqual(action, source);
                         try std.testing.expect(message.sender == null);
-                        try std.testing.expectEqual(@as(u64, text.len), message.content.length);
-                        try std.testing.expectEqualSlices(u8, &protocol.contentDigest(text), &message.content.digest);
+                        try std.testing.expectEqual(@as(u64, text.len), message.content.text.length);
+                        try std.testing.expectEqualSlices(u8, &protocol.contentDigest(text), &message.content.text.digest);
                         if (item.value == .received) received += 1;
                     },
                     else => {},
@@ -1305,7 +1305,7 @@ test "background final input joins the next Turn boundary without changing an in
                 for (public.items[0..public.count]) |item| if (item.source_action) |source| {
                     try std.testing.expectEqual(action, source);
                     try std.testing.expect(item.sender == null);
-                    try std.testing.expectEqualSlices(u8, &protocol.contentDigest(text), &item.content.digest);
+                    try std.testing.expectEqualSlices(u8, &protocol.contentDigest(text), &item.content.text.digest);
                     projected += 1;
                 };
                 try std.testing.expectEqual(@as(usize, 1), projected);

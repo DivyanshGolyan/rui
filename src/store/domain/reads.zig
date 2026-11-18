@@ -4,6 +4,7 @@ const command_reply = @import("../../command_reply.zig");
 const word_search = @import("../../word_search.zig");
 const pages = @import("../../os/pages.zig");
 const activity_facts = @import("../../activity_facts.zig");
+const content_value = @import("../../content_value.zig");
 const conversation_read = @import("../../conversation_read.zig");
 const activity_read = @import("../../activity_read.zig");
 const session_settings = @import("../../session_settings.zig");
@@ -479,7 +480,7 @@ pub fn publicConversationPage(a: *ReadAccess, request: *const conversation_read.
             4 => .tool_result,
             5 => .hosted_call,
             else => return error.CorruptStore,
-        }, .content = .{ .length = 0, .digest = content_string.digest("") } };
+        }, .content = .{ .text = .{ .length = 0, .digest = content_string.digest("") } } };
         if (row.kind == 5) {
             if (row.ordinal != 0) return error.CorruptStore;
         } else if ((row.content_id orelse 0) == 0 or (row.kind == 4) != (row.ordinal > 0)) return error.CorruptStore;
@@ -539,7 +540,7 @@ noinline fn readPublicRows(a: *ReadAccess, session: []const u8, rows: []const pu
         .hosted => {},
         .content => |*content| {
             try content.takeMetadata(a);
-            item.content = .{ .length = content.content.metadata.length, .digest = content.content.metadata.digest };
+            item.content = .{ .text = .{ .length = content.content.metadata.length, .digest = content.content.metadata.digest } };
             if (item.sender != null) try read.label.found();
             if (content.content.tool_operation != null) {
                 try read.presentation.checkCall();
@@ -1483,7 +1484,7 @@ const ItemRead = struct {
     position: u64,
     ordinal: u64,
     item: *activity_facts.Item,
-    content: ?struct { id: u64, value: *const activity_facts.Item.Content } = null,
+    content: ?struct { id: u64, value: content_value.Reference } = null,
     round: u8 = 0,
     done: bool = false,
     kind: u8 = 0,
@@ -1612,7 +1613,7 @@ const ItemRead = struct {
                     return;
                 }
                 const content = try content_parts.publicMetadata(a, message.read.content_id, &message.metadata);
-                message.read.message.content = .{ .length = content.length, .digest = content.digest };
+                message.read.message.content = .{ .text = .{ .length = content.length, .digest = content.digest } };
                 if (message.read.message.sender != null) try message.label.found();
                 item.at = message.read.message.admitted_at;
                 if (kind == 2) {
@@ -1621,7 +1622,7 @@ const ItemRead = struct {
                     if (message.entry.content.id != message.read.content_id) return error.CorruptStore;
                     item.at = message.entry.content.at;
                 }
-                read.exposes(message.read.content_id, &message.read.message.content);
+                read.exposes(message.read.content_id, message.read.message.content.text);
             },
             3, 5 => {
                 const content = &read.state.content;
@@ -1631,16 +1632,16 @@ const ItemRead = struct {
                         try content.read.takeMetadata(a);
                         const found = content.read.content;
                         item.at = found.at;
-                        const value: activity_facts.Item.Content = .{ .length = found.metadata.length, .digest = found.metadata.digest };
+                        const value: content_value.Reference = .{ .length = found.metadata.length, .digest = found.metadata.digest };
                         if (read.kind == 3) {
                             item.value = .{ .assistant = .{ .content = value, .final = content.answer != null } };
-                            read.exposes(@intCast(found.id), &item.value.assistant.content);
+                            read.exposes(@intCast(found.id), value);
                             read.done = true;
                             return;
                         }
                         if (found.tool_operation == null) return error.CorruptStore;
-                        item.value.tool_result.content = value;
-                        read.exposes(@intCast(found.id), &item.value.tool_result.content);
+                        item.value.tool_result.content = .{ .text = value };
+                        read.exposes(@intCast(found.id), value);
                         return content.presentation.checkCall();
                     },
                     else => try content.presentation.finish(),
@@ -1650,7 +1651,7 @@ const ItemRead = struct {
                 const call = &read.state.call;
                 if (read.round == 1) {
                     try call.proposal.found();
-                    read.exposes(call.proposal.arguments_content_id, &call.proposal.arguments);
+                    read.exposes(call.proposal.arguments_content_id, call.proposal.arguments);
                     return;
                 }
                 if (!call.found.get()) return error.CorruptStore;
@@ -1669,9 +1670,9 @@ const ItemRead = struct {
                     return;
                 }
                 const content = try content_parts.publicMetadata(a, sent.read.content_id, &sent.metadata);
-                item.value.sent.content = .{ .length = content.length, .digest = content.digest };
+                item.value.sent.content = .{ .text = .{ .length = content.length, .digest = content.digest } };
                 try sent.label.found();
-                read.exposes(sent.read.content_id, &item.value.sent.content);
+                read.exposes(sent.read.content_id, item.value.sent.content.text);
             },
             9 => {
                 const failure = &read.state.failure;
@@ -1691,7 +1692,7 @@ const ItemRead = struct {
                 } else {
                     const content = try content_parts.publicMetadata(a, outcome.read.content_id.?, &outcome.metadata);
                     item.value.turn_ended.content = .{ .length = content.length, .digest = content.digest };
-                    read.exposes(outcome.read.content_id.?, &item.value.turn_ended.content.?);
+                    read.exposes(outcome.read.content_id.?, item.value.turn_ended.content.?);
                 }
             },
             7 => {
@@ -1713,7 +1714,7 @@ const ItemRead = struct {
                 if (read.round == 2) {
                     try approval.proposal.found();
                     if (approval.metadata.action != request.action or approval.metadata.operation != request.operation or approval.metadata.call_ordinal != request.call_ordinal) return error.CorruptStore;
-                    read.exposes(approval.proposal.arguments_content_id, &approval.proposal.arguments);
+                    read.exposes(approval.proposal.arguments_content_id, approval.proposal.arguments);
                     return;
                 }
                 if (!approval.found.get()) return error.CorruptStore;
@@ -1803,7 +1804,7 @@ const ItemRead = struct {
         }
     }
 
-    fn exposes(read: *ItemRead, id: u64, value: *const activity_facts.Item.Content) void {
+    fn exposes(read: *ItemRead, id: u64, value: content_value.Reference) void {
         read.content = .{ .id = id, .value = value };
     }
 
@@ -1939,7 +1940,7 @@ pub const ProposalRead = struct {
     metadata: ?*activity_read.ProposalMetadata = null,
     count: RowCount = .{},
     arguments_content_id: u64 = 0,
-    arguments: activity_facts.Item.Content = undefined,
+    arguments: content_value.Reference = undefined,
 
     pub fn visit(read: *ProposalRead, row: *const proposal_row.Row) bool {
         return visitRow(read, row);

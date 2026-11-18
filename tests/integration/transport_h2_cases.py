@@ -82,15 +82,18 @@ def open_descriptors(pid):
     return sum("etilqs_" not in name for name in os_semantics.open_descriptor_names(pid))
 
 
-def assert_round_trip_history(streams, capacity, rounds, answers):
+def assert_round_trip_history(streams, capacity, rounds, answers, sessions):
     assert len(streams) == rounds * capacity, "history request population"
     assert {text for _, _, text, _ in streams} == {
         f"h2-{capacity}-{round_number}-{index}"
         for round_number in range(rounds) for index in range(capacity)
     }, "history request identities"
     requests = {text: (stream, body) for _, stream, text, body in streams}
+    assert len(sessions) == capacity, "history session population"
     for index in range(capacity):
-        expected = []
+        prompt = dispatch.model_instructions(dispatch.ROOT, store=None, session=sessions[index], model="gpt-6-sol")
+        baseline = {"role": "developer", "content": [{"type": "input_text", "text": prompt}]}
+        expected = [baseline]
         for wave in range(rounds):
             text = f"h2-{capacity}-{wave}-{index}"
             stream, body = requests[text]
@@ -201,7 +204,7 @@ def round_trip(root, endpoint, capacity, ca_file, rounds=2, *, observe=None):
         streams = list(endpoint.streams)
         assert len(streams) == rounds * capacity
         assert len({(address, stream) for address, stream, _, _ in streams}) == len(streams)
-        assert_round_trip_history(streams, capacity, rounds, endpoint.answers)
+        assert_round_trip_history(streams, capacity, rounds, endpoint.answers, sessions)
         assert len(endpoint.connections) == 1, endpoint.connections
         if endpoint.observed_shape:
             assert endpoint.offered_bytes >= rounds * capacity * (37_217 + 37_221 + 39_316 + 48 * 218)

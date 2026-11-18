@@ -28,8 +28,9 @@ class ImageInputFixtures(unittest.TestCase):
         self.assertEqual(png, base64.b64decode((fixtures / "pixel.base64").read_bytes(), validate=True))
         for version in (1, 2, 3):
             request = json.loads((fixtures / f"{version}-image.json").read_text())
-            user = request["input"][1]
-            tool = request["input"][3]
+            history = request["input"] if version == 1 else request["input"][1:]
+            user = history[1]
+            tool = history[3]
             self.assertEqual("screenshot-call", tool["call_id"])
             for image in (user["content"][3], tool["output"][1]):
                 self.assertEqual("input_image", image["type"])

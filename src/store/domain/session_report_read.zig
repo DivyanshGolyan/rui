@@ -506,7 +506,7 @@ fn resolvedRow(row: *const resolved_actions.Row) ValuesError!session_report.Row 
             .call_ordinal = row.call_ordinal,
             .code = row.resolution_code.slice(),
             .acceptance_position = row.acceptance_position.get(),
-            .result = .{ .length = row.result_length, .digest = row.result_digest },
+            .result = .{ .text = .{ .length = row.result_length, .digest = row.result_digest } },
             .presentation = try reads_domain.presentationOf(row.description, try presentedCode(row.resolution_code.slice()), null, optional(row.publication)),
         },
     };

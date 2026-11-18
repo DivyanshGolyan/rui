@@ -18,6 +18,15 @@ RUI = pathlib.Path(sys.argv[1]).resolve()
 ROOT = pathlib.Path.cwd()
 
 
+def request_system_prompt(request):
+    if "instructions" in request:
+        return request["instructions"]
+    first = request["input"][0]
+    text = first["content"][0]["text"]
+    assert first == {"role": "developer", "content": [{"type": "input_text", "text": text}]}, first
+    return text
+
+
 MODEL_CONTEXT_PARTS = (pathlib.Path(__file__).resolve().parents[2] / "src" / "model_instructions.txt").read_text().split("{}")
 
 

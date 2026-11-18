@@ -488,7 +488,7 @@ test "inline skills a peer Session's Message may list the recipient's skills" {
             };
             try std.testing.expectEqualStrings("skills-peer-accept", received.key.slice());
             try std.testing.expectEqualStrings(sender.slice(), received.sender.?.session.slice());
-            try std.testing.expectEqualSlices(u8, &protocol.contentDigest(authored), &received.content.digest);
+            try std.testing.expectEqualSlices(u8, &protocol.contentDigest(authored), &received.content.text.digest);
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_skill k JOIN message_admission m ON m.admission_id=k.admission_id JOIN content c ON c.content_id=k.content_id WHERE m.command_key='skills-peer-accept' AND k.position=1 AND k.name='demo' AND c.digest=?1", .{store_testing.Blob{ .bytes = &protocol.contentDigest(body) }}));
         }
     }.run);
@@ -799,7 +799,7 @@ test "inline skills keep the typed text once and project each bound skill as its
             try std.testing.expect(reply == .accepted);
             try std.testing.expectEqualSlices(u8, &protocol.contentDigest(typed), &reply.accepted.content.digest);
             const page = try store_core.activityPageForTesting(&storage, .{ .session = session, .kinds = .initOne(.admission) });
-            try std.testing.expectEqualSlices(u8, &protocol.contentDigest(typed), &page.items[0].value.admission.content.digest);
+            try std.testing.expectEqualSlices(u8, &protocol.contentDigest(typed), &page.items[0].value.admission.content.text.digest);
             try std.testing.expectEqual(@as(u64, 7), try store_testing.queryU64(&storage, "SELECT count(DISTINCT content_id) FROM message_skill", .{}));
             _ = (try storage.admitNextModelAttempt(.{})).?;
             const Entry = struct { kind: u64, skill: u64, name: []const u8, bytes: []const u8 };

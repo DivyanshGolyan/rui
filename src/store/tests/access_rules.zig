@@ -72,6 +72,7 @@ test "Store entry points queue and fence only through canonical access" {
         @embedFile("../mysql_literal.zig"),
         @embedFile("../mysql_row.zig"),
         @embedFile("../rsql.zig"),
+        @embedFile("../rsql_table.zig"),
         @embedFile("../schema.zig"),
         @embedFile("../sqlite.zig"),
         @embedFile("../testing.zig"),

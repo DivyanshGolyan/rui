@@ -1020,7 +1020,7 @@ test "feed_window target capacity admits whole entries atomically across trim re
     window.* = .{};
     var prepared: viewport.Sized(1024, true) = .{};
     var targets: [16]MessageTarget = undefined;
-    const reference: View.Collapsed = .{ .source = .activity, .position = 1, .ordinal = 0, .content = .{ .length = 99, .digest = @splat(7) }, .row = false };
+    const reference: View.Collapsed = .{ .source = .activity, .position = 1, .ordinal = 0, .content = .{ .text = .{ .length = 99, .digest = @splat(7) } }, .row = false };
     for (&targets, 0..) |*target, index| {
         target.* = .{ .offset = index * "┄\n".len, .target = reference };
         try prepared.append(View.Mark.summary ++ "┄" ++ View.Mark.reset ++ "\n");

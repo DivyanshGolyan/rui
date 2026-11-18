@@ -340,21 +340,6 @@ pub const SessionField = session_settings.SessionField;
 
 pub const ActivityItem = activity_facts.Item;
 
-pub const ContentJson = struct {
-    value: ActivityItem.Content,
-
-    pub const openapi_name = "ActivityItemContent";
-    pub const json_shape = .{ "{\"bytes\":\"", Hole.decimal, "\",\"sha256\":\"", Hole{ .hex = 32 }, "\"}" };
-    pub const max_json_bytes = shapeBytes(json_shape);
-
-    pub fn optional(value: ?ActivityItem.Content) ?ContentJson {
-        return if (value) |content| .{ .value = content } else null;
-    }
-
-    pub fn writeJson(self: *const ContentJson, out: *std.Io.Writer) !void {
-        try writeShape(out, json_shape, .{ self.value.length, self.value.digest });
-    }
-};
 pub const ReadActivityContent = activity_read.ReadActivityContent;
 pub const ReadSkillSuggestions = struct {
     store: Bounded(max_store_bytes) = .{},
@@ -486,9 +471,9 @@ pub const FirstMessage = struct {
     admission: u64,
     admitted_at: u64,
     sender: ?Peer,
-    content: ActivityItem.Content,
+    content: content_value.Value,
 
-    pub const json_shape = .{ "{\"position\":\"", Hole.decimal, "\",\"admission\":\"", Hole.decimal, "\",\"admitted_at\":\"", Hole.decimal, "\",\"sender\":", Hole{ .optional_json = Peer }, ",\"content\":", Hole{ .json = ContentJson }, "}" };
+    pub const json_shape = .{ "{\"position\":\"", Hole.decimal, "\",\"admission\":\"", Hole.decimal, "\",\"admitted_at\":\"", Hole.decimal, "\",\"sender\":", Hole{ .optional_json = Peer }, ",\"content\":", Hole{ .json = ContentValueJson }, "}" };
     pub const max_json_bytes = shapeBytes(json_shape);
 
     pub fn fromCore(first: session_list.FirstMessage) FirstMessage {
@@ -497,12 +482,12 @@ pub const FirstMessage = struct {
             .admission = first.admission,
             .admitted_at = first.admitted_at,
             .sender = if (first.sender) |sender| .{ .session = sender } else null,
-            .content = .{ .length = first.length, .digest = first.digest },
+            .content = first.content,
         };
     }
 
     pub fn writeJson(self: *const FirstMessage, out: *std.Io.Writer) !void {
-        try writeShape(out, json_shape, .{ self.position, self.admission, self.admitted_at, self.sender, ContentJson{ .value = self.content } });
+        try writeShape(out, json_shape, .{ self.position, self.admission, self.admitted_at, self.sender, ContentValueJson{ .value = self.content } });
     }
 };
 
@@ -2212,6 +2197,15 @@ pub const ContentValueJson = struct {
     pub const openapi_shapes = .{ text_shape, parts_shape };
     pub const max_json_bytes = maxShapeBytes(openapi_shapes);
 
+    /// Model text, which is never parts: an answer, an outcome, a call field.
+    pub fn text(reference: content_value.Reference) ContentValueJson {
+        return .{ .value = .{ .text = reference } };
+    }
+
+    pub fn optionalText(reference: ?content_value.Reference) ?ContentValueJson {
+        return if (reference) |value| text(value) else null;
+    }
+
     pub fn writeJson(self: *const ContentValueJson, out: *std.Io.Writer) !void {
         switch (self.value) {
             .text => |reference| try writeShape(out, text_shape, .{ reference.length, reference.digest }),
@@ -2432,8 +2426,8 @@ pub const action_stop_reply = struct {
 pub const action_read_reply = struct {
     pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"action_read\",\"session\":", session_hole, ",\"action\":\"", Hole.decimal, "\"," };
     pub const pending = .{ "\"state\":\"", Hole{ .tag = @import("action_read.zig").PendingState }, "\",\"final\":null}" };
-    pub const final = .{ "\"state\":\"resolved\",\"final\":{\"position\":\"", Hole.decimal, "\",\"code\":", Hole{ .string = max_code_bytes }, ",\"content\":{\"bytes\":\"", Hole.decimal, "\",\"sha256\":\"", Hole{ .hex = 32 }, "\"},\"window\":{\"offset\":\"", Hole.decimal, "\",\"next\":\"", Hole.decimal, "\",\"more\":", Hole.boolean, ",\"text\":", Hole{ .string = content_window_bytes }, "}}}" };
-    pub const parts = .{ "\"state\":\"resolved\",\"final\":{\"position\":\"", Hole.decimal, "\",\"code\":", Hole{ .string = max_code_bytes }, ",\"content\":{\"type\":\"parts\",\"bytes\":\"", Hole.decimal, "\",\"sha256\":\"", Hole{ .hex = 32 }, "\"},\"window\":null}}" };
+    pub const final = .{ "\"state\":\"resolved\",\"final\":{\"position\":\"", Hole.decimal, "\",\"code\":", Hole{ .string = max_code_bytes }, ",\"content\":", Hole{ .json = ContentValueJson }, ",\"window\":{\"offset\":\"", Hole.decimal, "\",\"next\":\"", Hole.decimal, "\",\"more\":", Hole.boolean, ",\"text\":", Hole{ .string = content_window_bytes }, "}}}" };
+    pub const parts = .{ "\"state\":\"resolved\",\"final\":{\"position\":\"", Hole.decimal, "\",\"code\":", Hole{ .string = max_code_bytes }, ",\"content\":", Hole{ .json = ContentValueJson }, ",\"window\":null}}" };
     pub const max_bytes = maxShapeBytes(.{ head ++ pending, head ++ final, head ++ parts });
 };
 
@@ -2582,9 +2576,9 @@ pub const max_response_bytes = @max(@max(max_mutation_response_bytes, max_host_i
 
 pub const conversation_page_reply = struct {
     pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"conversation_page\",\"direction\":\"newest_first\",\"end\":\"", Hole.decimal, "\",\"items\":[" };
-    pub fn item(comptime kind: ConversationItemKind) struct { []const u8, Hole, []const u8, Hole, []const u8, Hole, []const u8, Hole, []const u8 } {
+    pub fn item(comptime kind: ConversationItemKind) struct { []const u8, Hole, []const u8, Hole, []const u8, Hole } {
         comptime std.debug.assert(kind != .hosted_call);
-        return .{ "{\"position\":\"", .decimal, "\",\"ordinal\":\"", .decimal, "\",\"kind\":\"" ++ @tagName(kind) ++ "\",\"content\":{\"bytes\":\"", .decimal, "\",\"sha256\":\"", .{ .hex = 32 }, "\",\"display\":\"omitted\"}" };
+        return .{ "{\"position\":\"", .decimal, "\",\"ordinal\":\"", .decimal, "\",\"kind\":\"" ++ @tagName(kind) ++ "\",\"content\":", .{ .json = ContentValueJson } };
     }
     pub const hosted_call = .{ "{\"position\":\"", Hole.decimal, "\",\"ordinal\":\"", Hole.decimal, "\",\"kind\":\"hosted_call\"" };
     pub const admission = .{ ",\"admitted_at\":\"", Hole.decimal, "\",\"sender\":", Hole{ .optional_json = NamedPeerJson }, ",\"source_action\":", Hole.optional_id };

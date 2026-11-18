@@ -236,7 +236,7 @@ test "a tool entry escapes its name and description as JSON strings" {
 }
 
 test "hosted web search follows the function tools and asks for live pages" {
-    var encoder = resumeFrom(responses_initial);
+    var encoder = resumeFrom(.{ .@"openai-responses/1" = .{ .version = .one, .input = .first } });
     var buffer: [512]u8 = undefined;
     var out: std.Io.Writer = .fixed(&buffer);
     try encodeForTesting(&encoder, null, &.{
@@ -251,6 +251,7 @@ test "hosted web search follows the function tools and asks for live pages" {
 
 test "a resumed encoder writes what an uninterrupted one writes" {
     const history = [_]TestItem{
+        .{ .item = .history_start },
         .{ .item = .{ .message = .user }, .handles = &.{"one"} },
         .{ .item = .{ .output_open = .{ .kind = .reasoning, .phase = .unphased, .omit_reasoning_text = true } } },
         .{ .item = .{ .output_part = .{ .array = .summary, .kind = .summary_text } }, .handles = &.{ "plan", null } },
@@ -264,7 +265,7 @@ test "a resumed encoder writes what an uninterrupted one writes" {
     const tail = [_]TestItem{ .{ .item = .history_end }, .{ .item = .compaction_trigger }, .{ .item = .tools_start }, .{ .item = .text_format }, .{ .item = .request_end } };
     var whole_buffer: [2048]u8 = undefined;
     var whole: std.Io.Writer = .fixed(&whole_buffer);
-    var uninterrupted = resumeFrom(responses_initial);
+    var uninterrupted = resumeFrom(.{ .@"openai-responses/1" = .{ .version = .one, .input = .comma } });
     try encodeForTesting(&uninterrupted, null, &history, &whole);
     try encodeForTesting(&uninterrupted, null, &tail, &whole);
     for (0..history.len + 1) |cut| {
@@ -274,7 +275,7 @@ test "a resumed encoder writes what an uninterrupted one writes" {
         }
         var resumed_buffer: [2048]u8 = undefined;
         var resumed: std.Io.Writer = .fixed(&resumed_buffer);
-        var carry = responses_initial;
+        var carry: Carry = .{ .@"openai-responses/1" = .{ .version = .one, .input = .comma } };
         var first = resumeFrom(carry);
         try encodeForTesting(&first, &carry, history[0..cut], &resumed);
         var second = resumeFrom(responses_initial);
@@ -282,7 +283,7 @@ test "a resumed encoder writes what an uninterrupted one writes" {
         try encodeForTesting(&second, &carry, &tail, &resumed);
         try std.testing.expectEqualStrings(whole.buffered(), resumed.buffered());
     }
-    try std.testing.expectStringStartsWith(whole.buffered(), "{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"one\"}]},{\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"plan\"}],\"encrypted_content\":\"x\"}");
+    try std.testing.expectStringStartsWith(whole.buffered(), ",{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"one\"}]},{\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"plan\"}],\"encrypted_content\":\"x\"}");
     try std.testing.expectStringEndsWith(whole.buffered(), "{\"type\":\"compaction_trigger\"}],\"tools\":[],\"text\":{\"verbosity\":\"low\"}}");
 }
 
@@ -292,10 +293,10 @@ fn versionThreeForTesting(items: []const TestItem, out: *std.Io.Writer) !void {
     try encodeForTesting(&encoder, &carry, items, out);
 }
 
-const version_three_top = "{\"model\":\"m\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"reasoning\":{\"effort\":\"high\"},\"instructions\":\"i\",\"input\":[";
+const version_three_top = "{\"model\":\"m\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"reasoning\":{\"effort\":\"high\"},\"input\":[{\"role\":\"developer\",\"content\":[{\"type\":\"input_text\",\"text\":\"i\"}]},";
 const version_three_first_operation = [_]TestItem{
     .{ .item = .{ .settings = .{ .effort = .high, .starting_effort = .low, .session_affinity = @splat(0), .model_length = 1 } }, .handles = &.{"m"} },
-    .{ .item = .instructions, .handles = &.{"i"} },
+    .{ .item = .{ .message = .instruction }, .handles = &.{"i"} },
     .{ .item = .{ .message = .user }, .handles = &.{"one"} },
     .{ .item = .{ .operation = .low } },
     .{ .item = .declare_open },
@@ -386,7 +387,7 @@ fn legacyImageDomain(codec: protocol.Codec, compact: bool, out: *std.Io.Writer) 
     var encoder = resumeFrom(carry);
     try encodeForTesting(&encoder, &carry, &.{
         .{ .item = .{ .settings = .{ .effort = .high, .starting_effort = .low, .session_affinity = @splat(0), .model_length = 1 } }, .handles = &.{"m"} },
-        .{ .item = .instructions, .handles = &.{"i\"\\\n\x01é"} },
+        .{ .item = .{ .message = .instruction }, .handles = &.{"i\"\\\n\x01é"} },
         .{ .item = .{ .message = .user }, .handles = &.{ "body\"\\\n\x01é", "peer sender, not instructions" } },
         .{ .item = .{ .message = .user }, .handles = &.{""} },
         .{ .item = .{ .message = .instruction }, .handles = &.{""} },
@@ -425,7 +426,7 @@ fn legacyImageDomain(codec: protocol.Codec, compact: bool, out: *std.Io.Writer) 
     }, out);
 }
 
-test "additive image legacy requests retain their original bytes" {
+test "CM-44 complete request encoding preserves pinned wire bytes" {
     for ([_]protocol.Codec{ .@"openai-responses/1", .@"openai-responses/2", .@"openai-responses/3" }) |codec| {
         for ([_]bool{ false, true }) |compact| {
             var buffer: [8192]u8 = undefined;
@@ -490,7 +491,7 @@ fn additiveImageStart(codec: protocol.Codec, encoder: *Encoder, carry: *Carry, o
     encoder.* = resumeFrom(carry.*);
     try encodeForTesting(encoder, carry, &.{
         .{ .item = .{ .settings = .{ .effort = .high, .starting_effort = .low, .session_affinity = @splat(0), .model_length = 1 } }, .handles = &.{"m"} },
-        .{ .item = .instructions, .handles = &.{"i"} },
+        .{ .item = .{ .message = .instruction }, .handles = &.{"i"} },
     }, out);
 }
 
@@ -519,7 +520,8 @@ test "additive image inputs use typed parts and preserve whole-element carry" {
         try std.testing.expectEqualStrings(expected, out.buffered());
         const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, out.buffered(), .{});
         defer parsed.deinit();
-        const history = parsed.value.object.get("input").?.array.items;
+        const all_input = parsed.value.object.get("input").?.array.items;
+        const history = if (codec == .@"openai-responses/1") all_input else all_input[1..];
         const user = history[1].object;
         try std.testing.expectEqualStrings("user", user.get("role").?.string);
         const parts = user.get("content").?.array.items;
@@ -582,7 +584,7 @@ test "additive typed image pieces stay bounded over the new value domain" {
                     .image_message_close,
                     .image_tool_close,
                 }) |item| {
-                    var encoder: responses.Encoder = .{ .carry = .{ .version = version, .input_comma = comma }, .input_part_comma = comma };
+                    var encoder: responses.Encoder = .{ .carry = .{ .version = version, .input = if (comma) .comma else .first }, .input_part_comma = comma };
                     var pieces: codec_abi.Pieces = .{ .len = 0 };
                     const header: codec_abi.ItemHeader = .{ .item = item, .handles = 0b1 };
                     try encoder.encodeItem(&header, &pieces);
@@ -598,6 +600,12 @@ test "additive typed image pieces stay bounded over the new value domain" {
     }
 }
 
+fn fragmentCarry(codec: protocol.Codec) Carry {
+    return switch (codec) {
+        inline else => |tag| @unionInit(Carry, @tagName(tag), .{ .version = module(tag).initial(null).version, .input = .first }),
+    };
+}
+
 test "additive image-only and repeated parts keep MIME framing and order" {
     const expected_png = "{\"type\":\"input_image\",\"image_url\":\"data:image/png;base64," ++ additive_base64 ++ "\",\"detail\":\"auto\"}";
     const expected_jpeg = "{\"type\":\"input_image\",\"image_url\":\"data:image/jpeg;base64,/9j/2Q==\",\"detail\":\"auto\"}";
@@ -605,7 +613,7 @@ test "additive image-only and repeated parts keep MIME framing and order" {
         for (std.enums.values(codec_abi.Author)) |author| {
             var buffer: [2048]u8 = undefined;
             var out: std.Io.Writer = .fixed(&buffer);
-            var carry = initialCarry(codec, null);
+            var carry = fragmentCarry(codec);
             var encoder = resumeFrom(carry);
             try encodeForTesting(&encoder, &carry, &.{
                 .{ .item = .{ .image_message_open = author } },
@@ -614,7 +622,7 @@ test "additive image-only and repeated parts keep MIME framing and order" {
             }, &out);
             try std.testing.expectEqualStrings(if (author == .user) "{\"role\":\"user\",\"content\":[" ++ expected_png ++ "]}" else "{\"role\":\"developer\",\"content\":[" ++ expected_png ++ "]}", out.buffered());
             out.end = 0;
-            carry = initialCarry(codec, null);
+            carry = fragmentCarry(codec);
             encoder = resumeFrom(carry);
             try encodeForTesting(&encoder, &carry, &.{
                 .{ .item = .image_tool_open, .handles = &.{"call\"\n"} },

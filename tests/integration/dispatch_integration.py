@@ -19,11 +19,11 @@ import host_process
 from host_process import HostDiagnostics, PauseGate, PeerCensus, ReleaseGate, canonical_fixture_root, dispose_all, preserve_failure_metadata, retain_failure_state, stop_process, wait_for_execution_release
 from product_defaults import DEFAULTS, compaction_trigger, start_effort
 from model_fixture import (
-    ROOT, RUI, FailureEndpoint, ResponseSpec, SuccessEndpoint,
+    ROOT, RUI, MODEL_CONTEXT_PARTS, FailureEndpoint, ResponseSpec, SuccessEndpoint,
     assert_model_cleanup_census, classification_population, command,
     completed_observation, configure, configure_lost_reply, crash_host,
     encode_sse, finish_command, message, message_lost_reply,
-    model_instructions, observe, read_action, read_result, retry_message,
+    model_instructions, request_system_prompt, observe, read_action, read_result, retry_message,
     sse_answer, sse_many, sse_tool_calls, start_command, start_host, stop_host,
     wait_for, wait_for_result_release, wait_model_cleanup,
 )
@@ -47,8 +47,14 @@ def seed_future_retries(store, sessions):
         database.close()
 
 
+def request_history(items):
+    if items and items[0].get("role") == "developer" and items[0].get("content", [{}])[0].get("text", "").startswith(MODEL_CONTEXT_PARTS[0]):
+        return items[1:]
+    return items
+
+
 def history(items):
-    return [item for item in items if item.get("type") != "additional_tools"]
+    return [item for item in request_history(items) if item.get("type") != "additional_tools"]
 
 
 def without_prose(schema):
@@ -63,7 +69,7 @@ def content_reference(text):
     data = text.encode()
     domain = b"rui/content/v1"
     digest = hashlib.sha256(len(domain).to_bytes(8, "big") + domain + data).hexdigest()
-    return {"bytes": str(len(data)), "sha256": digest}
+    return {"type": "text", "bytes": str(len(data)), "sha256": digest}
 
 
 def stored_message_parts(database):
@@ -396,7 +402,7 @@ def compaction_cases(state, processes, endpoints, releases):
         compaction = json.loads(endpoint.requests[1])
         assert history(compaction["input"])[-1] == {"type": "compaction_trigger"}, compaction
         address = model_instructions(ROOT, "baseline", store=store, session=session, model="gpt-6-sol")
-        assert [json.loads(request)["instructions"] for request in endpoint.requests[:2]] == [address, address], endpoint.requests[:2]
+        assert [request_system_prompt(json.loads(request)) for request in endpoint.requests[:2]] == [address, address], endpoint.requests[:2]
         assert compaction["store"] is False and compaction["stream"] is True, compaction
         assert compaction["include"] == ["reasoning.encrypted_content"], compaction
         assert compaction["text"] == {"verbosity": "low"}, compaction
@@ -412,7 +418,7 @@ def compaction_cases(state, processes, endpoints, releases):
         assert len(endpoint.requests) == 3, endpoint.requests
         successor = json.loads(endpoint.requests[2])
         assert user_texts(successor) == ["covered user input", "pending input"], successor
-        assert successor["instructions"] == address, successor
+        assert request_system_prompt(successor) == address, successor
         assert [item["content"][0]["text"] for item in history(successor["input"]) if item.get("role") == "developer"] == ["arrived during compaction"], successor
         assert not any(item.get("id") == items[0]["id"] for item in history(successor["input"])), successor
         replay_anchor = dict(items[1])
@@ -446,7 +452,7 @@ def compaction_cases(state, processes, endpoints, releases):
         restarted = json.loads(endpoint.requests[3])
         assert replay_anchor in history(restarted["input"]) and items[2] in history(restarted["input"]), restarted
         assert user_texts(restarted) == ["covered user input", "pending input", "followup input"], restarted
-        assert restarted["instructions"] == address, restarted
+        assert request_system_prompt(restarted) == address, restarted
         execution = wait_for(lambda: (value := command("session", "inspect", "--store", store, "--session", session)["execution"])["custody_occupied"] == "0" and value, "compaction custody release")
         assert execution["scratch_used_bytes"] == "0" and not execution["dispatch_fenced"], execution
         stop_host(host)
@@ -485,7 +491,7 @@ def compaction_cases(state, processes, endpoints, releases):
     assert user_texts(json.loads(endpoint.requests[2])) == ["first", "apply only after compaction"]
     address = model_instructions(ROOT, store=store, session=session, model="gpt-6-sol")
     assert str(store) not in address and "雪" not in address, address
-    assert [json.loads(request)["instructions"] for request in endpoint.requests] == [address] * 3, endpoint.requests
+    assert [request_system_prompt(json.loads(request)) for request in endpoint.requests] == [address] * 3, endpoint.requests
     stop_host(host)
     processes.remove(host)
     stop_endpoint(endpoint, endpoints)
@@ -501,7 +507,7 @@ def compaction_cases(state, processes, endpoints, releases):
     assert outcome["state"] == "failed" and outcome["result"]["code"] == "ResourceExceeded", outcome
     assert len(endpoint.requests) == 3, endpoint.requests
     address = model_instructions(ROOT, store=store, session=session, model="gpt-6-sol")
-    assert [json.loads(request)["instructions"] for request in endpoint.requests] == [address] * 3, endpoint.requests
+    assert [request_system_prompt(json.loads(request)) for request in endpoint.requests] == [address] * 3, endpoint.requests
     stop_host(host)
     processes.remove(host)
     stop_endpoint(endpoint, endpoints)
@@ -524,7 +530,7 @@ def compaction_cases(state, processes, endpoints, releases):
     assert report["actions"]["count"] == "0" and not forbidden_effect.exists(), report
     assert len(endpoint.requests) == 2, endpoint.requests
     address = model_instructions(ROOT, store=store, session=session, model="gpt-6-sol")
-    assert [json.loads(request)["instructions"] for request in endpoint.requests] == [address] * 2, endpoint.requests
+    assert [request_system_prompt(json.loads(request)) for request in endpoint.requests] == [address] * 2, endpoint.requests
     stop_host(host)
     processes.remove(host)
     stop_endpoint(endpoint, endpoints)
@@ -1308,7 +1314,7 @@ def builtin_instruction_cases(state, processes, endpoints, releases):
             wait_for_result_release(store, key, session, time.monotonic() + 15)
             request = json.loads(endpoint.requests[index])
             assert request["model"] == model, request
-            assert request["instructions"] == model_instructions(
+            assert request_system_prompt(request) == model_instructions(
                 workspace, baseline, store=store, session=session, model=model), request
         assert len(endpoint.requests) == len(selected), endpoint.requests
         stop_host(host)
@@ -1337,10 +1343,10 @@ def builtin_instruction_cases(state, processes, endpoints, releases):
     assert endpoint.requests[0] == endpoint.requests[1], "replacement Attempt changed its frozen request"
     original, _, fresh = map(json.loads, endpoint.requests)
     assert original["model"] == "gpt-6-luna", original
-    assert original["instructions"] == model_instructions(
+    assert request_system_prompt(original) == model_instructions(
         workspace, baseline, store=store, session=session, model="gpt-6-luna"), original
     assert fresh["model"] == "gpt-6.1-sol", fresh
-    assert fresh["instructions"] == model_instructions(
+    assert request_system_prompt(fresh) == model_instructions(
         workspace, baseline, store=store, session=session, model="gpt-6.1-sol"), fresh
     updates = [item for item in history(fresh["input"]) if item.get("role") == "developer"]
     assert updates == initial_developers + [
@@ -1386,10 +1392,10 @@ def builtin_instruction_cases(state, processes, endpoints, releases):
     assert len(endpoint.requests) == 3, endpoint.requests
     requests = list(map(json.loads, endpoint.requests))
     expected = model_instructions(workspace, baseline, store=store, session=session, model="gpt-6.1-sol")
-    assert all(request["model"] == "gpt-6.1-sol" and request["instructions"] == expected for request in requests[:2])
+    assert all(request["model"] == "gpt-6.1-sol" and request_system_prompt(request) == expected for request in requests[:2])
     assert any(item.get("type") == "compaction_trigger" for item in requests[1]["input"]), requests[1]
     assert requests[2]["model"] == "gpt-6-luna", requests[2]
-    assert requests[2]["instructions"] == model_instructions(
+    assert request_system_prompt(requests[2]) == model_instructions(
         workspace, baseline, store=store, session=session, model="gpt-6-luna"), requests[2]
     assert "pending input" in [item["content"][0]["text"] for item in requests[2]["input"] if item.get("role") == "user"]
     updates = [item for item in history(requests[2]["input"]) if item.get("role") == "developer"]
@@ -2106,9 +2112,9 @@ def main(mode="all", correlation_case="all"):
         first_request = json.loads(success_endpoint.requests[0])
         second_request = json.loads(success_endpoint.requests[1])
         assert first_request["model"] == "gpt-6-sol", first_request
-        assert first_request["instructions"] == model_instructions(
+        assert request_system_prompt(first_request) == model_instructions(
             ROOT, store=success_store, session=success_session, model="gpt-6-sol"), first_request
-        assert second_request["instructions"] == model_instructions(
+        assert request_system_prompt(second_request) == model_instructions(
             ROOT, store=success_store, session=success_session, model="gpt-6.1-sol"), second_request
         assert history(first_request["input"]) == [
             {"role": "user", "content": [{"type": "input_text", "text": "first question"}]},
@@ -2227,7 +2233,7 @@ def main(mode="all", correlation_case="all"):
         assert retry_endpoint.request_times[2] - retry_endpoint.request_times[1] >= 0.90
         assert retry_endpoint.requests[0] == retry_endpoint.requests[1]
         assert retry_endpoint.requests[1] == retry_endpoint.requests[2]
-        assert json.loads(retry_endpoint.requests[0])["instructions"] == model_instructions(ROOT, store=retry_store, session=retry_session, model="gpt-6-sol")
+        assert request_system_prompt(json.loads(retry_endpoint.requests[0])) == model_instructions(ROOT, store=retry_store, session=retry_session, model="gpt-6-sol")
         stop_host(retry_host)
         processes.remove(retry_host)
         database = sqlite3.connect(retry_store / "rui.sqlite3")
@@ -2510,7 +2516,7 @@ def main(mode="all", correlation_case="all"):
         wait_for(lambda: len(continued_endpoint.requests) >= 3, "replacement continued Attempt")
         assert continued_endpoint.requests[1] == continued_endpoint.requests[2]
         frozen_retry = json.loads(continued_endpoint.requests[2])
-        assert frozen_retry["instructions"] == model_instructions(
+        assert request_system_prompt(frozen_retry) == model_instructions(
             ROOT, "original instructions", store=continued_store, session=continued_retry_session, model="gpt-6-sol"
         ), frozen_retry
         expected_private = dict(continued_reasoning)
@@ -2776,7 +2782,7 @@ def main(mode="all", correlation_case="all"):
         pending_request = json.loads(pending_endpoint.requests[1])
         expected_pending_reasoning = dict(pending_reasoning)
         expected_pending_reasoning.pop("created_by")
-        assert pending_request["instructions"] == model_instructions(ROOT, store=pending_store, session=pending_session, model="gpt-6-sol")
+        assert request_system_prompt(pending_request) == model_instructions(ROOT, store=pending_store, session=pending_session, model="gpt-6-sol")
         assert history(pending_request["input"]) == [
             {"role": "user", "content": [{"type": "input_text", "text": "before cutoff"}]},
             expected_pending_reasoning,
@@ -3588,7 +3594,6 @@ def main(mode="all", correlation_case="all"):
             "parallel_tool_calls": True,
             "include": ["reasoning.encrypted_content"],
             "reasoning": {"effort": start_effort("gpt-6-sol")},
-            "instructions": model_instructions(ROOT, "A", store=store, session=main_session, model="gpt-6-sol"),
             "input": [
                 {
                     "role": "user",
@@ -3631,7 +3636,9 @@ def main(mode="all", correlation_case="all"):
                 }
             },
         }
-        observed["input"] = without_prose(observed["input"])
+        assert request_system_prompt(observed) == model_instructions(ROOT, "A", store=store, session=main_session, model="gpt-6-sol")
+        observed.pop("instructions", None)
+        observed["input"] = without_prose(request_history(observed["input"]))
         assert observed == expected, (observed, expected)
         stop_host(host)
         frozen_peers.finish(time.monotonic() + 5)
@@ -3647,12 +3654,12 @@ def main(mode="all", correlation_case="all"):
         processes.remove(offline)
 
         successor = json.loads(endpoint.requests[1])
-        successor["input"] = without_prose(successor["input"])
+        assert request_system_prompt(successor) == model_instructions(ROOT, "A", store=store, session=main_session, model="gpt-6.1-sol")
+        successor["input"] = without_prose(request_history(successor["input"]))
         later_input = expected["input"] + [
             {"role": "user", "content": [{"type": "input_text", "text": "later message"}]}
         ]
         assert successor["input"] == later_input, successor
-        assert successor["instructions"] == model_instructions(ROOT, "A", store=store, session=main_session, model="gpt-6.1-sol"), successor
         assert successor["model"] == "gpt-6.1-sol", successor
         assert successor["tools"] == [], successor
         assert successor["text"] == {"verbosity": "low"}, successor
@@ -3661,11 +3668,11 @@ def main(mode="all", correlation_case="all"):
         processes.append(host)
         wait_for(lambda: len(endpoint.requests) == 3, "post-restart successor request")
         restarted = json.loads(endpoint.requests[2])
-        restarted["input"] = without_prose(restarted["input"])
+        assert request_system_prompt(restarted) == model_instructions(ROOT, "A", store=store, session=main_session, model="gpt-6.1-sol")
+        restarted["input"] = without_prose(request_history(restarted["input"]))
         assert restarted["input"] == later_input + [
             {"role": "user", "content": [{"type": "input_text", "text": "after restart"}]}
         ], restarted
-        assert restarted["instructions"] == successor["instructions"], restarted
         assert restarted["model"] == "gpt-6.1-sol", restarted
         assert restarted["tools"] == [], restarted
         assert restarted["text"] == {"verbosity": "low"}, restarted

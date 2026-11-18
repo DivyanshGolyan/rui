@@ -43,6 +43,9 @@
 | CM-39 | Module | A fresh Session's default compaction trigger is its provider and exact model's Codex trigger, else the provider's fallback, never above 90% of the shipped catalog window, and 90% of the unlisted estimate for a model the catalog does not list. | Client defaults public API | `CM-39 default compaction trigger`: cross exact-row, fallback, similar-ID, unlisted and small-window models with both providers. | docs/contracts/model-io.md:199 |
 
 | CM-42 | Module | Skill references in ordered Message input are read from each text part in order, excluding image bytes. | Skill reference scanner over sealed input | `CM-42 skill references are read from ordered text parts only` | src/session_skills.zig |
+| CM-43 | Module | Each Responses codec places the baseline according to its pinned version and emits valid input boundaries for each carry state. | Codec encoder API | `CM-43 input boundary transitions cover each version and carry state`: cross codec versions, input states and boundary items. | docs/contracts/model-io.md#history-memo; docs/contracts/model-io.md#codex-wire-binding |
+
+| CM-44 | Module | Each Responses codec encodes the complete request in its pinned wire form, including legacy tool output and regular or compaction requests. | Codec encoder API | `CM-44 complete request encoding preserves pinned wire bytes` in `src/codecs.zig`: cross codec versions and request kinds, and compare complete encoded bytes. | docs/contracts/model-io.md#history-memo; docs/contracts/model-io.md#codex-wire-binding |
 
 Owned elsewhere: ADM-3 (Label presentation and model input), ADM-4 (configuration field presence), ADM-21 (missing-tool catalog decisions), SES-1, SES-4–SES-7 and SES-17 (stop exclusion), SES-10 (queue survival after Turn failure), EXR-1 (provider candidate rejection), EXR-5 (Action permission snapshot), EXR-42 (loaded-tool narrowing and fallback), EXR-44 (allocation exhaustion during skill reload).
 

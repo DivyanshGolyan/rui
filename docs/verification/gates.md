@@ -85,7 +85,7 @@ A green PR therefore no longer proves:
 - that the Store-reaching binaries (`test-native`, `test-store`, the integration product) still compile and pass after a change to build inputs alone, such as build.zig, a dependency pin, the setup action or `build_artifact.py`; only `test-logic` runs through the changed path;
 - that every unit partition still compiles after a branch merged main, when the candidate's own diff does not reach them: a semantic merge conflict that breaks only a unit partition reaches main, and Promote bisects it to the merge commit;
 - unit and fixture behavior against a live MySQL or Postgres server, and `mysql-wire-integration`;
-- everything [Promote](../../.github/workflows/promote.yml) alone runs: macOS, `stack-frames`, the installed-release upgrade and renderer contracts.
+- everything [Promote](../../.github/workflows/promote.yml) alone runs: macOS, `stack-frames`, `rsql-table`, the installed-release upgrade and renderer contracts.
 
 Promotion proves those on main HEAD and bisects a failure to its commit; the owner accepted on 18 Nov 2026 that such a break reaches main first.
 
@@ -147,7 +147,7 @@ Syntax checks, probe compilation and unrelated product tests do not qualify a re
 
 ## Composed gates
 
-`check` runs formatting, ReleaseSafe native tests and process integrations, a Debug artifact and recovery smoke, ReleaseSmall deliverables and, on x86-64 Linux, `stack-frames`.
+`check` runs formatting, ReleaseSafe native tests and process integrations, a Debug artifact and recovery smoke, ReleaseSmall deliverables and, on x86-64 Linux, `stack-frames`; on Linux it also runs `rsql-table`, and promotion and Qualify main add both beside `check-full`.
 Required functional assertions stay required when their fixture changes.
 Native, Store and process suites run concurrently, except short-deadline Host-startup and Debug smoke cases, which follow the parallel batch.
 The Store unit root compiles once and runs as four concurrent processes through [the shared shard launcher](../../tests/ci/store_shards.py); native and each Store process retain separate 1200-second deadlines.
@@ -229,6 +229,7 @@ Cache-policy changes run [the fixed-seed execution regression](../../tests/ci/ca
 Cache policy is the proof, the prune script and the cache publication policy module themselves, and changed non-comment lines that name a Zig build cache or `has_side_effects` in the build, the workflows and the setup action, whose caches are all build caches; any change to the `cache_execution` job counts too.
 The plan never selects it for a pull request, so `admission` requires it skipped there.
 Build-cache keys separate native tools, Apple SDK, architecture, dependency pins, scripts, source inputs and shard.
+The native-tool identity names only tools whose output Zig's own cache cannot see. On Linux that is the OS release, architecture, glibc version, make and perl (`src/build_transport.sh` runs perl Configure and make, compiling with `zig cc`), never Ubuntu package revisions, so runner images that GitHub rolls out side by side share snapshots; macOS also names Apple clang, Xcode and the SDK, which that script compiles with.
 Only `main` saves caches; PR jobs restore main's snapshots and save none, so PR caches never feed a privileged workflow or evict main's.
 Setup restores caches and captures missing exact keys; an explicit `save-only` invocation of the same cache composite runs under `always()` after compilation, before long failure diagnostics.
 The cache owner's `save-keys.cjs` derives publication keys from the setup and bounded work outcomes; it never overwrites an exact hit.
@@ -290,7 +291,7 @@ The producer warmers run the same `build_artifact.py build` command as Selected 
 The new split warmers retain their 120-minute job budget and have a derived 92-minute compile step. No existing job budget increases: baseline stays at 30 minutes, runner maintenance at 15, previous release at 45, Linux unit/typecheck at 15, cache proof/codegen at 20, ordinary shards at 35 and Renderer contracts at 45. The existing 60-minute Linux and Mac producer safety nets remain. Only the measured, sufficiently long jobs receive derived work-step deadlines; no job budget changes to make space for saving.
 A build partition restores its own newest snapshot, for the current dependencies first and then across a dependency repin; a partition with neither, such as one only pull requests run, starts from that baseline for the current dependencies, and no partition restores another's snapshot.
 It also compiles the build runner on six Linux slots and one Mac, so test shards on the CPU models those slots drew restore it from main.
-Cleanup keeps main's newest complete snapshot per platform and partition, per build-runner CPU model, of each platform's compiler and of the package set, and removes every PR cache; these are targets, not a quota. It separately keeps at most the newest partial compilation snapshot per platform/partition or runner CPU prefix, so a partial cannot evict the retained complete snapshot.
+Cleanup keeps main's newest complete snapshot per platform, partition and native-tool identity, per build-runner CPU model, of each platform's compiler and of the package set, and removes every PR cache; these are targets, not a quota. It separately keeps at most the newest partial compilation snapshot per platform/partition/identity or runner CPU prefix, so a partial cannot evict the retained complete snapshot.
 Warm compilation snapshots are not test acceptance. Cleanup waits for all maintenance publishers, including the previous-release warmer.
 Maintenance also builds the pinned previous release per platform for the read-only upgrade check.
 The API-only cleanup job runs trusted main code with cache-deletion permission and consumes no producer code, caches or artifacts.

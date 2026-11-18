@@ -3,6 +3,8 @@ const tool_fold = @import("tool_fold.zig");
 const client = @import("client.zig");
 const protocol_reply = @import("protocol_reply.zig");
 const protocol = @import("protocol.zig");
+const content_value = @import("content_value.zig");
+const value_reads = @import("value_reads.zig");
 const Text = @import("TerminalText.zig");
 const Renderer = @import("AnswerRenderer.zig");
 pub const Destination = Renderer.Destination;
@@ -189,8 +191,15 @@ pub const Collapsed = struct {
     source: enum { activity, conversation },
     position: u64,
     ordinal: u64,
-    content: protocol.ActivityItem.Content,
+    content: content_value.Value,
     row: bool,
+
+    pub fn at(self: Collapsed) value_reads.At {
+        return .{ .source = switch (self.source) {
+            .activity => .activity,
+            .conversation => .conversation,
+        }, .position = self.position, .ordinal = self.ordinal };
+    }
 };
 
 pub fn writeCollapsed(sink: anytype, value: Collapsed, bytes: []const u8) !void {
@@ -502,7 +511,7 @@ test "list rows share chat heading marks except unmarked finished Sessions" {
         _ = try overview.step(&state, .{ .host = .{ .instance = @splat(7), .started_at = 1, .slots = 1, .slots_in_use = 0 } });
         _ = try overview.step(&state, .{ .tick = 100_000 });
         _ = try overview.step(&state, .{ .list = .{ .page = .{
-            .rows = &.{.{ .reference = "k7m2qx".*, .read_version = .{ .instance = @splat(7), .generation = 1 }, .workspace = "/work", .provider = .codex, .label = "Work", .state = case.state, .first = .{ .position = 1, .admission = 1, .sender = null } }},
+            .rows = &.{.{ .reference = "k7m2qx".*, .read_version = .{ .instance = @splat(7), .generation = 1 }, .workspace = "/work", .provider = .codex, .label = "Work", .state = case.state, .first = .{ .position = 1, .admission = 1, .sender = null, .content = .{ .text = .{ .length = 4, .digest = @splat(1) } } } }},
             .answer = .{ .delta = .full, .since = .{ .instance = @splat(7), .generation = 1 } },
         } } });
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
@@ -1186,7 +1195,7 @@ test "a queued Message is labelled only while work under way holds it" {
     inline for (.{ .queued, .excluded, .applied }) |state| try std.testing.expect(messageLabel(state, .none) == null);
 }
 
-pub fn message(requests: client.Requests, store: []const u8, session: []const u8, item: protocol.ActivityItem, value: protocol.ActivityItem.Message, labels: Labels, sink: anytype, colour: bool) !void {
+pub fn message(requests: client.Requests, store: []const u8, session: []const u8, scratch: std.Io.File, item: protocol.ActivityItem, value: protocol.ActivityItem.Message, labels: Labels, sink: anytype, colour: bool) !void {
     if (!visibleMessage(value)) return;
     if (messageLabel(value.state, labels)) |text| {
         try print(sink, "{s}{s}{s}\n", .{ Style.quiet.code(colour), text, Style.normal.code(colour) });
@@ -1195,17 +1204,32 @@ pub fn message(requests: client.Requests, store: []const u8, session: []const u8
     if (comptime std.meta.hasMethod(@TypeOf(sink), "userMessage")) try sink.userMessage(true);
     const block: Collapsed = .{ .source = .activity, .position = item.position, .ordinal = item.ordinal, .content = value.content, .row = item.value == .user };
     try userPrefix(sink, colour, value.admitted_at);
+    const display = try open(requests, store, session, scratch, item, value.content);
     var body: UserBody(@TypeOf(sink)) = undefined;
-    try body.init(sink, value.content.length, false);
-    try content(requests, store, session, item, value.content, &body);
+    try body.init(sink, display.length, false);
+    try stream(requests, &display, &body);
     if (try body.finishMessage(block)) {
         try sink.feed("\n");
     } else try Text.writeBody(sink, "\n");
     if (comptime std.meta.hasMethod(@TypeOf(sink), "userMessage")) try sink.userMessage(false);
 }
 
-fn content(requests: client.Requests, store: []const u8, session: []const u8, item: protocol.ActivityItem, reference: protocol.ActivityItem.Content, target: anytype) !void {
-    if (try requests.readActivityContent(store, session, item.position, item.ordinal, .{ .bytes = reference.length, .digest = reference.digest }, target)) |failure| return requests.failRead(failure);
+/// Opens the display of the value an activity entry shows. A parts value reads its
+/// certified list into `scratch`, which the returned Display borrows.
+fn open(requests: client.Requests, store: []const u8, session: []const u8, scratch: std.Io.File, item: protocol.ActivityItem, value: content_value.Value) !value_reads.Display {
+    return switch (try value_reads.Display.open(requests, store, session, .{ .source = .activity, .position = item.position, .ordinal = item.ordinal }, value, scratch)) {
+        .display => |display| display,
+        .failure => |failure| requests.failRead(failure),
+    };
+}
+
+fn stream(requests: client.Requests, display: *const value_reads.Display, target: anytype) !void {
+    if (try display.stream(requests, target)) |failure| return requests.failRead(failure);
+}
+
+fn content(requests: client.Requests, store: []const u8, session: []const u8, scratch: std.Io.File, item: protocol.ActivityItem, value: content_value.Value, target: anytype) !void {
+    const display = try open(requests, store, session, scratch, item, value);
+    try stream(requests, &display, target);
 }
 
 pub const ToolHeaderFacts = struct {
@@ -1312,7 +1336,7 @@ test "tool header hides all body lines for every outcome and first-line split" {
                     try expected.feed(case[1][glyph_end..]);
                     try expected.feed("\n");
                     try std.testing.expectEqualStrings(expected.bytes[0..expected.length], sink.bytes[0..sink.length]);
-                    try std.testing.expectEqual(case[0] == .succeeded, tight(.{ .tool_result = .{ .content = .{ .length = 0, .digest = @splat(0) }, .presentation = presentation } }));
+                    try std.testing.expectEqual(case[0] == .succeeded, tight(.{ .tool_result = .{ .content = .{ .text = .{ .length = 0, .digest = @splat(0) } }, .presentation = presentation } }));
                     try std.testing.expectEqual(case[0] == .succeeded, tight(.{ .hosted_call = presentation }));
                 }
             }
@@ -1530,7 +1554,8 @@ pub fn visibleMessage(value: protocol.ActivityItem.Message) bool {
     return value.source_action == null;
 }
 
-pub fn render(requests: client.Requests, store: []const u8, session: []const u8, provider: ?protocol.Provider, item: protocol.ActivityItem, queued: protocol.Queued, held: bool, sink: anytype, colour: bool, home: []const u8, destination: Destination, fold: Fold) !bool {
+/// `scratch` holds the part list of a parts value while its row draws.
+pub fn render(requests: client.Requests, store: []const u8, session: []const u8, scratch: std.Io.File, provider: ?protocol.Provider, item: protocol.ActivityItem, queued: protocol.Queued, held: bool, sink: anytype, colour: bool, home: []const u8, destination: Destination, fold: Fold) !bool {
     switch (item.value) {
         .admission, .received, .user => |value| if (!visibleMessage(value)) return false,
         else => {},
@@ -1542,22 +1567,22 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
             _ = held;
             return false;
         },
-        .received => |value| try message(requests, store, session, item, value, .none, sink, colour),
+        .received => |value| try message(requests, store, session, scratch, item, value, .none, sink, colour),
         .user => |value| {
             if (value.sender != null or value.source_action != null) return false;
-            try message(requests, store, session, item, value, .none, sink, colour);
+            try message(requests, store, session, scratch, item, value, .none, sink, colour);
         },
         .assistant => |assistant| {
             var answer: Answer(@TypeOf(sink)) = undefined;
             answer.init(sink, home, colour, destination);
-            try content(requests, store, session, item, assistant.content, &answer);
+            try content(requests, store, session, scratch, item, .{ .text = assistant.content }, &answer);
             try answer.finish();
             try Text.writeBody(sink, "\n");
         },
         .tool_result => |result| {
             var scan: ToolHeaderScan = .{};
             switch (fold) {
-                .none, .closed => try content(requests, store, session, item, result.content, &scan),
+                .none, .closed => try content(requests, store, session, scratch, item, result.content, &scan),
                 .open => |output| {
                     const Both = struct {
                         scan: *ToolHeaderScan,
@@ -1569,7 +1594,7 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
                     };
                     output.* = .{};
                     var both: Both = .{ .scan = &scan, .output = output };
-                    try content(requests, store, session, item, result.content, &both);
+                    try content(requests, store, session, scratch, item, result.content, &both);
                 },
             }
             try toolResultRow(result.presentation, scan.facts(result.presentation.code), fold != .none, sink, colour);
@@ -1587,7 +1612,7 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
             } else try workEnded(sink, ended.code.slice(), provider, colour);
         },
         .stop => |stop| {
-            const excluded = try excludedAtStop(requests, store, session, item, sink, colour);
+            const excluded = try excludedAtStop(requests, store, session, scratch, item, sink, colour);
             if (stop.turn == null) {
                 if (excluded) try sink.feed("\n");
                 try ending(sink, .{ .mark = .stopped, .words = "Stopped" }, colour);
@@ -1600,7 +1625,7 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
     return false;
 }
 
-fn excludedAtStop(requests: client.Requests, store: []const u8, session: []const u8, stop: protocol.ActivityItem, sink: anytype, colour: bool) !bool {
+fn excludedAtStop(requests: client.Requests, store: []const u8, session: []const u8, scratch: std.Io.File, stop: protocol.ActivityItem, sink: anytype, colour: bool) !bool {
     if (stop.value.stop.cutoff == 0) return false;
     var cursor: protocol_reply.ActivityCursor = .{ .end = stop.position - 1, .direction = .backward, .kinds = .initOne(.admission) };
     var first: ?u64 = null;
@@ -1632,7 +1657,7 @@ fn excludedAtStop(requests: client.Requests, store: []const u8, session: []const
             value.state = .excluded;
             if (wrote) try sink.feed("\n");
             wrote = true;
-            try message(requests, store, session, item, value, .lasting(false), sink, colour);
+            try message(requests, store, session, scratch, item, value, .lasting(false), sink, colour);
         }
         cursor = page.continuation() orelse return wrote;
     }
