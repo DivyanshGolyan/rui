@@ -182,6 +182,9 @@ def local_red_checks(planned, mysql):
 
 
 def unit_target(targets, cause, graph, registry=None):
+    # Logic cores are directly imported by the logic root, even when another binary reported them.
+    if any(path in graph.cores for path in cause.paths):
+        return "test-logic-only"
     registry = build_files.unit_roots() if registry is None else registry
     selected = set(targets)
     candidates = [root for root in registry if selected.intersection(root["owners"])]
