@@ -29,7 +29,7 @@ Promotion selects them over its whole batch: native Mac runs its core targets pl
 Darwin-only linking and settings live in `build/darwin.zig`, a Mac path.
 The [previous installed-release upgrade](../../.github/workflows/previous-release-upgrade.yml) runs on both systems in every promotion.
 In the same job and suite, `--running-host` starts the pinned v0.69.1 release on a private Store, saves a completed provider answer and Session configuration, and leaves the Host running while the candidate's rendered `release/install.sh` runs.
-The candidate is the existing `upgrade-fixture` production actor with a synthetic numeric release identity (ordinary untagged source builds report `unreleased`); archive transport is local, but checksum verification, extraction, publication and restart use the real release installer.
+In a promotion the candidate is that promotion's own release executable; elsewhere it is the existing `upgrade-fixture` production actor with a synthetic numeric release identity (ordinary untagged source builds report `unreleased`). Archive transport is local, but checksum verification, extraction, publication and restart use the real release installer.
 The installer must exit 0 and name that Store's restart; without any subsequent start/restart command, status must report a new instance and the socket peer's executable must be the selected candidate and report its release version.
 The saved answer, request binding and configuration must survive without another provider request.
 The real v0.69.1 Host has neither the later `chatgpt` route fact nor a Store hint beside its socket, so this also gates historical wire-13 fact normalization and authenticated socket-probe discovery before exact-instance pause/replacement.
@@ -57,7 +57,11 @@ Two steps broken by different commits get different verdicts, but a suite batch 
 The run then files one `promotion-red` issue per failure signature through [report_issue.py](../../tests/ci/report_issue.py), with the verdict on it.
 A red promotion publishes nothing and leaves `stable` where it is; fix forward on `main` through ordinary PRs and promote again.
 A bisect never turns a promotion green, and a promotion never merges or reverts.
-Only when every tier passes does it call [Release](../../.github/workflows/release.yml) with the qualified SHA for cold versioned builds and publication.
+From the start, beside the suites, [Release build](../../.github/workflows/release-build.yml) numbers the release and builds the cold versioned archives of main HEAD; it publishes nothing.
+The upgrade check and renderer contracts test those release executables instead of compiling their own ReleaseSafe Rui (`-Drui-under-test` and the upgrade's `--candidate-release`); the upgrade check's source install still compiles the candidate, and a bisect replay compiles each commit's own Rui.
+A failed release build fails the promotion.
+Only when every tier passes does it call [Release](../../.github/workflows/release.yml) with the qualified SHA and planned version to publish those archives; it never rebuilds.
+The owner accepted, on 18 Nov 2026, that a release build now runs before qualification decides and that a release-only failure surfacing in the tested executable is bisected with source builds.
 The publisher owns release identity, schema compatibility checks, complete assets and monotonic publication.
 It accepts only a commit on `main`; an arbitrary PR ref cannot publish.
 The `stable` branch remains a non-rewinding pointer to the last successfully published, promoted release.
@@ -74,7 +78,8 @@ Keep cleanup and resource bounds, and do not retry failed required acceptance to
 
 ## Release publication
 
-[Release](../../.github/workflows/release.yml) runs only inside a green [promotion](#landing-cadence) and publishes the immutable main SHA that promotion qualified.
+[Release](../../.github/workflows/release.yml) runs only inside a green [promotion](#landing-cadence) and publishes the immutable main SHA that promotion qualified, from the archives that promotion's [Release build](../../.github/workflows/release-build.yml) made and its tiers tested.
+Release build records `SHA256SUMS` for every archive and npm tarball when it packs them; publication checks the downloaded files against that record and publishes it, so a byte that changed after the tests cannot ship.
 Only verified publication advances the `stable` pointer.
 To recover an interrupted publication, rerun the promotion's failed jobs: `gh run rerun <promotion run id> --failed`.
 When every failure of a promotion's first attempt was infrastructure, such as a macOS job GitHub never gave a runner, [Retry infrastructure failures](gates.md#ci-artifacts-and-caches) does this once automatically.
@@ -86,7 +91,8 @@ Do not rerun the promotion for it: push to each named PR, or rerun that PR's `po
 [release.py](../../tests/ci/release.py) skips a SHA only when a verified public release already includes it, and can repair a missed pointer update without rebuilding.
 Drafts and orphan tags reserve a version for their exact SHA; recovery reuses that identity rather than skipping incomplete publication.
 A newer main SHA gets a newer version; one release covers a whole promotion batch.
-Each platform's native runner builds the tagged commit with empty caches and ReleaseSafe.
+Each platform's native runner builds the tagged commit with empty caches and ReleaseSafe, in Release build before qualification.
+Its archives live as run artifacts for three days, so a promotion's failed jobs must be rerun within that window.
 The targets are portable: a baseline CPU, glibc 2.34 on Linux and macOS 15 on Apple Silicon.
 Each build must report the version and exact SHA from `rui --version`.
 The Linux executables are stripped, and their debug info ships as a separate `-debug` archive that crash traces read once it is extracted beside them.
@@ -103,4 +109,4 @@ It covers version planning, template filling with the shared publication fragmen
 One manual check installed tagged archives through the filled installer on macOS 15, and under dash on Ubuntu 22.04 x86-64 with glibc 2.35.
 Debian 11, with glibc 2.31, refuses to load the Linux build.
 Another manual check built the Linux release, ran the stripping step, extracted the debug archive into an installer-shaped build, and sent `rui host serve` SIGSEGV: the trace showed source lines, and without the debug files it showed `???`.
-No hosted job checks a trace; the only hosted run of a released archive is that Host memory measurement.
+No hosted job checks a trace. Hosted runs of a released archive are the promotion's upgrade check (host launch and the running-Host upgrade), its renderer contracts and that Host memory measurement.
