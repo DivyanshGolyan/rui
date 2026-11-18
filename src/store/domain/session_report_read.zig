@@ -54,6 +54,7 @@ pub const Pressure = struct {
     read: ?*const model_admission_domain.PartsPressure.Read = null,
     needed: ?model_admission_domain.PartsPressure.Coverage = null,
     needed_boundary: u64 = std.math.maxInt(i64),
+    needed_rule: ?@import("../../model_catalog.zig").ImageCostRule = null,
 
     fn advance(self: *Pressure, read: *model_admission_domain.CompactionRead, a: *ReadAccess) !void {
         read.pressure = self.read;
@@ -61,6 +62,7 @@ pub const Pressure = struct {
             if (err == error.PartsPressureRequired) {
                 self.needed = read.bytes_args;
                 self.needed_boundary = read.boundary;
+                self.needed_rule = @import("../../model_catalog.zig").imageCostRule(read.provider, read.model);
             }
             return err;
         };

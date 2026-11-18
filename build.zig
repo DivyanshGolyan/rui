@@ -36,7 +36,8 @@ pub fn build(b: *std.Build) void {
     }
     const pinned_transport = product.addPinnedTransport(b, target);
 
-    const rui = product.addRui(b, target, optimize, "rui", pinned_transport);
+    const test_pauses = b.option(bool, "test-pauses", "Enable test pause points in the product executable") orelse false;
+    const rui = if (test_pauses) product.addPauseRui(b, target, optimize, "rui", pinned_transport) else product.addRui(b, target, optimize, "rui", pinned_transport);
     b.installArtifact(rui);
     b.installFile("THIRD_PARTY_NOTICES.md", "THIRD_PARTY_NOTICES.md");
 

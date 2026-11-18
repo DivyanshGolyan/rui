@@ -63,7 +63,7 @@ def needs_you():
             assert headings == [], frame
             assert lines[0] == "   + New chat" and lines[1] == "     Chats  Archived", frame
             asked = row(frame, "Asks before running")
-            assert re.fullmatch(r"   \? Asks before running {2,}now", asked), asked
+            assert re.fullmatch(r"   ● Asks before running {2,}now", asked), asked
             assert len(asked) == 96, asked
             assert "second line" not in frame, frame
             assert lines[2] == "" and lines.index(asked) == 3, frame
@@ -71,13 +71,13 @@ def needs_you():
             assert re.fullmatch(r"     Answered already {2,}now", row(frame, "Answered already")), frame
             mark = cells(screen, "Asks before running")[3]
             ordinary = cells(screen, "Answered already")[5]
-            assert mark.data == "?" and cells(screen, "Answered already")[3].data == " ", (mark, ordinary)
+            assert mark.data == "●" and cells(screen, "Answered already")[3].data == " ", (mark, ordinary)
             assert mark.fg is not None and mark.fg != ordinary.fg, (mark, ordinary)
             assert screen.style("Asks before running").bold, frame
             screen.keys(b"\r")
             opened = screen.contains("Asks before running · gpt-6-luna")
             assert "Answered already" not in opened, opened
-    print("overview groups: an Action's wait leads the flat list, `?` in the attention colour, selected, with minute-scale state age", flush=True)
+    print("overview groups: an Action's wait leads the flat list, `●` in the attention colour, selected, with minute-scale state age", flush=True)
 
 
 def queued_in_active():
@@ -107,7 +107,7 @@ def queued_in_active():
                 assert "Queued" not in frame, frame
                 working = row(frame, "First peer task")
                 queued = row(frame, "Second peer task")
-                assert re.fullmatch(r"   ⠹ First peer task *", working), working
+                assert re.fullmatch(r"   ◝ First peer task *", working), working
                 assert re.fullmatch(r"   ◌ Second peer task +now", queued), queued
                 done = row(frame, "Dispatcher")
                 assert lines.index(working) < lines.index(done) < lines.index(queued), frame
@@ -137,7 +137,7 @@ def detail_column():
             frame = screen.wait(lambda shown: "Rate limited task" in shown and "Fails every time" in shown,
                                 "the retrying and failed rows")
             shown = row(frame, "Rate limited task")
-            assert re.fullmatch(r"   ⠹ Rate limited task *", shown), shown
+            assert re.fullmatch(r"   ◝ Rate limited task *", shown), shown
             assert "retry in" not in frame and "workspace" not in frame, frame
             failure = row(frame, "Fails every time")
             assert re.fullmatch(r"   × Fails every time {2,}now", failure), (failure, code)

@@ -20,6 +20,7 @@ const mixed = [_]testing.MessagePart{
 const images = [_]testing.MessagePart{.{ .bytes = png, .kind = .{ .image = .{} } }};
 const text = [_]testing.MessagePart{.{ .bytes = "one Text remains bytes 雪" }};
 const json_text = [_]testing.MessagePart{.{ .bytes = "{\"text\":\"line\\nquote\\\"slash\\\\雪\",\"unicode\":\"\\u96ea\"}" }};
+const legacy_mcp_image_json = [_]testing.MessagePart{.{ .bytes = "{\"content\":[{\"type\":\"image\",\"data\":\"iVBORw0KGgo=\",\"mimeType\":\"image/png\"}],\"isError\":false}" }};
 const records = shared.testingHostToolRecords(&.{.{
     .name = "fetch_page",
     .owner = .mcp,
@@ -139,7 +140,7 @@ fn exercise(case: *testing.Case, background: bool) !void {
     var digests: [records.len][32]u8 = undefined;
     const tool_set = hostToolSet(&digests);
     inline for ([_]tools.Runner{ .bash, .mcp }) |runner| {
-        for ([_][]const testing.MessagePart{ &mixed, &images, &text, &json_text }) |parts| {
+        for ([_][]const testing.MessagePart{ &mixed, &images, &text, &json_text, &legacy_mcp_image_json }) |parts| {
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
             var storage: core.Store = undefined;
@@ -398,4 +399,134 @@ fn settlePartsForKept(storage: *core.Store, tmp: *std.testing.TmpDir, binding: a
         try capture.end();
     }
     return storage.settleActionAttemptParts(binding, .succeeded, try capture.seal(), .{});
+}
+
+test "image floor retains whole inputs and tool group until overflow exhaustion" {
+    try testing.forEachEngine(struct {
+        fn run(case: *testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: core.Store = undefined;
+            try testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try shared.configureTestSessionWithMode(&storage, "image-floor-config", "bypass");
+            try testing.submitTestMessageParts(&storage, &tmp, "image-floor-message", session.slice(), &.{
+                .{ .bytes = "keep image" },
+                .{ .bytes = png, .kind = .{ .image = .{} } },
+            });
+            const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            const calls = [_]shared.TestingCall{.{
+                .item_id = "floor-item",
+                .name = "bash",
+                .encoded_call_id = "floor-call",
+                .decoded_call_id = "floor-call",
+                .encoded_arguments = "{\\\"cmd\\\":\\\"true\\\",\\\"description\\\":\\\"Run command\\\"}",
+                .decoded_arguments = "{\"cmd\":\"true\",\"description\":\"Run command\"}",
+            }};
+            try shared.settleCallsForTesting(&storage, &tmp, first, "floor-output", &calls);
+            const selected = (try storage.nextAction(.bash, .fromFree(1, true))).?;
+            const floor_action = (try storage.admitActionAttempt(selected, 30_000, .{})).?.permit.binding;
+            try testing.settleTestActionParts(&storage, &tmp, floor_action, &.{
+                .{ .bytes = "tool image" },
+                .{ .bytes = png, .kind = .{ .image = .{} } },
+            });
+            var current = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            for (0..1) |_| {
+                try storage.settleModelAttemptFailure(current, .{ .uncorrelated = "overflow" }, .context_overflow, .{});
+                const compact = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                try std.testing.expectEqual(historical.ModelOperationKind.compaction, try storage.modelOperationKind(compact));
+                {
+                    var view: testing.TestingPage = undefined;
+                    view.open(&storage, compact);
+                    defer view.close();
+                    var cursor: shared.TestingHistoryCursor = .{};
+                    const message = (try cursor.next(&view)).?;
+                    try std.testing.expectEqual(historical.HistoricalEntryKind.user, message.kind);
+                    try view.page.openMessage(message.input.?);
+                    try std.testing.expect((try view.nextMessagePart()).?.kind == .text);
+                    const image = (try view.nextMessagePart()).?;
+                    try std.testing.expect(image.kind == .image);
+                    try std.testing.expectEqualSlices(u8, &protocol.contentDigest(png), &image.content.digest);
+                    try std.testing.expect((try view.nextMessagePart()) == null);
+                    try std.testing.expectEqual(historical.HistoricalEntryKind.provider_output, (try cursor.next(&view)).?.kind);
+                    try std.testing.expectEqual(historical.HistoricalEntryKind.tool_results, (try cursor.next(&view)).?.kind);
+                    const result = (try view.nextToolResult()).?;
+                    try view.page.openMessage(result.input.?);
+                    try std.testing.expect((try view.nextMessagePart()).?.kind == .text);
+                    const tool_image = (try view.nextMessagePart()).?;
+                    try std.testing.expect(tool_image.kind == .image);
+                    try std.testing.expectEqualSlices(u8, &protocol.contentDigest(png), &tool_image.content.digest);
+                    try std.testing.expect((try view.nextMessagePart()) == null);
+                    try std.testing.expect((try view.nextToolResult()) == null);
+                }
+                try testing.settleCompactionForTesting(&storage, &tmp, compact, &.{.compaction});
+                current = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            }
+            try storage.settleModelAttemptFailure(current, .{ .uncorrelated = "overflow" }, .context_overflow, .{});
+            try std.testing.expect((try storage.admitNextModelAttempt(.{})) == null);
+            try std.testing.expect((try storage.admitNextModelAttempt(.{})) == null);
+            try std.testing.expectEqual(@as(u64, 2), try testing.queryU64(&storage, "SELECT count(*) FROM model_operation WHERE resolution_code='context_overflow'", .{}));
+        }
+    }.run);
+}
+
+fn expectOldTextView(storage: *core.Store, binding: core.AttemptBinding) !void {
+    var view: testing.TestingPage = undefined;
+    view.open(storage, binding);
+    defer view.close();
+    var settings: historical.HistoricalSettings = undefined;
+    try view.settings(&settings);
+    try std.testing.expect(!view.page.compound_inputs);
+    var position: u64 = 0;
+    var users: usize = 0;
+    var results: usize = 0;
+    while (try view.nextEntry(position)) |entry| {
+        position = entry.position;
+        try std.testing.expect(entry.source_action == null);
+        if (entry.kind == .user) {
+            users += 1;
+            try expectBytes(&view, entry.content.?, "Run the tool.");
+        }
+        if (entry.kind == .tool_results) {
+            while (try view.nextToolResult()) |result| {
+                results += 1;
+                try expectBytes(&view, result.call_id, "parts-call");
+                try std.testing.expect(result.input == null);
+            }
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), users);
+    try std.testing.expectEqual(@as(usize, 1), results);
+}
+
+test "old text operation retry excludes later image message and background final after reopen" {
+    try testing.forEachEngine(struct {
+        fn run(case: *testing.Case) !void {
+            var digests: [records.len][32]u8 = undefined;
+            const tool_set = hostToolSet(&digests);
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: core.Store = undefined;
+            try testing.testingStoreWith(case, &storage, &tmp, std.testing.io, .{ .host_tool_set = &tool_set });
+            defer storage.close() catch unreachable;
+            const session = try propose(&storage, &tmp, .mcp);
+            const selected = (try storage.nextAction(.mcp, .fromFree(2, true))).?;
+            const action_binding = (try storage.admitActionAttempt(selected, 30_000, .{})).?.permit.binding;
+            var promotion: @import("../../command_input.zig").ActionBackgroundCommand = .{ .session = session, .action_id = selected.action_id };
+            try promotion.key.set("old-text-promote");
+            try std.testing.expect(storage.backgroundAction(.{ .command = &promotion }, .{}) == .accepted);
+            const original = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try expectOldTextView(&storage, original);
+            try storage.settleModelAttemptFailure(original, .{ .uncorrelated = "temporary" }, .{ .retryable = .{ .waits_ms = .{ 1, 1, 1 } } }, .{});
+            try testing.submitTestMessageParts(&storage, &tmp, "later-image", session.slice(), &images);
+            try testing.settleTestActionParts(&storage, &tmp, action_binding, &mixed);
+            try expectOldTextView(&storage, original);
+            try storage.close();
+            try testing.testingStoreWith(case, &storage, &tmp, std.testing.io, .{ .host_tool_set = &tool_set });
+            try expectOldTextView(&storage, original);
+            const retry = (try shared.admitRetryForTesting(&storage)).?.permit.binding;
+            try std.testing.expectEqual(original.operation_id, retry.operation_id);
+            try expectOldTextView(&storage, retry);
+        }
+    }.run);
 }

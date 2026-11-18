@@ -232,7 +232,7 @@ pub const CompactionRead = struct {
             .compound_bytes => stage: {
                 const parts = read.pressure.?.total;
                 read.facts.uncovered_bytes = read.compound_bytes.uncovered_bytes - parts.manifest_bytes +| parts.text_bytes;
-                read.facts.unknown_images = parts.unknown_images;
+                parts.apply(&read.facts, read.provider, read.model);
                 break :stage .done;
             },
             .done => .done,
@@ -580,6 +580,26 @@ pub const PartsPressure = struct {
     manifest_bytes: u64 = 0,
     text_bytes: u64 = 0,
     unknown_images: u64 = 0,
+    astra_tokens: u64 = 0,
+    astra_unknown: u64 = 0,
+    astra_impossible: u64 = 0,
+    gpt41_unknown: u64 = 0,
+    gpt41_tokens: u64 = 0,
+
+    fn apply(self: PartsPressure, facts: *turn_policy.CompactionFacts, provider: provider_name.Provider, model: []const u8) void {
+        facts.unknown_images = self.unknown_images;
+        if (model_catalog.imageCostRule(provider, model)) |rule| switch (rule) {
+            .astra_auto => {
+                facts.image_tokens = self.astra_tokens;
+                facts.unknown_images = self.astra_unknown;
+                facts.impossible_images = self.astra_impossible;
+            },
+            .gpt41_auto => {
+                facts.image_tokens = self.gpt41_tokens;
+                facts.unknown_images = self.gpt41_unknown;
+            },
+        };
+    }
 
     pub const Coverage = context_bytes.Args;
 
@@ -601,6 +621,7 @@ pub const PartsPressure = struct {
         loaded: bool = false,
         cursor: ?@import("../../os/pages.zig").Mapped(content_parts.Cursor) = null,
         total: PartsPressure = .{},
+        rule: ?model_catalog.ImageCostRule = null,
         ready: bool = false,
 
         pub fn init(self: *Read, session: []const u8, covered: u64, frontier: u64, results: u64, cutoff: u64) void {
@@ -618,6 +639,7 @@ pub const PartsPressure = struct {
             self.loaded = false;
             self.cursor = null;
             self.total = .{};
+            self.rule = null;
             self.ready = false;
         }
 
@@ -659,6 +681,7 @@ pub const PartsPressure = struct {
                 const value = try content_domain.Value.of(row.content_id orelse return error.CorruptStore, row.form orelse return error.CorruptStore, row.byte_length orelse return error.CorruptStore, row.digest orelse return error.CorruptStore);
                 const mapped = try @import("../../os/pages.zig").Mapped(content_parts.Cursor).map();
                 mapped.value.init(value);
+                mapped.value.weight.rule = self.rule;
                 self.cursor = mapped;
             }
             const cursor = self.cursor.?.value;
@@ -671,6 +694,11 @@ pub const PartsPressure = struct {
                 self.total.manifest_bytes +|= row.byte_length.?;
                 self.total.text_bytes +|= cursor.weight.text_bytes;
                 self.total.unknown_images +|= cursor.weight.unknown_images;
+                self.total.astra_tokens +|= cursor.weight.astra_tokens;
+                self.total.astra_unknown +|= cursor.weight.astra_unknown;
+                self.total.astra_impossible +|= cursor.weight.astra_impossible;
+                self.total.gpt41_unknown +|= cursor.weight.gpt41_unknown;
+                self.total.gpt41_tokens +|= cursor.weight.gpt41_tokens;
                 self.deinit();
                 self.finishRow(row.position);
             }
@@ -746,6 +774,7 @@ pub const AdmissionPreparation = struct {
         self.resolution = facts.latest_resolution;
         self.read.init(&selection.session.ref, coverage.covered, coverage.frontier, coverage.results, selection.cutoff.get());
         self.read.boundary = facts.session.next_position.get();
+        self.read.rule = model_catalog.imageCostRule(facts.provider, facts.model.slice());
         self.phase = .weighing;
     }
 
@@ -1082,12 +1111,16 @@ pub const AdmitModel = struct {
                         selection.cutoff = prepared.selection.cutoff;
                         selection.selected = prepared.selection.selected;
                         selection.skills = prepared.selection.skills;
-                        weighed = .{ .parts = .{
+                        prepared.read.total.apply(&compaction, facts.provider, facts.model.slice());
+                        const adjusted_limit = turn_policy.compactingBytes(compaction);
+                        if (adjusted_limit == null) {
+                            purpose = .compaction;
+                        } else weighed = .{ .parts = .{
                             .session = facts.session,
                             .covered = coverage.covered,
                             .frontier = coverage.frontier,
                             .results = coverage.results,
-                            .limit = @min(limit, std.math.maxInt(i64)),
+                            .limit = @min(adjusted_limit.?, std.math.maxInt(i64)),
                             .manifest_bytes = prepared.read.total.manifest_bytes,
                             .text_bytes = prepared.read.total.text_bytes,
                             .cutoff = selection.cutoff.get(),

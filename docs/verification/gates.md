@@ -4,8 +4,6 @@
 
 ## Canonical gates
 
-[Screen captures](../../.github/workflows/screens.yml) run separately from admission for same-repository UI PRs, using the same `screens_required` path rule. CI compares four capture shards against the PR merge base, posts one comment with changed and new PNGs and capture failures, and reports elapsed time. Main captures supply retained baselines on `pr-screens`; a missing merge-base baseline is captured on demand. A changed screen succeeds; a failed capture fails the screens job. This does not replace the current admission evidence requirement.
-
 Integration fixtures require Python 3.11 or newer on PATH, with the packages pinned in [tests/integration/requirements.txt](../../tests/integration/requirements.txt) (python-h2 serves every loopback fixture over h2c); the composed driver rejects older interpreters and records the one selected.
 PTY fixtures read the screen through libghostty-vt, from the test-only package in [screen-emulator](../../screen-emulator/build.zig.zon); build.zig builds it with a child `zig build` for the steps that run the observer and names it in `RUI_TEST_GHOSTTY_VT`.
 The first such step fetches its pinned release tarball and packages into `screen-emulator/zig-pkg` and takes a few minutes; installs never fetch it.

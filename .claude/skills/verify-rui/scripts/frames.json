@@ -1225,10 +1225,10 @@
           "wait": "Agent working"
         },
         {
-          "wait": "⠹ Agent working"
+          "wait": "◝ Agent working"
         },
         {
-          "wait": "? Agent approval"
+          "wait": "● Agent approval"
         }
       ],
       "expect": [
@@ -1247,7 +1247,7 @@
           "dim": true
         },
         {
-          "text": "⠹ Agent working",
+          "text": "◝ Agent working",
           "dim": true
         },
         {
@@ -1276,11 +1276,11 @@
           "min_columns": 140
         },
         {
-          "wait": "⠹ Agent working",
+          "wait": "◝ Agent working",
           "min_columns": 140
         },
         {
-          "wait": "? Agent approval",
+          "wait": "● Agent approval",
           "min_columns": 140
         }
       ],
@@ -1297,7 +1297,7 @@
           "min_columns": 140
         },
         {
-          "text": "⠹ Agent working",
+          "text": "◝ Agent working",
           "dim": true,
           "min_columns": 140
         },
@@ -2888,7 +2888,7 @@
       "expect": [
         "Schema migration",
         "Settings",
-        "\u25a0"
+        "\u25aa"
       ],
       "absent": [
         "What shall we work on?"
@@ -2922,7 +2922,7 @@
       "expect": [
         "Schema migration",
         "Settings",
-        "\u25a0",
+        "\u25aa",
         "Release notes for 0.60"
       ],
       "absent": [
@@ -2957,7 +2957,7 @@
       "expect": [
         "Schema migration",
         "Settings",
-        "\u25a0"
+        "\u25aa"
       ],
       "absent": [
         "What shall we work on?"
@@ -3772,7 +3772,7 @@
     },
     {
       "name": "tools-running",
-      "note": "14-tools-running: \u2839 marks active tool calls; owns its parallel jobs, leaving the retry transcript unchanged",
+      "note": "14-tools-running: \u25dd marks active tool calls; owns its parallel jobs, leaving the retry transcript unchanged",
       "open": "Run parallel checks",
       "steps": [
         {
@@ -3793,7 +3793,7 @@
         }
       ],
       "expect": [
-        "\u2839 Build the docs",
+        "\u25dd Build the docs",
         "Run the slow tests",
         "ctrl+x stop"
       ],
@@ -3836,7 +3836,7 @@
           }
         },
         {
-          "wait": "\u2839 Sleep eight seconds"
+          "wait": "\u25dd Sleep eight seconds"
         },
         {
           "keys": [
@@ -3844,12 +3844,12 @@
           ]
         },
         {
-          "wait": "\u25a0 Stopped",
+          "wait": "\u25aa Stopped",
           "timeout": 60
         }
       ],
       "expect": [
-        "\u25a0 Stopped",
+        "\u25aa Stopped",
         "   Stopped"
       ],
       "absent": [
@@ -3860,7 +3860,7 @@
       ],
       "first_frame": true,
       "expect_next": {
-        "\u25a0 Stop the slow job": "   Stopped"
+        "\u25aa Stop the slow job": "   Stopped"
       },
       "absent_sidebar_regex": [
         "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +(?:now|[0-9]+[mhd]) *$"
@@ -3890,7 +3890,7 @@
           }
         },
         {
-          "wait": "\u2839 Sleep eight seconds"
+          "wait": "\u25dd Sleep eight seconds"
         },
         {
           "keys": [
@@ -3898,11 +3898,11 @@
           ]
         },
         {
-          "wait": "\u25a0 Stopped",
+          "wait": "\u25aa Stopped",
           "timeout": 60
         }
       ],
-      "expect": "\u25a0 Stopped",
+      "expect": "\u25aa Stopped",
       "absent": [
         "Stopping",
         "ctrl+x stop"
@@ -3917,11 +3917,11 @@
     },
     {
       "name": "stopped",
-      "note": "14d-stopped: one \u25a0 Stopped line, without continuation advice; independently seeded with settle: stop",
+      "note": "14d-stopped: one \u25aa Stopped line, without continuation advice; independently seeded with settle: stop",
       "open": "Profile the Host under load",
       "steps": [
         {
-          "wait": "\u25a0 Stopped"
+          "wait": "\u25aa Stopped"
         }
       ],
       "absent_sidebar_regex": [
@@ -3959,9 +3959,11 @@
         }
       ],
       "expect": [
-        " \u00b7 ask"
+        " \u00b7 ask",
+        "● Record thirty progress steps"
       ],
       "absent": [
+        "? Record thirty progress steps",
         "asks before Bash/MCP",
         "Type a message",
         "enter sends",
