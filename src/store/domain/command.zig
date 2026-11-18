@@ -2342,7 +2342,13 @@ const permission_target = rsql.Read(.{
     .cardinality = .one,
 });
 
-pub fn observeCommand(a: anytype, key: []const u8, observation: *CommandObservation) !void {
+fn observedInput(content_id: u64, metadata: *const content_domain.content_metadata.Row, pending: *?content_domain.Value) !void {
+    if (metadata.private) return error.CorruptStore;
+    const value = try content_domain.Value.of(content_id, metadata.form, metadata.byte_length, metadata.digest);
+    if (value.reference == .parts) pending.* = value;
+}
+
+pub fn observeCommand(a: anytype, key: []const u8, observation: *CommandObservation, pending: *?content_domain.Value) !void {
     var saved: saved_command.Result = undefined;
     lookupCommand(a, key, &saved);
     var message: message_observation.Result = undefined;
@@ -2368,7 +2374,7 @@ pub fn observeCommand(a: anytype, key: []const u8, observation: *CommandObservat
                     var metadata: content_domain.content_metadata.Row = undefined;
                     a.read(content_domain.content_metadata, .{ .content_id = @intCast(id) }, &metadata);
                     try store_access.runAs(a, error.CorruptStore);
-                    _ = try content_parts.publicMetadata(a, @intCast(id), &metadata);
+                    try observedInput(@intCast(id), &metadata, pending);
                 }
                 return;
             }
@@ -2376,9 +2382,9 @@ pub fn observeCommand(a: anytype, key: []const u8, observation: *CommandObservat
             const content_id = command.primary_content_id orelse return error.CorruptStore;
             if (!row.session_ref.eql(command.target.slice()) or row.content_id.get() != content_id) return error.CorruptStore;
             const metadata: content_domain.content_metadata.Row = .{ .byte_length = row.input_length, .digest = row.input_digest, .private = row.input_private, .form = row.input_form };
-            _ = try content_parts.publicMetadata(a, row.content_id.get(), &metadata);
+            try observedInput(row.content_id.get(), &metadata, pending);
             const queue = try messageQueue(&row);
-            observation.kind.message = .{ .content = .{ .length = row.input_length, .digest = row.input_digest }, .queue = queue, .admitted_at = row.admitted_at.get() };
+            observation.kind.message = .{ .form = try @import("../../input_parts.zig").Form.decode(row.input_form), .content = .{ .length = row.input_length, .digest = row.input_digest }, .queue = queue, .admitted_at = row.admitted_at.get() };
             if (row.has_recovery) try readRecovery(a, key, &observation.kind.message.?.recovery);
             switch (queue.state) {
                 .queued, .processing => observation.kind.message.?.work = try readMessageWork(a, &work, command.target.slice(), row.created_at.get(), queue.state),

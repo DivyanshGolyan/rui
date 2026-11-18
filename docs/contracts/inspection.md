@@ -378,7 +378,7 @@ The Host reads a Message's admission, binding/exclusion, outcome and, while pend
 Work and recovery are client-neutral facts, not prompts or authorization instructions.
 This is not a global cross-owner snapshot.
 Current supplies a Session's summary and one-time work selection.
-Repeated observation by the human frontend or caller-owned polling retains no connection between reads.
+Repeated observation by the human frontend or caller-owned polling retains no connection between reads. A compound Message observation binds the content identity to its saved command and admission, then certifies the manifest and ordered index in bounded Store entries before returning it. Other Store work may proceed between entries.
 
 All waits observe work; they do not start or resume it.
 The adapter Session selections are not non-interactive CLI commands:
@@ -467,6 +467,7 @@ Every such JSON value, and each JSON diagnostic, spells DEL and every non-ASCII 
 Explicit content reads stream saved bytes only; a content reader that fails before content writes its typed diagnostic to stderr and leaves stdout empty.
 Stderr carries pre-send recovery notices, including the generated-handle notice, and diagnostics.
 A Message request alone also carries its sender's [environment](execution.md#bash-environment) as a framed prefix of its body; every other exchange's body is the JSON value alone.
+A Message carries either its existing `text` envelope or an ordered `parts` array, never both. Each part is `{"type":"text","text":...}` or `{"type":"image","mime":"image/png"|"image/jpeg","data":...}`, with image data encoded as standard padded base64. The Host validates the decoded bytes and asserted MIME before admission. Message replies and accepted observations identify a compound input as `type:parts`, with the length and digest of its canonical ordered manifest; a single text retains its existing `type:text` identity.
 Compiled public types and exhaustive goldens own fields, unions, omissions and integer encodings; `u64`-class values are JSON strings.
 No handwritten duplicate schema or generic native command/result union is required.
 
@@ -527,8 +528,8 @@ Every valid short control and its complete semantic response fit a field-derived
 Reject oversized discovery before body parsing, and route/kind disagreement as soon as `kind` is read, which is before any content capture when `kind` precedes the content.
 A request's object members may come in any order, as JSON allows, so clients generated from `openapi.json` in any language can build bodies (D212).
 Each member appears at most once, required members must all be present, and unknown members fail.
-The parser takes two passes over the metadata it has so far: the first reads `version`, `kind` and `store` wherever they sit and counts content values as they arrive (`instructions` text and `outputSchema` objects in either spec, plus a Message's `text` value), and the second fills the command, so each content value takes the capture its string arrived in.
-Once `kind` is known, content the kind cannot carry fails before capture; before that, at most three strings are captured, and a fourth fails.
+The parser takes two passes over the metadata it has so far: the first reads `version`, `kind` and `store` wherever they sit and counts content values as they arrive (`instructions` text and `outputSchema` objects in either spec, plus a Message's `text` or ordered `parts`), and the second fills the command, so each content value takes the capture its string arrived in.
+Once `kind` is known, content the kind cannot carry fails before capture. Before `kind`, at most three scalar content strings are captured; an ordered `parts` array instead uses the shared scratch budget and the bounded part and image limits, even when it precedes `kind`.
 Discovery keeps one acceptance-derived ten-second absolute deadline across headers, body and all reply/error writes.
 Progress cannot renew it.
 Mutation-response waiting and transfer inactivity follow [the client transport contract](cli.md#client-transport-and-observations).

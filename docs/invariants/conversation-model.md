@@ -9,6 +9,8 @@
 | CM-1 | Host | Admitted messages are immutable and project in admission order only when selected for a Turn. | Wire and Store | `pending_projection`: pause active work, admit a batch, inspect before and after boundary. | docs/contracts/conversation.md:10 |
 | CM-2 | Host | Selection atomically binds the eligible cutoff prefix, projects it, and admits its next model Operation. | Wire and Store | `boundary_atomicity`: vary cutoff, rollback and concurrent stop; inspect all three facts. | src/store/domain/model_admission.zig:804 |
 | CM-3 | Host | Every selected message receives its bound Turn's one terminal outcome without requeue. | Wire | `selected_outcomes`: batch messages and vary success, structured result and failure. | docs/contracts/conversation.md:23 |
+| CM-41 | Product | A known-negative model refuses a newly admitted image before making a provider request. | CLI and fake provider | `cli_image_integration.py:unsupported_model` | docs/contracts/model-io.md |
+| CM-40 | Product | Native start and send deliver ordered image bytes to each applicable provider and preserve them across retry. | CLI and fake provider | `cli_image_integration.py`: table start, send and provider dialect; compare ordered text, PNG and JPEG across retry. | docs/contracts/model-io.md |
 | CM-5 | Host | Runnable queued input resumes without another Message when ordinary scheduling prerequisites allow. | Wire | `runnable_progress`: suppress notifications and vary capacity, prerequisites and restart without a failed predecessor. | docs/contracts/conversation.md:35 |
 | CM-7 | Host | A rejected configuration changes neither the revision nor any other setting. | Wire and Store | `configuration_atomicity`: combine valid and invalid updates and compare snapshots. | src/store/domain/configuration.zig:192 |
 | CM-8 | Host | Every admitted explicit instruction update is recorded once in immutable chronological history, including equal values and reversals. | Wire and Store | `instruction_history`: vary omitted, equal, reversed, replayed and rolled-back updates. | docs/contracts/conversation.md:208 |
@@ -40,6 +42,8 @@
 | CM-38 | Module | Model admission reads Session facts with its selection inside the Store hold and before opening its transaction. | Store admission API with deterministic selection and transaction instrumentation | `admission_selection_order`: observe selection and transaction ordering for empty and admitted work, including no transaction for an empty selection. | docs/contracts/model-io.md:213; src/store/sqlite_tests/model_admission.zig:1013 |
 
 Owned elsewhere: ADM-3 (Label presentation and model input), ADM-4 (configuration field presence), ADM-21 (missing-tool catalog decisions), SES-1, SES-4–SES-7 and SES-17 (stop exclusion), SES-10 (queue survival after Turn failure), EXR-1 (provider candidate rejection), EXR-5 (Action permission snapshot), EXR-42 (loaded-tool narrowing and fallback), EXR-44 (allocation exhaustion during skill reload).
+
+| CM-39 | Module | Skill references in ordered Message input are read from each text part in order, excluding image bytes. | Skill reference scanner over sealed input | `CM-39 skill references are read from ordered text parts only` | src/session_skills.zig |
 
 ## Seams the harness must provide
 
