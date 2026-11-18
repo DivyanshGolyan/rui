@@ -113,6 +113,8 @@ export interface SessionStatus extends ServedWork {
 	since: CurrentReport["work"]["state"]["since"];
 	turn: CurrentReport["work"]["turn"];
 	operation: CurrentReport["work"]["operation"];
+	/** The Host-served target for interrupting the observed model call. */
+	interruptTarget: InterruptTarget | null;
 	pendingMessages: CurrentReport["pending_messages"];
 	parent: CurrentReport["session"]["parent"];
 	label: CurrentReport["session"]["label"];
