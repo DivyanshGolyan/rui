@@ -1,5 +1,6 @@
 
 import type { InterruptTarget, Link, ServedWork } from "./sessions.ts";
+import { listParts, readPartBytes, type ContentValue, type Part } from "./parts.ts";
 import { WIRE_VERSION } from "./transport.ts";
 import type { components } from "./wire.ts";
 
@@ -80,6 +81,8 @@ type EntryText = {
 	truncated?: boolean;
 	/** The text's length in bytes, when this kind carries text. */
 	contentBytes?: string;
+	/** Certified parts, in order, when the content is a parts value. */
+	parts?: Part[];
 };
 
 type EntryFromRow<R extends Row> = R extends Row ? {
@@ -114,13 +117,15 @@ function camelCase(row: Record<string, unknown>): Record<string, unknown> {
 	return Object.fromEntries(Object.entries(row).map(([name, value]) => [camel(name), value]));
 }
 
-function isReference(value: unknown): value is Schemas["ContentValue"] {
-	return typeof value === "object" && value !== null && "bytes" in value && "sha256" in value;
+function contentOf(payload: Record<string, unknown>): ContentValue | undefined {
+	const value = payload.content;
+	if (typeof value !== "object" || value === null || !("type" in value)) return undefined;
+	return value.type === "text" || value.type === "parts" ? value as ContentValue : undefined;
 }
 
 function entryOf(row: Row): { entry: FeedEntry; reference: Schemas["ContentValue"] | undefined } {
 	const [kind, payload] = Object.entries(row.value)[0] as [FeedKind, Record<string, unknown>];
-	const reference = isReference(payload.content) ? payload.content : undefined;
+	const reference = contentOf(payload);
 	const wanted = kind !== "turn_ended" || ENDINGS_WITH_TEXT.has(String(payload.ending));
 	const entry = {
 		kind,
@@ -215,7 +220,14 @@ export async function* listActivity(link: Link, session: string, options: ListAc
 					if (signal?.aborted) return;
 					const { entry, reference } = entryOf(row);
 					if (reference && "content" in entry) {
-						if (Number(reference.bytes) > INLINE_TEXT_BYTES) {
+						if (reference.type === "parts") {
+							entry.parts = await listParts(link, session, reference.owner);
+							for (const part of entry.parts) {
+								if (part.type !== "text") continue;
+								if (Number(part.bytes) > INLINE_TEXT_BYTES) part.truncated = true;
+								else part.text = (await readPartBytes(link, session, reference.owner, part.ordinal, { prefix: INLINE_TEXT_BYTES })).toString("utf8");
+							}
+						} else if (Number(reference.bytes) > INLINE_TEXT_BYTES) {
 							entry.truncated = true;
 						} else {
 							const prefix = await link.exchange("/v1/activity-content", (store) => contentBody(store, session, row), undefined, { prefix: INLINE_TEXT_BYTES });

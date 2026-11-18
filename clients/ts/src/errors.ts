@@ -46,3 +46,9 @@ export class RuiUnavailableError extends Error {
 		super(message, options);
 	}
 }
+
+/** The entry contains parts; read an individual part instead. */
+export class ContentIsPartsError extends Error {
+	override readonly name = "ContentIsPartsError";
+	constructor() { super("Content contains parts; use session.readPart(entry, ordinal)"); }
+}

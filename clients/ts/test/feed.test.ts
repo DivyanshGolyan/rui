@@ -571,3 +571,62 @@ test("feed observations belong to the handle that read them", async () => {
 	await other.interrupt();
 	assert.deepEqual(paths, ["/v1/activity-page"]);
 });
+
+test("TS-7 feed parts entries", async () => {
+	const image = Buffer.from([0, 255, 42, 128]);
+	const owners = [{ message: "17" }, { action: "42" }];
+	const requests: { path: string; body: Record<string, unknown> }[] = [];
+	const text = { type: "text", bytes: "2", sha256: "text-hash" };
+	const parts = [
+		{ ordinal: "0", type: "text", bytes: "2", sha256: "a" },
+		{ ordinal: "1", type: "text", bytes: "16384", sha256: "b" },
+		{ ordinal: "2", type: "text", bytes: "16385", sha256: "c" },
+		{ ordinal: "3", type: "image", mime: "image/png", width: "12", height: "34", name: "cat.png", bytes: "4", sha256: "d" },
+	];
+	const rows = [
+		{ position: "1", ordinal: "0", at: "1", value: { user: { content: text } } },
+		...owners.map((owner, i) => ({ position: String(i + 2), ordinal: "0", at: "1", value: { [i === 0 ? "user" : "tool_result"]: { content: { type: "parts", bytes: "99", sha256: "manifest", owner } } } })),
+	];
+	const link: Link = { async exchange(path, build, _environment, limits) {
+		const body = JSON.parse(build("store"));
+		requests.push({ path, body });
+		if (path === "/v1/activity-page") return Buffer.from(JSON.stringify({ work: { attention: null, group: "done", actions: { stop: false, interrupt: null, decide: null } }, delta: "full", since: null, items: rows, more: false, end: "3" }));
+		if (path === "/v1/activity-content") return Buffer.from("ok");
+		if (path === "/v1/public-parts") return Buffer.from(JSON.stringify({ value: { type: "parts", bytes: "99", sha256: "manifest", owner: body.owner }, parts }));
+		assert.equal(path, "/v1/public-part-content");
+		assert.equal(body.session, "s");
+		assert.equal(body.start, "0");
+		assert.equal(body.stream, true);
+		if (body.part === "0") return Buffer.from("hi");
+		if (body.part === "1") { assert.equal(limits?.prefix, 16384); return Buffer.alloc(16384, 120); }
+		if (body.part === "2") return Buffer.alloc(16385, 121);
+		assert.equal(body.part, "3");
+		return image;
+	} };
+	const session = new Session(link, "s");
+	const entries: FeedEntry[] = [];
+	for await (const entry of session.listActivity()) entries.push(entry);
+	assert.ok(entries[0]?.kind === "user");
+	assert.equal(entries[0].text, "ok");
+	for (const [index, owner] of owners.entries()) {
+		const entry = entries[index + 1];
+		assert.ok(entry && (entry.kind === "user" || entry.kind === "tool_result"));
+		assert.equal(entry.contentBytes, "99");
+		assert.equal("text" in entry, false);
+		assert.deepEqual(entry.parts, [
+			{ ordinal: 0, type: "text", bytes: "2", sha256: "a", text: "hi" },
+			{ ordinal: 1, type: "text", bytes: "16384", sha256: "b", text: "x".repeat(16384) },
+			{ ordinal: 2, type: "text", bytes: "16385", sha256: "c", truncated: true },
+			{ ordinal: 3, type: "image", mime: "image/png", width: 12, height: 34, name: "cat.png", bytes: "4", sha256: "d" },
+		]);
+		assert.deepEqual(await session.readPart(entry, 3), image);
+		assert.deepEqual(await session.readPart(entry, 0), Buffer.from("hi"));
+		assert.deepEqual(await session.readPart(entry, 2), Buffer.alloc(16385, 121));
+		assert.throws(() => session.readPart(entry, -1), RangeError);
+		assert.throws(() => session.readContent(entry), { name: "ContentIsPartsError", message: /readPart/ });
+		assert.throws(() => session.readContentBytes(entry), { name: "ContentIsPartsError", message: /readPart/ });
+		assert.ok(requests.some((request) => request.path === "/v1/public-parts" && JSON.stringify(request.body.owner) === JSON.stringify(owner)));
+	}
+	assert.equal(requests.filter((request) => request.path === "/v1/public-parts").length, 2);
+	assert.equal(requests.filter((request) => request.path === "/v1/public-part-content" && request.body.part === "2").length, 2);
+});
