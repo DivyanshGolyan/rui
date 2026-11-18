@@ -117,7 +117,7 @@ def catalog(*entries):
 
 def content_reference(raw):
     domain = b"rui/content/v1"
-    return {"bytes": str(len(raw)), "sha256": hashlib.sha256(len(domain).to_bytes(8, "big") + domain + raw).hexdigest()}
+    return {"type": "text", "bytes": str(len(raw)), "sha256": hashlib.sha256(len(domain).to_bytes(8, "big") + domain + raw).hexdigest()}
 
 
 def main():

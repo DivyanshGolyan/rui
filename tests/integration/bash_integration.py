@@ -1279,7 +1279,7 @@ def main():
         domain = b"rui/content/v1"
         expected_digest = hashlib.sha256(len(domain).to_bytes(8, "big") + domain + expected_bytes).hexdigest()
         assert metadata["code"] == "succeeded" and int(metadata["position"]) > 0, metadata
-        assert metadata["content"] == {"bytes": str(len(expected_bytes)), "sha256": expected_digest}, metadata
+        assert metadata["content"] == {"type": "text", "bytes": str(len(expected_bytes)), "sha256": expected_digest}, metadata
         page = first_read
         assembled = bytearray()
         while True:

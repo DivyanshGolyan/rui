@@ -302,8 +302,10 @@ pub fn firstMessage(row: anytype, first: u64) error{ CorruptStore, InputPartsNot
         .admission = (row.first_admission orelse return error.CorruptStore).get(),
         .admitted_at = (row.first_admitted_at orelse return error.CorruptStore).get(),
         .sender = row.first_sender,
-        .length = row.first_length orelse return error.CorruptStore,
-        .digest = row.first_digest orelse return error.CorruptStore,
+        .content = .{ .text = .{
+            .length = row.first_length orelse return error.CorruptStore,
+            .digest = row.first_digest orelse return error.CorruptStore,
+        } },
     };
 }
 

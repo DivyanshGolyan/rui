@@ -81,7 +81,7 @@ pub fn renderConversationPage(response: protocol.JsonOut, page: *const command_r
         if (index != 0) try response.append(",");
         switch (item.kind) {
             .hosted_call => try response.appendShape(shapes.hosted_call, .{ item.position, item.ordinal }),
-            inline else => |kind| try response.appendShape(shapes.item(kind), .{ item.position, item.ordinal, item.content.length, item.content.digest }),
+            inline else => |kind| try response.appendShape(shapes.item(kind), .{ item.position, item.ordinal, protocol.ContentValueJson{ .value = item.content } }),
         }
         switch (item.kind) {
             .user => if (item.admitted_at) |second| try response.appendShape(shapes.admission, .{ second, protocol.NamedPeerJson.optional(item.sender), item.source_action }),
@@ -178,8 +178,8 @@ pub fn renderActionRead(response: protocol.JsonOut, value: *const @import("actio
     try response.appendShape(shapes.head, .{ value.session.slice(), value.action_id });
     switch (value.status) {
         .pending => |state| try response.appendShape(shapes.pending, .{state}),
-        .resolved => |*final| try response.appendShape(shapes.final, .{ final.resolution.position, final.resolution.code.slice(), final.resolution.content.length, final.resolution.content.digest, final.window.offset, final.window.next, final.window.more, final.window.text.slice() }),
-        .resolved_parts => |*final| try response.appendShape(shapes.parts, .{ final.position, final.code.slice(), final.content.length, final.content.digest }),
+        .resolved => |*final| try response.appendShape(shapes.final, .{ final.resolution.position, final.resolution.code.slice(), protocol.ContentValueJson{ .value = final.resolution.content }, final.window.offset, final.window.next, final.window.more, final.window.text.slice() }),
+        .resolved_parts => |*final| try response.appendShape(shapes.parts, .{ final.position, final.code.slice(), protocol.ContentValueJson{ .value = final.content } }),
     }
 }
 
@@ -484,7 +484,7 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
             .position = max,
             .ordinal = max,
             .kind = kind,
-            .content = content,
+            .content = .{ .parts = .{ .identity = content, .owner = .{ .message = max } } },
             .presentation = if (kind == .tool_result or kind == .hosted_call) presentation else null,
             .admitted_at = if (kind == .user) max else null,
             .sender = if (kind == .user) .{ .session = session, .label = label } else null,
@@ -499,16 +499,17 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     var key: protocol.Bounded(protocol.max_key_bytes) = .{};
     try key.set(&escaped_key);
     const peer: protocol.NamedPeer = .{ .session = session, .label = label };
-    const reference: protocol.ActivityItem.Content = .{ .length = max, .digest = content.digest };
+    const text: @import("content_value.zig").Reference = .{ .length = max, .digest = content.digest };
+    const reference: @import("content_value.zig").Value = .{ .parts = .{ .identity = text, .owner = .{ .message = max } } };
     const field: protocol.ProposalFieldReference = .{ .length = max, .digest = content.digest };
     const values = [_]protocol.ActivityItem.Value{
         .{ .admission = .{ .admission = max, .key = key, .turn = max, .state = Worst.tag(@FieldType(protocol.ActivityItem.Message, "state")), .content = reference, .admitted_at = max, .sender = peer, .source_action = max } },
         .{ .user = .{ .admission = max, .key = key, .turn = max, .state = Worst.tag(@FieldType(protocol.ActivityItem.Message, "state")), .content = reference, .admitted_at = max, .sender = peer, .source_action = max } },
-        .{ .assistant = .{ .content = reference, .final = false } },
+        .{ .assistant = .{ .content = text, .final = false } },
         .{ .call = .{ .position = max, .operation = max, .turn = max, .call_ordinal = max, .action = max, .rejection = Worst.tag(protocol.ProposalRejection), .fields = @splat(field), .description = .{ .bytes = @splat(1), .len = CallText.max_description_bytes }, .tool = .{ .bytes = @splat(1), .len = CallText.max_tool_bytes }, .server = .{ .bytes = @splat(1), .len = CallText.max_server_bytes } } },
         .{ .tool_result = .{ .content = reference, .presentation = presentation } },
         .{ .hosted_call = presentation },
-        .{ .turn_ended = .{ .session = .{ .bytes = session.bytes[0..6].*, .len = 6 }, .turn = max, .operation = max, .ending = Worst.tag(protocol.TurnEnding), .code = code, .content = reference } },
+        .{ .turn_ended = .{ .session = .{ .bytes = session.bytes[0..6].*, .len = 6 }, .turn = max, .operation = max, .ending = Worst.tag(protocol.TurnEnding), .code = code, .content = text } },
         .{ .stop = .{ .key = key, .turn = max, .cutoff = max, .completion = Worst.tag(protocol.SessionStopCompletion) } },
         .{ .sent = .{ .admission = max, .target = peer, .content = reference, .admitted_at = max } },
         .{ .send_failed = .{ .key = key, .target = peer, .code = code } },
@@ -590,7 +591,7 @@ test "Action read JSON reaches its exact bound with an escaped final window" {
         .session = .{ .bytes = @splat(1), .len = protocol.max_session_bytes },
         .action_id = max,
         .status = .{ .resolved = .{
-            .resolution = .{ .position = max, .code = .{ .bytes = @splat(1), .len = protocol.max_code_bytes }, .content = .{ .length = max, .digest = @splat(0xff) } },
+            .resolution = .{ .position = max, .code = .{ .bytes = @splat(1), .len = protocol.max_code_bytes }, .content = .{ .parts = .{ .identity = .{ .length = max, .digest = @splat(0xff) }, .owner = .{ .message = max } } } },
             .window = .{ .offset = max, .next = max, .more = false, .text = .{ .bytes = @splat(1), .len = @import("action_read.zig").window_bytes } },
         } },
     };

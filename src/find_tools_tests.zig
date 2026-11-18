@@ -46,9 +46,9 @@ fn result(storage: *Store, session: protocol.Bounded(protocol.max_session_bytes)
         if (item.ordinal == 1) break item.value.tool_result.content;
     } else return error.MissingFindToolsResult;
     var reader: store.ContentReader = undefined;
-    reader.open(try storage.openContent(.{ .length = reference.length, .digest = reference.digest }));
+    reader.open(try storage.openContent(.{ .length = reference.text.length, .digest = reference.text.digest }));
     defer reader.close();
-    const bytes = try arena.alloc(u8, @intCast(reference.length));
+    const bytes = try arena.alloc(u8, @intCast(reference.text.length));
     try std.testing.expectEqual(bytes.len, try reader.read(0, bytes));
     return bytes;
 }

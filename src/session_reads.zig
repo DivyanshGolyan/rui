@@ -4,6 +4,8 @@ const fake_host = @import("testing/fake_host.zig");
 const client = @import("client.zig");
 const protocol_reply = @import("protocol_reply.zig");
 const protocol = @import("protocol.zig");
+const content_value = @import("content_value.zig");
+const value_reads = @import("value_reads.zig");
 const activity_reply = @import("activity_reply.zig");
 const Input = @import("SessionInput.zig");
 const Submission = @import("SessionSubmission.zig");
@@ -58,7 +60,9 @@ pub fn copyName(buffer: *[copy_name_bytes]u8, session: []const u8) []const u8 {
     return std.fmt.bufPrint(buffer, "rui-{s}-answer.md", .{session}) catch unreachable;
 }
 
-pub const Files = struct { scratch: std.Io.File, action: std.Io.File, inspection: std.Io.File, details: std.Io.File, actions: [2]std.Io.File };
+/// `parts` holds the certified part list of the parts value being drawn or staged, which
+/// `scratch` may be staging the display bytes of at the same time.
+pub const Files = struct { scratch: std.Io.File, action: std.Io.File, inspection: std.Io.File, details: std.Io.File, actions: [2]std.Io.File, parts: std.Io.File };
 
 pub const Moment = struct { revision: u64, end: u64 };
 
@@ -69,7 +73,8 @@ pub const Line = struct {
 
     read: ?Moment = null,
     label: ?Bounded(protocol.max_label_bytes) = null,
-    first_position: ?u64 = null,
+    /// The Session's first Message, whose first line names an unlabelled Session.
+    first: ?First = null,
     folder: ?Bounded(protocol.max_workspace_bytes) = null,
     model: Bounded(protocol.max_model_bytes) = .{},
     provider: ?protocol.Provider = null,
@@ -77,6 +82,8 @@ pub const Line = struct {
     left: ?u8 = null,
     asks: bool = false,
     archive_state: protocol.SessionArchiveState = .active,
+
+    pub const First = struct { position: u64, content: content_value.Value };
 
     fn stale(read: ?Moment, page: *const protocol.ActivityFacts) bool {
         const moment = read orelse return true;
@@ -91,7 +98,7 @@ pub const Line = struct {
         line.* = .{
             .read = moment,
             .label = if (settings.label) |label| plain(protocol.max_label_bytes, label.slice()) else null,
-            .first_position = if (first) |message| message.value.position else null,
+            .first = if (first) |message| .{ .position = message.value.position, .content = message.value.content } else null,
             .folder = if (first == null) plain(protocol.max_workspace_bytes, settings.workspace.slice()) else null,
             .model = plain(protocol.max_model_bytes, settings.model.slice()),
             .provider = settings.provider.value,
@@ -126,14 +133,20 @@ pub const Hint = union(enum) {
     line: Bounded(session_line.max_line_bytes),
 };
 
-fn readHint(requests: client.Requests, job: *const Job, position: u64) !Hint {
-    const line = try readFirstLine(requests, job, position, .absent) orelse return .absent;
+fn readHint(requests: client.Requests, job: *const Job, first: Line.First) !Hint {
+    const line = try readFirstLine(requests, job, first.position, first.content, .absent) orelse return .absent;
     return if (line.len == 0) .absent else .{ .line = line };
 }
 
-fn readFirstLine(requests: client.Requests, job: *const Job, position: u64, refused: enum { absent, fails }) !?queued_line.Line {
+/// The first display line of the Message at `position`. A null `value` reads the entry as
+/// text: the queued strip does not carry its newest Message's value yet.
+fn readFirstLine(requests: client.Requests, job: *const Job, position: u64, value: ?content_value.Value, refused: enum { absent, fails }) !?queued_line.Line {
     var buffer: [session_line.max_line_bytes + 1]u8 = undefined;
-    const reply = requests.readActivityPrefix(job.store, job.session, position, &buffer) catch |err| switch (err) {
+    const read = if (value) |known|
+        value_reads.firstLine(requests, job.store, job.session, position, known, job.files.parts, &buffer)
+    else
+        requests.readActivityPrefix(job.store, job.session, position, &buffer);
+    const reply = read catch |err| switch (err) {
         error.InvalidResponse => return if (refused == .absent) null else err,
         else => return err,
     };
@@ -301,7 +314,11 @@ pub fn retry(raw: *anyopaque, task: *Task) !void {
     job.result.retry = .{ .failure = .no_message };
     if (page.facts.count == 0) return;
     const item = page.facts.items[0];
-    const content = item.value.admission.content;
+    const content = switch (item.value.admission.content) {
+        .text => |reference| reference,
+        // Activity pages refuse parts values until readers project them; their retry policy comes with that.
+        .parts => return error.ContentIsParts,
+    };
     if (content.length > Input.capacity) {
         job.result.retry = .{ .failure = .too_large };
         return;
@@ -345,9 +362,9 @@ pub fn recall(raw: *anyopaque, task: *Task) !void {
         };
         if (page.facts.count == 0) return;
         const row = page.facts.items[0];
-        const content = row.value.admission.content;
         const at: Input.Recalled = .{ .position = row.position, .end = page.facts.end };
-        if (content.length <= Input.capacity) if (try stageRecalled(requests, job, task.io, at, content)) |found| {
+        // Only a text Message can return to the editor; a parts Message passes like one that fails the text check.
+        if (row.value.admission.content == .text) if (row.value.admission.content.text.length <= Input.capacity) if (try stageRecalled(requests, job, task.io, at, row.value.admission.content.text)) |found| {
             job.result.recalled = found;
             return;
         };
@@ -357,7 +374,7 @@ pub fn recall(raw: *anyopaque, task: *Task) !void {
     }
 }
 
-fn stageRecalled(requests: client.Requests, job: *const Job, io: std.Io, at: Input.Recalled, content: protocol.ActivityItem.Content) !?Input.Found {
+fn stageRecalled(requests: client.Requests, job: *const Job, io: std.Io, at: Input.Recalled, content: content_value.Reference) !?Input.Found {
     try job.files.scratch.setLength(io, 0);
     var staging: RecallStaging = .{ .io = io, .file = job.files.scratch, .check = DraftEditor.textCheck() };
     const reference: protocol_reply.CommandObservation.ContentReference = .{ .bytes = content.length, .digest = content.digest };
@@ -504,14 +521,14 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
         if (job.opening and job.result.latest_ending == null and page.facts.more) {
             try latestEnding(requests, job, page.facts.end);
         }
-        if (job.result.line) |*line| if (job.hint_wanted and line.label == null) if (line.first_position) |position| {
-            job.result.hint = try readHint(requests, job, position);
+        if (job.result.line) |*line| if (job.hint_wanted and line.label == null) if (line.first) |first| {
+            job.result.hint = try readHint(requests, job, first);
         };
         job.result.live = View.Live.init(page.facts.call_activity);
         job.result.queued = page.facts.queued;
         const queued = page.facts.queued;
         if (queued.count != 0 and queued.newest_admission != job.queued_line) {
-            job.result.queued_line = .{ .admission = queued.newest_admission, .line = (try readFirstLine(requests, job, queued.newest_position, .fails)).? };
+            job.result.queued_line = .{ .admission = queued.newest_admission, .line = (try readFirstLine(requests, job, queued.newest_position, null, .fails)).? };
         }
     }
     try job.files.inspection.setLength(task.io, 0);
@@ -529,10 +546,10 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
         if (toggled != null and toggled.?.key.order(key) != .eq) continue;
         const open = if (toggled) |one| one.open else job.opened.has(key);
         var capture: RowCapture = .{ .task = task, .file = job.files.inspection, .start = offset, .row = &row, .cap_target = switch (item.value) {
-            .assistant => |answer| .{ .source = .activity, .position = item.position, .ordinal = item.ordinal, .row = false, .content = answer.content },
+            .assistant => |answer| .{ .source = .activity, .position = item.position, .ordinal = item.ordinal, .row = false, .content = .{ .text = answer.content } },
             else => null,
         } };
-        row.provisional = try View.render(requests, job.store, job.session, job.sessionProvider(), item, page.facts.queued, page.facts.work.work.state.holdsQueue(), &capture, job.colour, job.home, .{ .viewport = job.width_method }, if (open) .{ .open = output.? } else .closed) or pending;
+        row.provisional = try View.render(requests, job.store, job.session, job.files.parts, job.sessionProvider(), item, page.facts.queued, page.facts.work.work.state.holdsQueue(), &capture, job.colour, job.home, .{ .viewport = job.width_method }, if (open) .{ .open = output.? } else .closed) or pending;
         row.tight = View.tight(item.value);
         try capture.finish();
         row.length = capture.length;
@@ -755,13 +772,12 @@ pub fn fullMessage(raw: *anyopaque, task: *Task) !void {
     };
     try job.files.scratch.setLength(task.io, 0);
     var staging: Staging = .{ .io = task.io, .file = job.files.scratch };
-    const reference: protocol_reply.CommandObservation.ContentReference = .{ .bytes = target.content.length, .digest = target.content.digest };
-    const failure = switch (target.source) {
-        .activity => try requests.readActivityContent(job.store, job.session, target.position, target.ordinal, reference, &staging),
-        .conversation => try requests.readConversationContent(job.store, job.session, target.position, target.ordinal, reference, &staging),
+    const display = switch (try value_reads.Display.open(requests, job.store, job.session, target.at(), target.content, job.files.parts)) {
+        .display => |opened| opened,
+        .failure => |failure| return requests.failRead(failure),
     };
-    if (failure) |value| return requests.failRead(value);
-    if (staging.offset != target.content.length) return error.ContentLengthMismatch;
+    if (try display.stream(requests, &staging)) |failure| return requests.failRead(failure);
+    if (staging.offset != display.length) return error.ContentLengthMismatch;
     const lines = staging.newlines + @intFromBool(staging.last != '\n');
     try writeMessagePage(task.io, job.files.scratch, staging.offset, lines, staging.last, target, job.store, job.session, job.files.inspection);
 }
@@ -772,7 +788,7 @@ fn writeMessagePage(io: std.Io, scratch: std.Io.File, length: u64, lines: u64, l
     var size: [24]u8 = undefined;
     var heading: [96]u8 = undefined;
     try page.feed(View.Mark.summary);
-    try page.feed(try std.fmt.bufPrint(&heading, "Message · {d} line{s} · {s}", .{ lines, if (lines == 1) "" else "s", byte_size.kilobytes(target.content.length, &size) }));
+    try page.feed(try std.fmt.bufPrint(&heading, "Message · {d} line{s} · {s}", .{ lines, if (lines == 1) "" else "s", byte_size.kilobytes(length, &size) }));
     try page.feed(View.Mark.reset ++ "\n");
     if (target.row) {
         try History.writeExport(&page, store, session, target.position, target.ordinal);
@@ -815,7 +831,7 @@ test "session_reads a Message page past the display limit keeps what fits and sa
     defer scratch.close(io);
     const file = try tmp.dir.createFile(io, "page", .{ .read = true });
     defer file.close(io);
-    const target: View.Collapsed = .{ .source = .conversation, .position = 7, .ordinal = 0, .content = .{ .length = 0, .digest = @splat(0) }, .row = true };
+    const target: View.Collapsed = .{ .source = .conversation, .position = 7, .ordinal = 0, .content = .{ .text = .{ .length = 0, .digest = @splat(0) } }, .row = true };
     const page = try std.testing.allocator.alloc(u8, Viewport.capacity + 4096);
     defer std.testing.allocator.free(page);
     const Case = struct { body: []const u8, lines: u64, kept: []const u8, notice: []const u8 };
@@ -929,14 +945,20 @@ pub fn copyAnswer(raw: *anyopaque, task: *Task) !void {
     job.result.copied = if (range.length > TerminalText.clipboard_limit) .too_large else .{ .clipboard = range };
 }
 
-fn lastAnswer(requests: client.Requests, store: []const u8, session: []const u8) !?protocol_reply.ConversationPage.Item {
+const LastAnswer = struct { position: u64, ordinal: u64, content: protocol_reply.CommandObservation.ContentReference };
+
+fn lastAnswer(requests: client.Requests, store: []const u8, session: []const u8) !?LastAnswer {
     var cursor: protocol_reply.ConversationCursor = .{ .end = 0 };
     while (true) {
         const page = switch (try requests.conversationPage(store, session, cursor)) {
             .page => |value| value,
             .failure => |failure| return requests.failRead(failure),
         };
-        for (page.items[0..page.count]) |item| if (item.kind == .assistant) return item;
+        for (page.items[0..page.count]) |item| if (item.kind == .assistant) {
+            // The page decoder refuses an assistant item that is not text.
+            const text = item.content.text;
+            return .{ .position = item.position, .ordinal = item.ordinal, .content = .{ .bytes = text.length, .digest = text.digest } };
+        };
         cursor = page.continuation() orelse return null;
     }
 }
@@ -980,7 +1002,7 @@ test "session_reads a Host command writes its page and inherits no saved termina
     const page = try tmp.dir.createFile(io, "inspection", .{ .read = true });
     defer page.close(io);
     var interrupted: client.Cancellation = .{};
-    var job: Job = .{ .files = .{ .scratch = undefined, .action = undefined, .inspection = page, .details = undefined, .actions = undefined }, .command = Probe.command, .interrupted = &interrupted };
+    var job: Job = .{ .files = .{ .scratch = undefined, .action = undefined, .inspection = page, .details = undefined, .actions = undefined, .parts = undefined }, .command = Probe.command, .interrupted = &interrupted };
     var task: Task = .{ .io = io };
     Probe.before = Probe.inheritable();
     try runCommand(&job, &task);
@@ -995,8 +1017,8 @@ test "session_reads the Session line takes archive and other facts from Current 
     defer tmp.cleanup();
     const file = try tmp.dir.createFile(io, "current", .{ .read = true });
     defer file.close(io);
-    const reference = "{\"bytes\":\"7\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"}";
-    const reference_format = "{{\"bytes\":\"7\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"}}";
+    const reference = "{\"type\":\"text\",\"bytes\":\"7\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"}";
+    const reference_format = "{{\"type\":\"text\",\"bytes\":\"7\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"}}";
     var line: ?Line = null;
     const unread: Hint = .unread;
     try std.testing.expect((Line{}).facts(&unread, "k7m2qx") == null);
@@ -1029,7 +1051,7 @@ test "session_reads the Session line takes archive and other facts from Current 
             try std.testing.expectEqual(case.left, facts.left);
             try std.testing.expectEqual(std.mem.eql(u8, case.mode, "ask"), facts.asks);
             try std.testing.expectEqual(!std.mem.eql(u8, case.effort, "null"), facts.effort != null);
-            try std.testing.expectEqual(!std.mem.eql(u8, case.first, "null"), line.?.first_position != null);
+            try std.testing.expectEqual(!std.mem.eql(u8, case.first, "null"), line.?.first != null);
         }
     }
     const hint: Hint = .{ .line = plain(session_line.max_line_bytes, session_line.firstLine("  Summarize\tCI\r\nand more")) };
@@ -1099,14 +1121,18 @@ const FakeHost = struct {
     const Tail = struct { value: protocol.ActivityItem.Value, excluded_at: ?u64 = null, applied_at: ?u64 = null };
     const text = "please wait\nfor the build";
 
-    fn content() protocol.ActivityItem.Content {
+    fn content() content_value.Reference {
         var hash = protocol.contentHasher();
         hash.update(text);
         return .{ .length = text.len, .digest = hash.finalResult() };
     }
 
+    fn textValue() content_value.Value {
+        return .{ .text = content() };
+    }
+
     fn message(admission: u64) protocol.ActivityItem.Value {
-        return .{ .admission = .{ .admission = admission, .key = .{}, .turn = null, .state = .queued, .content = content(), .admitted_at = 1 } };
+        return .{ .admission = .{ .admission = admission, .key = .{}, .turn = null, .state = .queued, .content = textValue(), .admitted_at = 1 } };
     }
 
     const Row = struct { position: u64, ordinal: u64 = 0 };
@@ -1221,7 +1247,7 @@ const FakeHost = struct {
                 defer inspection.close(io);
                 action.job.store = root;
                 if (action.job.session.len == 0) action.job.session = "k7m2qx";
-                action.job.files = .{ .scratch = inspection, .action = inspection, .inspection = inspection, .details = inspection, .actions = .{ inspection, inspection } };
+                action.job.files = .{ .scratch = inspection, .action = inspection, .inspection = inspection, .details = inspection, .actions = .{ inspection, inspection }, .parts = inspection };
                 var task: Task = .{ .io = io };
                 try action.run_read(action.job, &task);
                 host.shown = host.output[0..try inspection.readPositionalAll(io, &host.output, 0)];
@@ -1265,7 +1291,7 @@ test "SUI-49 Message placement preserves provenance across pages" {
                             var buffer: [8192]u8 = undefined;
                             var out = std.Io.Writer.fixed(&buffer);
                             var sink: Sink = .{ .out = &out };
-                            const provisional = try View.render(requests, root, "k7m2qx", null, rows[index], queued, held, &sink, false, "", .{ .viewport = .wcwidth }, .none);
+                            const provisional = try View.render(requests, root, "k7m2qx", undefined, null, rows[index], queued, held, &sink, false, "", .{ .viewport = .wcwidth }, .none);
                             try std.testing.expectEqualStrings(expected[index].text, out.buffered());
                             try std.testing.expectEqual(expected[index].provisional, provisional);
                             try std.testing.expectEqual(expected[index].lowest, sink.lowest);
@@ -1280,7 +1306,7 @@ test "SUI-49 Message placement preserves provenance across pages" {
             var peer: protocol.NamedPeer = .{ .session = .{} };
             try peer.session.set("9f8e7d");
             try peer.label.set("Peer");
-            const outbound: protocol.ActivityItem.Value = .{ .sent = .{ .admission = 99, .target = peer, .content = FakeHost.content(), .admitted_at = std.math.maxInt(u64) } };
+            const outbound: protocol.ActivityItem.Value = .{ .sent = .{ .admission = 99, .target = peer, .content = FakeHost.textValue(), .admitted_at = std.math.maxInt(u64) } };
             var incoming = FakeHost.message(90).admission;
             incoming.sender = peer;
             incoming.admitted_at = std.math.maxInt(u64);
@@ -1329,7 +1355,7 @@ test "SUI-49 Message placement preserves provenance across pages" {
                         texts[index] = try std.fmt.bufPrint(&words[index], "Message {d}", .{index + 1});
                         var value = FakeHost.message(index + 1).admission;
                         value.admitted_at = 1;
-                        value.content = .{ .length = texts[index].len, .digest = protocol.contentDigest(texts[index]) };
+                        value.content = .{ .text = .{ .length = texts[index].len, .digest = protocol.contentDigest(texts[index]) } };
                         tail[index] = .{ .value = .{ .admission = value } };
                         expected[index] = .{};
                     }
@@ -1463,14 +1489,14 @@ test "activity golden stop with interrupted ending draws one line across pages" 
                 if (!split) page.facts.items[1] = if (historical) stop else ended;
                 for (0..page.facts.count) |index| {
                     const item = page.facts.items[if (historical) page.facts.count - index - 1 else index];
-                    _ = try View.render(undefined, "unused", session.slice(), null, item, .{}, false, &sink, colour, "", .{ .viewport = .wcwidth }, .none);
+                    _ = try View.render(undefined, "unused", session.slice(), undefined, null, item, .{}, false, &sink, colour, "", .{ .viewport = .wcwidth }, .none);
                 }
                 if (split) {
                     try std.testing.expectEqualStrings("", out.buffered());
                     page.facts.items[0] = ended;
                     for (0..page.facts.count) |index| {
                         const item = page.facts.items[if (historical) page.facts.count - index - 1 else index];
-                        _ = try View.render(undefined, "unused", session.slice(), null, item, .{}, false, &sink, colour, "", .{ .viewport = .wcwidth }, .none);
+                        _ = try View.render(undefined, "unused", session.slice(), undefined, null, item, .{}, false, &sink, colour, "", .{ .viewport = .wcwidth }, .none);
                     }
                 }
                 try std.testing.expectEqualStrings(if (colour) "\x1b[39m▪\x1b[39m Stopped\n" else "▪ Stopped\n", out.buffered());
@@ -1483,7 +1509,7 @@ test "activity golden stop with interrupted ending draws one line across pages" 
     var buffer: [256]u8 = undefined;
     var out = std.Io.Writer.fixed(&buffer);
     var sink: Sink = .{ .out = &out };
-    _ = try View.render(undefined, "unused", session.slice(), null, page.facts.items[0], .{}, false, &sink, true, "", .{ .viewport = .wcwidth }, .none);
+    _ = try View.render(undefined, "unused", session.slice(), undefined, null, page.facts.items[0], .{}, false, &sink, true, "", .{ .viewport = .wcwidth }, .none);
     try std.testing.expectEqualStrings("\x1b[39m▪\x1b[39m Stopped\n", out.buffered());
 }
 
@@ -1513,7 +1539,7 @@ test "session_reads rendered row kinds keep their own text and feed_window draws
     try search.set("Search");
     var find: protocol.Bounded(protocol.max_tool_description_bytes) = .{};
     try find.set("Find");
-    const content: protocol.ActivityItem.Content = .{ .length = 3, .digest = @splat(0xab) };
+    const content: content_value.Value = .{ .text = .{ .length = 3, .digest = @splat(0xab) } };
     const Kind = struct { value: protocol.ActivityItem.Value, line: []const u8, packed_: bool };
     const kinds = [_]Kind{
         .{ .value = .{ .sent = .{ .admission = 4, .target = peer, .content = content, .admitted_at = std.math.maxInt(u64) } }, .line = "→ Messaged 9f8e7d", .packed_ = true },
@@ -1529,7 +1555,7 @@ test "session_reads rendered row kinds keep their own text and feed_window draws
         document.* = .{};
         var sink: Sink = .{ .document = document };
         const item: protocol.ActivityItem = .{ .position = index + 1, .at = 1, .value = kind.value };
-        try testing.expect(!try View.render(undefined, "unused", "k7m2qx", null, item, .{}, false, &sink, false, "", .{ .viewport = .wcwidth }, .none));
+        try testing.expect(!try View.render(undefined, "unused", "k7m2qx", undefined, null, item, .{}, false, &sink, false, "", .{ .viewport = .wcwidth }, .none));
         try document.prepare();
         text_.* = Text.fromDocument(document);
         try testing.expect(text_.bytes[0] != '\n' and std.mem.count(u8, text_.bytes, "\n") == 1);
@@ -1619,7 +1645,7 @@ test "SUI-51 opening reads expose ordered rows and scan boundaries" {
     var peer: protocol.NamedPeer = .{ .session = .{} };
     try peer.session.set("9f8e7d");
     const tail = [_]FakeHost.Tail{
-        .{ .value = .{ .sent = .{ .admission = 1, .target = peer, .content = FakeHost.content(), .admitted_at = 1 } } },
+        .{ .value = .{ .sent = .{ .admission = 1, .target = peer, .content = FakeHost.textValue(), .admitted_at = 1 } } },
         .{ .value = FakeHost.message(2) },
     };
     var host: FakeHost = .{ .history = 0, .tail = &tail, .end = 2 };
@@ -1684,7 +1710,7 @@ test "SUI-53 replay replaces queued rows and counts only new rows" {
         const tail = [_]FakeHost.Tail{
             .{ .value = FakeHost.message(1), .applied_at = if (excluded) null else 24, .excluded_at = if (excluded) 24 else null },
             .{ .value = .{ .received = incoming } },
-            .{ .value = .{ .sent = .{ .admission = 91, .target = peer, .content = FakeHost.content(), .admitted_at = 1 } } },
+            .{ .value = .{ .sent = .{ .admission = 91, .target = peer, .content = FakeHost.textValue(), .admitted_at = 1 } } },
             .{ .value = if (excluded) .{ .stop = .{ .key = .{}, .turn = null, .cutoff = 1, .completion = .completed } } else .{ .user = applied } },
         };
         var host: FakeHost = .{ .history = 20, .tail = &tail, .end = 21 };
@@ -1718,7 +1744,7 @@ test "SUI-54 queued replay retains its starting point across pages" {
     try peer.session.set("9f8e7d");
     var tail: [40]FakeHost.Tail = undefined;
     tail[0] = .{ .value = FakeHost.message(1) };
-    for (tail[1..], 2..) |*row, admission| row.* = .{ .value = .{ .sent = .{ .admission = admission, .target = peer, .content = FakeHost.content(), .admitted_at = 1 } } };
+    for (tail[1..], 2..) |*row, admission| row.* = .{ .value = .{ .sent = .{ .admission = admission, .target = peer, .content = FakeHost.textValue(), .admitted_at = 1 } } };
     var host: FakeHost = .{ .history = 0, .tail = &tail, .end = 1 };
     var job: Job = .{ .opening = true, .line_read = .{ .revision = 1, .end = 1 } };
     try host.read(&job);
@@ -1775,14 +1801,14 @@ test "session_reads row heads are bounded with ordered exact collapsed targets" 
     var row: RenderedRow = .{ .key = .{ .position = 1 }, .offset = 0, .length = 0, .tight = false, .provisional = false };
     var capture: RowCapture = .{ .task = &task, .file = file, .start = 0, .row = &row };
     try capture.feed("head\n");
-    for (0..20) |index| try capture.collapsedSummary(.{ .source = .activity, .position = index + 1, .ordinal = 0, .row = false, .content = FakeHost.content() }, View.Mark.summary ++ "┄ prior" ++ View.Mark.reset ++ "\n");
+    for (0..20) |index| try capture.collapsedSummary(.{ .source = .activity, .position = index + 1, .ordinal = 0, .row = false, .content = FakeHost.textValue() }, View.Mark.summary ++ "┄ prior" ++ View.Mark.reset ++ "\n");
     try std.testing.expectEqual(@as(usize, 16), row.collapsed_count);
     for (row.collapsed_targets[0..row.collapsed_count], 1..) |target, position| try std.testing.expectEqual(@as(u64, position), target.position);
     const large = try std.testing.allocator.alloc(u8, 2 * feed_window.row_capacity);
     defer std.testing.allocator.free(large);
     @memset(large, 'x');
     try capture.feed(large);
-    try capture.collapsedSummary(.{ .source = .activity, .position = 99, .ordinal = 0, .row = false, .content = FakeHost.content() }, View.Mark.summary ++ "┄ late" ++ View.Mark.reset);
+    try capture.collapsedSummary(.{ .source = .activity, .position = 99, .ordinal = 0, .row = false, .content = FakeHost.textValue() }, View.Mark.summary ++ "┄ late" ++ View.Mark.reset);
     try capture.feed("tail");
     try capture.finish();
     const shown = large[0..try file.readPositionalAll(io, large, 0)];
@@ -1851,7 +1877,7 @@ test "session_reads stopped collapsed Messages retain their exact ordered identi
         var texts: [18][]const u8 = @splat(text);
         for (tail[0..count], 1..) |*row, position| {
             var message = FakeHost.message(position).admission;
-            message.content = .{ .length = text.len, .digest = protocol.contentDigest(text) };
+            message.content = .{ .text = .{ .length = text.len, .digest = protocol.contentDigest(text) } };
             row.* = .{ .value = .{ .admission = message }, .excluded_at = count + 1 };
         }
         tail[count] = .{ .value = .{ .stop = .{ .key = .{}, .turn = null, .cutoff = count, .completion = .completed } } };
@@ -1870,7 +1896,7 @@ test "session_reads stopped collapsed Messages retain their exact ordered identi
         if (count > 16) try std.testing.expect(std.mem.endsWith(u8, document.text(), "┄ 1 more summary\n"));
         for (row.collapsed_targets[0..row.collapsed_count], 1..) |target, position| {
             try std.testing.expectEqual(@as(u64, position), target.position);
-            try std.testing.expectEqual(View.Collapsed{ .source = .activity, .position = position, .ordinal = 0, .row = false, .content = .{ .length = text.len, .digest = protocol.contentDigest(text) } }, target);
+            try std.testing.expectEqual(View.Collapsed{ .source = .activity, .position = position, .ordinal = 0, .row = false, .content = .{ .text = .{ .length = text.len, .digest = protocol.contentDigest(text) } } }, target);
         }
     }
 }
@@ -1935,7 +1961,7 @@ test "session_reads retry stages exact multi-window bytes before its ending and 
     @memcpy(text[protocol.content_window_bytes - 1 ..][0.."💚é\n\t /".len], "💚é\n\t /");
     text[0] = '/';
     var message = FakeHost.message(1).admission;
-    message.content = .{ .length = text.len, .digest = protocol.contentDigest(text) };
+    message.content = .{ .text = .{ .length = text.len, .digest = protocol.contentDigest(text) } };
     const tail = [_]FakeHost.Tail{
         .{ .value = FakeHost.message(1) },
         .{ .value = .{ .admission = message } },
@@ -1952,7 +1978,7 @@ test "session_reads retry stages exact multi-window bytes before its ending and 
             defer file.close(io);
             action.job.store = root;
             action.job.session = "k7m2qx";
-            action.job.files = .{ .scratch = file, .inspection = file, .action = file, .details = file, .actions = .{ file, file } };
+            action.job.files = .{ .scratch = file, .inspection = file, .action = file, .details = file, .actions = .{ file, file }, .parts = file };
             var task: Task = .{};
             try task.start(io, action.job, retry);
             try task.join();
@@ -1979,7 +2005,7 @@ test "session_reads retry reports only Message state without falling back" {
     for ([_]enum { absent, too_large }{ .absent, .too_large }) |case| {
         var message = FakeHost.message(2).admission;
         switch (case) {
-            .too_large => message.content.length = Input.capacity + 1,
+            .too_large => message.content.text.length = Input.capacity + 1,
             else => {},
         }
         const tail = [_]FakeHost.Tail{
@@ -2042,21 +2068,21 @@ test "session_reads retry rejects newer Host activity before reading any Message
 test "session_reads capped answer target opens the whole authenticated answer" {
     const Domain = struct {
         text: []const u8,
-        reference: protocol.ActivityItem.Content,
+        reference: content_value.Reference,
         pub fn run(self: *@This(), host: *FakeHost, dir: std.Io.Dir, root: []const u8) !void {
             const io = std.testing.io;
             const inspection = try dir.createFile(io, "inspection", .{ .read = true });
             defer inspection.close(io);
             const scratch = try dir.createFile(io, "message-stage", .{ .read = true });
             defer scratch.close(io);
-            var job: Job = .{ .opening = true, .store = root, .session = "k7m2qx", .line_read = .{ .revision = 1, .end = 1 }, .files = .{ .scratch = scratch, .inspection = inspection, .action = inspection, .details = inspection, .actions = .{ inspection, inspection } } };
+            var job: Job = .{ .opening = true, .store = root, .session = "k7m2qx", .line_read = .{ .revision = 1, .end = 1 }, .files = .{ .scratch = scratch, .inspection = inspection, .action = inspection, .details = inspection, .actions = .{ inspection, inspection }, .parts = inspection } };
             var task: Task = .{ .io = io };
             try scan(&job, &task);
             const row = job.result.rows[0];
             try std.testing.expect(row.length <= feed_window.row_capacity);
             try std.testing.expectEqual(@as(usize, 1), row.collapsed_count);
             const target = row.collapsed_targets[0];
-            try std.testing.expectEqualDeep(self.reference, target.content);
+            try std.testing.expectEqualDeep(content_value.Value{ .text = self.reference }, target.content);
             try std.testing.expectEqual(@as(u64, 1), target.position);
             try std.testing.expectEqual(@as(u64, 0), target.ordinal);
             try std.testing.expect(!target.row);
@@ -2080,7 +2106,7 @@ test "session_reads capped answer target opens the whole authenticated answer" {
     @memcpy(text[text.len - 12 ..], "WHOLE answer");
     var hash = protocol.contentHasher();
     hash.update(text);
-    const reference: protocol.ActivityItem.Content = .{ .length = text.len, .digest = hash.finalResult() };
+    const reference: content_value.Reference = .{ .length = text.len, .digest = hash.finalResult() };
     const tail = [_]FakeHost.Tail{.{ .value = .{ .assistant = .{ .content = reference, .final = true } } }};
     var host: FakeHost = .{ .history = 0, .tail = &tail, .end = 1, .content_texts = &.{text} };
     var domain: Domain = .{ .text = text, .reference = reference };
@@ -2100,10 +2126,10 @@ test "session_reads cap target follows prior collapsed markers without mispairin
     for (0..17) |prior| {
         try file.setLength(io, 0);
         var row: RenderedRow = .{ .key = .{ .position = 99 }, .offset = 0, .length = 0, .tight = false, .provisional = false };
-        const target: View.Collapsed = .{ .source = .activity, .position = 99, .ordinal = 7, .row = false, .content = FakeHost.content() };
+        const target: View.Collapsed = .{ .source = .activity, .position = 99, .ordinal = 7, .row = false, .content = FakeHost.textValue() };
         var capture: RowCapture = .{ .task = &task, .file = file, .start = 0, .row = &row, .cap_target = target };
         for (0..prior) |index| {
-            try capture.collapsedSummary(.{ .source = .activity, .position = index + 1, .ordinal = 0, .row = true, .content = FakeHost.content() }, View.Mark.summary ++ "┄ prior" ++ View.Mark.reset ++ "\n");
+            try capture.collapsedSummary(.{ .source = .activity, .position = index + 1, .ordinal = 0, .row = true, .content = FakeHost.textValue() }, View.Mark.summary ++ "┄ prior" ++ View.Mark.reset ++ "\n");
         }
         try capture.feed(large);
         try capture.finish();
@@ -2129,7 +2155,7 @@ test "session_reads summary byte overflow retains neither partial mark nor targe
     const bytes = try std.testing.allocator.alloc(u8, feed_window.row_capacity);
     defer std.testing.allocator.free(bytes);
     @memset(bytes, 'x');
-    for ([_]View.Collapsed{ .{ .source = .activity, .position = 37, .ordinal = 2, .row = false, .content = FakeHost.content() }, .{ .source = .conversation, .position = 39, .ordinal = 3, .row = true, .content = FakeHost.content() } }) |source| {
+    for ([_]View.Collapsed{ .{ .source = .activity, .position = 37, .ordinal = 2, .row = false, .content = FakeHost.textValue() }, .{ .source = .conversation, .position = 39, .ordinal = 3, .row = true, .content = FakeHost.textValue() } }) |source| {
         try file.setLength(io, 0);
         @memset(bytes, 'x');
         var row: RenderedRow = .{ .key = .{ .position = source.position }, .offset = 0, .length = 0, .tight = false, .provisional = false };
@@ -2176,7 +2202,7 @@ test "session_reads recall passes over a Message the draft refuses in one step, 
         var tail: [3]FakeHost.Tail = undefined;
         for (&tail, texts, 1..) |*row, body, admission| {
             var value = FakeHost.message(admission);
-            value.admission.content = .{ .length = body.len, .digest = protocol.contentDigest(body) };
+            value.admission.content = .{ .text = .{ .length = body.len, .digest = protocol.contentDigest(body) } };
             row.* = .{ .value = value };
         }
         var host: FakeHost = .{ .history = 0, .tail = &tail, .end = tail.len, .content_texts = &texts };

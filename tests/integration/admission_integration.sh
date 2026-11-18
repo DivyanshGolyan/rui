@@ -176,7 +176,7 @@ fresh_defaults_case() {
 $defaults
 EOF
     contains "$defaults" '"permission_mode":"bypass"'
-    contains "$defaults" '"instructions":{"bytes":"0"'
+    contains "$defaults" '"instructions":{"type":"text","bytes":"0"'
     contains "$defaults" '"output_schema":null'
 }
 
@@ -520,7 +520,7 @@ contains "$updated" '"revision":"2"'
 preserved=$($rui session inspect --store "$store" --session "$main_session")
 contains "$preserved" '"bytes":"21"'
 case "$preserved" in
-    *'"output_schema":{"bytes":'*) ;;
+    *'"output_schema":{"type":"text","bytes":'*) ;;
     *) echo "sparse update cleared output schema" >&2; exit 1 ;;
 esac
 printf 'mutated after durable capture\n' >"$state/instructions.txt"
@@ -541,7 +541,7 @@ contains "$current" '"model":"gpt-6-sol"'
 contains "$current" '"revision":"3"'
 contains "$current" '"tools":[]'
 contains "$current" '"permission_mode":"bypass"'
-contains "$current" '"instructions":{"bytes":"0"'
+contains "$current" '"instructions":{"type":"text","bytes":"0"'
 contains "$current" '"output_schema":null'
 
 changed=$(not_accepted "$rui" session configure --store "$store" --record "$records/changed.json" --key first-key --workspace "$root" --provider codex --model gpt-6-astra)
