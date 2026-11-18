@@ -151,10 +151,10 @@ def flat_list():
             listed = screen.wait(lambda frame: all(f"   {label}" in frame for label in peers_by_label),
                                  "every finished peer without folding")
             lines = listed.split("\n")
-            assert lines[0] == "   + New chat" and lines[1] == "     Chats  Archived" and re.fullmatch(r"     (?:lead|peer-[0-6]) +(?:now|\d+[mhd])", lines[2]), listed
+            assert any(re.fullmatch(r"     (?:lead|peer-[0-6]) +(?:now|\d+[mhd])", line) for line in lines), listed
             assert not any(re.fullmatch(r"   \S.* · \d+", line) for line in lines), listed
             assert " more" not in listed, listed
-            screen.click(4, 1)
+            screen.click(4, line_of(listed, lambda line: "+ New chat" in line, "New chat"))
             screen.wait(lambda frame: "What shall we work on?" in frame and not is_overview(frame), "New Session opens chat")
             listed = back_to_overview(screen, *peers_by_label)
             lines = listed.split("\n")

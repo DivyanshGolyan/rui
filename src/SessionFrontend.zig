@@ -335,7 +335,7 @@ pub fn begin(self: *Self, init: std.process.Init, store: []const u8, session: []
     self.app_input = .{ .composer = .{ .editor = &self.input.editors[self.input.active] } };
     self.app_document = .{ .document = &screen.browsing, .colour = self.colour, .handler = .{ .userdata = self, .on_open = appOpen, .on_notice = appNotice, .on_scroll = appDragScroll } };
     self.app_body = .{ .shown = self.app_content.widget() };
-    self.app_screen = .{ .content = &self.app_body, .input = self.app_input.widget(), .content_gutter = true, .userdata = self, .on_event = appEvent };
+    self.app_screen = .{ .content = &self.app_body, .input = self.app_input.widget(), .content_gutter = 1, .userdata = self, .on_event = appEvent };
 }
 
 pub const HostAccess = struct {
@@ -1071,6 +1071,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     chrome.marker.style = .{ .reverse = true };
     const send = session_chrome.send(original_presentation.status, original_presentation.in_flight);
     const list_visible = self.app_hooks.root.listVisible();
+    self.app_screen.content_gutter = if (list_visible) 2 else 1;
     chrome.place(&self.app_screen, &self.app_input, .{
         .list_visible = list_visible,
         .choice = if (!self.app_info.standaloneOpen()) .closed else if (self.app_info.hasChoice()) .pick else .retry,
@@ -5911,7 +5912,7 @@ const ChromeFixture = struct {
     }
 };
 
-test "App Session shell gutter and back control follow list visibility through resize" {
+test "SUI-33 App Session shell gutter and back control follow list visibility through resize" {
     var fixture: ChromeFixture = undefined;
     try fixture.init();
     defer fixture.deinit();
@@ -5933,11 +5934,15 @@ test "App Session shell gutter and back control follow list visibility through r
         const start: u16 = if (wide) 41 else 0;
         try std.testing.expectEqual(wide, fixture.root.listVisible());
         if (wide) try std.testing.expectEqualStrings("┆", screen.readCell(40, 0).?.char.grapheme);
+        const gutter: u16 = if (wide) 2 else 1;
         var sent: u16 = 0;
-        while (!std.mem.eql(u8, screen.readCell(start + 1, sent).?.char.grapheme, "›")) sent += 1;
-        try std.testing.expectEqualStrings(" ", screen.readCell(start, sent).?.char.grapheme);
-        try std.testing.expectEqualStrings(" ", screen.readCell(start, sent + 1).?.char.grapheme);
-        try std.testing.expectEqualStrings("✓", screen.readCell(start + 1, sent + 1).?.char.grapheme);
+        while (sent < 24 and !std.mem.eql(u8, screen.readCell(start + gutter, sent).?.char.grapheme, "›")) sent += 1;
+        try std.testing.expect(sent < 24);
+        for (0..gutter) |col| {
+            try std.testing.expectEqualStrings(" ", screen.readCell(start + @as(u16, @intCast(col)), sent).?.char.grapheme);
+            try std.testing.expectEqualStrings(" ", screen.readCell(start + @as(u16, @intCast(col)), sent + 1).?.char.grapheme);
+        }
+        try std.testing.expectEqualStrings("✓", screen.readCell(start + gutter, sent + 1).?.char.grapheme);
         try std.testing.expectEqualStrings(if (wide) "g" else "‹", screen.readCell(start + 1, 25).?.char.grapheme);
         var facts: std.Io.Writer.Allocating = .init(arena);
         for (start..width) |column| try facts.writer.writeAll(screen.readCell(@intCast(column), 25).?.char.grapheme);
@@ -10740,7 +10745,7 @@ test "consent and full panels compose across adoption, nested choices, and draft
     };
 }
 
-test "SUI-29 empty chat welcome is centred until the first message" {
+test "SUI-44 empty chat welcome is centred until the first message" {
     for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |unicode| {
         const held = try HeldFrontend.create();
         defer held.destroy();

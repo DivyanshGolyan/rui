@@ -147,7 +147,9 @@ def pane_content(row):
 
 
 def conversation_text(frame):
-    return "\n".join(chat_content_row(pane_content(row)) for row in frame.split("\n"))
+    rows = (split_pane_row(row) for row in frame.split("\n"))
+    return "\n".join(chat_content_row(content.removeprefix(" ") if divider else content)
+                     for _, divider, content in rows)
 
 
 def composer_line(screen, y):

@@ -61,12 +61,11 @@ def needs_you():
             lines = frame.split("\n")
             headings = [line for line in lines if re.fullmatch(r"   \S.* · \d+", line)]
             assert headings == [], frame
-            assert lines[0] == "   + New chat" and lines[1] == "     Chats  Archived", frame
             asked = row(frame, "Asks before running")
             assert re.fullmatch(r"   ● Asks before running {2,}now", asked), asked
             assert len(asked) == 96, asked
             assert "second line" not in frame, frame
-            assert lines.index(asked) == 2, frame
+            assert lines.index(asked) < lines.index(row(frame, "Answered already")), frame
             assert "echo first line" not in frame and "workspace" not in frame, frame
             assert re.fullmatch(r"     Answered already {2,}now", row(frame, "Answered already")), frame
             mark = cells(screen, "Asks before running")[3]

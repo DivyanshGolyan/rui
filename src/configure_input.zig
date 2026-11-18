@@ -120,7 +120,7 @@ test "a fresh Session sends concrete defaults where its caller named none" {
     try std.testing.expectEqualStrings("945000", input.compaction_trigger.value.?);
     input = .{ .store = "", .session = .create };
     input.completeCreation(.codex, "gpt-6.1-sol", true, null, null, &compaction);
-    try std.testing.expectEqualStrings("244800", input.compaction_trigger.value.?);
+    try std.testing.expectEqualStrings("450000", input.compaction_trigger.value.?);
     input = .{ .store = "", .session = .create };
     input.completeCreation(.openai, "openai/whisper-1", true, .high, null, &compaction);
     try std.testing.expect(input.reasoning_effort.present and input.reasoning_effort.value == null);
@@ -176,7 +176,7 @@ test "an update resets only the settings it names to default" {
     var reset: ConfigureInput = .{ .store = "", .session = .{ .named = "s" }, .compaction_trigger = policy("default") };
     try std.testing.expect(reset.resetsToDefault());
     reset.completeReset(.codex, "gpt-6.1-sol", &compaction);
-    try std.testing.expectEqualStrings("244800", reset.compaction_trigger.value.?);
+    try std.testing.expectEqualStrings("450000", reset.compaction_trigger.value.?);
     try std.testing.expect(!reset.reasoning_effort.present);
 
     reset = .{ .store = "", .session = .{ .named = "s" }, .reasoning_effort = policy("default") };

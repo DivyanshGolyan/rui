@@ -16,7 +16,6 @@ def smoke():
     from overview_fixture import world
     with world("smoke") as w, w.overview() as screen:
         shown = screen.contains("+ New chat")
-        assert shown.split("\n", 1)[0] == "   + New chat", shown
         assert "Settings" in shown and "What shall we work on?" not in shown, shown
         assert "enter open" not in shown, shown
     print("overview smoke: an empty Store's overview opens on a PTY", flush=True)
