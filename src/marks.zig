@@ -45,7 +45,7 @@ pub fn cause(code: []const u8, provider: ?Provider) Cause {
 
 pub const spinner = [_][]const u8{ "◜", "◝", "◞", "◟" };
 
-test "marks have distinct state meanings, nonempty scripts and printable ASCII" {
+test "MRK-1 status marks and spinner represent their states" {
     const Case = struct { mark: Mark, unicode: []const u8, ascii: []const u8, tone: Tone };
     const cases = [_]Case{
         .{ .mark = .needs_you, .unicode = "●", .ascii = "?", .tone = .attention },
@@ -80,32 +80,33 @@ test "marks have distinct state meanings, nonempty scripts and printable ASCII" 
     try std.testing.expect(still_frame);
 }
 
-test "cause retry keys and places cover every failure class and leave repair and stop unkeyed" {
-    const Case = struct { code: []const u8, provider: ?Provider = null, key: ?[]const u8, place: ?[]const u8 = null };
+test "MRK-2 failure causes provide the appropriate explanation and advice" {
+    const Case = struct { code: []const u8, provider: ?Provider = null, words: []const u8, key: ?[]const u8, place: ?[]const u8 = null };
     const cases = [_]Case{
-        .{ .code = "malformed_provider_output", .key = "ctrl+r retries" },
-        .{ .code = "provider_policy", .key = null },
-        .{ .code = "provider_quota", .key = null, .place = "Settings" },
-        .{ .code = "provider_quota", .provider = .codex, .key = null, .place = "Settings" },
-        .{ .code = "provider_quota", .provider = .openai, .key = null, .place = "Settings" },
-        .{ .code = "provider_quota", .provider = .chatgpt, .key = null, .place = "Manage usage: https://chatgpt.com/settings/usage" },
-        .{ .code = "provider_plan", .key = null, .place = "Settings" },
-        .{ .code = "provider_plan", .provider = .chatgpt, .key = null, .place = "Settings" },
-        .{ .code = "provider_model_unavailable", .key = "ctrl+r retries" },
-        .{ .code = "provider_http_401", .key = null, .place = "Settings" },
-        .{ .code = "provider_http_401", .provider = .chatgpt, .key = null, .place = "Settings" },
-        .{ .code = "provider_api_key_rejected", .key = null, .place = "Settings" },
-        .{ .code = "ResourceExceeded", .key = null },
-        .{ .code = "provider_tls_verification_failed", .key = "ctrl+r retries" },
-        .{ .code = "retry_exhausted", .key = "ctrl+r retries" },
-        .{ .code = "cancelled", .key = null },
-        .{ .code = "provider_http_400", .key = "ctrl+r retries" },
-        .{ .code = "unknown", .key = "ctrl+r retries" },
+        .{ .code = "malformed_provider_output", .words = "Model reply unreadable", .key = "ctrl+r retries" },
+        .{ .code = "provider_policy", .words = "Refused by the provider", .key = null },
+        .{ .code = "provider_quota", .words = "Out of quota", .key = null, .place = "Settings" },
+        .{ .code = "provider_quota", .words = "Out of quota", .provider = .codex, .key = null, .place = "Settings" },
+        .{ .code = "provider_quota", .words = "Out of quota", .provider = .openai, .key = null, .place = "Settings" },
+        .{ .code = "provider_quota", .words = "Out of quota", .provider = .chatgpt, .key = null, .place = "Manage usage: https://chatgpt.com/settings/usage" },
+        .{ .code = "provider_plan", .words = "Model not in plan", .key = null, .place = "Settings" },
+        .{ .code = "provider_plan", .words = "Model not in plan", .provider = .chatgpt, .key = null, .place = "Settings" },
+        .{ .code = "provider_model_unavailable", .words = "Model not served", .key = "ctrl+r retries" },
+        .{ .code = "provider_http_401", .words = "Sign-in expired", .key = null, .place = "Settings" },
+        .{ .code = "provider_http_401", .words = "Sign-in expired", .provider = .chatgpt, .key = null, .place = "Settings" },
+        .{ .code = "provider_api_key_rejected", .words = "API key rejected", .key = null, .place = "Settings" },
+        .{ .code = "ResourceExceeded", .words = "Context full", .key = null },
+        .{ .code = "provider_tls_verification_failed", .words = "Provider unreachable", .key = "ctrl+r retries" },
+        .{ .code = "retry_exhausted", .words = "Retries ran out", .key = "ctrl+r retries" },
+        .{ .code = "cancelled", .words = "Stopped", .key = null },
+        .{ .code = "provider_http_400", .words = "Provider refused the request", .key = "ctrl+r retries" },
+        .{ .code = "unknown", .words = "Something went wrong", .key = "ctrl+r retries" },
     };
     var seen: std.enums.EnumSet(failure_class.Class) = .empty;
     for (cases) |case| {
         seen.insert(failure_class.of(case.code));
         const shown = cause(case.code, case.provider);
+        try std.testing.expectEqualStrings(case.words, shown.words);
         if (case.key) |key| {
             try std.testing.expectEqualStrings(key, shown.key orelse return error.MissingRetryKey);
         } else try std.testing.expectEqual(@as(?[]const u8, null), shown.key);
@@ -115,31 +116,29 @@ test "cause retry keys and places cover every failure class and leave repair and
         if (shown.place != null) try std.testing.expect(shown.key == null);
     }
     try std.testing.expect(seen.eql(.full));
-}
-
-test "a provider changes only a quota refusal's place, and only when it names one" {
-    const codes = [_][]const u8{ "malformed_provider_output", "provider_policy", "provider_quota", "provider_plan", "provider_model_unavailable", "provider_http_401", "provider_api_key_rejected", "ResourceExceeded", "provider_tls_verification_failed", "retry_exhausted", "cancelled", "provider_http_400", "unknown" };
-    var seen: std.enums.EnumSet(failure_class.Class) = .empty;
-    for (codes) |code| {
-        seen.insert(failure_class.of(code));
-        const unknown = cause(code, null);
-        for (std.enums.values(Provider)) |provider| {
-            const shown = cause(code, provider);
-            try std.testing.expectEqualStrings(unknown.words, shown.words);
-            try std.testing.expectEqual(unknown.key, shown.key);
-            const usage = if (failure_class.of(code) == .quota) provider.usage() else null;
-            try std.testing.expectEqualStrings(usage orelse unknown.place orelse "", shown.place orelse "");
+    {
+        const codes = [_][]const u8{ "malformed_provider_output", "provider_policy", "provider_quota", "provider_plan", "provider_model_unavailable", "provider_http_401", "provider_api_key_rejected", "ResourceExceeded", "provider_tls_verification_failed", "retry_exhausted", "cancelled", "provider_http_400", "unknown" };
+        var provider_seen: std.enums.EnumSet(failure_class.Class) = .empty;
+        for (codes) |code| {
+            provider_seen.insert(failure_class.of(code));
+            const unknown = cause(code, null);
+            for (std.enums.values(Provider)) |provider| {
+                const shown = cause(code, provider);
+                try std.testing.expectEqualStrings(unknown.words, shown.words);
+                try std.testing.expectEqual(unknown.key, shown.key);
+                const usage = if (failure_class.of(code) == .quota) provider.usage() else null;
+                try std.testing.expectEqualStrings(usage orelse unknown.place orelse "", shown.place orelse "");
+            }
         }
+        try std.testing.expect(provider_seen.eql(.full));
     }
-    try std.testing.expect(seen.eql(.full));
-}
-
-test "ordered input limit is local and has no retry advice" {
-    const local = cause(failure_class.ordered_input_limit, null);
-    try std.testing.expectEqualStrings("Input exceeds this Host's request limit; no provider request was sent", local.words);
-    try std.testing.expect(local.key == null and local.place == null);
-    const unsupported = cause(failure_class.ordered_input_not_supported, null);
-    try std.testing.expectEqualStrings("This Host cannot send this input yet; no provider request was sent", unsupported.words);
-    try std.testing.expect(unsupported.key == null and unsupported.place == null);
-    try std.testing.expect(cause("provider_http_400", null).key != null);
+    {
+        const local = cause(failure_class.ordered_input_limit, null);
+        try std.testing.expectEqualStrings("Input exceeds this Host's request limit; no provider request was sent", local.words);
+        try std.testing.expect(local.key == null and local.place == null);
+        const unsupported = cause(failure_class.ordered_input_not_supported, null);
+        try std.testing.expectEqualStrings("This Host cannot send this input yet; no provider request was sent", unsupported.words);
+        try std.testing.expect(unsupported.key == null and unsupported.place == null);
+        try std.testing.expect(cause("provider_http_400", null).key != null);
+    }
 }
