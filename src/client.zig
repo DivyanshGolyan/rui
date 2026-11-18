@@ -366,15 +366,26 @@ pub const Requests = struct {
 
     /// One part's whole stream; its length and digest must match the certified `part`.
     pub fn readPublicPartContent(self: Requests, store_path: []const u8, session: []const u8, owner: content_value.Owner, part: content_value.Part, sink: anytype) !?protocol_reply.ReadFailure {
+        const fd = try self.openPublicPart(store_path, session, owner, part);
+        defer closeSocket(self.io, fd);
+        return readPublicContentResponse(self, fd, .{ .bytes = part.reference.length, .digest = part.reference.digest }, sink);
+    }
+
+    /// The first line of one Text part; the stream's length must match the certified `part`.
+    pub fn readPublicPartPrefix(self: Requests, store_path: []const u8, session: []const u8, owner: content_value.Owner, part: content_value.Part, buffer: []u8) !protocol_reply.ActivityPrefixReply {
+        const fd = try self.openPublicPart(store_path, session, owner, part);
+        defer closeSocket(self.io, fd);
+        return readFirstLine(self, fd, part.reference.length, buffer);
+    }
+
+    fn openPublicPart(self: Requests, store_path: []const u8, session: []const u8, owner: content_value.Owner, part: content_value.Part) !std.posix.fd_t {
         try self.check();
         try protocol_reply.validateIdentityInputs("", session);
         if (owner.id() == 0 or owner.id() > std.math.maxInt(i64) or part.ordinal >= @import("input_parts.zig").max_parts) return error.InvalidTarget;
         const paths = try resolveClientPaths(self.io, store_path);
         var body: protocol.RequestBuffer = .{};
         try body.appendShape(protocol.public_part_content_request.all, .{ paths.store_identity.slice(), session, protocol.OwnerJson{ .owner = owner }, part.ordinal, 0 });
-        const fd = try openRead(self, &paths, "/v1/public-part-content", body.slice());
-        defer closeSocket(self.io, fd);
-        return readPublicContentResponse(self, fd, .{ .bytes = part.reference.length, .digest = part.reference.digest }, sink);
+        return openRead(self, &paths, "/v1/public-part-content", body.slice());
     }
 
     pub fn readActivityContent(self: Requests, store_path: []const u8, session: []const u8, position: u64, ordinal: u64, expected: ?protocol_reply.CommandObservation.ContentReference, sink: anytype) !?protocol_reply.ReadFailure {
@@ -398,11 +409,11 @@ pub const Requests = struct {
         try body.appendShape(protocol.activity_content_request, .{ paths.store_identity.slice(), session, position, 0 });
         const fd = try openRead(self, &paths, "/v1/activity-content", body.slice());
         defer closeSocket(self.io, fd);
-        return readFirstLine(self, fd, buffer);
+        return readFirstLine(self, fd, null, buffer);
     }
 };
 
-fn readFirstLine(requests: Requests, fd: std.posix.fd_t, buffer: []u8) !protocol_reply.ActivityPrefixReply {
+fn readFirstLine(requests: Requests, fd: std.posix.fd_t, expected_length: ?u64, buffer: []u8) !protocol_reply.ActivityPrefixReply {
     const head = try readResponseHeadUntil(requests, fd, .{}, null);
     if (head.status != 200) {
         if (head.kind != .command_json) return error.InvalidResponse;
@@ -410,6 +421,7 @@ fn readFirstLine(requests: Requests, fd: std.posix.fd_t, buffer: []u8) !protocol
         return .{ .failure = try protocol_reply.decodeReadFailure(try readCommandBodyUntil(requests, fd, head, &reply_buffer, .{}, null), false) };
     }
     if (head.kind != .content_bytes or head.total != head.content_length or head.next != head.content_length) return error.InvalidResponse;
+    if (expected_length) |length| if (head.content_length != length) return error.ContentBindingMismatch;
     const wanted: usize = @intCast(@min(head.content_length, buffer.len));
     var filled: usize = 0;
     const line = while (filled != wanted) {
@@ -4963,7 +4975,7 @@ test "a first-line read returns the text before the first line break, within the
             try writeAll(descriptors[1], case.content);
         }
         var buffer: [4096]u8 = undefined;
-        const reply = try readFirstLine(.{ .io = std.testing.io }, descriptors[0], &buffer);
+        const reply = try readFirstLine(.{ .io = std.testing.io }, descriptors[0], null, &buffer);
         try std.testing.expectEqualStrings(case.line, reply.line);
     }
 }
@@ -5000,7 +5012,7 @@ test "a first-line read of a 1 MiB Message returns after the first line, before 
     const thread = try std.Thread.spawn(.{}, Host.send, .{&host});
     defer closeTestDescriptor(sockets[1]);
     var buffer: [4096]u8 = undefined;
-    const reply = readFirstLine(.{ .io = std.testing.io }, sockets[0], &buffer);
+    const reply = readFirstLine(.{ .io = std.testing.io }, sockets[0], null, &buffer);
     closeTestDescriptor(sockets[0]);
     thread.join();
     try std.testing.expectEqualStrings("Review the release plan", (try reply).line);
@@ -5020,7 +5032,7 @@ test "a first-line read returns the Host's refusal" {
         try writeAll(descriptors[1], body.slice());
     }
     var buffer: [4096]u8 = undefined;
-    const reply = try readFirstLine(.{ .io = std.testing.io }, descriptors[0], &buffer);
+    const reply = try readFirstLine(.{ .io = std.testing.io }, descriptors[0], null, &buffer);
     try std.testing.expectEqual(@as(u16, 409), reply.failure.status);
     try std.testing.expect(reply.failure.diagnostic.code.eql("ContentNotFound"));
 }
