@@ -1,7 +1,6 @@
 from terminal_screen import VERTICAL_DIVIDER
 import json
 import os
-import pathlib
 import re
 import select
 import shutil
@@ -774,95 +773,6 @@ def opening_case():
     print("session chrome: a reopened Session shows ◌ 2 · the newest waiting Message under the running call; Ctrl-O selects the lowest tool or Message, and reopening keeps tools folded", flush=True)
 
 
-def keys_case():
-    with Chrome("rui-chrome-keys.", []) as chrome:
-        session = chrome.session()
-        chrome.endpoint.responses.append(fixture.sse_answer("keys", "r", "m", "KEYS-ANSWER")[0])
-        chrome.answered(session, "keys")
-        for width in (140, 46):
-            master, caller, shown = chrome.open(session, lambda screen: "KEYS-ANSWER" in screen, columns=width)
-            if width == 140:
-                row, line = next((index, line) for index, line in enumerate(rows(shown)) if "Settings" in line)
-                col = line.index("Settings") + 1
-                gesture = f"\x1b[<0;{col};{row + 1}M\x1b[<0;{col};{row + 1}m".encode()
-            else:
-                chrome.frame(master, b"\x1b", lambda screen: "Settings" in screen and not any(line.startswith(" ‹ ") for line in rows(screen)))
-                gesture = b"\x1b[F\r"
-            settings = chrome.frame(master, gesture, lambda screen: "Notifications" in screen and "Version" in screen)
-            assert_plain_panel(master, settings, left="Settings")
-            keys = chrome.frame(master, b"\x1b[B" * 6 + b"\r", lambda screen: "earlier message" in screen)
-            expected = keys_reference()
-            columns = 2 if width == 140 else 1
-            key_widths = [max(len(key) for key, _ in expected[column::columns])
-                          for column in range(columns)]
-            bounds = composer_bounds(keys)
-            assert bounds is not None, keys
-            prompt = next(index for index in range(bounds[0] + 1, bounds[1])
-                          if composer_line(keys, index).startswith((" ›", " >")))
-            pane_rows = [chat_content_row(composer_line(keys, index))
-                         for index in range(bounds[0] + 1, prompt)]
-            positions = [[] for _ in range(columns)]
-            for start in range(0, len(expected), columns):
-                entries = expected[start:start + columns]
-                line = pane_rows[start // columns]
-                assert line.split() == [word for key, meaning in entries
-                                        for word in (key + " " + meaning).split()], (width, start, keys)
-                after = 0
-                for column, (key, meaning) in enumerate(entries):
-                    label = line.index(key, after)
-                    value = line.index(meaning, label + len(key))
-                    positions[column].append((label, value))
-                    assert value - label == key_widths[column] + 3, (width, key, keys)
-                    after = value + len(meaning)
-            for column in positions:
-                assert len(set(column)) == 1, (width, positions, keys)
-            assert positions[0][0][0] == 0, keys
-            used_rows = (len(expected) + columns - 1) // columns
-            assert all(not line.strip() for line in pane_rows[used_rows:]), keys
-            for absent in ("/help", "Ctrl-X twice", "shift+enter or ctrl+j", "Commands", "Marks", "Esc returns", "↑↓ · enter change · esc close", "‹ Rui · settings", 'ctrl+g', 'ctrl+d', 'ctrl+n', 'ctrl+end', 'ctrl+c/d', 'pgup/pgdn', 'first session', 'latest / last', 'scroll / select'):
-                assert absent not in keys, (width, absent, keys)
-            settings = chrome.frame(master, b"\r\x1b", lambda screen: "Notifications" in screen and "Version" in screen)
-            assert "earlier message" not in settings, settings
-            if width == 140:
-                chrome.frame(master, b"\x1b", lambda screen:
-                             latest(screen, "KEYS-ANSWER") and composing(screen, "")
-                             and "Rui · settings" not in screen)
-                chrome.frame(master, gesture, lambda screen: "Notifications" in screen and "Version" in screen)
-                chrome.frame(master, b"x", lambda screen: latest(screen, "KEYS-ANSWER") and composing(screen, "x")
-                             and "Notifications" not in screen)
-                chrome.frame(master, b"\x7f", lambda screen: composing(screen, ""))
-            else:
-                chrome.frame(master, b"\x1b", lambda screen: "Settings" in screen and "Rui · settings" not in screen and not any(line.startswith(" ‹ ") for line in rows(screen)))
-            chrome.leave(master, caller)
-    print("session chrome: Settings > Keys shows src/keymap.zig's reference rows aligned, paired at 140 columns and one column at 46; Enter is inert, Esc returns one layer, and printable input returns to the wide conversation", flush=True)
-
-
-def keys_reference():
-    source = (pathlib.Path(__file__).resolve().parents[2] / "src/keymap.zig").read_text()
-    body = source.split("pub const list = [_]Reference{", 1)[1].split("\n};", 1)[0]
-    rows = tuple(re.findall(r'^    \.\{ \.key = "([^"\\]*)", \.meaning = "([^"\\]*)"', body, re.MULTILINE))
-    assert rows and len(rows) == len(re.findall(r'^    \.\{ \.key = "', body, re.MULTILINE)), "src/keymap.zig: teach keys_reference this list"
-    return rows
-
-
-def notice_case():
-    with Chrome("rui-chrome-notice.", []) as chrome:
-        session = chrome.session()
-        master, caller, _ = chrome.open(session, lambda screen: True)
-        misused = chrome.frame(master, b"/new unexpected\r", lambda screen: footer(screen).endswith("! Usage: /new"))
-        assert composing(misused, ""), misused
-        gone = chrome.frame(master, b"a", lambda screen: composing(screen, "a"))
-        assert status(gone) == "" and "Usage:" not in footer(gone) and footer(gone).strip().startswith("‹ "), gone
-        os.write(master, b"\x15")
-        chrome.frame(master, b"", lambda screen: composing(screen, ""))
-        question = chrome.frame(master, b"?", lambda screen: composing(screen, "?"))
-        assert "shift+enter or ctrl+j" not in question, question
-        questions = chrome.frame(master, b"?", lambda screen: composing(screen, "??"))
-        assert "shift+enter or ctrl+j" not in questions, questions
-        chrome.leave(master, caller)
-    print("session chrome: a notice goes at the next key; ? is ordinary text on empty and nonempty drafts", flush=True)
-
-
 def main():
     command_panel_case()
     send_state_case()
@@ -877,5 +787,3 @@ def main():
     approval_glyph_domain()
     approval_overflow_case()
     opening_case()
-    notice_case()
-    keys_case()

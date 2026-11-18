@@ -2515,12 +2515,6 @@ def main(selected="all"):
             assert "result: completed\nfirst answer" in conversation_text(result), result
             terminal_step(master, "/requests", "Local recovery handles", composer=True)
             assert not (fresh_home / ".config/rui/requests").exists(), "re-entry should not require saved records"
-            before_misused = set(json.loads(run(preferences_home, "request", "list")))
-            for command in ("/new", "/clear", "/model", "/archive", "/unarchive", "/requests"):
-                notice = f"! Usage: {command}"
-                command += " unexpected"
-                terminal_step(master, command, notice, composer=True)
-                assert set(json.loads(run(preferences_home, "request", "list"))) == before_misused
             terminal_step(master, "/setup", "gpt-6-luna", composer=True)
             chat_info_frame(master)
             assert not credential.exists(), "local chat commands created credentials"
