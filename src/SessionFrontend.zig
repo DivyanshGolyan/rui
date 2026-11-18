@@ -190,7 +190,7 @@ test "a read freezes its viewport width method for live and historical answers" 
 fn freeze(self: *Self, phase: ReadPhase) *Job {
     std.debug.assert(self.reader.thread == null);
 
-    self.job = .{ .init = self.init, .home = self.home, .store = self.store, .session = self.session, .files = self.files, .colour = self.colour, .width_method = self.screen.vx.caps.unicode, .command = self.command, .configure = self.app_hooks.configure, .requests = self.requests, .status = self.status, .phase = phase, .cursor = self.scanCursor(), .opening = self.reading.opening, .queued_line = if (self.live.queued_line) |shown| shown.admission else 0, .inspection_kind = self.inspection.kind, .interrupted = self.interrupted, .line_read = self.line.read, .provider = self.line.provider, .hint_wanted = self.hint == .unread, .opened = self.screen.feed.opened };
+    self.job = .{ .init = self.init, .home = self.home, .store = self.store, .session = self.session, .files = self.files, .colour = self.colour, .unicode_script = self.app_caps.unicode, .width_method = self.screen.vx.caps.unicode, .command = self.command, .configure = self.app_hooks.configure, .requests = self.requests, .status = self.status, .phase = phase, .cursor = self.scanCursor(), .opening = self.reading.opening, .queued_line = if (self.live.queued_line) |shown| shown.admission else 0, .inspection_kind = self.inspection.kind, .interrupted = self.interrupted, .line_read = self.line.read, .provider = self.line.provider, .hint_wanted = self.hint == .unread, .opened = self.screen.feed.opened };
 
     const job = &self.job;
     job.latest_ending = self.live.latest_ending;
@@ -1169,9 +1169,9 @@ test "App Session retains the draft across a permission card arriving during pas
     const draw_context: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 24 }, .cell_size = .{} };
     try seedFeed(screen, "\x1b[2mtheme witness\x1b[0m");
     for ([_]struct { caps: overview_view.Caps, ground: vaxis.Color, band: vaxis.Color }{
-        .{ .caps = .{}, .ground = .{ .rgb = .{ 0x12, 0x19, 0x33 } }, .band = .{ .rgb = .{ 0x1a, 0x22, 0x46 } } },
-        .{ .caps = .{ .background = .{ 255, 255, 255 } }, .ground = .{ .rgb = .{ 0xf3, 0xee, 0xe2 } }, .band = .{ .rgb = .{ 0xe6, 0xdd, 0xc8 } } },
-        .{ .caps = .{ .depth = .indexed }, .ground = .{ .index = 234 }, .band = .{ .index = 236 } },
+        .{ .caps = .{}, .ground = .{ .rgb = .{ 0x1b, 0x21, 0x36 } }, .band = .{ .rgb = .{ 0x24, 0x2b, 0x45 } } },
+        .{ .caps = .{ .background = .{ 255, 255, 255 } }, .ground = .{ .rgb = .{ 0xf3, 0xee, 0xe2 } }, .band = .{ .rgb = .{ 0xea, 0xe2, 0xcf } } },
+        .{ .caps = .{ .depth = .indexed }, .ground = .{ .index = 235 }, .band = .{ .index = 236 } },
         .{ .caps = .{ .depth = .none }, .ground = .default, .band = .default },
     }) |case| {
         self.app_caps = case.caps;
@@ -5010,7 +5010,7 @@ test "one settled stop read updates the chat and its list row without a listing"
     self.lender = overview.lender();
     self.live.work.state = stopping;
     const job = self.freeze(.activity);
-    const text = "■ Stopped\n";
+    const text = "▪ Stopped\n";
     try fixture.file.writePositionalAll(std.testing.io, text, 0);
     job.result = .{
         .work = .{ .read_version = .{ .instance = @splat(0xab), .generation = 2 }, .work = stopped, .last_line = .{ .position = 2 } },
@@ -5028,7 +5028,7 @@ test "one settled stop read updates the chat and its list row without a listing"
     }.complete);
     try self.settleReader();
     const chat = try held.shown();
-    try std.testing.expect(std.mem.indexOf(u8, chat, "■ Stopped") != null);
+    try std.testing.expect(std.mem.indexOf(u8, chat, "▪ Stopped") != null);
     try std.testing.expect(std.mem.indexOf(u8, chat, "Stopping") == null);
     try std.testing.expectEqualDeep(stopped.state, self.live.work.state);
     const row = overview.state.find(ref).?;
@@ -5964,21 +5964,21 @@ test "App Session shows running calls in order above the input, with +N more run
     self.live.work.state = .{ .working = .{ .since = ChromeFixture.now() / 1000 - 12 } };
     self.live.work.actions.stop = true;
     const shown = try fixture.rows();
-    const first = ChromeFixture.find(&shown, "⠹ Read src/overview_view.zig").?;
-    try std.testing.expectEqualStrings("⠹ Run zig build test", shown[first + 1]);
-    try std.testing.expectEqualStrings("⠹ Read docs/using-rui.md", shown[first + 2]);
+    const first = ChromeFixture.find(&shown, "◝ Read src/overview_view.zig").?;
+    try std.testing.expectEqualStrings("◝ Run zig build test", shown[first + 1]);
+    try std.testing.expectEqualStrings("◝ Read docs/using-rui.md", shown[first + 2]);
     try std.testing.expectEqualStrings("+2 more running · info", shown[first + 3]);
-    try std.testing.expect(std.mem.eql(u8, shown[first + 4], "⠹ Thinking · 12s") or std.mem.eql(u8, shown[first + 4], "⠹ Thinking · 13s"));
+    try std.testing.expect(std.mem.eql(u8, shown[first + 4], "◝ Thinking · 12s") or std.mem.eql(u8, shown[first + 4], "◝ Thinking · 13s"));
     try std.testing.expectEqualStrings("", shown[first + 5]);
     try std.testing.expect(std.mem.startsWith(u8, shown[first + 6], "┄"));
     var waiting: usize = 0;
-    for (shown) |line| waiting += @intFromBool(std.mem.startsWith(u8, line, "⠹ Thinking"));
+    for (shown) |line| waiting += @intFromBool(std.mem.startsWith(u8, line, "◝ Thinking"));
     try std.testing.expectEqual(@as(usize, 1), waiting);
     self.live.view = .{};
     self.live.work.state = .{ .idle = .{ .since = 0 } };
     self.live.work.actions.stop = false;
     const idle = try fixture.rows();
-    try std.testing.expect(ChromeFixture.find(&idle, "⠹") == null and ChromeFixture.find(&idle, "+") == null);
+    try std.testing.expect(ChromeFixture.find(&idle, "◝") == null and ChromeFixture.find(&idle, "+") == null);
 }
 
 test "App Session shows the newest waiting Message as ◌ [N ·] its first line, without the word queued" {
@@ -5994,7 +5994,7 @@ test "App Session shows the newest waiting Message as ◌ [N ·] its first line,
     const three = try fixture.rows();
     const row = ChromeFixture.find(&three, "◌").?;
     try std.testing.expectEqualStrings("◌ 3 · also update docs/using-rui.md", three[row]);
-    try std.testing.expect(std.mem.startsWith(u8, three[row - 1], "⠹ Thinking"));
+    try std.testing.expect(std.mem.startsWith(u8, three[row - 1], "◝ Thinking"));
     try std.testing.expectEqualStrings("", three[row + 1]);
     try std.testing.expect(std.mem.startsWith(u8, three[row + 2], "┄"));
     for (three) |line| try std.testing.expect(std.ascii.findIgnoreCase(line, "queued") == null);
