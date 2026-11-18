@@ -7,6 +7,7 @@ Run with --seed to print the trusted bootstrap as JSON.
 import argparse
 import ast
 from collections import Counter
+from functools import lru_cache
 import io
 import json
 from pathlib import Path
@@ -83,8 +84,6 @@ def inventory(source, path):
                     counts['flake_masking'] += sum(1 for child in ast.walk(node)
                         if isinstance(child, ast.Constant) and isinstance(child.value, str)
                         and re.fullmatch(r'--(?:retries|reruns)(?:=.*)?', child.value))
-                if re.fullmatch(r'(?:time|asyncio)\.sleep', name):
-                    counts['fixed_sleep'] += 1
                 if re.fullmatch(r'(?:unittest\.)?mock\.patch(?:\.object|\.dict|\.multiple)?|patch(?:\.object|\.dict|\.multiple)?', name):
                     counts['test_double'] += 1
                 elif re.fullmatch(r'monkeypatch\.(?:setattr|setitem|delattr|delitem)', name) and node.args:
@@ -112,11 +111,6 @@ def inventory(source, path):
     else:
         def count(rule, pattern):
             counts[rule] += len(list(re.finditer(pattern, code, re.MULTILINE)))
-        if language == 'zig':
-            count('fixed_sleep', r'\b(?:Io|io|std\s*\.\s*Thread|std\s*\.\s*testing\s*\.\s*io)\s*\.\s*sleep\s*\(')
-        else:
-            # A timer callback alone may schedule work; awaiting a timer is a delay.
-            count('fixed_sleep', r'\b(?:await\s+setTimeout\s*\(|(?:await\s+)?new\s+Promise\s*\([^;]*?\bsetTimeout\s*\()')
         # Walk balanced loop bodies so nested branches do not hide state reads or waits.
         for loop in re.finditer(r'\b(?:while|for)\s*\(', code):
             pos = loop.end()
@@ -151,6 +145,7 @@ def inventory(source, path):
                 tail = source[match.end():match.end() + 120]
                 if re.match(r'\s*(?:rui\b|["\'][^"\']*rui(?:/|["\']))', tail):
                     counts['test_double'] += 1
+    counts['fixed_sleep'] = sum(sleep_ordering([(path, source)]).values())
     return {rule: counts[rule] for rule in RULES if counts[rule]}
 
 
@@ -213,7 +208,9 @@ def validate(value):
     for path, rules in value.items():
         if not isinstance(path, str) or not target(path) or not isinstance(rules, dict) or not rules:
             raise ValueError(f'invalid allowance path or rules: {path!r}')
-        if any(k not in RULES or type(v) is not int or v <= 0 for k, v in rules.items()):
+        if 'fixed_sleep' in rules:
+            parse_sleep_allowance({path: rules['fixed_sleep']})
+        if any(k not in RULES or (not (k == 'fixed_sleep' and isinstance(v, dict)) and (type(v) is not int or v <= 0)) for k, v in rules.items()):
             raise ValueError(f'invalid allowance counts: {path}')
     return value
 
@@ -232,6 +229,8 @@ def compare(actual, allowed, trusted):
     failures = []
     for path in sorted(set(actual) | set(allowed) | set(trusted)):
         for rule in RULES:
+            if rule == 'fixed_sleep':
+                continue
             observed = actual.get(path, {}).get(rule, 0)
             budget = allowed.get(path, {}).get(rule, 0)
             ceiling = trusted.get(path, {}).get(rule, 0)
@@ -245,24 +244,261 @@ def compare(actual, allowed, trusted):
 def trusted_allowance(root=ROOT):
     base = git(root, 'merge-base', 'HEAD', 'origin/main').strip()
     paths = git(root, 'ls-tree', '--name-only', base, '--', ALLOWANCE).strip()
+    data = json.loads(git(root, 'show', f'{base}:{ALLOWANCE}')) if paths else {}
     if paths:
-        return validate(json.loads(git(root, 'show', f'{base}:{ALLOWANCE}')))
-    return inventory_sources(trusted_sources(root, base))
+        legacy = isinstance(data, dict) and any(
+            isinstance(rules, dict) and type(rules.get('fixed_sleep')) is int
+            for rules in data.values())
+        if not legacy:
+            return validate(data)
+        stripped = {}
+        for path, rules in data.items():
+            if not isinstance(rules, dict):
+                raise ValueError(f'invalid allowance rules: {path!r}')
+            rules = dict(rules)
+            if type(rules.get('fixed_sleep')) is int:
+                if rules['fixed_sleep'] <= 0:
+                    raise ValueError(f'invalid legacy fixed sleep count: {path}')
+                del rules['fixed_sleep']
+            if rules:
+                stripped[path] = rules
+        validate(stripped)
+    sources = trusted_sources(root, base)
+    inventory = inventory_sources(sources)
+    if paths:
+        inventory = stripped
+    else:
+        for rules in inventory.values():
+            rules.pop('fixed_sleep', None)
+    old = {}
+    harness = sources.get('tests/ci/test_harness_contracts.py')
+    if harness:
+        matches = [node.value for node in ast.parse(harness).body if isinstance(node, ast.Assign)
+                   and getattr(node.targets[0], 'id', None) == 'SLEEP_ORDERED']
+        if len(matches) != 1:
+            raise ValueError('trusted base has no single SLEEP_ORDERED allowlist')
+        old = ast.literal_eval(matches[0])
+    found = sleep_ordering(sources.items())
+    for key in set(found) | set(old):
+        count = max(found.get(key, 0), old.get(key, (0, ''))[0])
+        reason = old.get(key, (0, 'Existing fixed sleep recorded at migration'))[1]
+        inventory.setdefault(key[0], {}).setdefault('fixed_sleep', {})[key[1]] = [count, reason]
+    return validate({path: rules for path, rules in inventory.items() if rules})
 
 
-def main(argv=None):
+ZIG_POLL_HELPER = ("src/testing/poll.zig", "waitUntil")
+PYTHON_POLL_HELPER = ("tests/integration/host_process.py", "wait_for")
+ZIG_SLEEP = re.compile(r"\b(?:sleep|nanosleep|usleep)\s*\(|\bpoll\(\s*&\[_\][\w.]*pollfd\{\}\s*,\s*0\s*,")
+ZIG_SKIPPED = re.compile(r'//[^\n]*|\\\\[^\n]*|"(?:\\.|[^"\\\n])*"|\'(?:\\.|[^\'\\\n])*\'')
+ZIG_TEST = re.compile(r'\s*test\s*(?:"((?:\\.|[^"\\])*)"|(\w+))?\s*')
+ZIG_DECLARATION = re.compile(r"\b(?:fn|const|var)\s+(\w+)")
+ZIG_EXPRESSION = re.compile(r"(?:\.|\berror)\s*$")
+ZIG_TEST_ONLY = re.compile(r"(?:^|/)(?:tests|testing)/|tests?\.zig$")
+
+
+@lru_cache(maxsize=512)
+def zig_blocks(text):
+    code = ZIG_SKIPPED.sub(lambda match: " " * len(match[0]), text)
+    names = ZIG_SKIPPED.sub(lambda match: match[0] if match[0][0] == '"' else " " * len(match[0]), text)
+    tests, declarations, open_blocks, head, top_head = [], [], [], 0, 0
+    for index, char in enumerate(code):
+        if char == "{":
+            open_blocks.append((head, index))
+            head = index + 1
+        elif char == "}":
+            block_head, start = open_blocks.pop()
+            if test := ZIG_TEST.fullmatch(names, block_head, start):
+                tests.append((start, index, test[1] or test[2] or "<unnamed test>"))
+            if not open_blocks and not ZIG_EXPRESSION.search(code, top_head, start):
+                if declaration := ZIG_DECLARATION.search(code, top_head, start):
+                    declarations.append((start, index, declaration[1]))
+                top_head = index + 1
+            head = index + 1
+        elif char == ";":
+            head = index + 1
+            if not open_blocks:
+                top_head = index + 1
+    return code, tuple(tests), tuple(declarations)
+
+
+def zig_sleep_ordering(path, text):
+    code, tests, declarations = zig_blocks(text)
+    test_only = ZIG_TEST_ONLY.search(path) is not None
+    offenses = Counter()
+    for match in ZIG_SLEEP.finditer(code):
+        if code[:match.start()].rstrip().endswith("fn"):
+            continue
+        within = [name for start, end, name in tests if start < match.start() < end]
+        if within:
+            offenses[(path, within[-1])] += 1
+        elif test_only:
+            offenses[(path, next((name for start, end, name in declarations if start < match.start() < end),
+                                 "<top level>"))] += 1
+    offenses.pop(ZIG_POLL_HELPER, None)
+    return offenses
+
+
+@lru_cache(maxsize=512)
+def sleep_python_tree(text):
+    return ast.parse(text)
+
+
+def python_sleep_ordering(path, text):
+    offenses = Counter()
+
+    def visit(node, name):
+        for child in ast.iter_child_nodes(node):
+            child_name = name
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                if name is None:
+                    child_name = child.name
+                elif isinstance(node, ast.ClassDef) and "." not in name:
+                    child_name = f"{name}.{child.name}"
+            elif (isinstance(child, ast.Call) and isinstance(child.func, ast.Attribute) and child.func.attr == "sleep"
+                  and getattr(child.func.value, "id", None) in ("time", "asyncio")):
+                offenses[(path, name or "<module>")] += 1
+            visit(child, child_name)
+
+    visit(sleep_python_tree(text), None)
+    offenses.pop(PYTHON_POLL_HELPER, None)
+    return offenses
+
+
+def sleep_ordering(sources):
+    offenses = Counter()
+    for path, text in sources:
+        if path.endswith(".zig"):
+            offenses += zig_sleep_ordering(path, text)
+        elif path.startswith("tests/") and path.endswith(".py"):
+            offenses += python_sleep_ordering(path, text)
+        elif path.endswith(".test.ts"):
+            code = mask(text, "ts")
+            count = len(re.findall(r'\b(?:await\s+setTimeout\s*\(|(?:await\s+)?new\s+Promise\s*\([^;]*?\bsetTimeout\s*\()', code))
+            if count:
+                offenses[(path, "<file>")] = count
+    return offenses
+
+
+def sleep_keys(sources):
+    keys = set()
+    for path, text in sources:
+        if path.endswith(".zig") and target(path):
+            _, tests, declarations = zig_blocks(text)
+            keys.update((path, name) for _, _, name in tests)
+            if ZIG_TEST_ONLY.search(path):
+                keys.update((path, name) for _, _, name in declarations)
+        elif path.startswith("tests/") and path.endswith(".py"):
+            for node in sleep_python_tree(text).body:
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    keys.add((path, node.name))
+                if isinstance(node, ast.ClassDef):
+                    keys.update((path, f"{node.name}.{child.name}") for child in node.body
+                                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)))
+    return keys
+
+
+def tree_sources(root=ROOT):
+    return iter(read_sources(root).items())
+
+
+def review_base_sources(root=ROOT):
+    base = git(root, "merge-base", "HEAD", "origin/main").strip()
+    return iter(trusted_sources(root, base).items())
+
+
+def review_base_ceiling(root=ROOT, sources=None):
+    sources = sources or dict(review_base_sources(root))
+    ceiling = sleep_ordering(sources.items())
+    base = git(root, "merge-base", "HEAD", "origin/main").strip()
+    try:
+        data = json.loads(git(root, "show", f"{base}:{ALLOWANCE}"))
+    except subprocess.CalledProcessError:
+        data = {}
+    has_allowance = bool(git(root, 'ls-tree', '--name-only', base, '--', ALLOWANCE).strip())
+    if has_allowance and all(not isinstance(rules.get('fixed_sleep'), int) for rules in data.values()):
+        for key, (count, _) in sleep_allowances(data).items():
+            ceiling[key] = max(ceiling[key], count)
+        return ceiling
+    allowlists = [node.value for node in ast.parse(sources["tests/ci/test_harness_contracts.py"]).body
+                  if isinstance(node, ast.Assign) and getattr(node.targets[0], "id", None) == "SLEEP_ORDERED"]
+    if len(allowlists) != 1:
+        raise AssertionError("review base has no single SLEEP_ORDERED allowlist")
+    for key, (count, _) in ast.literal_eval(allowlists[0]).items():
+        ceiling[key] = max(ceiling[key], count)
+    return ceiling
+
+
+def moved_ceiling(offenses, trusted, present, base):
+    ceiling = Counter(trusted)
+    for (path, name), count in trusted.items():
+        if (path, name) in offenses or (path, name) in present:
+            continue
+        moved = [key for key in offenses if key[1] == name and key not in trusted and key not in base]
+        if len(moved) == 1:
+            ceiling[moved[0]] = max(ceiling[moved[0]], count)
+    return ceiling
+
+
+def sleep_allowlist_problems(offenses, allowed, trusted):
+    problems = []
+    for key in sorted(set(offenses) | set(allowed)):
+        found, listed = offenses.get(key, 0), allowed.get(key, (0, ""))[0]
+        if found > listed:
+            problems.append(f"{key}: {found} test sleep(s) outside wait_for/waitUntil, {listed} allowed; "
+                            "poll through the helper, gate on an event, or list it with a reason")
+        elif found < listed:
+            problems.append(f"{key}: {listed} allowed but {found} found; lower or remove its allowlist entry")
+        if listed > trusted.get(key, 0):
+            problems.append(f"{key}: allowance {listed} exceeds the {trusted.get(key, 0)} found at the "
+                            "review base; the allowlist only shrinks")
+    return problems
+
+
+
+
+
+def parse_sleep_allowance(value):
+    if not isinstance(value, dict):
+        raise ValueError("fixed sleep test allowances must be an object")
+    result = {}
+    for path, entries in value.items():
+        if not isinstance(path, str) or not target(path) or not isinstance(entries, dict) or not entries:
+            raise ValueError(f"invalid fixed sleep allowance path: {path!r}")
+        for name, entry in entries.items():
+            if (not isinstance(name, str) or not name or not isinstance(entry, list) or len(entry) != 2
+                    or type(entry[0]) is not int or entry[0] <= 0 or not isinstance(entry[1], str)
+                    or not entry[1].strip() or "\n" in entry[1]):
+                raise ValueError(f"invalid fixed sleep allowance: {path}: {name!r}")
+            result[path, name] = tuple(entry)
+    return result
+
+def sleep_allowances(data):
+    return parse_sleep_allowance({path: rules["fixed_sleep"] for path, rules in data.items()
+                                  if isinstance(rules.get("fixed_sleep"), dict)})
+
+def load_sleep_allowance(root=ROOT):
+    return sleep_allowances(validate(json.loads((root / ALLOWANCE).read_text())))
+
+def main(argv=None, root=ROOT):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--seed', action='store_true', help='print the trusted origin/main allowance')
     args = parser.parse_args(argv)
-    trusted = trusted_allowance()
+    trusted = trusted_allowance(root)
     if args.seed:
         print(json.dumps(trusted, indent=2, sort_keys=True))
         return 0
-    allowed = validate(json.loads((ROOT / ALLOWANCE).read_text()))
-    actual = scan(ROOT)
-    flat_allowed = {(path, rule): count for path, rules in allowed.items() for rule, count in rules.items()}
+    allowed = validate(json.loads((root / ALLOWANCE).read_text()))
+    actual = scan(root)
+    actual = {key: count for key, count in actual.items() if key[1] != 'fixed_sleep'}
+    flat_allowed = {(path, rule): count for path, rules in allowed.items() for rule, count in rules.items()
+                    if rule != 'fixed_sleep'}
     failures = check(actual, flat_allowed)
     failures.extend(message for message in compare(allowed, allowed, trusted) if 'exceeds trusted' in message)
+    tree = list(tree_sources(root))
+    base = dict(review_base_sources(root))
+    offenses = sleep_ordering(tree)
+    ceiling = moved_ceiling(offenses, review_base_ceiling(root, sources=base), sleep_keys(tree), sleep_keys(base.items()))
+    failures.extend(sleep_allowlist_problems(offenses, sleep_allowances(allowed), ceiling))
     print('\n'.join(failures))
     return int(bool(failures))
 

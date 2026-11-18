@@ -61,7 +61,7 @@ SOURCE_POLICY = (
     (("src/*.zig", "tests/*.zig"), (("test_import_architecture.py", "*"),)),
     (("src/*.zig",), (("test_provider_locality.py", "*"), ("test_wire_version.py", "*"))),
     (("src/*.zig", "tests/*.zig", "tests/integration/*.py", "tests/ci/test_*.py", "tests/ci/*_test.py"),
-     (("test_harness_contracts.py", "SleepOrderingTest.test_tree_matches_the_shrink_only_allowlist"),)),
+     (("test_flake_sources.py", "SleepOrderingTest.test_tree_matches_the_shrink_only_allowlist"),)),
     (PLATFORM_SCANNED, (("test_platform_boundary.py", "*"),)),
     (("tests/integration/*.py", "tests/integration/*.sh", "tests/qualification/*.go"),
      (("test_wire_version.py", "*"), ("test_store_schema_fixtures.py", "*"))),

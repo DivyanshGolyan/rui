@@ -20,9 +20,9 @@ import select_tests
 ROOT = prepush.ROOT
 
 SOURCE_CHECKS = {"tests/ci: test_import_architecture.py", "tests/ci: test_provider_locality.py",
-                 "tests/ci: test_wire_version.py", "tests/ci: test_harness_contracts.py",
+                 "tests/ci: test_wire_version.py", "tests/ci: test_flake_sources.py",
                  "tests/ci: test_platform_boundary.py", "tests/ci: test_fixture_literals.py"}
-FIXTURE_CHECKS = {"tests/ci: test_wire_version.py", "tests/ci: test_harness_contracts.py",
+FIXTURE_CHECKS = {"tests/ci: test_wire_version.py", "tests/ci: test_flake_sources.py",
                   "tests/ci: test_platform_boundary.py", "tests/ci: test_store_schema_fixtures.py",
                   "tests/ci: test_fixture_literals.py"}
 
@@ -177,6 +177,15 @@ class PrepushTest(unittest.TestCase):
                 commands = dict(prepush.checks([path], AVAILABLE, "BASE"))
                 self.assertNotIn("client locality", commands)
                 self.assertNotIn("tests/ci: test_client_locality.py", commands)
+
+    def test_sleep_policy_selects_the_moved_owner(self):
+        for path in ("src/store/creator_tests.zig", "tests/integration/host_process.py"):
+            with self.subTest(path=path):
+                checks = prepush.policy_tests([path])
+                self.assertIn("SleepOrderingTest.test_tree_matches_the_shrink_only_allowlist",
+                              checks["test_flake_sources.py"])
+                self.assertNotIn("SleepOrderingTest.test_tree_matches_the_shrink_only_allowlist",
+                                 checks.get("test_harness_contracts.py", set()))
 
     def test_flake_sources_run_for_scanned_inputs_and_deletions(self):
         for path in ("src/example.zig", "build.zig", "tests/integration/example.py", "clients/ts/test/example.test.ts",
