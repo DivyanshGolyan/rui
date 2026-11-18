@@ -2,13 +2,16 @@
 
     python3 tests/ci/rsql_table.py generate   rewrite the table from a collect build
     python3 tests/ci/rsql_table.py check      fail when the checked-in table differs from a collect build
+    python3 tests/ci/rsql_table.py fingerprint  fail when the table records other inputs than the files hold (cheap; policy)
     (either takes --zig PATH, the compiler to build with; default zig on PATH)
 
 A collect build (-Drsql-collect=true) compiles the product and the unit roots on rsql's comptime path, and every
 statement exports one record of what that path produced. This script reads the records back from the binaries
 and writes them as the table rsql.Read and rsql.Write look statements up in. Linux only: it reads ELF symbols.
 """
+import hashlib
 import os
+import re
 import struct
 import subprocess
 import sys
@@ -20,6 +23,30 @@ TABLE = ROOT / "src/store/rsql_table.zig"
 TARGETS = "test-native,test-store,session-list-integration"
 PREFIX = b"rsqlstmt_"
 REGENERATE = "python3 tests/ci/rsql_table.py generate"
+
+
+def fingerprint(root):
+    """build/product.zig's fingerprint of the files rsql_table_inputs names, which that file owns."""
+    names = re.search(r"pub const rsql_table_inputs = \[_\]\[\]const u8\{([^}]*)\}", (root / "build/product.zig").read_text())
+    if names is None:
+        raise ValueError("build/product.zig declares no rsql_table_inputs")
+    digest = hashlib.sha256()
+    for name in re.findall(r'"([^"]+)"', names[1]):
+        digest.update(name.encode() + b"\0" + (root / name).read_bytes() + b"\0")
+    return digest.digest()[:16].hex()
+
+
+def recorded(root):
+    found = re.search(r'^pub const inputs = "([0-9a-f]*)";$', (root / "src/store/rsql_table.zig").read_text(), re.M)
+    return found[1] if found else None
+
+
+def fingerprint_error(root):
+    expected = fingerprint(root)
+    if recorded(root) == expected:
+        return None
+    return (f"src/store/rsql_table.zig records inputs {recorded(root)!r}, but the files rsql_table_inputs names hash to "
+            f"{expected!r}: every Store statement would compile on the slow comptime path. Run `{REGENERATE}` and commit it")
 
 
 def elf_records(data):
@@ -122,6 +149,10 @@ def main(argv):
     zig = "zig"
     if len(argv) == 3 and argv[1] == "--zig":
         argv, zig = argv[:1], argv[2]
+    if argv == ["fingerprint"]:
+        error = fingerprint_error(ROOT)
+        print(error or "src/store/rsql_table.zig records the current inputs", file=sys.stderr if error else sys.stdout)
+        return 1 if error else 0
     if argv not in (["generate"], ["check"]):
         raise SystemExit(__doc__)
     text, count = render(collect(zig))

@@ -31,8 +31,12 @@ fn rsqlTable(b: *std.Build) RsqlTable {
         hash.update(&.{0});
     }
     const digest = hash.finalResult();
+    const inputs = b.fmt("{x}", .{digest[0..16]});
+    const table = b.root.root_dir.handle.readFileAlloc(b.graph.io, b.pathJoin(&.{ b.root.sub_path, "src/store/rsql_table.zig" }), b.allocator, .limited(64 * 1024 * 1024)) catch "";
+    if (std.mem.indexOf(u8, table, b.fmt("pub const inputs = \"{s}\";", .{inputs})) == null)
+        std.log.warn("src/store/rsql_table.zig was generated from other inputs, so every Store statement compiles on the slow comptime path; run python3 tests/ci/rsql_table.py generate", .{});
     rsql_table = .{
-        .inputs = b.fmt("{x}", .{digest[0..16]}),
+        .inputs = inputs,
         .collect = b.option(bool, "rsql-collect", "Build Store statements on the comptime path and export them for tests/ci/rsql_table.py") orelse false,
     };
     return rsql_table.?;

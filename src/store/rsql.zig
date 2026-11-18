@@ -2674,7 +2674,7 @@ test "a statement calls only the functions every engine spells, by argument coun
     try std.testing.expectEqualStrings(text, comptime mysqlRendering(text).rendered.parts[0]);
 }
 
-test "CI-76: a statement serves its table entry only while its text, signature and the table's inputs all match" {
+test "SH-74: a statement serves its table entry only while its text, signature and the table's inputs all match" {
     const text = "SELECT next_position FROM session WHERE session_ref=?1";
     const written = "UPDATE session SET prefix_seal=?2 WHERE session_ref=@session(?1)";
     const Args = struct { session: []const u8 };

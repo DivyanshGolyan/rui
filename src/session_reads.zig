@@ -1,6 +1,6 @@
 const std = @import("std");
 const tool_fold = @import("tool_fold.zig");
-const socket_os = @import("os").socket;
+const fake_host = @import("testing/fake_host.zig");
 const client = @import("client.zig");
 const protocol_reply = @import("protocol_reply.zig");
 const protocol = @import("protocol.zig");
@@ -9,6 +9,7 @@ const Input = @import("SessionInput.zig");
 const Submission = @import("SessionSubmission.zig");
 const Task = @import("ClientTask.zig");
 const View = @import("session_view.zig");
+const byte_size = @import("byte_size.zig");
 const DraftEditor = @import("DraftEditor.zig");
 const History = @import("session_history.zig");
 const departure = @import("session_departure.zig");
@@ -771,7 +772,7 @@ fn writeMessagePage(io: std.Io, scratch: std.Io.File, length: u64, lines: u64, l
     var size: [24]u8 = undefined;
     var heading: [96]u8 = undefined;
     try page.feed(View.Mark.summary);
-    try page.feed(try std.fmt.bufPrint(&heading, "Message · {d} line{s} · {s}", .{ lines, if (lines == 1) "" else "s", View.kilobytes(target.content.length, &size) }));
+    try page.feed(try std.fmt.bufPrint(&heading, "Message · {d} line{s} · {s}", .{ lines, if (lines == 1) "" else "s", byte_size.kilobytes(target.content.length, &size) }));
     try page.feed(View.Mark.reset ++ "\n");
     if (target.row) {
         try History.writeExport(&page, store, session, target.position, target.ordinal);
@@ -1092,7 +1093,6 @@ const FakeHost = struct {
     pages: usize = 0,
     contents: usize = 0,
     others: usize = 0,
-    stopping: std.atomic.Value(bool) = .init(false),
     output: [4096]u8 = undefined,
     shown: []const u8 = "",
 
@@ -1177,39 +1177,15 @@ const FakeHost = struct {
         return facts;
     }
 
-    fn respond(fd: std.posix.fd_t, status: []const u8, kind: []const u8, extra: []const u8, body: []const u8) void {
-        var header: [512]u8 = undefined;
-        const head = std.fmt.bufPrint(&header, "HTTP/1.1 {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\n{s}\r\n", .{ status, kind, body.len, extra }) catch unreachable;
-        for ([_][]const u8{ head, body }) |bytes| {
-            var sent: usize = 0;
-            while (sent < bytes.len) {
-                const count = std.c.send(fd, bytes[sent..].ptr, bytes.len - sent, socket_os.send_flags);
-                if (count <= 0) return;
-                sent += @intCast(count);
-            }
-        }
-    }
-
-    fn answer(self: *FakeHost, fd: std.posix.fd_t) !void {
-        var request: [8192]u8 = undefined;
-        var used: usize = 0;
-        const body_start = while (true) {
-            const count = try std.posix.read(fd, request[used..]);
-            if (count == 0) return;
-            used += count;
-            if (std.mem.indexOf(u8, request[0..used], "\r\n\r\n")) |at| break at + 4;
-        };
-        const marker = "Content-Length: ";
-        const length_at = std.mem.indexOf(u8, request[0..body_start], marker).? + marker.len;
-        const length = try std.fmt.parseInt(usize, request[length_at..std.mem.indexOfScalarPos(u8, request[0..body_start], length_at, '\r').?], 10);
-        while (used < body_start + length) used += try std.posix.read(fd, request[used..]);
-        const body = request[body_start .. body_start + length];
+    pub fn answer(self: *FakeHost, fd: std.posix.fd_t) !void {
+        var buffer: [8192]u8 = undefined;
+        const request = try fake_host.readRequest(fd, &buffer) orelse return;
         var storage: [4096]u8 = undefined;
         var fixed = std.heap.FixedBufferAllocator.init(&storage);
         const Cursor = struct { end: ?[]const u8 = null, position: []const u8, ordinal: ?[]const u8 = null, direction: []const u8 = "forward", kinds: []const protocol.ActivityItem.Kind = &.{}, limit: []const u8 = "16" };
-        const cursor = try std.json.parseFromSliceLeaky(Cursor, fixed.allocator(), body, .{ .ignore_unknown_fields = true });
+        const cursor = try std.json.parseFromSliceLeaky(Cursor, fixed.allocator(), request.body, .{ .ignore_unknown_fields = true });
         const position = try std.fmt.parseInt(u64, cursor.position, 10);
-        if (std.mem.startsWith(u8, request[0..used], "POST /v1/activity-page ")) {
+        if (request.is("/v1/activity-page")) {
             self.pages += 1;
             const end = if (cursor.end) |value| try std.fmt.parseInt(u64, value, 10) else self.end;
             const ordinal = if (cursor.ordinal) |value| try std.fmt.parseInt(u64, value, 10) else null;
@@ -1219,55 +1195,16 @@ const FakeHost = struct {
             var out = std.Io.Writer.Allocating.init(std.testing.allocator);
             defer out.deinit();
             try activity_reply.writePage(&out.writer, &facts);
-            respond(fd, "200 OK", "application/json", "", out.written());
-        } else if (std.mem.startsWith(u8, request[0..used], "POST /v1/activity-content ")) {
+            fake_host.respond(fd, "200 OK", "application/json", "", out.written());
+        } else if (request.is("/v1/activity-content")) {
             self.contents += 1;
-            if (self.refuse_content) {
-                var out: [256]u8 = undefined;
-                var writer = std.Io.Writer.fixed(&out);
-                try protocol.writeShape(&writer, protocol.error_reply, .{ protocol.ErrorType.activity_unavailable, "ContentNotFound" });
-                return respond(fd, "409 Conflict", "application/json", "", writer.buffered());
-            }
-            const body_text = if (self.content_texts) |texts| texts[@intCast(position - 1)] else text;
-            var extra: [128]u8 = undefined;
-            respond(fd, "200 OK", "application/octet-stream", try std.fmt.bufPrint(&extra, "X-Rui-Content-Bytes: {d}\r\nX-Rui-Next-Offset: {d}\r\n", .{ body_text.len, body_text.len }), body_text);
+            if (self.refuse_content) return fake_host.refuse(fd, .activity_unavailable, "ContentNotFound");
+            fake_host.respondContent(fd, if (self.content_texts) |texts| texts[@intCast(position - 1)] else text);
         } else self.others += 1;
     }
 
-    fn serve(self: *FakeHost, listener: *std.Io.net.Server) void {
-        while (true) {
-            const peer = listener.accept(std.testing.io) catch return;
-            defer peer.close(std.testing.io);
-            if (self.stopping.load(.acquire)) return;
-            if (!socket_os.suppressSigpipe(peer.socket.handle)) return;
-            self.answer(peer.socket.handle) catch {};
-        }
-    }
-
     fn withHost(self: *FakeHost, action: anytype) !void {
-        const io = std.testing.io;
-        var tmp = std.testing.tmpDir(.{ .iterate = true });
-        defer tmp.cleanup();
-        try tmp.dir.setPermissions(io, .fromMode(0o700));
-        var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
-        var lease = try @import("platform.zig").StoreLease.acquire(io, root);
-        defer lease.release();
-        try lease.prepareForServing(false);
-        const paths = lease.paths;
-        var listener = try (try std.Io.net.UnixAddress.init(paths.socket.slice())).listen(io, .{});
-        defer {
-            listener.deinit(io);
-            std.Io.Dir.cwd().deleteFile(io, paths.socket.slice()) catch @panic("unable to remove fixture socket");
-        }
-        const thread = try std.Thread.spawn(.{}, serve, .{ self, &listener });
-        defer {
-            self.stopping.store(true, .release);
-            if ((std.Io.net.UnixAddress.init(paths.socket.slice()) catch unreachable).connect(io)) |wake| wake.close(io) else |_| {}
-            thread.join();
-            self.stopping.store(false, .release);
-        }
-        try action.run(self, tmp.dir, root);
+        try fake_host.withHost(self, action);
     }
 
     fn read(self: *FakeHost, job: *Job) !void {
@@ -1278,7 +1215,7 @@ const FakeHost = struct {
         const Read = struct {
             job: *Job,
             run_read: Task.Run,
-            fn run(action: *@This(), host: *FakeHost, dir: std.Io.Dir, root: []const u8) !void {
+            pub fn run(action: *@This(), host: *FakeHost, dir: std.Io.Dir, root: []const u8) !void {
                 const io = std.testing.io;
                 const inspection = try dir.createFile(io, "inspection", .{ .read = true });
                 defer inspection.close(io);
@@ -1339,7 +1276,7 @@ test "SUI-49 Message placement preserves provenance across pages" {
             };
         }
 
-        fn run(_: *@This(), host: *FakeHost, _: std.Io.Dir, root: []const u8) !void {
+        pub fn run(_: *@This(), host: *FakeHost, _: std.Io.Dir, root: []const u8) !void {
             var peer: protocol.NamedPeer = .{ .session = .{} };
             try peer.session.set("9f8e7d");
             try peer.label.set("Peer");
@@ -2009,7 +1946,7 @@ test "session_reads retry stages exact multi-window bytes before its ending and 
     const Read = struct {
         job: *Job,
         expected: []const u8,
-        fn run(action: *@This(), _: *FakeHost, dir: std.Io.Dir, root: []const u8) !void {
+        pub fn run(action: *@This(), _: *FakeHost, dir: std.Io.Dir, root: []const u8) !void {
             const io = std.testing.io;
             const file = try dir.createFile(io, "retry", .{ .read = true });
             defer file.close(io);
@@ -2106,7 +2043,7 @@ test "session_reads capped answer target opens the whole authenticated answer" {
     const Domain = struct {
         text: []const u8,
         reference: protocol.ActivityItem.Content,
-        fn run(self: *@This(), host: *FakeHost, dir: std.Io.Dir, root: []const u8) !void {
+        pub fn run(self: *@This(), host: *FakeHost, dir: std.Io.Dir, root: []const u8) !void {
             const io = std.testing.io;
             const inspection = try dir.createFile(io, "inspection", .{ .read = true });
             defer inspection.close(io);
