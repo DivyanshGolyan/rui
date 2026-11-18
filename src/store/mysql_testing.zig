@@ -170,10 +170,7 @@ fn send(comptime sql: []const u8, fixture_args: anytype) !void {
     inline for (fixture_args, 0..) |value, index| {
         args[index] = if (@TypeOf(value) == testing.Blob) .{ .bytes = value.bytes } else value;
     }
-    const template = comptime switch (rsql.mysqlRendering(sql)) {
-        .rendered => |value| value,
-        .refused => |message| @compileError(message),
-    };
+    const template = comptime rsql.sentTemplate(sql);
     const Args = @TypeOf(args);
     const served = protocol.routesAll(.endpoint);
     const bound: literal.Bound = .{ .now = 0, .served = &served };
