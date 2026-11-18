@@ -4966,6 +4966,15 @@ const MutationWitness = struct {
         } };
     }
 
+    // The frozen producer-byte oracle was captured at wire 20. Verify the
+    // actual version first, then retain those captured bytes in the digest.
+    fn hashResponse(hash: *Hash, body: []const u8) !void {
+        const current = "{\"version\":\"" ++ protocol.wire_version ++ "\",";
+        try std.testing.expect(std.mem.startsWith(u8, body, current));
+        hash.update("{\"version\":\"20\",");
+        hash.update(body[current.len..]);
+    }
+
     fn observe(hash: *Hash, body: []const u8, status: u16, supplied_session: []const u8, binding: reply.MutationTarget) !void {
         const decoded = reply.decodeMutationReply(.{ .status = status, .body = body }, supplied_session, binding);
         if (decoded.answer) |answer| {
@@ -5039,6 +5048,13 @@ const MutationWitness = struct {
 };
 
 test "mutation decoder preserves base bytes and the entire command domain" {
+    // Only the version is normalized; an incorrect actual version is refused.
+    var version_probe = MutationWitness.Hash.init(.{});
+    try std.testing.expectError(error.TestUnexpectedResult, MutationWitness.hashResponse(&version_probe, "{\"version\":\"" ++ protocol.next_wire_version ++ "\",\"type\":\"configuration_reply\"}"));
+    try MutationWitness.hashResponse(&version_probe, "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"configuration_reply\"}");
+    var frozen_probe = MutationWitness.Hash.init(.{});
+    frozen_probe.update("{\"version\":\"20\",\"type\":\"configuration_reply\"}");
+    try std.testing.expectEqualSlices(u8, &frozen_probe.finalResult(), &version_probe.finalResult());
     var covered: u16 = 0;
     inline for (comptime std.meta.tags(command_spec.CommandKind)) |kind| {
         if (comptime kind == .action_stop) continue;
@@ -5066,7 +5082,7 @@ test "mutation decoder preserves base bytes and the entire command domain" {
                     .conflict => 409,
                     .infrastructure_failure => 500,
                 };
-                hash.update(response.slice());
+                try MutationWitness.hashResponse(&hash, response.slice());
                 hash.update("\x00");
                 for ([_]bool{ false, true }) |wrong_session| {
                     for ([_]bool{ false, true }) |wrong_target| {
@@ -5092,7 +5108,7 @@ test "mutation decoder preserves base bytes and the entire command domain" {
         }
         var response: protocol.ResponseBuffer = .{};
         try response.render(render, .{ MutationWitness.subject(kind), alternate });
-        hash.update(response.slice());
+        try MutationWitness.hashResponse(&hash, response.slice());
         var binding = MutationWitness.target(kind, false);
         if (kind == .session_archive) binding.session_archive.archived = false;
         if (kind == .session_pin) binding.session_pin.pinned = true;
@@ -5103,7 +5119,7 @@ test "mutation decoder preserves base bytes and the entire command domain" {
             if (kind == .message) binding.message.creates_session = true;
             response = .{};
             try response.render(render, .{ @as([]const u8, ""), initial });
-            hash.update(response.slice());
+            try MutationWitness.hashResponse(&hash, response.slice());
             try MutationWitness.observe(&hash, response.slice(), 200, "", binding);
         }
         const expected = switch (kind) {
