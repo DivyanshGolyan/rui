@@ -507,6 +507,60 @@ fn collect(
 ) void {
     comptime {
         @setEvalBranchQuota(100 * (sql.len + sqlite.len) + 1_000_000);
+        _ = Exported(@tagName(kind) ++ "\x1f" ++ sql ++ "\x1f" ++ checked ++ "\x1f" ++ sqlite ++ "\x1f" ++ templateRecord(mysql) ++ "\x1f" ++
+            (if (facts.uses_now) "1" else "0") ++ "\x1f" ++ @tagName(facts.shape) ++ "\x1f" ++ inputs() ++ "\x1c");
+    }
+}
+
+/// A Store test fixture's text (store_testing.exec, queryU64, withoutForeignKeys) as MySQL renders it,
+/// after fixtureRendering's checks. The table's `fixtures` serve it on a text and inputs match, which
+/// means those checks passed under the same inputs; any other text is checked and rendered here.
+pub fn fixtureTemplate(comptime text: []const u8) Template {
+    return switch (comptime fixtureFrom(statement_table, text)) {
+        .refused => |message| @compileError(message ++ ": " ++ text),
+        .rendered => |template| template,
+    };
+}
+
+/// The MySQL rendering of a text mysql_testing sends: the table's fixture entry for it, else
+/// mysqlRendering. An entry holds what mysqlRendering produced under the same inputs.
+pub fn sentTemplate(comptime text: []const u8) Template {
+    return comptime servedFixture(statement_table, text) orelse mysqlTemplate(text);
+}
+
+fn servedFixture(comptime table: type, comptime text: []const u8) ?Template {
+    comptime {
+        if (collecting() or !std.mem.eql(u8, table.inputs, inputs()) or !@hasDecl(table.fixtures, text)) return null;
+        return @field(table.fixtures, text);
+    }
+}
+
+fn fixtureFrom(comptime table: type, comptime text: []const u8) MysqlRendering {
+    comptime {
+        if (servedFixture(table, text)) |template| return .{ .rendered = template };
+        const rendering = fixtureRendering(text);
+        if (collecting() and rendering == .rendered) _ = Exported("fixture\x1f" ++ text ++ "\x1f" ++ templateRecord(rendering.rendered) ++ "\x1f" ++ inputs() ++ "\x1c");
+        return rendering;
+    }
+}
+
+/// Every rule a fixture text meets, in order: portable Rui SQL naming no SQLite mechanism, each
+/// statement parsing as the Store's own grammar, and a MySQL rendering.
+pub fn fixtureRendering(comptime text: []const u8) MysqlRendering {
+    comptime {
+        if (fixtureTextError(text)) |message| return .{ .refused = message };
+        if (fixtureError(text)) |message| return .{ .refused = "fixture: " ++ message };
+        return switch (mysqlRendering(text)) {
+            .refused => |message| .{ .refused = "fixture: MySQL rendering refuses it: " ++ message },
+            .rendered => |template| .{ .rendered = template },
+        };
+    }
+}
+
+/// A template's MySQL parts (0x1e between them), 0x1f, then its slots.
+fn templateRecord(comptime mysql: Template) []const u8 {
+    comptime {
+        @setEvalBranchQuota(1_000_000);
         var parts: []const u8 = "";
         for (mysql.parts, 0..) |part, i| parts = parts ++ (if (i == 0) "" else "\x1e") ++ part;
         var slots: []const u8 = "";
@@ -515,8 +569,7 @@ fn collect(
             .now => "n,",
             .served => |provider| "s" ++ @tagName(provider) ++ ",",
         };
-        _ = Exported(@tagName(kind) ++ "\x1f" ++ sql ++ "\x1f" ++ checked ++ "\x1f" ++ sqlite ++ "\x1f" ++ parts ++ "\x1f" ++ slots ++ "\x1f" ++
-            (if (facts.uses_now) "1" else "0") ++ "\x1f" ++ @tagName(facts.shape) ++ "\x1f" ++ inputs() ++ "\x1c");
+        return parts ++ "\x1f" ++ slots;
     }
 }
 
@@ -691,6 +744,61 @@ pub fn fixtureError(comptime text: []const u8) ?[]const u8 {
         }
         return null;
     }
+}
+
+pub const fixture_sqlite_words = [_][]const u8{
+    "PRAGMA", "temp",      "CREATE", "ALTER",  "DROP",     "TRIGGER", "VIEW",
+    "ATTACH", "SAVEPOINT", "BEGIN",  "COMMIT", "ROLLBACK", "VACUUM",
+};
+
+pub const fixture_sqlite_prefixes = [_][]const u8{ "sqlite_", "pragma_" };
+
+pub fn fixtureTextError(comptime text: []const u8) ?[]const u8 {
+    comptime {
+        @setEvalBranchQuota(1000 * text.len + 10000);
+        if (portabilityError(text, reserved_names_checked)) |message| return message;
+        var index: usize = 0;
+        var previous: []const u8 = "";
+        while (index < text.len) {
+            if (text[index] == '\'') {
+                index += 1;
+                while (index < text.len) : (index += 1) {
+                    if (text[index] != '\'') continue;
+                    if (index + 1 < text.len and text[index + 1] == '\'') {
+                        index += 1;
+                        continue;
+                    }
+                    break;
+                }
+                index += 1;
+                previous = "";
+                continue;
+            }
+            if (!isFixtureWordByte(text[index])) {
+                if (!std.ascii.isWhitespace(text[index])) previous = "";
+                index += 1;
+                continue;
+            }
+            var end = index;
+            while (end < text.len and isFixtureWordByte(text[end])) end += 1;
+            const word = text[index..end];
+            index = end;
+            for (fixture_sqlite_words) |sqlite_word| {
+                if (std.ascii.eqlIgnoreCase(word, sqlite_word)) return "fixture: '" ++ word ++ "' is a SQLite mechanism; write the test under sqlite_tests/";
+            }
+            for (fixture_sqlite_prefixes) |prefix| {
+                if (std.ascii.startsWithIgnoreCase(word, prefix)) return "fixture: '" ++ word ++ "' is a SQLite mechanism; write the test under sqlite_tests/";
+            }
+            if (std.ascii.eqlIgnoreCase(previous, "AS") and std.ascii.eqlIgnoreCase(word, "TEXT"))
+                return "fixture: 'AS TEXT' is not a MySQL cast; compare the bytes another way";
+            previous = word;
+        }
+        return null;
+    }
+}
+
+fn isFixtureWordByte(byte: u8) bool {
+    return std.ascii.isAlphanumeric(byte) or byte == '_';
 }
 
 pub const max_parameters = 65;
@@ -2818,7 +2926,7 @@ test "a statement calls only the functions every engine spells, by argument coun
     try std.testing.expectEqualStrings(text, comptime mysqlRendering(text).rendered.parts[0]);
 }
 
-test "SH-92: a statement serves its table entry only while its text, signature and the table's inputs all match" {
+test "SH-92: a statement or fixture serves its table entry only while its text, signature and the table's inputs all match" {
     const text = "SELECT next_position FROM session WHERE session_ref=?1";
     const written = "UPDATE session SET prefix_seal=?2 WHERE session_ref=@session(?1)";
     const Args = struct { session: []const u8 };
@@ -2840,6 +2948,9 @@ test "SH-92: a statement serves its table entry only while its text, signature a
                 pub const entries = struct {
                     pub const @"SELECT next_position FROM session WHERE session_ref=?1": TableEntry = entry.of(read_signature, .select);
                     pub const @"UPDATE session SET prefix_seal=?2 WHERE session_ref=@session(?1)": TableEntry = entry.of(write_signature, .insert_row);
+                };
+                pub const fixtures = struct {
+                    pub const @"UPDATE session SET next_position=?1 WHERE session_ref=?2": Template = .{ .parts = &.{ "SERVED", "FROM THE TABLE" }, .slots = &.{.now} };
                 };
             };
         }
@@ -2869,18 +2980,23 @@ test "SH-92: a statement serves its table entry only while its text, signature a
         }
     }
     const cases = .{
-        .{ Table.of(current, "r0:.:next_position,", "w0:H."), true },
-        .{ Table.of(current ++ "0", "r0:.:next_position,", "w0:H."), false },
-        .{ Table.of(current, "r0:.:other,", "w0:.."), false },
-        .{ Table.of(current, "r1:.:next_position,", "w0:H"), false },
+        // table, statements served, fixture served (a fixture has no signature: text and inputs decide)
+        .{ Table.of(current, "r0:.:next_position,", "w0:H."), true, true },
+        .{ Table.of(current ++ "0", "r0:.:next_position,", "w0:H."), false, false },
+        .{ Table.of(current, "r0:.:other,", "w0:.."), false, true },
+        .{ Table.of(current, "r1:.:next_position,", "w0:H"), false, true },
         .{ struct {
             pub const inputs = current;
             pub const entries = struct {};
-        }, false },
+            pub const fixtures = struct {
+                pub const @"UPDATE session SET next_position=?1 WHERE session_ref=?3": Template = .{ .parts = &.{ "SERVED", "FROM THE TABLE" }, .slots = &.{.now} };
+            };
+        }, false, false },
     };
     inline for (cases) |case| {
         const R = ReadFrom(case[0], .{ .sql = text, .Args = Args, .Row = Row, .cardinality = .optional });
         const W = WriteFrom(case[0], .{ .sql = written, .Args = WriteArgs, .expect = .{ .at_most = 1 } });
+        const fixture = comptime fixtureFrom(case[0], "UPDATE session SET next_position=?1 WHERE session_ref=?2").rendered;
         if (case[1]) {
             try std.testing.expectEqualStrings("SERVED FROM THE TABLE", R.sql);
             try std.testing.expectEqualStrings("SERVED?FROM THE TABLE", comptime R.mysql.prepared());
@@ -2894,6 +3010,7 @@ test "SH-92: a statement serves its table entry only while its text, signature a
             try std.testing.expectEqualStrings("UPDATE session SET prefix_seal=?2 WHERE session_ref=?1", W.sql);
             try std.testing.expect(!W.uses_now and W.guarded);
         }
+        try std.testing.expectEqualStrings(if (case[2]) "SERVED?FROM THE TABLE" else "UPDATE session SET next_position=? WHERE session_ref=?", comptime fixture.prepared());
     }
 }
 
