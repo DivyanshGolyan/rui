@@ -171,8 +171,8 @@ test "a person's Message next to a position is a one-row page of admission rows,
     const page = try store_core.activityPageForTesting(&storage, request);
     try std.testing.expect(page.more);
     try std.testing.expectEqual(positions[2], page.items[0].position);
-    try std.testing.expectEqual(protocol.contentDigest("three"), page.items[0].value.admission.content.digest);
-    try std.testing.expectEqual(@as(u64, 5), page.items[0].value.admission.content.length);
+    try std.testing.expectEqual(protocol.contentDigest("three"), page.items[0].value.admission.content.text.digest);
+    try std.testing.expectEqual(@as(u64, 5), page.items[0].value.admission.content.text.length);
     request.end = page.end;
     for ([_]?u64{ positions[1], positions[0], null }, [_]u64{ positions[2], positions[1], positions[0] }) |expected, from| {
         request.position = from;

@@ -45,6 +45,7 @@ pub fn actionRead(a: anytype, request: *const read.Request, projection: Projecti
         if (projection == .bytes) return error.InputPartsNotSupported;
         if (request.offset != 0) return error.InvalidCursor;
         out.status = .{ .resolved_parts = final.resolution };
+        out.status.resolved_parts.content = .{ .parts = .{ .identity = final.location.reference, .owner = .{ .action = request.action_id } } };
         return;
     }
     const reference = final.location.reference;
@@ -101,7 +102,7 @@ fn resolution(a: anytype, row: metadata.Row) !?SavedResolution {
     const reference: content.ContentReference = .{ .length = info.byte_length, .digest = info.digest };
     return .{
         .value = value,
-        .resolution = .{ .position = position.get(), .code = row.resolution_code orelse return error.CorruptStore, .content = .{ .length = reference.length, .digest = reference.digest } },
+        .resolution = .{ .position = position.get(), .code = row.resolution_code orelse return error.CorruptStore, .content = .{ .text = reference } },
         .location = .{ .store = a.store, .content_id = @intCast((row.resolution_content_id orelse return error.CorruptStore).get()), .reference = reference },
     };
 }
