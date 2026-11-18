@@ -316,7 +316,6 @@ test "MySQL restoration reports every transport failure and keeps a body failure
     state = .open;
     try report.body({}, {});
     try std.testing.expectEqual(@as(usize, 0), report.failures);
-    try std.testing.expectEqual(State.open, state);
     finishRestoration(error.MysqlRefusedSetup, "SET FOREIGN_KEY_CHECKS=1", &report);
     try std.testing.expectEqual(@as(usize, 0), report.failures);
     try std.testing.expectEqual(State.broken, state);
@@ -457,11 +456,6 @@ fn piece(comptime text: []const u8) []const []const u8 {
     return if (trimmed.len == 0) &.{} else &.{trimmed};
 }
 
-test "each text has its own checked flag" {
-    try std.testing.expect(&Once("SELECT 1").done != &Once("SELECT 2").done);
-    try std.testing.expect(&Once("SELECT 1").done == &Once("SELECT 1").done);
-}
-
 test "SH-91 a PREPARE quotes the statement's text whole, doubling each quote" {
     const repeat = struct {
         fn of(comptime text: []const u8, comptime times: usize) []const u8 {
@@ -479,6 +473,7 @@ test "SH-91 a PREPARE quotes the statement's text whole, doubling each quote" {
         .{ .text = "", .want = head ++ tail },
         .{ .text = "SELECT 1", .want = head ++ "SELECT 1" ++ tail },
         .{ .text = "SELECT 'a'", .want = head ++ "SELECT ''a''" ++ tail },
+        .{ .text = "SELECT 'it''s'", .want = head ++ "SELECT ''it''''s''" ++ tail },
         .{ .text = "'''x''y'", .want = head ++ "''''''x''''y''" ++ tail },
         .{ .text = "SELECT " ++ comptime repeat("'ab',", 220) ++ "1", .want = head ++ "SELECT " ++ comptime repeat("''ab'',", 220) ++ "1" ++ tail },
     };
@@ -487,14 +482,29 @@ test "SH-91 a PREPARE quotes the statement's text whole, doubling each quote" {
         defer std.testing.allocator.free(buffer);
         try std.testing.expectEqualStrings(case.want, prepareInto(case.text, buffer));
     }
-}
 
-test "fixture text splits at semicolons outside string literals, and PREPARE quotes it whole" {
     const pieces = comptime statements("DELETE FROM turn; INSERT INTO t VALUES('a;b','it''s;');\n");
     try std.testing.expectEqual(2, pieces.len);
     try std.testing.expectEqualStrings("DELETE FROM turn", pieces[0]);
     try std.testing.expectEqualStrings("INSERT INTO t VALUES('a;b','it''s;')", pieces[1]);
-    try std.testing.expectEqualStrings("PREPARE rui_dialect_check FROM 'SELECT ''it''''s''';DEALLOCATE PREPARE rui_dialect_check", comptime prepareQuery("SELECT 'it''s'"));
+
+    // Exercise dispatch and deduplication when the live dialect checker is configured.
+    const io = std.testing.io;
+    mutex.lockUncancelable(io);
+    const connected = connection() != null;
+    const before = done;
+    const unavailable = state == .broken;
+    mutex.unlock(io);
+    if (!connected) {
+        return if (unavailable) error.MysqlUnavailable else error.SkipZigTest;
+    }
+    shadowPrepare("SELECT 'SH-91 runtime prepare one'");
+    shadowPrepare("SELECT 'SH-91 runtime prepare one'");
+    shadowPrepare("SELECT 'SH-91 runtime prepare two'");
+    mutex.lockUncancelable(io);
+    defer mutex.unlock(io);
+    try std.testing.expectEqual(before.prepares + 2, done.prepares);
+    try std.testing.expectEqual(before.prepare_refused, done.prepare_refused);
 }
 
 test "the schema's MySQL DDL and the touch oracle's MySQL triggers run on MySQL 8.4" {

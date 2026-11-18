@@ -435,16 +435,21 @@ const built_in_records = blk: {
 const built_in_digests = blk: {
     @setEvalBranchQuota(1_000_000);
     var out: [built_in_records.len][32]u8 = undefined;
-    const snapshots = @import("tool_digests_generated.zig").entries;
-    for (&built_in_records, &out, 0..) |*each, *digest, index| {
+    selectDigests(&built_in_records, &@import("tool_digests_generated.zig").entries, &out);
+    break :blk out;
+};
+
+/// Select a matching snapshot for each record, computing the digest when one is absent or stale.
+pub fn selectDigests(records: []const Record, snapshots: anytype, out: [][32]u8) void {
+    std.debug.assert(records.len == out.len);
+    for (records, out, 0..) |*each, *digest, index| {
         if (index < snapshots.len and sameRecord(each, &snapshots[index].record)) {
             digest.* = snapshots[index].digest;
         } else {
             digest.* = recordDigest(each);
         }
     }
-    break :blk out;
-};
+}
 
 // A snapshot serves only the exact record it was generated from. A changed record is hashed
 // normally, so an out-of-date snapshot cannot change a tool's persistent identity.
@@ -452,13 +457,6 @@ fn sameRecord(a: *const Record, b: anytype) bool {
     return std.mem.eql(u8, @tagName(a.owner), @tagName(b.owner)) and a.read_only == b.read_only and
         std.mem.eql(u8, a.name, b.name) and std.mem.eql(u8, a.server, b.server) and
         std.mem.eql(u8, a.description, b.description) and std.mem.eql(u8, a.input_schema, b.input_schema);
-}
-
-test "the built-in tool set is valid and finds each built-in by name" {
-    try std.testing.expect(built_in_tool_set.valid());
-    for (std.enums.values(Tool), 0..) |tool, index| try std.testing.expectEqual(@as(?usize, index), built_in_tool_set.find(@tagName(tool)));
-    try std.testing.expectEqual(@as(?usize, null), built_in_tool_set.find("bas"));
-    try std.testing.expectEqual(@as(?usize, null), built_in_tool_set.find("edit"));
 }
 
 comptime {
@@ -506,7 +504,48 @@ test "every built-in runner matches its table row" {
     }
 }
 
-test "tool record read-only identity preserves existing digests" {
+test "EXR-65 tool identities survive matching, stale and missing digest snapshots" {
+    const Snapshot = @import("tool_digests_generated.zig").Entry;
+    const base: Record = .{ .name = "fetch_page", .owner = .mcp, .server = "docs", .description = "Fetch a page.", .input_schema = "{\"type\":\"object\"}" };
+    const expected = recordDigest(&base);
+    const snapshot: Snapshot = .{ .record = .{ .name = base.name, .owner = .mcp, .server = base.server, .description = base.description, .input_schema = base.input_schema, .read_only = base.read_only }, .digest = expected };
+    const snapshots = [_]Snapshot{snapshot};
+    var selected: [2][32]u8 = undefined;
+    selectDigests(&.{base}, &snapshots, selected[0..1]);
+    try std.testing.expectEqualSlices(u8, &recordDigest(&base), &selected[0]);
+
+    var changes: [5]Record = .{ base, base, base, base, base };
+    changes[0].name = "fetch_other";
+    changes[1].description = "Fetch another page.";
+    changes[2].input_schema = "{}";
+    changes[3].server = "other";
+    changes[4].read_only = true;
+    for (changes) |changed| {
+        selectDigests(&.{changed}, &snapshots, selected[0..1]);
+        try std.testing.expectEqualSlices(u8, &recordDigest(&changed), &selected[0]);
+    }
+    var owner_base = base;
+    owner_base.owner = .rui;
+    owner_base.server = "";
+    var owner_snapshot = snapshot;
+    owner_snapshot.record.owner = .rui;
+    owner_snapshot.record.server = "";
+    owner_snapshot.digest = recordDigest(&owner_base);
+    var owner_changed = owner_base;
+    owner_changed.owner = .provider;
+    const owner_snapshots = [_]Snapshot{owner_snapshot};
+    selectDigests(&.{owner_changed}, &owner_snapshots, selected[0..1]);
+    try std.testing.expectEqualSlices(u8, &recordDigest(&owner_changed), &selected[0]);
+    selectDigests(&.{base}, &@as([0]Snapshot, .{}), selected[0..1]);
+    try std.testing.expectEqualSlices(u8, &recordDigest(&base), &selected[0]);
+    selectDigests(&.{ base, changes[0] }, &snapshots, &selected);
+    try std.testing.expectEqualSlices(u8, &recordDigest(&base), &selected[0]);
+    try std.testing.expectEqualSlices(u8, &recordDigest(&changes[0]), &selected[1]);
+
+    try std.testing.expect(built_in_tool_set.valid());
+    for (std.enums.values(Tool), 0..) |tool, index| try std.testing.expectEqual(@as(?usize, index), built_in_tool_set.find(@tagName(tool)));
+    try std.testing.expectEqual(@as(?usize, null), built_in_tool_set.find("bas"));
+    try std.testing.expectEqual(@as(?usize, null), built_in_tool_set.find("edit"));
     const provider = recordDigest(&web_search_record);
     try std.testing.expectEqualStrings("effe976e5ce171d6033b8cfefd755255535a6bbb32c075577842ac0358417fa0", &std.fmt.bytesToHex(provider, .lower));
     const before: Record = .{ .name = "fetch_page", .owner = .mcp, .server = "docs", .description = "Fetch a page.", .input_schema = "{\"type\":\"object\"}" };
