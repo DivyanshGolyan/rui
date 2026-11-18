@@ -626,3 +626,57 @@ test "ADM-23 multipart mutation reply binds form and manifest identity" {
         }
     }
 }
+
+test "ADM-19 a reply confirms only the captured command" {
+    const current = @import("protocol.zig").wire_version;
+    const protocol = @import("protocol.zig");
+    const reply = @import("command_reply.zig");
+    const cases = [_]struct { target: Target, fields: []const u8, tail: []const u8, kind: []const u8 }{
+        .{ .target = .configure, .kind = "configuration_reply", .fields = "\"session\":\"k7m2qx\",\"revision\":\"31\",\"created\":false", .tail = ",\"execution\":{\"status\":\"unavailable\",\"reason\":\"direct_reply_does_not_wait_for_model_processing\"}" },
+        .{ .target = .{ .message = .{ .bytes = 0, .digest = @splat(0) } }, .kind = "message_reply", .fields = "\"session\":\"k7m2qx\",\"admission\":\"7\"", .tail = ",\"input\":{\"type\":\"text\",\"bytes\":\"0\",\"sha256\":\"0000000000000000000000000000000000000000000000000000000000000000\"},\"queue\":{\"status\":\"queued\",\"admission\":\"7\"},\"execution\":{\"status\":\"queued\"}" },
+        .{ .target = .session_stop, .kind = "session_stop_reply", .fields = "\"session\":\"k7m2qx\",\"selection\":{\"turn\":null,\"admission_cutoff\":\"0\"}", .tail = ",\"completion\":{\"status\":\"completed\"}" },
+        .{ .target = .{ .session_archive = .{ .archived = true } }, .kind = "session_archive_reply", .fields = "\"session\":\"k7m2qx\",\"archived\":true", .tail = ",\"completion\":{\"status\":\"completed\"}" },
+        .{ .target = .{ .model_interruption = .{ .turn = 3, .operation = 4 } }, .kind = "model_interruption_reply", .fields = "\"target\":{\"session\":\"k7m2qx\",\"turn\":\"3\",\"operation\":\"4\"}", .tail = "" },
+        .{ .target = .{ .permission_decision = .{ .action = 9, .decision = .deny } }, .kind = "permission_decision_reply", .fields = "\"session\":\"k7m2qx\",\"action\":\"9\",\"decision\":\"deny\"", .tail = "" },
+        .{ .target = .{ .permission_decision = .{ .action = 9, .decision = .allow_once } }, .kind = "permission_decision_reply", .fields = "\"session\":\"k7m2qx\",\"action\":\"9\",\"decision\":\"allow_once\"", .tail = "" },
+        .{ .target = .{ .session_pin = .{ .pinned = false } }, .kind = "session_pin_reply", .fields = "\"session\":\"k7m2qx\",\"pinned\":false", .tail = "" },
+        .{ .target = .{ .action_background = 42 }, .kind = "action_background_reply", .fields = "\"session\":\"k7m2qx\",\"action\":\"42\",\"action_selection\":{\"kind\":\"background\",\"position\":\"1\"}", .tail = "" },
+        .{ .target = .{ .action_stop = 42 }, .kind = "action_stop_reply", .fields = "\"session\":\"k7m2qx\",\"action\":\"42\",\"resolution_position\":null", .tail = "" },
+    };
+    var buffer: [2048]u8 = undefined;
+    for (cases) |case| {
+        const body = try std.fmt.bufPrint(&buffer, "{{\"version\":\"{s}\",\"type\":\"{s}\",\"answer\":{{\"status\":\"accepted\",\"replayed\":false,{s}}}{s}}}", .{ current, case.kind, case.fields, case.tail });
+        const answer = try decodeForTest(protocol, reply, 200, body, "k7m2qx", case.target).answer;
+        try std.testing.expectEqualStrings(@tagName(case.target), @tagName(answer.result.accepted));
+        try std.testing.expectError(error.RequestBindingMismatch, decodeForTest(protocol, reply, 200, body, "rhvzwc", case.target).answer);
+        // The direct mutation reply has no key field; ADM-24 through ADM-26
+        // own capture and replay identity for both explicit and generated keys.
+        for (cases) |other| {
+            if (std.meta.activeTag(other.target) == std.meta.activeTag(case.target)) continue;
+            if (decodeForTest(protocol, reply, 200, body, "k7m2qx", other.target).answer) |_| {
+                return error.TestUnexpectedResult;
+            } else |_| {}
+        }
+        const changed: ?Target = switch (case.target) {
+            .configure, .session_stop => null,
+            .message => .{ .message = .{ .bytes = 1, .digest = @splat(0) } },
+            .session_archive => .{ .session_archive = .{ .archived = false } },
+            .session_pin => .{ .session_pin = .{ .pinned = true } },
+            .model_interruption => .{ .model_interruption = .{ .turn = 3, .operation = 5 } },
+            .permission_decision => .{ .permission_decision = .{ .action = 10, .decision = case.target.permission_decision.decision } },
+            .action_background => .{ .action_background = 43 },
+            .action_stop => .{ .action_stop = 43 },
+        };
+        if (changed) |target| try std.testing.expectError(error.RequestBindingMismatch, decodeForTest(protocol, reply, 200, body, "k7m2qx", target).answer);
+        try std.testing.expectError(error.InvalidResponse, decodeForTest(protocol, reply, 200, body[0 .. body.len - 1], "k7m2qx", case.target).answer);
+        var invalid: [2048]u8 = undefined;
+        const wrong_version = try std.fmt.bufPrint(&invalid, "{{\"version\":\"{s}\",\"type\":\"{s}\",\"answer\":{{\"status\":\"accepted\",\"replayed\":false,{s}}}{s}}}", .{ stale, case.kind, case.fields, case.tail });
+        try std.testing.expectError(error.InvalidResponse, decodeForTest(protocol, reply, 200, wrong_version, "k7m2qx", case.target).answer);
+        const duplicate = try std.fmt.bufPrint(&invalid, "{{\"version\":\"{s}\",\"type\":\"{s}\",\"answer\":{{\"status\":\"accepted\",\"status\":\"accepted\",\"replayed\":false,{s}}}{s}}}", .{ current, case.kind, case.fields, case.tail });
+        try std.testing.expectError(error.InvalidResponse, decodeForTest(protocol, reply, 200, duplicate, "k7m2qx", case.target).answer);
+        const foreign = try std.fmt.bufPrint(&invalid, "{{\"version\":\"{s}\",\"type\":\"{s}\",\"answer\":{{\"status\":\"accepted\",\"replayed\":false,{s},\"{s}\":true}}{s}}}", .{ current, case.kind, case.fields, if (case.target == .session_pin) "archived" else "pinned", case.tail });
+        try std.testing.expectError(error.InvalidResponse, decodeForTest(protocol, reply, 200, foreign, "k7m2qx", case.target).answer);
+        const null_code = try std.fmt.bufPrint(&invalid, "{{\"version\":\"{s}\",\"type\":\"{s}\",\"answer\":{{\"status\":\"accepted\",\"replayed\":false,{s},\"code\":null}}{s}}}", .{ current, case.kind, case.fields, case.tail });
+        try std.testing.expectError(error.InvalidResponse, decodeForTest(protocol, reply, 200, null_code, "k7m2qx", case.target).answer);
+    }
+}
