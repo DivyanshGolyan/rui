@@ -4640,7 +4640,9 @@ test "chat footer background click and Alt-I share natural panel opening and Esc
         var result: [10]picker.Entry = undefined;
         for (&result, 0..) |*entry, index| entry.* = .{
             .id = if (index < 2) std.fmt.comptimePrint("luna-{d}", .{index}) else std.fmt.comptimePrint("model-{d}", .{index}),
-            .known = false, .catalogued = false, .providers = .initOne(.codex),
+            .known = false,
+            .catalogued = false,
+            .providers = .initOne(.codex),
         };
         break :blk result;
     };
