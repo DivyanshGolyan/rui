@@ -231,3 +231,30 @@ test "Current facts traverse every attention row and preserve metadata with fixe
     try std.testing.expectEqual(bytes, try file.length(io));
     std.debug.print("Current facts={d}B, fixed scanner/token/input=16384B, capture={d}B; 4x257 rows, no population allocation\n", .{ @sizeOf(protocol_reply.Current), bytes });
 }
+
+test "SUI-29 Action-sourced inputs draw nothing in the conversation" {
+    const View = @import("session_view.zig");
+    const Sink = struct {
+        pub fn feed(_: *@This(), _: []const u8) !void {
+            return error.UnexpectedOutput;
+        }
+        pub fn excluding(_: *@This(), _: u64) void {}
+    };
+    var sink: Sink = .{};
+    const content_ref: protocol.ActivityItem.Content = .{ .length = 5, .digest = @splat(0) };
+    for (std.enums.values(@FieldType(protocol.ActivityItem.Message, "state"))) |state| {
+        const value: protocol.ActivityItem.Message = .{
+            .admission = 1,
+            .key = .{},
+            .turn = null,
+            .state = state,
+            .content = content_ref,
+            .admitted_at = 1,
+            .source_action = 42,
+        };
+        for ([_]protocol.ActivityItem.Value{ .{ .received = value }, .{ .user = value }, .{ .admission = value } }) |row| {
+            const item: protocol.ActivityItem = .{ .position = 1, .at = 1, .value = row };
+            try std.testing.expect(!try View.render(undefined, "unused", "k7m2qx", null, item, .{ .count = 1, .oldest_position = 1, .newest_admission = 1, .newest_position = 1 }, false, &sink, false, "", .{ .viewport = .wcwidth }, .none));
+        }
+    }
+}
