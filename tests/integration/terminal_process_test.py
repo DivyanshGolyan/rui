@@ -29,12 +29,12 @@ class TerminalProcessTest(unittest.TestCase):
     def test_resize_reset_receipt_waits_for_full_paint_across_every_split(self):
         from terminal_screen import RESIZE_RESET
 
-        paint = b"\x1b[?2026h\x1b[H + New Session\r\n Working row\r\n Finished row\r\n Waiting on you row\r\n Failed row\x1b[29;1H   Settings\x1b[?2026l"
+        paint = b"\x1b[?2026h\x1b[H + New chat\r\n Working row\r\n Finished row\r\n Waiting on you row\r\n Failed row\x1b[29;1H   Settings\x1b[?2026l"
         for split in range(len(RESIZE_RESET) + 1):
             with self.subTest(split=split):
                 capture = ScreenCapture(140, 40)
                 self.addCleanup(capture.free)
-                capture.feed(b"\x1b[?1049h\x1b[?2026h\x1b[H Type a task\x1b[?2026l")
+                capture.feed(b"\x1b[?1049h\x1b[?2026h\x1b[H What shall we work on?\x1b[?2026l")
                 capture.resize(46, 30)
                 before = capture.reset_generation
                 capture.feed(b"\x1b[?2026h\x1b[4;2H" + "◜".encode() + b"\x1b[?2026l" + RESIZE_RESET[:split])
@@ -44,13 +44,24 @@ class TerminalProcessTest(unittest.TestCase):
                 self.assertEqual(capture.frame_reset_generation, before)
                 capture.feed(paint[-1:])
                 self.assertGreater(capture.frame_reset_generation, before)
-                for text in ("New Session", "Working row", "Finished row", "Waiting on you row", "Failed row", "Settings"):
+                for text in ("New chat", "Working row", "Finished row", "Waiting on you row", "Failed row", "Settings"):
                     self.assertIn(text, capture.completed)
                 for _ in range(10):
                     capture.feed(b"\x1b[?2026h\x1b[4;2H" + "◝".encode() + b"\x1b[?2026l")
                     self.assertEqual(capture.frame_reset_generation, capture.reset_generation)
                     self.assertIn("Working row", capture.completed)
                     self.assertIn("Finished row", capture.completed)
+
+    def test_chat_info_footer_does_not_confuse_folder_suffix_with_escape(self):
+        from human_cli_fixture import assert_chat_info_layout
+
+        rule = "┄" * 40
+        screen = "\n".join((rule, "   Effort          low", "   Folder          /home/user/rui-esc",
+                            "", "   Rename     Archive     Copy last answer", "", " ›", rule,
+                            " Chat                                esc"))
+        assert_chat_info_layout(screen)
+        with self.assertRaisesRegex(AssertionError, "one plain panel footer"):
+            assert_chat_info_layout(screen + "\n Duplicate esc")
 
     def test_composer_oracles_follow_the_caret_pane(self):
         from human_cli_fixture import composer_empty, composer_ready
@@ -121,7 +132,7 @@ class TerminalProcessTest(unittest.TestCase):
                 self.assertEqual(split_pane_row(left + glyph + " pane", column), (left, glyph, " pane"))
                 self.assertEqual(split_pane_row(left + glyph + " pane", column - 1), ("", "", left + glyph + " pane"))
         self.assertEqual(split_pane_row("中" + " " * 38 + "| pane"), ("中" + " " * 38, "|", " pane"))
-        for text in (" › literal │ + ┼ ┤", " > literal │ +", "   + New Session", "plain | text"):
+        for text in (" › literal │ + ┼ ┤", " > literal │ +", "   + New chat", "plain | text"):
             self.assertEqual(split_pane_row(text), ("", "", text))
 
     def test_conversation_text_preserves_content_across_panes(self):
@@ -155,50 +166,50 @@ class TerminalProcessTest(unittest.TestCase):
 
         for prefix in ([" "], ["l", "┆", " "], ["中", "", "┆", " "], ["l", "│", " "], ["中", "", "│", " "], [" "] * 40 + ["|", " "], ["中", ""] + [" "] * 38 + ["|", " "]):
             for prompt in ("› ", "> "):
-                for text in ("", "kept", "café", "é", "Type a task"):
+                for text in ("", "kept", "café", "é", "What shall we work on?"):
                     normalized = unicodedata.normalize("NFC", text)
                     caret = 2 + len(normalized)
-                    for drawn in ((prompt.rstrip(), prompt + "Type a task") if not text else (prompt + normalized,)):
+                    for drawn in ((prompt.rstrip(), prompt + "What shall we work on?") if not text else (prompt + normalized,)):
                         with self.subTest(prefix=prefix, prompt=prompt, text=text, drawn=drawn):
-                            current = capture(prefix, drawn, caret, quiet=not text and drawn.endswith("Type a task"))
+                            current = capture(prefix, drawn, caret, quiet=not text and drawn.endswith("What shall we work on?"))
                             self.assertTrue(current.draft(text, caret, prompt=prompt))
                             self.assertFalse(current.draft(text, caret - 1, prompt=prompt))
                             self.assertFalse(current.draft("wrong", caret, prompt=prompt))
                             if text:
                                 self.assertFalse(current.draft("", 2, prompt=prompt))
-        literal = capture([" "], "› Type a task", 2)
-        self.assertTrue(literal.draft("Type a task", 2))
+        literal = capture([" "], "› What shall we work on?", 2)
+        self.assertTrue(literal.draft("What shall we work on?", 2))
         self.assertFalse(literal.draft("", 2), "literal text at Home is not an empty editor")
-        self.assertFalse(capture([" "], "› Type a task", 2, quiet=True, colour=7).draft("", 2))
-        self.assertTrue(capture([" "], "› Type a task", 2, quiet=True, colour=7, faint=True).draft("", 2))
-        self.assertFalse(capture([" "], "› Type a task", 3, quiet=True).draft("", 3))
-        current = capture([" "], "› Type a task", 2, quiet=True)
+        self.assertFalse(capture([" "], "› What shall we work on?", 2, quiet=True, colour=7).draft("", 2))
+        self.assertTrue(capture([" "], "› What shall we work on?", 2, quiet=True, colour=7, faint=True).draft("", 2))
+        self.assertFalse(capture([" "], "› What shall we work on?", 3, quiet=True).draft("", 3))
+        current = capture([" "], "› What shall we work on?", 2, quiet=True)
         current.synchronized = True
         self.assertFalse(current.draft("", 2))
         current.synchronized, current.generation = False, 0
         self.assertFalse(current.draft("", 2))
         current.generation, current.completed = 1, current.completed + "\nOpening…"
         self.assertFalse(current.draft("", 2))
-        self.assertFalse(capture([" "], "Password: Type a task", 10).draft("", 10, prompt="Password: "))
+        self.assertFalse(capture([" "], "Password: What shall we work on?", 10).draft("", 10, prompt="Password: "))
 
     def test_empty_composer_accepts_placeholder_in_the_focused_pane(self):
         from human_cli_fixture import composer_empty
 
         for prefix in (" ", "list text┆ ", "中       ┆ "):
             for mark in ("›", ">"):
-                for text in ("", " Type a task", " /copy", " draft", " Type a task extra", " x │ y"):
+                for text in ("", " What shall we work on?", " /copy", " draft", " What shall we work on? extra", " x │ y"):
                     with self.subTest(prefix=prefix, mark=mark, text=text):
                         screen = " › earlier message\n" + prefix + mark + text
-                        self.assertEqual(composer_empty(screen, 1), text in ("", " Type a task"))
-        self.assertFalse(composer_empty("   + New Session\n     Settings", 0))
+                        self.assertEqual(composer_empty(screen, 1), text in ("", " What shall we work on?"))
+        self.assertFalse(composer_empty("   + New chat\n     Settings", 0))
 
     def test_command_frame_waits_past_placeholder_for_typed_command_and_reply(self):
         from human_cli_fixture import command_frame
         from types import SimpleNamespace
 
-        initial = " › Type a task\n ‹ gpt-6-sol · low"
+        initial = " › What shall we work on?\n ‹ gpt-6-sol · low"
         typed = " › /copy\n ‹ gpt-6-sol · low"
-        reply = " › Type a task\n ‹ gpt-6-sol · low    No answer to copy"
+        reply = " › What shall we work on?\n ‹ gpt-6-sol · low    No answer to copy"
         frames = iter((initial, typed, reply))
         events = []
         capture = SimpleNamespace(completed=initial, listener=None)
@@ -223,12 +234,12 @@ class TerminalProcessTest(unittest.TestCase):
         with patch("human_cli_fixture.keyed_frame") as keyed:
             overview_frame(17, lambda screen: "Settings" in screen)
         predicate = keyed.call_args.args[2]
-        listed = "   + New Session\n     Settings"
+        listed = "   + New chat\n     Settings"
         self.assertTrue(predicate(listed, 0, 0))
         self.assertFalse(predicate(listed.replace("Settings", ""), 0, 0))
-        self.assertFalse(predicate(listed + "\n › Type a task", 3, 3))
-        self.assertFalse(predicate(listed + "\n" + " " * 40 + "| > Type a task", 43, 2))
-        self.assertFalse(predicate(" › Type a task\ngpt-6-luna", 3, 0))
+        self.assertFalse(predicate(listed + "\n › What shall we work on?", 3, 3))
+        self.assertFalse(predicate(listed + "\n" + " " * 40 + "| > What shall we work on?", 43, 2))
+        self.assertFalse(predicate(" › What shall we work on?\ngpt-6-luna", 3, 0))
 
     def test_app_settings_open_recognizes_only_the_settings_pane_footer(self):
         from human_cli_fixture import app_settings_open
@@ -261,12 +272,12 @@ class TerminalProcessTest(unittest.TestCase):
                 with patch("human_cli_fixture.keyed_frame") as keyed:
                     overview_frame(17, accept, ready=False)
                 relaxed = keyed.call_args.args[2]
-                frame = "   + New Session\n     Settings\n" + notice
+                frame = "   + New chat\n     Settings\n" + notice
                 self.assertTrue(strict(frame, 0, 0))
                 self.assertTrue(relaxed(frame, 0, 0))
-                for marker in ("+ New Session", "Settings", notice):
+                for marker in ("+ New chat", "Settings", notice):
                     self.assertFalse(relaxed(frame.replace(marker, "missing"), 0, 0))
-                for editor in ("Type a task", " › draft", " > draft", "sidebar ┆ › draft"):
+                for editor in ("What shall we work on?", " › draft", " > draft", "sidebar ┆ › draft"):
                     self.assertFalse(relaxed(frame + "\n" + editor, 3, 3))
 
     def test_screen_theme_queries_keep_defaults_and_report_light_terminal(self):

@@ -2387,7 +2387,7 @@ test "refused peer activity retains absent and canonical targets" {
     }
 }
 
-test "SUI-45 work state wire preserves owned facts" {
+test "SUI-47 work state wire preserves owned facts" {
     var cause: protocol.Bounded(protocol.max_code_bytes) = .{};
     try cause.set("provider_temporary_http_429");
     var quota: protocol.Bounded(protocol.max_code_bytes) = .{};

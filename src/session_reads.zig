@@ -1295,7 +1295,7 @@ const FakeHost = struct {
     }
 };
 
-test "SUI-47 Message placement preserves provenance across pages" {
+test "SUI-49 Message placement preserves provenance across pages" {
     const Domain = struct {
         const user = "› " ++ View.Mark.body ++ "please wait\n  for the build" ++ View.Mark.reset ++ "\n";
         const link = TerminalText.link_open ++ TerminalText.session_link ++ "9f8e7d" ++ TerminalText.link_end ++ "\x1b[4mPeer" ++ TerminalText.link_close ++ View.Mark.reset ++ View.Mark.summary;
@@ -1442,7 +1442,7 @@ test "session_reads the queued row's line fails the read when the Host refuses i
     try std.testing.expectEqual(@as(usize, 1), host.contents);
 }
 
-test "SUI-48 queued reads preserve invisible replay identities in every work state" {
+test "SUI-50 queued reads preserve invisible replay identities in every work state" {
     var first = FakeHost.message(1).admission;
     var second = FakeHost.message(2).admission;
     try first.key.set("01234567-89ab-4cde-8012-0123456789ab");
@@ -1678,7 +1678,7 @@ test "session_reads policy cursor is inclusive only for a fresh provisional repl
     for ([_]protocol.ActivityItem.Kind{ .admission, .received, .user, .assistant, .tool_result, .hosted_call, .turn_ended, .stop, .sent, .send_failed }) |kind| try std.testing.expect(above.kinds.contains(kind));
 }
 
-test "SUI-49 opening reads expose ordered rows and scan boundaries" {
+test "SUI-51 opening reads expose ordered rows and scan boundaries" {
     var peer: protocol.NamedPeer = .{ .session = .{} };
     try peer.session.set("9f8e7d");
     const tail = [_]FakeHost.Tail{
@@ -1715,7 +1715,7 @@ test "SUI-49 opening reads expose ordered rows and scan boundaries" {
     try std.testing.expect(job.result.at_start and job.result.at_end);
 }
 
-test "SUI-50 visible fills leave live read state unchanged" {
+test "SUI-52 visible fills leave live read state unchanged" {
     const tail = [_]FakeHost.Tail{.{ .value = FakeHost.message(1) }};
     var host: FakeHost = .{ .history = 0, .tail = &tail, .end = 1, .held = true };
     const edge: Key = .{ .position = 1, .ordinal = std.math.maxInt(u64) };
@@ -1735,7 +1735,7 @@ test "SUI-50 visible fills leave live read state unchanged" {
     try std.testing.expectEqualDeep(@as(?Key, .{ .position = 1 }), firstProvisional(&job.result));
 }
 
-test "SUI-51 replay replaces queued rows and counts only new rows" {
+test "SUI-53 replay replaces queued rows and counts only new rows" {
     var peer: protocol.NamedPeer = .{ .session = .{} };
     try peer.session.set("9f8e7d");
     var incoming = FakeHost.message(90).admission;
@@ -1776,7 +1776,7 @@ test "SUI-51 replay replaces queued rows and counts only new rows" {
     }
 }
 
-test "SUI-52 queued replay retains its starting point across pages" {
+test "SUI-54 queued replay retains its starting point across pages" {
     var peer: protocol.NamedPeer = .{ .session = .{} };
     try peer.session.set("9f8e7d");
     var tail: [40]FakeHost.Tail = undefined;
@@ -1807,7 +1807,7 @@ test "SUI-52 queued replay retains its starting point across pages" {
     try std.testing.expectEqual(@as(usize, 39), counted);
 }
 
-test "SUI-53 queued Message stays invisible when work becomes idle" {
+test "SUI-55 queued Message stays invisible when work becomes idle" {
     const tail = [_]FakeHost.Tail{.{ .value = FakeHost.message(1) }};
     var host: FakeHost = .{ .history = 0, .tail = &tail, .end = 1, .held = true };
     var job: Job = .{ .opening = true, .line_read = .{ .revision = 1, .end = 1 } };
@@ -2271,7 +2271,7 @@ test "session_reads recall passes over a Message the draft refuses in one step, 
     };
 }
 
-test "SUI-54 quote extraction follows visible Message provenance" {
+test "SUI-56 quote extraction follows visible Message provenance" {
     const gpa = std.testing.allocator;
     var peer: protocol.NamedPeer = .{ .session = .{} };
     try peer.session.set("9f8e7d");

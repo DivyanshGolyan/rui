@@ -185,7 +185,7 @@ fn row(state: WorkState, now_ms: u64, script: Script) ![]const u8 {
     return std.fmt.bufPrint(&S.bytes, "{s}{s}", .{ line.words, clockText(&buffer, line.clock, .row, script) });
 }
 
-test "SUI-46 work line presents every work state" {
+test "SUI-48 work line presents every work state" {
     const retry: WorkState = .{ .retrying = .{ .since = test_now_s - 4, .due_at_ms = test_now_ms + 17_200, .cause = bounded(session_work.max_code_bytes, "provider_temporary_http_429"), .attempt = 2 } };
     const cases = [_]struct { state: WorkState, conversation: []const u8, row: []const u8, ascii: []const u8, tone: Tone = .normal }{
         .{ .state = .{ .idle = .{ .since = 1 } }, .conversation = "", .row = "", .ascii = "" },

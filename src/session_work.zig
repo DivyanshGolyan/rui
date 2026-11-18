@@ -326,7 +326,7 @@ test "a Session with no Turn is idle, pending or stopped by its queue" {
     try std.testing.expect(work.turn == null and work.operation == null and work.first_action == null);
 }
 
-test "SUI-44 active Turn work reflects its Operation and purpose" {
+test "SUI-46 active Turn work reflects its Operation and purpose" {
     try expectState(.{ .working = .{ .since = 300 } }, .{ .now_ms = 0, .created_at = 1, .latest = activeTurn(.{ .in_flight = .{ .attempt_at = 300 } }, .{}) });
     for ([_]bool{ false, true }) |compaction| {
         var latest = activeTurn(.{ .in_flight = .{ .attempt_at = 123 } }, .{});

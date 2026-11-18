@@ -126,16 +126,16 @@ class World:
                             stdin=slave, stdout=slave, stderr=slave)
             screen = Screen(process, master, columns, rows)
             if columns >= 100 and not args:
-                launched = screen.wait(lambda frame: "+ New Session" in frame and "Settings" in frame
-                                       and "Type a task" in frame and "enter open" not in frame
+                launched = screen.wait(lambda frame: "+ New chat" in frame and "Settings" in frame
+                                       and "What shall we work on?" in frame and "enter open" not in frame
                                        and screen.capture.draft("", 2),
                                        "the wide launch chat beside the list")
                 assert any(split_pane_row(row)[1] for row in launched.splitlines()), launched
                 if not keep_launch:
                     screen.keys(b"\x1b")
             if not keep_launch:
-                screen.wait(lambda frame: "+ New Session" in frame and "Settings" in frame
-                            and "Type a task" not in frame
+                screen.wait(lambda frame: "+ New chat" in frame and "Settings" in frame
+                            and "What shall we work on?" not in frame
                             and not any(split_pane_row(row)[1] for row in frame.splitlines()),
                             "the full overview and its pinned rows")
             yield screen
