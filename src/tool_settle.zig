@@ -13,7 +13,7 @@ pub const Slot = struct {
     publication_phase: []const u8,
 };
 
-pub const Delivered = enum { delivered, lost, fenced };
+pub const Delivered = enum { delivered, session_stop, lost, fenced };
 
 pub fn result(host: *Host, slot: Slot, profile: tool_record.Profile, code: store.ActionResolutionCode, value: Value) Delivered {
     // Result uses this frozen profile for layout and retention before delivery.
@@ -52,13 +52,25 @@ pub fn fence(host: *Host, phase: []const u8, fault: result_fault.Failure) Delive
 
 fn deliver(host: *Host, slot: Slot, code: store.ActionResolutionCode, value: Value) Delivered {
     if (!host.custody.claimTerminalDelivery(slot.token)) return .lost;
-    switch (value) {
-        .text => |text| _ = host.store.settleActionAttempt(slot.binding, code, text, host.hooks.storeFaults(.action_result)) catch |err| {
+    const settlement = switch (value) {
+        .text => |text| host.store.settleActionAttempt(slot.binding, code, text, host.hooks.storeFaults(.action_result)) catch |err| {
             return fence(host, slot.publication_phase, .{ .store = err });
         },
-        .parts => |loan| _ = host.store.settleActionAttemptParts(slot.binding, code, loan, host.hooks.storeFaults(.action_result)) catch |err| {
+        .parts => |loan| host.store.settleActionAttemptParts(slot.binding, code, loan, host.hooks.storeFaults(.action_result)) catch |err| {
             return fence(host, slot.publication_phase, .{ .store = err });
         },
-    }
-    return .delivered;
+    };
+    return fromSettlement(settlement);
+}
+
+fn fromSettlement(settlement: store.ActionSettlement) Delivered {
+    return switch (settlement) {
+        .effect => .delivered,
+        .session_stop => .session_stop,
+    };
+}
+
+test "shared settlement preserves session stop" {
+    try std.testing.expectEqual(Delivered.delivered, fromSettlement(.effect));
+    try std.testing.expectEqual(Delivered.session_stop, fromSettlement(.session_stop));
 }

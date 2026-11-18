@@ -173,7 +173,10 @@ fn publish(host: *Host, active: *Active) void {
             return;
         },
     };
-    if (tool_settle.result(host, active.slot("image read result publication"), active.profile, .succeeded, value) == .delivered) result.keep();
+    if (switch (tool_settle.result(host, active.slot("image read result publication"), active.profile, .succeeded, value)) {
+        .delivered, .session_stop => true,
+        else => false,
+    }) result.keep();
 }
 
 fn settleText(host: *Host, active: *Active, code: store.ActionResolutionCode, text: []const u8) void {
