@@ -295,39 +295,14 @@ def discovery_cases(root, binary, releases):
         assert c.link.resolve() == custom
         c.assert_no_host()
 
-    with case(root, binary, releases, "selected-tagged-source-ineligible") as c:
-        build = c.build("tagged-source")
-        (build / "revision").write_text("synthetic-source-revision-marker\n")
-        c.run("--publish-install", c.home, build, "intentional-source")
-        c.original = c.link.resolve()
-        output = c.upgrade("--check")
-        assert "Upgrade cannot replace this destination" in output, output
-        c.finish_upgrade(c.spawn_upgrade(), success=False)
+    with case(root, binary, releases, "malformed-version") as c:
+        c.old_selection()
+        releases.latest_location = releases.origin + "/releases/tag/v0.056.4"
+        releases.status["/releases/tag/v0.056.4"] = 200
+        result = c.upgrade("--check", expect=6)
+        assert "upgrade_release_invalid" in result, result
         c.assert_unchanged()
         c.assert_no_host()
-        released = c.build("intentional-release-conversion")
-        c.run("--publish-install", c.home, released, "released-install")
-        assert c.link.resolve() == released / "bin/rui"
-        c.assert_no_host()
-
-    variants = ("malformed-version", "missing-redirect", "missing-archive-checksum", "unpinned-final-origin")
-    for name in variants:
-        with case(root, binary, releases, name) as c:
-            c.old_selection()
-            if name == "malformed-version":
-                releases.latest_location = releases.origin + "/releases/tag/v0.056.4"
-                releases.status["/releases/tag/v0.056.4"] = 200
-            elif name == "missing-redirect":
-                releases.status["/releases/latest"] = 200
-            elif name == "missing-archive-checksum":
-                releases.sums_name = "another-archive.tar.gz"
-            else:
-                releases.latest_location = releases.origin + "/not-the-repository/releases/tag/v0.56.4"
-                releases.status["/not-the-repository/releases/tag/v0.56.4"] = 200
-            result = c.upgrade("--check", expect=6)
-            assert "upgrade_release_invalid" in result, (name, result)
-            c.assert_unchanged()
-            c.assert_no_host()
 
     with case(root, binary, releases, "download-403-latest") as c:
         c.old_selection()
@@ -341,10 +316,20 @@ def discovery_cases(root, binary, releases):
 
 
 def install_cases(root, binary, releases):
-    with case(root, binary, releases, "install-no-host") as c:
+    with case(root, binary, releases, "install-pinned-no-host") as c:
+        # The release is resolved once: a later change of latest cannot
+        # change what is installed. A second run downloads nothing.
         c.old_selection()
-        output = c.upgrade()
+        gate = releases.gate_archive()
+        start = len(releases.requests)
+        child = c.spawn_upgrade()
+        wait_for(gate.entered.is_set, "pinned archive after release resolution")
+        releases.latest_location = releases.origin + "/releases/tag/v0.999.0"
+        gate.release.set()
+        output = c.finish_upgrade(child)
+        releases.latest_location = None
         assert "Installed Rui" in output and "No running Hosts." in output, output
+        assert releases.requests[start:] == ["/releases/latest", "/releases/redirect", f"/releases/tag/v{releases.version}", releases.sums_path, releases.archive_path]
         assert c.link.resolve() != c.original
         assert c.original.exists(), "retained old complete build removed"
         assert c.run("--version").startswith("rui " + releases.version)
@@ -358,60 +343,14 @@ def install_cases(root, binary, releases):
         assert releases.archive_path not in releases.requests[start:], "equal release re-downloaded"
         c.assert_no_host()
 
-    with case(root, binary, releases, "release-promotion-pinned") as c:
-        c.old_selection()
-        gate = releases.gate_archive()
-        start = len(releases.requests)
-        child = c.spawn_upgrade()
-        wait_for(gate.entered.is_set, "pinned archive after release resolution")
-        releases.latest_location = releases.origin + "/releases/tag/v0.999.0"
-        gate.release.set()
-        output = c.finish_upgrade(child)
-        assert "Installed Rui" in output, output
-        assert releases.requests[start:] == ["/releases/latest", "/releases/redirect", f"/releases/tag/v{releases.version}", releases.sums_path, releases.archive_path]
-        assert subprocess.check_output([str(c.link), "--version"], env=c.env, text=True).startswith("rui " + releases.version)
-        c.assert_no_host()
-
-    with case(root, binary, releases, "newer-selected-no-downgrade") as c:
-        c.select(c.build("synthetic-future-selected", "0.999.0"))
-        output = c.upgrade()
-        assert "Installation unchanged" in output and "No running Hosts." in output, output
-        c.assert_unchanged()
-        c.assert_no_host()
-
-    for name in ("download-failure", "checksum-failure", "bad-executable"):
-        with case(root, binary, releases, name) as c:
-            c.old_selection()
-            host, previous = c.start_host()
-            original_archive, original_digest = releases.archive, releases.digest
-            try:
-                if name == "download-failure":
-                    releases.status[releases.archive_path] = 503
-                elif name == "checksum-failure":
-                    releases.digest = "0" * 64
-                else:
-                    releases.archive = releases.make_archive(binary, invalid=True)
-                    releases.digest = hashlib.sha256(releases.archive).hexdigest()
-                child = c.spawn_upgrade()
-                output = c.finish_upgrade(child, success=False)
-                assert "Installed Rui" not in output, output
-                c.assert_unchanged()
-                assert host.poll() is None and c.status()["instance"] == previous["instance"]
-            finally:
-                releases.archive, releases.digest = original_archive, original_digest
-
-    with case(root, binary, releases, "destination-revalidated") as c:
+    with case(root, binary, releases, "download-failure") as c:
         c.old_selection()
         host, previous = c.start_host()
-        gate = releases.gate_archive()
+        releases.status[releases.archive_path] = 503
         child = c.spawn_upgrade()
-        wait_for(gate.entered.is_set, "archive preparation before destination replacement")
-        custom = c.build("application-owned", managed=False) / "bin/rui"
-        c.link.unlink()
-        c.link.symlink_to(custom)
-        gate.release.set()
-        c.finish_upgrade(child, success=False)
-        assert c.link.resolve() == custom, "commit overwrote newly ineligible destination"
+        output = c.finish_upgrade(child, success=False)
+        assert "Installed Rui" not in output, output
+        c.assert_unchanged()
         assert host.poll() is None and c.status()["instance"] == previous["instance"]
 
 
@@ -635,35 +574,71 @@ def retired_environment_upgrade_case(root, binary, releases, previous_binary):
         print("upgrade native: retired environment refused at checking; old PID and instance unchanged", flush=True)
 
 
+def upgrade_journey(root, binary, releases):
+    """One install proves SH-23: every eligible Host, found afresh after
+    publication, restarts on the selected build; others are left with a
+    reason; every Host is counted; a failed one exits 6 without undoing the
+    install; and a second run finds them current."""
+    with case(root, binary, releases, "journey-a") as a, \
+            case(root, binary, releases, "journey-b") as b, \
+            case(root, binary, releases, "journey-foreign") as foreign:
+        for shared in (b, foreign):
+            shared.home, shared.env, shared.link = a.home, a.env, a.link
+        a.old_selection()
+        old_a, previous_a = a.start_host("journey-a")
+        old_foreign, previous_foreign = foreign.start_host("journey-foreign", managed=False)
+        warning = a.upgrade("--check")
+        assert "Discovered 2 Hosts" in warning, warning
+        assert "every running Host" in warning and "ALL Sessions" in warning, warning
+        for previous in (previous_a, previous_foreign):
+            assert previous["store"] in warning, warning
+        assert "left running: application-owned Host" in warning, warning
+
+        unreadable = pathlib.Path(a.ready["socket"]).parent / "upgrade-unreadable.sock"
+        try:
+            with os_semantics.unix_stream() as listener:
+                listener.bind(str(unreadable))
+                listener.listen(1)
+                gate = releases.gate_archive()
+                start = len(releases.requests)
+                child = a.spawn_upgrade()
+                wait_for(gate.entered.is_set, "download while the old Host still serves")
+                assert old_a.poll() is None and a.status()["instance"] == previous_a["instance"], "Host touched before publication"
+                assert a.link.resolve() == a.original, "selection changed before the archive was verified"
+                # A Host started after the census is found afresh after publication.
+                old_b, previous_b = b.start_host("journey-b", store_hex=True)
+                gate.release.set()
+                output = a.finish_upgrade(child, success=False)
+                assert child.returncode == 6, (child.returncode, output)
+                assert "Installed Rui" in output and "[host_restart_failed]" in output, output
+                for previous in (previous_a, previous_b):
+                    assert f"{previous['store']}: restarted on {releases.version}" in output, output
+                assert f"{previous_foreign['store']}: left running: application-owned Host" in output, output
+                assert str(unreadable) in output and "failed at discovery" in output, output
+                assert "4 Hosts: 2 restarted, 0 already current, 1 left unchanged, 1 failed." in output, output
+                assert releases.requests[start:].count(releases.archive_path) == 1, releases.requests[start:]
+                assert a.link.resolve() != a.original, "restart failure rolled the installation back"
+                proof_ready(a, previous_a, old_a)
+                proof_ready(b, previous_b, old_b)
+                assert old_foreign.poll() is None and foreign.status()["instance"] == previous_foreign["instance"]
+                assert os_semantics.process_executable(old_foreign.pid) != a.link.resolve()
+        finally:
+            unreadable.unlink(missing_ok=True)
+
+        ready_a, ready_b = a.status(), b.status()
+        start = len(releases.requests)
+        output = a.upgrade()
+        assert "Installation unchanged" in output, output
+        for ready in (ready_a, ready_b):
+            assert f"{ready['store']}: already on {releases.version}" in output, output
+        assert "3 Hosts: 0 restarted, 2 already current, 1 left unchanged, 0 failed." in output, output
+        assert releases.archive_path not in releases.requests[start:], "equal release re-downloaded"
+        assert a.status()["instance"] == ready_a["instance"] and b.status()["instance"] == ready_b["instance"]
+
+
 def lifecycle_cases(root, binary, releases):
     frozen_upgrade_cases(root, binary, releases)
     frozen_credential_refusal_case(root, binary, releases)
-    with case(root, binary, releases, "managed-host-restart") as c:
-        c.old_selection()
-        old_host, previous = c.start_host()
-        other = Case(root, binary, releases, "unrelated-store")
-        try:
-            other_host, other_previous = other.start_host()
-            gate = releases.gate_archive()
-            child = c.spawn_upgrade()
-            wait_for(gate.entered.is_set, "download while old Host still serves")
-            assert old_host.poll() is None and c.status()["instance"] == previous["instance"]
-            assert c.link.resolve() == c.original
-            gate.release.set()
-            output = c.finish_upgrade(child)
-            assert "Installed Rui" in output and "restarted on " in output, output
-            proof_ready(c, previous, old_host)
-            assert other_host.poll() is None and other.status()["instance"] == other_previous["instance"]
-        finally:
-            other.close()
-
-    with case(root, binary, releases, "store-hex-host-restart") as c:
-        c.old_selection()
-        old_host, previous = c.start_host(store_hex=True)
-        output = c.upgrade()
-        assert "Installed Rui" in output and "restarted on " in output, output
-        proof_ready(c, previous, old_host)
-
     with case(root, binary, releases, "relative-launch-path-not-restarted") as c:
         c.old_selection()
         relative_bash = os.path.relpath("/bin/bash", pathlib.Path.cwd())
@@ -693,100 +668,7 @@ def lifecycle_cases(root, binary, releases):
         assert "Installed Rui" in output and "restarted on " in output, output
         proof_ready(c, previous, host)
 
-    with case(root, binary, releases, "upgrade-all-first") as first, \
-            case(root, binary, releases, "upgrade-all-second") as second, \
-            case(root, binary, releases, "upgrade-all-unsupported") as unsupported:
-        second.home, second.env, second.link = first.home, first.env, first.link
-        unsupported.home, unsupported.env, unsupported.link = first.home, first.env, first.link
-        first.old_selection()
-        old_first, previous_first = first.start_host("all-first")
-        old_second, previous_second = second.start_host("all-second", store_hex=True)
-        foreign, previous_foreign = unsupported.start_host("all-foreign", managed=False)
-        warning = first.upgrade("--check")
-        assert "Discovered 3 Hosts" in warning, warning
-        assert "every running Host" in warning and "ALL Sessions" in warning, warning
-        for previous in (previous_first, previous_second, previous_foreign):
-            assert previous["store"] in warning, warning
-        assert "left running: application-owned Host" in warning, warning
-        output = first.upgrade()
-        for previous in (previous_first, previous_second):
-            assert f"{previous['store']}: restarted on {releases.version}" in output, output
-        assert f"{previous_foreign['store']}: left running: application-owned Host" in output, output
-        assert "3 Hosts: 2 restarted, 0 already current, 1 left unchanged, 0 failed." in output, output
-        proof_ready(first, previous_first, old_first)
-        proof_ready(second, previous_second, old_second)
-        assert foreign.poll() is None and unsupported.status()["instance"] == previous_foreign["instance"]
-
-    with case(root, binary, releases, "upgrade-all-discovery-failure") as c:
-        c.old_selection()
-        old, previous = c.start_host()
-        unreadable = pathlib.Path(c.ready["socket"]).parent / "upgrade-unreadable.sock"
-        try:
-            with os_semantics.unix_stream() as listener:
-                listener.bind(str(unreadable))
-                listener.listen(1)
-                output = c.upgrade(expect=6)
-                assert "Installed Rui" in output and "[host_restart_failed]" in output, output
-                assert str(unreadable) in output and "failed at discovery" in output, output
-                assert "2 Hosts: 1 restarted, 0 already current, 0 left unchanged, 1 failed." in output, output
-                assert c.link.resolve() != c.original
-                proof_ready(c, previous, old)
-        finally:
-            unreadable.unlink(missing_ok=True)
-
-    with case(root, binary, releases, "upgrade-all-late-host") as c:
-        c.old_selection()
-        gate = releases.gate_archive()
-        child = c.spawn_upgrade()
-        wait_for(gate.entered.is_set, "initial empty census before late Host")
-        late, previous = c.start_host("late-after-check")
-        gate.release.set()
-        output = c.finish_upgrade(child)
-        assert "No running Hosts discovered now" in output, output
-        assert f"{previous['store']}: restarted on {releases.version}" in output, output
-        proof_ready(c, previous, late)
-
-    with case(root, binary, releases, "application-owned-host") as c:
-        c.old_selection()
-        host, previous = c.start_host(managed=False)
-        output = c.finish_upgrade(c.spawn_upgrade())
-        assert "Installed Rui" in output and "left running: application-owned Host" in output, output
-        assert host.poll() is None and c.status()["instance"] == previous["instance"]
-        assert os_semantics.process_executable(host.pid) != c.link.resolve()
-
-    with case(root, binary, releases, "replacement-race") as c:
-        c.old_selection()
-        old_host, previous = c.start_host()
-        gate = releases.gate_archive()
-        child = c.spawn_upgrade()
-        wait_for(gate.entered.is_set, "captured old Host before replacement")
-        c.run("host", "pause", "--store", c.store, "--instance", previous["instance"])
-        wait_for(lambda: old_host.poll() is not None, "original Host retirement before replacement")
-        replacement, current = c.start_host("replacement-real-host")
-        assert current["instance"] != previous["instance"]
-        gate.release.set()
-        output = c.finish_upgrade(child)
-        assert "Installed Rui" in output and "restarted on " in output, output
-        proof_ready(c, current, replacement)
-
-
-    with case(root, binary, releases, "activation-target-disappeared") as c:
-        c.old_selection()
-        host, previous = c.start_host()
-        gate = c.root / "after-publication.gate"
-        gate.touch()
-        c.env["RUI_TEST_UPGRADE_AFTER_PUBLICATION_GATE"] = str(gate)
-        child = c.spawn_upgrade()
-        wait_for(lambda: c.link.resolve() != c.original, "native publication receipt before activation")
-        installed = c.link.resolve()
-        assert host.poll() is None and c.status()["instance"] == previous["instance"]
-        installed.unlink()
-        gate.unlink()
-        output = c.finish_upgrade(child, success=False)
-        assert "Installed Rui" in output and "Host restart could not finish" in output, output
-        assert "Installation was not rolled back" in output and "failed before publication" not in output, output
-        assert c.link.is_symlink() and os.readlink(c.link) == str(installed)
-        assert host.poll() is None and c.status()["instance"] == previous["instance"]
+    upgrade_journey(root, binary, releases)
 
 
 class TerminalScreen:

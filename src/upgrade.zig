@@ -9,6 +9,8 @@ const platform = @import("platform.zig");
 const TerminalText = @import("TerminalText.zig");
 const process = @import("upgrade_process.zig");
 const installation_path = @import("installation_path.zig");
+const caller_error = @import("caller_error.zig");
+const upgrade_run = @import("upgrade_run.zig");
 
 pub const Phase = enum(u8) { checking, preparing, publishing, stopping, awaiting_retirement, starting, verifying, finished };
 pub const Progress = struct {
@@ -76,6 +78,16 @@ pub const Check = struct {
     running_executable: [:0]const u8,
     path: installation_path.Observation = .{ .state = .unavailable },
 
+    /// What this check observed, as `upgrade_run` reads it.
+    pub fn facts(self: *const Check, mode: upgrade_run.Mode) upgrade_run.Facts {
+        return .{
+            .mode = mode,
+            .selection = .{ .ok = selectionOf(self.selected) },
+            .release = .{ .ok = versionOf(self.candidate.version) },
+            .census = .{ .ok = self.hosts.entries.len },
+        };
+    }
+
     pub fn deinit(self: *Check, allocator: std.mem.Allocator) void {
         self.candidate.deinit(allocator);
         self.selected.deinit(allocator);
@@ -96,12 +108,54 @@ pub const Result = struct {
         return self.hosts.selectedOutcome(self.store);
     }
 
+    /// What the finished install of `checked` read, as `upgrade_run` reads it.
+    /// A batch that failed after publication is a failed restart batch,
+    /// whichever step failed.
+    pub fn facts(self: *const Result, checked: *const Check) upgrade_run.Facts {
+        var value = checked.facts(.install);
+        value.resumed = true;
+        if (!upgrade_run.holdsRelease(value)) value.prepared = .{ .ok = {} };
+        value.published = .{ .ok = publishedOf(self.installation) };
+        value.pinned = .{ .ok = {} };
+        value.hosts = .{ .ok = self.hosts.summary(self.store) };
+        return value;
+    }
+
     pub fn deinit(self: *Result, allocator: std.mem.Allocator) void {
         self.installation.deinit(allocator);
         self.hosts.deinit(allocator);
         allocator.free(self.store);
     }
 };
+
+fn selectionOf(selected: Installation.Selection) upgrade_run.Selection {
+    return switch (selected) {
+        .absent => .absent,
+        .ineligible => .ineligible,
+        .source => .source,
+        .unknown_managed => .unknown_managed,
+        .released => |value| .{ .released = versionOf(value.version) },
+    };
+}
+
+fn versionOf(version: release.Version) upgrade_run.Version {
+    return .{ .schema = version.schema, .patch = version.patch };
+}
+
+fn publishedOf(installation: Installation.InstallationOutcome) upgrade_run.Published {
+    return .{ .changed = installation == .installed, .selected = versionOf(installation.receipt().selected_version.?) };
+}
+
+/// The class `upgrade_run` records for an effect's error.
+fn causeOf(err: anyerror) upgrade_run.Cause {
+    if (err == error.Cancelled) return .cancelled;
+    return switch (caller_error.of(err)) {
+        .upgrade_download_failed => .download,
+        .upgrade_release_invalid => .release,
+        .upgrade_preparation_failed => .preparation,
+        else => .other,
+    };
+}
 
 pub fn discoverRelease(init: std.process.Init, allocator: std.mem.Allocator, cancellation: ?*client.Cancellation, diagnostic: *Download) !release.ReleaseCandidate {
     try process.check(cancellation);
@@ -126,16 +180,40 @@ pub fn check(init: std.process.Init, allocator: std.mem.Allocator, store: []cons
 pub fn checkDiscovered(init: std.process.Init, allocator: std.mem.Allocator, store: []const u8, cancellation: ?*client.Cancellation, diagnostic: *Download, discovered: *?release.ReleaseCandidate) !Check {
     try process.check(cancellation);
     const home = init.environ_map.get("HOME") orelse return error.HomeUnavailable;
-    var selected = try Installation.inspectCancellable(allocator, init.io, home, cancellation);
-    errdefer selected.deinit(allocator);
-    try process.check(cancellation);
-    var candidate = if (discovered.*) |candidate| take: {
-        discovered.* = null;
-        break :take candidate;
-    } else try fetchRelease(init, allocator, cancellation, diagnostic);
-    errdefer candidate.deinit(allocator);
-    var hosts = try restart_all.discover(init, allocator, home, cancellation);
-    errdefer hosts.deinit(allocator);
+    // The mode is read only once a caller continues past the check.
+    var facts: upgrade_run.Facts = .{ .mode = .check, .adopted = discovered.* != null };
+    var selected: ?Installation.Selection = null;
+    errdefer if (selected) |*value| value.deinit(allocator);
+    var candidate: ?release.ReleaseCandidate = null;
+    errdefer if (candidate) |*value| value.deinit(allocator);
+    var hosts: ?restart_all.Batch = null;
+    errdefer if (hosts) |*value| value.deinit(allocator);
+    // Each effect polls the cancellation token where it did before this loop;
+    // an error ends the check, so it is returned rather than recorded.
+    while (true) switch (upgrade_run.next(facts)) {
+        .inspect_selection => {
+            selected = try Installation.inspectCancellable(allocator, init.io, home, cancellation);
+            facts.selection = .{ .ok = selectionOf(selected.?) };
+        },
+        .release => |source| {
+            try process.check(cancellation);
+            candidate = switch (source) {
+                .adopt => take: {
+                    const value = discovered.*.?;
+                    discovered.* = null;
+                    break :take value;
+                },
+                .discover => try fetchRelease(init, allocator, cancellation, diagnostic),
+            };
+            facts.release = .{ .ok = versionOf(candidate.?.version) };
+        },
+        .census => {
+            hosts = try restart_all.discover(init, allocator, home, cancellation);
+            facts.census = .{ .ok = hosts.?.entries.len };
+        },
+        .checked => break,
+        .prepare, .publish, .pin_target, .restart_hosts, .end => unreachable,
+    };
     const owned_home = try allocator.dupe(u8, home);
     errdefer allocator.free(owned_home);
     const paths = platform.resolveClientPaths(init.io, store) catch null;
@@ -144,15 +222,15 @@ pub fn checkDiscovered(init: std.process.Init, allocator: std.mem.Allocator, sto
     const executable = try std.process.executablePathAlloc(init.io, allocator);
     errdefer allocator.free(executable);
     const path_observation = installation_path.inspect(allocator, init.io, home, init.environ_map.get("PATH") orelse "") catch installation_path.Observation{ .state = .unavailable };
-    return .{ .candidate = candidate, .selected = selected, .hosts = hosts, .home = owned_home, .store = owned_store, .running_executable = executable, .path = path_observation };
+    return .{ .candidate = candidate.?, .selected = selected.?, .hosts = hosts.?, .home = owned_home, .store = owned_store, .running_executable = executable, .path = path_observation };
 }
 
 pub fn canInstall(checked: *const Check) bool {
-    return checked.selected == .released;
+    return upgrade_run.installable(checked.facts(.install));
 }
 
 pub fn holdsRelease(checked: *const Check) bool {
-    return checked.selected == .released and checked.selected.released.version.order(checked.candidate.version) != .lt;
+    return upgrade_run.holdsRelease(checked.facts(.install));
 }
 
 const ActivationProgress = struct {
@@ -171,41 +249,83 @@ const ActivationProgress = struct {
 
 pub fn install(init: std.process.Init, allocator: std.mem.Allocator, checked: *const Check, cancellation: ?*client.Cancellation, progress: ?Progress, cleanup: *CleanupReceipts, diagnostic: *Download) !Result {
     try process.check(cancellation);
-    if (!canInstall(checked)) return error.UpgradeIneligible;
+    var facts = checked.facts(.install);
+    facts.resumed = true;
+    if (upgrade_run.next(facts) == .end) return error.UpgradeIneligible;
     const store = try allocator.dupe(u8, checked.store);
     errdefer allocator.free(store);
-    var installation: Installation.InstallationOutcome = undefined;
-    const selected = checked.selected.released;
-    if (holdsRelease(checked)) {
-        Progress.send(progress, .publishing);
-        try process.check(cancellation);
-        installation = try Installation.publishExistingWithReporter(allocator, init.io, checked.home, selected.build, .released_upgrade, cancellation, cleanup.reporter(.publication));
-    } else {
-        Progress.send(progress, .preparing);
-        var prepared = try Installation.prepareWithReporter(allocator, init.io, checked.home, &checked.candidate, cancellation, cleanup.reporter(.preparation), diagnostic);
-        defer prepared.disposeWithReporter(allocator, init.io, cleanup.reporter(.disposal)) catch {};
-        Progress.send(progress, .publishing);
-        try process.check(cancellation);
-        installation = try Installation.publishWithReporter(allocator, init.io, checked.home, &prepared, .released_upgrade, cancellation, cleanup.reporter(.publication));
-    }
-    errdefer installation.deinit(allocator);
+    var prepared: ?Installation.PreparedBuild = null;
+    // A run that ends before publishing still disposes what it prepared.
+    defer if (prepared) |*build| build.disposeWithReporter(allocator, init.io, cleanup.reporter(.disposal)) catch {};
+    var installation: ?Installation.InstallationOutcome = null;
+    errdefer if (installation) |*value| value.deinit(allocator);
+    var target: ?restart_all.Target = null;
+    defer if (target) |value| value.deinit(allocator);
     var activation_progress: ActivationProgress = .{ .progress = progress };
-    const receipt = installation.receipt();
-    var hosts: restart_all.Batch = hosts: {
-        waitAfterPublication(init, cancellation) catch |err| break :hosts .{ .failure = err };
-        var target = restart_all.Target.init(init, allocator, checked.home, receipt.selected_after, cancellation) catch |err| break :hosts .{ .failure = err };
-        defer target.deinit(allocator);
-        if (target.version.order(receipt.selected_version.?) != .eq) break :hosts .{ .failure = error.ReleaseExecutableVersionMismatch };
-        break :hosts @import("host_coordinator.zig").restart(init, allocator, .{
-            .home = checked.home,
-            .target = &target,
-            .cancellation = cancellation,
-            .progress = .{ .context = &activation_progress, .report = ActivationProgress.report },
-        }) catch |err| .{ .failure = err };
+    var hosts: restart_all.Batch = .{};
+    // Errors before publication end the run and are returned; errors after
+    // it are recorded beside the kept receipt as a failed restart batch.
+    while (true) switch (upgrade_run.next(facts)) {
+        .prepare => {
+            Progress.send(progress, .preparing);
+            prepared = try Installation.prepareWithReporter(allocator, init.io, checked.home, &checked.candidate, cancellation, cleanup.reporter(.preparation), diagnostic);
+            facts.prepared = .{ .ok = {} };
+        },
+        .publish => |source| {
+            Progress.send(progress, .publishing);
+            try process.check(cancellation);
+            installation = switch (source) {
+                .selected => try Installation.publishExistingWithReporter(allocator, init.io, checked.home, checked.selected.released.build, .released_upgrade, cancellation, cleanup.reporter(.publication)),
+                .prepared => published: {
+                    const value = try Installation.publishWithReporter(allocator, init.io, checked.home, &prepared.?, .released_upgrade, cancellation, cleanup.reporter(.publication));
+                    prepared.?.disposeWithReporter(allocator, init.io, cleanup.reporter(.disposal)) catch {};
+                    prepared = null;
+                    break :published value;
+                },
+            };
+            facts.published = .{ .ok = publishedOf(installation.?) };
+        },
+        .pin_target => {
+            const receipt = installation.?.receipt();
+            pinTarget(init, allocator, checked.home, receipt, cancellation, &target) catch |err| {
+                hosts = .{ .failure = err };
+                facts = upgrade_run.failing(facts, causeOf(err));
+                continue;
+            };
+            facts.pinned = .{ .ok = {} };
+        },
+        .restart_hosts => {
+            defer {
+                target.?.deinit(allocator);
+                target = null;
+            }
+            hosts = @import("host_coordinator.zig").restart(init, allocator, .{
+                .home = checked.home,
+                .target = &target.?,
+                .cancellation = cancellation,
+                .progress = .{ .context = &activation_progress, .report = ActivationProgress.report },
+            }) catch |err| {
+                hosts = .{ .failure = err };
+                facts = upgrade_run.failing(facts, causeOf(err));
+                continue;
+            };
+            facts.hosts = .{ .ok = hosts.summary(store) };
+        },
+        .end => break,
+        .inspect_selection, .release, .census, .checked => unreachable,
     };
-    hosts.version = receipt.selected_version;
+    hosts.version = installation.?.receipt().selected_version;
     Progress.send(progress, .finished);
-    return .{ .installation = installation, .hosts = hosts, .store = store };
+    return .{ .installation = installation.?, .hosts = hosts, .store = store };
+}
+
+/// The published build, re-read once the after-publication test gate opens,
+/// must have the receipt's version.
+fn pinTarget(init: std.process.Init, allocator: std.mem.Allocator, home: []const u8, receipt: Installation.Receipt, cancellation: ?*client.Cancellation, target: *?restart_all.Target) !void {
+    try waitAfterPublication(init, cancellation);
+    const pinned = try restart_all.Target.init(init, allocator, home, receipt.selected_after, cancellation);
+    target.* = pinned;
+    if (pinned.version.order(receipt.selected_version.?) != .eq) return error.ReleaseExecutableVersionMismatch;
 }
 
 fn waitAfterPublication(init: std.process.Init, cancellation: ?*const client.Cancellation) !void {
