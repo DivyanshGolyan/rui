@@ -326,6 +326,18 @@ test "exact model interruption continues only with applicable pending input" {
             const replay = storage.interruptModel(&interrupt, .{});
             try std.testing.expect(replay == .accepted);
             try std.testing.expect(replay.accepted.replayed);
+            const replay_observation = try store_testing.observeCommandForTesting(&storage, "interrupt");
+            try std.testing.expectEqualStrings(session.slice(), replay_observation.kind.model_interruption.session.slice());
+            try std.testing.expectEqual(binding.turn_id, replay_observation.kind.model_interruption.turn_id);
+            try std.testing.expectEqual(binding.operation_id, replay_observation.kind.model_interruption.operation_id);
+            var conflict = try completeModelInterruption("interrupt", session.slice(), successor.permit.binding);
+            try std.testing.expect(storage.interruptModel(&conflict, .{}) == .conflict);
+            var stale = try completeModelInterruption("interrupt-stale", session.slice(), binding);
+            const stale_reply = storage.interruptModel(&stale, .{});
+            try std.testing.expect(stale_reply == .rejected);
+            try std.testing.expectEqual(protocol.ModelInterruptionRejection.operation_resolved, stale_reply.rejected.code);
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_operation WHERE resolution_code IS NULL", .{}));
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_operation WHERE resolution_code='interrupted'", .{}));
             try storage.settleModelAttemptFailure(successor.permit.binding, .{ .uncorrelated = "successor_failure" }, .ordinary, .{});
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_operation WHERE resolution_code='successor_failure'", .{}));
             try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_operation WHERE resolution_code='late_old_failure'", .{}));
