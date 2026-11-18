@@ -1,4 +1,5 @@
 from functools import cache
+from itertools import product
 import json
 import os
 from pathlib import Path
@@ -18,6 +19,8 @@ from strict_paths import STRICT, strict
 ROOT = Path(__file__).resolve().parents[2]
 CHECK = ROOT / '.github/workflows/check.yml'
 POLICY = ROOT / '.github/actions/policy/action.yml'
+POLICY_CHECKS = ROOT / '.github/actions/policy/checks.sh'
+BESIDE = ROOT / '.github/actions/policy/beside.sh'
 UPGRADE = ROOT / '.github/workflows/previous-release-upgrade.yml'
 PROMOTE = ROOT / '.github/workflows/promote.yml'
 RELEASE = ROOT / '.github/workflows/release.yml'
@@ -108,12 +111,12 @@ class PlanFixture:
         self.git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '--allow-empty', '-qm', 'fixture')
         return self.git('rev-parse', 'HEAD')
 
-    def run(self, base=None, candidate=None, event='pull_request', draft=False, promotion=False, compile_only=False, branch_head='', native_targets=None):
+    def run(self, base=None, candidate=None, event='pull_request', draft=False, promotion=False, compile_only=False, native_targets=None):
         self.output = self.root / 'output'
         self.output.write_text('')
         script = step_script(job(CHECK.read_text(), 'plan'), 'Select existing targets')
         env = dict(os.environ, PYTHONDONTWRITEBYTECODE='1', BASE=base or self.base, DRAFT=str(draft).lower(), EVENT_NAME=event,
-                   PROMOTION=str(promotion).lower(), COMPILE_ONLY=str(compile_only).lower(), BRANCH_HEAD=branch_head,
+                   PROMOTION=str(promotion).lower(), COMPILE_ONLY=str(compile_only).lower(),
                    GITHUB_REF_NAME='5/merge', CANDIDATE_REF=candidate or self.git('rev-parse', 'HEAD'),
                    GITHUB_OUTPUT=str(self.output), GITHUB_STEP_SUMMARY=str(self.root / 'summary'),
                    NATIVE_TARGETS=json.dumps(native_targets) if native_targets is not None else '')
@@ -327,17 +330,100 @@ class AdmissionTest(unittest.TestCase):
 
     def test_policy_runs_live_client_locality_with_trusted_main_history(self):
         for name in ('policy', 'pr_linux'):
-            body = job(CHECK.read_text(), name)
-            self.assertIn('fetch-depth: 0', body)
-            self.assertIn('uses: ./.github/actions/policy\n', body)
-        self.assertIn('      run: python3 -B tests/ci/client_locality.py\n', POLICY.read_text())
+            self.assertIn('fetch-depth: 0', job(CHECK.read_text(), name))
+        self.assertIn('uses: ./.github/actions/policy\n', job(CHECK.read_text(), 'policy'))
+        self.assertIn('      run: bash .github/actions/policy/checks.sh\n', POLICY.read_text())
+
+    def test_policy_beside_the_compile_keeps_its_status_and_fails_the_job_through_its_final_gate(self):
+        # CI-77: policy {passes, fails, killed by a signal} x compile {passes, fails}, through the real
+        # PR job's compile step and final gate. The compile stub blocks on a fifo until the policy stub
+        # has written it, so the two run at once; the subprocess timeout is only a watchdog.
+        workflow = job(CHECK.read_text(), 'pr_linux')
+        compile_step = step_script(workflow, 'Compile only the binaries the selected targets need')
+        gate = 'Fail for the policy or format checks that failed above'
+        gate_script = step_script(workflow, gate)
+        gate_if = re.search(r'(?m)^        if: \$\{\{ (.*) \}\}$',
+                            workflow.split(f'      - name: {gate}\n', 1)[1].split('\n      - ', 1)[0])[1]
+
+        def gate_runs(policy):
+            expression = gate_if.replace('!cancelled()', 'True').replace('&&', ' and ').replace('||', ' or ')
+            expression = expression.replace('steps.compile.outputs.policy', repr(policy))
+            return eval(expression.replace('steps.format.outcome', repr('success')), {})
+
+        plan = {'linux_compile_targets': '["test-logic"]', 'policy_skips': '["test_unchanged"]'}
+        step_env = re.search(r'(?ms)^      - name: Compile only the binaries the selected targets need\n.*?^        run:',
+                             workflow)[0]
+        env = {key: plan[output] for key, output in
+               re.findall(r'(?m)^          ([A-Z_]+): \$\{\{ needs\.plan\.outputs\.(\w+) \}\}$', step_env)}
+        policies = {'passes': 'exit 0', 'fails': 'exit 3', 'killed by a signal': 'kill -KILL $$'}
+        compiles = {'passes': 0, 'fails': 5}
+        for (policy, ending), (compiled, code) in product(policies.items(), compiles.items()):
+            with self.subTest(policy=policy, compile=compiled), tempfile.TemporaryDirectory() as root:
+                root = Path(root)
+                (root / '.github/actions/policy').mkdir(parents=True)
+                (root / 'bin').mkdir()
+                (root / '.github/actions/policy/beside.sh').write_text(BESIDE.read_text())
+                fifo, calls, output = root / 'started', root / 'calls', root / 'output'
+                os.mkfifo(fifo)
+                (root / '.github/actions/policy/checks.sh').write_text(
+                    f'echo "checks SKIPS=$SKIPS" >> "{calls}"\necho "policy log line"\n'
+                    f'echo started > "{fifo}"\n{ending}\n')
+                (root / 'bin/python3').write_text(
+                    f'#!/bin/sh\necho "python3 $*" >> "{calls}"\nread line < "{fifo}"\n'
+                    f'[ "$line" = started ] || exit 9\necho "compile log line"\nexit {code}\n')
+                (root / 'bin/zig').write_text(f'#!/bin/sh\necho "zig $*" >> "{calls}"\n')
+                for tool in ('python3', 'zig'):
+                    (root / 'bin' / tool).chmod(0o755)
+                result = subprocess.run(['bash', '-euo', 'pipefail', '-c', compile_step], cwd=root,
+                                        capture_output=True, text=True, timeout=120,
+                                        env=dict(os.environ, **env, PATH=f"{root / 'bin'}:{os.environ['PATH']}",
+                                                 RUNNER_TEMP=str(root), GITHUB_OUTPUT=str(output)))
+                self.assertEqual(result.returncode, code, result.stdout + result.stderr)
+                expected = ['checks SKIPS=["test_unchanged"]', 'python3 -B tests/ci/build_artifact.py compile ["test-logic"]']
+                if code == 0:
+                    expected.append('zig build --fetch=all')
+                self.assertEqual(sorted(calls.read_text().splitlines()), sorted(expected))
+                self.assertIn('policy log line', result.stdout)
+                self.assertIn('compile log line', result.stdout)
+                outputs = dict(line.split('=', 1) for line in output.read_text().splitlines())
+                self.assertEqual(gate_runs(outputs.get('policy', '')), policy != 'passes')
+                if policy != 'passes':
+                    failed = subprocess.run(['bash', '-euc', gate_script], capture_output=True, text=True,
+                                            env=dict(POLICY=outputs['policy'], FORMAT='success'))
+                    self.assertNotEqual(failed.returncode, 0)
+
+    def test_every_policy_check_runs_after_another_fails_and_any_failure_fails_the_suite(self):
+        # CI-76: checks.sh over its fake tools, with no check, each check's last call, or every check failing.
+        calls = ['python3 -B tests/ci/caller_errors.py', 'python3 -B tests/ci/flake_sources.py',
+                 'python3 -B tests/ci/client_locality.py',
+                 'python3 -B tests/ci/policy_suite.py --skips ["test_unchanged"]',
+                 'python3 -m ruff check --select F821 tests', 'npm ci --ignore-scripts --no-audit --no-fund',
+                 'npm run check', 'npm test', 'actionlint -shellcheck= .github/workflows/check.yml']
+        last_of_each_check = [calls[index] for index in (0, 1, 2, 3, 4, 7, 8)]
+        for failing in [[]] + [[call] for call in last_of_each_check] + [last_of_each_check]:
+            with self.subTest(failing=failing), tempfile.TemporaryDirectory() as root:
+                root = Path(root)
+                for directory in ('bin', 'clients/ts', '.github/workflows', 'actionlint'):
+                    (root / directory).mkdir(parents=True)
+                (root / '.github/workflows/check.yml').write_text('on: push\n')
+                (root / 'failing').write_text(''.join(call + '\n' for call in failing))
+                for tool in ('bin/python3', 'bin/npm', 'actionlint/actionlint'):
+                    (root / tool).write_text(
+                        '#!/bin/sh\ncall="$(basename "$0") $*"\necho "$call" >> "$CALLS"\n'
+                        'if grep -qxF -- "$call" "$FAILING"; then exit 3; fi\n')
+                    (root / tool).chmod(0o755)
+                result = subprocess.run(['bash', str(POLICY_CHECKS)], cwd=root, capture_output=True, text=True,
+                                        env=dict(os.environ, PATH=f"{root / 'bin'}:{os.environ['PATH']}",
+                                                 RUNNER_TEMP=str(root), SKIPS='["test_unchanged"]',
+                                                 CALLS=str(root / 'calls'), FAILING=str(root / 'failing')))
+                self.assertEqual(sorted((root / 'calls').read_text().splitlines()), sorted(calls), result.stdout)
+                self.assertEqual(result.returncode, 1 if failing else 0, result.stdout + result.stderr)
 
     def test_policy_skips_only_the_named_unchanged_self_checks(self):
         script = 'python3 -B tests/ci/policy_suite.py --skips "$SKIPS"'
-        self.assertIn('      run: ' + script + '\n', POLICY.read_text())
+        self.assertIn(' ' + script + '\n', POLICY_CHECKS.read_text())
         self.assertIn('        SKIPS: ${{ inputs.skips }}\n', POLICY.read_text())
-        for name in ('policy', 'pr_linux'):
-            self.assertIn('skips: ${{ needs.plan.outputs.policy_skips }}', job(CHECK.read_text(), name))
+        self.assertIn('skips: ${{ needs.plan.outputs.policy_skips }}', job(CHECK.read_text(), 'policy'))
         modules = {
             'test_alpha': 'class Alpha(unittest.TestCase):\n    def test_one(self): pass\n    def test_two(self): pass\n',
             'test_beta': ('class Kept(unittest.TestCase):\n    def test_kept(self): pass\n'
@@ -517,7 +603,15 @@ class CandidatePlanTest(unittest.TestCase):
         'documentation': (['README.md'], set()),
         'tests/ci only': (['tests/ci/select_tests.py'], set()),
         'unreached source': (['src/future_owner.zig'], {'test-logic', 'test-native'}),
-        'build hub': (['build.zig'], {'test-logic', 'test-native'}),
+        'build hub': (['build.zig'], {'test-logic'}),
+        'compiler and cache setup': (['.github/actions/setup/action.yml'], {'test-logic'}),
+        'CI artifact producer': (['tests/ci/build_artifact.py'], {'test-logic'}),
+        'dependency pins': (['build.zig.zon', 'src/fetch_dependencies.sh'], {'test-logic'}),
+        'workflow and policy only': (['.github/workflows/check.yml', '.github/actions/policy/action.yml',
+                                      'tests/ci/ci_plan.py'], set()),
+        'producer and documentation': (['tests/ci/build_artifact.py', 'docs/verification/gates.md'], {'test-logic'}),
+        'producer and core source': (['tests/ci/build_artifact.py', 'src/request_encoding.zig'],
+                                     {'test-logic', 'test-native'}),
         'Store': (['src/store.zig'], {'test-native', 'test-store'}),
         'fixture script': (['tests/integration/overview_integration.py'], {'overview-integration'}),
         'slow fixture owner': (['src/Upgrade.zig'], {'upgrade-integration'}),
@@ -718,7 +812,8 @@ def plan(selection, *, event_name, draft, promotion, change_kind, compile_only):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertNotEqual(self.aggregate(workflow, 'admission', admission, draft, results).returncode, 0)
 
-    def test_main_merge_obligation_requires_compile_without_running_unselected_units(self):
+    def test_a_branch_that_merged_main_gets_only_its_own_diffs_pr_tier(self):
+        # CI-4: a branch merge alone adds nothing to the PR tier.
         workflow = CHECK.read_text()
         linux = step_script(job(workflow, 'linux'), 'Require every selected Linux part')
         with PlanFixture() as fixture:
@@ -736,24 +831,21 @@ def plan(selection, *, event_name, draft, promotion, change_kind, compile_only):
             candidate = fixture.git('rev-parse', 'HEAD')
             self.assertEqual(fixture.git('rev-parse', 'HEAD^1'), main)
             self.assertEqual(fixture.git('rev-parse', 'HEAD^2'), branch)
-            output = fixture.plan(self, base=main, candidate=candidate, branch_head=branch)
+            output = fixture.plan(self, base=main, candidate=candidate)
+            # The PR tier no longer compiles every unit partition for a branch that merged
+            # main: the candidate gets only what its own diff selects (here, documentation).
             self.assertEqual(output['candidate_ref'], candidate)
-            self.assertEqual(output['change_kind'], 'normal')
+            self.assertEqual(output['change_kind'], 'documentation')
             self.assertEqual(json.loads(output['targets']), [])
-            self.assertEqual(json.loads(output['linux_compile_targets']), ['test'])
+            self.assertEqual(json.loads(output['linux_compile_targets']), [])
+            self.assertEqual(output['pr_job'], 'false')
+            self.assertEqual(json.loads(output['pr_setup_targets']), [])
             self.assertEqual(output['linux_matrix'], '{"include": []}')
-            self.assertEqual(output['linux_split'], 'false')
-            self.assertEqual(json.loads(output['pr_setup_targets']), ['test'])
-            results = dict(plan='success', policy='skipped', pr_linux='success', linux_build='skipped',
-                           linux_build_unit='skipped',
-                           linux_suites='skipped', macos_typecheck='skipped')
+            results = dict(plan='success', policy='skipped', pr_linux='skipped', linux_build='skipped',
+                           linux_build_unit='skipped', linux_suites='skipped', macos_typecheck='skipped')
             self.assertEqual(self.aggregate(workflow, 'linux', linux, output, results).returncode, 0)
-            for status in ('skipped', 'failure', 'cancelled', ''):
-                with self.subTest(status=status):
-                    self.assertNotEqual(self.aggregate(workflow, 'linux', linux, output,
-                        dict(results, pr_linux=status)).returncode, 0)
             self.assertNotEqual(self.aggregate(workflow, 'linux', linux, output,
-                dict(results, linux_suites='success')).returncode, 0)
+                dict(results, pr_linux='success')).returncode, 0)
 
     def test_linux_suite_scheduling_uses_execution_not_compile_selection(self):
         from ci_plan import plan

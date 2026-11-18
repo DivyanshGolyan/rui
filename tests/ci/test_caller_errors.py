@@ -177,10 +177,10 @@ fn live() anyerror!void { return error.NewCallerError; }
         self.assertNotIn("development selection", names)
         command = dict(commands)["caller errors"]
         self.assertEqual(command[1:], ["-B", "tests/ci/caller_errors.py"])
-        policy = (ROOT / ".github/actions/policy/action.yml").read_text()
-        self.assertIn("run: python3 -B tests/ci/caller_errors.py", policy)
+        policy = (ROOT / ".github/actions/policy/checks.sh").read_text()
+        self.assertIn(" python3 -B tests/ci/caller_errors.py\n", policy)
         workflow = (ROOT / ".github/workflows/check.yml").read_text()
-        self.assertEqual(workflow.count("uses: ./.github/actions/policy"), 2)
+        self.assertEqual(workflow.count("uses: ./.github/actions/policy"), 1)
 
 
 class TrustedPending(unittest.TestCase):
