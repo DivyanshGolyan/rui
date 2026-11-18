@@ -8,11 +8,8 @@ pub fn configurePauses(b: *std.Build, compile: *std.Build.Step.Compile, enabled:
     compile.root_module.addOptions("build_options", options);
 }
 
-pub fn configureUnitRoot(b: *std.Build, compile: *std.Build.Step.Compile, target: std.Build.ResolvedTarget, pinned: ?PinnedTransport, mysql_dialect_check: bool) void {
+pub fn configureUnitRoot(b: *std.Build, compile: *std.Build.Step.Compile, target: std.Build.ResolvedTarget, pinned: ?PinnedTransport) void {
     configurePauses(b, compile, true);
-    const dialect_options = b.addOptions();
-    dialect_options.addOption(bool, "compiled", mysql_dialect_check);
-    compile.root_module.addOptions("mysql_dialect_check_options", dialect_options);
     configureSqlite(b, compile);
     configureYaml(b, compile);
     configureBashPlatform(b, compile);

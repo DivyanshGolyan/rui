@@ -85,7 +85,6 @@ A green PR therefore no longer proves:
 - that the Store-reaching binaries (`test-native`, `test-store`, the integration product) still compile and pass after a change to build inputs alone, such as build.zig, a dependency pin, the setup action or `build_artifact.py`; only `test-logic` runs through the changed path;
 - that every unit partition still compiles after a branch merged main, when the candidate's own diff does not reach them: a semantic merge conflict that breaks only a unit partition reaches main, and Promote bisects it to the merge commit;
 - unit and fixture behavior against a live MySQL or Postgres server, and `mysql-wire-integration`;
-- the MySQL dialect check: a PR-tier build (`-Dpr-ci=true`) compiles `store/mysql_dialect_check.zig`'s shadow PREPAREs out of the unit roots, so a statement or fixture text MySQL 8.4 refuses is found only by a main-tier build against a live server;
 - everything [Promote](../../.github/workflows/promote.yml) alone runs: macOS, `stack-frames`, the installed-release upgrade and renderer contracts.
 
 Promotion proves those on main HEAD and bisects a failure to its commit; the owner accepted on 18 Nov 2026 that such a break reaches main first.

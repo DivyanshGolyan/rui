@@ -48,7 +48,7 @@ pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, pinned_transport: pr
                 .optimize = .ReleaseSafe,
             }),
         });
-        product.configureUnitRoot(b, apple_tests, apple, null, true);
+        product.configureUnitRoot(b, apple_tests, apple, null);
         macos_types_step.dependOn(&apple_tests.step);
         macos_types_step.dependOn(&b.addTest(.{ .name = "test-typecheck-macos-os", .root_module = product.addOsRoot(b, apple) }).step);
     }

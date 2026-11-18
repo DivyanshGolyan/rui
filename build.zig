@@ -44,10 +44,7 @@ pub fn build(b: *std.Build) void {
     const test_filters = b.option([]const []const u8, "test-filter", "Run tests whose names contain this text (repeatable)") orelse &.{};
     if (ci.directory != null and test_filters.len != 0) @panic("CI artifacts contain unfiltered tests");
     const model_queue_output = b.option([]const u8, "model-queue-output", "Write model-queue qualification JSON to this path");
-    // The PR tier starts no MySQL server, so its unit roots compile no shadow PREPAREs;
-    // every other build keeps the dialect check (docs/verification/gates.md#two-tiers).
-    const mysql_dialect_check = !pr_ci;
-    const units = unit_module.add(b, ci, target, pinned_transport, test_filters, mysql_dialect_check);
+    const units = unit_module.add(b, ci, target, pinned_transport, test_filters);
     var unit_runs = units.runs;
 
     const openapi_emitter = b.addExecutable(.{
@@ -176,7 +173,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{ .root_source_file = b.path("src/tests.zig"), .target = target, .optimize = .ReleaseSafe }),
         .filters = &.{"seed CLI mixed parts fixture"},
     });
-    product.configureUnitRoot(b, public_parts_seed, target, pinned_transport, mysql_dialect_check);
+    product.configureUnitRoot(b, public_parts_seed, target, pinned_transport);
     const public_parts_integration = b.addSystemCommand(&.{ "python3", "-B" });
     public_parts_integration.addFileArg(b.path("tests/integration/public_parts_integration.py"));
     public_parts_integration.addFileArg(release_safe);
