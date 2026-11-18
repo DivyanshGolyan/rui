@@ -351,12 +351,13 @@ class BinarySourceSelectionTest(unittest.TestCase):
 
 
 class WorkflowEntrypointsTest(unittest.TestCase):
-    def test_workflows_have_no_scheduled_triggers_or_branches(self):
+    def test_only_qualify_main_is_scheduled_and_no_workflow_branches_on_it(self):
         workflows = sorted(Path(".github/workflows").glob("*.y*ml"))
         self.assertTrue(workflows)
         for path in workflows:
             with self.subTest(workflow=path.name):
-                self.assertNotRegex(path.read_text(), r"(?m)^\s*schedule\s*:")
+                scheduled = re.findall(r"(?m)^\s*schedule\s*:", path.read_text())
+                self.assertEqual(len(scheduled), path.name == "main-qualifier.yml")
                 self.assertNotRegex(path.read_text(), r"github\.event_name\s*==\s*[\"']schedule[\"']")
 
     def test_removed_scheduled_wrappers_have_no_live_references(self):
