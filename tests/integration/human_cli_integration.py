@@ -2388,9 +2388,15 @@ def main(selected="all"):
             env={**os.environ, "HOME": str(home)}, capture_output=True, text=True, timeout=5).stderr
         assert config["request"] in json.loads(run(home, "request", "list"))
         assert json.loads(run(home, "request", "recover", config["request"]))["answer"]["replayed"] is True
-        assert json.loads(run(home, "request", "recover", config["request"])) == {
+        creation = {"provider": "codex", "model": "gpt-6-sol", "reasoning_effort": "low",
+                    "workspace": str(workspace.resolve()), "tools": ["bash"], "loaded_tools": ["bash"],
+                    "permission_mode": "ask", "compaction_trigger": str(compaction_trigger("codex", "gpt-6-sol"))}
+        assert config["admission"]["answer"]["configuration"] == creation, config
+        recovered = json.loads(run(home, "request", "recover", config["request"]))
+        assert recovered == {
             "context": {"store": str(store), "session": session, "key": config["request"], "kind": "configure"},
-            "answer": {"status": "accepted", "replayed": True, "session": session, "revision": "1", "created": True}}
+            "answer": {"status": "accepted", "replayed": True, "session": session, "revision": "1", "created": True,
+                       "configuration": creation}}, recovered
 
         text = state / "input"
         text.write_text("first input")
