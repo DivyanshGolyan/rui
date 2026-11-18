@@ -461,7 +461,7 @@ def interactive_cases(state, binding=False, null_code=False):
                 assert "admitted:" not in output and "Configured." not in output, output
                 assert "You: " not in output, output
                 if not binding:
-                    assert "Detached." not in output, output
+                    assert "Detached." not in output and "Your chats keep working while you are away." not in output, output
                 actual = termios.tcgetattr(slave)
                 assert os_semantics.user_termios(actual) == os_semantics.user_termios(original_terminal), "fatal invocation did not restore the terminal"
                 request, reply = proxy.exchanges[0]

@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 
 import json
-import fcntl
 import os
 import pathlib
 import re
@@ -17,7 +16,8 @@ import bash_fixture as bash
 import model_fixture as fixture
 from product_defaults import DEFAULTS, compaction_trigger, start_effort
 import host_process
-from host_process import HostDiagnostics, retain_failure_state, start_ready_process
+import os_semantics
+from host_process import HostDiagnostics, PauseGate, retain_failure_state, start_ready_process
 from control_fixture import raw_request
 from codex_fixture import ACCESS, ACCOUNT, OPENAI_KEY, credentials, expected_user_agent
 
@@ -41,11 +41,9 @@ def credential_facts(path):
 
 
 def lock_available(lock):
-    try:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
+    if not os_semantics.try_lock(lock):
         return False
-    fcntl.flock(lock, fcntl.LOCK_UN)
+    os_semantics.release_lock(lock)
     return True
 
 
@@ -67,12 +65,13 @@ def proposal_with_private_reasoning(command):
     ])
 
 
-def start(store, endpoint, *extra):
+def start(store, endpoint, *extra, pause=None):
     host, _ = start_ready_process(
         [fixture.RUI, "host", "serve", "--store", store, "--set", 'execution.activeCapacity=2',
          "--set", f"providers.codex.endpoint={endpoint}", *extra],
         required_fields={"execution": "enabled", "nghttp2": "1.70.0"},
         observations="managed" if "--test-phase-trace" in extra else None,
+        pause=pause,
     )
     return host
 
@@ -98,6 +97,7 @@ def run():
     store = state / "store"
     host = None
     diagnostics = None
+    handoff = None
     complete = False
     try:
         credentials(credential_file, state="refresh_pending")
@@ -261,7 +261,7 @@ def run():
         assert configured["answer"]["status"] == "accepted"
         stopped_session = configured["answer"]["session"]
         with open(credential_dir / ".codex.json.lock", "r+b") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+            os_semantics.take_lock(lock)
             fixture.message(state, stop_store, "stop-message", stopped_session, "do not launch")
             diagnostics.wait("preparation_completed", timeout=10)
             stopped = fixture.command(
@@ -276,7 +276,9 @@ def run():
         fixture.stop_host(host)
         host = None
 
-        host = start(stop_store, url, "--test-phase-trace", "--test-before-launch-delay-ms", "1500")
+        # EXR-61
+        handoff = PauseGate("model.before_handoff")
+        host = start(stop_store, url, "--test-phase-trace", pause=handoff)
         diagnostics = HostDiagnostics(host)
         configured = fixture.command(
             "session", "configure", "--store", stop_store, "--record", state / "handoff-config.json",
@@ -286,7 +288,7 @@ def run():
         assert configured["answer"]["status"] == "accepted"
         handoff_session = configured["answer"]["session"]
         fixture.message(state, stop_store, "handoff-message", handoff_session, "do not launch")
-        diagnostics.wait("prepared_before_handoff", timeout=10)
+        handoff.wait()
         with open(credential_dir / ".codex.json.lock", "r+b") as lock:
             assert not lock_available(lock), "authenticated handoff released its credential lease early"
         stopped = fixture.command(
@@ -294,6 +296,7 @@ def run():
             "--key", "handoff-stop", "--session", handoff_session,
         )
         assert stopped["answer"]["status"] == "accepted"
+        handoff.release()
         fixture.wait_for(lambda: bash.execution_custody_idle(stop_store, handoff_session),
                          "stopped authenticated handoff custody", timeout=10)
         assert len(endpoint.requests) == 4, "stopped authenticated handoff launched a model request"
@@ -318,6 +321,7 @@ def run():
         assert rejected["result"]["code"] == "unsupported_output_schema_route", rejected
         assert len(endpoint.requests) == 4
         fixture.stop_host(host)
+        handoff.close()
         host = start(stop_store, url)
         diagnostics = None
         expected_agent = expected_user_agent()
@@ -397,6 +401,7 @@ def run():
         incoming_error = sys.exc_info()[1]
         errors = []
         for dispose in (lambda: fixture.stop_host(host) if host is not None else None,
+                        lambda: handoff.close() if handoff is not None else None,
                         endpoint.shutdown, endpoint.server_close, lambda: thread.join(timeout=5)):
             try:
                 dispose()
@@ -585,7 +590,7 @@ def forced_refresh_journey():
         assert credential_facts(credential_file) == ("3", "refresh_pending")
 
         with open(credential_dir / ".codex.json.lock", "r+b") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+            os_semantics.take_lock(lock)
             credentials(credential_file, generation=4)
         newer_release = threading.Event()
         with endpoint.lock:
@@ -593,7 +598,7 @@ def forced_refresh_journey():
         fixture.message(state, store, "newer-pending", session, "another owner claimed refresh")
         fixture.wait_for(lambda: len(endpoint.requests) == 6, "request before newer pending generation")
         with open(credential_dir / ".codex.json.lock", "r+b") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+            os_semantics.take_lock(lock)
             credentials(credential_file, state="refresh_pending", generation=5)
             newer_record = credential_file.read_bytes()
         newer_release.set()

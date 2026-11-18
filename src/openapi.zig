@@ -67,6 +67,7 @@ const CommandSchema = struct {
     pub const Configuration = configurationShape("Configuration");
     pub const Sender = SenderSchema;
     pub const Content = ContentSchema;
+    pub const Parts = PartsSchema;
     pub const Optional = optionalMember;
 };
 
@@ -76,7 +77,10 @@ fn commandRoute(comptime kind: protocol.CommandKind) Route {
         .path = facts.route,
         .kind = @field(protocol.Kind, @tagName(kind)),
         .summary = facts.summary,
-        .variants = &.{variant(facts.Request.schema(CommandSchema).shape, facts.Request.examples)},
+        .variants = if (comptime kind == .message)
+            &.{ variant(facts.Request.schema(CommandSchema).shape, facts.Request.examples), variant(facts.Request.partsSchema(CommandSchema).shape, facts.Request.examples) }
+        else
+            &.{variant(facts.Request.schema(CommandSchema).shape, facts.Request.examples)},
         .reply = jsonReply(facts.replyShapes(protocol).values),
         .conflict = jsonReply(.{facts.Reply(protocol).conflict}),
     };
@@ -194,6 +198,20 @@ pub const routes = [_]Route{
         .reply = .bytes,
     },
     .{
+        .path = "/v1/public-parts",
+        .kind = .public_parts,
+        .summary = "The complete certified, ordered part list of a Message or Action Resolution parts value, addressed by its owner in the Session.",
+        .variants = &.{variant(protocol.public_parts_request, .{.{ 2, "{\"message\":\"1\"}" }})},
+        .reply = jsonReply(.{protocol.public_parts_reply.head ++ .{ListOf(PublicPart)} ++ protocol.public_parts_reply.tail}),
+    },
+    .{
+        .path = "/v1/public-part-content",
+        .kind = .public_part_content,
+        .summary = "The exact bytes of one part of an owner's parts value, framed as conversation content.",
+        .variants = &.{variant(protocol.public_part_content_request.head ++ .{Optional(protocol.public_part_content_request.stream)} ++ protocol.public_part_content_request.tail, .{ .{ 2, "{\"action\":\"1\"}" }, .{ 4, "0" } })},
+        .reply = .bytes,
+    },
+    .{
         .path = "/v1/activity-search",
         .kind = .activity_search,
         .summary = "Search public Session activity newest first with bounded snippets.",
@@ -270,6 +288,12 @@ const SenderSchema = struct {
     }
 };
 
+/// One certified part in a `public_parts` reply: Text or Image metadata and its Store content identity.
+const PublicPart = struct {
+    pub const openapi_name = "PublicPart";
+    pub const openapi_shapes = .{ protocol.public_parts_reply.text, protocol.public_parts_reply.image };
+};
+
 fn ListOf(comptime item: anytype) type {
     return struct {
         pub const is_list = true;
@@ -292,6 +316,37 @@ fn BoundedListOf(comptime item: anytype, comptime capacity: usize, comptime uniq
         }
     };
 }
+
+const PartMimeSchema = struct {
+    pub fn openapi_inline(d: *Document) !Value {
+        var names: std.json.Array = .init(d.arena);
+        try names.append(.{ .string = "image/png" });
+        try names.append(.{ .string = "image/jpeg" });
+        return d.object(.{ .type = Value{ .string = "string" }, .@"enum" = Value{ .array = names } });
+    }
+};
+
+const ImageDataSchema = struct {
+    pub fn openapi_inline(d: *Document) !Value {
+        return d.object(.{ .type = Value{ .string = "string" }, .contentEncoding = Value{ .string = "base64" } });
+    }
+};
+
+const InputPartSchema = struct {
+    pub const openapi_shapes = .{
+        .{ "{\"type\":\"text\",\"text\":", ContentSchema, "}" },
+        .{ "{\"type\":\"image\",\"mime\":", PartMimeSchema, ",\"data\":", ImageDataSchema, "}" },
+    };
+};
+
+const PartsSchema = struct {
+    pub fn openapi_inline(d: *Document) !Value {
+        return d.object(.{ .type = Value{ .string = "array" }, .items = try d.typeRef(InputPartSchema), .minItems = Value{ .integer = 1 }, .maxItems = Value{ .integer = @import("input_parts.zig").max_parts } });
+    }
+    pub fn openapi_example(out: *std.Io.Writer) !void {
+        try out.writeAll("[{\"type\":\"text\",\"text\":\"x\"}]");
+    }
+};
 
 const ContentSchema = struct {
     pub fn openapi_inline(d: *Document) !Value {
@@ -596,6 +651,7 @@ pub const Document = struct {
         }
         if (T == protocol.WorkStateJson) return d.anyOf(&.{
             try d.shapeSchema(T.plain_shape),
+            try d.shapeSchema(T.compacting_shape),
             try d.shapeSchema(T.retrying_shape),
             try d.shapeSchema(T.bash_shape),
             try d.shapeSchema(T.older_bash_shape),
@@ -1219,7 +1275,14 @@ test "Full frozen offers have their own limits while Current and revision settin
     }
 }
 
-test "openapi requests use one object except exclusive targets" {
+test "WIR-4 published_wire_shapes" {
+    try publishedRequestSchemas();
+    try publishedRequestExamples();
+    try publishedReplyExamples();
+    try publishedResponseRoutes();
+}
+
+fn publishedRequestSchemas() !void {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var document: Document = .init(arena.allocator());
@@ -1228,7 +1291,7 @@ test "openapi requests use one object except exclusive targets" {
         const name = try std.fmt.allocPrint(arena.allocator(), "{s}Request", .{try pascal(arena.allocator(), @tagName(route.kind))});
         const schema = document.schemas.get(name).?.object;
         switch (route.kind) {
-            .inspect_session, .skill_suggestions => try std.testing.expect(schema.contains("anyOf")),
+            .inspect_session, .skill_suggestions, .message => try std.testing.expect(schema.contains("anyOf")),
             else => {
                 try std.testing.expectEqual(@as(usize, 1), route.variants.len);
                 try std.testing.expectEqualStrings("object", schema.get("type").?.string);
@@ -1243,7 +1306,7 @@ test "openapi requests use one object except exclusive targets" {
     }
 }
 
-test "openapi requests parse with all or no optional members in any order" {
+fn publishedRequestExamples() !void {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1594,7 +1657,7 @@ fn matches(pattern: []const u8, text: []const u8) bool {
     return true;
 }
 
-test "replies the Host renders conform to their schemas" {
+fn publishedReplyExamples() !void {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var document: Document = .init(arena.allocator());
@@ -1645,10 +1708,19 @@ test "replies the Host renders conform to their schemas" {
     try host_reply.renderConfigureReply(.{ .writer = &out.writer }, "", configured);
     try Case.check(schemas, "ConfigureReply", out.written(), a);
     out.clearRetainingCapacity();
-    const message: reply.MessageReply = .{ .rejected = .{ .replayed = false, .code = .mcp_server_unavailable, .message = configured.rejected.message, .content = .{ .length = 4, .digest = protocol.contentDigest("task") } } };
-    try host_reply.renderMessageReply(.{ .writer = &out.writer }, "", message);
-    try Case.check(schemas, "MessageReply", out.written(), a);
-    out.clearRetainingCapacity();
+    var message_session: @FieldType(reply.AcceptedMessage, "session") = .{};
+    try message_session.set("k7m2qx");
+    const message_content: reply.ContentReference = .{ .length = 4, .digest = protocol.contentDigest("task") };
+    for ([_]@import("input_parts.zig").Form{ .bytes, .parts }) |form| {
+        for ([_]reply.MessageReply{
+            .{ .accepted = .{ .form = form, .replayed = false, .session = message_session, .admission_id = 1, .content = message_content } },
+            .{ .rejected = .{ .form = form, .replayed = false, .code = .mcp_server_unavailable, .message = configured.rejected.message, .content = message_content } },
+        }) |message| {
+            try host_reply.renderMessageReply(.{ .writer = &out.writer }, message_session.slice(), message);
+            try Case.check(schemas, "MessageReply", out.written(), a);
+            out.clearRetainingCapacity();
+        }
+    }
 
     const ids = "gpt-6.1-sol\nmy\"model\n";
     try out.writer.writeAll(protocol.model_list_reply.head);
@@ -1673,6 +1745,23 @@ test "replies the Host renders conform to their schemas" {
     try row.writeJson(&out.writer);
     try protocol.writeShape(&out.writer, protocol.session_list_reply.last_tail, .{ protocol.ListDelta.full, "x" });
     try Case.check(schemas, "ListSessionsReply", out.written(), a);
+
+    // A parts list for each owner: text and image parts, an image with and without a name.
+    const parts_reply = protocol.public_parts_reply;
+    for ([_]protocol.content_value.Owner{ .{ .message = 1 }, .{ .action = std.math.maxInt(i64) } }) |owner| {
+        out.clearRetainingCapacity();
+        try protocol.writeShape(&out.writer, parts_reply.head, .{ "k7m2qx", protocol.ContentValueJson{ .value = .{ .parts = .{ .identity = .{ .length = 99, .digest = @splat(2) }, .owner = owner } } } });
+        try protocol.writeShape(&out.writer, parts_reply.text, .{ @as(u64, 0), @as(u64, 0), @as([32]u8, @splat(3)) });
+        try out.writer.writeAll(",");
+        try protocol.writeShape(&out.writer, parts_reply.image, .{ @as(u64, 1), "image/png", @as(u64, 1), @as(u64, 1), @as(?[]const u8, "cat \"雪\".png"), @as(u64, 67), @as([32]u8, @splat(4)) });
+        try out.writer.writeAll(",");
+        try protocol.writeShape(&out.writer, parts_reply.image, .{ @as(u64, 2), "image/jpeg", @as(u64, std.math.maxInt(u32)), @as(u64, 2), @as(?[]const u8, null), @as(u64, 5), @as([32]u8, @splat(5)) });
+        try protocol.writeShape(&out.writer, parts_reply.tail, .{});
+        try Case.check(schemas, "PublicPartsReply", out.written(), a);
+    }
+    // The schema refuses a list that names an unknown part type.
+    const unknown = try std.mem.replaceOwned(u8, a, out.written(), "\"type\":\"text\"", "\"type\":\"audio\"");
+    try std.testing.expect(!conforms(schemas, schemas.get("PublicPartsReply").?, try std.json.parseFromSliceLeaky(Value, a, unknown, .{})));
 
     try store.checkSessionReportsForTesting(Case{ .schemas = schemas, .allocator = a });
 }
@@ -1773,7 +1862,7 @@ test "Message observation schema requires Host state and bounds recovery" {
     try std.testing.expect(!conforms(schemas, recovery_schema, value));
 }
 
-test "statuses, media types and required headers match what the Host sends" {
+fn publishedResponseRoutes() !void {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var document: Document = .init(arena.allocator());

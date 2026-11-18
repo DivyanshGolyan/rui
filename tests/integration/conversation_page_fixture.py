@@ -1,13 +1,13 @@
 import http.server
 import json
 import os
-import pathlib
 import sqlite3
 import tempfile
 import threading
 
 from control_fixture import configure, inspect_execution, message, observe, raw_request, start_host, successful_sse
 import host_process
+import os_semantics
 from host_process import canonical_fixture_root, dispose_all, stop_process, TestHTTPServer, wait_for
 
 
@@ -34,19 +34,17 @@ def dispose_page(process, endpoint, thread, timeout):
 
 
 def host_resources(pid):
-    if not pathlib.Path(f"/proc/{pid}/status").exists():
+    memory = os_semantics.process_memory(pid)
+    if memory is None:
         return None
-    status = pathlib.Path(f"/proc/{pid}/status").read_text()
-    rss = int(next(line.split()[1] for line in status.splitlines() if line.startswith("VmRSS:"))) * 1024
-    return rss, len(os.listdir(f"/proc/{pid}/fd"))
+    return memory["rss_kib"] * 1024, len(os_semantics.descriptor_links(pid))
 
 
 def provider_connections(pid, port):
-    inodes = {line.split()[9] for table in ("/proc/net/tcp", "/proc/net/tcp6") if pathlib.Path(table).exists()
-              for line in pathlib.Path(table).read_text().splitlines()[1:]
-              if int(line.split()[2].rsplit(":", 1)[1], 16) == port}
+    inodes = {row[9] for rows in (os_semantics.socket_table("tcp"), os_semantics.socket_table("tcp6")) if rows is not None
+              for row in rows if int(row[2].rsplit(":", 1)[1], 16) == port}
     count = 0
-    for fd in pathlib.Path(f"/proc/{pid}/fd").iterdir():
+    for fd in os_semantics.descriptor_links(pid):
         try:
             target = os.readlink(fd)
         except FileNotFoundError:
@@ -56,13 +54,13 @@ def provider_connections(pid, port):
 
 
 def idle_resources(pid, path):
-    directory = pathlib.Path(f"/proc/{pid}/fd")
     try:
-        descriptors = {fd.name: os.readlink(fd) for fd in directory.iterdir()}
-        peers = {f"socket:[{r[6]}]" for line in pathlib.Path("/proc/net/unix").read_text().splitlines()[1:]
-            if len(r := line.split()) == 8 and r[7] == path and int(r[3], 16) == 0}
+        descriptors = {fd.name: os.readlink(fd) for fd in os_semantics.descriptor_links(pid)}
+        unix = os_semantics.socket_table("unix")
+        if unix is None: return None
+        peers = {f"socket:[{r[6]}]" for r in unix if len(r) == 8 and r[7] == path and int(r[3], 16) == 0}
         if any(target in peers for target in descriptors.values()): return None
-        if descriptors != {fd.name: os.readlink(fd) for fd in directory.iterdir()}: return None
+        if descriptors != {fd.name: os.readlink(fd) for fd in os_semantics.descriptor_links(pid)}: return None
     except FileNotFoundError: return None
     return host_resources(pid)[0], len(descriptors)
 

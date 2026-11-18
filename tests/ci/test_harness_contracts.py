@@ -397,21 +397,7 @@ class ProcessCensusTest(unittest.TestCase):
                                                env={"PYTHONHOME": sys.base_prefix}, stdin=subprocess.PIPE,
                                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                     children.append(process)
-                    os.set_blocking(process.stdout.fileno(), False)
-                    received = bytearray()
-
-                    def ready():
-                        self.assertIsNone(process.poll(), "actor exited before readiness")
-                        try:
-                            chunk = os.read(process.stdout.fileno(), len(marker) - len(received))
-                        except BlockingIOError:
-                            return False
-                        self.assertTrue(chunk, "actor closed stdout before readiness")
-                        received.extend(chunk)
-                        self.assertEqual(received, marker[:len(received)])
-                        return received == marker
-
-                    HOST.wait_for(ready, f"readiness from {name}")
+                    self.await_marker(process, marker, f"readiness from {name}")
                 owned, named = children
                 for process in children:
                     self.assertIsNone(process.poll(), "actor exited before census")
@@ -424,6 +410,111 @@ class ProcessCensusTest(unittest.TestCase):
                 HOST.dispose_all(
                     *(lambda process=process: HOST.close_stdin(process) for process in reversed(children)),
                     *(lambda process=process: HOST.stop_process(process) for process in reversed(children)))
+
+    def await_marker(self, process, marker, label):
+        """Waits, bounded by the shared wait owner, until the child writes exactly marker to stdout."""
+        os.set_blocking(process.stdout.fileno(), False)
+        received = bytearray()
+
+        def ready():
+            self.assertIsNone(process.poll(), "actor exited before readiness")
+            try:
+                chunk = os.read(process.stdout.fileno(), len(marker) - len(received))
+            except BlockingIOError:
+                return False
+            self.assertTrue(chunk, "actor closed stdout before readiness")
+            received.extend(chunk)
+            self.assertEqual(received, marker[:len(received)])
+            return received == marker
+
+        HOST.wait_for(ready, label)
+
+    def ready_child(self, *arguments, env=None):
+        """Starts a child that announces itself once initialised, then waits on stdin.
+
+        Samples taken after the announcement see its exec'd arguments and settled descriptors.
+        """
+        child = subprocess.Popen([sys.executable, "-S", "-c", "import sys; print('ready', flush=True); sys.stdin.read()",
+                                  *arguments], env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        try:
+            self.await_marker(child, b"ready\n", "the census child's readiness")
+        except BaseException:
+            child.kill()
+            child.communicate(timeout=5)
+            raise
+        return child
+
+    def test_process_state_tells_running_from_zombie_from_reaped(self):
+        # CI-70
+        child = self.ready_child()
+        try:
+            self.assertFalse(self.semantics.process_state(child.pid).startswith("Z"))
+            HOST.close_stdin(child)
+            HOST.wait_for(lambda: self.semantics.process_state(child.pid).startswith("Z"), "the exited child's zombie entry")
+        finally:
+            child.kill()
+            child.wait(timeout=5)
+        self.assertIsNone(self.semantics.process_state(child.pid))
+        listing = self.semantics.describe_processes((os.getpid(),))
+        self.assertIn(str(os.getpid()), listing)
+
+    def test_command_census_reads_each_process_argv(self):
+        # CI-71
+        census = dict(self.semantics.process_commands())
+        self.assertEqual(Path(census[os.getpid()][0]).name, Path(sys.orig_argv[0]).name)
+        self.assertEqual(census[os.getpid()][1:], sys.orig_argv[1:])
+
+    def test_launch_records_hold_arguments_and_environment_where_the_kernel_shows_them(self):
+        # CI-72
+        child = self.ready_child("argument-marker", env={"RUI_LAUNCH_MARKER": "environment-marker"})
+        try:
+            records = self.semantics.launch_records(child.pid)
+        finally:
+            child.communicate(timeout=5)
+        if not self.semantics.PROC_FS:
+            self.assertIsNone(records)
+            return
+        self.assertEqual(set(records), {"cmdline", "environ"})
+        self.assertIn(b"argument-marker", records["cmdline"])
+        self.assertIn(b"RUI_LAUNCH_MARKER=environment-marker", records["environ"])
+        with self.semantics.simulate("darwin"):
+            self.assertIsNone(self.semantics.launch_records(os.getpid()))
+
+    def test_resource_readers_observe_a_live_process(self):
+        # CI-73
+        child = self.ready_child()
+        try:
+            names = self.semantics.open_descriptor_names(child.pid)
+            self.assertGreaterEqual(len(names), 3, names)
+            self.assertGreater(self.semantics.process_resident_kib(child.pid), 0)
+            self.assertGreaterEqual(self.semantics.process_cpu_seconds(child.pid), 0)
+            memory = self.semantics.process_memory(child.pid)
+            if self.semantics.PROC_FS:
+                self.assertEqual(set(memory), {"rss_kib", "peak_kib"})
+                self.assertGreaterEqual(memory["peak_kib"], memory["rss_kib"])
+                self.assertEqual(len(self.semantics.descriptor_links(child.pid)), len(names))
+                self.assertIsNotNone(self.semantics.socket_table("unix"))
+            else:
+                self.assertIsNone(memory)
+            self.assertEqual(self.semantics.physical_footprint_peak(child.pid) is not None, self.semantics.FOOTPRINT)
+        finally:
+            child.communicate(timeout=5)
+        self.assertIsNone(self.semantics.process_memory(child.pid))
+        self.assertIsNone(self.semantics.socket_table("rui-no-such-table"))
+
+    def test_locks_exclude_other_open_descriptions_until_released(self):
+        # CI-74
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "host.lock"
+            path.touch()
+            with path.open("rb") as holder, path.open("rb") as other:
+                self.semantics.take_lock(holder)
+                self.assertFalse(self.semantics.try_lock(other))
+                self.assertFalse(self.semantics.try_lock(other, shared=True))
+                self.semantics.release_lock(holder)
+                self.assertTrue(self.semantics.try_lock(other, shared=True))
+                self.assertTrue(self.semantics.try_lock(holder, shared=True))
+                self.assertFalse(self.semantics.try_lock(holder))
 
     def test_darwin_census_fails_loudly_when_lsof_fails(self):
         def lsof(returncode, stdout="", stderr=""):

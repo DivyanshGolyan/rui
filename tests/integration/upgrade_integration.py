@@ -923,8 +923,8 @@ class TerminalScreen:
 
     def launch_overview(self):
         frame = wait_for(self.observe, "wide launch chat beside the overview", timeout=15,
-                         ready=lambda screen: "+ New Session" in screen and any(split_pane_row(row)[1] for row in screen.splitlines())
-                         and "Type a task" in screen and self.capture.draft("", 2))
+                         ready=lambda screen: "+ New chat" in screen and any(split_pane_row(row)[1] for row in screen.splitlines())
+                         and "What shall we work on?" in screen and self.capture.draft("", 2))
         assert "Settings" in frame, frame
         self.send("\x1b")
         return self.overview()
@@ -932,11 +932,11 @@ class TerminalScreen:
     def overview(self, *, ready=True):
         frame = wait_for(self.observe, "terminal overview list and footer", timeout=15,
                          ready=lambda screen: all(shown(marker, screen) for marker in
-                                                  ("+ New Session", "Settings"))
+                                                  ("+ New chat", "Settings"))
                          and "Notifications" not in screen
-                         and "Type a task" not in screen
+                         and "What shall we work on?" not in screen
                          and not any(re.match(r"\s*[›>](?: |$)", split_pane_row(row)[2]) for row in screen.splitlines()))
-        assert "Type a task" not in frame, ("overview has an editor", frame)
+        assert "What shall we work on?" not in frame, ("overview has an editor", frame)
         assert not any(re.match(r"\s*[›>](?: |$)", split_pane_row(row)[2]) for row in frame.splitlines()), ("overview has a composer", frame)
         return frame
 
@@ -2041,9 +2041,8 @@ def cancel_selected_version_check(root, binary, releases, artifacts):
                 child_pid = int(receipt.read_text().strip())
 
                 def alive():
-                    running = subprocess.run(["ps", "-p", str(child_pid), "-o", "stat="],
-                                             env=c.env, capture_output=True, text=True, timeout=5)
-                    return running.returncode == 0 and not running.stdout.strip().startswith("Z")
+                    state = os_semantics.process_state(child_pid, env=c.env)
+                    return state is not None and not state.startswith("Z")
 
                 assert alive()
                 screen.contains("checking for updates")
@@ -2053,12 +2052,7 @@ def cancel_selected_version_check(root, binary, releases, artifacts):
                 screen.save(artifacts, "selected-version-escape")
 
                 def reaped():
-                    observed = subprocess.run(["ps", "-p", str(child_pid), "-o", "stat="],
-                                              env=c.env, capture_output=True, text=True, timeout=5)
-                    if observed.returncode == 1 and not observed.stdout and not observed.stderr:
-                        return True
-                    assert observed.returncode == 0 and observed.stdout.strip(), observed
-                    return False
+                    return os_semantics.process_state(child_pid, env=c.env) is None
 
                 wait_for(reaped, "cancelled exact selected --version child reap")
                 assert releases.requests[start:] == [], "cancelled check reached latest discovery"

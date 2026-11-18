@@ -148,7 +148,7 @@ def composing(screen, draft):
     bounds = composer_bounds(screen)
     expected = {(" › " + draft).rstrip()}
     if not draft:
-        expected.add(" › Type a task")
+        expected.add(" › What shall we work on?")
     return (bounds is not None and bounds[1] == bounds[0] + 2
             and shown[bounds[0] + 1].rstrip() in expected)
 
@@ -205,8 +205,8 @@ def activity_case():
                 count = f"{index + 1} · " if index else ""
                 waiting = chrome.frame(master, b"", lambda screen, count=count, index=index:
                     f"◌ {count}WAITING-{index}" in screen and composing(screen, "")
-                    and all(screen.count(f"› WAITING-{i}") == 1
-                        and screen.count(f"second line {i}") == 1 for i in range(index + 1)))
+                    and all(f"› WAITING-{i}" not in screen
+                        and f"second line {i}" not in screen for i in range(index + 1)))
                 assert "Sending" not in waiting, waiting
             bottom = feed_bottom(waiting)
             tail = transcript_rows(waiting)[bottom - 2:bottom]
@@ -215,9 +215,9 @@ def activity_case():
             assert transcript_rows(waiting)[bottom - 1] == "◌ 3 · WAITING-2" and not rows(waiting)[bottom].strip(), waiting
             assert "queued" not in waiting.lower(), waiting
             for index in range(3):
-                assert waiting.count(f"› WAITING-{index}") == 1, waiting
-                assert waiting.count(f"second line {index}") == 1, waiting
-            assert waiting.index("› WAITING-0") < waiting.index("› WAITING-1") < waiting.index("› WAITING-2"), waiting
+                assert f"› WAITING-{index}" not in waiting, waiting
+                assert f"second line {index}" not in waiting, waiting
+            assert waiting.count("WAITING-2") == 1, waiting
             assert footer(waiting).endswith("ctrl+x stop"), waiting
             (chrome.workspace / "release").write_text("")
             done = chrome.frame(master, b"", lambda screen: "HELD-DONE" in screen
@@ -231,7 +231,103 @@ def activity_case():
         finally:
             release.set()
             (chrome.workspace / "release").write_text("")
-    print("session chrome: the running call and its clock, ◌ 3 · the newest waiting Message, ctrl+x stop; full waiting Messages stay visible once before and after completion", flush=True)
+    print("session chrome: the running call and its clock, ◌ 3 · the newest waiting Message, ctrl+x stop; waiting Messages appear only in the queue until applied, then once as bands", flush=True)
+
+
+
+def thinking_queue_case():
+    for width, height in ((140, 40), (46, 30)):
+        first_release, next_release = threading.Event(), threading.Event()
+        first = fixture.sse_answer("thinking-first", "r1", "m1", "FIRST-DONE")[0]
+        second = fixture.sse_answer("thinking-second", "r2", "m2", "SECOND-DONE")[0]
+        with Chrome("rui-thinking-queue.", [(first, first_release), (second, next_release)]) as chrome:
+            session = chrome.session()
+            master, caller, _ = chrome.open(session, lambda screen: True, columns=width, height=height)
+            try:
+                working = chrome.frame(master, b"FIRST-QUESTION\r", lambda screen:
+                    "Thinking" in screen and "FIRST-QUESTION" in screen)
+                assert "MIDTURN-HI" not in working, working
+                queued = chrome.frame(master, b"MIDTURN-HI\r", lambda screen:
+                    "◌ MIDTURN-HI" in screen and composing(screen, ""))
+                assert "Thinking" in queued, queued
+                assert queued.count("MIDTURN-HI") == 1 and "› MIDTURN-HI" not in queued, queued
+                first_release.set()
+                taken = chrome.frame(master, b"", lambda screen:
+                    "FIRST-DONE" in screen and "› MIDTURN-HI" in screen and "Thinking" in screen, timeout=30)
+                assert taken.count("MIDTURN-HI") == 1 and "◌ MIDTURN-HI" not in taken, taken
+                next_release.set()
+                done = chrome.frame(master, b"", lambda screen: "SECOND-DONE" in screen, timeout=30)
+                assert done.count("MIDTURN-HI") == 1 and "◌ MIDTURN-HI" not in done, done
+                chrome.leave(master, caller)
+            finally:
+                first_release.set()
+                next_release.set()
+    print("session chrome: a mid-Thinking submission is queued once, then shown once as a taken Message at both sizes", flush=True)
+
+
+def rejected_tool_thinking_queue_case():
+    for width, height in ((140, 40), (46, 30)):
+        next_release, final_release = threading.Event(), threading.Event()
+        calls = fixture.sse_tool_calls("rejected-thinking", [("unavailable_tool", "unknown-call", "{}")])
+        answer = fixture.sse_answer("rejected-after", "r1", "m1", "AFTER-REJECTION")[0]
+        final = fixture.sse_answer("rejected-final", "r2", "m2", "FINAL-ANSWER")[0]
+        with Chrome("rui-rejected-thinking.", [calls, (answer, next_release), (final, final_release)]) as chrome:
+            session = chrome.session()
+            master, caller, _ = chrome.open(session, lambda screen: True, columns=width, height=height)
+            try:
+                chrome.frame(master, b"FIRST-QUESTION\r", lambda screen:
+                    "Tool call · rejected" in screen and "Thinking" in screen, timeout=30)
+                initial = chrome.frame(master, b"MIDTURN-HI\r", lambda screen:
+                    "◌ MIDTURN-HI" in screen and composing(screen, ""))
+                assert initial.count("MIDTURN-HI") == 1 and "› MIDTURN-HI" not in initial, initial
+                for keys, draft in ((b"x", "x"), (b"\x7f", ""), (b"y", "y"), (b"\x7f", "")):
+                    stable = chrome.frame(master, keys, lambda screen:
+                        composing(screen, draft) and re.search(r"Thinking · \d+s", screen), timeout=15)
+                    assert "Tool call · rejected" in stable and stable.count("MIDTURN-HI") == 1, stable
+                    assert "◌ MIDTURN-HI" in stable and "› MIDTURN-HI" not in stable, stable
+                next_release.set()
+                taken = chrome.frame(master, b"", lambda screen:
+                    "AFTER-REJECTION" in screen and "› MIDTURN-HI" in screen and "Thinking" in screen, timeout=30)
+                assert taken.count("MIDTURN-HI") == 1 and "◌ MIDTURN-HI" not in taken, taken
+                final_release.set()
+                chrome.frame(master, b"", lambda screen: "FINAL-ANSWER" in screen, timeout=30)
+                chrome.leave(master, caller)
+            finally:
+                next_release.set()
+                final_release.set()
+    print("session chrome: rejected tool and resumed Thinking keep a queued follow-up once until taken at both sizes", flush=True)
+
+
+
+def rejection_after_queued_send_case():
+    for width, height in ((140, 40), (46, 30)):
+        first_release, next_release = threading.Event(), threading.Event()
+        calls = fixture.sse_tool_calls("queued-before-rejection", [("unavailable_tool", "unknown-call", "{}")])
+        answer = fixture.sse_answer("after-queued-rejection", "r1", "m1", "FINAL-ANSWER")[0]
+        with Chrome("rui-queued-before-rejection.", [(calls, first_release), (answer, next_release)]) as chrome:
+            session = chrome.session()
+            master, caller, _ = chrome.open(session, lambda screen: True, columns=width, height=height)
+            try:
+                chrome.frame(master, b"FIRST-QUESTION\r", lambda screen: "Thinking" in screen)
+                queued = chrome.frame(master, b"MIDTURN-HI\r", lambda screen:
+                    "◌ MIDTURN-HI" in screen and composing(screen, ""))
+                assert queued.count("MIDTURN-HI") == 1 and "› MIDTURN-HI" not in queued, queued
+                first_release.set()
+                taken = chrome.frame(master, b"", lambda screen:
+                    "Tool call · rejected" in screen and "Thinking" in screen and "› MIDTURN-HI" in screen, timeout=30)
+                assert taken.count("MIDTURN-HI") == 1 and "◌ MIDTURN-HI" not in taken, taken
+                for keys, draft in ((b"x", "x"), (b"\x7f", ""), (b"y", "y"), (b"\x7f", "")):
+                    stable = chrome.frame(master, keys, lambda screen:
+                        composing(screen, draft) and re.search(r"Thinking · \d+s", screen), timeout=15)
+                    assert "› MIDTURN-HI" in stable and stable.count("MIDTURN-HI") == 1, stable
+                    assert "◌ MIDTURN-HI" not in stable, stable
+                next_release.set()
+                chrome.frame(master, b"", lambda screen: "FINAL-ANSWER" in screen, timeout=30)
+                chrome.leave(master, caller)
+            finally:
+                first_release.set()
+                next_release.set()
+    print("session chrome: a rejected tool after a queued send preserves one representation as work continues", flush=True)
 
 
 def send_state_case():
@@ -742,16 +838,20 @@ def keys_case():
             assert all(not line.strip() for line in pane_rows[used_rows:]), keys
             for absent in ("/help", "Ctrl-X twice", "shift+enter or ctrl+j", "Commands", "Marks", "Esc returns", "↑↓ · enter change · esc close", "‹ Rui · settings", 'ctrl+g', 'ctrl+d', 'ctrl+n', 'ctrl+end', 'ctrl+c/d', 'pgup/pgdn', 'first session', 'latest / last', 'scroll / select'):
                 assert absent not in keys, (width, absent, keys)
-            settings = chrome.frame(master, b"\rx\x1b", lambda screen: "Notifications" in screen and "Version" in screen)
+            settings = chrome.frame(master, b"\r\x1b", lambda screen: "Notifications" in screen and "Version" in screen)
             assert "earlier message" not in settings, settings
             if width == 140:
                 chrome.frame(master, b"\x1b", lambda screen:
                              latest(screen, "KEYS-ANSWER") and composing(screen, "")
                              and "Rui · settings" not in screen)
+                chrome.frame(master, gesture, lambda screen: "Notifications" in screen and "Version" in screen)
+                chrome.frame(master, b"x", lambda screen: latest(screen, "KEYS-ANSWER") and composing(screen, "x")
+                             and "Notifications" not in screen)
+                chrome.frame(master, b"\x7f", lambda screen: composing(screen, ""))
             else:
                 chrome.frame(master, b"\x1b", lambda screen: "Settings" in screen and "Rui · settings" not in screen and not any(line.startswith(" ‹ ") for line in rows(screen)))
             chrome.leave(master, caller)
-    print("session chrome: Settings > Keys shows src/keymap.zig's reference rows aligned, paired at 140 columns and one column at 46; Enter/text are inert and Esc returns one layer, preserving a wide conversation", flush=True)
+    print("session chrome: Settings > Keys shows src/keymap.zig's reference rows aligned, paired at 140 columns and one column at 46; Enter is inert, Esc returns one layer, and printable input returns to the wide conversation", flush=True)
 
 
 def keys_reference():
@@ -786,6 +886,9 @@ def main():
     send_state_case()
     send_recovery_case()
     activity_case()
+    thinking_queue_case()
+    rejected_tool_thinking_queue_case()
+    rejection_after_queued_send_case()
     scroll_marker_case()
     pages_case()
     info_natural_height_case()

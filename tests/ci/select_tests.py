@@ -34,7 +34,7 @@ FUNCTIONAL_CORES = "src/logic_tests.zig"
 STACK_FRAMES_GATE = "tests/ci/stack_frames.json"
 
 MODULES = {
-    "url": "src/url.zig",
+    "url": "src/url.zig", "os": "src/os/os.zig",
     "test_poll": "src/testing/poll.zig", "h2": "src/h2/h2.zig", "tls_client": "src/tls_client/tls_client.zig", "rui_client": CALLER, "client": CALLER,
     "mysql_connection": "src/store/wire/mysql_connection.zig", "preferences": "src/preferences.zig",
     "codex_credentials": "src/codex_credentials.zig", "AnswerRenderer": "src/AnswerRenderer.zig",
@@ -64,6 +64,11 @@ FIXTURES = {
     "admission-debug-integration": ((I + "admission_integration.sh",), (), ()),
     "dispatch-integration": ((I + "dispatch_integration.py",), (), ("src/model_adapter.zig", *MODEL)),
     "dispatch-debug-integration": ((I + "dispatch_integration.py",), (), ()),
+    "cli-image-integration": ((I + "cli_image_integration.py",), (),
+                              (CALLER, HOST, "src/InputCapture.zig", "src/image_intake.zig")),
+    "public-parts-integration": ((I + "public_parts_integration.py",), ("src/store/tests/public_parts.zig",),
+                                 ("src/store/domain/public_parts.zig", "src/protocol.zig", "src/protocol_reply.zig",
+                                  "src/cli_args.zig", RUI, HOST)),
     "read-image-integration": ((I + "read_image_integration.py",), (),
                                ("src/server_read_image.zig", "src/os/read_image_file.zig", "src/input_media.zig")),
     "bash-integration": ((I + "bash_integration.py",), (), BASH),
@@ -417,7 +422,7 @@ RULES = (
      "Provider model lists: the Host's fetch and the wire reply follow"),
     (RENDERER_HARNESSES, (), (), "Renderer harnesses: only the promotion renderer contracts run them"),
     (("src/openapi*.zig", "openapi.json"), ("test",), ("test",),
-     "The wire contract: openapi.json must equal what the wire types emit"),
+     "WIR-4 published request schemas and generated wire contract"),
     (("clients/ts/*",), ("ts-client",), ("ts-client",), "The TypeScript client and its launch of a real Host"),
     (("tests/integration/mcp_sdk/*",), ("settings-integration", "ts-client"), ("settings-integration", "ts-client"),
      "The MCP SDK servers a settings document starts"),
@@ -483,6 +488,18 @@ RULES = (
     (("release/publish.sh",), ("host-status-integration",), ("host-status-integration",),
      "Installer report reads the CLI's defaults and Host status JSON"),
 )
+
+RULES += ((('src/host_reply.zig', 'src/command_reply.zig', 'src/command_spec.zig',
+            'src/store/domain/command.zig', 'src/session_skills.zig'),
+           ('request-wait-integration', 'skills-integration'), (),
+           'Message input identity and skill binding remain valid through admission and recovery'),)
+
+RULES += ((("src/InputCapture.zig", "src/client.zig", "src/mutation_answer.zig", "src/cli_args.zig", "src/cli_grammar.zig"),
+           ("test-native", "cli-image-integration", "human-cli-integration", "request-wait-integration", "read-image-integration",
+            "session-list-integration", "dispatch-integration", "codex-integration"),
+           ("test-native", "cli-image-integration", "human-cli-integration", "request-wait-integration", "read-image-integration",
+            "session-list-integration", "dispatch-integration", "codex-integration"),
+           "Ordered message capture, recovery and provider delivery invariants"),)
 
 LIVE_MYSQL_DIALECT_TARGETS = frozenset({"test", "test-store", "check", "check-full"})
 LIVE_POSTGRES_TARGETS = frozenset({"test-pg", "check", "check-full"})
@@ -620,12 +637,16 @@ def matches(path, patterns):
 
 
 def mysql_provisioning(targets, part, platform, mysql_suites):
+    """Which live engine servers a Linux shard starts."""
     targets = set(targets)
-    dialect = platform == "linux" and bool(
+    linux = platform == "linux"
+    dialect = linux and bool(
         targets & (LIVE_MYSQL_DIALECT_TARGETS - {"check-full"})
         or "check-full" in targets and part != "callers")
-    return {"live_mysql": platform == "linux" and (dialect or bool(targets & mysql_suites)),
-            "mysql_dialect": dialect}
+    return {"live_mysql": linux and (dialect or bool(targets & mysql_suites)),
+            "mysql_dialect": dialect,
+            "live_postgres": linux and bool(targets & (LIVE_POSTGRES_TARGETS - {"check-full"})
+                                            or "check-full" in targets and part != "callers")}
 
 
 def live_mysql_suites(targets, mysql_suites):
@@ -657,6 +678,42 @@ def normalize(targets: set) -> set:
     if "check-full" in checks:
         checks.discard("check")
     return {target for target in checks if not covers(target, checks - {target})}
+
+
+# The PR tier runs unit roots and the fixtures whose own sources changed; everything else,
+# including every whole-suite gate and live-server suite, runs on main and in promotion.
+WHOLE_SUITE_GATES = frozenset({"check", "check-full", "test", "test-full"})
+PR_UNIT_ROOTS = frozenset({"test-native", "test-store", "test-logic", "test-h2", "test-pg"})
+# Store unit tests run on a PR only for a change to the Store itself.
+STORE_PATHS = ("src/store.zig", "src/store/*")
+
+
+def own_fixture(target, paths):
+    """Whether the diff touches the fixture's own script, executable or FIXTURES owner."""
+    scripts, executables, owners = FIXTURES[target]
+    return any(matches(path, (*scripts, *executables, *owners)) for path in paths)
+
+
+def fast_tier(targets, paths):
+    """The PR tier of a raw (unnormalized) selection.
+
+    It keeps the unit roots the diff reaches (a whole-suite gate becomes
+    `test-native` and `test-logic`; `test-store` only for Store paths) and the
+    fixtures whose own sources the diff touches. A fixture the diff reaches
+    only through imports runs on main and in promotion, never on the PR.
+    """
+    targets = set(targets)
+    fast = targets & PR_UNIT_ROOTS
+    if targets & WHOLE_SUITE_GATES:
+        fast |= {"test-native", "test-logic"}
+    if not any(matches(path, STORE_PATHS) for path in paths):
+        fast.discard("test-store")
+    fast |= {target for target in targets & FIXTURES.keys() - PR_UNIT_ROOTS - {"mysql-wire-integration"}
+             if own_fixture(target, paths)}
+    for broad, covered in FIXTURE_COVERS.items():
+        if broad in fast:
+            fast -= covered
+    return sorted(fast)
 
 
 def select(paths, phase, available, graph=None, contents=None, fixture_literals=None):
@@ -775,6 +832,7 @@ def select(paths, phase, available, graph=None, contents=None, fixture_literals=
                    ({"installer-integration"} if any(matches(path, INSTALLER_PATHS) for path in paths) else set())
                    if targets else set())
         native_targets = set()
+    fast_targets = fast_tier(targets, paths)
     targets = normalize(targets)
     native_targets = normalize(native_targets)
     mysql_suites = live_mysql_suites(targets, graph.live_mysql)
@@ -790,7 +848,7 @@ def select(paths, phase, available, graph=None, contents=None, fixture_literals=
     missing = (targets | native_targets) - available
     if missing:
         raise ValueError(f"Selected targets absent from the build: {sorted(missing)}")
-    return {"phase": phase, "targets": sorted(targets),
+    return {"phase": phase, "targets": sorted(targets), "fast_targets": fast_targets,
             "mysql_suites": sorted(graph.live_mysql),
             "server_targets": sorted((targets & live_targets) | ({"test"} if "test" in targets and "test-store" in live_targets else set())),
             "live_needs": sorted(([root, reason] for root, reason in live_needs), key=lambda need: (need[0] or "", need[1])),

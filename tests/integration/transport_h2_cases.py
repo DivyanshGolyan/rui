@@ -2,7 +2,6 @@ import http.server
 import json
 import os
 import pathlib
-import re
 import sqlite3
 import ssl
 import subprocess
@@ -14,7 +13,7 @@ import time
 
 import model_fixture as dispatch
 from product_defaults import compaction_trigger
-from host_process import HostDiagnostics, ReleaseGate, TestHTTPServer, TRANSPORT_EXCHANGE_LIMIT, _failure_destination, preserve_failure_metadata, wait_for_execution_release as wait_for_drain
+from host_process import HostDiagnostics, PauseGate, ReleaseGate, TestHTTPServer, TRANSPORT_EXCHANGE_LIMIT, _failure_destination, preserve_failure_metadata, wait_for_execution_release as wait_for_drain
 import os_semantics
 from h2_fixture import Endpoint, closed_host_request
 
@@ -79,29 +78,8 @@ class HeldHandler(http.server.BaseHTTPRequestHandler):
         pass
 
 
-def host_physical_peak(pid):
-    if not os_semantics.FOOTPRINT:
-        return None
-    report = subprocess.run(
-        ["/usr/bin/footprint", "-f", "bytes", "-p", str(pid)],
-        capture_output=True, text=True, check=True, timeout=30,
-    ).stdout
-    return int(re.search(r"^\s*phys_footprint_peak: (\d+) B$", report, re.M).group(1))
-
-
 def open_descriptors(pid):
-    if os.path.isdir(f"/proc/{pid}/fd"):
-        names = []
-        for fd in os.listdir(f"/proc/{pid}/fd"):
-            try:
-                names.append(os.readlink(f"/proc/{pid}/fd/{fd}"))
-            except FileNotFoundError:
-                pass
-        return sum("etilqs_" not in name for name in names)
-    rows = subprocess.check_output(["/usr/sbin/lsof", "-n", "-P", "-p", str(pid)],
-                                   text=True).splitlines()
-    return sum(bool(re.fullmatch(r"\d+[rwu]?", row.split()[3])) and "etilqs_" not in row
-               for row in rows[1:])
+    return sum("etilqs_" not in name for name in os_semantics.open_descriptor_names(pid))
 
 
 def assert_round_trip_history(streams, capacity, rounds, answers, sessions):
@@ -215,7 +193,7 @@ def round_trip(root, endpoint, capacity, ca_file, rounds=2, *, observe=None):
             )
             idle_fds.append(requests.idle_descriptors(drain_deadline))
             if endpoint.observed_shape:
-                physical_peaks.append(host_physical_peak(host.pid))
+                physical_peaks.append(os_semantics.physical_footprint_peak(host.pid))
                 print(json.dumps({"case": "observed_shape_wave", "round": round_number + 1,
                                   "capacity": capacity, "host_physical_peak_bytes": physical_peaks[-1],
                                   "native_connection_observations": True,
@@ -346,14 +324,10 @@ def held_population(root):
                     if key != held_key:
                         wait_result(key, result_deadline)
 
-                def cpu_seconds():
-                    value = subprocess.check_output(["ps", "-o", "time=", "-p", str(host.pid)], text=True).strip()
-                    return sum(float(part) * 60 ** index for index, part in enumerate(reversed(value.split(":"))))
-
                 time.sleep(0.2)
-                before_cpu = cpu_seconds()
+                before_cpu = os_semantics.process_cpu_seconds(host.pid)
                 time.sleep(3)
-                held_cpu = cpu_seconds() - before_cpu
+                held_cpu = os_semantics.process_cpu_seconds(host.pid) - before_cpu
                 with endpoint.lock:
                     assert len(endpoint.requests) == capacity and endpoint.active == 1, endpoint.requests
                 held_fds = open_descriptors(host.pid)
@@ -444,8 +418,8 @@ def held_streams(root, endpoint, after_progress=False):
                           "interrupted stream reset", deadline=result_deadline)
         assert not endpoint.release.is_set()
         assert dispatch.observe(store, "held-message-1").get("result") is None
-        held_rss_kib = int(subprocess.check_output(["ps", "-o", "rss=", "-p", str(host.pid)]))
-        held_physical_peak = host_physical_peak(host.pid) if endpoint.observed_shape else None
+        held_rss_kib = os_semantics.process_resident_kib(host.pid)
+        held_physical_peak = os_semantics.physical_footprint_peak(host.pid) if endpoint.observed_shape else None
         endpoint.release.set()
         for index in range(1, 100):
             key = f"held-message-{index}"
@@ -463,8 +437,8 @@ def held_streams(root, endpoint, after_progress=False):
             result_deadline,
         )
         assert len(endpoint.connections) == 1, endpoint.connections
-        idle_rss_kib = int(subprocess.check_output(["ps", "-o", "rss=", "-p", str(host.pid)]))
-        idle_physical_peak = host_physical_peak(host.pid) if endpoint.observed_shape else None
+        idle_rss_kib = os_semantics.process_resident_kib(host.pid)
+        idle_physical_peak = os_semantics.physical_footprint_peak(host.pid) if endpoint.observed_shape else None
         print(json.dumps({"case": "held_observed_shape" if endpoint.observed_shape else "held_streams",
                           "phase": phase, "live_streams": 100,
                           "connections": 1, "cancelled_before_release": True,
@@ -570,12 +544,13 @@ def refused_stream(root, endpoint, phase):
 
 
 def flow_while_execution_held(root, endpoint):
+    # PAU-17
     store = root / "flow-store"
-    gate = ReleaseGate(root / "flow-settlement-gate")
+    gate = PauseGate("model.result_ready", occurrence=1)
     host = dispatch.start_host(
         store, f"https://localhost:{endpoint.server_address[1]}/responses",
         "--set", "network.caFile=" + str(str(root / "cert.pem")),
-        "--test-phase-trace", "--test-model-result-gate-path", str(gate.path), active_capacity=2,
+        "--test-phase-trace", active_capacity=2, pause=gate,
     )
     try:
         diagnostics = HostDiagnostics(host)
@@ -585,11 +560,11 @@ def flow_while_execution_held(root, endpoint):
             dispatch.message(root, store, f"flow-{name}-message", sessions[name], name)
         assert endpoint.ready.wait(20), "both flow-probe streams did not become live"
         quick = dispatch.observe(store, "flow-quick-message")["binding"]
-        diagnostics.wait("sealed_before_settlement", timeout=20, operation=quick["operation"])
+        arrival = gate.wait(operation=quick["operation"])
+        assert arrival["context"]["attempt"] == int(quick["attempt"]), arrival
         endpoint.flow_release.set()
         assert endpoint.flow_ping_acked.wait(10), "no PING answer while execution was held"
         assert endpoint.flow_body_sent.wait(10), "the sibling stream stalled while execution was held"
-        gate.assert_held()
         assert dispatch.observe(store, "flow-quick-message").get("result") is None
         gate.release()
         result_deadline = time.monotonic() + 20
@@ -604,7 +579,7 @@ def flow_while_execution_held(root, endpoint):
         print(json.dumps({"case": "flow_while_execution_held", "streams": 2, "connections": 1,
                           "held_body_bytes": len(endpoint.answers["flow"]), "ping_answered": True}), flush=True)
     finally:
-        gate.release()
+        gate.close()
         dispatch.stop_host(host)
 
 

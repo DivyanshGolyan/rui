@@ -1,11 +1,11 @@
 const std = @import("std");
-const builtin = @import("builtin");
 const c = @import("tls_client").c;
 const h2 = @import("h2.zig");
-const Waker = @import("Waker.zig");
+const os = @import("os");
+const Waker = os.Waker;
 const job = @import("job.zig");
 
-pub const enabled = builtin.os.tag.isDarwin();
+pub const enabled = os.sec_trust;
 
 pub const Verdict = enum { trusted, untrusted, failed };
 

@@ -5,7 +5,7 @@
 ## Hosted qualification
 
 [Linux qualification](../../.github/workflows/qualify-linux.yml) runs full native gates in isolated jobs on demand, including credentials, measurement checks and long witnesses.
-CI has no scheduled workflows.
+CI's only scheduled workflow is [Qualify main](release.md#qualify-main), which runs the promotion tier on `main`.
 Full native and resource campaigns remain available through manual qualification on both platforms.
 [report_issue.py](../../tests/ci/report_issue.py) remains an on-demand tool for recording failure signatures from full job logs.
 A signature names the failing fixture and assertion, a Zig test, or a gate's own error.

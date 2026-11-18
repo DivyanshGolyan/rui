@@ -8,7 +8,6 @@ import unittest
 from unittest.mock import patch
 
 import conflict_alert
-from main_build import MARKER
 import pr_timeline as timeline
 from report_issue import LABEL
 
@@ -300,7 +299,7 @@ class TimelineTest(unittest.TestCase):
         self.assertEqual(days[1]["median_merged_to_released_minutes"], 41.27)
         self.assertTrue(all(day["red_main_minutes"] is None for day in days))
 
-    def issue(self, number, created, *events, body=MARKER, **extra):
+    def issue(self, number, created, *events, body=timeline.RED_MAIN_MARKER, **extra):
         closes = [at for event, at in events if event == "closed"]
         state = "open" if not events or events[-1][0] == "reopened" else "closed"
         row = {"number": number, "created_at": created, "closed_at": closes[-1] if closes else None,
@@ -321,7 +320,7 @@ class TimelineTest(unittest.TestCase):
             return [{"event": "labeled", "created_at": "2026-11-14T00:00:01Z"}, *events[int(match[1])]]
         return api, calls
 
-    def test_red_main_is_main_build_issues_only(self):
+    def test_red_main_is_main_red_and_main_build_issues_only(self):
         api, calls = self.red_main_api([
             self.issue(1, "2026-11-14T23:00:00Z", ("closed", "2026-11-15T01:30:00Z")),
             self.issue(2, "2026-11-15T11:00:00Z"),
@@ -329,12 +328,17 @@ class TimelineTest(unittest.TestCase):
                        ("reopened", "2026-11-14T05:00:00Z")),
             self.issue(4, "2026-11-14T00:00:00Z", body="<!-- ci-signature: {} -->"),
             self.issue(5, "2026-11-14T00:00:00Z", body=None),
-            self.issue(6, "2026-11-14T00:00:00Z", pull_request={"url": "..."})])
+            self.issue(6, "2026-11-14T00:00:00Z", pull_request={"url": "..."}),
+            self.issue(7, "2026-11-14T01:00:00Z", ("closed", "2026-11-14T01:30:00Z"), body="<!-- ci-signature: {} -->",
+                       labels=[{"name": "ci-red"}, {"name": timeline.RED_MAIN_LABEL}]),
+            self.issue(8, "2026-11-14T00:00:00Z", body="<!-- ci-signature: {} -->",
+                       labels=[{"name": "ci-red"}, {"name": "promotion-red"}])])
         self.assertEqual(timeline.red_main(api, "2026-11-15T12:00:00Z"), [
+            ("2026-11-14T01:00:00Z", "2026-11-14T01:30:00Z"),
             ("2026-11-14T02:00:00Z", "2026-11-14T03:00:00Z"), ("2026-11-14T05:00:00Z", "2026-11-15T12:00:00Z")])
         self.assertIn("state=all", calls[0])
         self.assertIn(f"labels={LABEL}", calls[0])
-        self.assertEqual(sorted(path.split("/")[4] for path in calls[1:]), ["1", "2", "3"])
+        self.assertEqual(sorted(path.split("/")[4] for path in calls[1:]), ["1", "2", "3", "7"])
 
     def test_red_main_counts_a_reopened_issue_only_while_open(self):
         api, _ = self.red_main_api([self.issue(

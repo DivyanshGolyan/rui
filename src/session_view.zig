@@ -1447,7 +1447,7 @@ test "a descendant's ending names the agent without codes or advice" {
     try agentEnded(&sink, "9f8e7d", "provider_http_401", false);
     try agentEnded(&sink, "9f8e7d", "cancelled", false);
     try agentEnded(&sink, "bad\x1b[2J", "malformed_provider_output", false);
-    try std.testing.expectEqualStrings("× Agent 9f8e7d · Sign-in expired\n▪ Agent 9f8e7d stopped\n× Agent bad\\x1b[2J · Model reply unreadable\n", out.buffered());
+    try std.testing.expectEqualStrings("× Agent 9f8e7d · Sign-in expired\n▪ Agent 9f8e7d stopped\n× Agent bad\\x1b[2J · The model's reply didn't come through\n", out.buffered());
 }
 
 test "an ended Turn shows one plain cause line for every failure class, and its provider's usage place for quota" {
@@ -1474,8 +1474,8 @@ test "an ended Turn shows one plain cause line for every failure class, and its 
         .{ "retry_exhausted", null, "× Retries ran out" },
         .{ "cancelled", null, "▪ Stopped" },
         .{ "provider_http_400", null, "× Provider refused the request" },
-        .{ "unknown\x1b[2J", null, "× Something went wrong" },
-        .{ "malformed_provider_output", null, "× Model reply unreadable" },
+        .{ "unknown\x1b[2J", null, "× That didn't work" },
+        .{ "malformed_provider_output", null, "× The model's reply didn't come through" },
     };
     var seen: std.enums.EnumSet(failure_class.Class) = .empty;
     inline for (cases) |case| {
@@ -1503,9 +1503,9 @@ test "turn and agent ending marks use their table tones" {
     try workEnded(&sink, "cancelled", null, true);
     try agentEnded(&sink, "9f8e7d", "malformed_provider_output", true);
     try agentEnded(&sink, "9f8e7d", "cancelled", true);
-    try std.testing.expectEqualStrings("\x1b[91m×\x1b[39m Model reply unreadable\n" ++
+    try std.testing.expectEqualStrings("\x1b[91m×\x1b[39m The model's reply didn't come through\n" ++
         "\x1b[39m▪\x1b[39m Stopped\n" ++
-        "\x1b[91m×\x1b[39m Agent 9f8e7d · Model reply unreadable\n" ++
+        "\x1b[91m×\x1b[39m Agent 9f8e7d · The model's reply didn't come through\n" ++
         "\x1b[39m▪\x1b[39m Agent 9f8e7d stopped\n", out.buffered());
 }
 
@@ -1529,24 +1529,6 @@ test "ending tails are quiet and joined in destination then key order" {
     try std.testing.expectEqualStrings("× Cause · Key\n", out.buffered());
 }
 
-pub fn showsAtAdmission(position: u64, value: protocol.ActivityItem.Message, queued: protocol.Queued, held: bool) bool {
-    return value.state == .queued and !held and position == queued.oldest_position;
-}
-
-test "a waiting Message shows at its Admission only when nothing holds it and nothing older waits" {
-    const body: protocol.ActivityItem.Content = .{ .length = 1, .digest = @splat(0) };
-    const waiting: protocol.ActivityItem.Message = .{ .admission = 12, .key = .{}, .turn = null, .state = .queued, .content = body, .admitted_at = 1, .sender = null };
-    const alone: protocol.Queued = .{ .count = 1, .oldest_position = 30, .newest_admission = 12, .newest_position = 30 };
-    try std.testing.expect(showsAtAdmission(30, waiting, alone, false));
-    try std.testing.expect(!showsAtAdmission(30, waiting, alone, true));
-    try std.testing.expect(!showsAtAdmission(34, waiting, .{ .count = 2, .oldest_position = 30, .newest_admission = 12, .newest_position = 34 }, false));
-    var taken = waiting;
-    taken.state = .applied;
-    try std.testing.expect(!showsAtAdmission(30, taken, .{}, false));
-    taken.state = .excluded;
-    try std.testing.expect(!showsAtAdmission(30, taken, alone, false));
-}
-
 pub const Fold = union(enum) { none, closed, open: *tool_fold.Output };
 
 pub fn tight(value: protocol.ActivityItem.Value) bool {
@@ -1566,9 +1548,10 @@ pub fn gap(above: bool, below: bool, tool_pair: bool) bool {
 pub fn render(requests: client.Requests, store: []const u8, session: []const u8, provider: ?protocol.Provider, item: protocol.ActivityItem, queued: protocol.Queued, held: bool, sink: anytype, colour: bool, home: []const u8, destination: Destination, fold: Fold) !bool {
     switch (item.value) {
         .admission => |value| {
-            if (!showsAtAdmission(item.position, value, queued, held)) return false;
-            try message(requests, store, session, item, value, .none, sink, colour);
-            return true;
+            _ = value;
+            _ = queued;
+            _ = held;
+            return false;
         },
         .received => |value| try message(requests, store, session, item, value, .none, sink, colour),
         .user => |value| {

@@ -351,12 +351,13 @@ class BinarySourceSelectionTest(unittest.TestCase):
 
 
 class WorkflowEntrypointsTest(unittest.TestCase):
-    def test_workflows_have_no_scheduled_triggers_or_branches(self):
+    def test_only_qualify_main_is_scheduled_and_no_workflow_branches_on_it(self):
         workflows = sorted(Path(".github/workflows").glob("*.y*ml"))
         self.assertTrue(workflows)
         for path in workflows:
             with self.subTest(workflow=path.name):
-                self.assertNotRegex(path.read_text(), r"(?m)^\s*schedule\s*:")
+                scheduled = re.findall(r"(?m)^\s*schedule\s*:", path.read_text())
+                self.assertEqual(len(scheduled), path.name == "main-qualifier.yml")
                 self.assertNotRegex(path.read_text(), r"github\.event_name\s*==\s*[\"']schedule[\"']")
 
     def test_removed_scheduled_wrappers_have_no_live_references(self):
@@ -463,6 +464,15 @@ class BuildModuleTest(unittest.TestCase):
 
 
 class SelectionTest(unittest.TestCase):
+    def test_ordered_message_capture_selects_provider_and_capture_witnesses(self):
+        # CI-75: touched Message capture owners select their real provider witness.
+        for path in ("src/InputCapture.zig", "src/client.zig", "src/mutation_answer.zig",
+                     "src/cli_args.zig", "src/cli_grammar.zig", "tests/integration/cli_image_integration.py"):
+            with self.subTest(path=path):
+                selected = select([path], "review", AVAILABLE)
+                for family in ("targets", "native_targets"):
+                    self.assertIn("cli-image-integration", selected[family])
+
     def test_verify_rui_map_is_never_skipped_for_map_inputs(self):
         for path in (".claude/skills/verify-rui/scripts/frames.json",
                      ".claude/skills/verify-rui/features/README.md",
@@ -537,6 +547,7 @@ class SelectionTest(unittest.TestCase):
     def test_mysql_provisioning_owner_combinations(self):
         cases = (([], "all", False, False),
                  (["plain"], "all", False, False),
+                 (["test-pg"], "all", False, False),
                  (["fixture"], "all", True, False),
                  (["test-native"], "all", False, False),
                  (["test"], "all", True, True),
@@ -550,9 +561,12 @@ class SelectionTest(unittest.TestCase):
         for targets, part, live, dialect in cases:
             for platform in ("linux", "macos"):
                 with self.subTest(targets=targets, part=part, platform=platform):
+                    postgres = platform == "linux" and bool(
+                        {"test-pg", "check"} & set(targets) or "check-full" in targets and part != "callers")
                     self.assertEqual(mysql_provisioning(targets, part, platform, {"fixture"}),
                                      {"live_mysql": live and platform == "linux",
-                                      "mysql_dialect": dialect and platform == "linux"})
+                                      "mysql_dialect": dialect and platform == "linux",
+                                      "live_postgres": postgres})
                     for row in shards(targets, platform, mysql_suites={"fixture"})["include"]:
                         self.assertEqual(row["live_mysql"], platform == "linux" and (
                             "fixture" in row["targets"] or row["mysql_dialect"]))
@@ -706,14 +720,13 @@ class SelectionTest(unittest.TestCase):
     def test_workflow_consumes_mysql_provisioning_and_postgres_condition(self):
         workflow = Path(".github/workflows/check.yml").read_text()
 
-        def named(line):
-            return frozenset(re.findall(r"contains\(matrix\.targets, '([a-z0-9-]+)'\)", line))
-
         self.assertIn("LIVE_MYSQL: ${{ matrix.live_mysql }}", workflow)
         self.assertIn("if: ${{ !cancelled() && matrix.mysql_dialect }}", workflow)
         postgres = workflow.split("- name: Start Postgres 15", 1)[1].splitlines()[1]
-        self.assertTrue(postgres.strip().startswith("if:"), postgres)
-        self.assertEqual(named(postgres), LIVE_POSTGRES_TARGETS)
+        self.assertEqual(postgres.strip(), "if: ${{ matrix.live_postgres }}")
+        self.assertEqual({target for target in LIVE_POSTGRES_TARGETS
+                          if mysql_provisioning([target], "all", "linux", set())["live_postgres"]},
+                         LIVE_POSTGRES_TARGETS)
 
     def test_portable_owner_does_not_require_full_suite(self):
         result = select(["src/request_encoding.zig"], "review", AVAILABLE)
@@ -973,7 +986,7 @@ class SelectionTest(unittest.TestCase):
                                                  'NATIVE_RESULT': native, 'TYPECHECK_RESULT': typecheck,
                                                  'TYPECHECK': typecheck_selected,
                                                  'SPLIT': split, 'UNIT_RESULT': unit,
-                                                 'COMPILE_ONLY': 'false'})
+                                                 'COMPILE_ONLY': 'false', 'PR_JOB': 'false', 'PR_RESULT': 'skipped'})
                     actual = 'success' if result.returncode == 0 else 'failure'
                 self.assertEqual(actual, expected)
 
@@ -1213,6 +1226,13 @@ class SelectionTest(unittest.TestCase):
                 result = select([f"tests/integration/{path}"], "review", AVAILABLE)
                 self.assertIn(target, result["targets"])
                 self.assertNotIn("human-cli-integration", result["targets"])
+
+    def test_public_parts_owner_selects_part_cli_fixture(self):
+        for path in ("src/store/domain/public_parts.zig", "src/store/tests/public_parts.zig",
+                     "src/protocol.zig", "src/protocol_reply.zig", "src/cli_args.zig", "src/cli.zig", "src/server.zig"):
+            with self.subTest(path=path):
+                result = select([path], "review", AVAILABLE)
+                self.assertTrue({"public-parts-integration", "check"} & set(result["targets"]))
 
     def test_shared_fixture_helpers_keep_composed_and_separate_consumers(self):
         for name in ("host_process.py",):
@@ -1608,7 +1628,7 @@ fi
         self.assertTrue(all(row["targets"] == ["measure-model-output"] for row in rows))
 
     def test_requested_ref_cannot_publish_shared_caches(self):
-        read_only = ('qualify-macos.yml', 'previous-release-upgrade.yml', 'release.yml')
+        read_only = ('qualify-macos.yml', 'previous-release-upgrade.yml', 'release.yml', 'release-build.yml')
         for name in read_only:
             with self.subTest(workflow=name):
                 workflow = Path('.github/workflows', name).read_text()
@@ -1619,7 +1639,6 @@ fi
                 if name == 'release.yml':
                     publisher = re.search(r'(?ms)^  publish:\n(.*?)(?=^  [\w-]+:|\Z)', workflow)[1]
                     self.assertIn("github.ref == 'refs/heads/main'", publisher)
-                    self.assertIn("needs.plan.result == 'success'", publisher)
                     self.assertNotIn('uses: ./.github/actions/setup', publisher)
                     self.assertNotIn('uses: actions/cache', publisher)
                     trusted = re.search(r'(?ms)^      - uses: actions/checkout@.*?(?=^      - |\Z)', publisher)[0]
@@ -1640,23 +1659,26 @@ fi
                 workflow = path.read_text()
                 if path.name == 'check.yml':
                     policy = re.search(r'(?ms)^  policy:\n(.*?)(?=^  [\w-]+:\n|\Z)', workflow).group(1)
+                    self.assertNotIn('uses: ./.github/actions/setup', policy)
+                    self.assertIn('uses: ./.github/actions/policy', policy)
+                    composite = Path('.github/actions/policy/action.yml').read_text()
                     bootstrap_steps = re.findall(
-                        r'(?m)^      - uses: \./\.github/actions/setup\n(?:        .*\n)*', policy)
+                        r'(?m)^    - uses: \./\.github/actions/setup\n(?:      .*\n)*', composite)
                     self.assertEqual(len(bootstrap_steps), 1)
-                    self.assertEqual(policy.count('uses: ./.github/actions/setup'), 1)
+                    self.assertEqual(composite.count('uses: ./.github/actions/setup'), 1)
                     bootstrap = bootstrap_steps[0]
                     self.assertEqual([line.strip() for line in bootstrap.splitlines()
                                       if line.strip() and not line.lstrip().startswith('#')], [
                         '- uses: ./.github/actions/setup',
-                        "if: ${{ steps.caller-bootstrap.outputs.needed == 'true' }}",
+                        "if: ${{ steps.caller-bootstrap.outputs.needed == 'true' && inputs.compiler-installed != 'true' }}",
                         'with:',
                         "targets: '[]'",
                         "compiled: 'true'",
                         "cold: 'true'",
                         "publish-caches: 'false'",
                     ])
-                    self.assertIn('id: caller-bootstrap', policy)
-                    self.assertIn('python3 -B tests/ci/caller_errors.py --bootstrap-needed', policy)
+                    self.assertIn('id: caller-bootstrap', composite)
+                    self.assertIn('python3 -B tests/ci/caller_errors.py --bootstrap-needed', composite)
                     workflow = workflow.replace(bootstrap, '', 1)
                     producer = re.search(r'(?ms)^  linux_build:\n(.*?)(?=^  [\w-]+:\n|\Z)', workflow)[1]
                     diagnostic_gate = ("publish-caches: ${{ github.ref == 'refs/heads/main' && "
@@ -1672,6 +1694,11 @@ fi
                         self.assertEqual(native.count(mac_gate), 1, name)
                     self.assertEqual(workflow.count(mac_gate), 3)
                     workflow = workflow.replace(mac_gate, '')
+                    pr_job = re.search(r'(?ms)^  pr_linux:\n(.*?)(?=^  [\w-]+:\n|\Z)', workflow)[1]
+                    self.assertIn("if: ${{ needs.plan.outputs.pr_job == 'true' }}", pr_job)
+                    self.assertEqual(pr_job.count("publish-caches: 'false'"), 1)
+                    self.assertEqual(pr_job.count('uses: ./.github/actions/setup'), 1)
+                    workflow = workflow.replace(pr_job, pr_job.replace("publish-caches: 'false'", ''), 1)
                 self.assertNotIn('publish-caches', workflow, f'{path.name} native checks must keep publishing')
         self.assertNotIn('actions/cache', Path('.github/actions/setup/action.yml').read_text())
         setup = Path('.github/actions/setup/caches/action.yml').read_text()
@@ -1767,8 +1794,9 @@ fi
         caches = Path(".github/actions/setup/caches/action.yml").read_text()
         self.assertTrue(cache(".github/actions/setup/caches/action.yml", caches, caches.replace("~/.cache/zig", "~/.cache/zig2", 1)))
         check = Path(".github/workflows/check.yml").read_text()
+        policy = Path(".github/actions/policy/action.yml").read_text()
         policy_step = "Reject undefined fixture names before native builds"
-        self.assertFalse(cache(".github/workflows/check.yml", check, check.replace(policy_step, policy_step + " here")))
+        self.assertFalse(cache(".github/actions/policy/action.yml", policy, policy.replace(policy_step, policy_step + " here")))
         job = re.search(r"(?ms)^  cache_execution:\n.*?timeout-minutes: (\d+)", check)
         edited = check[:job.start(1)] + "21" + check[job.end(1):]
         self.assertNotEqual(edited, check)

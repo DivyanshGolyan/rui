@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 
-import fcntl
 import hashlib
 import json
-import os
 import pathlib
 import os_semantics
 import subprocess
@@ -49,12 +47,10 @@ def hold_reply(sock, store, route, kind, **fields):
 
 
 def resources(pid):
-    root = pathlib.Path(f"/proc/{pid}")
-    if not root.exists():
+    memory = os_semantics.process_memory(pid)
+    if memory is None:
         return None
-    status = (root / "status").read_text()
-    rss = int(next(line.split()[1] for line in status.splitlines() if line.startswith("VmRSS:")))
-    return {"rss_kib": rss, "fds": len(os.listdir(root / "fd"))}
+    return {"rss_kib": memory["rss_kib"], "fds": len(os_semantics.descriptor_links(pid))}
 
 
 def checkpoint_readers(repetitions=12_000, *, chunk_sizes=None):
@@ -226,12 +222,7 @@ def main():
                 peers.release(request, stop_deadline)
             wait_for(lambda: not pathlib.Path(sock).exists(), "listener closure with ten readers held")
             with (store / "host.lock").open("rb") as lease:
-                try:
-                    fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                except BlockingIOError:
-                    pass
-                else:
-                    raise AssertionError("lease released before unread borrowers drained")
+                assert not os_semantics.try_lock(lease), "lease released before unread borrowers drained"
             assert host.poll() is None, "acknowledgement is not completed drain"
             assert host.wait(timeout=75) == 1
             elapsed = time.monotonic() - started

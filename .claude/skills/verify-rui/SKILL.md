@@ -168,7 +168,7 @@ Stable handles from the product:
 - `Effort`, `Permissions` and `Copy last answer`: natural-height chat info above visible feed, opened with Alt-I (`--keys M-i` or `--hex 1b69`) or a click on the chat’s own Session/model/effort line or `alt+i info`.
 - `alt+d details`: separate submission repair/identity page while an original is held unresolved or rejected (`--keys M-d` or `--hex 1b64`).
 - `Start of conversation`.
-- `Detached. Host work continues.` and `Resume: rui session resume …`: shown after exit.
+- `Your chats keep working while you are away.` and `Resume: rui session resume …`: shown after exit.
 - `Run Bash`: the consent prompt.
 - `Fixture answer N: received "…"`: the fixture echoes the exact received text.
 
@@ -244,7 +244,7 @@ It never kills by process name. Evidence under `~/.cache/verify-rui/runs/ID/` su
 ## Gotchas
 
 - Opening a terminal in tmux makes Rui receive DECRPM replies (`ESC[?2027;0$y ESC[?1007;0$y`). These are terminal reports, not typed input. A PTY run receives none.
-- Rui exits 0 after Ctrl-C and SIGTERM, and prints `Detached. Host work continues.` on the main screen.
+- Rui exits 0 after Ctrl-C and SIGTERM, and prints `Your chats keep working while you are away.` on the main screen.
 - Esc completes only after the decoder's lone-Esc deadline. Wait for the next frame before sending more bytes, or they join it as Alt-key input.
 - PENDIN can be set after exit when input is queued. It is kernel-owned and masked in `termios_restored`, and the raw `stty_after` is kept.
 - The tap's wrapper shell (`/bin/sh -c`) is the session leader. Rui is its only child, and `signal` resolves and verifies that child.

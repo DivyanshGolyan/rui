@@ -440,9 +440,8 @@ def performance_case(item_bytes):
         admitted_start = time.monotonic()
         message(state, store, "large", SESSION, "propose command")
         def capturing():
-            descriptors = pathlib.Path(f"/proc/{process.pid}/fd")
-            assert descriptors.exists(), "the live import observer is Linux-only"
-            for descriptor in descriptors.iterdir():
+            assert os_semantics.PROC_FS, "the live import observer is Linux-only"
+            for descriptor in os_semantics.descriptor_links(process.pid):
                 try:
                     if "/scratch/response-" in os.readlink(descriptor): return True
                 except FileNotFoundError:

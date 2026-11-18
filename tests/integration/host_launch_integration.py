@@ -1028,7 +1028,7 @@ def resume_saved_host(root, env, directory, reference):
         output = bytearray()
         screen = ScreenCapture(COLUMNS, ROWS, reply=answers_to(master))
         until = time.monotonic() + COMMAND_TIMEOUT
-        while "Type a task" not in screen.completed or "Opening…" in screen.completed:
+        while "What shall we work on?" not in screen.completed or "Opening…" in screen.completed:
             remaining = until - time.monotonic()
             assert remaining > 0 and select.select([master], [], [], remaining)[0], (caller.poll(), screen.completed, output)
             chunk = os.read(master, 65536)
@@ -1399,7 +1399,7 @@ def contended_starters(root, env):
         loser = winner = None
         lock = os.fdopen(os.open(store / "host.lock", os.O_RDWR | os.O_CREAT, 0o600), "r+b")
         try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            assert os_semantics.try_lock(lock), "a fresh Store's lease was already held"
             loser = subprocess.Popen(
                 [RUI, "host", "start", "--store", store, "--set", "providers={}"],
                 env={**env, "RUI_TEST_HOST_STORE_LOCKED_GATE": str(gate)},
@@ -1641,10 +1641,10 @@ def main():
             pids = wait_for_processes(store, 1)
             assert pids[0] not in launcher_pids, "Host remained the CLI launcher process"
             if os_semantics.PROC_FS:
-                assert os.readlink(f"/proc/{pids[0]}/fd/0") == "/dev/null"
+                assert os.readlink(os_semantics.descriptor_link(pids[0], 0)) == "/dev/null"
                 for descriptor in (1, 2):
-                    assert os.readlink(f"/proc/{pids[0]}/fd/{descriptor}").startswith("pipe:[")
-                assert os.readlink(f"/proc/{pids[0]}/cwd") == "/", "detached Host retained launcher cwd"
+                    assert os.readlink(os_semantics.descriptor_link(pids[0], descriptor)).startswith("pipe:[")
+                assert os.readlink(os_semantics.working_directory_link(pids[0])) == "/", "detached Host retained launcher cwd"
                 assert os.getsid(pids[0]) not in launcher_pids
             assert not credential.exists(), "Host startup opened or created credentials"
             started = [json.loads(stdout) for _, stdout, _ in results]
@@ -1745,7 +1745,7 @@ def main():
             output = bytearray()
             screen = ScreenCapture(COLUMNS, ROWS, reply=answers_to(master))
             until = time.monotonic() + COMMAND_TIMEOUT
-            while not all(marker in screen.completed for marker in ("+ New Session", "Settings")):
+            while not all(marker in screen.completed for marker in ("+ New chat", "Settings")):
                 remaining = until - time.monotonic()
                 assert remaining > 0 and select.select([master], [], [], remaining)[0], (screen.completed, output)
                 chunk = os.read(master, 65536)
@@ -1754,7 +1754,7 @@ def main():
                 output.extend(chunk)
                 screen.feed(chunk)
             assert all(noise not in screen.completed for noise in ("Provider:", "Model:", "Permission:", "request:", "Session:", "Workspace:")), screen.completed
-            assert "Type a task" not in screen.completed and "enter open" not in screen.completed, screen.completed
+            assert "What shall we work on?" not in screen.completed and "enter open" not in screen.completed, screen.completed
             assert not screen.plain, ("bypass notice left the frame", screen.plain)
             assert "Bash commands can run without asking you" not in screen.completed, screen.completed
             assert not list((bare_home / ".config/rui/requests").glob("*.json")), "the overview captured a request"

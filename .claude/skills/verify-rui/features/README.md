@@ -9,7 +9,7 @@ Use these names when describing a change or a screenshot. Panels and notices cou
 | Screen | How to get there | Main actions (keyboard and mouse) | Feature |
 | --- | --- | --- | --- |
 | Overview | Run `rui`; Esc back from a chat | Up/Down, Home/End select; Enter or click opens; Right opens a chat; Alt-Up/Down switch; Ctrl-X stops; Alt-A archives | [Overview and session list](./overview.md) |
-| Chat | Open a list row or **+ New Session** | Type and Enter send; Shift-Enter adds a line; Ctrl-P/Ctrl-N recall messages; PgUp/PgDn, arrows or wheel scroll; click **↓**, Esc, End (empty draft) or Ctrl-G return to latest; Left/Right or clicks move between list and chat | [Compose and submit](./compose-submit.md), [New Session](./new-chat.md), [navigation](./status-navigation.md) |
+| Chat | Open a list row or **+ New chat** | Type and Enter send; Shift-Enter adds a line; Ctrl-P/Ctrl-N recall messages; PgUp/PgDn, arrows or wheel scroll; click **↓**, Esc, End (empty draft) or Ctrl-G return to latest; Left/Right or clicks move between list and chat | [Compose and submit](./compose-submit.md), [New Session](./new-chat.md), [navigation](./status-navigation.md) |
 | App settings | End then Enter on Overview, or click **Settings** | Up/Down then Enter, or click a field/choice; **Version** starts Upgrade; Esc goes back | [App settings and Keys](./app-settings.md) |
 | Keys | Open **Keys** in Settings | Read the key reference; Esc returns to Settings | [App settings and Keys](./app-settings.md) |
 | Model choice | Click a chat's model, Tab then Enter, `/model`, or open **Model** in Settings/Chat info | Type to filter; Up/Down then Enter, or click a match; Esc closes | [Model choice and Effort](./model-choice.md) |
@@ -26,7 +26,7 @@ Use these names when describing a change or a screenshot. Panels and notices cou
 | Defaults for new chats | Send `/setup` in Chat | Read the defaults; scroll a long page with arrows, PgUp/PgDn or wheel; Esc returns | [Slash commands and skills](./slash-commands.md) |
 | Submission details | Alt-D or click **alt+d details** for a held or rejected submission; click **details** on an environment refusal | Read repair instructions; arrows, PgUp/PgDn or wheel scroll; Esc returns | [Chat info and navigation](./status-navigation.md) |
 | Host stopped | The connected Host stops | Use the shown start/retry control; `r` starts from Chat when offered; Ctrl-C leaves | [Working, queued and stopped](./work-stop.md) |
-| Exit | Ctrl-C or a termination signal | Read **Detached. Host work continues.** and the resume command; mouse actions end with the client | [Exit and terminal restoration](./exit-restore.md) |
+| Exit | Ctrl-C or a termination signal | Read **Your chats keep working while you are away.** and the resume command; mouse actions end with the client | [Exit and terminal restoration](./exit-restore.md) |
 
 Working, queued, stopped and failed messages are Chat states; [work and stop](./work-stop.md) covers them. [Terminal themes and input focus](./appearance.md) covers night, day, mist and no-color views across screens.
 

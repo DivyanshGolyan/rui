@@ -13,12 +13,20 @@ on:
         description: Last promoted commit; a failure bisects base..ref
         required: true
         type: string
+      release-version:
+        description: Version of this run's release archives (Promote's Release build) to test; empty compiles rui
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: read
+  # Reads this run's release archives when a promotion supplies them.
+  actions: read
 
 concurrency:
-  group: renderer-contracts-${{ github.event_name }}-${{ github.ref }}${{ inputs.ref && '-promotion' || '' }}
+  # The caller's name keeps Promote and Qualify main on one SHA from cancelling each other.
+  group: renderer-contracts-${{ github.event_name }}-${{ github.ref }}${{ inputs.ref && format('-promotion-{0}', github.workflow) || '' }}
   cancel-in-progress: true
 
 # Cache timeout accounting, not a setup deadline:
@@ -42,6 +50,18 @@ jobs:
         with:
           targets: '["terminal-restoration-integration"]'
           check-part: renderer-contracts
+      - name: Fetch the release executable this promotion publishes
+        id: release
+        if: ${{ inputs.release-version != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.release-version }}
+          SHA: ${{ inputs.ref }}
+        run: |
+          set -euo pipefail
+          # A standalone assignment, so a failed fetch fails this step instead of leaving rui empty.
+          rui=$(python3 -B tests/ci/release_under_test.py "$VERSION" "$SHA" "$RUNNER_TEMP/release-under-test")
+          echo "rui=$rui" >> "$GITHUB_OUTPUT"
       - name: Self-tests, direct-PTY, Ghostty, controls and recovery encodings
         id: compile
         # Cache timing: green 725 s, run 43732653500; minimum margin 120 s.
@@ -49,13 +69,17 @@ jobs:
         timeout-minutes: ${{ inputs.batch-base && 272 || 17 }}
         # Each contract's only copy. Every one runs even after another fails;
         # steps.py records the failed ones for a promotion to replay.
+        env:
+          # A promotion tests its release executable instead of compiling rui-release-safe-check.
+          # Only this step sees it, so a bisect replay compiles each commit's own.
+          RUI_UNDER_TEST: ${{ steps.release.outputs.rui }}
         run: |
           python3 -B tests/ci/steps.py --output-root "$RUNNER_TEMP/contracts" \
             'selftest=zig build renderer-contracts-selftest -j2 --summary all' \
-            'pty=zig build direct-pty -j2 --summary all -- --output "$STEP_OUTPUT" --jobs 2' \
-            'ghostty=zig build direct-pty -j2 --summary all -- --output "$STEP_OUTPUT" --jobs 2 --vectors "$PWD/tests/qualification/direct-pty/ghostty.json"' \
-            'controls=zig build direct-pty-controls -j2 --summary all -- --output "$STEP_OUTPUT"' \
-            'recovery=zig build input-equivalence -j2 --summary all -- --output "$STEP_OUTPUT"'
+            'pty=zig build direct-pty -j2 --summary all ${RUI_UNDER_TEST:+"-Drui-under-test=$RUI_UNDER_TEST"} -- --output "$STEP_OUTPUT" --jobs 2' \
+            'ghostty=zig build direct-pty -j2 --summary all ${RUI_UNDER_TEST:+"-Drui-under-test=$RUI_UNDER_TEST"} -- --output "$STEP_OUTPUT" --jobs 2 --vectors "$PWD/tests/qualification/direct-pty/ghostty.json"' \
+            'controls=zig build direct-pty-controls -j2 --summary all ${RUI_UNDER_TEST:+"-Drui-under-test=$RUI_UNDER_TEST"} -- --output "$STEP_OUTPUT"' \
+            'recovery=zig build input-equivalence -j2 --summary all ${RUI_UNDER_TEST:+"-Drui-under-test=$RUI_UNDER_TEST"} -- --output "$STEP_OUTPUT"'
       - name: Save reusable caches even after failure
         if: ${{ always() }}
         uses: ./.github/actions/setup/caches

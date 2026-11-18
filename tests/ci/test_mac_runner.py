@@ -224,13 +224,21 @@ class AdapterTest(unittest.TestCase):
         call = check.split("  workflow_call:\n", 1)[1].split("\npermissions:", 1)[0]
         self.assertIn("    secrets:\n", call)
         self.assertRegex(call, r"(?m)^      MAC_RUNNER_STATUS_TOKEN:\n        required: false$")
-        promote = (ROOT / ".github/workflows/promote.yml").read_text()
-        selected = re.search(r"(?ms)^  selected:\n(.*?)(?=^  [a-z_]+:|\Z)", promote)[1]
-        self.assertIn("uses: ./.github/workflows/check.yml", selected)
-        secrets = selected.split("    secrets:\n", 1)[1]
-        self.assertEqual([line.strip() for line in secrets.splitlines() if line.strip()],
-                         ["MAC_RUNNER_STATUS_TOKEN: ${{ secrets.MAC_RUNNER_STATUS_TOKEN }}"],
-                         "promotion passes the status token alone, never inherit")
+        tier = (ROOT / ".github/workflows/qualification-tier.yml").read_text()
+        self.assertRegex(tier.split("\npermissions:", 1)[0], r"(?m)^      MAC_RUNNER_STATUS_TOKEN:\n        required: false$")
+        token = ["MAC_RUNNER_STATUS_TOKEN: ${{ secrets.MAC_RUNNER_STATUS_TOKEN }}"]
+        # Runner routing is the one input the callers differ in: Promote may route
+        # to rui-mac, Qualify main passes no token and stays hosted.
+        for path, job, uses, expected in ((".github/workflows/qualification-tier.yml", "selected", "check.yml", token),
+                                          (".github/workflows/promote.yml", "qualify", "qualification-tier.yml", token),
+                                          (".github/workflows/main-qualifier.yml", "qualify", "qualification-tier.yml", [])):
+            with self.subTest(caller=path):
+                text = (ROOT / path).read_text()
+                body = re.search(rf"(?ms)^  {job}:\n(.*?)(?=^  [a-z_]+:|\Z)", text)[1]
+                self.assertIn(f"uses: ./.github/workflows/{uses}", body)
+                secrets = body.split("    secrets:\n", 1)[1] if "    secrets:\n" in body else ""
+                self.assertEqual([line.strip() for line in secrets.splitlines() if line.strip()], expected,
+                                 "a caller passes the status token alone, never inherit")
 
     def test_allowlist_cli(self):
         result = subprocess.run([sys.executable, str(ROOT / "tests/ci/mac_runner.py"), "allowlist"],

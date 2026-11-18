@@ -29,7 +29,8 @@ def main():
                              "then passes a second such failure, promotion fails it")
     args = parser.parse_args()
     targets = json.loads(args.targets)
-    for batch in execution_batches(targets, args.check_part):
+    batches = execution_batches(targets, args.check_part)
+    for index, batch in enumerate(batches):
         returncode, output = execute(batch, args.ci_artifacts)
         if returncode and args.quarantine != "off" and (flakes := listed(output)):
             note = (f"{' '.join(batch)} failed only on listed flakes ({issues(flakes)}); "
@@ -57,6 +58,10 @@ def main():
             record_failure(' '.join(batch), command(batch))
             summarize(f"Executed {' '.join(batch)}: failed (exit {returncode}). "
                       "Inspect the failed step. Retained artifacts are diagnostics, not acceptance.")
+            if skipped := [target for later in batches[index + 1:] for target in later if not target.startswith("-")]:
+                note = f"Not run after that failure: {', '.join(skipped)}."
+                print(note, flush=True)
+                summarize(note)
             raise SystemExit(returncode)
     summarize(f"Executed {', '.join(targets)} (partition {args.check_part}): passed. Fresh execution.")
 

@@ -558,7 +558,7 @@ def stdin_start_contract():
 
         failed(invoke("session", "start", "--store", state / "absent", input=b"first"), "store_unavailable", status=6)
         host = fixture.start_host(store, None)
-        for args in (("send", "--to", "k7m2qx", "--text", "input"),
+        for args in (("send", "--to", "k7m2qx", "--texts", "input"),
                      ("send", "--to", "k7m2qx", "literal"),
                      ("configure", "--instructions", "input"),
                      ("start", "--instructions", "-")):

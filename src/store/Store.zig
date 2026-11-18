@@ -629,12 +629,29 @@ pub const Store = struct {
     }
 
     pub fn submitMessageParts(self: *Store, command: *const content_custody.MessageCommand, loan: @import("../InputCapture.zig").Loan, committed: ?MessageCommitted, faults: Faults) !MessageReply {
-        var saving = try content_parts.Saving.init(.{ .captured = loan });
-        return self.queue().write(submitMessageWithModelHeld, .{ self, command, committed, @as(?*const skills_domain.Initial, null), @as(?*const skills_domain.MessageCapture, null), @as(?*content_parts.Saving, &saving), faults });
+        return self.submitMessagePartsCapturedSkills(command, loan, committed, null, null, faults);
     }
 
-    /// Fixture adapter for a compound Message and its captured skills. Both
-    /// enter the same canonical admission transition as ordinary Messages.
+    pub fn submitMessagePartsCapturedSkills(
+        self: *Store,
+        command: *const content_custody.MessageCommand,
+        loan: @import("../InputCapture.zig").Loan,
+        committed: ?MessageCommitted,
+        initial_skills: ?*const skills_domain.Initial,
+        captured_skill: ?*const skills_domain.MessageCapture,
+        faults: Faults,
+    ) !MessageReply {
+        var saving = try content_parts.Saving.init(.{ .captured = loan });
+        var reply = self.queue().write(submitMessageWithModelHeld, .{ self, command, committed, initial_skills, captured_skill, @as(?*content_parts.Saving, &saving), faults });
+        switch (reply) {
+            .accepted => |*value| value.form = std.meta.activeTag(saving.reference),
+            .rejected => |*value| value.form = std.meta.activeTag(saving.reference),
+            else => {},
+        }
+        return reply;
+    }
+
+    /// Fixture adapter for a compound Message and its captured skills.
     pub fn submitMessagePartsCapturedSkillsForTesting(
         self: *Store,
         command: *const content_custody.MessageCommand,
@@ -643,8 +660,7 @@ pub const Store = struct {
         captured_skill: ?*const skills_domain.MessageCapture,
     ) !MessageReply {
         if (!@import("builtin").is_test) @compileError("test-only compound Message fixture");
-        var saving = try content_parts.Saving.init(.{ .captured = loan });
-        return self.queue().write(submitMessageWithModelHeld, .{ self, command, @as(?MessageCommitted, null), initial_skills, captured_skill, @as(?*content_parts.Saving, &saving), Faults{} });
+        return self.submitMessagePartsCapturedSkills(command, loan, null, initial_skills, captured_skill, .{});
     }
 
     fn submitMessageWithModelHeld(
@@ -803,10 +819,17 @@ pub const Store = struct {
             out.* = .{ .not_modified = token };
             return;
         }
-        return self.queue().run(observeCommandHeld, .{ self, key, since, out });
+        var pending: ?content_domain.Value = null;
+        try self.queue().run(observeCommandHeld, .{ self, key, since, out, &pending });
+        if (pending) |value| {
+            const mapped = try @import("../os/pages.zig").Mapped(content_parts.Cursor).map();
+            defer mapped.unmap();
+            mapped.value.init(value);
+            while (try self.observeCommandPart(mapped.value)) {}
+        }
     }
 
-    fn observeCommandHeld(self: *Store, key: []const u8, since: ?change_ring.SessionToken, out: *Observed) !void {
+    fn observeCommandHeld(self: *Store, key: []const u8, since: ?change_ring.SessionToken, out: *Observed, pending: *?content_domain.Value) !void {
         const entry = try enter(self, .none);
         defer entry.release();
         const generation = self.commitGeneration();
@@ -817,11 +840,38 @@ pub const Store = struct {
         out.* = .{ .full = .{ .token = null } };
         var access: ReadAccess = .open(&entry);
         defer access.deinit();
-        try entry.finish(error{InputPartsNotSupported}, command_domain.observeCommand(&access, key, &out.full.observation));
+        try entry.finish(Ordinary.none, command_domain.observeCommand(&access, key, &out.full.observation, pending));
         const observation = &out.full.observation;
         if (observation.status != .absent and session_id.valid(observation.target.slice())) {
             out.full.token = .{ .instance = self.instance, .generation = generation, .session = observation.target.slice()[0..session_id.bytes].* };
         }
+    }
+
+    pub fn observeCommandPart(self: *Store, cursor: *content_parts.Cursor) !bool {
+        return self.queue().run(observeCommandPartHeld, .{ self, cursor });
+    }
+
+    fn observeCommandPartHeld(self: *Store, cursor: *content_parts.Cursor) !bool {
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: ReadAccess = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.none, observeCommandPartStep(&access, cursor));
+    }
+
+    fn observeCommandPartStep(access: *ReadAccess, cursor: *content_parts.Cursor) !bool {
+        const progress = try cursor.step(access);
+        // The first pass certifies the complete manifest and index. The cursor's
+        // second pass is for callers that export each part, not observation.
+        if (cursor.certified) return false;
+        return switch (progress) {
+            .raw, .part => true,
+            .rows => blk: {
+                try store_access.runAs(access, error.CorruptStore);
+                break :blk true;
+            },
+            .certified, .done => false,
+        };
     }
 
     pub fn commandResult(self: *Store, key: []const u8) !ContentReference {
@@ -1003,6 +1053,27 @@ pub const Store = struct {
                 return true;
             }
         };
+    }
+
+    pub const RetryDeadlineRead = struct { generation: u64, next: ?u64 };
+
+    pub fn publishRetryCrossings(self: *Store, from: u64, now: u64) !RetryDeadlineRead {
+        return self.queue().run(publishRetryCrossingsHeld, .{ self, from, now });
+    }
+
+    fn publishRetryCrossingsHeld(self: *Store, from: u64, now: u64) !RetryDeadlineRead {
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: ReadAccess = .open(&entry);
+        defer access.deinit();
+        var crossings: session_list_read.RetryCrossings = .{};
+        const next = try entry.finish(Ordinary.none, session_list_read.retryCrossings(&access, from, now, &crossings));
+        if (crossings.touched.count != 0 or crossings.touched.everything) {
+            const generation = self.commit_generation.fetchAdd(1, .release) + 1;
+            self.changes.record(generation, &crossings.touched);
+            if (self.commitWake().load(.acquire)) |wake| wake.set(self.io);
+        }
+        return .{ .generation = self.commitGeneration(), .next = next };
     }
 
     pub fn readSessionList(self: *Store, request: *const session_list.ListSessions, visitor: anytype) !void {
@@ -1351,7 +1422,7 @@ pub const Store = struct {
         self.identities().survey.asked = asked;
         self.identities().survey.capacity = capacity;
         if (survey.kept == .ready and survey.asked == asked and std.meta.eql(survey.capacity.workInput(), capacity.workInput()) and !self.isFenced())
-            return .{ .core = survey.core, .mcp = survey.mcp, .bash = survey.bash, .message = survey.message, .tool_continuation = survey.tool_continuation, .retry = survey.retry };
+            return .{ .core = survey.core, .mcp = survey.mcp, .bash = survey.bash, .message = survey.message, .tool_continuation = survey.tool_continuation, .retry = survey.retry, .retry_waiting = survey.retry_waiting };
         const entry = try enter(self, .none);
         defer entry.release();
         var access: store_access.Access(.survey, error{}) = .open(&entry);
@@ -1522,6 +1593,31 @@ pub const Store = struct {
         var access: ReadAccess = .open(&entry);
         defer access.deinit();
         return entry.finish(Ordinary.none, historical_domain.messagePartFrom(&access, page));
+    }
+
+    pub fn readPublicParts(self: *Store, reader: *@import("domain/public_parts.zig").Reader) !@import("domain/public_parts.zig").Progress {
+        return self.queue().run(readPublicPartsHeld, .{ self, reader });
+    }
+
+    fn readPublicPartsHeld(self: *Store, reader: *@import("domain/public_parts.zig").Reader) !@import("domain/public_parts.zig").Progress {
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: ReadAccess = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.public_parts, @import("domain/public_parts.zig").step(&access, reader));
+    }
+
+    /// One indexed part of a Session-scoped owner's parts value, at `start`.
+    pub fn openPublicPart(self: *Store, session: []const u8, owner: @import("../content_value.zig").Owner, part: u32, start: u64) !ContentLocation {
+        return self.queue().run(openPublicPartHeld, .{ self, session, owner, part, start });
+    }
+
+    fn openPublicPartHeld(self: *Store, session: []const u8, owner: @import("../content_value.zig").Owner, part: u32, start: u64) !ContentLocation {
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: ReadAccess = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.public_part, @import("domain/public_parts.zig").openPart(&access, session, owner, part, start));
     }
 
     pub fn modelOperationKind(self: *Store, binding: AttemptBinding) !ModelOperationKind {
@@ -1866,6 +1962,8 @@ pub const Ordinary = struct {
     const page = error{ SessionNotFound, InvalidCursor, InputPartsNotSupported };
     const content = error{ ContentNotFound, InputPartsNotSupported };
     const public_content = error{ ContentNotFound, RangeOutOfBounds, InputPartsNotSupported };
+    const public_parts = error{ ContentNotFound, ContentIsText };
+    const public_part = public_parts || error{RangeOutOfBounds};
     pub const action = error{ActionNotFound};
     pub const action_read = action || error{ InvalidCursor, InputPartsNotSupported };
     const result = error{ ResultNotFound, ResultNotReady, ResultFailed };
@@ -2088,6 +2186,7 @@ pub noinline fn commitWithSurvey(self: *Store, writer: anytype, follow: anytype)
     kept.message = found.message;
     kept.tool_continuation = found.tool_continuation;
     kept.retry = found.retry;
+    kept.retry_waiting = found.retry_waiting;
     kept.kept = .fresh;
 }
 
@@ -2298,8 +2397,9 @@ const Survey = packed struct(u16) {
     message: bool = false,
     tool_continuation: bool = false,
     retry: bool = false,
+    retry_waiting: bool = false,
     capacity: action_domain.Capacity = .{ .free_credit = .none, .mcp_open = false },
-    _: u3 = 0,
+    _: u2 = 0,
 };
 
 const Admitted = struct {

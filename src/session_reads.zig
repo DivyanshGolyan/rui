@@ -1,6 +1,6 @@
 const std = @import("std");
 const tool_fold = @import("tool_fold.zig");
-const socket_os = @import("os/socket.zig");
+const socket_os = @import("os").socket;
 const client = @import("client.zig");
 const protocol_reply = @import("protocol_reply.zig");
 const protocol = @import("protocol.zig");
@@ -509,8 +509,7 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
         job.result.live = View.Live.init(page.facts.call_activity);
         job.result.queued = page.facts.queued;
         const queued = page.facts.queued;
-        const echoed = queued.count != 0 and !page.facts.work.work.state.holdsQueue();
-        if (queued.count > @intFromBool(echoed) and queued.newest_admission != job.queued_line) {
+        if (queued.count != 0 and queued.newest_admission != job.queued_line) {
             job.result.queued_line = .{ .admission = queued.newest_admission, .line = (try readFirstLine(requests, job, queued.newest_position, .fails)).? };
         }
     }
@@ -532,14 +531,11 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
             .assistant => |answer| .{ .source = .activity, .position = item.position, .ordinal = item.ordinal, .row = false, .content = answer.content },
             else => null,
         } };
-        row.provisional = if (pending and item.value.admission.sender == null and item.value.admission.source_action == null) message: {
-            try View.message(requests, job.store, job.session, item, item.value.admission, .none, &capture, job.colour);
-            break :message true;
-        } else try View.render(requests, job.store, job.session, job.sessionProvider(), item, page.facts.queued, page.facts.work.work.state.holdsQueue(), &capture, job.colour, job.home, .{ .viewport = job.width_method }, if (open) .{ .open = output.? } else .closed) or pending;
+        row.provisional = try View.render(requests, job.store, job.session, job.sessionProvider(), item, page.facts.queued, page.facts.work.work.state.holdsQueue(), &capture, job.colour, job.home, .{ .viewport = job.width_method }, if (open) .{ .open = output.? } else .closed) or pending;
         row.tight = View.tight(item.value);
         try capture.finish();
         row.length = capture.length;
-        if (row.length != 0) switch (item.value) {
+        if (row.length != 0 or pending) switch (item.value) {
             .admission, .received, .user => |message| {
                 const key_bytes = message.key.slice();
                 if (key_bytes.len == 36) row.message_key = key_bytes[0..36].*;
@@ -1090,6 +1086,7 @@ const FakeHost = struct {
     tail: []const Tail,
     end: u64,
     held: bool = false,
+    work_state: ?protocol.WorkState = null,
     refuse_content: bool = false,
     content_texts: ?[]const []const u8 = null,
     pages: usize = 0,
@@ -1175,7 +1172,7 @@ const FakeHost = struct {
             facts.queued.newest_admission = value.admission.admission;
             facts.queued.newest_position = at;
         }
-        facts.work = .{ .work = if (self.held) .{ .state = .{ .working = .{ .since = 1 } }, .turn = 1, .operation = 1 } else .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 };
+        facts.work = .{ .work = if (self.work_state) |state| .{ .state = state, .turn = 1, .operation = 1 } else if (self.held) .{ .state = .{ .working = .{ .since = 1 } }, .turn = 1, .operation = 1 } else .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 };
         facts.work.workspace.set("/") catch unreachable;
         return facts;
     }
@@ -1298,7 +1295,7 @@ const FakeHost = struct {
     }
 };
 
-test "session_view Message placement is identical in either direction at every page split" {
+test "SUI-49 Message placement preserves provenance across pages" {
     const Domain = struct {
         const user = "› " ++ View.Mark.body ++ "please wait\n  for the build" ++ View.Mark.reset ++ "\n";
         const link = TerminalText.link_open ++ TerminalText.session_link ++ "9f8e7d" ++ TerminalText.link_end ++ "\x1b[4mPeer" ++ TerminalText.link_close ++ View.Mark.reset ++ View.Mark.summary;
@@ -1365,9 +1362,8 @@ test "session_view Message placement is identical in either direction at every p
                             .{ .position = 4, .at = 1, .value = outbound },
                             .{ .position = 5, .at = 1, .value = if (state == .applied) .{ .user = value } else .{ .session_changed = .{ .revision = 2, .field = .label } } },
                         };
-                        const echo = source != .session and state == .queued and oldest and !held;
                         const expected = [_]Expected{
-                            .{ .text = if (source == .session) received else if (echo) user else "", .provisional = echo },
+                            .{ .text = if (source == .session) received else "" },
                             .{ .text = received },
                             .{ .text = sent },
                             .{ .text = if (state == .applied and source != .session) user else "" },
@@ -1446,28 +1442,54 @@ test "session_reads the queued row's line fails the read when the Host refuses i
     try std.testing.expectEqual(@as(usize, 1), host.contents);
 }
 
-test "session_reads local queued Messages keep canonical full bands and exact identities while work holds the queue" {
+test "SUI-50 queued reads preserve invisible replay identities in every work state" {
     var first = FakeHost.message(1).admission;
     var second = FakeHost.message(2).admission;
     try first.key.set("01234567-89ab-4cde-8012-0123456789ab");
     try second.key.set("01234567-89ab-4cde-8012-0123456789ac");
     const tail = [_]FakeHost.Tail{ .{ .value = .{ .admission = first } }, .{ .value = .{ .admission = second } } };
-    var held: FakeHost = .{ .history = 20, .tail = &tail, .end = 22, .held = true };
-    var behind: Job = .{ .session = "k7m2qx", .opening = true, .line_read = .{ .revision = 1, .end = 22 } };
-    try held.read(&behind);
-    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, held.shown, "please wait"));
-    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, held.shown, "for the build"));
-    try std.testing.expectEqual(@as(u64, 2), behind.result.queued.count);
-    try std.testing.expectEqual(@as(usize, 2), behind.result.row_count);
-    for (behind.result.rows[0..behind.result.row_count], [_][36]u8{ first.key.slice()[0..36].*, second.key.slice()[0..36].* }) |row, key| {
-        try std.testing.expect(row.length != 0 and row.provisional);
-        try std.testing.expectEqual(key, row.message_key.?);
+    var code: protocol.Bounded(protocol.max_code_bytes) = .{};
+    try code.set("provider_temporary_http_429");
+    const states = [_]protocol.WorkState{
+        .{ .idle = .{ .since = 1 } },
+        .{ .pending = .{ .since = 1 } },
+        .{ .working = .{ .since = 1 } },
+        .{ .working = .{ .since = 1, .compaction = true } },
+        .{ .retrying = .{ .since = 1, .due_at_ms = 2000, .cause = code, .attempt = 1 } },
+        .{ .bash = .{ .since = 1, .call = 1, .description = null, .running = 1, .approvals = 0 } },
+        .{ .approval = .{ .since = 1 } },
+        .{ .stopping = .{ .since = 1 } },
+        .{ .finished = .{ .since = 1 } },
+        .{ .failed = .{ .since = 1, .code = code, .resets_at = null } },
+        .{ .stopped = .{ .since = 1, .cause = .stop } },
+    };
+    var seen: std.enums.EnumSet(protocol.session_work.Kind) = .empty;
+    for (states) |state| {
+        seen.insert(state);
+        for (0..3) |count| {
+            var host: FakeHost = .{ .history = 20, .tail = tail[0..count], .end = 20 + count, .work_state = state };
+            var job: Job = .{ .session = "k7m2qx", .opening = true, .line_read = .{ .revision = 1, .end = 20 + count } };
+            try host.read(&job);
+            try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, host.shown, "please wait"));
+            try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, host.shown, "for the build"));
+            try std.testing.expectEqual(@as(u64, @intCast(count)), job.result.queued.count);
+            try std.testing.expectEqual(count, job.result.row_count);
+            const keys = [_][36]u8{ first.key.slice()[0..36].*, second.key.slice()[0..36].* };
+            for (job.result.rows[0..job.result.row_count], keys[0..count]) |row, key| {
+                try std.testing.expect(row.length == 0 and row.provisional);
+                try std.testing.expectEqual(key, row.message_key.?);
+            }
+            if (count == 0) {
+                try std.testing.expect(job.result.queued_line == null);
+            } else {
+                const shown = job.result.queued_line.?;
+                try std.testing.expectEqual(@as(u64, @intCast(count)), shown.admission);
+                try std.testing.expectEqualStrings("please wait", shown.line.slice());
+            }
+            try std.testing.expectEqualDeep(if (count == 0) @as(?Key, null) else @as(?Key, .{ .position = 21 }), firstProvisional(&job.result));
+        }
     }
-    var idle: FakeHost = .{ .history = 20, .tail = &tail, .end = 22 };
-    var opening: Job = .{ .session = "k7m2qx", .opening = true, .line_read = .{ .revision = 1, .end = 22 } };
-    try idle.read(&opening);
-    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, idle.shown, "please wait"));
-    try std.testing.expectEqual(@as(?Key, .{ .position = 21 }), firstProvisional(&opening.result));
+    try std.testing.expect(seen.eql(.full));
 }
 
 test "activity golden stop with interrupted ending draws one line across pages" {
@@ -1656,7 +1678,7 @@ test "session_reads policy cursor is inclusive only for a fresh provisional repl
     for ([_]protocol.ActivityItem.Kind{ .admission, .received, .user, .assistant, .tool_result, .hosted_call, .turn_ended, .stop, .sent, .send_failed }) |kind| try std.testing.expect(above.kinds.contains(kind));
 }
 
-test "session_reads opening exposes ordered rows and the normalized scan edge" {
+test "SUI-51 opening reads expose ordered rows and scan boundaries" {
     var peer: protocol.NamedPeer = .{ .session = .{} };
     try peer.session.set("9f8e7d");
     const tail = [_]FakeHost.Tail{
@@ -1677,12 +1699,12 @@ test "session_reads opening exposes ordered rows and the normalized scan edge" {
         try std.testing.expectEqual(index == 1, row.provisional);
         try std.testing.expectEqual(index == 0, row.tight);
         const body = host.shown[@intCast(row.offset)..][0..@intCast(row.length)];
-        try std.testing.expect(body.len != 0 and body[0] != '\n');
+        try std.testing.expect(index == 1 or (body.len != 0 and body[0] != '\n'));
         try std.testing.expectEqual(@as(usize, if (index == 0) 1 else 0), std.mem.count(u8, body, "Messaged"));
-        try std.testing.expectEqual(@as(usize, if (index == 1) 1 else 0), std.mem.count(u8, body, "please wait"));
+        try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, body, "please wait"));
     }
     try std.testing.expectEqual(job.result.rows[0].length, job.result.rows[1].offset);
-    try std.testing.expectEqual(@as(usize, 2), job.result.new_rows);
+    try std.testing.expectEqual(@as(usize, 1), job.result.new_rows);
     try std.testing.expectEqualDeep(@as(?Key, .{ .position = 2 }), firstProvisional(&job.result));
 
     var empty: FakeHost = .{ .history = 0, .tail = &.{}, .end = 0 };
@@ -1693,14 +1715,14 @@ test "session_reads opening exposes ordered rows and the normalized scan edge" {
     try std.testing.expect(job.result.at_start and job.result.at_end);
 }
 
-test "session_reads visible fills do not refresh line work queue live or scan cursor" {
+test "SUI-52 visible fills leave live read state unchanged" {
     const tail = [_]FakeHost.Tail{.{ .value = FakeHost.message(1) }};
     var host: FakeHost = .{ .history = 0, .tail = &tail, .end = 1, .held = true };
     const edge: Key = .{ .position = 1, .ordinal = std.math.maxInt(u64) };
     var job: Job = .{ .cursor = .{ .position = 80 }, .feed_page = .{ .direction = .backward, .kinds = .visible, .started_from = edge, .from = edge }, .open_status = true, .hint_wanted = true };
     try host.read(&job);
     try std.testing.expectEqual(@as(usize, 1), host.pages);
-    try std.testing.expectEqual(@as(usize, 1), host.contents);
+    try std.testing.expectEqual(@as(usize, 0), host.contents);
     try std.testing.expectEqual(@as(usize, 0), host.others);
     try std.testing.expect(job.result.line == null and job.result.hint == null and !job.result.status);
     try std.testing.expectEqual(@as(u64, 0), job.result.work.revision);
@@ -1708,12 +1730,12 @@ test "session_reads visible fills do not refresh line work queue live or scan cu
     try std.testing.expectEqual(@as(u64, 0), job.result.cursor.position);
     try std.testing.expectEqual(@as(u64, 80), job.cursor.position);
     try std.testing.expectEqual(@as(usize, 1), job.result.row_count);
-    try std.testing.expect(job.result.rows[0].length != 0);
+    try std.testing.expect(job.result.rows[0].length == 0);
     try std.testing.expect(job.result.rows[0].provisional);
     try std.testing.expectEqualDeep(@as(?Key, .{ .position = 1 }), firstProvisional(&job.result));
 }
 
-test "session_reads replay replaces a provisional echo after intervening rows and counts only new rows" {
+test "SUI-53 replay replaces queued rows and counts only new rows" {
     var peer: protocol.NamedPeer = .{ .session = .{} };
     try peer.session.set("9f8e7d");
     var incoming = FakeHost.message(90).admission;
@@ -1741,7 +1763,7 @@ test "session_reads replay replaces a provisional echo after intervening rows an
             job.result = .{};
             job.line_read = .{ .revision = 1, .end = end };
             try host.read(&job);
-            try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, host.shown, "please wait"));
+            try std.testing.expectEqual(@as(usize, if (end == 23) 0 else 1), std.mem.count(u8, host.shown, "please wait"));
             try std.testing.expectEqual(@as(usize, if (end == 23) 2 else 1), job.result.new_rows);
             try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, host.shown, "Received message"));
             try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, host.shown, "Messaged"));
@@ -1754,7 +1776,7 @@ test "session_reads replay replaces a provisional echo after intervening rows an
     }
 }
 
-test "session_reads first provisional survives every continuation page" {
+test "SUI-54 queued replay retains its starting point across pages" {
     var peer: protocol.NamedPeer = .{ .session = .{} };
     try peer.session.set("9f8e7d");
     var tail: [40]FakeHost.Tail = undefined;
@@ -1780,19 +1802,19 @@ test "session_reads first provisional survives every continuation page" {
         try std.testing.expectEqual(page_index == 2, job.result.at_end);
         try std.testing.expectEqualDeep(@as(?Key, .{ .position = 1 }), job.feed_page.?.replace_from);
         try std.testing.expectEqualDeep(if (page_index == 0) @as(?Key, .{ .position = 1 }) else null, firstProvisional(&job.result));
-        try std.testing.expectEqual(@as(usize, if (page_index == 0) 1 else 0), std.mem.count(u8, host.shown, "please wait"));
+        try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, host.shown, "please wait"));
     }
     try std.testing.expectEqual(@as(usize, 39), counted);
 }
 
-test "session_reads a full queued Message replays once when the queue becomes idle" {
+test "SUI-55 queued Message stays invisible when work becomes idle" {
     const tail = [_]FakeHost.Tail{.{ .value = FakeHost.message(1) }};
     var host: FakeHost = .{ .history = 0, .tail = &tail, .end = 1, .held = true };
     var job: Job = .{ .opening = true, .line_read = .{ .revision = 1, .end = 1 } };
     try host.read(&job);
     try std.testing.expectEqual(@as(usize, 1), job.result.row_count);
-    try std.testing.expect(job.result.rows[0].length != 0);
-    try std.testing.expectEqual(@as(usize, 1), job.result.new_rows);
+    try std.testing.expect(job.result.rows[0].length == 0);
+    try std.testing.expectEqual(@as(usize, 0), job.result.new_rows);
     const edge = job.result.high;
     const replay = firstProvisional(&job.result);
     job.cursor = job.result.cursor;
@@ -1802,7 +1824,7 @@ test "session_reads a full queued Message replays once when the queue becomes id
     host.held = false;
     try host.read(&job);
     try std.testing.expectEqual(@as(usize, 1), job.result.row_count);
-    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, host.shown, "please wait"));
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, host.shown, "please wait"));
     try std.testing.expectEqual(@as(usize, 0), job.result.new_rows);
 }
 
@@ -2249,7 +2271,7 @@ test "session_reads recall passes over a Message the draft refuses in one step, 
     };
 }
 
-test "quote body extraction follows rendered person and peer provenance through stopped rows" {
+test "SUI-56 quote extraction follows visible Message provenance" {
     const gpa = std.testing.allocator;
     var peer: protocol.NamedPeer = .{ .session = .{} };
     try peer.session.set("9f8e7d");
@@ -2283,7 +2305,7 @@ test "quote body extraction follows rendered person and peer provenance through 
             try window.append(&.{.{ .key = row.key, .text = feed_window.Text.fromDocument(document) }});
         }
         const result = try @import("transcript_selection.zig").copyBody(gpa, window, .{ .from = 0, .to = window.document.length });
-        if (case == .peer) {
+        if (case != .stopped) {
             try std.testing.expect(result == .nothing);
         } else {
             defer gpa.free(result.text.bytes);

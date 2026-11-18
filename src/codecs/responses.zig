@@ -2308,7 +2308,7 @@ test "effort update refusal requires an unambiguous parameter and invalid reques
     }
 }
 
-test "CM-40 input boundary transitions cover each version and carry state" {
+test "CM-43 input boundary transitions cover each version and carry state" {
     const State = @TypeOf(@as(Carry, undefined).input);
     for (std.enums.values(Version)) |version| for (std.enums.values(State)) |state| {
         for ([_]codec_abi.Item{ .{ .message = .instruction }, .{ .message = .user }, .history_start, .tools_start }) |item| {

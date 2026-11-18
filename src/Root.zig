@@ -218,8 +218,8 @@ pub fn closeSession(self: *Self, ctx: *vxfw.EventContext) !void {
 
 fn capture(raw: *anyopaque, ctx: *vxfw.EventContext, routed: vxfw.Event) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
-    const input: app_input.Input = switch (routed) {
-        .key_press => |key| .{ .key = .{ .named = @import("keypress.zig").named(key), .enter = @import("keypress.zig").isEnter(key) } },
+    var input: app_input.Input = switch (routed) {
+        .key_press => |key| .{ .key = .{ .named = @import("keypress.zig").named(key), .enter = @import("keypress.zig").isEnter(key), .printable = @import("keypress.zig").classify(key) == .text } },
         .paste_start => .paste_start,
         .paste_end => .paste_end,
         .mouse => |mouse| .{ .mouse = switch (mouse.button) {
@@ -235,7 +235,12 @@ fn capture(raw: *anyopaque, ctx: *vxfw.EventContext, routed: vxfw.Event) !void {
     if (routed == .mouse and routed.mouse.button == .left and routed.mouse.type == .press and !routed.mouse.mods.alt) {
         // Later candidates are deeper controls inside a pane-sized target.
         for (self.focus_frame.slice(), 0..) |target, i| if (self.focus_rects[i]) |rect| {
-            if (routed.mouse.row >= rect.row and routed.mouse.row < rect.row + rect.height and routed.mouse.col >= rect.col and routed.mouse.col < rect.col + rect.width) input_facts.mouse_target = target;
+            if (routed.mouse.row >= rect.row and routed.mouse.row < rect.row + rect.height and routed.mouse.col >= rect.col and routed.mouse.col < rect.col + rect.width) {
+                if (target == .settings_row) {
+                    input_facts.mouse_target = null;
+                    input = .{ .mouse = .click };
+                } else input_facts.mouse_target = target;
+            }
         };
     }
     try self.apply(ctx, app_input.step(&self.input, input_facts, input), routed);
