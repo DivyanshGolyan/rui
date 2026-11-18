@@ -185,6 +185,7 @@ Review parity and failure paths as well as the diff:
   On every exit (return, error, cancel), the owner reports each still-open record to the caller's failure boundary.
 - **Consumers.** When the change alters a shared value (a label, status text, column, step list, exit convention or file list), search for the old form. A test or fixture that restates it reads it from its owner instead ([Evidence](#evidence)); a consumer that cannot (a skill, helper script or document) changes in the same change.
 - **Runnable instructions.** A command in a skill, doc or script runs as written on the platforms it names: required inputs are supplied, nothing depends on one machine's paths or permissions, and a step that needs a person (such as a hardware check at the Mac) says so.
+- **Tests.** A change to production logic moves the touched owners' tests onto the [test requirements](docs/verification/testing.md#migration): catalog rows for the owners' promises, one owner test per invariant at the lowest level that observes it, and the replaced legacy tests deleted. A new test that names no invariant, checks internals, waits on time or replays one bug is a finding.
 - **Design.** Check the change against the approved design, not only the issue derived from it.
   An edit to a contract document that makes it match the change's own code is a finding, and so is a "by design" that cites text the same change added.
 
@@ -252,7 +253,7 @@ A value another file owns is pinned only by that owner's tests: other tests read
 `test_store_schema_fixtures.py`, `test_wire_version.py` and `test_fixture_literals.py` in `tests/ci` take the forbidden values from the owners and reject restated ones.
 Code that runs only on scheduled or one-platform jobs gets no other drift check.
 
-For each new owner-boundary regression on a [strict path](tests/ci/strict_paths.py), demonstrate that its counterexample goes red on the unfixed path or a targeted mutation at the intended assertion, not fixture setup.
+For a fix on a [strict path](tests/ci/strict_paths.py), demonstrate that the owning invariant's test goes red on the unfixed path or a targeted mutation at the intended assertion, not fixture setup; the fix sharpens that invariant rather than adding a test for the one bug ([Test requirements](docs/verification/testing.md#bugs-refine-the-catalog)).
 Examples: [#271 custody negative control](https://github.com/DivyanshGolyan/rui/commit/186514f) and [#258 qualification-oracle correction](https://github.com/DivyanshGolyan/rui/pull/258#issuecomment-5745097364).
 
 For documentation, check contract preservation, references and `git diff --check`.
