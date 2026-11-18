@@ -1919,41 +1919,6 @@ test "interrupt regression: Message promotion watches running calls and ignores 
     }.run);
 }
 
-test "list clock changes only after the last permission in a group is decided" {
-    try store_testing.forEachEngine(struct {
-        fn run(case: *store_testing.Case) !void {
-            var tmp = std.testing.tmpDir(.{});
-            defer tmp.cleanup();
-            var storage: Store = undefined;
-            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
-            defer storage.close() catch unreachable;
-            const session = try configureTestSessionAsk(&storage, "clock-permission-config");
-            try submitTestMessage(&storage, &tmp, "clock-permission-input", "clock-permission-message", session.slice(), "propose");
-            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-            try settleTwoActionsForTesting(&storage, &tmp, model, "clock-permission-tools");
-            const first = try store_testing.queryU64(&storage, "SELECT min(action_id) FROM action_operation", .{});
-            const second = try store_testing.queryU64(&storage, "SELECT max(action_id) FROM action_operation", .{});
-            var entered = try shared_fixtures.testingListRow(&storage, &tmp, session.slice());
-            defer entered.deinit();
-            const entering = try entered.number(&.{"state_change_at"});
-            var allow: protocol.PermissionDecisionCommand = .{ .action_id = first, .decision = .allow_once };
-            try allow.key.set("clock-permission-first");
-            try allow.session.set(session.slice());
-            try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
-            var partial = try shared_fixtures.testingListRow(&storage, &tmp, session.slice());
-            defer partial.deinit();
-            try std.testing.expectEqual(entering, try partial.number(&.{"state_change_at"}));
-            allow.action_id = second;
-            try allow.key.set("clock-permission-second");
-            try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
-            var completed = try shared_fixtures.testingListRow(&storage, &tmp, session.slice());
-            defer completed.deinit();
-            const last_decision = try store_testing.queryU64(&storage, "SELECT max(decided_at) FROM action_operation", .{});
-            try std.testing.expectEqual(@max(entering, last_decision), try completed.number(&.{"state_change_at"}));
-        }
-    }.run);
-}
-
 test "compound Action Resolution read verifies the whole value before declining parts" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {

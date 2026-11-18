@@ -33,7 +33,6 @@ const settleCallsForTesting = shared_fixtures.settleCallsForTesting;
 const settleCallsForTestingWithFaults = shared_fixtures.settleCallsForTestingWithFaults;
 const testSettings = shared_fixtures.testSettings;
 const testingBytesContent = shared_fixtures.testingBytesContent;
-const testingListRow = shared_fixtures.testingListRow;
 const testingSessionReport = shared_fixtures.testingSessionReport;
 const testingSessionReportWithProfile = shared_fixtures.testingSessionReportWithProfile;
 
@@ -609,9 +608,6 @@ test "compaction soft trigger freezes settings before selecting arrivals and ins
             try storage.settleModelAttemptFailure(first, .{ .uncorrelated = "provider_failure" }, .ordinary, .{});
             try submitTestMessage(&storage, &tmp, "two", "two", session.slice(), "pending");
             const compact = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-            var during_compaction = try testingListRow(&storage, &tmp, session.slice());
-            defer during_compaction.deinit();
-            const queued_clock = try during_compaction.number(&.{"state_change_at"});
             var view: TestingPage = undefined;
             view.open(&storage, compact);
             defer view.close();
@@ -635,9 +631,6 @@ test "compaction soft trigger freezes settings before selecting arrivals and ins
             try submitTestMessage(&storage, &tmp, "three", "three", session.slice(), "arrival");
             try settleCompactionForTesting(&storage, &tmp, compact, &.{.compaction});
             const successor = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-            var after_compaction = try testingListRow(&storage, &tmp, session.slice());
-            defer after_compaction.deinit();
-            try std.testing.expect((try after_compaction.number(&.{"state_change_at"})) >= queued_clock);
             var later: TestingPage = undefined;
             later.open(&storage, successor);
             defer later.close();

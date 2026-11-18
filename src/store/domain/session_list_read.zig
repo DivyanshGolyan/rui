@@ -656,20 +656,3 @@ pub const LastLineRead = struct {
         } else null } else null;
     }
 };
-
-test "changed candidates retain the lowest page after the client cursor" {
-    const after: change_ring.Id = "b4n8wd".*;
-    var candidates: ChangedCandidates = .{ .after = &after };
-    const references = [_]change_ring.Id{
-        "z1z1z1".*, "y2y2y2".*, "x3x3x3".*, "w4w4w4".*, "v5v5v5".*,
-        "t6t6t6".*, "s7s7s7".*, "r8r8r8".*, "q9q9q9".*, "p0p0p0".*,
-        "n1n1n1".*, "m2m2m2".*, "b4n8wd".*, "a1b2c3".*, "m2m2m2".*,
-    };
-    for (&references) |*reference| candidates.add(reference);
-    try std.testing.expectEqual(@as(usize, 9), candidates.count);
-    const expected = [_]change_ring.Id{
-        "m2m2m2".*, "n1n1n1".*, "p0p0p0".*, "q9q9q9".*, "r8r8r8".*,
-        "s7s7s7".*, "t6t6t6".*, "v5v5v5".*, "w4w4w4".*,
-    };
-    try std.testing.expectEqualSlices(change_ring.Id, &expected, candidates.refs[0..candidates.count]);
-}
