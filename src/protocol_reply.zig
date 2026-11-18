@@ -2483,7 +2483,7 @@ test "activity page delta variants validate tokens and preserve the cursor" {
     try std.testing.expect((try ActivityPage.parse(writer.buffered(), .{})).facts.token == null);
 }
 
-test "the integration empty queue matches the Activity writer and decoder" {
+test "INS-7 the integration empty queue matches the Activity writer and decoder" {
     var facts: protocol.ActivityFacts = .{ .end = 40, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
     try facts.work.workspace.set("/w");
     var buffer: [activity_reply.max_page_bytes]u8 = undefined;
