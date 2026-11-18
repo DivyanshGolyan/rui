@@ -21,7 +21,7 @@ The existing Linux producers and artifact restore share that compile selection; 
 This is compilation, not execution of every unit test, and does not add portable `test-logic` unless that root is selected separately.
 Required producers must succeed even when no product execution target was selected.
 
-[Selected checks](../../.github/workflows/check.yml) qualify each ready PR's immutable merge candidate with the PR tier only: Linux compilation and the affected Linux targets from [select_tests.py](../../tests/ci/select_tests.py).
+[Selected checks](../../.github/workflows/check.yml) qualify each ready PR's immutable merge candidate with the PR tier only: Linux compilation and the [fast tier](gates.md#two-tiers) of the affected Linux targets from [select_tests.py](../../tests/ci/select_tests.py), without whole-suite gates or live database servers.
 [ci_plan.py](../../tests/ci/ci_plan.py) owns that tier and routes everything else to promotion: native macOS, `typecheck-macos`, the `stack-frames` oracle, the previous installed-release upgrade, renderer contracts, the cache-execution proof and the Linux-memory collector checks.
 The owner accepted on 18 Nov 2026 that a defect only those checks catch now surfaces at promotion, which bisects the batch, rather than on the PR; in the five days measured these checks took about 48% of PR runner-minutes.
 The selector still computes the [Mac paths](../../tests/ci/platform_boundary.py) and the upgrade and `typecheck-macos` obligations; on a PR they only keep a change out of the documentation lane.
