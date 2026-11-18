@@ -4448,6 +4448,59 @@ test "read_action uses the frozen configured offer and returns one provider tool
     try std.testing.expectEqual(@as(u64, 1), try store.testing.sqlite_only.queryU64(&setup.storage, "SELECT count(*) FROM model_tool_call WHERE operation_id=?1 AND rejection_code='unknown_tool'", .{binding.operation_id}));
 }
 
+test "core reader failures retain exact bytes in provider continuation" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    const session = try setup.configure("reader-errors-codec");
+    var configure: wire_request.ConfigureCommand = .{};
+    configure.session = session;
+    try configure.key.set("reader-errors-offer");
+    configure.configuration.tools = try .of(&.{ "read_action", "read_transcript" });
+    try std.testing.expect(try setup.storage.configure(&configure, .{}) == .accepted);
+    try setup.submit("reader-errors-input", "reader-errors-input", session.slice(), "inspect");
+    var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+    var binding = try admitted.permit.consume();
+    try settleItemsForTesting(&setup, binding, "reader-errors-calls", &.{
+        "{\"type\":\"function_call\",\"id\":\"read-item\",\"call_id\":\"read-call\",\"name\":\"read_action\",\"arguments\":\"{}\"}",
+        "{\"type\":\"function_call\",\"id\":\"transcript-item\",\"call_id\":\"transcript-call\",\"name\":\"read_transcript\",\"arguments\":\"{\\\"offset\\\":1}\"}",
+        "{\"type\":\"function_call\",\"id\":\"stop-item\",\"call_id\":\"stop-call\",\"name\":\"stop_action\",\"arguments\":\"{}\"}",
+    });
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    for (0..3) |_| {
+        const action = (try setup.storage.nextCoreWork(.{ .free_credit = .none, .mcp_open = false })).?.action;
+        switch (action.tool) {
+            .read_action => try @import("read_action_tool.zig").run(&setup.storage, arena.allocator(), &action, .{}),
+            .read_transcript => try @import("read_transcript.zig").run(&setup.storage, arena.allocator(), &action, .{}),
+            .stop_action => try @import("stop_action_tool.zig").run(&setup.storage, arena.allocator(), &action, .{}),
+            else => return error.UnexpectedTool,
+        }
+    }
+    admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+    binding = try admitted.permit.consume();
+    const next = try prepareMemoForTesting(&setup, binding, null, .{});
+    defer std.testing.allocator.free(next.bytes);
+    const request = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), next.bytes, .{});
+    var seen: usize = 0;
+    for (request.object.get("input").?.array.items) |item| {
+        const kind = item.object.get("type") orelse continue;
+        if (!std.mem.eql(u8, kind.string, "function_call_output")) continue;
+        const call_id = item.object.get("call_id").?.string;
+        const expected = if (std.mem.eql(u8, call_id, "read-call"))
+            "Rui could not read the Action: action is required."
+        else if (std.mem.eql(u8, call_id, "transcript-call"))
+            "Rui could not read the transcript: offset is only accepted with full."
+        else if (std.mem.eql(u8, call_id, "stop-call"))
+            "Rui could not stop the Action: expected an object containing only action."
+        else
+            return error.UnexpectedCall;
+        try std.testing.expectEqualStrings(expected, item.object.get("output").?.string);
+        seen += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 3), seen);
+}
+
 test "a full rebuild must begin with the Session's prefix seal" {
     var setup: PreparationTestSetup = undefined;
     try setup.init();
