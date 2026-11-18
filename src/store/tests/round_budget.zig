@@ -175,6 +175,9 @@ test "each Store entry point takes its round budget on its common path" {
             defer storage.close() catch unreachable;
             var meter: RoundMeter = .{ .storage = &storage };
             meter.start();
+            _ = try storage.publishRetryCrossings(0, 1);
+            meter.stop(.publishRetryCrossings);
+            meter.start();
             try storage.saveModelFacts(&.{.{ .id = "catalog-budget", .context_window = null, .efforts = .{}, .openai_listed = true }}, null);
             meter.stop(.saveModelFacts);
             meter.start();
@@ -288,6 +291,9 @@ test "each Store entry point takes its round budget on its common path" {
             meter.start();
             try std.testing.expect((try storage.readPublicParts(&public_reader)) == .pending);
             meter.stop(.readPublicParts);
+            meter.start();
+            _ = try storage.openPublicPart(session.slice(), .{ .message = admission }, 1, 0);
+            meter.stop(.openPublicPart);
             const binding = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
             var view: TestingPage = undefined;
             view.open(storage, binding);

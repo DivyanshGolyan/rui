@@ -34,7 +34,7 @@ FUNCTIONAL_CORES = "src/logic_tests.zig"
 STACK_FRAMES_GATE = "tests/ci/stack_frames.json"
 
 MODULES = {
-    "url": "src/url.zig",
+    "url": "src/url.zig", "os": "src/os/os.zig",
     "test_poll": "src/testing/poll.zig", "h2": "src/h2/h2.zig", "tls_client": "src/tls_client/tls_client.zig", "rui_client": CALLER, "client": CALLER,
     "mysql_connection": "src/store/wire/mysql_connection.zig", "preferences": "src/preferences.zig",
     "codex_credentials": "src/codex_credentials.zig", "AnswerRenderer": "src/AnswerRenderer.zig",
@@ -64,8 +64,8 @@ FIXTURES = {
     "admission-debug-integration": ((I + "admission_integration.sh",), (), ()),
     "dispatch-integration": ((I + "dispatch_integration.py",), (), ("src/model_adapter.zig", *MODEL)),
     "dispatch-debug-integration": ((I + "dispatch_integration.py",), (), ()),
-    "public-parts-integration": ((I + "public_parts_integration.py",), ("src/store/tests/action_parts.zig",),
-                                 ("src/store/domain/public_parts.zig", "src/protocol.zig",
+    "public-parts-integration": ((I + "public_parts_integration.py",), ("src/store/tests/public_parts.zig",),
+                                 ("src/store/domain/public_parts.zig", "src/protocol.zig", "src/protocol_reply.zig",
                                   "src/cli_args.zig", RUI, HOST)),
     "read-image-integration": ((I + "read_image_integration.py",), (),
                                ("src/server_read_image.zig", "src/os/read_image_file.zig", "src/input_media.zig")),

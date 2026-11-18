@@ -1,9 +1,26 @@
 
-import type { InterruptTarget, Link } from "./sessions.ts";
+import type { InterruptTarget, Link, ServedWork } from "./sessions.ts";
 import { WIRE_VERSION } from "./transport.ts";
 import type { components } from "./wire.ts";
 
 type Schemas = components["schemas"];
+export function servedWork(work: Pick<Schemas["SessionWork"], "attention" | "group" | "actions">): ServedWork {
+	if (!work || !("attention" in work) || !("group" in work) || !work.actions ||
+		typeof work.actions.stop !== "boolean" || !("interrupt" in work.actions) || !("decide" in work.actions) ||
+		!["needs_you", "working", "queued", "done"].includes(work.group) ||
+		(work.attention !== null && (typeof work.attention !== "object" ||
+			!["approval", "failed", "finished"].includes(work.attention.kind) ||
+			typeof work.attention.turn !== "string" || typeof work.attention.step !== "string")) ||
+		(work.actions.decide !== null && typeof work.actions.decide !== "string") ||
+		(work.actions.interrupt !== null && (typeof work.actions.interrupt !== "object" ||
+			typeof work.actions.interrupt.turn !== "string" || typeof work.actions.interrupt.operation !== "string"))) {
+		throw new Error("Invalid work reply: missing served facts");
+	}
+	return { attention: work.attention, group: work.group, canStop: work.actions.stop,
+		decide: work.actions.decide, interruptTarget: work.actions.interrupt };
+}
+
+
 type Row = Schemas["ActivityItem"];
 
 type WireKind = Schemas["ActivityPageRequest"]["kinds"][number];
@@ -192,7 +209,8 @@ export async function* listActivity(link: Link, session: string, options: ListAc
 			if (page.delta === "not_modified") {
 				since = page.since;
 			} else {
-				observe?.(page.work?.actions?.interrupt ?? null);
+				const served = servedWork(page.work);
+				observe?.(served.interruptTarget);
 				for (const row of page.items) {
 					if (signal?.aborted) return;
 					const { entry, reference } = entryOf(row);

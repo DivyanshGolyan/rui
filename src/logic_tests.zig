@@ -45,6 +45,7 @@ const cores = .{
     .{ "configuration_admission.zig", @import("configuration_admission.zig") },
     .{ "configure_input.zig", @import("configure_input.zig") },
     .{ "content_string.zig", @import("content_string.zig") },
+    .{ "content_value.zig", @import("content_value.zig") },
     .{ "conversation_read.zig", @import("conversation_read.zig") },
     .{ "deadline.zig", @import("deadline.zig") },
     .{ "descriptor_capacity.zig", @import("descriptor_capacity.zig") },
@@ -286,7 +287,7 @@ test "the overview core reads session list pages as the client decodes them" {
         std.debug.assert(overview_view.max_page_rows == protocol.session_list_page_size);
     }
     var page: protocol_reply.SessionListPage = .{ .count = 2, .delta = .changed, .since = .{ .instance = @splat(7), .generation = 42 }, .next = .{ .since = null, .changed = .{ .through = 41, .after_reference = "r4t9vw".* } } };
-    page.rows[0] = .{ .read_version = page.since, .work = .{ .state = .{ .approval = .{ .since = 1_792_925_300 } } }, .peers = .{ .from_person_at = 1_792_925_001 } };
+    page.rows[0] = .{ .read_version = page.since, .work = .{ .state = .{ .approval = .{ .since = 1_792_925_300 } }, .attention = .{ .kind = .approval, .turn = 0, .step = 0 }, .group = .needs_you }, .peers = .{ .from_person_at = 1_792_925_001 } };
     try page.rows[0].reference.set("k7m2qx");
     try page.rows[0].workspace.set("/home/d/code/rui");
     page.rows[0].label = .{};
