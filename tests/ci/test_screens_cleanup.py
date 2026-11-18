@@ -15,8 +15,7 @@ def git(repo, *args):
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE).stdout.strip()
 
 
-@pytest.fixture
-def repos(tmp_path, monkeypatch):
+def create_repos(tmp_path, monkeypatch):
     origin = tmp_path / 'origin.git'
     subprocess.run(['git', 'init', '--bare', '-q', str(origin)], check=True)
     writer = tmp_path / 'writer'
@@ -51,7 +50,7 @@ def paths(origin):
     return git(origin, 'ls-tree', '-r', '--name-only', 'refs/heads/pr-screens').splitlines()
 
 
-def test_cleanup_keeps_open_and_removes_closed_and_legacy(repos):
+def _cleanup_keeps_open_and_removes_closed_and_legacy(repos):
     origin, writer = repos
     publish(writer, 2)
     (writer / 'main').mkdir()
@@ -68,7 +67,7 @@ def test_cleanup_keeps_open_and_removes_closed_and_legacy(repos):
     assert git(origin, 'rev-parse', 'refs/heads/pr-screens') == original
 
 
-def test_cleanup_removes_late_publication_on_next_sweep(repos):
+def _cleanup_removes_late_publication_on_next_sweep(repos):
     origin, writer = repos
     cleanup.cleanup(lambda pr: 'closed')
     publish(writer, 1)
@@ -76,15 +75,14 @@ def test_cleanup_removes_late_publication_on_next_sweep(repos):
     assert paths(origin) == []
 
 
-@pytest.mark.parametrize('state,expected', [('open', ['pr-2/capture']), ('closed', [])])
-def test_cleanup_recomputes_after_concurrent_publication(repos, state, expected):
+def _cleanup_recomputes_after_concurrent_publication(repos, state, expected):
     origin, writer = repos
     cleanup.cleanup(lambda pr: 'closed' if pr == 1 else state,
                     before_push=lambda attempt: publish(writer, 2) if attempt == 0 else None)
     assert paths(origin) == expected
 
 
-def test_retries_are_bounded_and_preserve_each_publication(repos):
+def _retries_are_bounded_and_preserve_each_publication(repos):
     origin, writer = repos
     attempts = []
     def race(attempt):
@@ -96,7 +94,7 @@ def test_retries_are_bounded_and_preserve_each_publication(repos):
     assert paths(origin) == [f'pr-{pr}/capture' for pr in range(1, 7)]
 
 
-def test_concurrent_cleanup_on_last_attempt_is_success(repos):
+def _concurrent_cleanup_on_last_attempt_is_success(repos):
     origin, writer = repos
     def race(attempt):
         if attempt < 4:
@@ -111,7 +109,7 @@ def test_concurrent_cleanup_on_last_attempt_is_success(repos):
     assert paths(origin) == [f'pr-{pr}/capture' for pr in range(2, 6)]
 
 
-def test_push_failure_without_tip_change_fails(repos):
+def _push_failure_without_tip_change_fails(repos):
     origin, _ = repos
     hook = origin / 'hooks' / 'pre-receive'
     hook.write_text('#!/bin/sh\nexit 1\n')
@@ -121,14 +119,14 @@ def test_push_failure_without_tip_change_fails(repos):
     assert paths(origin) == ['pr-1/capture']
 
 
-def test_absent_branch_is_noop(repos):
+def _absent_branch_is_noop(repos):
     origin, _ = repos
     git(origin, 'update-ref', '-d', 'refs/heads/pr-screens')
     cleanup.cleanup(lambda pr: 'closed')
     assert cleanup.tip() is None
 
 
-def test_state_lookup_failure_leaves_branch_unchanged(repos):
+def _state_lookup_failure_leaves_branch_unchanged(repos):
     origin, _ = repos
     original = git(origin, 'rev-parse', 'refs/heads/pr-screens')
     def fail(pr):
@@ -136,6 +134,26 @@ def test_state_lookup_failure_leaves_branch_unchanged(repos):
     with pytest.raises(RuntimeError, match='API unavailable'):
         cleanup.cleanup(fail)
     assert git(origin, 'rev-parse', 'refs/heads/pr-screens') == original
+
+
+def test_cleanup_sweep_preserves_open_prs_scr_5(tmp_path, monkeypatch):
+    # SCR-5: sweep only closed PR and legacy entries, including races and failures.
+    cases = [
+        (_cleanup_keeps_open_and_removes_closed_and_legacy, ()),
+        (_cleanup_removes_late_publication_on_next_sweep, ()),
+        (_cleanup_recomputes_after_concurrent_publication, ('open', ['pr-2/capture'])),
+        (_cleanup_recomputes_after_concurrent_publication, ('closed', [])),
+        (_retries_are_bounded_and_preserve_each_publication, ()),
+        (_concurrent_cleanup_on_last_attempt_is_success, ()),
+        (_push_failure_without_tip_change_fails, ()),
+        (_absent_branch_is_noop, ()),
+        (_state_lookup_failure_leaves_branch_unchanged, ()),
+    ]
+    for index, (case, args) in enumerate(cases):
+        root = tmp_path / str(index)
+        root.mkdir()
+        with monkeypatch.context() as context:
+            case(create_repos(root, context), *args)
 
 
 def test_pr_state_reads_rest_and_rejects_unknown_state(monkeypatch):

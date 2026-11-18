@@ -2657,14 +2657,17 @@ class EvidencePublicationTest(unittest.TestCase):
 from pathlib import Path
 args = sys.argv[1:]
 with open(os.environ['PUBLISH_LOG'], 'a') as f: f.write(json.dumps(args) + '\\n')
-if args[:1] == ['api'] and '/pulls/' in args[1]:
+if args[:1] == ['api'] and args[1] == 'repos/DivyanshGolyan/rui/pulls/1549':
     print(json.dumps({'state': os.environ.get('PUBLISH_STATE', 'open'), 'head': {'sha': os.environ['PUBLISH_HEAD']}}))
+elif args[:4] != ['api', '--method', 'POST', 'repos/DivyanshGolyan/rui/actions/workflows/screens-comment.yml/dispatches']:
+    raise AssertionError(args)
 """)
         gh.chmod(0o755)
         env = {**os.environ, "PATH": str(fake) + os.pathsep + os.environ["PATH"],
                "PUBLISH_LOG": str(log), "PUBLISH_HEAD": head or self.head,
-               "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": f"url.{remote.as_uri()}.insteadOf",
-               "GIT_CONFIG_VALUE_0": "https://github.com/DivyanshGolyan/rui"}
+               "RUI_SCREENS_REMOTE": str(remote), "GIT_ALLOW_PROTOCOL": "file",
+               "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+               "GIT_CONFIG_COUNT": "0"}
         if retry:
             # Advance the branch immediately before the first push, forcing a rejection.
             real_git = shutil.which("git")
@@ -2691,11 +2694,11 @@ os.execv(os.environ['REAL_GIT'], [os.environ['REAL_GIT'], *args])
                        RACE_REPO=str(root / "race"), PUBLISH_REMOTE=str(remote))
         return remote, log, env
 
-    def publish_run(self, out, env, *args):
-        return subprocess.run([sys.executable, str(SCRIPT), "publish", str(out), "--pr", "1549", *args],
+    def publish_run(self, out, env, *args, script=SCRIPT):
+        return subprocess.run([sys.executable, str(script), "publish", str(out), "--pr", "1549", "--repo", "DivyanshGolyan/rui", *args],
                               env=env, text=True, capture_output=True)
 
-    def test_publish_refuses_closed_pr(self):
+    def _publish_refuses_closed_pr(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             out = root / "frames"
@@ -2707,7 +2710,7 @@ os.execv(os.environ['REAL_GIT'], [os.environ['REAL_GIT'], *args])
             self.assertIn("PR that is not open", result.stderr)
             self.assertEqual(subprocess.run(["git", "-C", str(remote), "show-ref"], capture_output=True, text=True).stdout, "")
 
-    def test_publish_selected_media_and_dispatch(self):
+    def _publish_selected_media_and_dispatch(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             out = root / "frames"
@@ -2738,15 +2741,22 @@ os.execv(os.environ['REAL_GIT'], [os.environ['REAL_GIT'], *args])
             self.assertEqual(calls[-1], ["api", "--method", "POST", "repos/DivyanshGolyan/rui/actions/workflows/screens-comment.yml/dispatches", "-f", "ref=main", "-f", "inputs[pr]=1549", "-f", f"inputs[head]={self.head}", "-f", f"inputs[gen]={gen}"])
             self.assertIn("actions/workflows/screens-comment.yml", result.stdout)
 
-    def test_publish_repeated_preserves_generations(self):
+    def test_publish_immutable_generations_scr_2(self):
+        # SCR-2: each publication retains its own immutable generation.
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             out = root / "frames"
             self.comparison(out)
             remote, log, env = self.publish_fixture(root)
-            for args in ((), ("--all",)):
-                result = self.publish_run(out, env, *args)
-                self.assertEqual(result.returncode, 0, result.stderr)
+            result = self.publish_run(out, env)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            first_gen = json.loads(log.read_text().splitlines()[-1])[-1].removeprefix("inputs[gen]=")
+            first_tree = subprocess.check_output(["git", "--git-dir", str(remote), "rev-parse",
+                                                  f"pr-screens:pr-1549/{self.head}/{first_gen}"])
+            result = self.publish_run(out, env, "--all")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(first_tree, subprocess.check_output(["git", "--git-dir", str(remote), "rev-parse",
+                                                  f"pr-screens:pr-1549/{self.head}/{first_gen}"]))
             dispatches = [json.loads(line) for line in log.read_text().splitlines() if "--method" in line]
             gens = [call[-1].removeprefix("inputs[gen]=") for call in dispatches]
             self.assertEqual(len(set(gens)), 2)
@@ -2757,7 +2767,7 @@ os.execv(os.environ['REAL_GIT'], [os.environ['REAL_GIT'], *args])
                 self.assertEqual(json.loads(data)["same_count"], count)
                 subprocess.check_output(["git", "--git-dir", str(remote), "show", prefix + "/after/changed@140x40.png"])
 
-    def test_publish_all_includes_unchanged_pairs(self):
+    def _publish_all_includes_unchanged_pairs(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             out = root / "frames"
@@ -2773,7 +2783,7 @@ os.execv(os.environ['REAL_GIT'], [os.environ['REAL_GIT'], *args])
             self.assertEqual(diff["same"][0]["before"]["files"]["png"], "before/same@140x40.png")
             self.assertEqual(diff["same"][0]["after"]["files"]["png"], "after/same@140x40.png")
 
-    def test_publish_refuses_combined_media_over_limit(self):
+    def _publish_refuses_combined_media_over_limit(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             out = root / "frames"
@@ -2788,7 +2798,8 @@ os.execv(os.environ['REAL_GIT'], [os.environ['REAL_GIT'], *args])
             self.assertFalse(log.exists())
             self.assertEqual(subprocess.check_output(["git", "--git-dir", str(remote), "branch", "--list"], text=True), "")
 
-    def test_publish_retries_concurrent_push(self):
+    def test_publish_preserves_concurrent_publication_scr_8(self):
+        # SCR-8: a rejected push is retried without discarding the concurrent branch.
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             out = root / "frames"
@@ -2802,8 +2813,8 @@ os.execv(os.environ['REAL_GIT'], [os.environ['REAL_GIT'], *args])
             self.assertIn(f"pr-1549/{self.head}/{gen}/diff.json", files)
             self.assertTrue((root / "raced").exists())
 
-    def test_publish_refuses_mismatched_head_and_oversize(self):
-        for mismatch in (True, False):
+    def _publish_refuses_mismatched_head_or_oversize(self, cases):
+        for mismatch in cases:
             with self.subTest(mismatch=mismatch), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 out = root / "frames"
@@ -2819,6 +2830,45 @@ os.execv(os.environ['REAL_GIT'], [os.environ['REAL_GIT'], *args])
                 self.assertEqual(refs, "")
                 if log.exists():
                     self.assertNotIn("dispatches", log.read_text())
+
+    def test_publish_refuses_closed_or_stale_pr_scr_6(self):
+        # SCR-6: reject closed PRs and stale capture heads.
+        self._publish_refuses_closed_pr()
+        self._publish_refuses_mismatched_head_or_oversize((True,))
+
+    def test_publish_refuses_oversized_media_scr_10(self):
+        # SCR-10: reject both single and combined media over the limit.
+        self._publish_refuses_mismatched_head_or_oversize((False,))
+        self._publish_refuses_combined_media_over_limit()
+
+    def test_publish_selected_media_scr_7(self):
+        # SCR-7: publication includes selected media and dispatches its generation.
+        self._publish_selected_media_and_dispatch()
+        self._publish_all_includes_unchanged_pairs()
+
+    def test_publish_uses_explicit_fixture_with_any_origin_scr_9(self):
+        # SCR-9: explicit targets isolate publication from checkout origin discovery.
+        for origin in (None, "git@github.com:someone/rui.git", "https://github.com/fork/rui.git"):
+            with self.subTest(origin=origin), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                checkout = root / "checkout"
+                script = checkout / ".claude/skills/verify-rui/scripts/verify-rui"
+                script.parent.mkdir(parents=True)
+                shutil.copyfile(SCRIPT, script)
+                subprocess.run(["git", "init", "-q", str(checkout)], check=True)
+                if origin:
+                    subprocess.run(["git", "-C", str(checkout), "remote", "add", "origin", origin], check=True)
+                out = root / "frames"
+                self.comparison(out)
+                remote, log, env = self.publish_fixture(root)
+                result = self.publish_run(out, env, script=script)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                files = subprocess.check_output(["git", "--git-dir", str(remote), "ls-tree", "-r", "--name-only", "pr-screens"], text=True)
+                self.assertIn("diff.json", files)
+                calls = [json.loads(line) for line in log.read_text().splitlines()]
+                self.assertEqual(len(calls), 2)
+                self.assertEqual(calls[0], ["api", "repos/DivyanshGolyan/rui/pulls/1549"])
+                self.assertEqual(calls[1][3], "repos/DivyanshGolyan/rui/actions/workflows/screens-comment.yml/dispatches")
 
     def test_screens_parts_preserves_fenced_example_and_other_sections(self):
         body = "## Summary\n```md\n## Screens\nfake\n```\n\n## Screens\nold\n\n## Evidence\nproof\n"

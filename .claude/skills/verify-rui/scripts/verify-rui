@@ -4179,8 +4179,12 @@ def cmd_publish(args):
         if sum(path.stat().st_size for path in files.values()) > 20 * 1024 * 1024:
             raise ValueError("selected media exceeds 20 MB in total")
         repo = HERE.parents[4]
-        url = subprocess.check_output(["git", "-C", str(repo), "config", "--get", "remote.origin.url"], text=True).strip()
-        repository = github_repository(url)
+        url = os.environ.get("RUI_SCREENS_REMOTE")
+        if not url:
+            url = subprocess.check_output(["git", "-C", str(repo), "config", "--get", "remote.origin.url"], text=True).strip()
+        repository = args.repo or github_repository(url)
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
+            raise ValueError("--repo must be OWNER/NAME")
         pr = json.loads(gh("api", f"repos/{repository}/pulls/{args.pr}", cwd=repo))
         if pr["state"] != "open":
             raise ValueError("cannot publish captures for a PR that is not open")
@@ -4306,6 +4310,7 @@ def main():
     p = sub.add_parser("publish", help="publish selected frames to the PR Screens comment")
     p.add_argument("directory", metavar="DIR")
     p.add_argument("--pr", required=True, type=int, help="PR number to publish captures for")
+    p.add_argument("--repo", help="GitHub repository OWNER/NAME (default: origin)")
     p.add_argument("--states", metavar="NAME,...")
     p.add_argument("--all", action="store_true", help="include pairs with identical committed cells")
     p.set_defaults(func=cmd_publish)

@@ -307,7 +307,10 @@ class PrShapeMainTest(unittest.TestCase):
                 self.assertEqual(pr_shape.main(), expected)
                 changed.assert_not_called()
 
-    def test_screens_mode_accepts_only_current_bot_sticky_images(self):
+    def test_screens_mode_accepts_only_current_bot_sticky_images_scr_4(self):
+        # SCR-4: sticky evidence must be from the bot, match HEAD and contain an image.
+        self._screens_mode_accepts_rendered_screenshot_table()
+        self._screens_mode_paginates_comments_and_fails_closed_on_api_error()
         head = "a" * 40
         marker = "<!-- rui-screens -->"
         image = "| Overview | ![After](https://example.com/screen.png) |"
@@ -332,7 +335,7 @@ class PrShapeMainTest(unittest.TestCase):
                  redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
                 self.assertEqual(pr_shape.main(), expected)
 
-    def test_screens_mode_accepts_rendered_screenshot_table(self):
+    def _screens_mode_accepts_rendered_screenshot_table(self):
         head = "a" * 40
         pair = {"name": "overview", "size": "140x40", "before": None,
                 "after": {"files": {"png": "overview.png"}}}
@@ -350,7 +353,7 @@ class PrShapeMainTest(unittest.TestCase):
              redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
             self.assertEqual(pr_shape.main(), 0)
 
-    def test_screens_mode_paginates_comments_and_fails_closed_on_api_error(self):
+    def _screens_mode_paginates_comments_and_fails_closed_on_api_error(self):
         head = "a" * 40
         comment = {"user": {"login": "github-actions[bot]"}, "body":
                    f"<!-- rui-screens -->\nHead: `{head}`\n![After](https://example.com/a.png)"}

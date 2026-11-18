@@ -124,9 +124,10 @@ class UpsertTest(unittest.TestCase):
         self.assertIn('page=2', calls[1][1])
         self.assertNotIn('user', [path for _, path, _ in calls])
 
-    def test_generation_order_and_different_head(self):
+    def test_comment_generation_order_scr_3(self):
+        # SCR-3: an older same-head generation never replaces a newer comment.
         for existing_head, existing_gen, new_gen, updates in [
-            ('head', '200', '100', False), ('head', '100', '200', True),
+            ('head', '200', '100', False), ('head', '100', '200', True), ('head', '100', '100', True),
             ('other', '200', '100', True),
         ]:
             with self.subTest(existing_head=existing_head, existing_gen=existing_gen):
