@@ -36,13 +36,11 @@ class SocketTest(unittest.TestCase):
 
     def cleanup_process(self):
         self.client.close()
-        self.process.stdin.close()
         try:
-            self.process.wait(timeout=5)
+            self.process.communicate(timeout=5)
         except subprocess.TimeoutExpired:
             self.process.kill()
-            self.process.wait()
-        self.process.stdout.close()
+            self.process.communicate()
 
     def test_pau_8_arm_ack_then_repeated_arrivals(self):
         self.client.arm(POINT)
