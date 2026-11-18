@@ -10,4 +10,4 @@ The pause controller is a test-only seam; these promises apply to its callers an
 | PAU-4 | Module | Poll stays pending until release and consumes the decision once. | PauseController | `pause PAU-4 poll remains pending until release and consumes once` | `src/testing/pause.zig` |
 | PAU-5 | Module | Arming rejects faults unsupported by the point. | PauseController | `pause PAU-5 rejects unsupported faults before arming` | `src/testing/pause.zig` |
 | PAU-6 | Module | Closing the controller unblocks parked workers with an error. | PauseController | `pause PAU-6 close releases parked workers with closed` | `src/testing/pause.zig` |
-| PAU-7 | Module | Disjoint selections count matching arrivals independently and overlapping selections are rejected. | PauseController | `pause PAU-7 selections count matching contexts independently` | `src/testing/pause.zig` |
+| PAU-7 | Module | Occurrences count all matching arrivals per point and filter regardless of arming time; passed occurrences and ambiguous overlapping selections are rejected. | PauseController | `pause PAU-7 selections count matching contexts independently` | `src/testing/pause.zig` |
