@@ -199,6 +199,7 @@ fn editSaved(init: std.process.Init, gpa: std.mem.Allocator, path: []const u8, v
     if (bytes.len > hs.max_document_bytes) return invalid(failure, "settings", "saved document exceeds the document byte bound");
     settings.deinit();
     try hs.apply(settings, init.gpa, bytes, .file, checkPreset, failure);
+    try detachedPaths(settings, failure);
     return bytes;
 }
 
@@ -1029,6 +1030,46 @@ fn expectJsonEqual(expected: std.json.Value, actual: std.json.Value) !void {
     try std.testing.expectEqualStrings(a, b);
 }
 
+test "saved edits share detached relative path admission for every schema path" {
+    const gpa = std.testing.allocator;
+    var environment: std.process.Environ.Map = .init(gpa);
+    defer environment.deinit();
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const init = initForTest(&arena, &environment);
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const settings = try gpa.create(hs.Settings);
+    defer gpa.destroy(settings);
+    for (hs.leaves, 0..) |leaf, index| {
+        if (!std.mem.eql(u8, leaf.kind, "path")) continue;
+        const path = try concreteLeaf(arena.allocator(), leaf.pattern);
+        const name = try std.fmt.allocPrint(arena.allocator(), "path-{d}", .{index});
+        var host = try tmp.dir.createDirPathOpen(init.io, name, .{ .permissions = .fromMode(0o700) });
+        defer host.close(init.io);
+        var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const dir = root[0..try host.realPath(init.io, &root)];
+        var failure: start_report.Failure = undefined;
+        errdefer std.debug.print("path leaf {s}: {s}\n", .{ path, failure.message.slice() });
+        try savedEdit(init, dir, path, "/tmp/pr7c-path", &failure);
+        var before_buffer: [hs.max_document_bytes + 1]u8 = undefined;
+        const saved_path = try savedPath(init, arena.allocator(), dir);
+        const before = try arena.allocator().dupe(u8, (try credentials.readPrivate(saved_path, &before_buffer)).?);
+        settings.* = .{};
+        defer settings.deinit();
+        var expected: start_report.Failure = undefined;
+        const result = input(init, settings, path, "relative/path", &expected);
+        if (result) |_| {
+            try std.testing.expectError(error.SettingsInvalid, detachedPaths(settings, &expected));
+        } else |err| try std.testing.expectEqual(error.SettingsInvalid, err);
+        try std.testing.expectError(error.SettingsInvalid, savedEdit(init, dir, path, "relative/path", &failure));
+        try std.testing.expectEqual(start_report.StartError.settings_invalid, failure.code);
+        try std.testing.expectEqualStrings(expected.message.slice(), failure.message.slice());
+        var after_buffer: [hs.max_document_bytes + 1]u8 = undefined;
+        try std.testing.expectEqualStrings(before, (try credentials.readPrivate(saved_path, &after_buffer)).?);
+    }
+}
+
 test "Host start every generated leaf saves shows loads and unsets to defaults" {
     const gpa = std.testing.allocator;
     var environment: std.process.Environ.Map = .init(gpa);
@@ -1507,6 +1548,10 @@ fn readDetached(init: std.process.Init, request: Spawn, settings: *hs.Settings, 
 
 fn detachedValue(settings: *const hs.Settings, failure: *start_report.Failure) !void {
     if (settings.interface.lifetime.value == .stdin) return invalid(failure, "interface.lifetime", "a Host started by bare rui or rui host start has no stdin; use detached, or run rui host serve");
+    try detachedPaths(settings, failure);
+}
+
+fn detachedPaths(settings: *const hs.Settings, failure: *start_report.Failure) !void {
     var name: LeafName = .{};
     if (relativeLeaf(hs.Settings, settings, &name)) {
         var buffer: [start_report.max_refusal_message_bytes]u8 = undefined;
