@@ -48,7 +48,7 @@ pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, pinned_transport: pr
                 .optimize = .ReleaseSafe,
             }),
         });
-        product.configureUnitRoot(b, apple_tests, apple, null);
+        product.configureUnitRoot(b, apple_tests, apple, null, true);
         macos_types_step.dependOn(&apple_tests.step);
     }
     const targets = [_]std.Target.Query{

@@ -132,7 +132,7 @@ pub const Units = struct {
     signal_stack_probe: *std.Build.Step.Run,
 };
 
-pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pinned_transport: ?product.PinnedTransport, test_filters: []const []const u8) Units {
+pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pinned_transport: ?product.PinnedTransport, test_filters: []const []const u8, mysql_dialect_check: bool) Units {
     const native_group = group(.native_pair);
     if (native_group.roots.len == 0) @panic("Native group must contain a unit root");
     const identities = b.allocator.alloc(UnitRoot.Id, if (test_filters.len == 0) unit_partition.roots.len else 1) catch @panic("OOM");
@@ -185,7 +185,7 @@ pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pin
                 .optimize = .ReleaseSafe,
             }));
         }
-        product.configureUnitRoot(b, compile, target, pinned_transport);
+        product.configureUnitRoot(b, compile, target, pinned_transport, mysql_dialect_check);
     }
     const native = nativeGroup(b, ci, identities, tests, test_filters.len != 0, &runs);
     runs.set(.native_pair, native.final);
@@ -214,7 +214,7 @@ pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pin
         .filters = if (test_filters.len != 0) test_filters else &.{root(.deadline).filter.?},
         .test_runner = filtered_runner,
     });
-    product.configureUnitRoot(b, deadline_witness, target, pinned_transport);
+    product.configureUnitRoot(b, deadline_witness, target, pinned_transport, mysql_dialect_check);
     const run_full_tests = ci.run(deadline_witness);
     run_full_tests.has_side_effects = true;
     run_full_tests.setEnvironmentVariable("RUI_TEST_EXACT_INACTIVITY", "1");

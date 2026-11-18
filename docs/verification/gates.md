@@ -82,6 +82,7 @@ A green PR therefore no longer proves:
 - any integration fixture the diff reaches only through imports, `RULES` or asserted text, rather than through the fixture's own script, executable or `FIXTURES` owner;
 - the Store unit partition for a change outside `src/store.zig` and `src/store/`;
 - unit and fixture behavior against a live MySQL or Postgres server, and `mysql-wire-integration`;
+- the MySQL dialect check: a PR-tier build (`-Dpr-ci=true`) compiles `store/mysql_dialect_check.zig`'s shadow PREPAREs out of the unit roots, so a statement or fixture text MySQL 8.4 refuses is found only by a main-tier build against a live server;
 - everything [Promote](../../.github/workflows/promote.yml) alone runs: macOS, `stack-frames`, the installed-release upgrade and renderer contracts.
 
 Promotion proves those on main HEAD and bisects a failure to its commit; the owner accepted on 18 Nov 2026 that such a break reaches main first.

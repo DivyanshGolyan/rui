@@ -8,6 +8,10 @@ const store_testing = @import("testing.zig");
 const mysql_connection = @import("wire/mysql_connection.zig");
 const mysql = mysql_connection.mysql;
 
+/// Whether this unit root compiles the shadow PREPAREs. `build.zig` turns it off only
+/// in a PR-tier build, which starts no MySQL server.
+pub const compiled = @import("mysql_dialect_check_options").compiled;
+
 const database_sql = "{[database]s}";
 const oracle_database_sql = "{[oracle]s}";
 
@@ -172,7 +176,12 @@ fn configured() !?Config {
     defer environ.deinit();
     const socket = environ.get("RUI_TEST_MYSQL_SOCKET");
     const password = environ.get("RUI_TEST_MYSQL_ROOT_PASSWORD");
-    if (socket == null and password == null and !(try store_testing.requiredEngines()).contains(.mysql)) return null;
+    const server = socket != null or password != null or (try store_testing.requiredEngines()).contains(.mysql);
+    switch (decide(compiled, server)) {
+        .skip => return null,
+        .refuse => return error.MysqlDialectCheckCompiledOut,
+        .prepare => {},
+    }
     if (socket == null or password == null) return error.MysqlRequired;
     if (socket.?.len > socket_buffer.len or password.?.len > password_buffer.len) return error.MysqlConfigTooLong;
     @memcpy(socket_buffer[0..socket.?.len], socket.?);
@@ -354,11 +363,26 @@ fn run(text: []const u8) !?Refused {
     return refused;
 }
 
+const Decision = enum { prepare, skip, refuse };
+
+/// A build without the check must not stand in for one against a live server.
+fn decide(compiled_in: bool, server: bool) Decision {
+    if (!server) return .skip;
+    return if (compiled_in) .prepare else .refuse;
+}
+
 pub fn shadowPrepare(comptime text: []const u8) void {
+    if (comptime !compiled) return;
     once(text, null);
 }
 
+pub fn shadowPrepareStatement(comptime S: type) void {
+    if (comptime !compiled) return;
+    once(comptime S.mysql.prepared(), null);
+}
+
 pub fn shadowPrepareFixture(comptime text: []const u8) void {
+    if (comptime !compiled) return;
     switch (comptime rsql.mysqlRendering(text)) {
         .refused => |message| once(text, message),
         .rendered => |template| inline for (comptime statements(template.prepared())) |statement| once(statement, null),
@@ -422,6 +446,16 @@ fn statements(comptime text: []const u8) []const []const u8 {
 fn piece(comptime text: []const u8) []const []const u8 {
     const trimmed = std.mem.trim(u8, text, " \t\n");
     return if (trimmed.len == 0) &.{} else &.{trimmed};
+}
+
+test "the dialect check prepares only when compiled in, skips without a server, and refuses a server it cannot check" {
+    const cases = [_]struct { compiled_in: bool, server: bool, want: Decision }{
+        .{ .compiled_in = true, .server = true, .want = .prepare },
+        .{ .compiled_in = true, .server = false, .want = .skip },
+        .{ .compiled_in = false, .server = false, .want = .skip },
+        .{ .compiled_in = false, .server = true, .want = .refuse },
+    };
+    for (cases) |case| try std.testing.expectEqual(case.want, decide(case.compiled_in, case.server));
 }
 
 test "each text has its own checked flag" {

@@ -321,7 +321,7 @@ fn controlStatement(self: *Sqlite, comptime which: Control) !*c.sqlite3_stmt {
 
 pub fn cachedTyped(self: *Sqlite, comptime S: type) !*c.sqlite3_stmt {
     comptime if (!rsql.isStatement(S)) @compileError("cachedTyped runs only a type rsql.Read or rsql.Write made: " ++ @typeName(S));
-    if (@import("builtin").is_test) @import("../mysql_dialect_check.zig").shadowPrepare(comptime S.mysql.prepared());
+    if (@import("builtin").is_test) @import("../mysql_dialect_check.zig").shadowPrepareStatement(S);
     return cachedStatic(self, S.sql);
 }
 

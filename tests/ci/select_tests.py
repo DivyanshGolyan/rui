@@ -41,7 +41,8 @@ MODULES = {
     "openapi.json": "openapi.json",
 }
 PACKAGES = {"std", "builtin", "vaxis", "terminal_width", "terminal_unicode", "h2_c", "openssl_c", "posix",
-            "transport_options", "build_options", "yaml", "sqlite", "unit_test_options", "unit_test_partition"}
+            "transport_options", "build_options", "mysql_dialect_check_options", "yaml", "sqlite", "unit_test_options",
+            "unit_test_partition"}
 
 UNIT_ROOTS = {
     "test-native": ("src/tests.zig", "src/unit_test_partition.zig", "src/signal_stack_probe.zig",
