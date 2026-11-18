@@ -672,6 +672,9 @@ pub fn executionMain(host: *Host) void {
     traceLifecycleService(host, measurement.maximum_gap_ns);
 }
 
+// executionMain runs every NativeTurn step through execution_turn.run. Steps
+// that never lead to a completion stay out of line, so their locals do not
+// widen the frame under serviceOneCompletion, the engine's deepest chain.
 const NativeTurn = struct {
     host: *Host,
     reactor: ?*provider.Reactor,
@@ -732,7 +735,7 @@ const NativeTurn = struct {
         return self.host.slot_changes;
     }
 
-    pub fn reconcileControls(self: *NativeTurn) void {
+    pub noinline fn reconcileControls(self: *NativeTurn) void {
         self.workspace.model_admission.deinit();
         cancelSupersededTransfers(
             self.host,
@@ -742,11 +745,11 @@ const NativeTurn = struct {
         stopSupersededBash(self.host, self.slots, &self.workspace.bash_preparation);
     }
 
-    pub fn advanceBashPreparation(self: *NativeTurn) bool {
+    pub noinline fn advanceBashPreparation(self: *NativeTurn) bool {
         return callAdvanceBashPreparation(self.host, self.slots, self.workspace);
     }
 
-    pub fn advanceLiveBash(self: *NativeTurn) bool {
+    pub noinline fn advanceLiveBash(self: *NativeTurn) bool {
         const observed = std.Io.Clock.Timestamp.now(self.host.io, .awake);
         const generation = self.host.store.commitGeneration();
         var cursor: usize = 0;
@@ -774,7 +777,7 @@ const NativeTurn = struct {
         return advanceBash(self.host, self.slots, self.workspace) or mcp_progress or image_progress;
     }
 
-    pub fn advanceRetainedCleanup(self: *NativeTurn, observed: std.Io.Clock.Timestamp, retry_at: *std.Io.Clock.Timestamp) bool {
+    pub noinline fn advanceRetainedCleanup(self: *NativeTurn, observed: std.Io.Clock.Timestamp, retry_at: *std.Io.Clock.Timestamp) bool {
         return callAdvanceRetainedCleanup(self.host, self.slots, observed, retry_at);
     }
 
@@ -819,7 +822,7 @@ const NativeTurn = struct {
         return slotsHaveBash(self.slots) or self.mcp.any() or (if (self.images) |images| images.any() else false);
     }
 
-    pub fn recoverUncertainAction(self: *NativeTurn) error{Fence}!bool {
+    pub noinline fn recoverUncertainAction(self: *NativeTurn) error{Fence}!bool {
         const active_slots = ActiveSlots{ .slots = self.slots, .mcp = self.mcp, .images = self.images };
         const active_actions = store_module.ActiveOperationFilter{
             .context = &active_slots,
@@ -833,7 +836,7 @@ const NativeTurn = struct {
         };
     }
 
-    pub fn recoverExhaustedRetry(self: *NativeTurn) error{Fence}!bool {
+    pub noinline fn recoverExhaustedRetry(self: *NativeTurn) error{Fence}!bool {
         if (retryRecoveryHeld(self.host)) return false;
         const active_slots = ActiveSlots{ .slots = self.slots };
         const active_filter = store_module.ActiveOperationFilter{
@@ -900,7 +903,7 @@ const NativeTurn = struct {
         };
     }
 
-    pub fn scanWork(self: *NativeTurn, paused: bool, capacity: DispatchCapacity) error{Fence}!execution_turn.Work {
+    pub noinline fn scanWork(self: *NativeTurn, paused: bool, capacity: DispatchCapacity) error{Fence}!execution_turn.Work {
         const found = self.host.store.dispatchWork(paused, capacity) catch |err| {
             fenceDispatch(self.host, "dispatch work read", err);
             self.fenced = true;
@@ -938,7 +941,7 @@ const NativeTurn = struct {
         };
     }
 
-    pub fn advanceModelAdmission(self: *NativeTurn) bool {
+    pub noinline fn advanceModelAdmission(self: *NativeTurn) bool {
         const preparation = &self.workspace.model_admission;
         if (!preparation.pending()) return false;
         if (!self.host.launchAllowed() or
@@ -1019,7 +1022,7 @@ const NativeTurn = struct {
         };
     }
 
-    pub fn advanceModelPreparation(self: *NativeTurn, byte_allowance: usize, item_allowance: usize) bool {
+    pub noinline fn advanceModelPreparation(self: *NativeTurn, byte_allowance: usize, item_allowance: usize) bool {
         const pending_progress = advancePendingFailure(self.host, self.slots, self.workspace);
         return callAdvanceModelPreparation(
             self.host,
@@ -2564,10 +2567,7 @@ noinline fn completeSuccessfulTransfer(host: *Host, workspace: *Workspace, activ
     defer if (response_owned) response.deinit();
     const rejected: failed_responses.Source = .{ .file = response.file, .length = response.length, .transfer = .complete };
     if (model_adapter.outputSchemaRejection(structured_output, response.length)) |rejection| {
-        var detail: [512]u8 = undefined;
-        const diagnostic = rejection.format(&detail);
-        retainFailedResponse(host, rejected, answered.retention(rejection.code, diagnostic, http_status));
-        answered.reject(rejection.code, diagnostic, "", .ordinary);
+        rejectOutputSchema(host, rejected, &answered, rejection, http_status);
         return .cleanup;
     }
 
@@ -2649,15 +2649,7 @@ noinline fn completeSuccessfulTransfer(host: *Host, workspace: *Workspace, activ
         if (err == error.SupersededByControl) {
             traceOperation(host, "model_settlement_superseded", owner.binding);
         } else if (err == error.InvalidProviderEnvelope) {
-            const rejection: output_decode.Rejection = .{ .stage = .response, .byte_offset = response.length };
-            var detail: [512]u8 = undefined;
-            const diagnostic = rejection.format(err, &detail);
-            retainFailedResponse(host, rejected, answered.retention("contradictory_provider_output", diagnostic, http_status));
-            saveImmediateFailure(host, owner.binding, answered.rejection(
-                "contradictory_provider_output",
-                diagnostic,
-                "",
-            ), .ordinary);
+            rejectContradictoryOutput(host, rejected, &answered, err, http_status);
         } else {
             fenceDispatch(host, "model output import", err);
         }
@@ -2665,6 +2657,36 @@ noinline fn completeSuccessfulTransfer(host: *Host, workspace: *Workspace, activ
     };
     traceOperation(host, "model_settlement_committed", owner.binding);
     return .cleanup;
+}
+
+// Diagnostic buffers and the failure's Store settlement live in these frames,
+// not in completeSuccessfulTransfer's, which already holds the response
+// decode state on the engine's deepest stack chain.
+noinline fn rejectOutputSchema(
+    host: *Host,
+    rejected: failed_responses.Source,
+    answered: *const AnsweredAttempt,
+    rejection: output_decode.Rejected,
+    http_status: u16,
+) void {
+    var detail: [512]u8 = undefined;
+    const diagnostic = rejection.format(&detail);
+    retainFailedResponse(host, rejected, answered.retention(rejection.code, diagnostic, http_status));
+    answered.reject(rejection.code, diagnostic, "", .ordinary);
+}
+
+noinline fn rejectContradictoryOutput(
+    host: *Host,
+    rejected: failed_responses.Source,
+    answered: *const AnsweredAttempt,
+    err: anyerror,
+    http_status: u16,
+) void {
+    const rejection: output_decode.Rejection = .{ .stage = .response, .byte_offset = rejected.length };
+    var detail: [512]u8 = undefined;
+    const diagnostic = rejection.format(err, &detail);
+    retainFailedResponse(host, rejected, answered.retention("contradictory_provider_output", diagnostic, http_status));
+    saveImmediateFailure(host, answered.owner.binding, answered.rejection("contradictory_provider_output", diagnostic, ""), .ordinary);
 }
 
 fn advanceRetainedCleanup(
