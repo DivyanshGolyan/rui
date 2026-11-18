@@ -618,8 +618,7 @@ class CandidatePlanTest(unittest.TestCase):
         'core owning no fixture': (['src/request_encoding.zig'], {'test-logic', 'test-native'}),
         'core owning one fixture': (['src/session_skills.zig'], {'skills-integration', 'test-logic', 'test-native'}),
         'core owning many fixtures (Mac path)': (['src/client.zig'], {
-            'activity-integration', 'admission-integration', 'cli-image-integration', 'control-integration',
-            'conversation-page-integration',
+            'activity-integration', 'admission-integration', 'cli-image-integration', 'control-integration', 'conversation-page-integration',
             'host-status-integration', 'host-stop-integration', 'human-cli-integration', 'request-wait-integration',
             'session-list-integration', 'test-logic', 'test-native'}),
     }
