@@ -71,13 +71,19 @@ ZIG_TEST_ONLY = re.compile(r"(?:^|/)(?:tests?|testing)/|_tests/|tests?\.zig$")
 
 
 def inventory(source, path):
+    # Callers may adjust their inventory, so never expose the cached value.
+    return dict(inventory_details(source, path))
+
+
+@lru_cache(maxsize=2048)
+def inventory_details(source, path):
     language = 'py' if path.endswith('.py') else 'zig' if path.endswith('.zig') else 'ts'
     code = mask(source, language)
     if language == 'zig' and not ZIG_TEST_ONLY.search(path):
         code = zig_tests(code)
     counts = Counter()
     if language == 'py':
-        tree = ast.parse(source)
+        tree = sleep_python_tree(source)
 
         def call_name(node):
             return ast.unparse(node.func) if isinstance(node, ast.Call) else ''
@@ -151,7 +157,7 @@ def inventory(source, path):
                 if re.match(r'\s*(?:rui\b|["\'][^"\']*rui(?:/|["\']))', tail):
                     counts['test_double'] += 1
     counts['fixed_sleep'] = sum(sleep_ordering([(path, source)]).values())
-    return {rule: counts[rule] for rule in RULES if counts[rule]}
+    return tuple((rule, counts[rule]) for rule in RULES if counts[rule])
 
 
 def inventory_sources(sources):
@@ -305,7 +311,7 @@ ZIG_DECLARATION = re.compile(r"\b(?:fn|const|var)\s+(\w+)")
 ZIG_EXPRESSION = re.compile(r"(?:\.|\berror)\s*$")
 
 
-@lru_cache(maxsize=512)
+@lru_cache(maxsize=1)
 def zig_blocks(text):
     code = ZIG_SKIPPED.sub(lambda match: " " * len(match[0]), text)
     names = ZIG_SKIPPED.sub(lambda match: match[0] if match[0][0] == '"' else " " * len(match[0]), text)
@@ -330,45 +336,73 @@ def zig_blocks(text):
     return code, tuple(tests), tuple(declarations)
 
 
-def zig_sleep_ordering(path, text):
-    code, tests, declarations = zig_blocks(text)
-    test_only = ZIG_TEST_ONLY.search(path) is not None
-    offenses = Counter()
-    for match in ZIG_SLEEP.finditer(code):
-        if code[:match.start()].rstrip().endswith("fn"):
-            continue
-        within = [name for start, end, name in tests if start < match.start() < end]
-        if within:
-            offenses[(path, within[-1])] += 1
-        elif test_only:
-            offenses[(path, next((name for start, end, name in declarations if start < match.start() < end),
-                                 "<top level>"))] += 1
-    offenses.pop(ZIG_POLL_HELPER, None)
-    return offenses
-
-
-@lru_cache(maxsize=512)
+@lru_cache(maxsize=1)
 def sleep_python_tree(text):
     return ast.parse(text)
 
 
-def python_sleep_ordering(path, text):
+@lru_cache(maxsize=2048)
+def sleep_details(text, language, test_only=False):
+    """Compute a file's sleep counts and named scopes once per content."""
     offenses = Counter()
+    names = set()
+    if language == "zig":
+        code, tests, declarations = zig_blocks(text)
+        names.update(name for _, _, name in tests)
+        if test_only:
+            names.update(name for _, _, name in declarations)
+        for match in ZIG_SLEEP.finditer(code):
+            if code[:match.start()].rstrip().endswith("fn"):
+                continue
+            within = [name for start, end, name in tests if start < match.start() < end]
+            if within:
+                offenses[within[-1]] += 1
+            elif test_only:
+                offenses[next((name for start, end, name in declarations if start < match.start() < end),
+                              "<top level>")] += 1
+    elif language == "py":
+        tree = sleep_python_tree(text)
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                names.add(node.name)
+            if isinstance(node, ast.ClassDef):
+                names.update(f"{node.name}.{child.name}" for child in node.body
+                             if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)))
 
-    def visit(node, name):
-        for child in ast.iter_child_nodes(node):
-            child_name = name
-            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                if name is None:
-                    child_name = child.name
-                elif isinstance(node, ast.ClassDef) and "." not in name:
-                    child_name = f"{name}.{child.name}"
-            elif (isinstance(child, ast.Call) and isinstance(child.func, ast.Attribute) and child.func.attr == "sleep"
-                  and getattr(child.func.value, "id", None) in ("time", "asyncio")):
-                offenses[(path, name or "<module>")] += 1
-            visit(child, child_name)
+        def visit(node, name):
+            for child in ast.iter_child_nodes(node):
+                child_name = name
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    if name is None:
+                        child_name = child.name
+                    elif isinstance(node, ast.ClassDef) and "." not in name:
+                        child_name = f"{name}.{child.name}"
+                elif (isinstance(child, ast.Call) and isinstance(child.func, ast.Attribute) and child.func.attr == "sleep"
+                      and getattr(child.func.value, "id", None) in ("time", "asyncio")):
+                    offenses[name or "<module>"] += 1
+                visit(child, child_name)
 
-    visit(sleep_python_tree(text), None)
+        # Python normalizes non-ASCII identifiers before producing the AST.
+        if "sleep" in text or not text.isascii():
+            visit(tree, None)
+    elif language == "ts":
+        code = mask(text, "ts")
+        count = len(re.findall(r'\b(?:await\s+setTimeout\s*\(|(?:await\s+)?new\s+Promise\s*\([^;]*?\bsetTimeout\s*\()', code))
+        if count:
+            offenses["<file>"] = count
+    return tuple(offenses.items()), frozenset(names)
+
+
+def zig_sleep_ordering(path, text):
+    counts, _ = sleep_details(text, "zig", ZIG_TEST_ONLY.search(path) is not None)
+    offenses = Counter({(path, name): count for name, count in counts})
+    offenses.pop(ZIG_POLL_HELPER, None)
+    return offenses
+
+
+def python_sleep_ordering(path, text):
+    counts, _ = sleep_details(text, "py")
+    offenses = Counter({(path, name): count for name, count in counts})
     offenses.pop(PYTHON_POLL_HELPER, None)
     return offenses
 
@@ -381,10 +415,9 @@ def sleep_ordering(sources):
         elif path.startswith("tests/") and path.endswith(".py"):
             offenses += python_sleep_ordering(path, text)
         elif path.endswith(".test.ts"):
-            code = mask(text, "ts")
-            count = len(re.findall(r'\b(?:await\s+setTimeout\s*\(|(?:await\s+)?new\s+Promise\s*\([^;]*?\bsetTimeout\s*\()', code))
-            if count:
-                offenses[(path, "<file>")] = count
+            counts, _ = sleep_details(text, "ts")
+            for name, count in counts:
+                offenses[path, name] = count
     return offenses
 
 
@@ -392,17 +425,11 @@ def sleep_keys(sources):
     keys = set()
     for path, text in sources:
         if path.endswith(".zig") and target(path):
-            _, tests, declarations = zig_blocks(text)
-            keys.update((path, name) for _, _, name in tests)
-            if ZIG_TEST_ONLY.search(path):
-                keys.update((path, name) for _, _, name in declarations)
+            _, names = sleep_details(text, "zig", ZIG_TEST_ONLY.search(path) is not None)
+            keys.update((path, name) for name in names)
         elif path.startswith("tests/") and path.endswith(".py"):
-            for node in sleep_python_tree(text).body:
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                    keys.add((path, node.name))
-                if isinstance(node, ast.ClassDef):
-                    keys.update((path, f"{node.name}.{child.name}") for child in node.body
-                                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)))
+            _, names = sleep_details(text, "py")
+            keys.update((path, name) for name in names)
     return keys
 
 

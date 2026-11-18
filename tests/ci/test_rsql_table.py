@@ -1,4 +1,4 @@
-"""CI-78 and CI-79: statement table comparison and input fingerprint policy."""
+"""CI-84 and CI-85: statement table comparison and input fingerprint policy."""
 import re
 import tempfile
 import unittest
@@ -12,7 +12,7 @@ CURRENT = "d1311121114a1397a0efc2efd738bfd9"
 
 
 class RsqlTableTest(unittest.TestCase):
-    def test_ci_78_statement_table_comparison(self):
+    def test_ci_84_statement_table_comparison(self):
         def table(inputs, statements, fixtures):
             return (f'pub const inputs = "{inputs}";\n'
                     'pub const entries = struct {\n' + statements + '};\n'

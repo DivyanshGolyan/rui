@@ -270,37 +270,7 @@ fn nameText(store: *storage.Store, arena: std.mem.Allocator, name: protocol.Prop
 }
 
 fn outline(store: *storage.Store, arena: std.mem.Allocator, session: []const u8, item: *const protocol.ActivityItem, out: *std.Io.Writer) !void {
-    try out.print("{d}.{d} {s}", .{ item.position, item.ordinal, @tagName(item.value) });
-    var note: ?protocol.Bounded(protocol.max_tool_description_bytes) = null;
-    switch (item.value) {
-        .admission, .user, .received => |message| if (message.source_action) |action|
-            try out.print(" Action {d}", .{action})
-        else if (message.sender) |sender|
-            try out.print(" {s}", .{sender.session.slice()})
-        else
-            try out.writeAll(" person"),
-        .sent => |sent| try out.print(" {s}", .{sent.target.session.slice()}),
-        .send_failed => |sent| if (sent.target) |target|
-            try out.print(" {s}", .{target.session.slice()})
-        else
-            try out.writeAll(" (no valid target reference)"),
-        .call, .tool_result => {
-            const request = try contentRequest(arena, session, item);
-            const tool = try store.activityTool(request);
-            const name = try nameText(store, arena, tool.name);
-            try out.print(" {s}", .{name});
-            if (name.len < tool.name.length) try out.writeAll("…");
-            note = tool.presentation.description;
-            if (item.value == .tool_result) try out.print(" {s}", .{@tagName(item.value.tool_result.presentation.code)});
-        },
-        .hosted_call => |presentation| note = presentation.description,
-        .turn_ended => |ended| {
-            try out.print(" {s}", .{@tagName(ended.ending)});
-            if (!std.mem.eql(u8, ended.session.slice(), session)) try out.print(" agent {s}", .{ended.session.slice()});
-        },
-        .approval_requested => |requested| if (!std.mem.eql(u8, requested.session.slice(), session)) try out.print(" agent {s}", .{requested.session.slice()}),
-        else => {},
-    }
+    const note = try outlineHeader(store, arena, session, item, out);
     if (contentOf(item)) |value| {
         var parts: ?Shown = null;
         switch (value) {
@@ -319,8 +289,46 @@ fn outline(store: *storage.Store, arena: std.mem.Allocator, session: []const u8,
             try std.json.Stringify.value(utf8_validation.wholePrefix(line) orelse "", .{}, out);
         }
     }
-    if (note) |description| try out.print(": {s}", .{description.slice()});
+    if (note) |description| try out.print(": {s}", .{description});
     try out.writeByte('\n');
+}
+
+// Keep the tool presentation scratch off the content-reading stack chain.
+noinline fn outlineHeader(store: *storage.Store, arena: std.mem.Allocator, session: []const u8, item: *const protocol.ActivityItem, out: *std.Io.Writer) !?[]const u8 {
+    try out.print("{d}.{d} {s}", .{ item.position, item.ordinal, @tagName(item.value) });
+    var note: ?[]const u8 = null;
+    switch (item.value) {
+        .admission, .user, .received => |message| if (message.source_action) |action|
+            try out.print(" Action {d}", .{action})
+        else if (message.sender) |sender|
+            try out.print(" {s}", .{sender.session.slice()})
+        else
+            try out.writeAll(" person"),
+        .sent => |sent| try out.print(" {s}", .{sent.target.session.slice()}),
+        .send_failed => |sent| if (sent.target) |target|
+            try out.print(" {s}", .{target.session.slice()})
+        else
+            try out.writeAll(" (no valid target reference)"),
+        .call, .tool_result => {
+            const request = try contentRequest(arena, session, item);
+            const tool = try store.activityTool(request);
+            const name = try nameText(store, arena, tool.name);
+            try out.print(" {s}", .{name});
+            if (name.len < tool.name.length) try out.writeAll("…");
+            if (tool.presentation.description) |description| note = try arena.dupe(u8, description.slice());
+            if (item.value == .tool_result) try out.print(" {s}", .{@tagName(item.value.tool_result.presentation.code)});
+        },
+        .hosted_call => |*presentation| if (presentation.description) |*description| {
+            note = description.slice();
+        },
+        .turn_ended => |ended| {
+            try out.print(" {s}", .{@tagName(ended.ending)});
+            if (!std.mem.eql(u8, ended.session.slice(), session)) try out.print(" agent {s}", .{ended.session.slice()});
+        },
+        .approval_requested => |requested| if (!std.mem.eql(u8, requested.session.slice(), session)) try out.print(" agent {s}", .{requested.session.slice()}),
+        else => {},
+    }
+    return note;
 }
 
 fn full(store: *storage.Store, arena: std.mem.Allocator, session: []const u8, item: *const protocol.ActivityItem, offset: u64, out: *std.Io.Writer) !void {
