@@ -1,4 +1,5 @@
 test {
+    _ = @import("testing/pause.zig");
     _ = @import("InputCapture.zig");
     _ = @import("image_intake.zig");
     _ = @import("image_file_source.zig");

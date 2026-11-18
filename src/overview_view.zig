@@ -5312,7 +5312,7 @@ test "overview footer slot follows only visible notices and upgrade cancellation
     };
 }
 
-test "UI-8 overview bottom layout reserves visible rows" {
+test "SUI-36 overview bottom layout reserves visible rows" {
     for ([_]u16{ 0, 1, 46, 140 }) |width| {
         for ([_]bool{ false, true }) |notice| {
             for ([_]bool{ false, true }) |host| for ([_]bool{ false, true }) |upgrading| {

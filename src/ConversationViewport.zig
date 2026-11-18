@@ -1909,7 +1909,7 @@ test "user band provenance includes blank and wrapped message lines only" {
     try std.testing.expectEqual(@as(@TypeOf(unfinished.lineKind(0, null)), .plain), unfinished.lineKind(unfinished.length, null));
 }
 
-test "UI-6 user message bands retain padded rows and selectable source text" {
+test "SUI-34 user message bands retain padded rows and selectable source text" {
     const testing = std.testing;
     for ([_]u16{ 46, 140 }) |width| for ([_]u8{ 0, 1, 2 }) |depth| for ([_]bool{ false, true }) |unicode_caps| {
         const method: Method = if (unicode_caps) .unicode else .wcwidth;
@@ -1997,7 +1997,7 @@ test "baseline user band shape at requested widths" {
     }
 }
 
-test "UI-3 answer prose has a bounded measure while code and tables use the pane" {
+test "SUI-31 answer prose has a bounded measure while code and tables use the pane" {
     const word = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
     const input = word ++ "\n- " ++ word ++ "\n> " ++ word ++ "\n# " ++ word ++ "\n```\n" ++ word ++ "\n```\n| " ++ word ++ " | z |\n| --- | --- |\n| " ++ word ++ " | z |\n";
     for ([_]bool{ false, true }) |colour| {

@@ -404,7 +404,7 @@ test "App screens update layout state through exhausted resizes for every option
     };
 }
 
-test "UI-7 App screens retain one pane of cells in the cell arena" {
+test "SUI-35 App screens retain one pane of cells in the cell arena" {
     const vaxis = @import("vaxis");
     const Body = struct {
         short: bool = false,
@@ -455,7 +455,7 @@ test "UI-7 App screens retain one pane of cells in the cell arena" {
     };
 }
 
-test "UI-4 App screens ground uncovered content and preserve content hit targets" {
+test "SUI-32 App screens ground uncovered content and preserve content hit targets" {
     const vaxis = @import("vaxis");
     const Body = struct {
         fn widget(self: *@This()) vxfw.Widget {

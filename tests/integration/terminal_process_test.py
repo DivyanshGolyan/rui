@@ -125,7 +125,7 @@ class TerminalProcessTest(unittest.TestCase):
             self.assertEqual(split_pane_row(text), ("", "", text))
 
     def test_conversation_text_preserves_content_across_panes(self):
-        # UI-9: gutter removal retains indentation and literal divider characters.
+        # SUI-37: gutter removal retains indentation and literal divider characters.
         from human_cli_fixture import conversation_text
 
         self.assertEqual(conversation_text("list┆  › line1    01:23\nlist┆    line2\n    ┆  edited 2"),

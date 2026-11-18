@@ -4672,7 +4672,7 @@ test "upgrade quiescence cancels read jobs rather than granting them mutation cu
     try std.testing.expectEqual(@as(usize, 0), rig.overview.job_count);
 }
 
-test "UI-1 overview top space and drawn controls accept clicks" {
+test "SUI-29 overview top space and drawn controls accept clicks" {
     for ([_]u16{ 46, 60, 140 }) |width| {
         for ([_]enum { new_session, settings }{ .new_session, .settings }) |control| {
             const rig = try openListed();
@@ -4708,7 +4708,7 @@ test "UI-1 overview top space and drawn controls accept clicks" {
     }
 }
 
-test "UI-2 clicking a scrolled Session opens the drawn row" {
+test "SUI-30 clicking a scrolled Session opens the drawn row" {
     for ([_]u16{ 46, 60, 140 }) |width| {
         const rig = try openListed();
         defer rig.close();
