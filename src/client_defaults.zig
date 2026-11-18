@@ -9,7 +9,10 @@ pub fn compactionTrigger(provider: Provider, model: []const u8) u64 {
     const provider_trigger = for (defaults.provider_compaction_triggers) |entry| {
         if (std.mem.eql(u8, entry.provider, @tagName(provider))) break entry.tokens;
     } else model_trigger;
-    return @min(provider_trigger, model_trigger);
+    const trigger = for (defaults.model_compaction_triggers) |entry| {
+        if (std.mem.eql(u8, entry.provider, @tagName(provider)) and std.mem.eql(u8, entry.model, model)) break entry.tokens;
+    } else provider_trigger;
+    return @min(trigger, model_trigger);
 }
 
 pub fn startEffort(model: []const u8, saved: ?catalog.ReasoningEffort) ?catalog.ReasoningEffort {
@@ -27,7 +30,11 @@ test "client compaction defaults fit small ChatGPT model windows" {
 }
 
 test "client defaults use product compaction defaults and catalog effort admission" {
-    try std.testing.expectEqual(@as(u64, 244800), compactionTrigger(.codex, "gpt-6.1-sol"));
+    try std.testing.expectEqual(@as(u64, 450000), compactionTrigger(.codex, "gpt-6.1-sol"));
+    try std.testing.expectEqual(@as(u64, 450000), compactionTrigger(.codex, "gpt-6.1-terra"));
+    try std.testing.expectEqual(@as(u64, 244800), compactionTrigger(.codex, "gpt-6.2-astra"));
+    try std.testing.expectEqual(@as(u64, 244800), compactionTrigger(.codex, "gpt-6-sol"));
+    try std.testing.expectEqual(@as(u64, 450000), compactionTrigger(.codex, "gpt-6.2-sol"));
     try std.testing.expectEqual(@as(u64, 945000), compactionTrigger(.openai, "gpt-6.1-sol"));
     try std.testing.expectEqual(@as(u64, 115200), compactionTrigger(.openai, "unlisted-model"));
     try std.testing.expectEqual(@as(u64, 115200), compactionTrigger(.codex, "unlisted-model"));
