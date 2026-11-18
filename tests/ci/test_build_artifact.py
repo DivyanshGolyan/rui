@@ -398,13 +398,28 @@ else:
     def test_failed_local_compilation_stops_with_its_exit_and_executes_nothing(self):
         self.receipt['inputs']['compiler'] = 'd' * 64
         self.refresh_download()
-        with patch.dict(os.environ, BUILD_EXIT='37'), \
-                patch.object(sys, 'argv', ['build_artifact.py', 'restore', '["test"]', '--artifact-id', '101']), \
-                self.assertRaises(SystemExit) as failure:
-            build_artifact.main()
-        self.assertEqual(failure.exception.code, 37)
-        self.assertFalse(build_artifact.roots()['binaries'].exists())
-        self.assertFalse((self.root / 'gates').exists())
+        for operation, options in (('restore', ['--artifact-id', '101']), ('compile', [])):
+            for exit in ('37', '0'):
+                with self.subTest(operation=operation, exit=exit):
+                    (self.root / 'gates').unlink(missing_ok=True)
+                    with patch.dict(os.environ, BUILD_EXIT=exit), \
+                            patch.object(sys, 'argv', ['build_artifact.py', operation, '["test"]', *options]), \
+                            contextlib.redirect_stdout(io.StringIO()) as output:
+                        try:
+                            build_artifact.main()
+                            code = 0
+                        except SystemExit as failure:
+                            code = failure.code
+                    self.assertEqual(code, int(exit))
+                    self.assertFalse((self.root / 'gates').exists())
+                    if exit != '0':
+                        self.assertFalse(build_artifact.roots()['binaries'].exists())
+                        continue
+                    self.assertEqual((self.root / 'zig-pkg/pinned-source').read_text(), 'fetched\n')
+                    if operation == 'compile':
+                        self.assertIn("Compiled locally for this job's own gates; compiled only, acceptance not yet "
+                                      "established", output.getvalue())
+                    self.assertEqual(self.gates(), ['consumer'])
 
     def test_one_retry_only_when_requested(self):
         build_artifact.restore(['101'], ['test'])

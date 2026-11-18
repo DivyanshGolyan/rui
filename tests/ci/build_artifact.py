@@ -266,7 +266,8 @@ def restore(artifact_ids, targets):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=("build", "restore"))
+    parser.add_argument("operation", choices=("build", "restore", "compile"),
+                        help="build: produce an artifact; restore: use one; compile: build here for this job's own gates")
     parser.add_argument("targets", help="Complete platform selection, JSON array")
     parser.add_argument("--part", choices=("all", "unit", "rest"), default="all")
     parser.add_argument("--artifact-id", action="append", default=[],
@@ -276,6 +277,9 @@ def main():
     try:
         if args.operation == "build":
             package(targets, Path(os.environ["RUNNER_TEMP"]) / "rui-compiled", build(targets, args.part), args.part)
+        elif args.operation == "compile":
+            rebuild(targets)
+            print("Compiled locally for this job's own gates; compiled only, acceptance not yet established", flush=True)
         else:
             restore([artifact_id for artifact_id in args.artifact_id if artifact_id], targets)
     except subprocess.CalledProcessError as error:

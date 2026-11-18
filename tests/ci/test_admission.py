@@ -17,6 +17,7 @@ from strict_paths import STRICT, strict
 
 ROOT = Path(__file__).resolve().parents[2]
 CHECK = ROOT / '.github/workflows/check.yml'
+POLICY = ROOT / '.github/actions/policy/action.yml'
 UPGRADE = ROOT / '.github/workflows/previous-release-upgrade.yml'
 PROMOTE = ROOT / '.github/workflows/promote.yml'
 RELEASE = ROOT / '.github/workflows/release.yml'
@@ -179,12 +180,20 @@ class AdmissionTest(unittest.TestCase):
 
     def admission(self, **changes):
         env = dict(CHANGE_KIND='normal', DRAFT='false', PLAN_RESULT='success', POLICY_RESULT='success',
-                   LINUX_RESULT='success', MACOS_RESULT='success',
+                   LINUX_RESULT='success', MACOS_RESULT='success', PR_JOB='false',
                    NATIVE='true', CACHE_SELECTED='false', CACHE_RESULT='skipped')
         env.update(changes)
         script = step_script(job(CHECK.read_text(), 'admission'), 'Require candidate acceptance')
         return subprocess.run(['bash', '-c', script], env=dict(os.environ, **env),
                               capture_output=True, text=True)
+
+    def test_single_pr_job_admits_only_with_policy_folded_into_it(self):
+        self.assertEqual(self.admission(PR_JOB='true', POLICY_RESULT='skipped', NATIVE='false',
+                                        MACOS_RESULT='skipped').returncode, 0)
+        for pr_job, policy in (('true', 'success'), ('true', 'failure'), ('false', 'skipped'),
+                               ('', 'success'), ('unknown', 'skipped')):
+            with self.subTest(pr_job=pr_job, policy=policy):
+                self.assertNotEqual(self.admission(PR_JOB=pr_job, POLICY_RESULT=policy).returncode, 0)
 
     def test_all_green_and_only_unselected_cache_skip_pass(self):
         self.assertEqual(self.admission().returncode, 0)
@@ -259,7 +268,7 @@ class AdmissionTest(unittest.TestCase):
         script = step_script(job(CHECK.read_text(), 'linux'), 'Require every selected Linux part')
         env = dict(DRAFT_RUN='false', CHANGE_KIND='documentation', PLAN_RESULT='success', POLICY_RESULT='skipped',
                    TARGETS='[]', COMPILE_TARGETS='[]', SPLIT='false', BUILD_RESULT='skipped',
-                   UNIT_RESULT='skipped', NATIVE_RESULT='skipped',
+                   UNIT_RESULT='skipped', NATIVE_RESULT='skipped', PR_JOB='false', PR_RESULT='skipped',
                    TYPECHECK='false', TYPECHECK_RESULT='skipped', COMPILE_ONLY='false')
 
         def run(values):
@@ -284,7 +293,7 @@ class AdmissionTest(unittest.TestCase):
         env = dict(DRAFT_RUN='false', PLAN_RESULT='success', POLICY_RESULT='success', TARGETS='[]', COMPILE_TARGETS='[]', SPLIT='false',
                    BUILD_RESULT='skipped', UNIT_RESULT='skipped',
                    NATIVE_RESULT='skipped', TYPECHECK='false', TYPECHECK_RESULT='skipped',
-                   COMPILE_ONLY='false')
+                   PR_JOB='false', PR_RESULT='skipped', COMPILE_ONLY='false')
         self.assertEqual(subprocess.run(['bash', '-euc', script], env=env).returncode, 0)
         for kind in ('', 'docs', 'unknown'):
             with self.subTest(kind=kind):
@@ -310,14 +319,18 @@ class AdmissionTest(unittest.TestCase):
         self.assertNotIn('paths-ignore', text)
 
     def test_policy_runs_live_client_locality_with_trusted_main_history(self):
-        policy = job(CHECK.read_text(), 'policy')
-        self.assertIn('fetch-depth: 0', policy)
-        self.assertIn('        run: python3 -B tests/ci/client_locality.py\n', policy)
+        for name in ('policy', 'pr_linux'):
+            body = job(CHECK.read_text(), name)
+            self.assertIn('fetch-depth: 0', body)
+            self.assertIn('uses: ./.github/actions/policy\n', body)
+        self.assertIn('      run: python3 -B tests/ci/client_locality.py\n', POLICY.read_text())
 
     def test_policy_skips_only_the_named_unchanged_self_checks(self):
-        policy = job(CHECK.read_text(), 'policy')
         script = 'python3 -B tests/ci/policy_suite.py --skips "$SKIPS"'
-        self.assertIn('        run: ' + script + '\n', policy)
+        self.assertIn('      run: ' + script + '\n', POLICY.read_text())
+        self.assertIn('        SKIPS: ${{ inputs.skips }}\n', POLICY.read_text())
+        for name in ('policy', 'pr_linux'):
+            self.assertIn('skips: ${{ needs.plan.outputs.policy_skips }}', job(CHECK.read_text(), name))
         modules = {
             'test_alpha': 'class Alpha(unittest.TestCase):\n    def test_one(self): pass\n    def test_two(self): pass\n',
             'test_beta': ('class Kept(unittest.TestCase):\n    def test_kept(self): pass\n'
@@ -492,41 +505,41 @@ class CandidatePlanTest(unittest.TestCase):
 
     # CI-1: written as literals, independent of select_tests' tier constants.
     PR_TIER_NEVER = {'check', 'check-full', 'test', 'test-full', 'stack-frames', 'mysql-wire-integration'}
+    # Unit roots the diff reaches, plus fixtures whose own script, executable or owner changed.
     PR_TIER_CASES = {
-        'documentation': (['README.md'], set(), set()),
-        'tests/ci only': (['tests/ci/select_tests.py'], set(), set()),
-        'unreached source': (['src/future_owner.zig'], {'test-logic', 'test-native'}, set()),
-        'slow fixture owner': (['src/Upgrade.zig'], {'test-logic', 'upgrade-integration'}, set()),
-        'build hub': (['build.zig'],
-                      {'admission-debug-integration', 'canonical-failure-integration', 'codex-h2-integration',
-                       'current-facts-integration', 'installer-integration', 'login-signal-integration',
-                       'server-delivery-integration', 'test-logic', 'test-native', 'transport-h2-integration'}, set()),
-        'portable core': (['src/request_encoding.zig'], {'test-logic', 'test-native', 'dispatch-integration'},
-                          {'test-store', 'human-cli-integration', 'upgrade-integration'}),
-        'Store': (['src/store.zig'], {'test-logic', 'test-native', 'test-store', 'dispatch-debug-integration'},
-                  {'human-cli-integration', 'upgrade-integration'}),
-        'Mac path': (['src/client.zig'], {'test-logic', 'test-native', 'human-cli-integration', 'request-wait-integration'},
-                     {'test-store', 'upgrade-integration'}),
+        'documentation': (['README.md'], set()),
+        'tests/ci only': (['tests/ci/select_tests.py'], set()),
+        'unreached source': (['src/future_owner.zig'], {'test-logic', 'test-native'}),
+        'build hub': (['build.zig'], {'test-logic', 'test-native'}),
+        'Store': (['src/store.zig'], {'test-native', 'test-store'}),
+        'fixture script': (['tests/integration/overview_integration.py'], {'overview-integration'}),
+        'slow fixture owner': (['src/Upgrade.zig'], {'upgrade-integration'}),
+        'core owning no fixture': (['src/request_encoding.zig'], {'test-logic', 'test-native'}),
+        'core owning one fixture': (['src/session_skills.zig'], {'skills-integration', 'test-logic', 'test-native'}),
+        'core owning many fixtures (Mac path)': (['src/client.zig'], {
+            'activity-integration', 'admission-integration', 'control-integration', 'conversation-page-integration',
+            'host-status-integration', 'host-stop-integration', 'human-cli-integration', 'request-wait-integration',
+            'session-list-integration', 'test-logic', 'test-native'}),
     }
 
     def test_ready_candidate_runs_its_pr_tier_and_promotion_the_full_selection(self):
         from ci_plan import plan
         from docs_only import ChangeKind
         available = set(build_files.steps())
-        exact = {'documentation', 'tests/ci only', 'unreached source', 'slow fixture owner', 'build hub'}
-        for name, (paths, required, forbidden) in self.PR_TIER_CASES.items():
+        for name, (paths, expected) in self.PR_TIER_CASES.items():
             with self.subTest(case=name):
                 selected = select(paths, 'review', available)
 
+                kind = ChangeKind.DOCUMENTATION if name == 'documentation' else ChangeKind.NORMAL
+
                 def run(event, draft=False, promotion=False):
                     return plan(selected, event_name=event, draft=draft, promotion=promotion,
-                                change_kind=ChangeKind.NORMAL).outputs
-                ready = set(run('pull_request')['targets'])
-                if name in exact:
-                    self.assertEqual(ready, required)
-                else:
-                    self.assertLessEqual(required, ready)
-                self.assertFalse(ready & (forbidden | self.PR_TIER_NEVER), sorted(ready & (forbidden | self.PR_TIER_NEVER)))
+                                change_kind=kind).outputs
+                ready = run('pull_request')
+                self.assertEqual(set(ready['targets']), expected)
+                self.assertFalse(set(ready['targets']) & self.PR_TIER_NEVER)
+                self.assertEqual(ready['pr_job'], name != 'documentation', 'every ready normal PR is one job')
+                self.assertEqual(ready['linux_matrix'], {'include': []})
                 self.assertEqual(run('pull_request', draft=True)['targets'], [])
                 self.assertEqual(run('workflow_dispatch')['targets'], selected['targets'])
                 promoted = set(run('workflow_dispatch', promotion=True)['targets'])
@@ -629,7 +642,7 @@ def plan(selection, *, event_name, draft, promotion, change_kind, compile_only):
             candidate = fixture.commit()
             output = fixture.plan(self, candidate=candidate)
             results = dict(plan='success', policy='skipped', linux='success', macos='skipped',
-                           cache_execution='skipped',
+                           cache_execution='skipped', pr_linux='skipped',
                            linux_build='skipped', linux_build_unit='skipped',
                            linux_suites='skipped', macos_typecheck='skipped')
             for name, script in (('linux', linux), ('admission', admission)):
@@ -668,7 +681,7 @@ def plan(selection, *, event_name, draft, promotion, change_kind, compile_only):
             self.assertEqual(draft['draft_run'], 'true')
             self.assert_quick_plan(draft)
             results = {name: 'skipped' for name in (
-                'policy', 'macos', 'cache_execution',
+                'policy', 'macos', 'cache_execution', 'pr_linux',
                 'linux_build', 'linux_build_unit', 'linux_suites', 'macos_typecheck')}
             results.update(plan='success', linux='success')
             self.assertEqual(self.aggregate(workflow, 'linux', linux, draft, results, draft=True).returncode, 0)
@@ -678,19 +691,19 @@ def plan(selection, *, event_name, draft, promotion, change_kind, compile_only):
             ready = fixture.plan(self, candidate=candidate)
             self.assertEqual(ready['change_kind'], 'normal')
             self.assertEqual(ready['draft_run'], 'false')
-            has_targets = bool(json.loads(ready['targets']))
-            self.assertTrue(has_targets)
-            selected = dict(results, policy='success',
-                            linux_build='success' if has_targets else 'skipped',
-                            linux_suites='success' if has_targets else 'skipped',
-                            linux_build_unit='success' if ready['linux_split'] == 'true' else 'skipped',
-                            macos_typecheck='success' if ready['typecheck_macos'] == 'true' else 'skipped')
+            self.assertTrue(json.loads(ready['targets']))
+            self.assertEqual(ready['pr_job'], 'true')
+            selected = dict(results, pr_linux='success')
             self.assertEqual(self.aggregate(workflow, 'linux', linux, ready, selected).returncode, 0)
-            for part in ('policy', 'linux_build', 'linux_build_unit', 'linux_suites', 'macos_typecheck'):
-                if selected[part] == 'success':
-                    with self.subTest(skipped=part):
+            for part in ('pr_linux',):
+                for value in ('skipped', 'failure', 'cancelled'):
+                    with self.subTest(part=part, value=value):
                         self.assertNotEqual(self.aggregate(workflow, 'linux', linux, ready,
-                            dict(selected, **{part: 'skipped'})).returncode, 0)
+                            dict(selected, **{part: value})).returncode, 0)
+            for part in ('policy', 'linux_build', 'linux_build_unit', 'linux_suites', 'macos_typecheck'):
+                with self.subTest(ran_beside_the_single_job=part):
+                    self.assertNotEqual(self.aggregate(workflow, 'linux', linux, ready,
+                        dict(selected, **{part: 'success'})).returncode, 0)
             accepted = dict(selected,
                 macos='success' if ready['native'] == 'true' else 'skipped',
                 cache_execution='success' if ready['cache_execution'] == 'true' else 'skipped')
@@ -723,14 +736,15 @@ def plan(selection, *, event_name, draft, promotion, change_kind, compile_only):
             self.assertEqual(json.loads(output['linux_compile_targets']), ['test'])
             self.assertEqual(output['linux_matrix'], '{"include": []}')
             self.assertEqual(output['linux_split'], 'false')
-            results = dict(plan='success', policy='success', linux_build='success',
+            self.assertEqual(json.loads(output['pr_setup_targets']), ['test'])
+            results = dict(plan='success', policy='skipped', pr_linux='success', linux_build='skipped',
                            linux_build_unit='skipped',
                            linux_suites='skipped', macos_typecheck='skipped')
             self.assertEqual(self.aggregate(workflow, 'linux', linux, output, results).returncode, 0)
             for status in ('skipped', 'failure', 'cancelled', ''):
                 with self.subTest(status=status):
                     self.assertNotEqual(self.aggregate(workflow, 'linux', linux, output,
-                        dict(results, linux_build=status)).returncode, 0)
+                        dict(results, pr_linux=status)).returncode, 0)
             self.assertNotEqual(self.aggregate(workflow, 'linux', linux, output,
                 dict(results, linux_suites='success')).returncode, 0)
 
@@ -744,7 +758,11 @@ def plan(selection, *, event_name, draft, promotion, change_kind, compile_only):
             for required in (False, True):
                 source = dict(select([], 'review', set(build_files.steps())), targets=targets,
                               fast_targets=targets, unit_compile_required=required)
-                output = plan(source, event_name='pull_request', draft=False,
+                # Shards serve every non-PR run; a ready PR runs its single job instead.
+                ready = plan(source, event_name='pull_request', draft=False,
+                             promotion=False, change_kind=ChangeKind.NORMAL).outputs
+                self.assertTrue(ready['pr_job'])
+                output = plan(source, event_name='workflow_dispatch', draft=False,
                               promotion=False, change_kind=ChangeKind.NORMAL).outputs
                 encoded = {key: json.dumps(value) if not isinstance(value, str) else value
                            for key, value in output.items()}
@@ -780,7 +798,7 @@ def plan(selection, *, event_name, draft, promotion, change_kind, compile_only):
             output = fixture.plan(self, candidate=candidate, event='push', compile_only=True)
             self.assertEqual(output['compile_only'], 'true')
             self.assertEqual(json.loads(output['targets']), ['check', 'test-logic'])
-            built = {name: 'skipped' for name in ('policy', 'macos', 'cache_execution', 'linux_suites')}
+            built = {name: 'skipped' for name in ('policy', 'macos', 'cache_execution', 'linux_suites', 'pr_linux')}
             built.update(plan='success', linux_build='success', linux_build_unit='success',
                          macos_typecheck='success')
             result = self.aggregate(workflow, 'linux', linux, output, built)

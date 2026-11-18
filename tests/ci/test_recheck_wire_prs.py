@@ -172,6 +172,14 @@ class SelectionTest(unittest.TestCase):
         for conclusion in ("success", "failure", "cancelled", "timed_out", "action_required"):
             with self.subTest(conclusion=conclusion):
                 self.assertEqual(self.select(jobs=[job(conclusion=conclusion)]).job_id, 100)
+        skipped_policy = job(conclusion="skipped")
+        for jobs, expected in (([skipped_policy, job(101, name="linux pr")], 101),
+                               ([job(101, name="linux pr", conclusion="skipped"), job()], 100),
+                               ([skipped_policy, job(101, name="linux pr", conclusion="skipped")], None),
+                               ([skipped_policy, job(101, name="linux pr", status="in_progress", conclusion=None)], None),
+                               ([job(101, name="linux suites (test-native)")], None)):
+            with self.subTest(jobs=[(item["name"], item["conclusion"]) for item in jobs]):
+                self.assertEqual(self.select(jobs=jobs).job_id, expected)
 
     def test_ambiguous_policy_jobs_fail_loudly(self):
         with self.assertRaisesRegex(ValueError, "multiple latest policy"):
@@ -587,9 +595,16 @@ class AdapterTest(unittest.TestCase):
         workflow = (Path(__file__).resolve().parents[2] / ".github/workflows/check.yml").read_text()
         policy, admission = workflow_job(workflow, "policy"), workflow_job(workflow, "admission")
         self.assertIn("fetch-depth: 0", policy)
-        self.assertIn('python3 -B tests/ci/policy_suite.py --skips "$SKIPS"', policy)
+        self.assertIn("uses: ./.github/actions/policy", policy)
+        single = workflow_job(workflow, "pr_linux")
+        self.assertIn("name: linux pr", single)
+        self.assertIn("fetch-depth: 0", single)
+        self.assertIn("uses: ./.github/actions/policy", single)
+        composite = (Path(__file__).resolve().parents[2] / ".github/actions/policy/action.yml").read_text()
+        self.assertIn('python3 -B tests/ci/policy_suite.py --skips "$SKIPS"', composite)
         needs = re.search(r"needs: \[([^\]]+)\]", admission)[1].split(", ")
         self.assertIn("policy", needs)
+        self.assertTrue({"linux", "pr_linux"} & set(needs))
 
 
     def test_release_rechecks_only_after_a_new_successful_publication(self):
