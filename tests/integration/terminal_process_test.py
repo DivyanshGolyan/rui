@@ -815,6 +815,21 @@ class TerminalProcessTest(unittest.TestCase):
             with self.assertRaises(FileNotFoundError):
                 spawn(args, cwd=cwd, stdin=slave, stdout=slave, stderr=slave)
 
+    def test_cached_leader_keeps_terminal_identity_until_retired(self):
+        master, slave = open_pty()
+        process = self.job("pass", slave)
+        self.assertEqual(process.wait(timeout=5), 0)
+        leader = process.leader
+        device = os.fstat(slave).st_rdev
+        os.kill(leader.process.pid, signal.SIGSTOP)
+        self.addCleanup(lambda: os.kill(leader.process.pid, signal.SIGCONT) if leader.process.poll() is None else None)
+        close_pty(master, slave)
+        other_master, other_slave = open_pty()
+        self.assertNotEqual(os.fstat(other_slave).st_rdev, device)
+        other = self.job("pass", other_slave)
+        self.assertIsNot(other.leader, leader)
+        self.assertEqual(other.wait(timeout=5), 0)
+
     def test_closed_terminal_hangs_up_job_and_leader(self):
         master, slave = open_pty()
         process = self.job("import os, time; os.write(1, b'R'); time.sleep(30)", slave,
