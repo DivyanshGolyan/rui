@@ -74,9 +74,6 @@ class TerminalProcessTest(unittest.TestCase):
                     capture.feed(b"\x1b[D")
                     self.assertFalse(capture.draft("", 2))
 
-        from human_cli_fixture import conversation_text
-        self.assertEqual(conversation_text("list┆ › line1    01:23\nlist┆   line2\n    ┆ edited 2"),
-                         "› line1    01:23\n  line2\nedited 2")
 
     def test_composer_rules_follow_rendered_junctions(self):
         from human_cli_fixture import composer_bounds, composer_line, chat_footer_row, footer_click, pane_content
@@ -127,12 +124,19 @@ class TerminalProcessTest(unittest.TestCase):
         for text in (" › literal │ + ┼ ┤", " > literal │ +", "   + New Session", "plain | text"):
             self.assertEqual(split_pane_row(text), ("", "", text))
 
+    def test_conversation_strips_gutter_and_preserves_message_indent(self):
+        from human_cli_fixture import conversation_text
+
+        self.assertEqual(conversation_text("list┆  › line1    01:23\nlist┆    line2\n    ┆  edited 2"),
+                         "› line1    01:23\n  line2\nedited 2")
+        self.assertEqual(conversation_text(" › narrow\n   continued"), "› narrow\n  continued")
+
     def test_conversation_keeps_junction_characters_in_chat_text(self):
         from human_cli_fixture import conversation_text
 
-        self.assertEqual(conversation_text("list│ message │ ┼ ┤ +\n › literal │ +"),
+        self.assertEqual(conversation_text("list│  message │ ┼ ┤ +\n › literal │ +"),
                          "message │ ┼ ┤ +\n› literal │ +")
-        self.assertEqual(conversation_text(" " * 40 + "| message + |"), "message + |")
+        self.assertEqual(conversation_text(" " * 40 + "|  message + |"), "message + |")
 
     def test_draft_oracle_matches_empty_placeholder_without_losing_text_or_caret(self):
         from types import SimpleNamespace

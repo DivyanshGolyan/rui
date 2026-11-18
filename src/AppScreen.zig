@@ -24,7 +24,7 @@ fn Screen(comptime Body: type) type {
         header: ?vxfw.Widget = null,
         tail: ?vxfw.Widget = null,
         host: ?vxfw.Widget = null,
-        content_gutter: bool = false,
+        content_gutter: u16 = 0,
         marker: ?vxfw.Widget = null,
         userdata: *anyopaque,
         on_event: *const fn (*anyopaque, *vxfw.EventContext, vxfw.Event) anyerror!void,
@@ -83,9 +83,9 @@ fn Screen(comptime Body: type) type {
                 count += 1;
             };
             lower.* = .{ .children = lower_children[0..count] };
-            const feed: vxfw.Widget = if (self.content_gutter) gutter: {
+            const feed: vxfw.Widget = if (self.content_gutter > 0) gutter: {
                 const padding = try ctx.arena.create(vxfw.Padding);
-                padding.* = .{ .child = lower.widget(), .padding = .{ .left = 1 } };
+                padding.* = .{ .child = lower.widget(), .padding = .{ .left = self.content_gutter } };
                 break :gutter padding.widget();
             } else lower.widget();
             const upper = try ctx.arena.create(Stack);
@@ -426,8 +426,9 @@ test "App screens allocate cells once for a covered pane and its gutter" {
     var editor: @import("DraftEditor.zig") = .initText(&bytes, &bytes, 0);
     var input: InputArea = .{ .composer = .{ .editor = &editor } };
     var body: Body = .{};
-    var screen: Screen(Body) = .{ .content = &body, .input = input.widget(), .content_gutter = true, .userdata = &body, .on_event = Body.event, .style = .{ .bg = .{ .index = 4 } } };
-    for ([_]u16{ 1, 2, 46, 120, 250 }) |width| for ([_]u16{ 1, 2, 5, 40, 70 }) |height| for ([_]Screen(Body).Part{ .whole, .list }) |part| {
+    var screen: Screen(Body) = .{ .content = &body, .input = input.widget(), .content_gutter = 2, .userdata = &body, .on_event = Body.event, .style = .{ .bg = .{ .index = 4 } } };
+    for ([_]u16{ 0, 1, 2 }) |gutter| for ([_]u16{ 1, 2, 46, 120, 250 }) |width| for ([_]u16{ 1, 2, 5, 40, 70 }) |height| for ([_]Screen(Body).Part{ .whole, .list }) |part| {
+        screen.content_gutter = gutter;
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         const drawn = try screen.drawPart(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = height }, .cell_size = .{} }, part);

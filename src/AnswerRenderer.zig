@@ -76,6 +76,7 @@ pub fn feed(self: *Renderer, bytes: []const u8) !void {
                 self.table_len += 1;
                 continue;
             } else {
+                if (self.destination == .viewport) try self.out.writeAll(TerminalText.full_width_on);
                 try self.literalBlock(self.held[0..self.table_len]);
                 self.table_len = 0;
                 self.table_literal = true;
@@ -83,6 +84,7 @@ pub fn feed(self: *Renderer, bytes: []const u8) !void {
         }
         if (self.table_literal) {
             if (self.line_start and byte != '|') {
+                if (self.destination == .viewport) try self.out.writeAll(TerminalText.full_width_off);
                 self.table_literal = false;
             } else {
                 try self.literalBlock(&.{byte});
@@ -136,6 +138,7 @@ fn markdownByte(self: *Renderer, byte: u8) !void {
 }
 
 pub fn finish(self: *Renderer) !void {
+    if ((self.table_literal or self.fence_literal) and self.destination == .viewport) try self.out.writeAll(TerminalText.full_width_off);
     if (self.table_len != 0) try self.flushTable();
     if (self.line_start and self.prefix_len != 0) {
         if (fenceCandidate(self.prefix[0..self.prefix_len])) self.literal_line = true;
@@ -267,6 +270,7 @@ pub const LastCode = struct {
 
 fn fencedByte(self: *Renderer, byte: u8) !void {
     if (!self.fence_literal and self.fence_len == fence_limit) {
+        if (self.destination == .viewport) try self.out.writeAll(TerminalText.full_width_on);
         try self.literalBlock(self.held[0..self.fence_len]);
         self.fence_literal = true;
         self.fence_closer_possible = true;
@@ -279,6 +283,7 @@ fn fencedByte(self: *Renderer, byte: u8) !void {
         try self.literalBlock(&.{byte});
         if (byte == '\n') {
             if (self.fence_closer_possible and self.fence_closer_ticks == 3) {
+                if (self.destination == .viewport) try self.out.writeAll(TerminalText.full_width_off);
                 self.fence_pending = false;
                 self.fence_literal = false;
                 self.fence_body_start = 0;
@@ -332,6 +337,7 @@ fn flushTable(self: *Renderer) !void {
             widths[column] = @max(widths[column], try self.tableCell(cell, false));
         }
     }
+    if (self.destination == .viewport) try self.out.writeAll(TerminalText.full_width_on);
     var start: usize = 0;
     row = 0;
     while (start < bytes.len) : (row += 1) {
@@ -357,6 +363,7 @@ fn flushTable(self: *Renderer) !void {
         }
         start = end + 1;
     }
+    if (self.destination == .viewport) try self.out.writeAll(TerminalText.full_width_off);
 }
 
 fn replayProse(self: *Renderer, bytes: []const u8) !void {
@@ -493,6 +500,7 @@ const CellWidth = struct {
 
 fn codeBlock(self: *Renderer, bytes: []const u8) !void {
     const band = self.destination == .viewport and self.colour;
+    if (self.destination == .viewport) try self.out.writeAll(TerminalText.full_width_on);
     var start: usize = 0;
     while (start < bytes.len) {
         const end = if (std.mem.indexOfScalarPos(u8, bytes, start, '\n')) |at| at + 1 else bytes.len;
@@ -502,6 +510,7 @@ fn codeBlock(self: *Renderer, bytes: []const u8) !void {
         if (band) try self.out.writeAll("\x1b[0m");
         start = end;
     }
+    if (self.destination == .viewport) try self.out.writeAll(TerminalText.full_width_off);
 }
 
 fn literalBlock(self: *Renderer, bytes: []const u8) !void {

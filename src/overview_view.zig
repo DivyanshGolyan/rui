@@ -2302,8 +2302,8 @@ pub const Layout = struct {
 pub fn layout(state: *const State) Layout {
     const height = state.size.height;
     if (height == 0 or state.size.width == 0) return .{};
-    const top: u16 = @intCast(@min(topRows(state), height));
-    const settings = @max(top, state.sidebar_rule orelse (@import("draft_layout.zig").fixedBottom(height, 0, .overview).rule orelse height));
+    const settings = state.sidebar_rule orelse (@import("draft_layout.zig").fixedBottom(height, 0, .overview).rule orelse height);
+    const top: u16 = @intCast(@min(topRows(state), settings));
     const footer_rows: u16 = @intFromBool(footerShown(state));
     const input = @max(top, settings -| (statusRows(state) + footer_rows));
     const host = @max(top, input -| @intFromBool(state.host_line));
@@ -2318,7 +2318,7 @@ fn statusRows(state: *const State) u16 {
 }
 
 fn topRows(state: *const State) usize {
-    return @as(usize, @intFromBool(band(state) != null)) + 2;
+    return @as(usize, @intFromBool(band(state) != null)) + 3;
 }
 
 const Spans = struct {

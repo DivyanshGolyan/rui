@@ -37,7 +37,7 @@ def rows_by_mark():
     with world("drawing-marks", responses, active_capacity=2) as w, released(*holds.values()):
         with w.overview(columns=99, rows=30) as screen:
             frame = screen.contains("+ New Session")
-            assert frame.split("\n")[0] == "   + New Session", frame
+            assert frame.split("\n")[:2] == ["", "   + New Session"], frame
             asking = w.session("--label", "Asking", "--tools", "bash", "--permission-mode", "ask")
             failing = w.session("--label", "Failing")
             send(w, asking, "ask")
