@@ -2702,6 +2702,9 @@ fn shutdownExecution(host: *Host, slots: []ExecutionSlot, workspace: *Workspace)
             finishCustodyNow(host, slot);
         },
     };
+    if (comptime test_pause.enabled) if (host.pause_owner) |owner| {
+        _ = owner.reach(.host_shutdown_signalled, .{}) catch {};
+    };
     pause(host, .shutdown_signalled);
     var retained_cleanup_at = std.Io.Clock.Timestamp.now(host.io, .awake);
     while (hasOwnedSlots(slots)) {

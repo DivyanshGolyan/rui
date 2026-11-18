@@ -52,6 +52,7 @@
 | SH-45 | Host | A Host starts with the supported intake capacity at available descriptor limits, or reports a specific refusal without retaining ownership. | Host launch and controlled descriptor budget | `descriptor_budget_admission`: vary available descriptors and competing peers; inspect readiness, capacity, refusal and lease release. | docs/contracts/store.md:365 |
 | SH-46 | Module | A failed Store open returns its classified error without crashing, and identity admission refusals leave Store metadata unchanged. | Store open API and filesystem | `store_open_failure`: vary inaccessible paths and malformed or refused metadata and inspect errors and files. | src/store/Store.zig |
 | SH-48 | Product | A detached Host inherits only its intended launch descriptors and retains a useful startup failure diagnostic. | detached launch and inherited descriptor fixtures | `detached_descriptor_custody`: vary open descriptors and startup failures and inspect child descriptors and caller diagnostic. | src/host_launch.c |
+| SH-49 | Host | Host shutdown signals each running Bash once and drains its owned resources even while a provider response remains held. | Host stop, process observation, Store and scratch directory | `host_stop_integration.py:mixed_effect_drain` | docs/contracts/execution.md:514 |
 
 Owned elsewhere: ADM-14 (atomic admission acknowledgment), CLI-16 (client discovery classification), CM-36 (configured endpoint binding), EXR-30 (owned scratch cleanup and preservation of unrelated entries).
 

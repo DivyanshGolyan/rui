@@ -29,6 +29,9 @@ work and pending waits. The socket is marked close-on-exec. A killed child canno
 send an exit frame: the Python process watcher reaps it and synthesizes a
 length-prefixed JSON child-exit event with its PID and return code. EOF while
 the process remains alive immediately unblocks pending calls; callers can wait
-independently for the child-exit event.
+independently for the child-exit event. The Host keeps the owner open until its
+execution thread joins, including during shutdown. A worker paused at shutdown
+remains parked until its test releases it or closes the control socket; a test
+that forgets to do so fails at its client watchdog.
 
 Known limit: a paused Action blocks other execution work until release; resumable polling will be added when an invariant test needs concurrent execution progress.

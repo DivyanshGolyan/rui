@@ -1161,8 +1161,8 @@ fn serveOpened(
         };
         socket_owned = false;
         _ = host.advance(.draining);
-        if (comptime test_pause.enabled) pause_owner.close();
         execution_thread.join();
+        if (comptime test_pause.enabled) pause_owner.close();
     }
     try writeReadiness(&lease.paths, host.instance, active_capacity, intake_capacity, descriptor_requirement, descriptor_limit_text, retention_entries.len, served.any());
     stderr.release();
