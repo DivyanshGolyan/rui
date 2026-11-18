@@ -187,7 +187,7 @@ test "session tabs press only separate drawn destinations and clear clipped targ
     defer state.deinit();
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    for ([_]bool{ false, true }) |sidebar| for ([_]u16{ 0, 1, 9, 20, 46, 140 }) |width| for ([_]u16{ 0, 1, 2 }) |height| {
+    for ([_]bool{ false, true }) |sidebar| for ([_]u16{ 0, 1, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 46, 140 }) |width| for ([_]u16{ 0, 1, 2 }) |height| {
         state.conversing = if (sidebar) "aaaaaa".* else null;
         var clicks: Clicks = .{};
         var controls: SessionControls = .{ .state = &state, .userdata = &clicks, .on_click = Clicks.take };
@@ -202,12 +202,17 @@ test "session tabs press only separate drawn destinations and clear clipped targ
             var line: std.ArrayList(u8) = .empty;
             for (0..width) |col| try line.appendSlice(arena.allocator(), screen.readCell(@intCast(col), 0).?.char.grapheme);
             try std.testing.expect(std.mem.startsWith(u8, line.items, "   + New chat"));
+            if (width >= 23 and height >= 2) {
+                line.clearRetainingCapacity();
+                for (0..width) |col| try line.appendSlice(arena.allocator(), screen.readCell(@intCast(col), 1).?.char.grapheme);
+                try std.testing.expect(std.mem.startsWith(u8, line.items, "     Chats  Archived"));
+            }
         }
         for (0..3) |row| for (0..@max(1, width)) |col| {
             clicks.got = null;
             events.consume_event = false;
             try controls.widget().handleEvent(&events, .{ .mouse = .{ .col = @intCast(col), .row = @intCast(row), .button = .left, .type = .press, .mods = .{} } });
-            const expected: ?overview_view.Click = if (col >= width or row >= height) null else if (row == 0) .new_session else if (col >= 5 and col < @min(13, width -| 3)) .sessions else if (col >= 15 and col < @min(23, width -| 3)) .archived else null;
+            const expected: ?overview_view.Click = if (col >= width or row >= height) null else if (row == 0) .new_session else if (col >= 5 and col < @min(10, width -| 3)) .sessions else if (col >= 12 and col < @min(20, width -| 3)) .archived else null;
             try std.testing.expectEqual(expected, clicks.got);
         };
     };

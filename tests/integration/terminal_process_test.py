@@ -52,6 +52,17 @@ class TerminalProcessTest(unittest.TestCase):
                     self.assertIn("Working row", capture.completed)
                     self.assertIn("Finished row", capture.completed)
 
+    def test_chat_info_footer_does_not_confuse_folder_suffix_with_escape(self):
+        from human_cli_fixture import assert_chat_info_layout
+
+        rule = "┄" * 40
+        screen = "\n".join((rule, "   Effort          low", "   Folder          /home/user/rui-esc",
+                            "", "   Rename     Archive     Copy last answer", "", " ›", rule,
+                            " Chat                                esc"))
+        assert_chat_info_layout(screen)
+        with self.assertRaisesRegex(AssertionError, "one plain panel footer"):
+            assert_chat_info_layout(screen + "\n Duplicate esc")
+
     def test_composer_oracles_follow_the_caret_pane(self):
         from human_cli_fixture import composer_empty, composer_ready
 

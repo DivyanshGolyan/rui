@@ -229,7 +229,7 @@ def panel_frame(master, accept, keys=b"", timeout=15):
 def assert_chat_info_layout(screen, *, context=None):
     rows = screen.split("\n")
     contents = [pane_content(row) for row in rows]
-    footers = [index for index, row in enumerate(contents) if row.endswith("esc")]
+    footers = [index for index, row in enumerate(contents) if re.search(r"(?:^|\s)esc$", row)]
     assert footers == [chat_footer_row(screen)], ("one plain panel footer after the input", screen)
     assert " · info" not in screen and "esc close" not in screen, screen
     assert "alt+i info" not in screen, ("live chat footer must be substituted", screen)

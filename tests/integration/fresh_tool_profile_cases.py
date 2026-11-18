@@ -143,7 +143,7 @@ def restrictions_and_resume(world, engine):
                 keyed_frame(master, b"", lambda screen, x, y: "› " in screen)
                 profile(w, session, allowed, loaded, "ask")
                 os.write(master, b"\x03")
-                read_terminal(master, "Detached.")
+                read_terminal(master, "Your chats keep working while you are away.")
                 assert caller.wait(timeout=5) == 0
             resumed = profile(w, session, allowed, loaded, "ask")
             assert resumed["revision"] == revised["revision"], resumed

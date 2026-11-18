@@ -2800,7 +2800,7 @@ pub fn controls(arena: Allocator, state: *const State, width: u16, caps: Caps) e
     var regions: [2]Region = undefined;
     var region_count: usize = 0;
     inline for (.{ .{ "Chats", Selection.sessions, ArchiveFilter.active, Click.sessions }, .{ "Archived", Selection.archived, ArchiveFilter.archived, Click.archived } }, 0..) |tab, index| {
-        const start = text_column + index * 10;
+        const start = text_column + index * ("Chats".len + 2);
         const active = state.archive == tab[2];
         const focused = state.selected == tab[1];
         const cells = try built.put(start, tab[0], width -| 1 -| start, .{
@@ -6267,6 +6267,31 @@ test "Session pin captured intent changes no selection or conversation and await
     try std.testing.expectEqual(IntentAdmission.refused, (try step(&state, .{ .conversed = .{ .reference = target, .work = .idle, .input = .{ .pin = false } } })).intent_admission);
     try std.testing.expect(state.find(target).?.pin_order == null);
     state.selected = selected;
+}
+
+test "session list tab regions follow the two-space layout and clip with the labels" {
+    var state = try opened(&.{});
+    defer state.deinit();
+    for ([_]u16{ 8, 12, 15, 19, 80 }) |width| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const line = (try controls(arena.allocator(), &state, width, .{}))[1];
+        const chats_cells = @min(@as(u16, 5), width -| 1 -| text_column);
+        const archived_start: u16 = text_column + 7;
+        const archived_cells = @min(@as(u16, 8), width -| 1 -| archived_start);
+        try std.testing.expectEqual(@as(usize, @intFromBool(chats_cells > 0)) + @as(usize, @intFromBool(archived_cells > 0)), line.regions.len);
+        if (chats_cells > 0) {
+            try std.testing.expectEqual(@as(u16, text_column), line.regions[0].start);
+            try std.testing.expectEqual(@as(u16, text_column) + chats_cells, line.regions[0].end);
+            try std.testing.expectEqual(Click.sessions, line.regions[0].target);
+        }
+        if (archived_cells > 0) {
+            const region = line.regions[line.regions.len - 1];
+            try std.testing.expectEqual(archived_start, region.start);
+            try std.testing.expectEqual(archived_start + archived_cells, region.end);
+            try std.testing.expectEqual(Click.archived, region.target);
+        }
+    }
 }
 
 test "session list tabs have explicit destinations active no-op and one selection owner" {

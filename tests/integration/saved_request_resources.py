@@ -104,7 +104,7 @@ def retained(state, binary, label):
                 else:
                     cli.chat_info_frame(master)
             samples.append(sample(process.pid))
-        cli.terminal_step(master, "\x03", "Detached.")
+        cli.terminal_step(master, "\x03", "Your chats keep working while you are away.")
         assert process.wait(timeout=5) == 0
         assert samples[0]["retained_fds"] in (3, 4), samples
         assert all(value["retained_fds"] == samples[0]["retained_fds"] and value["sockets"] <= 1 for value in samples), samples
