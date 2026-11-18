@@ -35,6 +35,9 @@ from urllib.parse import quote
 CACHE = pathlib.Path(os.environ.get("VERIFY_RUI_CACHE", pathlib.Path.home() / ".cache/verify-rui"))
 SCRATCH_PARENT = pathlib.Path("/private/tmp" if sys.platform == "darwin" else "/tmp")  # short paths: Unix socket limits
 HERE = pathlib.Path(__file__).resolve()
+if len(HERE.parents) > 4 and (HERE.parents[4] / "tests/integration/terminal_screen.py").is_file():
+    sys.path.insert(0, str(HERE.parents[4] / "tests/integration"))
+    from terminal_screen import DIVIDER_GLYPHS, DIVIDER_PATTERN, RULE_GLYPHS, RULE_PATTERN, split_pane_row
 REPO_URL = "https://github.com/DivyanshGolyan/rui.git"
 
 
@@ -457,7 +460,7 @@ def fixture_main(args):
     """
     run = Run(args.run)
     sys.argv = [sys.argv[0], str(run.rui)]
-    sys.path.insert(0, str(pathlib.Path(run.meta["source"]) / "tests/integration"))
+    sys.path.insert(0, str(HERE.parents[4] / "tests/integration"))
     import http.server
     import model_fixture as fixture
     log = run.evidence / "provider.jsonl"
@@ -651,7 +654,7 @@ def tap_main(args):
     require_screen(build)
     term = pathlib.Path(args.term_dir)
     term.mkdir(parents=True, exist_ok=True)
-    sys.path.insert(0, str(source / "tests/integration"))
+    sys.path.insert(0, str(HERE.parents[4] / "tests/integration"))
     try:
         os.environ["RUI_TEST_GHOSTTY_VT"] = build["screen_library"]
         from terminal_screen import ScreenCapture
@@ -912,7 +915,7 @@ def cmd_new(args):
     run = Run(root)
     (run.home / ".config/rui").mkdir(parents=True, mode=0o700)
     sys.argv = [sys.argv[0], str(run.rui)]
-    sys.path.insert(0, str(pathlib.Path(run.meta["source"]) / "tests/integration"))
+    sys.path.insert(0, str(HERE.parents[4] / "tests/integration"))
     import codex_integration as codex_fixture
     codex_fixture.credentials(run.home / ".config/rui/codex.json")
     python = sys.executable
@@ -2397,7 +2400,8 @@ def validate_scenario(data, sizes=None):
 
 
 def load_scenario(path, sizes=None):
-    return validate_scenario(json.loads(pathlib.Path(path).read_text()), sizes)
+    text = pathlib.Path(path).read_text().replace("{divider}", json.dumps(DIVIDER_PATTERN)[1:-1]).replace("{rule}", json.dumps(RULE_PATTERN)[1:-1])
+    return validate_scenario(json.loads(text), sizes)
 
 
 def scenario_snapshot(scenario):
@@ -2682,19 +2686,18 @@ def frame_cell_width(text):
 
 
 def frame_split_row(line, column=None):
+    if column is not None:
+        return split_pane_row(line, column)
     for index, char in enumerate(line):
-        if column is not None:
-            if frame_cell_width(line[:index]) == column and char in "│|┼┤+":
-                return line[:index], char, line[index + 1:]
-        elif char in "│|":
+        if char in DIVIDER_GLYPHS:
             right = line[index + 1:].strip()
             left = line[:index]
-            if (left and (set(left) <= {"─"} or set(left) <= {"-"})) or (right and (set(right) <= {"─"} or set(right) <= {"-"})):
-                return line[:index], char, line[index + 1:]
+            if (left and any(set(left) <= {glyph} for glyph in RULE_GLYPHS)) or (right and any(set(right) <= {glyph} for glyph in RULE_GLYPHS)):
+                return split_pane_row(line, frame_cell_width(left))
         elif char in "┼┤+":
             left, right = line[:index], line[index + 1:]
-            if left and (set(left) <= {"─"} or set(left) <= {"-"}):
-                return left, char, right
+            if left and any(set(left) <= {glyph} for glyph in RULE_GLYPHS):
+                return split_pane_row(line, frame_cell_width(left))
     return "", "", line
 
 
@@ -2720,7 +2723,9 @@ def frame_wait(run, terminal, text, absent=False, timeout=20, allow_exit=False, 
         if column is None and x > 40:
             column = 40
         line = frame_split_row(lines[y], column)[2].strip()
-        return capture.frame.visible and line == "›"
+        if column is None:
+            line = re.split(DIVIDER_PATTERN, line)[-1].strip()
+        return capture.frame.visible and line in ("›", ">")
     terminal.wait(ready,
                   f"{'absence of ' if absent else ''}{text!r}", timeout, allow_exit)
 
@@ -2826,7 +2831,7 @@ def frame_row_failure(state, plain):
                     continue
                 previous, separator, right = rows[index - 1]
                 rule = previous if separator else right
-                if not rule or not (set(rule) <= {"─"} or set(rule) <= {"-"}):
+                if not rule or not any(set(rule) <= {glyph} for glyph in RULE_GLYPHS):
                     continue
                 if rows[index][1] and (not separator or separator == rows[index][1]):
                     continue
@@ -2850,6 +2855,9 @@ def frame_row_failure(state, plain):
         if re.search(pattern, plain, re.MULTILINE) is None:
             return f"missing row matching {pattern!r}"
     for pattern in frame_absent_regex(state):
+        if "[0123456789abcdefghjkmnpqrstvwxyz]{6}" in pattern:
+            literal_divider = "|".join(re.escape(glyph) for glyph in DIVIDER_GLYPHS if glyph != "|")
+            pattern = re.sub(r"(?<=\(\?:)(?:" + literal_divider + r")(?=\.\*)", lambda _: DIVIDER_PATTERN, pattern)
         if match := re.search(pattern, plain, re.MULTILINE):
             return f"unexpected row matching {pattern!r}: {match.group(0)!r}"
     return None
@@ -3106,7 +3114,7 @@ def frame_chat_ready(plain, witness=None, empty=False):
 
     def is_rule(line):
         line = line.strip()
-        return bool(line) and (set(line) <= {"─"} or set(line) <= {"-"})
+        return bool(line) and any(set(line) == {glyph} for glyph in RULE_GLYPHS)
 
     for index in range(max(1, len(lines) - 6), len(lines) - 1):
         left, divider, right = frame_split_row(lines[index])
@@ -3737,8 +3745,11 @@ def cmd_shots(args):
                                              pkg_dir=None, force=False, no_screen=False, upgrade=True))
             identifier = json.loads(output.getvalue())["sha"]
         build = load_build(identifier)
-        raw = subprocess.check_output(["git", "-C", build["source"], "show",
-                                       f"{build['tree']}:.claude/skills/verify-rui/scripts/frames.json"], text=True)
+        if getattr(args, "scenario", None):
+            raw = pathlib.Path(args.scenario).read_text()
+        else:
+            raw = subprocess.check_output(["git", "-C", build["source"], "show",
+                                           f"{build['tree']}:.claude/skills/verify-rui/scripts/frames.json"], text=True)
         scenario = validate_scenario(json.loads(raw), None)
         metadata = {"build": build.get("sha", identifier), "tree": build["tree"],
                     "recipe_sha256": hashlib.sha256(raw.encode("utf-8")).hexdigest()}
@@ -4092,6 +4103,7 @@ def main():
     p = sub.add_parser("shots", help="capture a build's own screen recipe")
     p.add_argument("build", nargs="?", metavar="BUILD")
     p.add_argument("--baseline", metavar="DIR")
+    p.add_argument("--scenario", metavar="FILE", help="use this trusted recipe instead of the build tree recipe")
     p.add_argument("--only", metavar="NAME,...")
     p.add_argument("--shard", metavar="I/N")
     p.add_argument("--out")

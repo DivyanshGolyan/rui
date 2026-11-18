@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Open a PR and request Codex review; ready by default, draft with --draft.
+"""Open a PR; ready by default, or draft with --draft and request Codex review.
 
 Merge still requires current-candidate admission and the Codex evidence in
 CODING_STANDARDS.md. `ready` converts drafts without another push.
@@ -85,14 +85,14 @@ def main():
             print(pr["html_url"])
             if needs_screens:
                 print("UI PR: publish frames with verify-rui publish DIR --pr N; admission stays red until then.")
-            github("POST", f"repos/{repo}/issues/{pr['number']}/comments", [("body", "@codex review")])
             if args.draft:
+                github("POST", f"repos/{repo}/issues/{pr['number']}/comments", [("body", "@codex review")])
                 print("Opened draft and requested Codex review. "
                       "Run `open_pr.py ready` after Codex review is clean to start the full selected suite.")
             else:
-                print("Opened ready and requested Codex review. Selected CI runs beside review.")
+                print("Opened ready; Codex reviews automatically. Selected CI runs beside review.")
             print("Merge requires current-candidate admission and clean Codex evidence; "
-                  "request review again when a semantic change invalidates it.")
+                  "Codex reviews ready PRs automatically on each push.")
             return 0
         owner = repo.split("/")[0]
         found = github("GET", f"repos/{repo}/pulls?state=open&head={quote(f'{owner}:{branch}', safe=':/')}")

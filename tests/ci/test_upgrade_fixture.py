@@ -1,6 +1,7 @@
 """Pure checks for Upgrade fixture ownership and readiness; no native fixture is launched."""
 import copy
 import importlib.util
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -11,6 +12,8 @@ from unittest.mock import Mock, call, patch
 
 
 FIXTURE = Path(__file__).resolve().parents[1] / "integration/upgrade_integration.py"
+sys.path.insert(0, str(FIXTURE.parent))
+from terminal_screen import DIVIDER_GLYPHS, VERTICAL_DIVIDER
 
 
 class NotReady(Exception):
@@ -48,9 +51,52 @@ class UpgradeEmptyChatTest(unittest.TestCase):
     def observe(self, footer, *, report=None, listing=None, model="gpt-6-luna"):
         self.case.json.side_effect = [copy.deepcopy(self.report if report is None else report),
                                       copy.deepcopy(self.listing if listing is None else listing)]
-        frame = f"│ › conversation β draft\n│ {model} · low    {footer}"
+        frame = f"{VERTICAL_DIVIDER} › conversation β draft\n{VERTICAL_DIVIDER} {model} · low    {footer}"
         self.screen.observe = lambda: frame
         return self.screen.empty_chat(self.case, self.session)
+
+    def test_sigint_drains_restoration_after_process_exit(self):
+        screen = self.fixture.TerminalScreen.__new__(self.fixture.TerminalScreen)
+        screen.master = 42
+        screen.capture = SimpleNamespace(feed=Mock())
+        screen.tail = bytearray()
+        screen.transition_tail = b""
+        screen.entries = screen.restorations = 0
+        status = [None]
+        process = SimpleNamespace(send_signal=Mock(), poll=Mock(side_effect=lambda: status[0]))
+        chunks = iter([BlockingIOError(), b"receipt \x1b[?104", b"9l\x1b[?25h done", b""])
+
+        def read_chunk(*args):
+            chunk = next(chunks)
+            if isinstance(chunk, BlockingIOError):
+                status[0] = 0
+                raise chunk
+            return chunk
+
+        self.wait.stop()
+        with patch.object(self.fixture.os, "read", side_effect=read_chunk) as read:
+            receipt = self.fixture.exit_on_sigint(screen, process, "exit")
+        self.assertEqual(receipt, b"\x1b[?1049l\x1b[?25h done")
+        self.assertEqual(screen.restorations, 1)
+        self.assertEqual(read.call_count, 4)
+
+    def test_sigint_drains_with_slave_still_open(self):
+        master, slave = os.openpty()
+        self.addCleanup(os.close, master)
+        self.addCleanup(os.close, slave)
+        os.set_blocking(master, False)
+        screen = self.fixture.TerminalScreen.__new__(self.fixture.TerminalScreen)
+        screen.master = master
+        screen.capture = SimpleNamespace(feed=Mock())
+        screen.tail = bytearray()
+        screen.transition_tail = b""
+        screen.entries = screen.restorations = 0
+        process = SimpleNamespace(send_signal=Mock(), poll=Mock(return_value=0))
+        os.write(slave, b"receipt \x1b[?1049l\x1b[?25h done")
+        self.wait.stop()
+        receipt = self.fixture.exit_on_sigint(screen, process, "exit with open slave")
+        self.assertEqual(receipt, b"\x1b[?1049l\x1b[?25h done")
+        self.assertIsNone(screen.read_output())
 
     def test_case_disk_lifetime_follows_successful_process_retirement(self):
         for body_fails, cleanup_fails in ((False, False), (True, False), (False, True)):
@@ -243,8 +289,8 @@ class UpgradeEmptyChatTest(unittest.TestCase):
                 self.hidden(wrong)
 
     def test_overview_waits_past_sidebar_controls_for_the_full_list(self):
-        sidebar = " + New Session                Archived │\n   Settings │ gpt-6-luna · low\n"
-        frames = [sidebar + "│ › Type a task", sidebar + "│ › unsent draft",
+        sidebar = f" + New Session                Archived {VERTICAL_DIVIDER}\n   Settings {VERTICAL_DIVIDER} gpt-6-luna · low\n"
+        frames = [sidebar + f"{VERTICAL_DIVIDER} › Type a task", sidebar + f"{VERTICAL_DIVIDER} › unsent draft",
                   "+ New Session                Archived\nSettings"]
         self.screen.observe = Mock(side_effect=frames)
         self.case.json.side_effect = [copy.deepcopy(self.report), copy.deepcopy(self.listing)]
@@ -262,6 +308,18 @@ class UpgradeEmptyChatTest(unittest.TestCase):
             self.assertEqual(frames[-1], self.screen.empty_overview(self.case, self.session))
         self.assertEqual(readiness, [False, False, True])
         self.assertEqual(self.screen.observe.call_count, 3)
+
+    def test_legacy_and_stitch_dividers_preserve_overview_and_upgrade_readiness(self):
+        for divider in DIVIDER_GLYPHS:
+            with self.subTest(divider=divider):
+                sidebar = f"{'+ New Session'.ljust(40)}{divider} chat\n{'Settings'.ljust(40)}{divider} model\n"
+                with self.assertRaises(NotReady):
+                    self.hidden(sidebar + f"{''.ljust(40)}{divider} › unsent draft")
+                self.screen.observe = lambda: f"{'Settings 38 MB'.ljust(40)}{divider} chat"
+                self.assertIn("38 MB", self.screen.sidebar())
+                self.case.json.side_effect = [copy.deepcopy(self.report), copy.deepcopy(self.listing)]
+                self.screen.observe = lambda: f"{''.ljust(40)}{divider} gpt-6-luna · low"
+                self.assertIn("gpt-6-luna", self.screen.empty_chat(self.case, self.session))
 
     def test_hidden_projection_does_not_weaken_stored_identity_or_zero_messages(self):
         frame = "+ New Session\nSettings"

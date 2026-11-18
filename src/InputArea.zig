@@ -7,8 +7,11 @@ const Self = @This();
 const empty: vxfw.Text = .{ .text = "" };
 const status_lines = @import("slash_commands.zig").short_result_lines;
 
+pub const Panel = union(enum) { inline_panel: vxfw.Widget, full: vxfw.Widget };
+
 composer: Composer,
 permission: ?*PermissionCard = null,
+panel: ?Panel = null,
 facts: vxfw.Widget = empty.widget(),
 status: ?vxfw.Widget = empty.widget(),
 facts_at: enum { top, bottom } = .top,
@@ -34,10 +37,18 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const footer_rows = facts_rows + bottom.status_rows;
     const children = try ctx.arena.alloc(vxfw.SubSurface, 1 + facts_rows + @intFromBool(status != null));
     const room = size.height - footer_rows;
-    const content = if (self.permission) |card|
+    self.composer.panel = if (self.panel) |panel| switch (panel) {
+        .inline_panel, .full => |widget_| widget_,
+    } else null;
+    self.composer.max_rows = @import("draft_layout.zig").cap(size.height);
+    const permission = if (self.panel) |panel| switch (panel) {
+        .inline_panel => self.permission,
+        .full => null,
+    } else self.permission;
+    const content = if (permission) |card|
         try card.drawInput(ctx.withConstraints(.{}, .{ .width = size.width, .height = room }), if (card.consent.row == .draft) self.composer.widget() else null)
     else
-        try self.composer.widget().draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = @min(room, @import("draft_layout.zig").cap(size.height) + 2) }));
+        try self.composer.widget().draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = room }));
     const row = ctx.withConstraints(.{ .width = size.width, .height = 1 }, .{ .width = size.width, .height = 1 });
     children[0] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = content };
     const status_rows = footer_rows - facts_rows;
@@ -203,7 +214,7 @@ test "InputArea approval has one document title above a choice between composer 
         try std.testing.expectEqualStrings("A", screen.readCell(3, choice).?.char.grapheme);
         try std.testing.expect(screen.readCell(3, choice).?.style.reverse);
         for (0..width) |col| for ([_]u16{ choice - 1, choice + 1 }) |row| {
-            try std.testing.expectEqualStrings("─", screen.readCell(@intCast(col), row).?.char.grapheme);
+            try std.testing.expectEqualStrings("┄", screen.readCell(@intCast(col), row).?.char.grapheme);
         };
         _ = consent.route(.printable);
         const drafting = try input.widget().draw(ctx);
@@ -233,7 +244,7 @@ test "InputArea has no empty status row below the footer" {
         const idle = try input.widget().draw(ctx);
         try std.testing.expectEqual(@as(u16, 4), idle.size.height);
         try std.testing.expectEqual(@as(usize, 2), idle.children.len);
-        try std.testing.expectEqualStrings("─", idle.children[0].surface.readCell(0, 2).char.grapheme);
+        try std.testing.expectEqualStrings("┄", idle.children[0].surface.readCell(0, 2).char.grapheme);
         try std.testing.expectEqual(@as(i17, 3), idle.children[1].origin.row);
 
         notice.text = "Copied 12 lines";

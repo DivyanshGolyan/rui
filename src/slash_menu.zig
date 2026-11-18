@@ -24,9 +24,11 @@ pub const Menu = struct {
     shown: ?commands.Shown = null,
     rows: skills.Rows = .{},
     drawn_pick: ?Pick = null,
+    closed_draft_revision: ?u64 = null,
 
     pub fn frame(self: *Menu, source: Source) ?*commands.Shown {
         self.shown = build(&self.rows, self.shown, source);
+        self.keepClosed(source);
         if (self.shown == null) self.drawn_pick = null;
         return if (self.shown) |*shown| shown else null;
     }
@@ -45,7 +47,28 @@ pub const Menu = struct {
     pub fn current(self: *Menu, source: Source) ?*commands.Shown {
         const next = build(&self.rows, self.shown, source) orelse return null;
         self.shown = next;
+        self.keepClosed(source);
         return if (self.shown.?.seen == .drawn) &self.shown.? else null;
+    }
+
+    pub fn closeIfDrawn(self: *Menu, source: Source) bool {
+        const drawn = if (self.drawn_pick) |pick| switch (source) {
+            .draft => |draft| pick.revision == draft.revision,
+            else => false,
+        } else false;
+        const current_list = self.current(source);
+        const shown = current_list orelse if (drawn) (if (self.shown) |*list| list else null) else null;
+        const list = shown orelse return false;
+        list.close();
+        self.drawn_pick = null;
+        if (source == .draft) self.closed_draft_revision = source.draft.revision;
+        return true;
+    }
+
+    fn keepClosed(self: *Menu, source: Source) void {
+        if (source == .draft and self.closed_draft_revision == source.draft.revision) {
+            if (self.shown) |*shown| shown.close();
+        }
     }
 
     /// Preview without changing the shown list, its strings, or drawn authority.
@@ -80,6 +103,7 @@ pub const Menu = struct {
     pub fn reset(self: *Menu) void {
         self.shown = null;
         self.drawn_pick = null;
+        self.closed_draft_revision = null;
     }
 };
 
@@ -342,6 +366,60 @@ test "slash_menu close persists until edit and reopens hidden before a frame dra
         held.draw(true);
         try std.testing.expect(held.menu.accepting(held.source, .enter) != null);
     }
+}
+
+test "slash_menu close authority survives refresh navigation and repaint in every order" {
+    const Event = enum { refresh, navigation, close, repaint };
+    const events = std.enums.values(Event);
+    for (events) |a| for (events) |b| for (events) |c| for (events) |d| {
+        if (a == b or a == c or a == d or b == c or b == d or c == d) continue;
+        const sequence = [_]Event{ a, b, c, d };
+        errdefer std.debug.print("menu sequence {any}\n", .{sequence});
+        var held: MenuTest = undefined;
+        held.init(.drawn);
+        const old_pick = held.menu.drawn_pick.?;
+        var refreshed = false;
+        var closed = false;
+        for (sequence) |event| {
+            switch (event) {
+                .refresh => {
+                    held.load(&.{.{ .name = "renew", .description = "New rows" }});
+                    refreshed = true;
+                },
+                .navigation => if (held.menu.current(held.source)) |shown| shown.move(true),
+                .close => {
+                    try std.testing.expect(held.menu.closeIfDrawn(held.source));
+                    closed = true;
+                    try std.testing.expect(!held.menu.closeIfDrawn(held.source));
+                },
+                .repaint => held.draw(true),
+            }
+            if (refreshed) try std.testing.expect(held.menu.accepting(held.source, .{ .pick = old_pick }) == null);
+            if (closed) try std.testing.expect(held.menu.accepting(held.source, .enter) == null);
+        }
+        held.draw(true);
+        try std.testing.expect(!held.menu.closeIfDrawn(held.source));
+        try std.testing.expect(held.menu.accepting(held.source, .enter) == null);
+        held.source = held.draft("use /ren and /re", "use /ren".len, 8);
+        held.draw(true);
+        try std.testing.expect(held.menu.accepting(held.source, .enter) != null);
+    };
+}
+
+test "slash_menu close refuses an undrawn or edited replacement after refresh" {
+    var held: MenuTest = undefined;
+    held.init(.drawn);
+    const old_pick = held.menu.drawn_pick.?;
+    held.load(&.{.{ .name = "renew", .description = "New rows" }});
+    held.source = held.draft("use /ren and /re", "use /ren".len, 8);
+    try std.testing.expect(held.menu.current(held.source) == null);
+    try std.testing.expect(!held.menu.closeIfDrawn(held.source));
+    try std.testing.expect(held.menu.accepting(held.source, .{ .pick = old_pick }) == null);
+    held.draw(false);
+    try std.testing.expect(!held.menu.closeIfDrawn(held.source));
+    held.draw(true);
+    try std.testing.expect(held.menu.closeIfDrawn(held.source));
+    try std.testing.expect(!held.menu.closeIfDrawn(held.source));
 }
 
 test "slash_menu changed skill rows refuse every acceptance until repaint including with an edit" {

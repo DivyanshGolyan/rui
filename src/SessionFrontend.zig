@@ -925,7 +925,8 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
                 self.reading.phase = .activity;
                 self.app_consent.adopt(request);
                 self.app_input.permission = &self.app_card;
-                try ctx.requestFocus(self.app_card.widget());
+                if (!self.info_open and !self.app_info.standaloneOpen() and !self.app_hooks.root.input.layer.settingsOpen())
+                    try ctx.requestFocus(self.app_card.widget());
                 self.dirty = true;
             };
             try self.app_card.widget().handleEvent(ctx, .tick);
@@ -1008,6 +1009,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     self.app_card.quiet = quiet;
     self.app_card.hover_style = hover;
     self.app_card.method = self.app_caps.width;
+    self.app_card.caps = self.app_caps;
     self.app_preview.style = normal;
     self.app_preview.colours = colours;
     self.app_preview.hover_style = hover;
@@ -1081,14 +1083,26 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
         .notice = self.shown_notice.current(now_ms) orelse said.notice,
         .overview = said.text,
 
-        .overlay = if (self.info_open) self.app_info.bodyWidget() else if (self.app_info.standaloneOpen()) self.app_info.standaloneWidget() else palette,
+        .overlay = if (self.app_hooks.root.input.layer.settingsOpen())
+            .{ .full = self.app_hooks.root.settings_page.bodyWidget() }
+        else if (self.info_open)
+            .{ .full = self.app_info.bodyWidget() }
+        else if (self.app_info.standaloneOpen())
+            .{ .full = self.app_info.standaloneWidget() }
+        else if (palette) |widget_|
+            .{ .inline_panel = widget_ }
+        else
+            null,
 
         .width = ctx.max.width.?,
     });
-    self.app_screen.overlay_reserves_space = self.info_open or self.app_info.standaloneOpen();
     self.app_info.narrow = !list_visible;
     if (self.info_open) {
         self.app_input.facts = self.app_info.footerWidget();
+        self.app_input.status = null;
+    }
+    if (self.app_hooks.root.input.layer.settingsOpen()) {
+        self.app_input.facts = self.app_hooks.root.settings_page.footerWidget();
         self.app_input.status = null;
     }
     self.app_preview.size = .{};
@@ -2448,15 +2462,14 @@ fn perform(self: *Self, action: ConversationAction) !void {
                 self.dirty = true;
                 return;
             }
-            if (action == .close) if (self.menu.current(self.menuSource())) |shown| {
-                shown.close();
+            if (action == .close and self.menu.closeIfDrawn(self.menuSource())) {
                 switch (slash_commands.draftOf(self.input.composition().bytes)) {
                     .word, .command => self.input.clear(),
                     .message => {},
                 }
                 self.dirty = true;
                 return;
-            };
+            }
             self.dropMessageRequest();
             screen.moveRow(.selector);
             if (action == .close and self.settledView()) {
@@ -3372,6 +3385,15 @@ const HeldFrontend = struct {
     fn drawnInput(held: *HeldFrontend, base: vxfw.Surface) !vxfw.SubSurface {
         for (base.children) |child| if (child.surface.widget.eql(held.self.app_input.widget())) return child;
         return error.TestUnexpectedResult;
+    }
+
+    fn drawnPanel(held: *HeldFrontend, base: vxfw.Surface) !vxfw.SubSurface {
+        const input = try held.drawnInput(base);
+        const composer = input.surface.children[0];
+        var panel = composer.surface.children[0];
+        panel.origin.row += input.origin.row + composer.origin.row;
+        panel.origin.col += input.origin.col + composer.origin.col;
+        return panel;
     }
 
     fn shown(held: *HeldFrontend) ![]const u8 {
@@ -4554,15 +4576,18 @@ test "chat info opens from the chat line above the input at 140 and 46 columns a
         try std.testing.expect(held.self.info_open and held.self.inspection.status_requested);
         try std.testing.expectEqual(Screen.ViewKind.feed, held.screen.view);
         const surface = try held.draw();
-        try std.testing.expectEqual(@as(usize, 2), surface.children.len);
+        try std.testing.expectEqual(@as(usize, 1), surface.children.len);
         const base = surface.children[0].surface;
-        const panel = surface.children[1];
-        try std.testing.expectEqual(@as(u8, 2), panel.z_index);
-        try std.testing.expectEqual((try held.drawnInput(base)).origin.row, panel.origin.row + panel.surface.size.height);
+        const panel = try held.drawnPanel(base);
+        const input = try held.drawnInput(base);
+        try std.testing.expectEqual(input.origin.row + 1, panel.origin.row);
+        try std.testing.expectEqual(@as(u16, width), panel.surface.size.width);
+        try std.testing.expect(panel.surface.size.height > 0);
+        try std.testing.expectEqual(input.surface.children[1].origin.row - 3, panel.surface.size.height);
         try std.testing.expect((try rowWith(held, "Fix retry deadline")) != null);
         try std.testing.expect((try rowWith(held, "Folder")) != null);
         try std.testing.expect((try rowWith(held, "alt+i info")) == null);
-        try std.testing.expect((try rowWith(held, "esc close")) != null);
+        try std.testing.expect((try rowWith(held, "esc")) != null);
         try held.keys("\r");
         try std.testing.expect(held.self.app_info.hasChoice());
         try held.keys("\x07");
@@ -4597,12 +4622,13 @@ test "chat footer background click and Alt-I share natural panel opening and Esc
         for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| try @import("testing/app_events.zig").mouse(&ctx, ordinary, .{ .row = row, .col = col, .button = .left, .mods = .{}, .type = kind });
         try std.testing.expect(held.self.info_open and held.self.inspection.status_requested);
         const clicked = try held.draw();
-        const panel = clicked.children[1];
         const base = clicked.children[0].surface;
+        const panel = try held.drawnPanel(base);
         const draft = (try held.drawnInput(base));
         try std.testing.expect(panel.origin.row > 0);
-        try std.testing.expectEqual(base.children[0].surface.size.height, panel.origin.row);
-        try std.testing.expectEqual(draft.origin.row, panel.origin.row + panel.surface.size.height);
+        try std.testing.expectEqual(base.children[0].surface.size.height, draft.origin.row);
+        try std.testing.expectEqual(draft.origin.row + 1, panel.origin.row);
+        try std.testing.expectEqual(draft.origin.row + draft.surface.children[1].origin.row - 2, panel.origin.row + panel.surface.size.height);
         try std.testing.expect((try rowWith(held, "latest feed line")) != null);
         const footer_row: i16 = @intCast(draft.origin.row + draft.surface.children[1].origin.row);
         for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| try @import("testing/app_events.zig").mouse(&ctx, clicked, .{ .row = footer_row, .col = col, .button = .left, .mods = .{}, .type = kind });
@@ -4613,8 +4639,9 @@ test "chat footer background click and Alt-I share natural panel opening and Esc
         try held.keys("\x1bi");
         const keyed = try held.draw();
         try std.testing.expect(held.self.info_open);
-        try std.testing.expectEqual(panel.origin, keyed.children[1].origin);
-        try std.testing.expectEqual(panel.surface.size, keyed.children[1].surface.size);
+        const keyed_panel = try held.drawnPanel(keyed.children[0].surface);
+        try std.testing.expectEqual(panel.origin, keyed_panel.origin);
+        try std.testing.expectEqual(panel.surface.size, keyed_panel.surface.size);
         try held.keys("\x1b");
         try std.testing.expect(!held.self.info_open and held.left == null);
         try std.testing.expectEqualStrings("kept draft", held.self.input.composition().bytes);
@@ -5902,7 +5929,7 @@ test "App Session shell gutter and back control follow list visibility through r
         const wide = width >= 100;
         const start: u16 = if (wide) 41 else 0;
         try std.testing.expectEqual(wide, fixture.root.listVisible());
-        if (wide) try std.testing.expectEqualStrings("│", screen.readCell(40, 0).?.char.grapheme);
+        if (wide) try std.testing.expectEqualStrings("┆", screen.readCell(40, 0).?.char.grapheme);
         var sent: u16 = 0;
         while (!std.mem.eql(u8, screen.readCell(start + 1, sent).?.char.grapheme, "›")) sent += 1;
         try std.testing.expectEqualStrings(" ", screen.readCell(start, sent).?.char.grapheme);
@@ -5938,7 +5965,7 @@ test "App Session shows running calls in order above the input, with +N more run
     try std.testing.expectEqualStrings("+2 more running · info", shown[first + 3]);
     try std.testing.expect(std.mem.eql(u8, shown[first + 4], "⠹ Thinking · 12s") or std.mem.eql(u8, shown[first + 4], "⠹ Thinking · 13s"));
     try std.testing.expectEqualStrings("", shown[first + 5]);
-    try std.testing.expect(std.mem.startsWith(u8, shown[first + 6], "─"));
+    try std.testing.expect(std.mem.startsWith(u8, shown[first + 6], "┄"));
     var waiting: usize = 0;
     for (shown) |line| waiting += @intFromBool(std.mem.startsWith(u8, line, "⠹ Thinking"));
     try std.testing.expectEqual(@as(usize, 1), waiting);
@@ -5962,7 +5989,7 @@ test "App Session shows the newest waiting Message as ◌ [N ·] its first line,
     try std.testing.expectEqualStrings("◌ 3 · also update docs/using-rui.md", three[row]);
     try std.testing.expect(std.mem.startsWith(u8, three[row - 1], "⠹ Thinking"));
     try std.testing.expectEqualStrings("", three[row + 1]);
-    try std.testing.expect(std.mem.startsWith(u8, three[row + 2], "─"));
+    try std.testing.expect(std.mem.startsWith(u8, three[row + 2], "┄"));
     for (three) |line| try std.testing.expect(std.ascii.findIgnoreCase(line, "queued") == null);
     self.live.queued.count = 1;
     self.live.queued.oldest_position = 70;
@@ -5989,7 +6016,7 @@ test "SessionFrontend optimistic submission keeps input rows fixed" {
             try std.testing.expect(std.mem.indexOf(u8, line, "Sending") == null);
         }
         try std.testing.expectEqual(@as(usize, 1), messages);
-        try std.testing.expect(std.mem.startsWith(u8, idle[20], "─"));
+        try std.testing.expect(std.mem.startsWith(u8, idle[20], "┄"));
         for (idle[20..24], pending[20..24]) |before, during| try std.testing.expectEqualStrings(before, during);
         self.submission.state = .unconfirmed;
         const unconfirmed = try fixture.rowsAtWidth(width);
@@ -6523,11 +6550,11 @@ test "App Session question mark encodings append ordinary text to empty and none
             if (has_draft) try fixture.press(.{ .codepoint = 'a', .text = "a" });
             try fixture.press(key);
             _ = try fixture.draw();
-            try std.testing.expect(self.app_screen.overlay == null);
+            try std.testing.expect(self.app_input.panel == null);
             try std.testing.expectEqualStrings(if (has_draft) "a?" else "?", self.input.composition().bytes);
             try fixture.press(key);
             _ = try fixture.draw();
-            try std.testing.expect(self.app_screen.overlay == null);
+            try std.testing.expect(self.app_input.panel == null);
             try std.testing.expectEqualStrings(if (has_draft) "a??" else "??", self.input.composition().bytes);
         }
     }
@@ -6625,7 +6652,7 @@ test "App Session footer takes list visibility from Root across desktop and phon
         for (chat_col..case.width) |col| try row.writer.writeAll(screen.readCell(@intCast(col), 29).?.char.grapheme);
         try std.testing.expectEqual(@as(usize, if (case.list) 0 else 1), std.mem.count(u8, row.written(), "‹"));
         try std.testing.expectEqual(!case.list, std.mem.indexOf(u8, row.written(), "k7m2qx") != null);
-        try std.testing.expectEqualStrings("─", screen.readCell(chat_col, 28).?.char.grapheme);
+        try std.testing.expectEqualStrings("┄", screen.readCell(chat_col, 28).?.char.grapheme);
         try std.testing.expectEqual(!case.list, std.mem.trim(u8, row.written(), " ").len != 0);
     }
 }
@@ -9225,8 +9252,8 @@ test "chat input stays untinted and bottom anchored with fixed rules at 140 and 
                         const plain = style.of(held.self.app_caps, .{ .colour = .quiet });
                         const rows: u16 = if (draft.len == 0) 1 else 3;
                         const first = size.height - rows - 2;
-                        try std.testing.expectEqualStrings("─", rendered.readCell(0, first - 1).?.char.grapheme);
-                        try std.testing.expectEqualStrings("─", rendered.readCell(0, size.height - 2).?.char.grapheme);
+                        try std.testing.expectEqualStrings("┄", rendered.readCell(0, first - 1).?.char.grapheme);
+                        try std.testing.expectEqualStrings("┄", rendered.readCell(0, size.height - 2).?.char.grapheme);
                         if (!list_focused) {
                             try std.testing.expectEqual(@as(u16, size.height - 3), rendered.cursor.row);
                             try std.testing.expectEqual(vaxis.Cell.CursorShape.block_blink, rendered.cursor_shape);
@@ -9271,19 +9298,21 @@ test "chat info supplies the one bottom footer after the input and both dividers
         const footer = input.surface.children[1];
         try std.testing.expectEqual(@as(i17, size.height - 1), input.origin.row + footer.origin.row);
         try std.testing.expectEqual(@as(u16, 1), footer.surface.size.height);
-        try std.testing.expectEqual(input.origin.row, surface.children[1].origin.row + surface.children[1].surface.size.height);
+        const panel = try held.drawnPanel(base);
+        try std.testing.expectEqual(input.origin.row + 1, panel.origin.row);
+        try std.testing.expectEqual(@as(i17, size.height - 3), panel.origin.row + panel.surface.size.height);
         const text = try held.shown();
-        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, "· info"));
+        try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, text, "· info"));
         try std.testing.expect(std.mem.indexOf(u8, text, "alt+i info") == null);
         var rows = std.mem.splitScalar(u8, text, '\n');
         var row: usize = 0;
         var previous: []const u8 = "";
         while (rows.next()) |line| : (row += 1) {
             if (row == size.height - 1) {
-                try std.testing.expect(std.mem.indexOf(u8, line, "Fix retry deadline · info") != null);
-                try std.testing.expect(std.mem.indexOf(u8, line, "esc close") != null);
-            } else if (row == size.height - 2 or row == size.height - 4) {
-                try std.testing.expect(std.mem.startsWith(u8, line, "──"));
+                try std.testing.expect(std.mem.startsWith(u8, line, " Fix retry deadline"));
+                try std.testing.expect(std.mem.endsWith(u8, std.mem.trimEnd(u8, line, " "), "esc"));
+            } else if (row == size.height - 2 or row == @as(usize, @intCast(input.origin.row))) {
+                try std.testing.expect(std.mem.startsWith(u8, line, "┄┄"));
             } else if (row == size.height - 3) {
                 try std.testing.expect(std.mem.indexOf(u8, line, "kept draft") != null);
             }
@@ -9298,7 +9327,37 @@ test "chat info supplies the one bottom footer after the input and both dividers
     };
 }
 
-test "App Session palette total budget stays input anchored without reserving feed rows" {
+test "App Session Escape closes drawn command list before leaving chat" {
+    for ([_]struct { width: u16, height: u16 }{ .{ .width = 140, .height = 40 }, .{ .width = 46, .height = 30 } }) |size| {
+        for ([_][]const u8{ "/", "/ne" }) |draft| for ([_]bool{ false, true }) |new_skills| {
+            const held = try HeldFrontend.create();
+            defer held.destroy();
+            held.size = .{ .width = size.width, .height = size.height };
+            held.root.size = .{ .width = size.width, .height = size.height };
+            try held.frame();
+            try held.keys(draft);
+            try held.frame();
+            try std.testing.expectEqual(.drawn, held.self.menu.shown.?.seen);
+            if (new_skills) {
+                _ = held.self.dropSkills();
+                const ask = held.self.skills.ask(draft[1..]).?;
+                try std.testing.expect(held.self.skills.answer(ask.read, .{}, draft[1..]) == null);
+                try std.testing.expect(held.self.menu.current(held.self.menuSource()) == null);
+            }
+            try held.keys("\x1b");
+            try std.testing.expectEqual(@as(?Outcome, null), held.left);
+            try std.testing.expect(held.root.session != null);
+            try std.testing.expect(held.root.input.mainFocused());
+            try std.testing.expectEqualStrings("", held.self.input.composition().bytes);
+            try held.frame();
+            try std.testing.expect(held.self.menu.current(held.self.menuSource()) == null);
+            try held.keys("\x1b");
+            try std.testing.expectEqual(@as(?Outcome, .returned), held.left);
+        };
+    }
+}
+
+test "App Session palette total budget stays between input rules and reserves feed rows" {
     const Find = struct {
         fn widget(surface: vxfw.Surface, target: vxfw.Widget) ?vxfw.SubSurface {
             if (surface.widget.eql(target)) return .{ .origin = .{ .row = 0, .col = 0 }, .surface = surface };
@@ -9318,9 +9377,8 @@ test "App Session palette total budget stays input anchored without reserving fe
     const feed_before = held.self.app_content.size;
     try held.keys("/");
     const after = try held.draw();
-    try std.testing.expectEqual(input_before.origin, Find.widget(after, held.self.app_input.widget()).?.origin);
-    try std.testing.expectEqual(feed_before, held.self.app_content.size);
-    try std.testing.expect(!held.self.app_screen.overlay_reserves_space);
+    try std.testing.expect(Find.widget(after, held.self.app_input.widget()).?.origin.row < input_before.origin.row);
+    try std.testing.expect(held.self.app_content.size.height < feed_before.height);
     held.self.menu.shown.?.highlight = held.self.menu.shown.?.list.count - 1;
     for (1..49) |height| {
         held.size.height = @intCast(height);
@@ -9330,8 +9388,10 @@ test "App Session palette total budget stays input anchored without reserving fe
         const limit = @max(1, height / 3 -| 1);
         try std.testing.expectEqual(limit, held.self.app_palette.max_height);
         try std.testing.expect(panel.surface.size.height <= limit);
-        try std.testing.expectEqual(input.origin.row, panel.origin.row + panel.surface.size.height);
-        if (input.origin.row == 0) {
+        const composer = Find.widget(surface, held.self.app_input.composer.widget()).?;
+        const rule: u16 = if (composer.surface.size.height >= 3) 1 else 0;
+        try std.testing.expectEqual(input.origin.row + rule, panel.origin.row);
+        if (panel.surface.size.height == 0) {
             try std.testing.expectEqual(@as(u16, 0), panel.surface.size.height);
             try std.testing.expectEqual(.hidden, held.self.menu.shown.?.seen);
         } else {
@@ -9474,11 +9534,15 @@ test "App Session palette clicks requests rows with an empty draft as Enter does
     _ = try held.draw();
     var events = held.context();
     const widget_ = held.self.app_palette.widget();
+    const index = for (held.self.menu.shown.?.list.shown(), 0..) |entry, index| {
+        if (std.mem.indexOf(u8, entry.word, older) != null) break index;
+    } else return error.TestExpectedRow;
+    const target = held.self.app_palette.hover.targets[index - held.self.app_palette.first];
     try widget_.handleEvent(&events, .mouse_enter);
-    try widget_.handleEvent(&events, .{ .mouse = .{ .col = 2, .row = 2, .button = .none, .type = .motion, .mods = .{} } });
+    try widget_.handleEvent(&events, .{ .mouse = .{ .col = @intCast(target.col), .row = @intCast(target.row), .button = .none, .type = .motion, .mods = .{} } });
     try std.testing.expectEqual(@as(usize, 0), held.self.menu.shown.?.highlight);
     try widget_.handleEvent(&events, .mouse_leave);
-    try widget_.handleEvent(&events, .{ .mouse = .{ .col = 2, .row = 2, .button = .left, .type = .press, .mods = .{} } });
+    try widget_.handleEvent(&events, .{ .mouse = .{ .col = @intCast(target.col), .row = @intCast(target.row), .button = .left, .type = .press, .mods = .{} } });
     try std.testing.expectEqualStrings("/result " ++ older, held.self.input.queuedCommand().?);
     try std.testing.expectEqualStrings("", held.self.input.composition().bytes);
 }
@@ -9506,14 +9570,15 @@ test "App Session palette clicks replace the caret skill without sending or movi
     try std.testing.expectEqualStrings("/review", held.self.menu.shown.?.list.entries[1].shown);
     const widget_ = held.self.app_palette.widget();
     var events = held.context();
+    const target = held.self.app_palette.hover.targets[1 - held.self.app_palette.first];
     try widget_.handleEvent(&events, .mouse_enter);
-    try widget_.handleEvent(&events, .{ .mouse = .{ .col = 2, .row = 2, .button = .none, .type = .motion, .mods = .{} } });
+    try widget_.handleEvent(&events, .{ .mouse = .{ .col = @intCast(target.col), .row = @intCast(target.row), .button = .none, .type = .motion, .mods = .{} } });
     _ = try held.draw();
     try std.testing.expectEqual(@as(usize, 0), held.self.menu.shown.?.highlight);
     try std.testing.expectEqualStrings("please /re now", held.self.input.composition().bytes);
     for (events.cmds.items) |command| try std.testing.expect(command != .request_focus);
     try widget_.handleEvent(&events, .mouse_leave);
-    try widget_.handleEvent(&events, .{ .mouse = .{ .col = 2, .row = 2, .button = .left, .type = .press, .mods = .{} } });
+    try widget_.handleEvent(&events, .{ .mouse = .{ .col = @intCast(target.col), .row = @intCast(target.row), .button = .left, .type = .press, .mods = .{} } });
     try std.testing.expectEqualStrings("please /review now", held.self.input.composition().bytes);
     try std.testing.expectEqual("please /review".len, held.self.input.composition().cursor);
     try std.testing.expectEqual(null, held.self.input.queuedCommand());
@@ -10260,7 +10325,20 @@ test "App Session composer click recovers submission from every drawn focus targ
             _ = held.self.input.append("click recovered draft");
             const draw_ctx: vxfw.DrawContext = .{ .arena = held.arena.allocator(), .cell_arena = held.arena.allocator(), .min = .{}, .max = held.size, .cell_size = .{} };
             _ = try held.root.widget().draw(draw_ctx);
-            const drawn = std.mem.indexOfScalar(focus.Target, held.root.focus_frame.slice(), target) != null;
+            const order = held.root.focus_frame.slice();
+            const input_index = std.mem.indexOfScalar(focus.Target, order, .input).?;
+            const model_index = std.mem.indexOfScalar(focus.Target, order, .model).?;
+            const effort_index = std.mem.indexOfScalar(focus.Target, order, .effort).?;
+            try std.testing.expect(input_index < model_index and model_index < effort_index);
+            try std.testing.expect(std.mem.indexOfScalar(focus.Target, order, .info) == null);
+            if (width == 46) {
+                const back_index = std.mem.indexOfScalar(focus.Target, order, .back).?;
+                try std.testing.expect(input_index < back_index and back_index < model_index);
+            } else {
+                const list_index = std.mem.indexOfScalar(focus.Target, order, .list).?;
+                try std.testing.expect(list_index < input_index);
+            }
+            const drawn = std.mem.indexOfScalar(focus.Target, order, target) != null;
             if (drawn) {
                 visited.append(target);
                 // Drawn controls are reached through captured Tab, not by
@@ -10575,4 +10653,86 @@ test "Session modal custody changes before a new focus projection is drawn" {
         try held.keys("\t");
         try std.testing.expectEqual(expected, focus.currentFocus(held.root.input));
     }
+}
+
+test "consent and full panels compose across adoption, nested choices, and draft focus" {
+    const PanelCase = enum { settings, info };
+    const Steps = struct {
+        fn open(held: *HeldFrontend, panel: PanelCase) !void {
+            switch (panel) {
+                .settings => {
+                    var ctx = held.context();
+                    try held.root.openSettings(&ctx);
+                },
+                .info => try held.keys("\x1bi"),
+            }
+        }
+        fn choice(held: *HeldFrontend, panel: PanelCase) !void {
+            switch (panel) {
+                .settings => {
+                    _ = try held.shown();
+                    held.root.settings_page.select(.permissions);
+                    held.root.settings_page.panel.openChoice(&.{ "run without asking", "ask first" }, 0);
+                    try std.testing.expect(held.root.settings_page.hasChoice());
+                },
+                .info => {
+                    try held.keys("\x1b[B\r");
+                    try std.testing.expect(held.self.app_info.hasChoice());
+                },
+            }
+        }
+        fn closeChoice(held: *HeldFrontend, panel: PanelCase) !void {
+            switch (panel) {
+                .settings => held.root.settings_page.cancelChoice(),
+                .info => try held.keys("\x07"),
+            }
+        }
+        fn close(held: *HeldFrontend, panel: PanelCase) !void {
+            switch (panel) {
+                .settings => {
+                    var ctx = held.context();
+                    try held.root.showMain(&ctx);
+                },
+                .info => try held.keys("\x07"),
+            }
+        }
+    };
+    for (std.enums.values(PanelCase)) |panel| for ([_]bool{ false, true }) |adopt_before| for ([_]bool{ false, true }) |draft| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        try captureInfo(held, "Panel test chat");
+        var file: ?std.Io.File = null;
+        defer if (file) |f| f.close(std.testing.io);
+        if (adopt_before) {
+            file = try held.adopt(3);
+            if (draft) try held.keys("draft");
+        }
+        try Steps.open(held, panel);
+        try Steps.choice(held, panel);
+        if (!adopt_before) file = try held.adopt(3);
+        try std.testing.expectEqual(@as(?u64, 0xa), held.self.app_consent.request);
+        try std.testing.expect(held.self.app_input.permission == &held.self.app_card);
+        const choice_text = try held.shown();
+        try std.testing.expect(std.mem.indexOf(u8, choice_text, "Allow once") == null);
+        try std.testing.expect(std.mem.indexOf(u8, choice_text, if (panel == .settings) "ask first" else "run without asking") != null);
+        try Steps.closeChoice(held, panel);
+        try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "Allow once") == null);
+        try Steps.close(held, panel);
+        if (!adopt_before and draft) {
+            try held.keys("draft");
+            try Steps.open(held, panel);
+            try Steps.choice(held, panel);
+            _ = try held.shown();
+            try Steps.closeChoice(held, panel);
+            try Steps.close(held, panel);
+        }
+        try std.testing.expectEqual(if (draft) ConsentPolicy.Row.draft else .selector, held.self.app_consent.row);
+        if (draft) {
+            try std.testing.expectEqualStrings("draft", held.self.input.composition().bytes);
+            try held.keys("\x1b");
+        }
+        try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "Allow once") != null);
+        try std.testing.expectEqual(@as(?u64, 0xa), held.self.app_consent.request);
+        try std.testing.expect(held.self.submission.intent == null);
+    };
 }
