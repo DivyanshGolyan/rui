@@ -290,7 +290,10 @@ pub fn build(b: *std.Build) void {
         .optimize = .ReleaseSafe,
         .link_libc = true,
     });
-    if (product.addTlsClient(b, target, .ReleaseSafe, pinned_transport, product.addUrl(b), product.addOs(b))) |tls_client| mysql_connection.addImport("tls_client", tls_client);
+    if (product.addTlsClient(b, target, .ReleaseSafe, pinned_transport, product.addUrl(b), product.addOs(b))) |tls_client| {
+        mysql_connection.addImport("tls_client", tls_client);
+        mysql_connection.addImport("os", tls_client.import_table.get("os").?);
+    }
     mysql_wire_tests.root_module.addImport("mysql_connection", mysql_connection);
     const mysql_wire_integration = b.addSystemCommand(&.{"python3"});
     mysql_wire_integration.addFileArg(b.path("tests/integration/mysql_wire_integration.py"));

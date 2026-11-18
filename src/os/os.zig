@@ -15,6 +15,7 @@ pub const Semantics = struct {
     full_backlog_blocks_connect: bool,
     stack_guard_bus_error: bool,
     sec_trust: bool,
+    hashed_trust_directories: bool,
     link_opener: ?struct { command: []const u8, needs_display: bool },
 };
 
@@ -32,6 +33,7 @@ pub fn semantics(comptime os: std.Target.Os.Tag) Semantics {
         .full_backlog_blocks_connect = os == .linux,
         .stack_guard_bus_error = os == .macos,
         .sec_trust = os.isDarwin(),
+        .hashed_trust_directories = os == .linux,
         .link_opener = switch (os) {
             .macos => .{ .command = "open", .needs_display = false },
             .linux => .{ .command = "xdg-open", .needs_display = true },
@@ -73,6 +75,10 @@ pub const stack_guard_bus_error = current.stack_guard_bus_error;
 /// SSL_CERT_DIR (#990, #997); elsewhere system trust is OpenSSL's store.
 pub const sec_trust = current.sec_trust;
 
+/// Linux distributions keep OpenSSL hashed certificate directories, which
+/// OpenSSL system trust probes before the bundles.
+pub const hashed_trust_directories = current.hashed_trust_directories;
+
 /// The command that opens a link in a browser here, given the environment:
 /// macOS's `open` always has one; Linux's `xdg-open` only in a graphical
 /// session, which names `DISPLAY` or `WAYLAND_DISPLAY`.
@@ -94,6 +100,7 @@ test "Linux and Darwin semantics" {
     try std.testing.expect(linux.full_backlog_blocks_connect and !mac.full_backlog_blocks_connect);
     try std.testing.expect(!linux.stack_guard_bus_error and mac.stack_guard_bus_error);
     try std.testing.expect(!linux.sec_trust and mac.sec_trust);
+    try std.testing.expect(linux.hashed_trust_directories and !mac.hashed_trust_directories);
     try std.testing.expectEqualStrings("xdg-open", linux.link_opener.?.command);
     try std.testing.expect(linux.link_opener.?.needs_display and !mac.link_opener.?.needs_display);
     try std.testing.expectEqualStrings("open", mac.link_opener.?.command);

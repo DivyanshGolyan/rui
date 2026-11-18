@@ -39,7 +39,6 @@ MAC_PATHS = (
     "tests/integration/os_semantics.py",
     "tests/integration/terminal_process.py", "tests/integration/terminal_leader.py",
     "tests/integration/terminal_restoration_cases.py",
-    "src/tls_client/*",
     "src/*.c", "src/*.h", "src/*.inc", "src/*.patch", "src/*.sh", "tests/integration/*.c",
     ".github/workflows/qualify-macos.yml",
     "install.sh", "release/*",
