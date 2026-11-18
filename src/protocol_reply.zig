@@ -2177,6 +2177,32 @@ test "activity page preserves the canonical row preview with its work" {
     }
 }
 
+test "CLI-17 activity_served_work" {
+    var facts: protocol.ActivityFacts = .{ .end = 0, .work = .{
+        .revision = 1,
+        .work = .{ .state = .{ .working = .{ .since = 1 } }, .turn = 1, .operation = 2, .served_attention = .{ .kind = .approval, .turn = 1, .step = 7 }, .served_group = .needs_you, .actions = .{ .stop = true, .interrupt = .{ .turn = 1, .operation = 2 } } },
+    } };
+    try facts.work.workspace.set("/work");
+    var buffer: [activity_reply.max_page_bytes]u8 = undefined;
+    for (0..2) |i| {
+        if (i == 1) facts.work.work.actions.interrupt = null;
+        var out = std.Io.Writer.fixed(&buffer);
+        try activity_reply.writePage(&out, &facts);
+        const parsed = try ActivityPage.parse(out.buffered(), .{});
+        try std.testing.expectEqualDeep(facts.work.work, parsed.facts.work.work);
+        for ([_][]const u8{
+            "\"attention\":{\"kind\":\"approval\",\"turn\":\"1\",\"step\":\"7\"},",
+            "\"group\":\"needs_you\",",
+            if (i == 0) ",\"actions\":{\"stop\":true,\"interrupt\":{\"turn\":\"1\",\"operation\":\"2\"},\"decide\":null}" else ",\"actions\":{\"stop\":true,\"interrupt\":null,\"decide\":null}",
+        }) |field| {
+            try std.testing.expect(std.mem.indexOf(u8, out.buffered(), field) != null);
+            const missing = try std.mem.replaceOwned(u8, std.testing.allocator, out.buffered(), field, "");
+            defer std.testing.allocator.free(missing);
+            try std.testing.expectError(error.InvalidActivityPage, ActivityPage.parse(missing, .{}));
+        }
+    }
+}
+
 test "activity page creator is required nullable canonical provenance" {
     var facts: protocol.ActivityFacts = .{ .end = 0, .work = .{ .revision = 1, .work = .{ .state = .{ .idle = .{ .since = 1 } } } } };
     try facts.work.workspace.set("/work");
@@ -2788,7 +2814,7 @@ const testing_started_row_facts = ",\"read_version\":\"0000000000000000000000000
     "\"first_message\":{\"position\":\"1\",\"admission\":\"4\",\"admitted_at\":\"1792925001\",\"sender\":null,\"content\":{\"bytes\":\"5\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"}}," ++
     "\"last_line\":null,\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"1792925300\"},\"turn\":\"2\",\"operation\":\"6\",\"first_action\":null,\"attention\":null,\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null}},\"peers\":{\"from_person_at\":\"1792925001\"}";
 
-test "Session list facts own complete rows and render semantic output after scratch reuse" {
+fn listValidationCase0() !void {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -2797,7 +2823,7 @@ test "Session list facts own complete rows and render semantic output after scra
     const digest = @as([64]u8, @splat('a'));
     const facts = "\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"pin_order\":null,\"parent\":\"p33rs1\",\"creator\":\"cr3at0\",\"label\":\"Review \\u0050R\",\"created_at\":\"1792925000\",\"revision\":\"3\",\"end\":\"9\"," ++
         "\"first_message\":{\"position\":\"1\",\"admission\":\"4\",\"admitted_at\":\"1792925001\",\"sender\":{\"session\":\"p33rs1\"},\"content\":{\"bytes\":\"5\",\"sha256\":\"" ++ digest ++ "\"}}," ++
-        "\"last_line\":{\"position\":\"8\",\"text\":\"Saved preview\"},\"work\":{\"state\":{\"kind\":\"bash\",\"since\":\"1792925300\",\"call\":\"0\",\"description\":\"Run the tests\",\"running\":\"1\",\"approvals\":\"0\"},\"turn\":\"2\",\"operation\":\"6\",\"first_action\":null,\"attention\":null,\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null}}," ++
+        "\"last_line\":{\"position\":\"8\",\"text\":\"Saved preview\"},\"work\":{\"state\":{\"kind\":\"bash\",\"since\":\"1792925300\",\"call\":\"0\",\"description\":\"Run the tests\",\"running\":\"1\",\"approvals\":\"0\"},\"turn\":\"2\",\"operation\":\"6\",\"first_action\":null,\"attention\":{\"kind\":\"approval\",\"turn\":\"2\",\"step\":\"8\"},\"group\":\"needs_you\",\"actions\":{\"stop\":true,\"interrupt\":{\"turn\":\"2\",\"operation\":\"6\"},\"decide\":null}}," ++
         "\"peers\":{\"from_person_at\":\"1792925200\"}";
     const wire = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[{\"reference\":\"k7m2q\\u0078\",\"workspace\":\"/w\\nµ\",\"provider\":\"codex\",\"model\":\"m\\\"\",\"tools\":[\"bash\"],\"permission_mode\":\"ask\"," ++
         facts ++ ",\"extra\":[null,{\"discard\":true}]}" ++ testing_list_facts ++ "null,\"extra\":1}";
@@ -2819,6 +2845,9 @@ test "Session list facts own complete rows and render semantic output after scra
     try std.testing.expectEqualStrings("p33rs1", row.first_message.?.sender.?.session.slice());
     try std.testing.expectEqual(@as(u64, 1792925300), row.work.state.since());
     try std.testing.expectEqualStrings("Run the tests", row.work.state.bash.description.?.slice());
+    try std.testing.expectEqual(@import("session_work.zig").Group.needs_you, row.work.group);
+    try std.testing.expectEqualDeep(@as(?@import("session_work.zig").Attention, .{ .kind = .approval, .turn = 2, .step = 8 }), row.work.attention);
+    try std.testing.expectEqualDeep(@import("session_work.zig").Actions{ .stop = true, .interrupt = .{ .turn = 2, .operation = 6 } }, row.work.actions);
     try std.testing.expectEqual(@as(?u64, 1792925200), row.peers.from_person_at);
     var output: [2048]u8 = undefined;
     var writer = std.Io.Writer.fixed(&output);
@@ -2827,6 +2856,30 @@ test "Session list facts own complete rows and render semantic output after scra
         "\"parent\":\"p33rs1\",\"creator\":\"cr3at0\",\"label\":\"Review PR\"" ++ facts["\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"pin_order\":null,\"parent\":\"p33rs1\",\"creator\":\"cr3at0\",\"label\":\"Review \\u0050R\"".len..] ++ "}" ++ testing_list_facts ++ "null}", writer.buffered());
     var exhausted = std.Io.Writer.fixed(&.{});
     try std.testing.expectError(error.WriteFailed, page.writeJson(&exhausted));
+    for ([_][]const u8{
+        "\"attention\":{\"kind\":\"approval\",\"turn\":\"2\",\"step\":\"8\"},",
+        "\"group\":\"needs_you\",",
+        ",\"actions\":{\"stop\":true,\"interrupt\":{\"turn\":\"2\",\"operation\":\"6\"},\"decide\":null}",
+    }) |field| {
+        try std.testing.expect(std.mem.indexOf(u8, wire, field) != null);
+        const missing = try std.mem.replaceOwned(u8, std.testing.allocator, wire, field, "");
+        defer std.testing.allocator.free(missing);
+        try file.writePositionalAll(io, missing, 0);
+        try std.testing.expectError(error.InvalidSessionPage, SessionListPage.read(io, file, missing.len, "/w\nµ", .{}));
+    }
+    const collision = try std.mem.replaceOwned(u8, std.testing.allocator, wire, "\"interrupt\":{\"turn\":\"2\",\"operation\":\"6\"}", "\"interrupt\":null");
+    defer std.testing.allocator.free(collision);
+    try file.writePositionalAll(io, collision, 0);
+    const decoded_collision = try SessionListReply.decode(io, file, "/w\nµ", .{}, .{ .report = .{ .bytes = collision.len } });
+    const other = decoded_collision.page.rows[0].work;
+    try std.testing.expectEqualDeep(row.work.state, other.state);
+    try std.testing.expectEqual(row.work.turn, other.turn);
+    try std.testing.expectEqual(row.work.operation, other.operation);
+    try std.testing.expectEqualDeep(row.work.attention, other.attention);
+    try std.testing.expectEqual(row.work.group, other.group);
+    try std.testing.expect(other.actions.interrupt == null);
+    try std.testing.expectEqual(row.work.actions.stop, other.actions.stop);
+    try std.testing.expectEqual(row.work.actions.decide, other.actions.decide);
 }
 
 test "Session list reply owns read failure facts without asserting absence or admission" {
@@ -2916,7 +2969,7 @@ test "Session list byte range validates junk inside and ignores junk outside the
     try std.testing.expectEqual(@as(usize, 0), spaced.page.count);
 }
 
-test "Session list facts reject malformed metadata and consequential ambiguity" {
+fn listValidationCase1() !void {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -3154,7 +3207,7 @@ test "Session list rows retain host tool names" {
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "\"tools\":[\"bash\",\"fetch_page\"]") != null);
 }
 
-test "Session list facts attain eight maximum escaped rows and bind the continuation cohort" {
+fn listValidationCase2() !void {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -4097,6 +4150,12 @@ test "derived observation payloads cover caller fields" {
             try std.testing.expect(owned);
         }
     }
+}
+
+test "CLI-12 list_page_validation" {
+    try listValidationCase0();
+    try listValidationCase1();
+    try listValidationCase2();
 }
 
 test "WIR-5 released_host_info_profiles" {

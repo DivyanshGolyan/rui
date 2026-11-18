@@ -1,5 +1,5 @@
 const std = @import("std");
-const os = @import("os.zig");
+const os = @import("os");
 const path_list = @import("../path_list.zig");
 const stderr = @import("../stderr.zig");
 

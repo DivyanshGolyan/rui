@@ -1273,8 +1273,9 @@ pub const DispatchWork = struct {
     message: bool,
     tool_continuation: bool,
     retry: bool,
+    retry_waiting: bool,
 
-    pub const unknown: DispatchWork = .{ .core = true, .mcp = true, .bash = true, .message = true, .tool_continuation = true, .retry = true };
+    pub const unknown: DispatchWork = .{ .core = true, .mcp = true, .bash = true, .message = true, .tool_continuation = true, .retry = true, .retry_waiting = true };
 };
 
 pub const DispatchSurvey = struct {
@@ -1312,6 +1313,7 @@ pub const DispatchSurvey = struct {
             .message = survey.message != null,
             .tool_continuation = survey.continuation != null,
             .retry = survey.retry != null,
+            .retry_waiting = if (survey.retry) |retry| retry.waiting else false,
         };
     }
 };
@@ -1325,10 +1327,13 @@ pub fn dispatchWork(reader: anytype, paused: bool, capacity: action_domain.Capac
 }
 
 const retrying_attempt = rsql.Read(.{
-    .sql = "SELECT 1 AS retrying FROM turn active JOIN model_operation current ON current.operation_id=active.operation_id " ++
+    .sql = "SELECT 1 AS retrying,EXISTS(SELECT 1 FROM model_operation waiting @index(model_operation_retry_due) " ++
+        "JOIN turn waiting_turn ON waiting_turn.operation_id=waiting.operation_id AND waiting_turn.outcome_code IS NULL " ++
+        "WHERE waiting.resolution_code IS NULL AND waiting." ++ retry_allowance_open_sql ++ " AND waiting.retry_due_at_ms>0) AS waiting " ++
+        "FROM turn active JOIN model_operation current ON current.operation_id=active.operation_id " ++
         "WHERE active.outcome_code IS NULL AND current.resolution_code IS NULL AND current.retry_due_at_ms IS NOT NULL LIMIT 1",
     .Args = struct {},
-    .Row = struct { retrying: u64 },
+    .Row = struct { retrying: u64, waiting: bool },
     .cardinality = .optional,
 });
 
