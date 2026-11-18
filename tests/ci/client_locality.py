@@ -51,7 +51,6 @@ ALLOWED = {
     ("src/status_page.zig", "imports product_defaults.zig"): "#1697",
     ("src/attention.zig", "classifies Session work"): "#1622",
     ("src/overview_view.zig", "classifies Session work"): "#1622",
-    ("clients/ts/src/sessions.ts", "classifies Session work"): "#1622",
 }
 
 WORK_KINDS = frozenset("idle pending working retrying bash approval stopping finished failed stopped".split())

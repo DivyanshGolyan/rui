@@ -3,20 +3,8 @@ const codex_credentials = @import("codex_credentials.zig");
 
 pub const max_key_bytes = @import("secret_value.zig").max_key_bytes;
 
-pub const path_variable = "RUI_OPENAI_KEY_FILE";
-
 pub const Key = @import("secret_value.zig").Key;
 pub const valid = @import("secret_value.zig").valid;
-
-pub fn path(environ: *const std.process.Environ.Map, buffer: []u8) ![]const u8 {
-    if (environ.get(path_variable)) |named| {
-        if (!std.fs.path.isAbsolute(named)) return error.InvalidCredentialPath;
-        return named;
-    }
-    const home = environ.get("HOME") orelse return error.HomeRequired;
-    if (!std.fs.path.isAbsolute(home)) return error.InvalidCredentialPath;
-    return std.fmt.bufPrint(buffer, "{s}/.config/rui/openai.key", .{home});
-}
 
 pub fn read(file: []const u8, key: *Key) !bool {
     var buffer: [max_key_bytes + 2]u8 = undefined;

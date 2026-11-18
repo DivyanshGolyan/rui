@@ -7,6 +7,7 @@ or writes the user's default Store, credentials or tmux server.
 """
 import argparse
 import copy
+import datetime
 import functools
 import hashlib
 import html
@@ -843,7 +844,7 @@ def tap_main(args):
 # ---------------------------------------------------------------- new run
 
 
-def launch_host(run, *, restartable=False):
+def launch_host(run, *, restartable=False, without_preload=False):
     """Start this run's Host from the options saved at `new`; return its ready status."""
     options = run.meta["host_options"]
     host_argv = [str(run.rui), "host", "serve", "--store", str(run.store),
@@ -856,6 +857,8 @@ def launch_host(run, *, restartable=False):
     for assignment in options["host_setenv"]:
         key, _, value = assignment.partition("=")
         host_env[key] = value
+    if without_preload:
+        host_env.pop("LD_PRELOAD", None)
     host = subprocess.Popen(host_argv, env=host_env, cwd=run.project, stdin=subprocess.DEVNULL,
                             stdout=open(run.evidence / "host.stdout.log", "a"), stderr=open(run.evidence / "host.log", "a"),
                             start_new_session=True)
@@ -910,7 +913,7 @@ def cmd_new(args):
             "scratch": str(scratch), "home": str(scratch / "home"), "store": str(scratch / "store"),
             "project": str(scratch / "project"), "created": wall(), "label": args.label,
             "helper_sha256": sha256(HERE), "answers": getattr(args, "answers", "echo"),
-            "no_sessions": args.no_sessions}
+            "no_sessions": args.no_sessions, "frame_env": getattr(args, "frame_env", {})}
     (root / "run.json").write_text(json.dumps(meta, indent=1) + "\n")
     run = Run(root)
     (run.home / ".config/rui").mkdir(parents=True, mode=0o700)
@@ -2335,7 +2338,7 @@ def validate_scenario(data, sizes=None):
         suspended = False
         for step in steps:
             require(isinstance(step, dict), f"{name}: step must be an object")
-            actions = set(step) - {"timeout", "repaint", "min_columns", "empty_composer"}
+            actions = set(step) - {"timeout", "repaint", "min_columns", "empty_composer", "shot_clock_advance", "shot_settle_message"}
             require(len(actions) == 1 and actions <= {"text", "keys", "wait", "gone", "sleep", "send", "host", "mouse", "exited"}, f"{name}: unknown or ambiguous step {step}")
             action = next(iter(actions))
             require("repaint" not in step or action == "mouse" and type(step["repaint"]) is bool, f"{name}: invalid repaint (mouse boolean only)")
@@ -2344,6 +2347,8 @@ def validate_scenario(data, sizes=None):
                     f"{name}: invalid min_columns (positive integer for wait/gone only)")
             require("empty_composer" not in step or action == "wait" and type(step["empty_composer"]) is bool,
                     f"{name}: invalid empty_composer (wait boolean only)")
+            require("shot_clock_advance" not in step or action == "sleep" and type(step["shot_clock_advance"]) is int and step["shot_clock_advance"] >= 0, f"{name}: shot_clock_advance requires nonnegative whole seconds on a sleep")
+            require("shot_settle_message" not in step or action == "host" and step[action] == "suspend" and step["shot_settle_message"] is True, f"{name}: shot_settle_message requires Host suspension")
             value = step[action]
             require("timeout" not in step or action in ("wait", "gone", "exited") and duration(step["timeout"]), f"{name}: invalid timeout")
             if action == "mouse":
@@ -2453,8 +2458,17 @@ def frame_request(run, result, settle="answered", sid=None):
     raise FrameFailure(f"request {key} did not settle ({settle})")
 
 
-def seed_cast(run, entries):
+def seed_cast(run, entries, *, ordered=False):
+    # Shots assign distinct seconds to cast settlements. Ordinary frames keep
+    # their real clock; both continue to use Host-allocated Session IDs.
     for entry in cast_entries(entries):
+        if ordered and getattr(run, "_shot_clock", None) is not None:
+            run._shot_clock.next_cast()
+            run._shot_clock.cast_times[entry["label"]] = run._shot_clock.current
+        elif ordered and (previous := getattr(run, "_cast_settled_at", None)) is not None:
+            delay = 1.01 - (time.monotonic() - previous)
+            if delay > 0:
+                time.sleep(delay)
         workspace = run.home / entry["workspace"]
         workspace.mkdir(parents=True, exist_ok=True)
         (workspace / "README.md").write_text("verify-rui project\n")
@@ -2502,6 +2516,8 @@ def seed_cast(run, entries):
                 wait_for(settled, f"peer {entry['label']} {settle}", timeout=40)
             else:
                 frame_request(run, result, settle, sid)
+        if ordered:
+            run._cast_settled_at = time.monotonic()
 
 
 class FrameTerminal:
@@ -2514,6 +2530,7 @@ class FrameTerminal:
         from terminal_screen import ScreenCapture
         self.run, self.state = run, state
         self.condition = threading.Condition()
+        self.last_commit_ns = None
         self.pressed = None
         self.log = run.evidence / "frames-pty" / state["name"]
         self.log.mkdir(parents=True, exist_ok=True)
@@ -2558,6 +2575,7 @@ class FrameTerminal:
 
     def _committed(self, _text, _x, _y):
         t_ns = now_ns()
+        self.last_commit_ns = t_ns
         frame = self.capture.frame
         append_jsonl(self.log / "frames.jsonl", {"t_ns": t_ns, "generation": self.capture.generation,
                                                 "cursor": list(frame.cursor), "visible": frame.visible,
@@ -2611,6 +2629,24 @@ class FrameTerminal:
                 if remaining <= 0:
                     raise FrameFailure(f"timeout waiting for {description}")
                 self.condition.wait(remaining)
+
+    def settle_shot(self, *, allow_exit=False):
+        """Wait for 300 ms without a committed frame, for at most five seconds."""
+        with self.condition:
+            started = now_ns()
+            deadline = started + 5_000_000_000
+            while True:
+                self.process.output.check()
+                if not allow_exit and self.status is not None:
+                    raise FrameFailure(f"Rui exited with status {self.status} before shot settled")
+                if self.capture.frame is None or self.last_commit_ns is None:
+                    raise FrameFailure("Rui produced no committed frame before shot settled")
+                now = now_ns()
+                quiet_since = max(started, self.last_commit_ns)
+                remaining = min(deadline - now, quiet_since + 300_000_000 - now)
+                if remaining <= 0:
+                    return self.capture.frame
+                self.condition.wait(remaining / 1_000_000_000)
 
     def resize(self, size):
         import fcntl
@@ -2730,11 +2766,19 @@ def frame_wait(run, terminal, text, absent=False, timeout=20, allow_exit=False, 
                   f"{'absence of ' if absent else ''}{text!r}", timeout, allow_exit)
 
 
-def frame_host_suspension(run, suspend):
+def frame_host_suspension(run, suspend, *, settle_message=False):
     held = getattr(run, "frame_suspended_host", None)
     if suspend:
         if held is not None:
             raise FrameFailure("this frame already suspended its Host")
+        clock = getattr(run, "_shot_clock", None)
+        if clock is not None and settle_message:
+            label = run._shot_open_label
+            if label not in clock.cast_times:
+                raise FrameFailure(f"suspended shot requires a seeded Session: {label}")
+            listing = frame_command(run.rui_cmd("request", "list", log=False), "list prior requests")
+            run._shot_suspended = {"before": set(json.loads(listing.stdout)), "session": run.sid(label),
+                                   "at": clock.cast_times[label]}
         hosts = [record for record in run.owned() if record["kind"] == "host"
                  and (current := process_start(record["pid"])) is not None
                  and current[0] == record["lstart"]]
@@ -2752,6 +2796,62 @@ def frame_host_suspension(run, suspend):
     append_jsonl(run.evidence / "injections.jsonl", {
         "t_ns": now_ns(), "wall": wall(), "via": "kill", "target": "host",
         "pid": held["pid"], "lstart": held["lstart"], "signal": "STOP" if suspend else "CONT"})
+
+
+def frame_resume_settled_shot(run):
+    """Finish the captured original while the resumed Host has a unique fixture second."""
+    held = getattr(run, "frame_suspended_host", None)
+    shot = getattr(run, "_shot_suspended", None)
+    if held is None or shot is None:
+        return frame_host_suspension(run, False)
+    clock = run._shot_clock
+    try:
+        deadline = time.monotonic() + 10
+        handle = None
+        while time.monotonic() < deadline:
+            listing = frame_command(run.rui_cmd("request", "list", log=False), "list suspended requests")
+            candidates = []
+            for key in set(json.loads(listing.stdout)) - shot["before"]:
+                if not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", key):
+                    raise FrameFailure("invalid generated request handle")
+                path = run.home / ".config/rui/requests" / (key + ".json")
+                try:
+                    record = json.loads(path.read_text())
+                except (OSError, ValueError):
+                    continue
+                if (record.get("key") == key and record.get("kind") == "message"
+                        and record.get("session") == shot["session"] and record.get("store") == str(run.store)):
+                    candidates.append(key)
+            if len(candidates) > 1:
+                raise FrameFailure("multiple original suspended Session requests")
+            if candidates:
+                handle = candidates[0]
+                break
+            time.sleep(0.05)
+        if handle is None:
+            raise FrameFailure("no captured original suspended Session request")
+        clock.set(shot["at"])
+        frame_host_suspension(run, False)
+        record_path = run.home / ".config/rui/requests" / (handle + ".json")
+        result = run.rui_cmd("request", "recover", "--store", run.store, "--record", record_path, "--kind", "message")
+        frame_command(result, "recover original suspended request")
+        deadline = time.monotonic() + 40
+        while time.monotonic() < deadline:
+            result = run.rui_cmd("request", "inspect", "--store", run.store, "--key", handle, log=False)
+            if result.returncode == 0:
+                observed = json.loads(result.stdout).get("observation", {})
+                if observed.get("target") != shot["session"] or observed.get("kind") != "message":
+                    raise FrameFailure("recovered request binding differs from suspended Session")
+                if observed.get("state") in ("completed", "failed", "cancelled", "rejected"):
+                    return
+            time.sleep(0.1)
+        raise FrameFailure("original suspended request did not settle")
+    finally:
+        try:
+            frame_host_suspension(run, False)
+        finally:
+            clock.reset()
+            run._shot_suspended = None
 
 
 def frame_steps(run, terminal, steps, exiting=False):
@@ -2784,13 +2884,20 @@ def frame_steps(run, terminal, steps, exiting=False):
         elif "sleep" in step:
             # An explicit scenario hold also keeps draining/recording output.
             time.sleep(step["sleep"])
+            if getattr(run, "_shot_clock", None) is not None and "shot_clock_advance" in step:
+                run._shot_clock.advance(step["shot_clock_advance"])
         elif "send" in step:
             message = step["send"]
             sid = run.sid(message["to"])
             result = run.rui_cmd("session", "send", "--store", run.store, "--to", sid, input=message["text"])
             frame_request(run, result, "answered" if message.get("wait", True) else "pending", sid)
         elif step["host"] in ("suspend", "resume"):
-            frame_host_suspension(run, step["host"] == "suspend")
+            if step["host"] == "resume":
+                frame_resume_settled_shot(run)
+            elif step.get("shot_settle_message"):
+                frame_host_suspension(run, True, settle_message=True)
+            else:
+                frame_host_suspension(run, True)
         elif step["host"] == "pause":
             frame_command(run.rui_cmd("host", "pause", "--store", run.store), "pause Host")
         else:
@@ -3045,6 +3152,9 @@ def frame_upgrade_run(run, state, build):
         isolated.home = run.scratch / "upgrades" / state["name"] / "home"
         isolated.store = isolated.home.parent / "store"
         isolated.home.mkdir(parents=True)
+        isolated.project = isolated.home / "code/rui"
+        shutil.copytree(run.project, isolated.project)
+        isolated.meta["project"] = str(isolated.project)
         shutil.copytree(run.home / ".config", isolated.home / ".config")
         host_build = isolated.home / ".local/lib/rui/actor"
         (host_build / "bin").mkdir(parents=True)
@@ -3052,7 +3162,7 @@ def frame_upgrade_run(run, state, build):
         shutil.copy2(actor, isolated.rui)
         (host_build / "THIRD_PARTY_NOTICES.md").write_text("Synthetic release actor\n")
         isolated.meta.update(binary=str(isolated.rui), home=str(isolated.home), store=str(isolated.store), sessions={},
-                             frame_env={"RUI_TEST_UPGRADE_RELEASES_URL": releases.origin + "/releases",
+                             frame_env={**isolated.meta.get("frame_env", {}), "RUI_TEST_UPGRADE_RELEASES_URL": releases.origin + "/releases",
                                         "PATH": f"{isolated.home}/.local/bin:{isolated.rui.parent}:/usr/bin:/bin:/usr/sbin:/sbin"})
         gate = isolated.home.parent / "publication.gate" if mode == "updating" else None
         if gate is not None:
@@ -3070,7 +3180,19 @@ def frame_upgrade_run(run, state, build):
             (selected / "THIRD_PARTY_NOTICES.md").write_text("Synthetic selected release\n")
         frame_command(subprocess.run([str(actor), "--publish-install", str(isolated.home), str(selected), "released-install"],
                                      env=isolated.env(), capture_output=True, text=True, timeout=25), "select managed release")
-        ready = launch_host(isolated, restartable=True)
+        # Persist deterministic cast timestamps first; upgrade ownership rejects
+        # loader overrides, so retire that Host before starting the real upgrade Host.
+        staged_clock = getattr(isolated, "_shot_clock", None)
+        if staged_clock is not None and state.get("cast"):
+            launch_host(isolated, restartable=True)
+            try:
+                seed_cast(isolated, state["cast"], ordered=True)
+            finally:
+                staged_clock.reset()
+            frame_pause_owned_host(isolated)
+            isolated._upgrade_seeded = True
+        ready = (launch_host(isolated, restartable=True, without_preload=True) if staged_clock is not None
+                 else launch_host(isolated, restartable=True))
         isolated.meta["upgrade_previous_instance"] = json.loads(ready.stdout)["instance"]
         replacements = {"{upgrade_version}": version, "{available_version}": available}
         def expand(value, regex=False):
@@ -3263,6 +3385,54 @@ def require_upgrade_fixture_user():
         die("upgrade frames require a dedicated fixture account and VERIFY_RUI_UPGRADE_FIXTURE_USER matching its login; never use an account with unrelated Rui Hosts")
 
 
+class ShotsClock:
+    """A common stopped wall clock, with deterministic cast settlement seconds."""
+    base = datetime.datetime(2026, 1, 1, 12, 0, 0)
+    def __init__(self, path, cast_count):
+        if cast_count > 300:
+            raise ValueError("shots support at most 300 cast entries")
+        self.path = pathlib.Path(path)
+        self.cast_count = cast_count
+        self.cast_start = self.base - datetime.timedelta(seconds=max(0, cast_count - 1))
+        self.ordinal = 0
+        self.cast_times = {}
+        self.reset()
+
+    def set(self, value):
+        self.current = value
+        atomic_write(self.path, value.strftime("%Y-%m-%d %H:%M:%S") + "\n")
+
+    def reset(self):
+        self.set(self.base)
+
+    def advance(self, seconds):
+        self.set(self.current + datetime.timedelta(seconds=seconds))
+
+    def next_cast(self):
+        value = self.cast_start + datetime.timedelta(seconds=self.ordinal)
+        if self.ordinal >= self.cast_count:
+            raise FrameFailure("shot cast exceeds the planned cast entries")
+        self.ordinal += 1
+        self.set(value)
+
+
+def shots_fixture_env(clock_path):
+    """Share a stopped, externally controlled wall clock across shot processes."""
+    override = os.environ.get("VERIFY_RUI_FAKETIME_LIB")
+    if override:
+        candidates = [pathlib.Path(override).expanduser()]
+    else:
+        candidates = [pathlib.Path("/usr/local/lib/faketime/libfaketime.so.1"),
+                      pathlib.Path("/usr/lib/faketime/libfaketime.so.1")]
+        candidates += sorted(pathlib.Path("/usr/lib").glob("*/faketime/libfaketime.so.1"))
+    library = next((path.resolve() for path in candidates if path.is_file()), None)
+    if library is None:
+        raise ValueError("shots requires libfaketime; install it or set VERIFY_RUI_FAKETIME_LIB to libfaketime.so.1")
+    return {"LD_PRELOAD": str(library), "FAKETIME_TIMESTAMP_FILE": str(clock_path),
+            "FAKETIME_NO_CACHE": "1", "FAKETIME_DONT_FAKE_MONOTONIC": "1", "TZ": "UTC",
+            "RUI_TEST_MEMORY_BYTES": "33554432"}
+
+
 def run_frames(args):
     try:
         scenario = load_scenario(args.scenario or HERE.with_name("frames.json"), args.sizes)
@@ -3292,12 +3462,28 @@ def run_frames(args):
         probe = subprocess.run(["node", str(HERE.with_name("frames_png.js")), "--check"], capture_output=True, text=True)
         if probe.returncode:
             die("frames requires node and Playwright with Chromium; use --no-png")
+    clock_dir = None
+    try:
+        if getattr(args, "shots_fixture", False):
+            clock_dir = pathlib.Path(tempfile.mkdtemp(prefix="rui-shots-clock-"))
+            cast_count = sum(sum(1 for _ in cast_entries(state.get("cast", [])))
+                             for state in scenario["states"])
+            shot_clock = ShotsClock(clock_dir / "clock", cast_count)
+            fixture_env = shots_fixture_env(shot_clock.path)
+        else:
+            shot_clock = None
+            fixture_env = {}
+    except ValueError as error:
+        if clock_dir is not None:
+            shutil.rmtree(clock_dir)
+        die(str(error))
     # Keep the existing new command as the one run/fixture owner.
     output = io.StringIO()
     try:
         with contextlib.redirect_stdout(output):
             cmd_new(argparse.Namespace(sha=args.sha, seed=0, no_sessions=True, answers="realistic", label="frames",
-                                       active_capacity=2, host_setenv=[]))
+                                       active_capacity=2, host_setenv=[],
+                                       frame_env=fixture_env))
     except BaseException:
         # Even a partially initialized run must be torn down; cmd_new writes run.json first.
         candidates = sorted((CACHE / "runs").glob(f"*-{build_run_tag(args.sha)}-{os.getpid()}"))
@@ -3307,8 +3493,11 @@ def run_frames(args):
                     cmd_cleanup(argparse.Namespace(run=str(candidates[-1]), no_export=True))
                 except SystemExit:
                     pass
+        if clock_dir is not None and not args.keep:
+            shutil.rmtree(clock_dir)
         raise
     run = Run(output.getvalue().strip())
+    run._shot_clock = shot_clock
     # Match the review's home-relative working directory even in the empty overview.
     run.project = run.home / "code/rui"
     run.project.mkdir(parents=True, exist_ok=True)
@@ -3342,9 +3531,15 @@ def run_frames(args):
         (out / "scenario.json").write_text(json.dumps(scenario_snapshot(scenario), indent=2) + "\n")
         last = max(i for i, state in enumerate(scenario["states"]) if state["name"] in selected)
         parent_paused = False
+        cast_ordinal = 0
         for state in scenario["states"][:last + 1]:
+            if shot_clock is not None:
+                shot_clock.ordinal = cast_ordinal
+                cast_ordinal += sum(1 for _ in cast_entries(state.get("cast", [])))
             if state.get("upgrade") and state["name"] not in selected:
                 continue
+            if shot_clock is not None:
+                shot_clock.reset()
             state_started = time.monotonic_ns() if getattr(args, "timing", False) else None
             if state.get("upgrade") and not parent_paused:
                 frame_pause_owned_host(run)
@@ -3369,7 +3564,14 @@ def run_frames(args):
             is_selected = frame_capture_selected(state, selected)
             try:
                 run, state, upgrade_fixture = upgrade_scope.enter_context(frame_upgrade_run(run, state, build))
-                seed_cast(run, state.get("cast", []))
+                run._shot_clock = shot_clock
+                try:
+                    if not getattr(run, "_upgrade_seeded", False):
+                        seed_cast(run, state.get("cast", []), ordered=getattr(args, "shots_fixture", False))
+                finally:
+                    if shot_clock is not None:
+                        shot_clock.reset()
+                run._shot_open_label = state["open"]
                 steps = state["steps"]
                 launch_size = state_sizes[0]
                 if state.get("upgrade") and launch_size[0] < 100:
@@ -3382,6 +3584,8 @@ def run_frames(args):
                                        if "The Host stopped." in step.get("wait", "")), None)
                 first_wait = steps[0].get("wait") if steps else None
                 frame_initial_ready(target, first_wait, allow_exit=bool(stopped_marker))
+                if getattr(args, "shots_fixture", False):
+                    target.settle_shot(allow_exit=bool(stopped_marker))
                 frame_drive_upgrade(run, target, state, upgrade_fixture)
                 exiting = frame_steps(run, target, steps, exiting=bool(stopped_marker))
                 if launch_size != state_sizes[0]:
@@ -3416,9 +3620,14 @@ def run_frames(args):
                                 target.resize(size)
                                 frame_upgrade_viewport(run, target, state)
                                 frame_ready(target, state, allow_exit=exiting, sessions=run.meta.get("sessions", {}))
-                            # The first viewport is already sized. Capture directly
-                            # after its steps/wait, while a transient is still visible.
-                            record = frame_capture(run, target, out, state, size, reason)
+                            # Ordinary frames preserve the first committed transition.
+                            # Shots settle each viewport after its last step or resize.
+                            capture_target = target
+                            if getattr(args, "shots_fixture", False):
+                                # Freeze the settled frame under the collector lock;
+                                # later commits must not replace it before rendering.
+                                capture_target = argparse.Namespace(frame=target.settle_shot(allow_exit=exiting))
+                            record = frame_capture(run, capture_target, out, state, size, reason)
                         except (Exception, SystemExit) as error:
                             failed = True
                             failure_reason = reason or str(error)
@@ -3444,7 +3653,7 @@ def run_frames(args):
             finally:
                 try:
                     try:
-                        frame_host_suspension(run, False)
+                        frame_resume_settled_shot(run)
                     finally:
                         if opened:
                             try:
@@ -3530,6 +3739,8 @@ def run_frames(args):
                     cmd_cleanup(argparse.Namespace(run=str(run.root), no_export=True))
                 except SystemExit as error:
                     failed = failed or bool(error.code)
+        if clock_dir is not None and not args.keep:
+            shutil.rmtree(clock_dir)
     print(out)
     if failed:
         raise SystemExit(1)
@@ -3775,7 +3986,7 @@ def cmd_shots(args):
             if selected:
                 child = argparse.Namespace(sha=identifier, scenario=str(recipe), sizes=None,
                     only=",".join(s["name"] for s in states if s["name"] in selected),
-                    out=str(out), no_png=args.no_png, record=False, keep=False, timing=True)
+                    out=str(out), no_png=args.no_png, record=False, keep=False, timing=True, shots_fixture=True)
                 with contextlib.redirect_stdout(sys.stderr):
                     try:
                         run_frames(child)
@@ -3906,26 +4117,10 @@ def gh(*args, cwd=None):
     try:
         result = subprocess.run(["gh", *args], cwd=cwd, capture_output=True, text=True)
     except FileNotFoundError:
-        raise ValueError("gh 2.104.0+ with --attach is required; install GitHub CLI") from None
+        raise ValueError("GitHub CLI is required; install gh") from None
     if result.returncode:
         raise ValueError(f"gh {args[0]} failed: {result.stderr.strip()}")
     return result.stdout
-
-
-def require_attachments(repository, cwd):
-    version = re.search(r"gh version (\d+)\.(\d+)\.(\d+)", gh("--version", cwd=cwd))
-    if not version or tuple(map(int, version.groups())) < (2, 104, 0):
-        raise ValueError("gh 2.104.0+ with --attach is required; upgrade GitHub CLI")
-    if "--attach" not in gh("pr", "edit", "--help", cwd=cwd):
-        raise ValueError("gh 2.104.0+ with --attach is required; upgrade GitHub CLI")
-    try:
-        token = gh("auth", "token", cwd=cwd).strip()
-        if not token.startswith(("ghp_", "gho_")):
-            raise ValueError("unsupported token")
-        if json.loads(gh("api", f"repos/{repository}", cwd=cwd)).get("permissions", {}).get("push") is not True:
-            raise ValueError("no push permission")
-    except (ValueError, OSError):
-        raise ValueError("a classic PAT or gh OAuth token with repository push access is required") from None
 
 
 def screens_markdown(head, base, rows):
@@ -3975,92 +4170,90 @@ def screens_parts(body):
     return body.rstrip() + "\n\n", "", ""
 
 
-def verify_attachments(body, attachments, facts):
-    _, screens, _ = screens_parts(body)
-    embedded = dict(re.findall(r"^[ \t]*!\[([^\]\n]*)\]\(\s*(https://github\.com/user-attachments/[^\s)]+)\s*\)[ \t]*$", screens, re.M))
-    if not all(alt in embedded for alt in attachments.values()) or not all(fact in screens for fact in facts):
-        raise ValueError("PR readback is missing embedded Screens attachments; inspect the body before retrying")
-
-
-def publish_attachments(out, repository, number, head, base, rows):
-    """The one upload/readback owner, run locally or copied unchanged over SSH."""
-    require_attachments(repository, cwd=out)
-    endpoint = f"repos/{repository}/pulls/{number}"
-    body = json.loads(gh("api", endpoint, cwd=out))["body"] or ""
-    prefix, _old, suffix = screens_parts(body)
-    screens, attachments = screens_markdown(head, base, rows)
-    body = prefix + screens + "\n" + suffix
-    facts = screens.splitlines()[2:6]
-    uploaded = {}
-    with tempfile.TemporaryDirectory(prefix="verify-rui-attach-") as temporary:
-        body_file = pathlib.Path(temporary) / "body.md"
-        items = list(attachments.items())
-        for offset in range(0, len(items), 50):
-            batch = items[offset:offset + 50]
-            body_file.write_text(body)
-            command = ["gh", "pr", "edit", str(number), "-R", repository, "--body-file", str(body_file)]
-            for name, alt in batch:
-                command += ["--attach", f"{name}#{alt}"]
-            result = subprocess.run(command, cwd=out, capture_output=True, text=True)
-            # The CLI can update the PR even on partial failure; always read it back.
-            body = json.loads(gh("api", endpoint, cwd=out))["body"] or ""
-            if result.returncode:
-                raise ValueError("attachment upload failed (requires a classic PAT or gh OAuth token with push access); PR may be partially updated, inspect its body before retrying")
-            uploaded.update(batch)
-            verify_attachments(body, uploaded, facts)
-    return f"Updated PR #{number}: {len(attachments)} embedded Screens attachments verified by readback"
-
-
-def publish_over_ssh(host, files, job):
-    """Stage one worker and its selected inputs; always remove the owned remote directory."""
-    if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.@:-]*", host):
-        raise ValueError("--ssh must name an SSH host or user@host")
-    def remote(command):
-        result = subprocess.run(["ssh", "-oBatchMode=yes", host, shlex.join(command)], capture_output=True, text=True)
-        if result.returncode:
-            raise ValueError("SSH publisher failed: " + result.stderr.strip())
-        return result.stdout
-    directory = remote(["mktemp", "-d", "/tmp/verify-rui-attachments.XXXXXXXXXX"]).strip()
-    if not re.fullmatch(r"/tmp/verify-rui-attachments\.[A-Za-z0-9_-]+", directory):
-        raise ValueError("SSH publisher returned an unexpected temporary directory")
-    try:
-        with tempfile.TemporaryDirectory(prefix="verify-rui-stage-") as temporary:
-            stage = pathlib.Path(temporary)
-            for name, source in files.items():
-                target = stage / name
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(source, target)
-            shutil.copyfile(HERE, stage / "__verify_publish_helper__.py")
-            (stage / "__publish_job__.json").write_text(json.dumps(job))
-            result = subprocess.run(["scp", "-oBatchMode=yes", "-r", str(stage) + "/.", f"{host}:{directory}/"],
-                                    capture_output=True, text=True)
-            if result.returncode:
-                raise ValueError("cannot copy selected captures over SSH: " + result.stderr.strip())
-            output = remote(["python3", directory + "/__verify_publish_helper__.py", "_publish", directory + "/__publish_job__.json"])
-    finally:
-        remote(["rm", "-rf", "--", directory])
-    return output.strip()
-
-
-def cmd_publish_worker(args):
-    job = pathlib.Path(args.job).resolve()
-    try:
-        print(publish_attachments(job.parent, **json.loads(job.read_text())))
-    except (OSError, ValueError, KeyError, subprocess.CalledProcessError) as error:
-        die(f"publish failed: {error}")
-
-
 def cmd_publish(args):
     try:
         out = pathlib.Path(args.directory).resolve()
         head, base, rows, files = publication_frames(out, args.states, args.all)
         if args.pr <= 0:
             raise ValueError("--pr must be a positive PR number")
-        url = subprocess.check_output(["git", "-C", str(HERE.parents[4]), "remote", "get-url", "origin"], text=True).strip()
-        job = dict(repository=github_repository(url), number=args.pr, head=head, base=base, rows=rows)
-        print(publish_over_ssh(args.ssh, files, job) if args.ssh else publish_attachments(out, **job))
-    except FileNotFoundError as error:
-        die("publish failed: gh 2.104.0+ with --attach is required; install GitHub CLI" if error.filename == "gh" else f"publish failed: {error}")
+        if sum(path.stat().st_size for path in files.values()) > 20 * 1024 * 1024:
+            raise ValueError("selected media exceeds 20 MB in total")
+        repo = HERE.parents[4]
+        url = os.environ.get("RUI_SCREENS_REMOTE")
+        if not url:
+            url = subprocess.check_output(["git", "-C", str(repo), "config", "--get", "remote.origin.url"], text=True).strip()
+        repository = args.repo or github_repository(url)
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
+            raise ValueError("--repo must be OWNER/NAME")
+        pr = json.loads(gh("api", f"repos/{repository}/pulls/{args.pr}", cwd=repo))
+        if pr["state"] != "open":
+            raise ValueError("cannot publish captures for a PR that is not open")
+        if pr["head"]["sha"] != head:
+            raise ValueError("capture HEAD does not match PR head")
+
+        gen = str(time.time_ns())
+
+        # The comment workflow consumes the same manifest shape as shots-merge.
+        diff = {"changed": [], "new": [], "removed": [], "same_count": 0, "same": [], "failed": []}
+        def published_record(record):
+            if record is None:
+                return None
+            return {**record, "files": {ext: name for ext, name in record.get("files", {}).items()
+                                        if name in files}}
+        for row in rows:
+            pair = {"name": row["name"], "size": row["size"],
+                    "before": published_record(row.get("before")),
+                    "after": published_record(row.get("after"))}
+            if row["same"]:
+                diff["same_count"] += 1
+                diff["same"].append(pair)
+            else:
+                diff["new" if not base or row.get("new") else "changed"].append(pair)
+        shots = [published_record(row["after"]) for row in rows]
+        with tempfile.TemporaryDirectory(prefix="verify-rui-publish-") as temporary:
+            work = pathlib.Path(temporary)
+            def git(*argv, check=True):
+                result = subprocess.run(["git", *argv], cwd=work, text=True, capture_output=True)
+                if check and result.returncode:
+                    raise ValueError(f"git {argv[0]} failed: {result.stderr.strip()}")
+                return result
+            git("init", "-q")
+            git("remote", "add", "origin", url)
+            git("config", "user.name", "Rui screens")
+            git("config", "user.email", "rui-screens@users.noreply.github.com")
+            def fetch():
+                refs = git("ls-remote", "--heads", "origin", "refs/heads/pr-screens").stdout.strip()
+                if not refs:
+                    return None
+                git("fetch", "--no-tags", "origin", "+refs/heads/pr-screens:refs/remotes/origin/pr-screens")
+                return git("rev-parse", "refs/remotes/origin/pr-screens").stdout.strip()
+            remote = fetch()
+            for attempt in range(5):
+                if remote:
+                    git("checkout", "-q", "--detach", remote)
+                else:
+                    git("checkout", "-q", "--orphan", "publish")
+                target = work / f"pr-{args.pr}" / head / gen
+                target.mkdir(parents=True, exist_ok=False)
+                for name, source in files.items():
+                    dest = target / name
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(source, dest)
+                (target / "shots.json").write_text(json.dumps(shots, indent=2) + "\n")
+                (target / "diff.json").write_text(json.dumps(diff, indent=2) + "\n")
+                (target / "shots-meta.json").write_text(json.dumps({"head": head, "base": base}, indent=2) + "\n")
+                git("add", "-A")
+                git("commit", "-q", "--allow-empty", "-m", f"Publish screens for PR #{args.pr}")
+                pushed = git("push", "origin", "HEAD:refs/heads/pr-screens", check=False)
+                if pushed.returncode == 0:
+                    break
+                updated = fetch()
+                if updated == remote or attempt == 4:
+                    raise ValueError(f"git push failed: {pushed.stderr.strip()}")
+                remote = updated
+            gh("api", "--method", "POST", f"repos/{repository}/actions/workflows/screens-comment.yml/dispatches",
+               "-f", "ref=main", "-f", f"inputs[pr]={args.pr}", "-f", f"inputs[head]={head}", "-f", f"inputs[gen]={gen}", cwd=repo)
+        print(f"https://github.com/{repository}/actions/workflows/screens-comment.yml")
     except (OSError, ValueError, KeyError, subprocess.CalledProcessError) as error:
         die(f"publish failed: {error}")
 
@@ -4114,16 +4307,13 @@ def main():
     p.add_argument("--out", required=True)
     p.add_argument("--baseline", metavar="DIR")
     p.set_defaults(func=cmd_shots_merge)
-    p = sub.add_parser("publish", help="attach frames media to a PR Screens section (gh 2.104.0+)")
+    p = sub.add_parser("publish", help="publish selected frames to the PR Screens comment")
     p.add_argument("directory", metavar="DIR")
-    p.add_argument("--pr", required=True, type=int, help="PR number to attach captures to")
+    p.add_argument("--pr", required=True, type=int, help="PR number to publish captures for")
+    p.add_argument("--repo", help="GitHub repository OWNER/NAME (default: origin)")
     p.add_argument("--states", metavar="NAME,...")
     p.add_argument("--all", action="store_true", help="include pairs with identical committed cells")
-    p.add_argument("--ssh", metavar="HOST", help="upload on HOST using its gh credentials (cloud: rui-box)")
     p.set_defaults(func=cmd_publish)
-    p = sub.add_parser("_publish", help=argparse.SUPPRESS)
-    p.add_argument("job")
-    p.set_defaults(func=cmd_publish_worker)
     p = sub.add_parser("restart-host", help="stop the run's Host and start a fresh one on the same Store and fixture")
     p.add_argument("run")
     p.set_defaults(func=cmd_restart_host)

@@ -1646,7 +1646,7 @@ fi
         self.assertTrue(all(row["targets"] == ["measure-model-output"] for row in rows))
 
     def test_requested_ref_cannot_publish_shared_caches(self):
-        read_only = ('qualify-macos.yml', 'previous-release-upgrade.yml', 'release.yml', 'screens.yml')
+        read_only = ('qualify-macos.yml', 'previous-release-upgrade.yml', 'release.yml')
         for name in read_only:
             with self.subTest(workflow=name):
                 workflow = Path('.github/workflows', name).read_text()

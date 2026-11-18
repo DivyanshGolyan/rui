@@ -1,3 +1,4 @@
+const credential_location = @import("credential_location.zig");
 const std = @import("std");
 const utf8_validation = @import("utf8_validation.zig");
 const model_catalog = @import("model_catalog.zig");
@@ -350,9 +351,9 @@ fn postCommandHoldDescriptors(ready: std.posix.fd_t, release: std.posix.fd_t) !v
     if (std.c.read(release, &acknowledgment, acknowledgment.len) != 1) return error.PostCommandHoldClosed;
 }
 
-fn credentialPath(init: std.process.Init, comptime provider: protocol.Provider, buffer: []u8, create: bool) ![]const u8 {
-    return provider_login.credentialPath(init, provider, buffer, create) catch |err| {
-        if (err == error.HomeRequired) return homeRequired("the " ++ (comptime provider.shown()) ++ " credential is HOME/.config/rui/" ++ @tagName(provider) ++ ".json unless " ++ comptime provider_login.credentialVariable(provider) ++ " names it");
+fn signInPath(init: std.process.Init, comptime provider: protocol.Provider, buffer: []u8) ![]const u8 {
+    return credential_location.default(init.environ_map, provider, buffer) catch |err| {
+        if (err == error.HomeRequired) return homeRequired("the " ++ (comptime provider.shown()) ++ " credential is HOME/.config/rui/" ++ @tagName(provider) ++ ".json unless " ++ comptime credential_location.variable(provider) ++ " names it");
         return err;
     };
 }
@@ -562,7 +563,7 @@ test "auth status says each ChatGPT way in that exists, and how to sign in when 
 fn planSignInLine(init: std.process.Init, buffer: []u8) []const u8 {
     const plain = "ChatGPT: signed in (remote acceptance not checked).\n";
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const path = credentialPath(init, .chatgpt, &path_buffer, false) catch return plain;
+    const path = signInPath(init, .chatgpt, &path_buffer) catch return plain;
     var shown: codex_auth.Shown = undefined;
     codex_auth.localSignIn(path, codex_auth.nowSeconds(init.io), &shown) catch return plain;
     if (!shown.status.usable()) return plain;
@@ -589,7 +590,7 @@ fn planLogin(init: std.process.Init, fixture_endpoint: ?[]const u8) !void {
             return login_state.cmpxchgStrong(.cancellable, .publishing, .acq_rel, .acquire) == null;
         }
     }.publish) catch |err| return switch (err) {
-        error.HomeRequired => homeRequired("the ChatGPT credential and host id are in HOME/.config/rui unless " ++ comptime provider_login.credentialVariable(.chatgpt) ++ " names the credential"),
+        error.HomeRequired => homeRequired("the ChatGPT credential and host id are in HOME/.config/rui unless " ++ comptime credential_location.variable(.chatgpt) ++ " names the credential"),
         else => err,
     };
     const outcome = try finishLogin(init, .chatgpt, "Rui: Signed in to ChatGPT.\n") orelse return;
@@ -675,9 +676,9 @@ fn planLogout(init: std.process.Init, provider: []const u8, fixture_endpoint: ?[
     }
     const issuer = try planIssuer(init, fixture_endpoint);
     var browser_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const browser_path = provider_login.credentialPath(init, .chatgpt, &browser_buffer, false) catch null;
+    const browser_path = credential_location.default(init.environ_map, .chatgpt, &browser_buffer) catch null;
     var device_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const device_path = provider_login.credentialPath(init, .codex, &device_buffer, false) catch null;
+    const device_path = credential_location.default(init.environ_map, .codex, &device_buffer) catch null;
     const receipt = logoutReceipt(chatgpt_plan_login.logout(init.io, browser_path, device_path, issuer));
     if (receipt.done) |line| try std.Io.File.stdout().writeStreamingAll(init.io, line);
     if (receipt.browser) |line| stderr.diagnosticBytes(line);
@@ -726,7 +727,7 @@ fn logoutReceipt(ended: chatgpt_plan_login.Logout) LogoutReceipt {
 
 fn unlocated(comptime way: []const u8, comptime provider: protocol.Provider) []const u8 {
     return "rui: could not end the ChatGPT " ++ way ++ " sign-in: Rui could not find its credential. Set " ++
-        comptime provider_login.credentialVariable(provider) ++ " to an absolute path, or leave it unset with HOME absolute, then run rui auth logout chatgpt again.\n";
+        comptime credential_location.variable(provider) ++ " to an absolute path, or leave it unset with HOME absolute, then run rui auth logout chatgpt again.\n";
 }
 
 test "logout says how it left each ChatGPT login, and fails while either may remain" {
@@ -739,8 +740,8 @@ test "logout says how it left each ChatGPT login, and fails while either may rem
     const unconfirmed_browser = "Rui: Signed out of ChatGPT in the browser: Rui deleted its tokens, but ChatGPT did not confirm it ended the browser sign-in. To end it there too, disconnect Rui in ChatGPT's settings.\n";
     const browser_stays = "rui: still signed in to ChatGPT in the browser: Rui could not read or change its private credential; inspect it, then run rui auth logout chatgpt again.\n";
     const device_stays = "rui: still signed in to ChatGPT with a device code: Rui could not read or change its private credential; inspect it, then run rui auth logout chatgpt again.\n";
-    const browser_unfound = "rui: could not end the ChatGPT browser sign-in: Rui could not find its credential. Set RUI_CHATGPT_CREDENTIAL_FILE to an absolute path, or leave it unset with HOME absolute, then run rui auth logout chatgpt again.\n";
-    const device_unfound = "rui: could not end the ChatGPT device-code sign-in: Rui could not find its credential. Set RUI_CODEX_CREDENTIAL_FILE to an absolute path, or leave it unset with HOME absolute, then run rui auth logout chatgpt again.\n";
+    const browser_unfound = "rui: could not end the ChatGPT browser sign-in: Rui could not find its credential. Set " ++ comptime credential_location.variable(.chatgpt) ++ " to an absolute path, or leave it unset with HOME absolute, then run rui auth logout chatgpt again.\n";
+    const device_unfound = "rui: could not end the ChatGPT device-code sign-in: Rui could not find its credential. Set " ++ comptime credential_location.variable(.codex) ++ " to an absolute path, or leave it unset with HOME absolute, then run rui auth logout chatgpt again.\n";
     const B = chatgpt_plan_login.Browser;
     const D = chatgpt_plan_login.DeviceCode;
     const Row = struct { Readiness, Readiness, B, D, ?[]const u8, ?[]const u8, ?[]const u8, u8 };
@@ -803,7 +804,7 @@ test "logout says how it left each ChatGPT login, and fails while either may rem
 
 fn planIssuer(init: std.process.Init, fixture_endpoint: ?[]const u8) !chatgpt_plan_login.Issuer {
     const endpoint = fixture_endpoint orelse return .openai;
-    if (init.environ_map.get("RUI_CHATGPT_CREDENTIAL_FILE") == null) return error.FixtureCredentialPathRequired;
+    if (init.environ_map.get(credential_location.variable(.chatgpt)) == null) return error.FixtureCredentialPathRequired;
     const base = providers.responsesBase(endpoint) orelse return error.InvalidArguments;
     if (!std.mem.startsWith(u8, base, "http://127.0.0.1:")) return error.InvalidArguments;
     return .{ .fixture = base };
@@ -1445,8 +1446,8 @@ fn onLoginInterrupt(_: std.posix.SIG) callconv(.c) void {
 }
 
 fn openAiKeyPath(init: std.process.Init, buffer: []u8) ![]const u8 {
-    return api_key.path(init.environ_map, buffer) catch |err| {
-        if (err == error.HomeRequired) return homeRequired("the OpenAI key is HOME/.config/rui/openai.key unless " ++ api_key.path_variable ++ " names it");
+    return credential_location.default(init.environ_map, .openai, buffer) catch |err| {
+        if (err == error.HomeRequired) return homeRequired("the OpenAI key is HOME/.config/rui/openai.key unless " ++ credential_location.variable(.openai) ++ " names it");
         return err;
     };
 }
@@ -2057,7 +2058,7 @@ fn providerReadiness(init: std.process.Init, provider: protocol.Provider) !provi
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     switch (provider) {
         inline .codex, .chatgpt => |sign_in| {
-            const path = try credentialPath(init, sign_in, &path_buffer, false);
+            const path = try signInPath(init, sign_in, &path_buffer);
             return switch (try codex_auth.localStatus(path, codex_auth.nowSeconds(init.io))) {
                 .missing => .missing,
                 .configured => .configured,
@@ -2065,7 +2066,7 @@ fn providerReadiness(init: std.process.Init, provider: protocol.Provider) !provi
                 .refresh_required => .refresh_required,
             };
         },
-        .openai => return if (try api_key.present(try api_key.path(init.environ_map, &path_buffer))) .configured else .missing,
+        .openai => return if (try api_key.present(try credential_location.default(init.environ_map, .openai, &path_buffer))) .configured else .missing,
     }
 }
 
@@ -5428,7 +5429,7 @@ test "Host launch guided activation requires frozen pair and exact fresh identit
         }
         if (case.delayed) try std.testing.expect(fixture.report_reads != 0);
         var key_path: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        try std.testing.expect(!try api_key.present(try api_key.path(&environment, &key_path)));
+        try std.testing.expect(!try api_key.present(try credential_location.default(&environment, .openai, &key_path)));
         try std.testing.expectError(error.FileNotFound, tmp.dir.access(init.io, ".config/rui/preferences", .{}));
     }
 }
@@ -5472,7 +5473,8 @@ test "Host launch chosen usable bindings attach before startup document admissio
             try provider_login.key(init, "fixture-global-key");
         } else {
             var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-            const path = try provider_login.credentialPath(init, provider, &path_buffer, true);
+            try provider_login.createConfigDirectory(init.io, home);
+            const path = try credential_location.default(init.environ_map, provider, &path_buffer);
             const record = try init.gpa.create(codex_credentials.Record);
             defer init.gpa.destroy(record);
             record.* = .{ .generation = 0, .account_id = .{}, .id_token = .{}, .access_token = .{}, .refresh_token = .{}, .expires_at = 4_102_444_800, .refreshed_at = 1 };
@@ -5555,7 +5557,7 @@ test "Host launch scoped readiness still discovers selected private keys and req
     const store = try std.fs.path.join(arena.allocator(), &.{ home, "store" });
     _ = try host_start.saveConnection(init, store, .{ .base = "https://custom.example/v1" }, .{ .provided = "only-scoped-key" }, "custom-model", Gate.yes);
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    try std.testing.expect(!try api_key.present(try api_key.path(&environment, &path_buffer)));
+    try std.testing.expect(!try api_key.present(try credential_location.default(&environment, .openai, &path_buffer)));
     const entry = try init.gpa.create(OverviewEntry);
     defer init.gpa.destroy(entry);
     var fixture: LaunchFixture = .{ .scenario = .already_ready };

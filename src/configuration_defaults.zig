@@ -22,7 +22,7 @@ fn names(comptime text: []const u8) input.ToolsField {
 
 /// These lists borrow the request or immutable product defaults.
 fn creationProfile(model: []const u8, can_read_images: bool) *const ToolProfile {
-    return if (catalog.acceptsImages(model) and can_read_images) &image_profile else &text_profile;
+    return if (catalog.imageCapability(model) != .unsupported and can_read_images) &image_profile else &text_profile;
 }
 
 pub fn creationTools(requested: *const input.ToolsField, model: []const u8, can_read_images: bool) *const input.ToolsField {
@@ -471,6 +471,7 @@ test "creation tool profiles cover model image support Host capability explicit 
         .{ .model = "gpt-3.5-turbo-1106", .accepts_images = false },
         .{ .model = "gpt-3.5-turbo-instruct", .accepts_images = false },
         .{ .model = "gpt-6.1-sol", .accepts_images = true },
+        .{ .model = "gpt-4.1", .accepts_images = true },
         .{ .model = "unlisted-model", .accepts_images = true },
         .{ .model = "gpt-3.5-turbo-next", .accepts_images = true },
     };

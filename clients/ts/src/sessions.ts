@@ -64,6 +64,8 @@ export type SessionCreate = CreationSettings & (
 export type SessionUpdate = Partial<Pick<SessionSpec, "model" | "instructions" | "outputSchema" | "tools" | "permissionMode" | "effort" | "compactAt" | "label" | "loadedTools" | "outputReservation">>;
 
 export interface WriteOptions {
+	/** Optional caller-supplied key for replay. Takes precedence over `idempotencyKey`. */
+	key?: string;
 	/** Required on `create` and `send`, built as `kind:driftId`. Other writes get a fresh UUIDv4 when it is left out (D123). */
 	idempotencyKey?: string;
 }
@@ -102,6 +104,9 @@ export interface SessionSummary {
 
 type CurrentReport = Extract<Schemas["InspectSessionReply"], { profile: "current"; work: unknown }>;
 
+/** The observed Turn and Operation IDs as decimal strings. */
+export interface InterruptTarget { turn: string; operation: string }
+
 /** Current Host facts. Decimal counts, times and IDs remain lossless strings. */
 export interface SessionStatus {
 	archiveState: SessionArchiveState;
@@ -110,6 +115,8 @@ export interface SessionStatus {
 	since: CurrentReport["work"]["state"]["since"];
 	turn: CurrentReport["work"]["turn"];
 	operation: CurrentReport["work"]["operation"];
+	/** The Host-served target for interrupting the observed model call. */
+	interruptTarget: InterruptTarget | null;
 	pendingMessages: CurrentReport["pending_messages"];
 	parent: CurrentReport["session"]["parent"];
 	label: CurrentReport["session"]["label"];
@@ -163,7 +170,7 @@ function configureBody(store: string, key: string, session: string, spec: Partia
 }
 
 function key(options: WriteOptions | undefined): string {
-	return options?.idempotencyKey ?? randomUUID();
+	return options?.key ?? options?.idempotencyKey ?? randomUUID();
 }
 
 function parse<T>(reply: Buffer): T {
@@ -184,6 +191,7 @@ export function environmentBytes(env: Record<string, string> | undefined): Buffe
 
 export class Session {
 	readonly #link: Link;
+	#interruptTarget: InterruptTarget | null = null;
 	readonly id: string;
 
 	constructor(link: Link, id: string) {
@@ -198,7 +206,7 @@ export class Session {
 	 * See `ListActivityOptions.follow`; `signal` abort also ends an idle wait.
 	 */
 	listActivity(options?: ListActivityOptions): AsyncGenerator<FeedEntry, void, undefined> {
-		return listActivity(this.#link, this.id, options);
+		return listActivity(this.#link, this.id, options, (target) => { this.#interruptTarget = target; });
 	}
 
 	/** Search public feed text newest first, with bounded snippets. */
@@ -227,12 +235,14 @@ export class Session {
 			} satisfies Schemas["InspectSessionRequest"])),
 		);
 		if (reply.session === null) throw new RuiRequestError("invocation_error", "session_not_found");
+		this.#interruptTarget = reply.work.actions.interrupt === null ? null : { ...reply.work.actions.interrupt };
 		return {
 			archiveState: reply.archive_state,
 			state: reply.work.state.kind,
 			since: reply.work.state.since,
 			turn: reply.work.turn,
 			operation: reply.work.operation,
+			interruptTarget: reply.work.actions.interrupt,
 			pendingMessages: reply.pending_messages,
 			parent: reply.session.parent,
 			label: reply.session.label,
@@ -384,28 +394,23 @@ export class Session {
 		} satisfies Schemas["ReadActionRequest"])));
 	}
 
-	/**
-	 * Cuts off the model call that is current now while the Session keeps going.
-	 * It takes no key: each call names the work it sees at that moment, so a
-	 * repeat is a new cut, not a replay. Resolves without effect when no model
-	 * call is current, or when the call ended before the cut arrived (D167, D171).
+	/** Interrupt an observed target with one keyed request. Reuse the key to replay its answer.
+	 * `operation_resolved` and `target_mismatch` resolve without effect. With no target, use this handle's
+	 * last status or feed observation; send nothing when it had no interrupt target.
+	 * Neither form reads first.
 	 */
-	async interrupt(): Promise<void> {
-		const status = await this.status();
-		const { turn, operation } = status;
-		if (turn === null || operation === null || !modelCallCurrent(status.state)) {
-			this.#link.activity?.notify(this.id);
-			return;
-		}
-		const idempotencyKey = randomUUID();
-		const body = (store: string) =>
-			JSON.stringify({
-				version: WIRE_VERSION,
-				kind: "model_interruption",
-				store,
-				key: idempotencyKey,
-				target: { session: this.id, turn, operation },
-			} satisfies Schemas["ModelInterruptionRequest"]);
+	interrupt(target: InterruptTarget, options?: WriteOptions): Promise<void>;
+	interrupt(options?: WriteOptions): Promise<void>;
+	async interrupt(targetOrOptions?: InterruptTarget | WriteOptions, options?: WriteOptions): Promise<void> {
+		const explicit = targetOrOptions !== undefined && "turn" in targetOrOptions;
+		const target = explicit ? targetOrOptions : this.#interruptTarget;
+		if (target === null) return;
+		const { turn, operation } = target;
+		const idempotencyKey = key(explicit ? options : targetOrOptions);
+		const body = (store: string) => JSON.stringify({
+			version: WIRE_VERSION, kind: "model_interruption", store,
+			key: idempotencyKey, target: { session: this.id, turn, operation },
+		} satisfies Schemas["ModelInterruptionRequest"]);
 		try {
 			accepted(parse<Schemas["ModelInterruptionReply"]>(await this.#link.exchange("/v1/control/model-interruption", body)).answer);
 		} catch (error) {
@@ -432,10 +437,6 @@ export class Session {
 		accepted(parse<Schemas["PermissionDecisionReply"]>(await this.#link.exchange("/v1/control/permission-decision", body)).answer);
 		this.#link.activity?.notify(this.id);
 	}
-}
-
-function modelCallCurrent(kind: string): boolean {
-	return kind === "working" || kind === "retrying" || kind === "pending";
 }
 
 export class Sessions {
