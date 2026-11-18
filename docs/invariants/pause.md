@@ -1,6 +1,6 @@
 # Pause point owner invariants
 
-The pause controller is a test-only seam; these promises apply to its callers and fixtures.
+The pause controller is a test-only seam; these promises apply to its callers and fixtures. PAU-8 through PAU-14 run in the `pause-socket-test` fixture.
 
 | Id | Level | Invariant | Seam | Owner test | Source |
 | --- | --- | --- | --- | --- | --- |

@@ -110,7 +110,8 @@ class ParallelRootsTest(unittest.TestCase):
         if store is not None:
             command.append(store)
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                   text=True, start_new_session=True)
+                                   text=True, start_new_session=True,
+                                   env=dict(os.environ, RUI_TEST_PAUSE_SOCKET_BINARY="pause-socket"))
         try:
             stdout, stderr = process.communicate(timeout=8)
         except subprocess.TimeoutExpired:
