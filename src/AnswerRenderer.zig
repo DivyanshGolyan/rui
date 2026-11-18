@@ -721,12 +721,13 @@ fn linkByte(self: *Renderer, byte: u8) !void {
         .target => switch (byte) {
             '(' => self.link_depth += 1,
             ')' => if (self.link_depth == 0) {
-                if (!TerminalText.linkTarget(self.held[self.link_text_end + 2 .. self.link_len])) return self.dropLink(byte);
+                const target = self.held[self.link_text_end + 2 .. self.link_len];
+                if (!TerminalText.linkTarget(target) and self.markdownLocalParts(target) == null) return self.dropLink(byte);
                 return self.showText();
             } else {
                 self.link_depth -= 1;
             },
-            else => if (byte <= ' ' or byte >= 0x7f or byte == '[') return self.dropLink(byte),
+            else => if (byte <= ' ' or byte == 0x7f or byte == '[') return self.dropLink(byte),
         },
     }
     if (self.link_len == self.held.len) return self.dropLink(byte);
@@ -801,28 +802,52 @@ fn showLocal(self: *Renderer) !void {
     const length = self.link_len;
     const end = trimmedEnd(self.held[0..length], 1, ".,:;!?'\"]");
     const path = self.held[0..end];
-    const tilde = path[0] == '~';
-    if (path.len <= @as(usize, if (tilde) 2 else 1)) return self.literalLocal();
-    if (!validPath(path, tilde)) return self.literalLocal();
-    var home = if (tilde) self.home else "";
-    if (tilde and !validPath(home, false)) return self.literalLocal();
-    while (home.len > 0 and home[home.len - 1] == '/') home = home[0 .. home.len - 1];
-    const tail = if (tilde) path[1..] else path;
-    const home_bytes = encodedSize(home) orelse return self.literalLocal();
-    const tail_bytes = encodedSize(tail) orelse return self.literalLocal();
-    if ("file://".len + home_bytes + tail_bytes > TerminalText.max_link_bytes) return self.literalLocal();
+    const parts = self.localParts(path) orelse return self.literalLocal();
     self.link = .none;
     self.link_len = 0;
     try self.terminal_text.finish(self.out);
     try self.out.writeAll(TerminalText.link_open ++ "file://");
-    try writeEncoded(self.out, home);
-    try writeEncoded(self.out, tail);
+    try writeEncoded(self.out, parts.home);
+    try writeEncoded(self.out, parts.tail);
     try self.out.writeAll(TerminalText.link_end);
     self.in_link = true;
     try self.transition(self.base());
     try self.safeSlice(path);
     try self.closeLink();
     for (self.held[end..length]) |byte| try self.prose(byte);
+}
+
+const LocalParts = struct { home: []const u8, tail: []const u8 };
+
+fn localParts(self: *const Renderer, path: []const u8) ?LocalParts {
+    if (path.len == 0) return null;
+    const tilde = path[0] == '~';
+    if (path.len <= @as(usize, if (tilde) 2 else 1) or !validPath(path, tilde)) return null;
+    var home = if (tilde) self.home else "";
+    if (tilde and !validPath(home, false)) return null;
+    while (home.len > 0 and home[home.len - 1] == '/') home = home[0 .. home.len - 1];
+    const tail = if (tilde) path[1..] else path;
+    const home_bytes = encodedSize(home) orelse return null;
+    const tail_bytes = encodedSize(tail) orelse return null;
+    if ("file://".len + home_bytes + tail_bytes > TerminalText.max_link_bytes) return null;
+    return .{ .home = home, .tail = tail };
+}
+
+fn markdownLocalParts(self: *const Renderer, target: []const u8) ?LocalParts {
+    var path = target;
+    for (0..2) |_| {
+        const colon = std.mem.lastIndexOfScalar(u8, path, ':') orelse break;
+        const suffix = path[colon + 1 ..];
+        if (suffix.len == 0) break;
+        var digits = true;
+        for (suffix) |byte| if (!std.ascii.isDigit(byte)) {
+            digits = false;
+            break;
+        };
+        if (!digits) break;
+        path = path[0..colon];
+    }
+    return self.localParts(path);
 }
 
 fn validPath(path: []const u8, tilde: bool) bool {
@@ -870,7 +895,16 @@ fn showText(self: *Renderer) !void {
     const length = self.link_len;
     self.link = .none;
     self.link_len = 0;
-    try self.openLink(self.held[text_end + 2 .. length]);
+    const target = self.held[text_end + 2 .. length];
+    if (self.markdownLocalParts(target)) |parts| {
+        try self.terminal_text.finish(self.out);
+        try self.out.writeAll(TerminalText.link_open ++ "file://");
+        try writeEncoded(self.out, parts.home);
+        try writeEncoded(self.out, parts.tail);
+        try self.out.writeAll(TerminalText.link_end);
+        self.in_link = true;
+        try self.transition(self.base());
+    } else try self.openLink(target);
     for (self.held[1..text_end]) |byte| try self.prose(byte);
     try self.closeLink();
 }
@@ -1741,7 +1775,7 @@ test "bare local paths require valid HOME only for tilde paths" {
 test "bare local paths are prose tokens not relative paths or Markdown targets" {
     inline for (.{
         "a/b x/tmp/a x~/a ./a ../a ~user/a //host/a ///tmp/a ftp://x/a httpx:/x file:///tmp/a",
-        "[label](/tmp/a) [label](~/a) [label](file:///tmp/a)",
+        "[label](file:///tmp/a)",
         "\\/tmp/a \\~/a",
     }) |input| try expectRenderedHome(input, input, "/home/test");
     try expectRenderedHome("~user/a;/tmp/b //host/~/b /tmp/ok;", "~user/a;/tmp/b //host/~/b " ++ comptime linked("file:///tmp/ok", "/tmp/ok") ++ ";", "/home/test");
