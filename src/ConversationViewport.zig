@@ -908,7 +908,7 @@ test "every state mark hangs continuation text in both scripts" {
 
 test "vaxis wraps reading text at words with hanging indentation" {
     var view: Sized(256, false) = .{};
-    try view.append("  The plain rui command isn't on PATH\n0123456789abcdef next\n› a longword\n  supercalifragilistic x\n⠹ one two three four\n中中中中中中中中Z\n  │ alpha beta gamma");
+    try view.append("  The plain rui command isn't on PATH\n0123456789abcdef next\n› a longword\n  supercalifragilistic x\n◝ one two three four\n中中中中中中中中Z\n  │ alpha beta gamma");
     try view.prepare();
     const layout: Layout = .{ .width = 16, .method = .unicode };
     var test_screen: TestScreen = undefined;
@@ -918,7 +918,7 @@ test "vaxis wraps reading text at words with hanging indentation" {
         "0123456789abcdef", "next",
         "› a longword",
         "  supercalifragi", "  listic x",
-        "⠹ one two three",
+        "◝ one two three",
         "  four",
         "中中中中中中中中",
         "Z",

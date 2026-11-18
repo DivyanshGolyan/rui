@@ -3361,10 +3361,10 @@ test "Host line appears once in overview and chat at wide and narrow widths, nev
             const text = try shown.text();
             const expected: ?[]const u8 = switch (availability) {
                 .ready => null,
-                .paused, .stopping => "■ Host paused",
-                .stopped => "■ Host stopped ·",
-                .incompatible => "■ Host is a different Rui version",
-                .unreadable => "■ Host unreachable",
+                .paused, .stopping => "▪ Host paused",
+                .stopped => "▪ Host stopped ·",
+                .incompatible => "▪ Host is a different Rui version",
+                .unreadable => "▪ Host unreachable",
             };
             try std.testing.expectEqual(@as(usize, @intFromBool(expected != null)), std.mem.count(u8, text, "Host "));
             if (expected) |line| try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, line));
@@ -3403,7 +3403,7 @@ test "Host line and Settings tail show together without overlap at wide and narr
         try std.testing.expectEqual(at.host.end, at.input);
         try std.testing.expect(std.mem.startsWith(u8, try shown.line(at.settings.start), "┄"));
         try std.testing.expect(std.mem.startsWith(u8, try shown.line(at.settings.start + 1), "     Settings"));
-        try std.testing.expect(std.mem.startsWith(u8, try shown.line(at.host.start), "■ Host stopped ·"));
+        try std.testing.expect(std.mem.startsWith(u8, try shown.line(at.host.start), "▪ Host stopped ·"));
         if (at.input < height) try std.testing.expect(std.mem.indexOf(u8, try shown.line(at.input), "enter open") == null);
         for (at.list.start..at.list.end) |row| {
             const line = try shown.line(@intCast(row));
@@ -3540,7 +3540,7 @@ test "Host recovery keeps the open widget drafts and scroll and starts only on a
     for ([_]u16{ 140, 46 }) |width| {
         var shown = try rig.shown(width, 26);
         defer shown.deinit();
-        try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "■ Host stopped ·") != null);
+        try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "▪ Host stopped ·") != null);
     }
     try std.testing.expect(overview.root.session.?.eql(child));
     try std.testing.expectEqualStrings("chat draft", frontend.input.composition().bytes);
@@ -3621,7 +3621,7 @@ test "Host recovery paused shutting down and upgrading offer no start gesture" {
         var shown = try rig.shown(140, 26);
         defer shown.deinit();
         const text = try shown.text();
-        try std.testing.expect(std.mem.indexOf(u8, text, "■ Host paused") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "▪ Host paused") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, "· start") == null);
         HostRecovery.availability = .ready;
         overview.queue(.host);
@@ -3860,7 +3860,7 @@ test "Host recovery renders the launch result cause without confusing failure an
         var held = try rig.shown(140, 26);
         defer held.deinit();
         const text = try held.text();
-        try std.testing.expectEqual(after == .stopping, std.mem.indexOf(u8, text, "■ Host paused") != null);
+        try std.testing.expectEqual(after == .stopping, std.mem.indexOf(u8, text, "▪ Host paused") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, "· retry") == null);
     };
 }
@@ -3926,7 +3926,7 @@ test "a Host that stopped unasked starts again once by itself; any other stop wa
         } else if (!case.upgrading and case.availability == .stopped) {
             var shown = try rig.shown(46, 26);
             defer shown.deinit();
-            try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "■ Host stopped ·") != null);
+            try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "▪ Host stopped ·") != null);
         }
     }
 }
@@ -3953,7 +3953,7 @@ test "the automatic start is spent once per run: a second crash and a failed sta
         try std.testing.expectEqual(@as(usize, 1), HostRecovery.starts);
         var shown = try rig.shown(46, 26);
         defer shown.deinit();
-        try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "■ Host stopped ·") != null);
+        try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "▪ Host stopped ·") != null);
         try std.testing.expect(try rig.hostStart() == null);
         try std.testing.expect(try rig.settle() == null);
         try std.testing.expectEqual(@as(usize, 2), HostRecovery.starts);
@@ -8176,7 +8176,7 @@ test "upgrade attempt presentation domain ends synthetic pause and publishing wi
             var shown = try rig.shown(width, 30);
             defer shown.deinit();
             const text = try shown.text();
-            try std.testing.expectEqual(paused, std.mem.indexOf(u8, text, "■ Host paused") != null);
+            try std.testing.expectEqual(paused, std.mem.indexOf(u8, text, "▪ Host paused") != null);
             try std.testing.expectEqual(attempt == .installing and attempt.installing.step == .publishing, std.mem.indexOf(u8, text, "Publishing; cancelling no longer rolls back") != null);
             if (attempt == .ended and attempt.ended.how == .incompatible) {
                 try std.testing.expect(std.mem.indexOf(u8, text, "restart rui") != null);

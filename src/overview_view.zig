@@ -46,7 +46,7 @@ pub const max_requests = 8;
 
 pub const list_interval_ms = 1000;
 
-pub const spin_interval_ms = 100;
+pub const spin_interval_ms = 200;
 
 pub const mark_column = 1;
 pub const text_column = 3;
@@ -3183,14 +3183,14 @@ const mixed = [_]Listed{
 const kind_cases = [_]struct { state: WorkState, unicode: []const u8, ascii: []const u8, colour: Colour, stoppable: bool }{
     .{ .state = .{ .idle = ago(7200) }, .unicode = " ○ Write the notes                                                           2h", .ascii = " o Write the notes                                                           2h", .colour = .normal, .stoppable = false },
     .{ .state = .{ .pending = ago(5) }, .unicode = " ◌ Write the notes                                                          now", .ascii = " : Write the notes                                                          now", .colour = .quiet, .stoppable = true },
-    .{ .state = .{ .working = ago(40) }, .unicode = " ⠹ Write the notes", .ascii = " * Write the notes", .colour = .ink, .stoppable = true },
-    .{ .state = .{ .retrying = .{ .since = test_now_s - 30, .due_at_ms = test_now_s * 1000 + 11_500, .cause = bounded(session_work.max_code_bytes, "provider_temporary_error"), .attempt = 2 } }, .unicode = " ⠹ Write the notes", .ascii = " * Write the notes", .colour = .attention, .stoppable = true },
-    .{ .state = .{ .bash = .{ .since = test_now_s - 75, .call = 0, .description = bounded(session_work.max_description_bytes, "Run the logic tests"), .running = 1, .approvals = 0 } }, .unicode = " ⠹ Write the notes", .ascii = " * Write the notes", .colour = .ink, .stoppable = true },
-    .{ .state = .{ .approval = ago(3 * 60) }, .unicode = " ? Write the notes                                                           3m", .ascii = " ? Write the notes                                                           3m", .colour = .attention, .stoppable = true },
-    .{ .state = .{ .stopping = ago(8) }, .unicode = " ⠹ Write the notes", .ascii = " * Write the notes", .colour = .quiet, .stoppable = false },
+    .{ .state = .{ .working = ago(40) }, .unicode = " ◝ Write the notes", .ascii = " * Write the notes", .colour = .ink, .stoppable = true },
+    .{ .state = .{ .retrying = .{ .since = test_now_s - 30, .due_at_ms = test_now_s * 1000 + 11_500, .cause = bounded(session_work.max_code_bytes, "provider_temporary_error"), .attempt = 2 } }, .unicode = " ◝ Write the notes", .ascii = " * Write the notes", .colour = .attention, .stoppable = true },
+    .{ .state = .{ .bash = .{ .since = test_now_s - 75, .call = 0, .description = bounded(session_work.max_description_bytes, "Run the logic tests"), .running = 1, .approvals = 0 } }, .unicode = " ◝ Write the notes", .ascii = " * Write the notes", .colour = .ink, .stoppable = true },
+    .{ .state = .{ .approval = ago(3 * 60) }, .unicode = " ● Write the notes                                                           3m", .ascii = " ? Write the notes                                                           3m", .colour = .attention, .stoppable = true },
+    .{ .state = .{ .stopping = ago(8) }, .unicode = " ◝ Write the notes", .ascii = " * Write the notes", .colour = .quiet, .stoppable = false },
     .{ .state = .{ .finished = ago(12 * 60) }, .unicode = "   Write the notes                                                          12m", .ascii = "   Write the notes                                                          12m", .colour = .mark, .stoppable = false },
     .{ .state = .{ .failed = .{ .since = test_now_s - 3 * 3600, .code = bounded(session_work.max_code_bytes, "provider_output_invalid"), .resets_at = null } }, .unicode = " × Write the notes                                                           3h", .ascii = " x Write the notes                                                           3h", .colour = .failure, .stoppable = false },
-    .{ .state = .{ .stopped = .{ .since = test_now_s - 2 * 86400, .cause = .interruption } }, .unicode = " ■ Write the notes                                                           2d", .ascii = " # Write the notes                                                           2d", .colour = .normal, .stoppable = false },
+    .{ .state = .{ .stopped = .{ .since = test_now_s - 2 * 86400, .cause = .interruption } }, .unicode = " ▪ Write the notes                                                           2d", .ascii = " # Write the notes                                                           2d", .colour = .normal, .stoppable = false },
 };
 
 test "every work state follows the rules table, in Unicode and ASCII" {
@@ -3351,13 +3351,13 @@ test "row segments show each state mark name and state duration" {
     defer state.deinit();
     state.selected = .new_session;
     const a = arena.allocator();
-    try expectRow(try rowOf(a, &state, "Fix flaky store test", 100, .{}), 100, &.{ .{ "?", .attention }, .{ "Fix flaky store test", .normal }, .{ "2m", .quiet } });
-    try expectRow(try rowOf(a, &state, "Asking beside Bash", 100, .{}), 100, &.{ .{ "?", .attention }, .{ "Asking beside Bash", .normal }, .{ "1m", .quiet } });
+    try expectRow(try rowOf(a, &state, "Fix flaky store test", 100, .{}), 100, &.{ .{ "●", .attention }, .{ "Fix flaky store test", .normal }, .{ "2m", .quiet } });
+    try expectRow(try rowOf(a, &state, "Asking beside Bash", 100, .{}), 100, &.{ .{ "●", .attention }, .{ "Asking beside Bash", .normal }, .{ "1m", .quiet } });
     try expectRow(try rowOf(a, &state, "Check install script", 100, .{}), 100, &.{ .{ "◌", .quiet }, .{ "Check install script", .normal }, .{ "now", .quiet } });
-    try expectRow(try rowOf(a, &state, "Investigate retry storm", 100, .{}), 100, &.{ .{ "⠹", .attention }, .{ "Investigate retry storm", .normal } });
+    try expectRow(try rowOf(a, &state, "Investigate retry storm", 100, .{}), 100, &.{ .{ "◝", .attention }, .{ "Investigate retry storm", .normal } });
     try expectRow(try rowOf(a, &state, "Benchmark memory", 100, .{}), 100, &.{ .{ "×", .failure }, .{ "Benchmark memory", .normal }, .{ "20m", .quiet } });
     try expectRow(try rowOf(a, &state, "Odd failure", 100, .{}), 100, &.{ .{ "×", .failure }, .{ "Odd failure", .normal }, .{ "1m", .quiet } });
-    try expectRow(try rowOf(a, &state, "Stopped by me", 100, .{}), 100, &.{ .{ "■", .normal }, .{ "Stopped by me", .normal }, .{ "1m", .quiet } });
+    try expectRow(try rowOf(a, &state, "Stopped by me", 100, .{}), 100, &.{ .{ "▪", .normal }, .{ "Stopped by me", .normal }, .{ "1m", .quiet } });
 }
 
 test "row segments keep mark title and state duration on a narrow screen" {
@@ -3466,11 +3466,11 @@ test "your Sessions at work turn the spinner in step, and every other mark holds
         const turn = spinner[frame % spinner.len];
         try std.testing.expectEqualStrings(turn, markOf(text, "Mine, thinking"));
         try std.testing.expectEqualStrings(turn, markOf(text, "Mine, running"));
-        try std.testing.expectEqualStrings("?", markOf(text, "Mine, asking"));
+        try std.testing.expectEqualStrings("●", markOf(text, "Mine, asking"));
         try std.testing.expectEqualStrings("◌", markOf(text, "Mine, queued"));
-        try std.testing.expectEqualStrings("⠹", markOf(text, "Mine, retrying"));
-        try std.testing.expectEqualStrings("⠹", markOf(text, "Mine, stopping"));
-        try std.testing.expectEqualStrings("⠹", markOf(text, "Theirs, thinking"));
+        try std.testing.expectEqualStrings("◝", markOf(text, "Mine, retrying"));
+        try std.testing.expectEqualStrings("◝", markOf(text, "Mine, stopping"));
+        try std.testing.expectEqualStrings("◝", markOf(text, "Theirs, thinking"));
         try std.testing.expectEqualStrings("", markOf(text, "Theirs, finished"));
         var screen = try Frame.of(&state, 80, 24, .{}, frame);
         defer screen.deinit();
@@ -3484,7 +3484,7 @@ test "your Sessions at work turn the spinner in step, and every other mark holds
     try std.testing.expect(state.openStop("y0urs1".*) != null);
     const asked = try frameText(&state, 80, 24, .{}, 1);
     defer std.testing.allocator.free(asked);
-    try std.testing.expectEqualStrings("⠹", markOf(asked, "Mine, thinking"));
+    try std.testing.expectEqualStrings("◝", markOf(asked, "Mine, thinking"));
     for ([_]Caps{ .{ .unicode = false }, .{ .depth = .none }, .{ .unicode = false, .depth = .none }, .{} }, 0..) |caps, at| {
         if (at == 3) state.list_stale = true;
         const first = try screenText(&state, 80, 24, caps);
@@ -4035,7 +4035,7 @@ test "Host facts change only the counts line, and a row from before a restart st
     const after = try screenText(&state, 80, 24, .{});
     defer std.testing.allocator.free(after);
     try std.testing.expectEqualStrings(before[std.mem.indexOf(u8, before, " + New Session").?..], after[std.mem.indexOf(u8, after, " + New Session").?..]);
-    try std.testing.expect(std.mem.indexOf(u8, after, " ⠹ Admitted before the restart") != null);
+    try std.testing.expect(std.mem.indexOf(u8, after, " ◝ Admitted before the restart") != null);
 }
 
 test "a row from another Workspace keeps its title at every width" {
@@ -4311,7 +4311,7 @@ test "the overview lists once a second, one listing at a time" {
     try expectScreenLine(&state, 0, " + New Session");
     var screen = try Frame.of(&state, 80, 24, .{}, 0);
     defer screen.deinit();
-    try expectScreenLine(&state, 2, " ? Review PR 412                                                             3m");
+    try expectScreenLine(&state, 2, " ● Review PR 412                                                             3m");
     try std.testing.expectEqual(Colour.attention, screen.styleAt(2, 1).?.colour);
     _ = try refresh(&state, .not_modified, testToken(1), &.{});
     try expectScreenLine(&state, 0, " + New Session");
@@ -4546,7 +4546,7 @@ test "bidi controls in a title cannot reorder a row" {
 test "untrusted text cannot reach the terminal as control bytes" {
     var state = try opened(&.{session("k7m2qx", .{ .working = ago(5) }, .{ .label = "Bell\x07 and \x1b[31mred" })});
     defer state.deinit();
-    try expectScreenLine(&state, 2, " ⠹ Bell? and ?[31mred");
+    try expectScreenLine(&state, 2, " ◝ Bell? and ?[31mred");
 }
 
 test "overview idle rows never fold" {
@@ -5060,7 +5060,7 @@ test "overview one-line rows at 40 and 140 columns cover every work state" {
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         const first = (try Lines.at(arena.allocator(), &state, Lines.lineOf(&state, 0), width, .{}, 0)).?.segments;
-        const prefix = try std.fmt.allocPrint(arena.allocator(), "{s}A useful Session name", .{([_][]const u8{ "○ ", "◌ ", "⠹ ", "⠹ ", "⠹ ", "? ", "⠹ ", "", "× ", "■ " })[index]});
+        const prefix = try std.fmt.allocPrint(arena.allocator(), "{s}A useful Session name", .{([_][]const u8{ "○ ", "◌ ", "◝ ", "◝ ", "◝ ", "● ", "◝ ", "", "× ", "▪ " })[index]});
         var buffer: [8]u8 = undefined;
         const expected = [_][]const u8{ prefix, (Age{ .elapsed = listed.state.since() }).text(&buffer, state.now_ms) };
         try expectLine(first, width, expected[0..if (rules.get(shownKind(&state, &state.rows.items[0])).mark == .active) @as(usize, 1) else 2]);
@@ -6344,7 +6344,7 @@ test "approval rows require no command reads across waiting Action and conversat
 }
 
 test "list marks and ages domain covers every state age band width and list surface" {
-    try std.testing.expectEqual(@as(u64, 100), spin_interval_ms);
+    try std.testing.expectEqual(@as(u64, 200), spin_interval_ms);
     const ages = [_]struct { seconds: u64, text: []const u8 }{
         .{ .seconds = 0, .text = "now" },
         .{ .seconds = 59, .text = "now" },
@@ -6357,7 +6357,7 @@ test "list marks and ages domain covers every state age band width and list surf
         .{ .seconds = 86399, .text = "23h" },
         .{ .seconds = 86400, .text = "1d" },
     };
-    const expected_marks = [_][]const u8{ "○", "◌", "⠹", "⠹", "⠹", "?", "⠹", " ", "×", "■" };
+    const expected_marks = [_][]const u8{ "○", "◌", "◝", "◝", "◝", "●", "◝", " ", "×", "▪" };
     const expected_ascii = [_][]const u8{ "o", ":", "*", "*", "*", "?", "*", " ", "x", "#" };
     for (kind_cases, 0..) |case, kind| for (ages) |age| for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |sidebar| for ([_]bool{ false, true }) |unicode_marks| {
         var work = case.state;
@@ -6371,7 +6371,7 @@ test "list marks and ages domain covers every state age band width and list surf
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         const caps: Caps = .{ .unicode = unicode_marks };
-        const segments = ((try Lines.at(arena.allocator(), &state, Lines.lineOf(&state, 0), width, caps, 2)).?).segments;
+        const segments = ((try Lines.at(arena.allocator(), &state, Lines.lineOf(&state, 0), width, caps, 1)).?).segments;
         const text = try segmentText(arena.allocator(), segments);
         const mark = if (unicode_marks) expected_marks[kind] else expected_ascii[kind];
         const prefix = try std.fmt.allocPrint(arena.allocator(), " {s} Domain row", .{mark});
@@ -6413,7 +6413,7 @@ test "redraw deadline domain includes quota bands visible ages and eligible spin
         .{ .remaining = 86400, .text = "Quota used up. Resets in 1d.", .delay = 750 },
     };
     const Screen = enum { unicode, indexed, ascii, colourless, stale, peer };
-    for (cases) |case| for ([_]bool{ false, true }) |header| for ([_]bool{ false, true }) |ages| for ([_]bool{ false, true }) |working| for (std.enums.values(Screen)) |screen| for ([_]u64{ 1000, 1099 }) |awake_ms| for ([_]u16{ 46, 140 }) |width| {
+    for (cases) |case| for ([_]bool{ false, true }) |header| for ([_]bool{ false, true }) |ages| for ([_]bool{ false, true }) |working| for (std.enums.values(Screen)) |screen| for ([_]u64{ 1000, 1199 }) |awake_ms| for ([_]u16{ 46, 140 }) |width| {
         var state = try opened(&.{
             failedRow("quota0", 120, "provider_quota", if (case.remaining) |seconds| test_now_s + seconds else null),
             session("age000", .{ .idle = ago(50) }, .{ .label = "Age row", .yours = true }),
@@ -6434,7 +6434,7 @@ test "redraw deadline domain includes quota bands visible ages and eligible spin
         var expected: ?u64 = if (header) case.delay else null;
         if (ages) expected = @min(expected orelse 9_750, 9_750);
         if (working and (screen == .unicode or screen == .indexed)) {
-            const delay: u64 = if (awake_ms == 1000) 100 else 1;
+            const delay: u64 = if (awake_ms == 1000) 200 else 1;
             expected = @min(expected orelse delay, delay);
         }
         try std.testing.expectEqual(if (expected) |delay| @as(?u64, awake_ms + delay) else null, nextRedrawAt(&state, drawn, caps, awake_ms));

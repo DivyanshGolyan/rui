@@ -37,7 +37,7 @@ class TerminalProcessTest(unittest.TestCase):
                 capture.feed(b"\x1b[?1049h\x1b[?2026h\x1b[H Type a task\x1b[?2026l")
                 capture.resize(46, 30)
                 before = capture.reset_generation
-                capture.feed(b"\x1b[?2026h\x1b[4;2H" + "⠙".encode() + b"\x1b[?2026l" + RESIZE_RESET[:split])
+                capture.feed(b"\x1b[?2026h\x1b[4;2H" + "◜".encode() + b"\x1b[?2026l" + RESIZE_RESET[:split])
                 self.assertEqual(capture.frame_reset_generation, before)
                 capture.feed(RESIZE_RESET[split:] + paint[:-1])
                 self.assertGreater(capture.reset_generation, before)
@@ -47,7 +47,7 @@ class TerminalProcessTest(unittest.TestCase):
                 for text in ("New Session", "Working row", "Finished row", "Waiting on you row", "Failed row", "Settings"):
                     self.assertIn(text, capture.completed)
                 for _ in range(10):
-                    capture.feed(b"\x1b[?2026h\x1b[4;2H" + "⠹".encode() + b"\x1b[?2026l")
+                    capture.feed(b"\x1b[?2026h\x1b[4;2H" + "◝".encode() + b"\x1b[?2026l")
                     self.assertEqual(capture.frame_reset_generation, capture.reset_generation)
                     self.assertIn("Working row", capture.completed)
                     self.assertIn("Finished row", capture.completed)

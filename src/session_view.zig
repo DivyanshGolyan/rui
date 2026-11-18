@@ -1235,8 +1235,8 @@ test "tool header hides all body lines for every outcome and first-line split" {
         "Bash failed. Exit code: 7.\nCapture may be incomplete.\nstdout:\nhead\n[123 bytes left out]\ntail\nstderr:\n\x1b[2Jhidden\nFull stdout: /secret\nFull stderr: /secret-err\n",
     };
     const cases = .{
-        .{ protocol.ToolPresentation.Code.unresolved, "⠹ Tool call" },
-        .{ protocol.ToolPresentation.Code.pending_permission, "? Tool call" },
+        .{ protocol.ToolPresentation.Code.unresolved, "◝ Tool call" },
+        .{ protocol.ToolPresentation.Code.pending_permission, "● Tool call" },
         .{ protocol.ToolPresentation.Code.background, "✓ Tool call · background" },
         .{ protocol.ToolPresentation.Code.succeeded, "✓ Tool call" },
         .{ protocol.ToolPresentation.Code.failed, "× Tool call" ++ tool_fold.exit_open ++ "exit 7" ++ Text.link_close },
@@ -1244,9 +1244,9 @@ test "tool header hides all body lines for every outcome and first-line split" {
         .{ protocol.ToolPresentation.Code.indeterminate, "× Tool call · may have run" },
         .{ protocol.ToolPresentation.Code.storage_failed, "× Tool call · output lost" },
         .{ protocol.ToolPresentation.Code.spawn_failed, "× Tool call · could not start" },
-        .{ protocol.ToolPresentation.Code.cancelled, "■ Tool call" },
+        .{ protocol.ToolPresentation.Code.cancelled, "▪ Tool call" },
         .{ protocol.ToolPresentation.Code.infrastructure_shutdown, "× Tool call · may have run" },
-        .{ protocol.ToolPresentation.Code.denied, "■ Tool call · denied" },
+        .{ protocol.ToolPresentation.Code.denied, "▪ Tool call · denied" },
         .{ protocol.ToolPresentation.Code.unknown_tool, "× Tool call · rejected" },
         .{ protocol.ToolPresentation.Code.invalid_arguments, "× Tool call · rejected" },
     };
@@ -1391,7 +1391,7 @@ test "a descendant's ending names the agent without codes or advice" {
     try agentEnded(&sink, "9f8e7d", "provider_http_401", false);
     try agentEnded(&sink, "9f8e7d", "cancelled", false);
     try agentEnded(&sink, "bad\x1b[2J", "malformed_provider_output", false);
-    try std.testing.expectEqualStrings("× Agent 9f8e7d · Sign-in expired\n■ Agent 9f8e7d stopped\n× Agent bad\\x1b[2J · Model reply unreadable\n", out.buffered());
+    try std.testing.expectEqualStrings("× Agent 9f8e7d · Sign-in expired\n▪ Agent 9f8e7d stopped\n× Agent bad\\x1b[2J · Model reply unreadable\n", out.buffered());
 }
 
 test "an ended Turn shows one plain cause line for every failure class, and its provider's usage place for quota" {
@@ -1416,7 +1416,7 @@ test "an ended Turn shows one plain cause line for every failure class, and its 
         .{ "ResourceExceeded", null, "× Context full" },
         .{ "provider_tls_verification_failed", null, "× Provider unreachable" },
         .{ "retry_exhausted", null, "× Retries ran out" },
-        .{ "cancelled", null, "■ Stopped" },
+        .{ "cancelled", null, "▪ Stopped" },
         .{ "provider_http_400", null, "× Provider refused the request" },
         .{ "unknown\x1b[2J", null, "× Something went wrong" },
         .{ "malformed_provider_output", null, "× Model reply unreadable" },
@@ -1448,9 +1448,9 @@ test "turn and agent ending marks use their table tones" {
     try agentEnded(&sink, "9f8e7d", "malformed_provider_output", true);
     try agentEnded(&sink, "9f8e7d", "cancelled", true);
     try std.testing.expectEqualStrings("\x1b[91m×\x1b[39m Model reply unreadable\n" ++
-        "\x1b[39m■\x1b[39m Stopped\n" ++
+        "\x1b[39m▪\x1b[39m Stopped\n" ++
         "\x1b[91m×\x1b[39m Agent 9f8e7d · Model reply unreadable\n" ++
-        "\x1b[39m■\x1b[39m Agent 9f8e7d stopped\n", out.buffered());
+        "\x1b[39m▪\x1b[39m Agent 9f8e7d stopped\n", out.buffered());
 }
 
 test "ending tails are quiet and joined in destination then key order" {

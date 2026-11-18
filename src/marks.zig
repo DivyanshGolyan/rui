@@ -6,13 +6,13 @@ pub const Mark = enum { needs_you, active, queued, waiting, finished, failed, st
 pub const Tone = enum { ink, normal, quiet, attention, failure };
 
 pub const marks = std.enums.EnumArray(Mark, struct { unicode: []const u8, ascii: []const u8, tone: Tone }).init(.{
-    .needs_you = .{ .unicode = "?", .ascii = "?", .tone = .attention },
-    .active = .{ .unicode = "⠹", .ascii = "*", .tone = .ink },
+    .needs_you = .{ .unicode = "●", .ascii = "?", .tone = .attention },
+    .active = .{ .unicode = "◝", .ascii = "*", .tone = .ink },
     .queued = .{ .unicode = "◌", .ascii = ":", .tone = .quiet },
     .waiting = .{ .unicode = "○", .ascii = "o", .tone = .quiet },
     .finished = .{ .unicode = "✓", .ascii = "+", .tone = .quiet },
     .failed = .{ .unicode = "×", .ascii = "x", .tone = .failure },
-    .stopped = .{ .unicode = "■", .ascii = "#", .tone = .normal },
+    .stopped = .{ .unicode = "▪", .ascii = "#", .tone = .normal },
     .none = .{ .unicode = " ", .ascii = " ", .tone = .quiet },
     .newer = .{ .unicode = "↓", .ascii = "v", .tone = .quiet },
 });
@@ -43,18 +43,18 @@ pub fn cause(code: []const u8, provider: ?Provider) Cause {
     };
 }
 
-pub const spinner = [_][]const u8{ "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" };
+pub const spinner = [_][]const u8{ "◜", "◝", "◞", "◟" };
 
 test "marks have distinct state meanings, nonempty scripts and printable ASCII" {
     const Case = struct { mark: Mark, unicode: []const u8, ascii: []const u8, tone: Tone };
     const cases = [_]Case{
-        .{ .mark = .needs_you, .unicode = "?", .ascii = "?", .tone = .attention },
-        .{ .mark = .active, .unicode = "⠹", .ascii = "*", .tone = .ink },
+        .{ .mark = .needs_you, .unicode = "●", .ascii = "?", .tone = .attention },
+        .{ .mark = .active, .unicode = "◝", .ascii = "*", .tone = .ink },
         .{ .mark = .queued, .unicode = "◌", .ascii = ":", .tone = .quiet },
         .{ .mark = .waiting, .unicode = "○", .ascii = "o", .tone = .quiet },
         .{ .mark = .finished, .unicode = "✓", .ascii = "+", .tone = .quiet },
         .{ .mark = .failed, .unicode = "×", .ascii = "x", .tone = .failure },
-        .{ .mark = .stopped, .unicode = "■", .ascii = "#", .tone = .normal },
+        .{ .mark = .stopped, .unicode = "▪", .ascii = "#", .tone = .normal },
         .{ .mark = .none, .unicode = " ", .ascii = " ", .tone = .quiet },
         .{ .mark = .newer, .unicode = "↓", .ascii = "v", .tone = .quiet },
     };
@@ -71,10 +71,12 @@ test "marks have distinct state meanings, nonempty scripts and printable ASCII" 
     }
     try std.testing.expect(seen.eql(.full));
     var still_frame = false;
-    for (spinner) |frame| {
+    const expected_frames = [_][]const u8{ "◜", "◝", "◞", "◟" };
+    for (spinner, expected_frames) |frame, expected| {
+        try std.testing.expectEqualStrings(expected, frame);
         if (std.mem.eql(u8, frame, marks.get(.active).unicode)) still_frame = true;
     }
-    try std.testing.expectEqual(@as(usize, 10), spinner.len);
+    try std.testing.expectEqual(@as(usize, 4), spinner.len);
     try std.testing.expect(still_frame);
 }
 

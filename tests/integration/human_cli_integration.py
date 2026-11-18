@@ -36,7 +36,7 @@ def untimed(row):
     return match.group(1) if match else row
 
 
-LIVE_LINE = re.compile(r"^(?:[⠹◌?] .+ · (?:\d|retry )|Stopping…)", re.M)
+LIVE_LINE = re.compile(r"^(?:[◝◌●] .+ · (?:\d|retry )|Stopping…)", re.M)
 REASON = "enter denies the call and sends this"
 REASON_NOT_READY = "! Not ready; nothing denied · " + REASON
 
@@ -48,7 +48,7 @@ def reason_shown(shown):
 def send_reason(master, ready, description):
     shown = action_ready(ready, master, shows=reason_shown)
     os.write(master, b"\r")
-    return shown + read_terminal(master, f"■ {description} · denied")
+    return shown + read_terminal(master, f"▪ {description} · denied")
 
 
 def time_limit(milliseconds):
@@ -594,7 +594,7 @@ def conversation_wait_oracles():
     marker = "edited 2"
     for wide in (False, True):
         def rows(answer, draft="", listed=marker):
-            chat = ["", answer, "⠹ Waiting" if answer != marker else "", "› " + draft]
+            chat = ["", answer, "◝ Waiting" if answer != marker else "", "› " + draft]
             return ([f"{left:20}┆ {right}" for left, right in zip(
                 ("+ New Session", listed, "", ""), chat)] if wide else [" " + row for row in chat])
 
@@ -1087,7 +1087,7 @@ def silent_read_edit_cases():
 
 
 def wait_for_listed_call(tty):
-    running = re.compile(r"[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Held call *")
+    running = re.compile(r"[◜◝◞◟] Held call *")
     tty.wait(predicate=lambda: any(running.fullmatch(row) for row in conversation_text(tty.capture.completed).splitlines()), timeout=30)
 
 
@@ -1100,9 +1100,9 @@ def listed_call_readiness_cases():
             self.frames = (
                 "   Held call                  now",
                 " ◌ Held call                  now",
-                " ⠹ Other call",
-                "prefix ⠹ Held call",
-                " ⠹ Held call                  now",
+                " ◝ Other call",
+                "prefix ◝ Held call",
+                " ◝ Held call                  now",
                 " " + spinner + " Held call",
             )
             self.offered = None
@@ -1119,7 +1119,7 @@ def listed_call_readiness_cases():
                     return self.capture.completed
             raise AssertionError(("running listed call was not accepted", self.capture.completed))
 
-    for spinner in "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏":
+    for spinner in "◜◝◞◟":
         tty = OfferedFrames(spinner)
         wait_for_listed_call(tty)
         assert tty.offered == len(tty.frames) - 1, ("listed call accepted before current running row", tty.capture.completed)
@@ -1363,7 +1363,7 @@ def renderer_cases():
         master, writer = os.pipe()
         try:
             tty = Terminal(master, None, None)
-            os.write(writer, terminal_frame(["   + New Session ┆", "    edited 2      ┆ edited 1", "                  ┆ ⠹ Waiting"])
+            os.write(writer, terminal_frame(["   + New Session ┆", "    edited 2      ┆ edited 1", "                  ┆ ◝ Waiting"])
                 + terminal_frame(["   + New Session ┆", "    edited 2      ┆ edited 2", "                  ┆ ›"]))
             observed = tty.wait("edited 2", after=0)
             assert "\nedited 2" in conversation_text(observed), observed
