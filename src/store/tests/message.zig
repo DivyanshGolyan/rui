@@ -762,7 +762,8 @@ test "failed message import rolls back content command and admission" {
     }.run);
 }
 
-test "compound Message retains ordered input across replay and saved refusal" {
+test "INS-12 every public reader projects parts with their owner" {
+    // Also: a compound Message retains ordered input across replay and saved refusal.
     // Keep the exercised owner set in sync with schema annotations.
     comptime {
         const expected = [_][]const u8{
@@ -828,11 +829,30 @@ test "compound Message retains ordered input across replay and saved refusal" {
             const observed = try store_testing.observeCommandForTesting(&storage, command.key.slice());
             try std.testing.expectEqual(@import("../../input_parts.zig").Form.parts, observed.kind.message.?.form);
             try std.testing.expect(!storage.isFenced());
+            const admission = try store_testing.queryU64(&storage, "SELECT admission_id FROM message_admission WHERE command_key='compound-message'", .{});
+            var owner_buffer: [20]u8 = undefined;
+            const parts_value: @import("../../content_value.zig").Value = .{ .parts = .{ .identity = accepted.accepted.content, .owner = .{ .message = admission } } };
             for ([_]protocol.ReportProfile{ .current, .full }) |profile| {
-                try std.testing.expectError(error.InputPartsNotSupported, shared_fixtures.testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, profile));
+                const report = try shared_fixtures.testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, profile);
+                defer std.testing.allocator.free(report);
+                try expectPartsOwner(report, "message", admission);
+            }
+            {
+                const page = try store_core.activityPageForTesting(&storage, .{ .session = session });
+                var shown: usize = 0;
+                for (page.items[0..page.count]) |item| if (item.value == .admission) {
+                    try std.testing.expectEqualDeep(parts_value, item.value.admission.content);
+                    shown += 1;
+                };
+                try std.testing.expectEqual(@as(usize, 1), shown);
+                try std.testing.expectEqualDeep(@as(?@import("../../content_value.zig").Value, parts_value), page.queued.newest_content);
             }
             const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-            try std.testing.expectError(error.InputPartsNotSupported, store_core.publicConversationPageForTesting(&storage, .{ .session = session }));
+            {
+                const page = try store_core.publicConversationPageForTesting(&storage, .{ .session = session });
+                try std.testing.expectEqualDeep(parts_value, page.items[0].content);
+                try std.testing.expectError(error.ContentIsParts, storage.openPublicConversationContent(&.{ .session = session, .position = page.items[0].position, .ordinal = 0 }));
+            }
             var historical: store_testing.TestingPage = undefined;
             historical.open(&storage, binding);
             defer historical.close();
@@ -876,8 +896,24 @@ test "compound Message retains ordered input across replay and saved refusal" {
             // Both admission and conversation retain the same compound value.
             try std.testing.expectEqual(id, try store_testing.queryU64(&storage, "SELECT content_id FROM message_admission WHERE command_key='compound-message'", .{}));
             try std.testing.expectEqual(id, try store_testing.queryU64(&storage, "SELECT content_id FROM conversation_entry WHERE session_ref=?1 AND entry_kind=1", .{session.slice()}));
-            try std.testing.expectError(error.InputPartsNotSupported, testingListRow(&storage, &tmp, session.slice()));
-            try std.testing.expectError(error.InputPartsNotSupported, store_core.activityPageForTesting(&storage, .{ .session = session }));
+            {
+                var listed = try testingListRow(&storage, &tmp, session.slice());
+                defer listed.parsed.deinit();
+                const content = listed.row.object.get("first_message").?.object.get("content").?.object;
+                try std.testing.expectEqualStrings("parts", content.get("type").?.string);
+                try std.testing.expect(std.mem.eql(u8, content.get("owner").?.object.get("message").?.string, try std.fmt.bufPrint(&owner_buffer, "{d}", .{admission})));
+                const page = try store_core.activityPageForTesting(&storage, .{ .session = session });
+                var shown: usize = 0;
+                for (page.items[0..page.count]) |item| switch (item.value) {
+                    .admission, .user => |message| {
+                        try std.testing.expectEqualDeep(parts_value, message.content);
+                        try std.testing.expectError(error.ContentIsParts, storage.openActivityContent(&.{ .session = session, .position = item.position, .ordinal = 0 }));
+                        shown += 1;
+                    },
+                    else => {},
+                };
+                try std.testing.expectEqual(@as(usize, 2), shown);
+            }
 
             // Exercise each Action value column in a session whose Message is text.
             const action_session = try shared_fixtures.configureTestSessionAsk(&storage, "compound-action-config");
@@ -899,13 +935,16 @@ test "compound Message retains ordered input across replay and saved refusal" {
             const old_result = try store_testing.queryU64(&storage, "SELECT resolution_content_id FROM action_operation WHERE action_id=?1", .{resolved_action});
             try store_testing.exec(&storage, "UPDATE action_operation SET resolution_content_id=?1 WHERE action_id=?2", .{ id, resolved_action });
             var result: @import("../../action_read.zig").Read = undefined;
-            try std.testing.expectError(error.InputPartsNotSupported, storage.readAction(&.{ .session = action_session, .action_id = resolved_action }, &result));
-            try std.testing.expectError(error.InputPartsNotSupported, shared_fixtures.testingSessionReportWithProfile(&storage, &tmp, action_session.slice(), 1024 * 1024, .current));
-            try std.testing.expectError(error.InputPartsNotSupported, shared_fixtures.testingSessionReportWithProfile(&storage, &tmp, action_session.slice(), 1024 * 1024, .full));
+            try storage.readAction(&.{ .session = action_session, .action_id = resolved_action }, &result);
+            try std.testing.expectEqualDeep(@import("../../content_value.zig").Value{ .parts = .{ .identity = accepted.accepted.content, .owner = .{ .action = resolved_action } } }, result.status.resolved_parts.content);
+            for ([_]protocol.ReportProfile{ .current, .full }) |profile| {
+                const report = try shared_fixtures.testingSessionReportWithProfile(&storage, &tmp, action_session.slice(), 1024 * 1024, profile);
+                defer std.testing.allocator.free(report);
+                try expectPartsOwner(report, "action", resolved_action);
+            }
             try store_testing.exec(&storage, "UPDATE action_operation SET resolution_content_id=?1 WHERE action_id=?2", .{ old_result, resolved_action });
             try store_testing.exec(&storage, "UPDATE action_operation SET background_content_id=?1 WHERE action_id=?2", .{ id, background_action });
-            try std.testing.expectError(error.InputPartsNotSupported, shared_fixtures.testingSessionReportWithProfile(&storage, &tmp, action_session.slice(), 1024 * 1024, .full));
-            try std.testing.expectError(error.InputPartsNotSupported, store_core.activityPageForTesting(&storage, .{ .session = action_session }));
+            try std.testing.expect(!storage.isFenced());
             const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             var action_history: store_testing.TestingPage = undefined;
             action_history.open(&storage, continuation);
@@ -948,8 +987,22 @@ test "compound Message retains ordered input across replay and saved refusal" {
             try std.testing.expect(replayed_single == .accepted and replayed_single.accepted.replayed);
             const single_id = try store_testing.queryU64(&storage, "SELECT primary_content_id FROM core_command WHERE command_key='single-text-key'", .{});
             try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT form FROM content WHERE content_id=?1", .{single_id}));
+
+            // A background notice has no owner, so a parts value there is damage, and it fences.
+            try std.testing.expectError(error.CorruptStore, store_core.activityPageForTesting(&storage, .{ .session = action_session }));
+            try std.testing.expect(storage.isFenced());
         }
     }.run);
+}
+
+/// The report names a parts value owned by `kind` `id`.
+fn expectPartsOwner(report: []const u8, comptime kind: []const u8, id: u64) !void {
+    var buffer: [64]u8 = undefined;
+    const owner = try std.fmt.bufPrint(&buffer, "\"owner\":{{\"" ++ kind ++ "\":\"{d}\"}}", .{id});
+    if (std.mem.indexOf(u8, report, owner) == null) {
+        std.debug.print("missing {s} in {s}\n", .{ owner, report });
+        return error.TestUnexpectedResult;
+    }
 }
 
 test "creating captured Messages reuse matching configuration content" {

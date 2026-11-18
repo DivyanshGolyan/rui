@@ -976,7 +976,7 @@ pub const Store = struct {
         defer entry.release();
         var access: ReadAccess = .open(&entry);
         defer access.deinit();
-        return entry.finish(Ordinary.content, reads_domain.openActivityContent(&access, request));
+        return entry.finish(Ordinary.activity_content, reads_domain.openActivityContent(&access, request));
     }
 
     pub fn activityTool(self: *Store, request: *const activity_read.ReadActivityContent) !reads_domain.ActivityTool {
@@ -1096,19 +1096,15 @@ pub const Store = struct {
     }
 
     pub fn readAction(self: *Store, request: *const @import("../action_read.zig").Request, out: *@import("../action_read.zig").Read) !void {
-        return self.queue().run(readActionHeld, .{ self, request, action_read_domain.Projection.bytes, out });
+        return self.queue().run(readActionHeld, .{ self, request, out });
     }
 
-    pub fn readActionForTool(self: *Store, request: *const @import("../action_read.zig").Request, out: *@import("../action_read.zig").Read) !void {
-        return self.queue().run(readActionHeld, .{ self, request, action_read_domain.Projection.model_tool, out });
-    }
-
-    fn readActionHeld(self: *Store, request: *const @import("../action_read.zig").Request, projection: action_read_domain.Projection, out: *@import("../action_read.zig").Read) !void {
+    fn readActionHeld(self: *Store, request: *const @import("../action_read.zig").Request, out: *@import("../action_read.zig").Read) !void {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: ReadAccess = .open(&entry);
         defer access.deinit();
-        return entry.finish(Ordinary.action_read, action_read_domain.actionRead(&access, request, projection, out));
+        return entry.finish(Ordinary.action_read, action_read_domain.actionRead(&access, request, out));
     }
 
     pub fn actionArguments(self: *Store, session_ref: []const u8, action_id: u64) !ContentReference {
@@ -1959,13 +1955,15 @@ fn destroyRing(ring: *change_ring.Ring) void {
 
 pub const Ordinary = struct {
     pub const none = error{};
-    const page = error{ SessionNotFound, InvalidCursor, InputPartsNotSupported };
-    const content = error{ ContentNotFound, InputPartsNotSupported };
-    const public_content = error{ ContentNotFound, RangeOutOfBounds, InputPartsNotSupported };
+    const page = error{ SessionNotFound, InvalidCursor };
+    const content = error{ContentNotFound};
+    const activity_content = content || error{ContentIsParts};
+    /// A text route on a parts value refuses it as ordinary: the parts routes serve it.
+    const public_content = error{ ContentNotFound, RangeOutOfBounds, ContentIsParts };
     const public_parts = error{ ContentNotFound, ContentIsText };
     const public_part = public_parts || error{RangeOutOfBounds};
     pub const action = error{ActionNotFound};
-    pub const action_read = action || error{ InvalidCursor, InputPartsNotSupported };
+    pub const action_read = action || error{InvalidCursor};
     const result = error{ ResultNotFound, ResultNotReady, ResultFailed };
     pub const attempt_binding = error{ StaleAttemptBinding, SupersededByControl };
     pub const historical_entry = error{ HistoricalPending, InputPartsNotSupported };
@@ -2052,7 +2050,7 @@ pub const Entry = struct {
     fn finishCapture(self: Entry, ordinary: bool, result: anytype) @TypeOf(result) {
         comptime assertSmallResult(@TypeOf(result));
         return result catch |err| {
-            if (ordinary or err == error.InputPartsNotSupported) return err;
+            if (ordinary) return err;
             return fence(self.store, err);
         };
     }

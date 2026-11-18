@@ -620,7 +620,7 @@ export interface components {
                     admitted_at: components["schemas"]["Decimal"];
                     sender: components["schemas"]["NamedPeer"] | null;
                     source_action: components["schemas"]["Decimal"] | null;
-                    content: components["schemas"]["ActivityItemContent"];
+                    content: components["schemas"]["ContentValue"];
                 };
             };
         } | {
@@ -637,7 +637,7 @@ export interface components {
                     admitted_at: components["schemas"]["Decimal"];
                     sender: components["schemas"]["NamedPeer"] | null;
                     source_action: components["schemas"]["Decimal"] | null;
-                    content: components["schemas"]["ActivityItemContent"];
+                    content: components["schemas"]["ContentValue"];
                 };
             };
         } | {
@@ -646,7 +646,7 @@ export interface components {
             at: components["schemas"]["Decimal"];
             value: {
                 assistant: {
-                    content: components["schemas"]["ActivityItemContent"];
+                    content: components["schemas"]["ContentValue"];
                     final: boolean;
                 };
             };
@@ -663,9 +663,9 @@ export interface components {
                     /** @enum {unknown} */
                     rejection: "unknown_tool" | "invalid_arguments" | null;
                     fields: [
-                        components["schemas"]["ActivityItemContent"],
-                        components["schemas"]["ActivityItemContent"],
-                        components["schemas"]["ActivityItemContent"]
+                        components["schemas"]["ContentValue"],
+                        components["schemas"]["ContentValue"],
+                        components["schemas"]["ContentValue"]
                     ];
                     description: string | null;
                     tool: string | null;
@@ -678,7 +678,7 @@ export interface components {
             at: components["schemas"]["Decimal"];
             value: {
                 tool_result: {
-                    content: components["schemas"]["ActivityItemContent"];
+                    content: components["schemas"]["ContentValue"];
                     presentation: components["schemas"]["ToolPresentation"];
                 };
             };
@@ -703,7 +703,7 @@ export interface components {
                     /** @enum {string} */
                     ending: "done" | "context_full" | "provider_refused" | "provider_unavailable" | "stopped" | "interrupted" | "failed";
                     code: string;
-                    content: components["schemas"]["ActivityItemContent"] | null;
+                    content: components["schemas"]["ContentValue"] | null;
                 };
             };
         } | {
@@ -728,7 +728,7 @@ export interface components {
                     admission: components["schemas"]["Decimal"];
                     admitted_at: components["schemas"]["Decimal"];
                     target: components["schemas"]["NamedPeer"];
-                    content: components["schemas"]["ActivityItemContent"];
+                    content: components["schemas"]["ContentValue"];
                 };
             };
         } | {
@@ -756,7 +756,7 @@ export interface components {
                     admitted_at: components["schemas"]["Decimal"];
                     sender: components["schemas"]["NamedPeer"] | null;
                     source_action: components["schemas"]["Decimal"] | null;
-                    content: components["schemas"]["ActivityItemContent"];
+                    content: components["schemas"]["ContentValue"];
                 };
             };
         } | {
@@ -814,10 +814,6 @@ export interface components {
                 };
             };
         };
-        ActivityItemContent: {
-            bytes: components["schemas"]["Decimal"];
-            sha256: string;
-        };
         ActivityPageReply: {
             /** @constant */
             version: "21";
@@ -868,6 +864,7 @@ export interface components {
             snippet: string;
             offset: components["schemas"]["Decimal"];
             length: components["schemas"]["Decimal"];
+            part: components["schemas"]["Decimal"] | null;
         };
         ActivitySearchItem: {
             position: components["schemas"]["Decimal"];
@@ -1081,23 +1078,13 @@ export interface components {
                 ordinal: components["schemas"]["Decimal"];
                 /** @constant */
                 kind: "user";
-                content: {
-                    bytes: components["schemas"]["Decimal"];
-                    sha256: string;
-                    /** @constant */
-                    display: "omitted";
-                };
+                content: components["schemas"]["ContentValue"];
             } | {
                 position: components["schemas"]["Decimal"];
                 ordinal: components["schemas"]["Decimal"];
                 /** @constant */
                 kind: "user";
-                content: {
-                    bytes: components["schemas"]["Decimal"];
-                    sha256: string;
-                    /** @constant */
-                    display: "omitted";
-                };
+                content: components["schemas"]["ContentValue"];
                 admitted_at: components["schemas"]["Decimal"];
                 sender: components["schemas"]["NamedPeer"] | null;
                 source_action: components["schemas"]["Decimal"] | null;
@@ -1106,34 +1093,19 @@ export interface components {
                 ordinal: components["schemas"]["Decimal"];
                 /** @constant */
                 kind: "assistant";
-                content: {
-                    bytes: components["schemas"]["Decimal"];
-                    sha256: string;
-                    /** @constant */
-                    display: "omitted";
-                };
+                content: components["schemas"]["ContentValue"];
             } | {
                 position: components["schemas"]["Decimal"];
                 ordinal: components["schemas"]["Decimal"];
                 /** @constant */
                 kind: "tool_result";
-                content: {
-                    bytes: components["schemas"]["Decimal"];
-                    sha256: string;
-                    /** @constant */
-                    display: "omitted";
-                };
+                content: components["schemas"]["ContentValue"];
             } | {
                 position: components["schemas"]["Decimal"];
                 ordinal: components["schemas"]["Decimal"];
                 /** @constant */
                 kind: "tool_result";
-                content: {
-                    bytes: components["schemas"]["Decimal"];
-                    sha256: string;
-                    /** @constant */
-                    display: "omitted";
-                };
+                content: components["schemas"]["ContentValue"];
                 presentation: components["schemas"]["ToolPresentation"];
             } | {
                 position: components["schemas"]["Decimal"];
@@ -1162,23 +1134,13 @@ export interface components {
                 ordinal: components["schemas"]["Decimal"];
                 /** @constant */
                 kind: "user";
-                content: {
-                    bytes: components["schemas"]["Decimal"];
-                    sha256: string;
-                    /** @constant */
-                    display: "omitted";
-                };
+                content: components["schemas"]["ContentValue"];
             } | {
                 position: components["schemas"]["Decimal"];
                 ordinal: components["schemas"]["Decimal"];
                 /** @constant */
                 kind: "user";
-                content: {
-                    bytes: components["schemas"]["Decimal"];
-                    sha256: string;
-                    /** @constant */
-                    display: "omitted";
-                };
+                content: components["schemas"]["ContentValue"];
                 admitted_at: components["schemas"]["Decimal"];
                 sender: components["schemas"]["NamedPeer"] | null;
                 source_action: components["schemas"]["Decimal"] | null;
@@ -1187,34 +1149,19 @@ export interface components {
                 ordinal: components["schemas"]["Decimal"];
                 /** @constant */
                 kind: "assistant";
-                content: {
-                    bytes: components["schemas"]["Decimal"];
-                    sha256: string;
-                    /** @constant */
-                    display: "omitted";
-                };
+                content: components["schemas"]["ContentValue"];
             } | {
                 position: components["schemas"]["Decimal"];
                 ordinal: components["schemas"]["Decimal"];
                 /** @constant */
                 kind: "tool_result";
-                content: {
-                    bytes: components["schemas"]["Decimal"];
-                    sha256: string;
-                    /** @constant */
-                    display: "omitted";
-                };
+                content: components["schemas"]["ContentValue"];
             } | {
                 position: components["schemas"]["Decimal"];
                 ordinal: components["schemas"]["Decimal"];
                 /** @constant */
                 kind: "tool_result";
-                content: {
-                    bytes: components["schemas"]["Decimal"];
-                    sha256: string;
-                    /** @constant */
-                    display: "omitted";
-                };
+                content: components["schemas"]["ContentValue"];
                 presentation: components["schemas"]["ToolPresentation"];
             } | {
                 position: components["schemas"]["Decimal"];
@@ -1258,7 +1205,7 @@ export interface components {
             admission: components["schemas"]["Decimal"];
             admitted_at: components["schemas"]["Decimal"];
             sender: components["schemas"]["Peer"] | null;
-            content: components["schemas"]["ActivityItemContent"];
+            content: components["schemas"]["ContentValue"];
         };
         HostInfoReply: {
             /** @constant */
@@ -4138,6 +4085,7 @@ export interface components {
             oldest_position: components["schemas"]["Decimal"];
             newest_admission: components["schemas"]["Decimal"];
             newest_position: components["schemas"]["Decimal"];
+            newest_content: components["schemas"]["ContentValue"] | null;
         };
         ReadActionArgumentsRequest: {
             /** @constant */
@@ -4179,10 +4127,7 @@ export interface components {
             final: {
                 position: components["schemas"]["Decimal"];
                 code: string;
-                content: {
-                    bytes: components["schemas"]["Decimal"];
-                    sha256: string;
-                };
+                content: components["schemas"]["ContentValue"];
                 window: {
                     offset: components["schemas"]["Decimal"];
                     next: components["schemas"]["Decimal"];
@@ -4536,7 +4481,7 @@ export interface components {
         };
         domainreportCurrentJsonOutcome: {
             code: string;
-            content: components["schemas"]["ActivityItemContent"] | null;
+            content: components["schemas"]["ContentValue"] | null;
         };
         domainreportCurrentJsonRecent: {
             turn: components["schemas"]["Decimal"];
@@ -4548,10 +4493,10 @@ export interface components {
             call_ordinal: components["schemas"]["Decimal"];
             code: string;
             acceptance_position: components["schemas"]["Decimal"];
-            result: components["schemas"]["domainreportCurrentJsonTextReference"];
-            name: components["schemas"]["domainreportCurrentJsonTextReference"];
-            call_id: components["schemas"]["domainreportCurrentJsonTextReference"];
-            arguments: components["schemas"]["domainreportCurrentJsonTextReference"];
+            result: components["schemas"]["ContentValue"];
+            name: components["schemas"]["ContentValue"];
+            call_id: components["schemas"]["ContentValue"];
+            arguments: components["schemas"]["ContentValue"];
             presentation: components["schemas"]["ToolPresentation"];
         };
         domainreportCurrentJsonRejectedCalls: {
@@ -4564,7 +4509,7 @@ export interface components {
             call_ordinal: components["schemas"]["Decimal"];
             code: string;
             acceptance_position: components["schemas"]["Decimal"];
-            result: components["schemas"]["domainreportCurrentJsonTextReference"];
+            result: components["schemas"]["ContentValue"];
             presentation: components["schemas"]["ToolPresentation"];
         };
         domainreportCurrentJsonSettings: {
@@ -4590,16 +4535,10 @@ export interface components {
             loaded_tools: string[];
             /** @enum {string} */
             permission_mode: "ask" | "bypass";
-            instructions: components["schemas"]["ActivityItemContent"];
-            output_schema: components["schemas"]["ActivityItemContent"] | null;
+            instructions: components["schemas"]["ContentValue"];
+            output_schema: components["schemas"]["ContentValue"] | null;
             label: string | null;
             created_at: components["schemas"]["Decimal"];
-        };
-        domainreportCurrentJsonTextReference: {
-            /** @constant */
-            type: "text";
-            bytes: components["schemas"]["Decimal"];
-            sha256: string;
         };
         domainreportCurrentJsonUnresolved: {
             action: components["schemas"]["Decimal"];
@@ -4610,8 +4549,8 @@ export interface components {
             permission_revision: components["schemas"]["Decimal"];
             /** @enum {string} */
             authorization: "core" | "pending" | "bypass" | "allow_once";
-            call_id: components["schemas"]["domainreportCurrentJsonTextReference"];
-            arguments: components["schemas"]["domainreportCurrentJsonTextReference"];
+            call_id: components["schemas"]["ContentValue"];
+            arguments: components["schemas"]["ContentValue"];
             presentation: components["schemas"]["ToolPresentation"];
         } | {
             action: components["schemas"]["Decimal"];
@@ -4621,9 +4560,9 @@ export interface components {
             permission_revision: components["schemas"]["Decimal"];
             /** @enum {string} */
             authorization: "core" | "pending" | "bypass" | "allow_once";
-            call_id: components["schemas"]["domainreportCurrentJsonTextReference"];
+            call_id: components["schemas"]["ContentValue"];
             server: string;
-            arguments: components["schemas"]["domainreportCurrentJsonTextReference"];
+            arguments: components["schemas"]["ContentValue"];
             presentation: components["schemas"]["ToolPresentation"];
         };
         domainreportCurrentJsonWork: {
@@ -4668,7 +4607,7 @@ export interface components {
             /** @enum {string} */
             permission: "denied" | "authorized" | "requested";
             resolution: string | null;
-            result: components["schemas"]["domainreport_full_shapeFullInline"] | null;
+            result: components["schemas"]["domainreport_full_shapeFullStored"] | null;
             acceptance_position: components["schemas"]["Decimal"] | null;
         };
         domainreport_full_shapeFullCall: {
@@ -4693,7 +4632,7 @@ export interface components {
             source_catalog_position: components["schemas"]["Decimal"] | null;
             source_skill_position: components["schemas"]["Decimal"] | null;
             source_operation: components["schemas"]["Decimal"] | null;
-            content: components["schemas"]["ActivityItemContent"];
+            content: components["schemas"]["ContentValue"];
         };
         domainreport_full_shapeFullDecision: {
             command_key: string;
@@ -4728,7 +4667,7 @@ export interface components {
         domainreport_full_shapeFullMessage: {
             admission: components["schemas"]["Decimal"];
             command_key: string;
-            content: components["schemas"]["domainreport_full_shapeFullInline"];
+            content: components["schemas"]["domainreport_full_shapeFullStored"];
             turn: components["schemas"]["Decimal"] | null;
             /** @enum {string} */
             application: "applied" | "pending" | "excluded";
@@ -4749,7 +4688,7 @@ export interface components {
         };
         domainreport_full_shapeFullOutcome: {
             code: string;
-            content: components["schemas"]["ActivityItemContent"] | null;
+            content: components["schemas"]["ContentValue"] | null;
         };
         domainreport_full_shapeFullResolution: {
             code: string;
@@ -4761,7 +4700,7 @@ export interface components {
             acceptance_position: components["schemas"]["Decimal"];
             call_id: components["schemas"]["domainreport_full_shapeFullInline"];
             code: string;
-            result: components["schemas"]["domainreport_full_shapeFullInline"];
+            result: components["schemas"]["domainreport_full_shapeFullStored"];
         };
         domainreport_full_shapeFullRevision: {
             revision: components["schemas"]["Decimal"];
@@ -4807,6 +4746,20 @@ export interface components {
             code: string;
             selected_turn: components["schemas"]["Decimal"] | null;
             admission_cutoff: components["schemas"]["Decimal"] | null;
+        };
+        domainreport_full_shapeFullStored: {
+            /** @constant */
+            type: "text";
+            bytes: components["schemas"]["Decimal"];
+            sha256: string;
+            /** @description Text of any length, saved as content. */
+            text: string;
+        } | {
+            /** @constant */
+            type: "parts";
+            bytes: components["schemas"]["Decimal"];
+            sha256: string;
+            owner: components["schemas"]["PartOwner"];
         };
         domainreport_full_shapeFullTurn: {
             turn: components["schemas"]["Decimal"];

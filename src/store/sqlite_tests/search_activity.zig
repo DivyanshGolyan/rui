@@ -200,3 +200,45 @@ test "searchActivity fences missing assistant entries only in its scanned range"
     try std.testing.expectError(error.CorruptStore, storage.searchActivity(&request, result));
     try std.testing.expect(storage.isFenced());
 }
+
+test "INS-8 searchActivity matches Text parts, names each part and skips Image bytes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const session = try configureTestSession(&storage, "search-parts");
+    const png = @embedFile("../../codecs/fixtures/image-input/pixel.png");
+    // The query straddles the boundary between the first two Text parts, and appears in the PNG.
+    try store_testing.submitTestMessageParts(&storage, &tmp, "search-parts", session.slice(), &.{
+        .{ .bytes = "a nee" }, .{ .bytes = "dle é needle" }, .{ .bytes = png, .kind = .{ .image = .{} } }, .{ .bytes = "IHDR needle" },
+    });
+    const result = try arena.create(protocol.ActivitySearchFacts);
+    var request: protocol.ActivitySearch = .{ .session = session, .kinds = .initOne(.admission) };
+    try request.query.set("NEEDLE");
+    try storage.searchActivity(&request, result);
+    try std.testing.expectEqual(@as(usize, 1), result.count);
+    const item = &result.items[0];
+    try std.testing.expectEqual(@as(usize, 2), item.count);
+    for (item.hits[0..item.count], [_]u32{ 1, 3 }, [_][]const u8{ "dle é needle", "IHDR needle" }) |*hit, part, snippet| {
+        try std.testing.expectEqual(@as(?u32, part), hit.part);
+        try std.testing.expectEqualStrings(snippet, hit.snippet.slice());
+        try std.testing.expectEqualStrings("needle", hit.snippet.slice()[hit.offset..][0..hit.length]);
+    }
+    try request.query.set("IHDR");
+    try storage.searchActivity(&request, result);
+    try std.testing.expectEqual(@as(usize, 1), result.count);
+    try std.testing.expectEqual(@as(?u32, 3), result.items[0].hits[0].part);
+    try std.testing.expectEqual(@as(usize, 1), result.items[0].count);
+
+    // The manifest pass is charged to the scan budget before any part.
+    const manifest = try store_testing.queryU64(&storage, "SELECT byte_length FROM content WHERE content_id=(SELECT content_id FROM message_admission WHERE command_key='search-parts')", .{});
+    const text_bytes = "a nee".len + "dle é needle".len + "IHDR needle".len;
+    const before = storage.testing_content_work.read.load(.monotonic);
+    try storage.searchActivity(&request, result);
+    try std.testing.expectEqual(manifest + text_bytes, storage.testing_content_work.read.load(.monotonic) - before);
+    try std.testing.expect(!storage.isFenced());
+}

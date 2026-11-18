@@ -23,9 +23,8 @@ const metadata = rsql.Read(.{
     .cardinality = .optional,
 });
 
-pub const Projection = enum { bytes, model_tool };
-
-pub fn actionRead(a: anytype, request: *const read.Request, projection: Projection, out: *read.Read) !void {
+/// Native and model reads agree: a parts Resolution is its owned parts value with no window.
+pub fn actionRead(a: anytype, request: *const read.Request, out: *read.Read) !void {
     if (request.action_id == 0 or request.action_id > std.math.maxInt(i64)) return error.ActionNotFound;
     var selected: metadata.Result = null;
     a.read(metadata, .{ .session = request.session.slice(), .action_id = request.action_id }, &selected);
@@ -41,8 +40,6 @@ pub fn actionRead(a: anytype, request: *const read.Request, projection: Projecti
         return;
     };
     if (final.value.reference == .parts) {
-        try @import("content_parts.zig").verify(a, final.value);
-        if (projection == .bytes) return error.InputPartsNotSupported;
         if (request.offset != 0) return error.InvalidCursor;
         out.status = .{ .resolved_parts = final.resolution };
         out.status.resolved_parts.content = .{ .parts = .{ .identity = final.location.reference, .owner = .{ .action = request.action_id } } };

@@ -253,6 +253,14 @@ fn writeOptionalText(capture: anytype, value: ?session_report.Text, text: anytyp
     if (value) |content| try writeText(capture, content, text) else try capture.append("null");
 }
 
+/// Text is inlined; a parts value is its `ContentValue`, whose owner addresses its parts.
+fn writeStored(capture: anytype, value: session_report.Stored, text: anytype) !void {
+    switch (value) {
+        .text => |content| try writeText(capture, content, text),
+        .parts => |parts| try appendShape(capture, .{H{ .json = Reference }}, .{Reference{ .value = .{ .parts = parts } }}),
+    }
+}
+
 fn TextSink(comptime Capture: type) type {
     return struct {
         capture: Capture,
@@ -269,7 +277,7 @@ fn TextSink(comptime Capture: type) type {
 fn writeMessage(capture: anytype, message: *const session_report.Message, text: anytype) !void {
     const shape = FullJson.Message;
     try appendShape(capture, shape.head, .{ message.admission, message.command_key });
-    try writeText(capture, message.content, text);
+    try writeStored(capture, message.content, text);
     switch (message.application) {
         .applied => |applied| {
             try appendShape(capture, shape.application, .{ applied.turn, session_report.Application.applied, @as(?FullJson.Exclusion, null) });
@@ -294,7 +302,7 @@ fn writeConversation(capture: anytype, entry: *const session_report.Conversation
         entry.source_catalog_position,
         entry.source_skill_position,
         entry.source_operation,
-        reference(entry.content),
+        Reference{ .value = entry.content },
     });
 }
 
@@ -322,7 +330,7 @@ fn writeCall(capture: anytype, call: *const session_report.Call, text: anytype) 
 fn writeAction(capture: anytype, action: *const session_report.Action, text: anytype) !void {
     const shape = FullJson.Action;
     try appendShape(capture, shape.head, .{ action.action, action.parent_operation, action.call_ordinal, action.permission_revision, action.permission, action.resolution });
-    try writeOptionalText(capture, action.result, text);
+    if (action.result) |result| try writeStored(capture, result, text) else try capture.append("null");
     try appendShape(capture, shape.tail, .{action.acceptance_position});
 }
 
@@ -331,7 +339,7 @@ fn writeResult(capture: anytype, result: *const session_report.Result, text: any
     try appendShape(capture, shape.head, .{ result.operation, result.call_ordinal, result.acceptance_position });
     try writeText(capture, result.call_id, text);
     try appendShape(capture, shape.code, .{result.code});
-    try writeText(capture, result.result, text);
+    try writeStored(capture, result.result, text);
     try capture.append("}");
 }
 
@@ -522,6 +530,11 @@ pub const FullJson = struct {
         pub const openapi_name = "domainreport_full_shapeFullRevisionContent";
         pub const openapi_shapes = .{ Inline.json_shape, OwnedReference.json_shape };
     };
+    /// A Message or Action value: text inlined, or a parts `ContentValue`.
+    pub const Stored = struct {
+        pub const openapi_name = "domainreport_full_shapeFullStored";
+        pub const openapi_shapes = .{ Inline.json_shape, protocol.ContentValueJson.parts_shape };
+    };
     pub const Revision = struct {
         pub const openapi_name = "domainreport_full_shapeFullRevision";
         const head = .{
@@ -566,7 +579,7 @@ pub const FullJson = struct {
         pub const openapi_name = "domainreport_full_shapeFullMessage";
         const head = .{ "{\"admission\":\"", H.decimal, "\",\"command_key\":", H{ .string = idempotency_key.max_bytes }, ",\"content\":" };
         const application = .{ ",\"turn\":", H.optional_id, ",\"application\":\"", H{ .tag = session_report.Application }, "\",\"exclusion\":", H{ .optional_json = Exclusion }, ",\"outcome\":" };
-        pub const json_shape = head ++ .{H{ .json = Inline }} ++ application ++ .{ H{ .optional_json = Outcome }, "}" };
+        pub const json_shape = head ++ .{H{ .json = Stored }} ++ application ++ .{ H{ .optional_json = Outcome }, "}" };
     };
     pub const Conversation = struct {
         pub const openapi_name = "domainreport_full_shapeFullConversation";
@@ -595,7 +608,7 @@ pub const FullJson = struct {
         pub const openapi_name = "domainreport_full_shapeFullAction";
         const head = .{ "{\"action\":\"", H.decimal, "\",\"parent_operation\":\"", H.decimal, "\",\"call_ordinal\":\"", H.decimal, "\",\"permission_revision\":\"", H.decimal, "\",\"permission\":\"", H{ .tag = session_report.Permission }, "\",\"resolution\":", H{ .optional_string = session_report.max_action_resolution_bytes }, ",\"result\":" };
         const tail = .{ ",\"acceptance_position\":", H.optional_id, "}" };
-        pub const json_shape = head ++ .{H{ .optional_json = Inline }} ++ tail;
+        pub const json_shape = head ++ .{H{ .optional_json = Stored }} ++ tail;
     };
     pub const Decision = struct {
         pub const openapi_name = "domainreport_full_shapeFullDecision";
@@ -613,6 +626,6 @@ pub const FullJson = struct {
         pub const openapi_name = "domainreport_full_shapeFullResult";
         const head = .{ "{\"operation\":\"", H.decimal, "\",\"call_ordinal\":\"", H.decimal, "\",\"acceptance_position\":\"", H.decimal, "\",\"call_id\":" };
         const code = .{ ",\"code\":", H{ .string = 32 }, ",\"result\":" };
-        pub const json_shape = head ++ .{H{ .json = Inline }} ++ code ++ .{ H{ .json = Inline }, "}" };
+        pub const json_shape = head ++ .{H{ .json = Inline }} ++ code ++ .{ H{ .json = Stored }, "}" };
     };
 };

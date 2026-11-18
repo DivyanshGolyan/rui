@@ -64,6 +64,7 @@ fn render(store: *storage.Store, arena: std.mem.Allocator, session: []const u8, 
             const item = try findEntry(store, page, request, .{ .position = match.position, .ordinal = match.ordinal });
             try outline(store, arena, session, item, out);
             for (match.hits[0..match.count]) |*hit| {
+                if (hit.part) |part| try out.print("part {d}: ", .{part});
                 try std.json.Stringify.value(hit.snippet.slice(), .{}, out);
                 try out.writeByte('\n');
             }
@@ -508,6 +509,67 @@ test "read_transcript core runner reads other Session outlines before full windo
         }
     }
     try std.testing.expect(try database.nextCoreWork(.{ .free_credit = .one, .mcp_open = true }) == null);
+}
+
+test "EXR-65 read_transcript renders parts entries" {
+    // A parts entry reads as its Text parts and one placeholder per Image, joined by newlines,
+    // in the outline and in display-byte windows; a search hit names its part.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var database: storage.Store = undefined;
+    try storage.testing.testingSqliteStore(&database, &tmp, std.testing.io);
+    defer database.close() catch unreachable;
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    var command = try storage.testingCompleteConfiguration("parts-caller", "", try storage.testingCanonicalCwd(std.testing.io, &workspace_buffer), "model-a");
+    command.configuration.tools = try .of(&.{"read_transcript"});
+    const caller = (try database.configure(&command, .{})).accepted.session;
+    try storage.testingSubmitMessage(&database, &tmp, "parts-task", "parts-task", caller.slice(), "read the parts");
+    const model = (try database.admitNextModelAttempt(.{})).?.permit.binding;
+    const other = try storage.testing.configureTestSession(&database, "parts-other");
+    const png = @embedFile("codecs/fixtures/image-input/pixel.png");
+    try storage.testing.submitTestMessageParts(&database, &tmp, "parts-message", other.slice(), &.{
+        .{ .bytes = "before" }, .{ .bytes = png, .kind = .{ .image = .{} } }, .{ .bytes = "after text" },
+    });
+    // Independent of part_text: the 70-byte PNG is 0.1 KB.
+    const display = "before\n[image 1: PNG 1x1, 0.1 KB]\nafter text";
+    const page = try arena.create(protocol.ActivityFacts);
+    try database.activityPage(&.{ .session = other, .direction = .backward }, page);
+    const position = page.items[0].position;
+    const Case = struct { arguments: []const u8, expected: []const u8, whole: bool = false };
+    const cases = [_]Case{
+        .{ .arguments = try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"limit\":1}}", .{other.slice()}), .expected = try std.fmt.allocPrint(arena, "{d}.0 admission person 3 parts, 1 images: \"before\"\n", .{position}) },
+        .{ .arguments = try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"full\":\"{d}.0\"}}", .{ other.slice(), position }), .whole = true, .expected = try std.fmt.allocPrint(arena, "Entry {d}.0 admission, bytes 0 to {d} of {d}:\n{s}", .{ position, display.len, display.len, display }) },
+        // Starts inside the placeholder, then on the separator before it.
+        .{ .arguments = try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"full\":\"{d}.0\",\"offset\":10}}", .{ other.slice(), position }), .whole = true, .expected = try std.fmt.allocPrint(arena, "Entry {d}.0 admission, bytes 10 to {d} of {d}:\n{s}", .{ position, display.len, display.len, display[10..] }) },
+        .{ .arguments = try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"full\":\"{d}.0\",\"offset\":6}}", .{ other.slice(), position }), .whole = true, .expected = try std.fmt.allocPrint(arena, "Entry {d}.0 admission, bytes 6 to {d} of {d}:\n{s}", .{ position, display.len, display.len, display[6..] }) },
+        .{ .arguments = try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"query\":\"AFTER\",\"kinds\":[\"admission\"]}}", .{other.slice()}), .expected = "part 2: \"after text\"\n" },
+    };
+    var calls: [cases.len]storage.TestingCall = undefined;
+    for (&calls, cases, 0..) |*call, case, index| {
+        const quoted = try std.json.Stringify.valueAlloc(arena, case.arguments, .{});
+        const id = try std.fmt.allocPrint(arena, "parts-read-{d}", .{index});
+        call.* = .{ .item_id = id, .name = "read_transcript", .encoded_call_id = id, .decoded_call_id = id, .encoded_arguments = quoted[1 .. quoted.len - 1], .decoded_arguments = case.arguments };
+    }
+    try storage.settleCallsForTesting(&database, &tmp, model, "parts-reads", &calls);
+    for (cases) |case| {
+        const work = (try database.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
+        try run(&database, arena, &work, .{});
+        const result_id = try storage.testing.sqlite_only.queryU64(&database, "SELECT resolution_content_id FROM action_operation WHERE action_id=?1", .{work.binding.action_id});
+        const reference = try storage.testingContentReference(&database, result_id);
+        const bytes = try arena.alloc(u8, @intCast(reference.length));
+        var reader: storage.ContentReader = undefined;
+        reader.open(try database.openContent(reference));
+        defer reader.close();
+        try std.testing.expectEqual(bytes.len, try reader.readRange(0, bytes));
+        if (case.whole) try std.testing.expectEqualStrings(case.expected, bytes) else if (std.mem.indexOf(u8, bytes, case.expected) == null) {
+            std.debug.print("missing {s} in {s}\n", .{ case.expected, bytes });
+            return error.TestUnexpectedResult;
+        }
+    }
 }
 
 test "read_transcript opens public calls and no-content rows and identifies nonzero result ordinals" {

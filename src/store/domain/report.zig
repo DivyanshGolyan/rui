@@ -30,6 +30,8 @@ const sourced_input = @import("sourced_input.zig");
 const command_domain = @import("command.zig");
 const configuration_domain = @import("configuration.zig");
 const content_domain = @import("content.zig");
+const content_parts = @import("content_parts.zig");
+const content_value = @import("../../content_value.zig");
 const skills_domain = @import("skills.zig");
 const reads_domain = @import("reads.zig");
 const store_schema = @import("../schema.zig");
@@ -293,36 +295,22 @@ pub fn sortedToolNames(names: ?[]const u8, sorted: [][]const u8) ![]const []cons
     return sorted[0..count];
 }
 
-pub fn firstMessage(row: anytype, first: u64) error{ CorruptStore, InputPartsNotSupported }!?session_list.FirstMessage {
+pub fn firstMessage(row: anytype, first: u64) error{CorruptStore}!?session_list.FirstMessage {
     if (first == 0) return null;
-    if (row.first_private orelse return error.CorruptStore) return error.CorruptStore;
-    if (try @import("../../input_parts.zig").Form.decode(row.first_form orelse return error.CorruptStore) == .parts) return error.InputPartsNotSupported;
+    const admission = (row.first_admission orelse return error.CorruptStore).get();
+    const metadata: content_domain.content_metadata.Row = .{
+        .byte_length = row.first_length orelse return error.CorruptStore,
+        .digest = row.first_digest orelse return error.CorruptStore,
+        .private = row.first_private orelse return error.CorruptStore,
+        .form = row.first_form orelse return error.CorruptStore,
+    };
     return .{
         .position = (row.first_position orelse return error.CorruptStore).get(),
-        .admission = (row.first_admission orelse return error.CorruptStore).get(),
+        .admission = admission,
         .admitted_at = (row.first_admitted_at orelse return error.CorruptStore).get(),
         .sender = row.first_sender,
-        .content = .{ .text = .{
-            .length = row.first_length orelse return error.CorruptStore,
-            .digest = row.first_digest orelse return error.CorruptStore,
-        } },
+        .content = try @import("content_parts.zig").publicValue(&metadata, .{ .message = admission }),
     };
-}
-
-const first_message_value = rsql.Read(.{
-    .sql = "SELECT content_id FROM message_admission WHERE admission_id=?1",
-    .Args = struct { admission: u64 },
-    .Row = struct { content_id: rsql.Positive },
-    .cardinality = .one,
-});
-
-pub fn verifyFirstMessage(a: *ReadAccess, row: anytype) !void {
-    var found: first_message_value.Result = undefined;
-    a.read(first_message_value, .{ .admission = (row.first_admission orelse return error.CorruptStore).get() }, &found);
-    try store_access.runAs(a, error.CorruptStore);
-    const value = try content_domain.Value.of(found.content_id.get(), row.first_form orelse return error.CorruptStore, row.first_length orelse return error.CorruptStore, row.first_digest orelse return error.CorruptStore);
-    if (value.reference != .parts) return error.CorruptStore;
-    try @import("content_parts.zig").verify(a, value);
 }
 
 const active_proposers_sql = "FROM turn active @index(turn_one_active_per_session) " ++
@@ -895,23 +883,6 @@ pub fn readWorks(a: *ReadAccess, works: []WorkRead) !void {
     }
 }
 
-pub const full_compound_value = rsql.Read(.{
-    .compound = true,
-    .sql = "SELECT c.content_id,c.byte_length,c.digest,c.private,c.form FROM message_admission m JOIN content c ON c.content_id=m.content_id WHERE m.session_ref=?1 AND c.form<>0 " ++
-        "UNION ALL SELECT c.content_id,c.byte_length,c.digest,c.private,c.form FROM conversation_entry e JOIN content c ON c.content_id=e.content_id WHERE e.session_ref=?1 AND c.form<>0 " ++
-        "UNION ALL SELECT c.content_id,c.byte_length,c.digest,c.private,c.form FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id WHERE a.session_ref=?1 AND c.form<>0 " ++
-        "UNION ALL SELECT c.content_id,c.byte_length,c.digest,c.private,c.form FROM action_operation a JOIN content c ON c.content_id=a.background_content_id WHERE a.session_ref=?1 AND c.form<>0 LIMIT 1",
-    .Args = struct { session: []const u8 },
-    .Row = struct { content_id: rsql.Positive, byte_length: u64, digest: [32]u8, private: bool, form: u8 },
-    .cardinality = .optional,
-});
-
-pub fn verifyFullCompound(a: *ReadAccess, row: full_compound_value.Row) !void {
-    const metadata: content_domain.content_metadata.Row = .{ .byte_length = row.byte_length, .digest = row.digest, .private = row.private, .form = row.form };
-    _ = try @import("content_parts.zig").publicMetadata(a, row.content_id.get(), &metadata);
-    return error.CorruptStore;
-}
-
 pub fn readFull(a: *ReadAccess, session_ref: []const u8, watched: anytype) !void {
     try watched.call("fullOpen", .{session_report.FullList.session_revisions});
     try readRevisions(a, session_ref, watched);
@@ -1239,6 +1210,14 @@ fn failedOnFirst(a: *const ReadAccess, comptime L: type) bool {
     return if (@hasDecl(L, "FirstRead")) a.failedOn(L.FirstRead) else false;
 }
 
+/// The Full projection of a stored Message or Action value: text to inline, or parts with their owner.
+fn stored(id: rsql.Positive, metadata: content_domain.content_metadata.Row, owner: ?content_value.Owner) error{CorruptStore}!session_report.Stored {
+    return switch (try content_parts.publicValue(&metadata, owner)) {
+        .text => |reference| .{ .text = .{ .id = id.get(), .length = reference.length, .digest = reference.digest } },
+        .parts => |parts| .{ .parts = parts },
+    };
+}
+
 fn optionalText(id: ?rsql.Positive, length: ?u64, digest: ?[32]u8) error{CorruptStore}!?session_report.Text {
     const content_id = id orelse return null;
     return .{ .id = content_id.get(), .length = length orelse return error.CorruptStore, .digest = digest orelse return error.CorruptStore };
@@ -1451,7 +1430,7 @@ pub const full_messages = rsql.Page(.{
     .arms = &.{.{
         .on = .{ .index = "message_admission_position" },
         .alias = "m",
-        .columns = "m.admission_id,m.command_key,m.content_id,input.byte_length AS content_length,input.digest AS content_digest," ++
+        .columns = "m.admission_id,m.command_key,m.content_id,input.byte_length AS content_length,input.digest AS content_digest,input.private AS content_private,input.form AS content_form," ++
             "m.turn_id,t.operation_id,o.attempt_ordinal,t.outcome_code,t.outcome_content_id,outcome.byte_length AS outcome_length,outcome.digest AS outcome_digest," ++
             "CASE WHEN m.turn_id IS NULL THEN (SELECT stopped.command_key FROM session_stop stopped " ++
             "WHERE stopped.session_ref=m.session_ref AND stopped.admission_cutoff>=m.admission_id " ++
@@ -1467,6 +1446,8 @@ pub const full_messages = rsql.Page(.{
         content_id: rsql.Positive,
         content_length: u64,
         content_digest: [32]u8,
+        content_private: bool,
+        content_form: u8,
         turn_id: ?rsql.Positive,
         operation_id: ?rsql.Positive,
         attempt_ordinal: ?rsql.Positive,
@@ -1510,7 +1491,7 @@ pub const Messages = struct {
 
     pub fn values(a: *ReadAccess, row: *const S.Row, _: *ListState(@This())) !session_report.FullRow {
         const projection = try command_domain.projectMessage(row, if (row.excluding_stop) |*stop| stop.slice() else null);
-        const content: session_report.Text = .{ .id = row.content_id.get(), .length = row.content_length, .digest = row.content_digest };
+        const content = try stored(row.content_id, .{ .byte_length = row.content_length, .digest = row.content_digest, .private = row.content_private, .form = row.content_form }, .{ .message = projection.admission_id });
         return .{ .message = .{
             .admission = projection.admission_id,
             .command_key = row.command_key.slice(),
@@ -1521,7 +1502,7 @@ pub const Messages = struct {
                     .outcome = if (row.outcome_code) |*code| .{
                         .code = code.slice(),
                         .content = optionalReference(row.outcome_content_id, row.outcome_length, row.outcome_digest) catch |err| {
-                            try readEarlier(a, &.{content});
+                            if (content == .text) try readEarlier(a, &.{content.text});
                             return err;
                         },
                     } else null,
@@ -1542,7 +1523,7 @@ const full_conversation = rsql.Page(.{
         .on = .{ .primary_key = "conversation_entry" },
         .alias = "e",
         .columns = "e.session_position,e.entry_kind,e.turn_id,coalesce(e.source_admission_id,e.source_skill_admission_id) AS source_admission_id,e.source_revision,e.source_catalog_position,e.source_skill_position,e.source_operation_id," ++
-            "c.byte_length AS content_length,c.digest AS content_digest," ++ reads_domain.publicEntryColumns("(e.entry_kind=2 AND (e.source_catalog_position IS NULL OR " ++ skills_domain.instructionConsistentSql("e") ++ ")) OR " ++
+            "c.byte_length AS content_length,c.digest AS content_digest,c.form AS content_form," ++ reads_domain.publicEntryColumns("(e.entry_kind=2 AND (e.source_catalog_position IS NULL OR " ++ skills_domain.instructionConsistentSql("e") ++ ")) OR " ++
             "(e.entry_kind=4 AND t.session_ref=e.session_ref AND EXISTS(SELECT 1 FROM message_skill skill JOIN message_admission owner ON owner.admission_id=skill.admission_id " ++
             "WHERE skill.admission_id=e.source_skill_admission_id AND skill.position=e.source_skill_position AND skill.content_id=e.content_id " ++
             "AND owner.session_ref=e.session_ref AND owner.turn_id=e.turn_id)) OR "),
@@ -1560,6 +1541,7 @@ const full_conversation = rsql.Page(.{
         source_operation_id: ?rsql.Positive,
         content_length: u64,
         content_digest: [32]u8,
+        content_form: u8,
         consistent: bool,
     },
     .take = takes(Conversation.kept_rows),
@@ -1601,7 +1583,8 @@ pub const Conversation = struct {
             .source_catalog_position = optional(row.source_catalog_position),
             .source_skill_position = optional(row.source_skill_position),
             .source_operation = optional(row.source_operation_id),
-            .content = .{ .length = row.content_length, .digest = row.content_digest },
+            // Only a Message entry has an owner; any other entry holding parts fences.
+            .content = try content_parts.publicValue(&.{ .byte_length = row.content_length, .digest = row.content_digest, .private = false, .form = row.content_form }, if (row.entry_kind == 1) .{ .message = (row.source_admission_id orelse return error.CorruptStore).get() } else null),
         } };
     }
 };
@@ -1779,7 +1762,7 @@ const full_actions = rsql.Page(.{
         .alias = "action",
         .columns = "action.parent_operation_id,action.call_ordinal,action.permission_revision," ++
             "CASE WHEN @same(action.resolution_code,'denied') THEN 'denied' WHEN action.authorized=1 THEN 'authorized' ELSE 'requested' END AS permission," ++
-            "action.resolution_code,action.resolution_content_id,result.byte_length AS result_length,result.digest AS result_digest,action.acceptance_position",
+            "action.resolution_code,action.resolution_content_id,result.byte_length AS result_length,result.digest AS result_digest,result.private AS result_private,result.form AS result_form,action.acceptance_position",
         .joins = "LEFT JOIN content result ON result.content_id=action.resolution_content_id",
     }},
     .Row = struct {
@@ -1792,6 +1775,8 @@ const full_actions = rsql.Page(.{
         resolution_content_id: ?rsql.Positive,
         result_length: ?u64,
         result_digest: ?[32]u8,
+        result_private: ?bool,
+        result_form: ?u8,
         acceptance_position: ?rsql.Positive,
     },
     .take = takes(Actions.kept_rows),
@@ -1812,7 +1797,12 @@ const Actions = struct {
                 .permission_revision = row.permission_revision.get(),
                 .permission = std.meta.stringToEnum(session_report.Permission, row.permission.slice()) orelse return error.CorruptStore,
                 .resolution = optionalSlice(&row.resolution_code),
-                .result = try optionalText(row.resolution_content_id, row.result_length, row.result_digest),
+                .result = if (row.resolution_content_id) |id| try stored(id, .{
+                    .byte_length = row.result_length orelse return error.CorruptStore,
+                    .digest = row.result_digest orelse return error.CorruptStore,
+                    .private = row.result_private orelse return error.CorruptStore,
+                    .form = row.result_form orelse return error.CorruptStore,
+                }, .{ .action = row.action_id.get() }) else null,
                 .acceptance_position = optional(row.acceptance_position),
             },
         };
@@ -1940,7 +1930,7 @@ pub const full_results = rsql.Page(.{
             .alias = "tool_call",
             .columns = "tool_call.call_ordinal,tool_call.call_id_content_id AS call_id,call_id_content.byte_length AS call_id_length," ++
                 "call_id_content.digest AS call_id_digest,tool_call.rejection_code AS code,tool_call.rejection_content_id AS result_id," ++
-                "result.byte_length AS result_length,result.digest AS result_digest",
+                "result.byte_length AS result_length,result.digest AS result_digest,result.private AS result_private,result.form AS result_form,NULL AS owner_action",
             .joins = "LEFT JOIN content call_id_content ON call_id_content.content_id=tool_call.call_id_content_id " ++
                 "LEFT JOIN content result ON result.content_id=tool_call.rejection_content_id",
         },
@@ -1949,7 +1939,7 @@ pub const full_results = rsql.Page(.{
             .alias = "action",
             .columns = "action.call_ordinal,tool_call.call_id_content_id AS call_id,call_id_content.byte_length AS call_id_length," ++
                 "call_id_content.digest AS call_id_digest,action.resolution_code AS code,action.resolution_content_id AS result_id," ++
-                "result.byte_length AS result_length,result.digest AS result_digest",
+                "result.byte_length AS result_length,result.digest AS result_digest,result.private AS result_private,result.form AS result_form,action.action_id AS owner_action",
             .joins = "LEFT JOIN model_tool_call tool_call ON tool_call.operation_id=action.parent_operation_id AND tool_call.call_ordinal=action.call_ordinal " ++
                 "LEFT JOIN content call_id_content ON call_id_content.content_id=tool_call.call_id_content_id " ++
                 "LEFT JOIN content result ON result.content_id=action.resolution_content_id",
@@ -1959,7 +1949,7 @@ pub const full_results = rsql.Page(.{
             .alias = "action",
             .columns = "action.call_ordinal,tool_call.call_id_content_id AS call_id,call_id_content.byte_length AS call_id_length," ++
                 "call_id_content.digest AS call_id_digest,'background' AS code,action.background_content_id AS result_id," ++
-                "result.byte_length AS result_length,result.digest AS result_digest",
+                "result.byte_length AS result_length,result.digest AS result_digest,result.private AS result_private,result.form AS result_form,NULL AS owner_action",
             .joins = "LEFT JOIN model_tool_call tool_call ON tool_call.operation_id=action.parent_operation_id AND tool_call.call_ordinal=action.call_ordinal " ++
                 "LEFT JOIN content call_id_content ON call_id_content.content_id=tool_call.call_id_content_id " ++
                 "LEFT JOIN content result ON result.content_id=action.background_content_id",
@@ -1976,6 +1966,9 @@ pub const full_results = rsql.Page(.{
         result_id: rsql.Positive,
         result_length: u64,
         result_digest: [32]u8,
+        result_private: bool,
+        result_form: u8,
+        owner_action: ?rsql.Positive,
     },
     .take = takes(Results.kept_rows),
 });
@@ -1986,14 +1979,14 @@ const Results = struct {
     pub const list = session_report.FullList.tool_results;
     pub const kept_rows = 8;
 
-    pub fn values(_: *ReadAccess, row: *const S.Row, _: *ListState(@This())) error{}!session_report.FullRow {
+    pub fn values(_: *ReadAccess, row: *const S.Row, _: *ListState(@This())) error{CorruptStore}!session_report.FullRow {
         return .{ .result = .{
             .operation = row.operation_id.get(),
             .call_ordinal = row.call_ordinal,
             .acceptance_position = row.acceptance_position.get(),
             .call_id = .{ .id = row.call_id.get(), .length = row.call_id_length, .digest = row.call_id_digest },
             .code = row.code.slice(),
-            .result = .{ .id = row.result_id.get(), .length = row.result_length, .digest = row.result_digest },
+            .result = try stored(row.result_id, .{ .byte_length = row.result_length, .digest = row.result_digest, .private = row.result_private, .form = row.result_form }, if (row.owner_action) |action| .{ .action = action.get() } else null),
         } };
     }
 };

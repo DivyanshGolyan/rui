@@ -157,7 +157,7 @@ pub const ActivityPage = struct {
         const CallEntry = struct { operation: JsonString(20), ordinal: JsonString(20), presentation: JsonToolPresentation };
         const Calls = JsonArray(CallEntry, 3);
         const Work = struct { creator: ?JsonString(protocol.session_id_bytes), read_version: JsonString(protocol.SinceToken.max_bytes), state: JsonWorkState, turn: ?JsonString(20), operation: ?JsonString(20), first_action: ?JsonString(20), attention: ?JsonWorkAttention, group: JsonEnum(@import("session_work.zig").Group), actions: JsonWorkActions, last_line: ?struct { position: JsonString(20), text: ?JsonString(session_list.max_last_line_bytes) } = null, revision: JsonString(20), workspace: JsonString(protocol.max_workspace_bytes) };
-        const Queued = struct { count: JsonString(20), oldest_position: JsonString(20), newest_admission: JsonString(20), newest_position: JsonString(20) };
+        const Queued = struct { count: JsonString(20), oldest_position: JsonString(20), newest_admission: JsonString(20), newest_position: JsonString(20), newest_content: ?Ref };
         const Wire = struct { version: JsonString(8), type: JsonString(32), delta: JsonEnum(enum { full }), since: ?JsonString(SessionToken.max_bytes), end: JsonString(20), direction: JsonEnum(@FieldType(ActivityCursor, "direction")), items: Items, more: bool, call_activity: struct { total: JsonString(20), entries: Calls }, queued: Queued, work: Work };
         var storage: [2 * activity_reply.max_page_bytes]u8 = undefined;
         var fixed = std.heap.FixedBufferAllocator.init(&storage);
@@ -281,12 +281,13 @@ pub const ActivityPage = struct {
                 p == boundary_position and (boundary_ordinal == null or fact.ordinal + 1 <= boundary_ordinal.?)) return error.InvalidActivityPage;
             previous = fact.*;
         }
-        const queued: protocol.Queued = .{ .count = try id(wire.queued.count, true), .oldest_position = try id(wire.queued.oldest_position, true), .newest_admission = try id(wire.queued.newest_admission, true), .newest_position = try id(wire.queued.newest_position, true) };
+        const queued: protocol.Queued = .{ .count = try id(wire.queued.count, true), .oldest_position = try id(wire.queued.oldest_position, true), .newest_admission = try id(wire.queued.newest_admission, true), .newest_position = try id(wire.queued.newest_position, true), .newest_content = if (wire.queued.newest_content) |value| value.value else null };
         if (if (queued.count == 0)
             !std.meta.eql(queued, protocol.Queued{})
         else
             queued.newest_admission == 0 or queued.oldest_position == 0 or queued.oldest_position > queued.newest_position or
-                queued.newest_position > boundary_position or queued.count > queued.newest_position - queued.oldest_position + 1) return error.InvalidActivityPage;
+                queued.newest_position > boundary_position or queued.count > queued.newest_position - queued.oldest_position + 1 or
+                !ownedBy(queued.newest_content orelse return error.InvalidActivityPage, .{ .message = queued.newest_admission })) return error.InvalidActivityPage;
         page.facts.queued = queued;
         const facts = &page.facts.work;
         const work = &facts.work;
@@ -315,6 +316,14 @@ pub const ActivityPage = struct {
         if (result > std.math.maxInt(i64)) return error.InvalidActivityPage;
         return result;
     }
+    /// A Message value is text, or parts owned by that Message's admission.
+    fn ownedBy(value: content_value.Value, owner: content_value.Owner) bool {
+        return switch (value) {
+            .text => true,
+            .parts => |parts| std.meta.eql(parts.owner, owner),
+        };
+    }
+
     fn textOf(value: JsonContentValue) !content_value.Reference {
         return value.text() catch error.InvalidActivityPage;
     }
@@ -2330,7 +2339,7 @@ test "canonical presentation typed ingress owns escaped labels and closed facts"
     defer roundtrip.deinit();
     try std.testing.expectEqualDeep(maximum.value.value, roundtrip.value.value);
     var facts: protocol.ActivityFacts = .{ .end = std.math.maxInt(i64) - 1, .count = 16 };
-    facts.queued = .{ .count = std.math.maxInt(i64) - 1_000_000_000_000_000_000, .oldest_position = 1_000_000_000_000_000_000, .newest_admission = std.math.maxInt(i64), .newest_position = std.math.maxInt(i64) - 1 };
+    facts.queued = .{ .count = std.math.maxInt(i64) - 1_000_000_000_000_000_000, .oldest_position = 1_000_000_000_000_000_000, .newest_admission = std.math.maxInt(i64), .newest_position = std.math.maxInt(i64) - 1, .newest_content = .{ .text = .{ .length = 1, .digest = @splat(1) } } };
     for (&facts.items, 0..) |*item, index| item.* = .{
         .position = index + 1,
         .ordinal = 1,
@@ -2506,15 +2515,22 @@ test "an activity page's queued Messages are none or a span at its boundary" {
     var facts: protocol.ActivityFacts = .{ .end = 40, .work = .{ .work = .{ .state = .{ .working = .{ .since = 1 } } }, .revision = 1 } };
     try facts.work.workspace.set("/w");
     const Case = struct { queued: protocol.Queued, valid: bool };
+    const text: content_value.Value = .{ .text = .{ .length = 1, .digest = @splat(1) } };
     for ([_]Case{
         .{ .queued = .{}, .valid = true },
-        .{ .queued = .{ .count = 2, .oldest_position = 31, .newest_admission = 9, .newest_position = 40 }, .valid = true },
-        .{ .queued = .{ .count = 1, .oldest_position = 40, .newest_admission = 9, .newest_position = 40 }, .valid = true },
+        .{ .queued = .{ .count = 2, .oldest_position = 31, .newest_admission = 9, .newest_position = 40, .newest_content = text }, .valid = true },
+        .{ .queued = .{ .count = 1, .oldest_position = 40, .newest_admission = 9, .newest_position = 40, .newest_content = text }, .valid = true },
+        .{ .queued = .{ .count = 1, .oldest_position = 40, .newest_admission = 9, .newest_position = 40, .newest_content = .{ .parts = .{ .identity = text.text, .owner = .{ .message = 9 } } } }, .valid = true },
+        // The newest Message's value is its own: another owner, or none while one waits, is refused.
+        .{ .queued = .{ .count = 1, .oldest_position = 40, .newest_admission = 9, .newest_position = 40, .newest_content = .{ .parts = .{ .identity = text.text, .owner = .{ .message = 8 } } } }, .valid = false },
+        .{ .queued = .{ .count = 1, .oldest_position = 40, .newest_admission = 9, .newest_position = 40, .newest_content = .{ .parts = .{ .identity = text.text, .owner = .{ .action = 9 } } } }, .valid = false },
+        .{ .queued = .{ .count = 1, .oldest_position = 40, .newest_admission = 9, .newest_position = 40 }, .valid = false },
+        .{ .queued = .{ .newest_content = text }, .valid = false },
         .{ .queued = .{ .newest_admission = 9 }, .valid = false },
-        .{ .queued = .{ .count = 1, .oldest_position = 41, .newest_admission = 9, .newest_position = 41 }, .valid = false },
-        .{ .queued = .{ .count = 2, .oldest_position = 32, .newest_admission = 9, .newest_position = 31 }, .valid = false },
-        .{ .queued = .{ .count = 3, .oldest_position = 39, .newest_admission = 9, .newest_position = 40 }, .valid = false },
-        .{ .queued = .{ .count = 1, .oldest_position = 40, .newest_admission = 0, .newest_position = 40 }, .valid = false },
+        .{ .queued = .{ .count = 1, .oldest_position = 41, .newest_admission = 9, .newest_position = 41, .newest_content = text }, .valid = false },
+        .{ .queued = .{ .count = 2, .oldest_position = 32, .newest_admission = 9, .newest_position = 31, .newest_content = text }, .valid = false },
+        .{ .queued = .{ .count = 3, .oldest_position = 39, .newest_admission = 9, .newest_position = 40, .newest_content = text }, .valid = false },
+        .{ .queued = .{ .count = 1, .oldest_position = 40, .newest_admission = 0, .newest_position = 40, .newest_content = text }, .valid = false },
     }) |case| {
         facts.queued = case.queued;
         var buffer: [activity_reply.max_page_bytes]u8 = undefined;

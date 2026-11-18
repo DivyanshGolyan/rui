@@ -1927,7 +1927,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
         },
         .activity_content => |*command| {
             const location = host.store.openActivityContent(command) catch |err| switch (err) {
-                error.ContentNotFound => return respondStatic(fd, 409, .activity_unavailable, @errorName(err)),
+                error.ContentNotFound, error.ContentIsParts => return respondStatic(fd, 409, .activity_unavailable, @errorName(err)),
                 else => return refuseRead(host, fd, "activity content", err),
             };
             try deliverPublicContent(host, fd, location, 0, true);
@@ -2088,7 +2088,7 @@ fn deliverConversationContent(host: *Host, fd: std.posix.fd_t, command: protocol
 
 fn prepareConversationContent(host: *Host, fd: *Reply, command: *const protocol.ConversationContent) !void {
     const location = host.store.openPublicConversationContent(command) catch |err| switch (err) {
-        error.ContentNotFound, error.RangeOutOfBounds => return respondStatic(fd, 409, .conversation_unavailable, @errorName(err)),
+        error.ContentNotFound, error.RangeOutOfBounds, error.ContentIsParts => return respondStatic(fd, 409, .conversation_unavailable, @errorName(err)),
         else => return refuseRead(host, fd, "conversation content", err),
     };
     return deliverPublicContent(host, fd, location, command.start, command.stream);
@@ -2280,7 +2280,7 @@ test "initial Message reply binds its allocated Session and original input befor
 }
 
 /// The Store owns which read failures are fatal: it fences itself for those and returns the
-/// rest, such as InputPartsNotSupported, as ordinary refusals. Dispatch fences only after it.
+/// rest as ordinary refusals. Dispatch fences only after it.
 fn refuseRead(host: *Host, reply: *Reply, phase: []const u8, err: anyerror) void {
     if (host.store.isFenced()) {
         fenceDispatch(host, phase, err);
@@ -4632,9 +4632,10 @@ test "inline skills suggestions answer heap exhaustion as busy, not a catalog re
     try std.testing.expect(fail_index > 0);
 }
 
-test "SH-51 a read the Store refuses without fencing leaves the Host serving" {
+test "SH-51 a route that cannot serve a parts value refuses it as ordinary and leaves the Host serving" {
     // A Session holds both parts producers: a compound Message and a read_image Resolution.
-    // Every public read that meets them gets the Store's ordinary refusal; none may fence the Host.
+    // Readers project them; every text-only route refuses a parts value and both parts routes
+    // refuse a text value as ordinary 409s. Only a Store that fenced itself fences dispatch.
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var root_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
@@ -4672,20 +4673,31 @@ test "SH-51 a read the Store refuses without fencing leaves the Host serving" {
     var retention = output_retention.Queue.initialize(host.io, root, .{ .used = &host.scratch_used, .limit = 9000 }, &.{});
     host.retention = &retention;
     const head = "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"";
-    const Read = struct { path: []const u8, body: []const u8 };
+    // `answer`: the status and, for a 409, the refusal code, or a member every 200 body must carry.
+    const Read = struct { path: []const u8, body: []const u8, status: []const u8 = "200", has: ?[]const u8 = null };
+    const result_position = try store_module.testing.queryU64(&storage, "SELECT acceptance_position FROM action_operation WHERE action_id=?1", .{selected.action_id});
+    const text_admission = try store_module.testing.queryU64(&storage, "SELECT admission_id FROM message_admission WHERE command_key=?1", .{"parts-task"});
+    const action_owner = try std.fmt.allocPrint(arena, "\"owner\":{{\"action\":\"{d}\"}}", .{selected.action_id});
+    const message_owner = try std.fmt.allocPrint(arena, "\"owner\":{{\"message\":\"{d}\"}}", .{try store_module.testing.queryU64(&storage, "SELECT admission_id FROM message_admission WHERE command_key=?1", .{"parts-message"})});
     const reads = [_]Read{
-        .{ .path = "read-action", .body = try std.fmt.allocPrint(arena, head ++ "read_action\",\"store\":\"s\",\"session\":\"{s}\",\"action\":\"{d}\"}}", .{ session.slice(), selected.action_id }) },
-        .{ .path = "activity-page", .body = try std.fmt.allocPrint(arena, head ++ "activity_page\",\"store\":\"s\",\"session\":\"{s}\",\"end\":null,\"position\":\"0\",\"ordinal\":null,\"direction\":\"forward\",\"kinds\":[\"admission\",\"user\",\"assistant\",\"call\",\"tool_result\"],\"limit\":\"16\"}}", .{session.slice()}) },
-        .{ .path = "conversation-page", .body = try std.fmt.allocPrint(arena, head ++ "conversation_page\",\"store\":\"s\",\"session\":\"{s}\",\"end\":\"0\",\"before_position\":\"0\",\"before_ordinal\":\"0\"}}", .{session.slice()}) },
-        .{ .path = "observe-command", .body = try std.fmt.allocPrint(arena, head ++ "observe_command\",\"store\":\"s\",\"key\":\"parts-message\"}}", .{}) },
+        .{ .path = "read-action", .body = try std.fmt.allocPrint(arena, head ++ "read_action\",\"store\":\"s\",\"session\":\"{s}\",\"action\":\"{d}\"}}", .{ session.slice(), selected.action_id }), .has = action_owner },
+        .{ .path = "activity-page", .body = try std.fmt.allocPrint(arena, head ++ "activity_page\",\"store\":\"s\",\"session\":\"{s}\",\"end\":null,\"position\":\"0\",\"ordinal\":null,\"direction\":\"forward\",\"kinds\":[\"admission\",\"user\",\"assistant\",\"call\",\"tool_result\"],\"limit\":\"16\"}}", .{session.slice()}), .has = action_owner },
+        .{ .path = "activity-page", .body = try std.fmt.allocPrint(arena, head ++ "activity_page\",\"store\":\"s\",\"session\":\"{s}\",\"end\":null,\"position\":\"0\",\"ordinal\":null,\"direction\":\"forward\",\"kinds\":[\"admission\",\"user\",\"assistant\",\"call\",\"tool_result\"],\"limit\":\"16\"}}", .{session.slice()}), .has = message_owner },
+        .{ .path = "conversation-page", .body = try std.fmt.allocPrint(arena, head ++ "conversation_page\",\"store\":\"s\",\"session\":\"{s}\",\"end\":\"0\",\"before_position\":\"0\",\"before_ordinal\":\"0\"}}", .{session.slice()}), .has = action_owner },
+        .{ .path = "observe-command", .body = try std.fmt.allocPrint(arena, head ++ "observe_command\",\"store\":\"s\",\"key\":\"parts-message\"}}", .{}), .has = "\"type\":\"parts\"" },
         .{ .path = "inspect-session", .body = try std.fmt.allocPrint(arena, head ++ "inspect_session\",\"store\":\"s\",\"session\":\"{s}\"}}", .{session.slice()}) },
-        .{ .path = "activity-content", .body = try std.fmt.allocPrint(arena, head ++ "activity_content\",\"store\":\"s\",\"session\":\"{s}\",\"position\":\"{d}\",\"ordinal\":\"1\"}}", .{ session.slice(), try store_module.testing.queryU64(&storage, "SELECT acceptance_position FROM action_operation WHERE action_id=?1", .{selected.action_id}) }) },
-        .{ .path = "activity-search", .body = try std.fmt.allocPrint(arena, head ++ "activity_search\",\"store\":\"s\",\"session\":\"{s}\",\"query\":\"after\",\"kinds\":[\"admission\",\"user\",\"tool_result\"],\"before_position\":null,\"before_ordinal\":null,\"limit\":\"16\"}}", .{session.slice()}) },
-        .{ .path = "conversation-content", .body = try std.fmt.allocPrint(arena, head ++ "conversation_content\",\"store\":\"s\",\"session\":\"{s}\",\"position\":\"{d}\",\"ordinal\":\"0\",\"start\":\"0\"}}", .{ session.slice(), try store_module.testing.queryU64(&storage, "SELECT max(session_position) FROM conversation_entry WHERE session_ref=?1 AND entry_kind=1", .{session.slice()}) }) },
+        .{ .path = "activity-search", .body = try std.fmt.allocPrint(arena, head ++ "activity_search\",\"store\":\"s\",\"session\":\"{s}\",\"query\":\"after\",\"kinds\":[\"admission\",\"user\",\"tool_result\"],\"before_position\":null,\"before_ordinal\":null,\"limit\":\"16\"}}", .{session.slice()}), .has = "\"part\":\"2\"" },
         .{ .path = "list-sessions", .body = try std.fmt.allocPrint(arena, head ++ "list_sessions\",\"store\":\"s\",\"workspace\":null,\"after\":\"0\",\"ceiling\":\"0\"}}", .{}) },
-        .{ .path = "read-result", .body = try std.fmt.allocPrint(arena, head ++ "read_result\",\"store\":\"s\",\"key\":\"parts-message\"}}", .{}) },
         .{ .path = "read-action-arguments", .body = try std.fmt.allocPrint(arena, head ++ "read_action_arguments\",\"store\":\"s\",\"session\":\"{s}\",\"action\":\"{d}\"}}", .{ session.slice(), selected.action_id }) },
         .{ .path = "read-action-call-id", .body = try std.fmt.allocPrint(arena, head ++ "read_action_call_id\",\"store\":\"s\",\"session\":\"{s}\",\"action\":\"{d}\"}}", .{ session.slice(), selected.action_id }) },
+        .{ .path = "read-result", .body = try std.fmt.allocPrint(arena, head ++ "read_result\",\"store\":\"s\",\"key\":\"parts-message\"}}", .{}), .status = "409", .has = "result_not_ready" },
+        // Text-only routes on a parts value.
+        .{ .path = "activity-content", .body = try std.fmt.allocPrint(arena, head ++ "activity_content\",\"store\":\"s\",\"session\":\"{s}\",\"position\":\"{d}\",\"ordinal\":\"1\"}}", .{ session.slice(), result_position }), .status = "409", .has = "ContentIsParts" },
+        .{ .path = "conversation-content", .body = try std.fmt.allocPrint(arena, head ++ "conversation_content\",\"store\":\"s\",\"session\":\"{s}\",\"position\":\"{d}\",\"ordinal\":\"1\",\"start\":\"0\"}}", .{ session.slice(), result_position }), .status = "409", .has = "ContentIsParts" },
+        .{ .path = "read-action", .body = try std.fmt.allocPrint(arena, head ++ "read_action\",\"store\":\"s\",\"session\":\"{s}\",\"action\":\"{d}\",\"offset\":\"1\"}}", .{ session.slice(), selected.action_id }), .status = "400", .has = "invalid_cursor" },
+        // Both parts routes on a text value.
+        .{ .path = "public-parts", .body = try std.fmt.allocPrint(arena, head ++ "public_parts\",\"store\":\"s\",\"session\":\"{s}\",\"owner\":{{\"message\":\"{d}\"}}}}", .{ session.slice(), text_admission }), .status = "409", .has = "ContentIsText" },
+        .{ .path = "public-part-content", .body = try std.fmt.allocPrint(arena, head ++ "public_part_content\",\"store\":\"s\",\"session\":\"{s}\",\"owner\":{{\"message\":\"{d}\"}},\"part\":\"0\",\"start\":\"0\"}}", .{ session.slice(), text_admission }), .status = "409", .has = "ContentIsText" },
     };
     const Answer = struct { status: []const u8, body: []const u8 };
     const exchangeRead = struct {
@@ -4714,18 +4726,15 @@ test "SH-51 a read the Store refuses without fencing leaves the Host serving" {
         }
     }.run;
 
-    var refused: usize = 0;
     for (reads) |read| {
         const answer = try exchangeRead(&host, arena, read);
-        if (std.mem.indexOf(u8, answer.body, "canonical_store_failure") != null or storage.isFenced() or !host.launchAllowed()) {
-            std.debug.print("{s} fenced the Host: {s}{s}\n", .{ read.path, answer.status, answer.body });
+        const status = std.mem.startsWith(u8, answer.status, "HTTP/1.1 ") and std.mem.startsWith(u8, answer.status["HTTP/1.1 ".len..], read.status);
+        const carries = if (read.has) |member| std.mem.indexOf(u8, answer.body, member) != null else true;
+        if (!status or !carries or storage.isFenced() or !host.launchAllowed()) {
+            std.debug.print("{s}: expected {s} with {?s}, got {s}{s}\n", .{ read.path, read.status, read.has, answer.status, answer.body });
             return error.TestUnexpectedResult;
         }
-        if (std.mem.indexOf(u8, answer.body, "\"code\":\"InputPartsNotSupported\"") != null) refused += 1;
     }
-    // Guards against a fixture that never reaches a refusal: store.md says byte readers refuse
-    // parts, so at least the read_image Action read and the compound Message observation do.
-    try std.testing.expect(refused >= 2);
 
     // A Store that fails its own read fences, and so does the Host.
     try store_module.testingFailReadsOf(&storage, "action_operation");

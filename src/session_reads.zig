@@ -138,15 +138,10 @@ fn readHint(requests: client.Requests, job: *const Job, first: Line.First) !Hint
     return if (line.len == 0) .absent else .{ .line = line };
 }
 
-/// The first display line of the Message at `position`. A null `value` reads the entry as
-/// text: the queued strip does not carry its newest Message's value yet.
-fn readFirstLine(requests: client.Requests, job: *const Job, position: u64, value: ?content_value.Value, refused: enum { absent, fails }) !?queued_line.Line {
+/// The first display line of the Message at `position`, whose stored value is `value`.
+fn readFirstLine(requests: client.Requests, job: *const Job, position: u64, value: content_value.Value, refused: enum { absent, fails }) !?queued_line.Line {
     var buffer: [session_line.max_line_bytes + 1]u8 = undefined;
-    const read = if (value) |known|
-        value_reads.firstLine(requests, job.store, job.session, position, known, job.files.parts, &buffer)
-    else
-        requests.readActivityPrefix(job.store, job.session, position, &buffer);
-    const reply = read catch |err| switch (err) {
+    const reply = value_reads.firstLine(requests, job.store, job.session, position, value, job.files.parts, &buffer) catch |err| switch (err) {
         error.InvalidResponse => return if (refused == .absent) null else err,
         else => return err,
     };
@@ -278,7 +273,8 @@ pub const Job = struct {
     }
 };
 
-pub const RetryFailure = enum { no_message, too_large };
+/// `has_images`: the editor has no image attachments, and resending only the text would drop them.
+pub const RetryFailure = enum { no_message, too_large, has_images };
 pub const RetryMessage = struct { ending: Key, position: u64, length: usize };
 const Retry = union(enum) { stale, message: RetryMessage, failure: RetryFailure };
 pub const RetryCompletion = union(enum) { stale, message: RetryMessage, failure: RetryFailure };
@@ -316,8 +312,10 @@ pub fn retry(raw: *anyopaque, task: *Task) !void {
     const item = page.facts.items[0];
     const content = switch (item.value.admission.content) {
         .text => |reference| reference,
-        // Activity pages refuse parts values until readers project them; their retry policy comes with that.
-        .parts => return error.ContentIsParts,
+        .parts => {
+            job.result.retry = .{ .failure = .has_images };
+            return;
+        },
     };
     if (content.length > Input.capacity) {
         job.result.retry = .{ .failure = .too_large };
@@ -528,7 +526,7 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
         job.result.queued = page.facts.queued;
         const queued = page.facts.queued;
         if (queued.count != 0 and queued.newest_admission != job.queued_line) {
-            job.result.queued_line = .{ .admission = queued.newest_admission, .line = (try readFirstLine(requests, job, queued.newest_position, null, .fails)).? };
+            job.result.queued_line = .{ .admission = queued.newest_admission, .line = (try readFirstLine(requests, job, queued.newest_position, queued.newest_content orelse return error.InvalidActivityPage, .fails)).? };
         }
     }
     try job.files.inspection.setLength(task.io, 0);
@@ -1112,6 +1110,8 @@ const FakeHost = struct {
     work_state: ?protocol.WorkState = null,
     refuse_content: bool = false,
     content_texts: ?[]const []const u8 = null,
+    /// Serves the parts routes; a Message whose content is parts reads through it.
+    parts: ?*value_reads.PartsHost = null,
     pages: usize = 0,
     contents: usize = 0,
     others: usize = 0,
@@ -1197,6 +1197,7 @@ const FakeHost = struct {
             facts.queued.count += 1;
             facts.queued.newest_admission = value.admission.admission;
             facts.queued.newest_position = at;
+            facts.queued.newest_content = value.admission.content;
         }
         facts.work = .{ .work = if (self.work_state) |state| .{ .state = state, .turn = 1, .operation = 1 } else if (self.held) .{ .state = .{ .working = .{ .since = 1 } }, .turn = 1, .operation = 1 } else .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 };
         facts.work.workspace.set("/") catch unreachable;
@@ -1226,7 +1227,7 @@ const FakeHost = struct {
             self.contents += 1;
             if (self.refuse_content) return fake_host.refuse(fd, .activity_unavailable, "ContentNotFound");
             fake_host.respondContent(fd, if (self.content_texts) |texts| texts[@intCast(position - 1)] else text);
-        } else self.others += 1;
+        } else if (self.parts) |parts| try parts.serve(fd, request) else self.others += 1;
     }
 
     fn withHost(self: *FakeHost, action: anytype) !void {
@@ -1403,6 +1404,21 @@ test "session_reads the queued row's line fails the read when the Host refuses i
     var job: Job = .{ .session = "k7m2qx", .opening = true, .line_read = .{ .revision = 1, .end = 21 } };
     try std.testing.expectError(error.HostInvocationFailed, host.read(&job));
     try std.testing.expectEqual(@as(usize, 1), host.contents);
+}
+
+test "SUI-60 the queued strip reads a parts Message's first line through its owner" {
+    const texts = [_][]const u8{ "Describe this screenshot.\nmore", "" };
+    const parts = [_]content_value.Part{ value_reads.PartsHost.textPart(0, texts[0]), value_reads.PartsHost.imagePart(1, 2, 2, 70) };
+    var parts_host: value_reads.PartsHost = .{ .parts = &parts, .texts = &texts };
+    var queued = FakeHost.message(1).admission;
+    queued.content = value_reads.PartsHost.value;
+    const tail = [_]FakeHost.Tail{.{ .value = .{ .admission = queued } }};
+    var host: FakeHost = .{ .history = 20, .tail = &tail, .end = 21, .held = true, .parts = &parts_host };
+    var job: Job = .{ .session = "k7m2qx", .opening = true, .line_read = .{ .revision = 1, .end = 21 } };
+    try host.read(&job);
+    try std.testing.expectEqualStrings("Describe this screenshot.", job.result.queued_line.?.line.slice());
+    try std.testing.expectEqual(@as(usize, 0), host.contents);
+    try std.testing.expectEqual(@as(usize, 1), parts_host.lists);
 }
 
 test "SUI-50 queued reads preserve invisible replay identities in every work state" {
@@ -2001,11 +2017,15 @@ test "session_reads retry stages exact multi-window bytes before its ending and 
     try std.testing.expectEqual(@as(usize, 1), host.contents);
 }
 
-test "session_reads retry reports only Message state without falling back" {
-    for ([_]enum { absent, too_large }{ .absent, .too_large }) |case| {
+test "SUI-16 session_reads retry reports only Message state without falling back" {
+    for ([_]enum { absent, too_large, parts }{ .absent, .too_large, .parts }) |case| {
         var message = FakeHost.message(2).admission;
         switch (case) {
             .too_large => message.content.text.length = Input.capacity + 1,
+            .parts => {
+                const identity = message.content.text;
+                message.content = .{ .parts = .{ .identity = identity, .owner = .{ .message = message.admission } } };
+            },
             else => {},
         }
         const tail = [_]FakeHost.Tail{
@@ -2020,6 +2040,7 @@ test "session_reads retry reports only Message state without falling back" {
         const expected: RetryFailure = switch (case) {
             .absent => .no_message,
             .too_large => .too_large,
+            .parts => .has_images,
         };
         try std.testing.expectEqual(expected, job.retryCompletion(latest).failure);
         try std.testing.expectEqual(@as(usize, 2), host.pages);
@@ -2194,15 +2215,17 @@ test "chat info worker owns typed model and label bytes until completion" {
     try std.testing.expectEqual(ChatInfo.Edit{ .permission = .ask }, job.info_edit.?);
 }
 
-test "session_reads recall passes over a Message the draft refuses in one step, whatever refuses it" {
-    for ([_][]const u8{ "\x01x", "\u{301}x" }) |refused| for (0..3) |bad| {
+test "SUI-16 session_reads recall passes over a Message the draft refuses in one step, whatever refuses it" {
+    // null: a Message with parts, which the editor cannot hold.
+    for ([_]?[]const u8{ "\x01x", "\u{301}x", null }) |refused| for (0..3) |bad| {
         errdefer std.debug.print("refused={any} bad position={d}\n", .{ refused, bad + 1 });
         var texts = [_][]const u8{ "older", "middle", "newer" };
-        texts[bad] = refused;
+        texts[bad] = refused orelse "parts";
         var tail: [3]FakeHost.Tail = undefined;
         for (&tail, texts, 1..) |*row, body, admission| {
             var value = FakeHost.message(admission);
-            value.admission.content = .{ .text = .{ .length = body.len, .digest = protocol.contentDigest(body) } };
+            const reference: content_value.Reference = .{ .length = body.len, .digest = protocol.contentDigest(body) };
+            value.admission.content = if (refused == null and admission == bad + 1) .{ .parts = .{ .identity = reference, .owner = .{ .message = admission } } } else .{ .text = reference };
             row.* = .{ .value = value };
         }
         var host: FakeHost = .{ .history = 0, .tail = &tail, .end = tail.len, .content_texts = &texts };
@@ -2230,7 +2253,7 @@ test "session_reads recall passes over a Message the draft refuses in one step, 
         };
         try std.testing.expectEqual(expected_shown, shown);
         try std.testing.expectEqual(expected_passed, passed);
-        try std.testing.expectEqual(@as(usize, 3), host.contents);
+        try std.testing.expectEqual(@as(usize, if (refused == null) 2 else 3), host.contents);
     };
 }
 

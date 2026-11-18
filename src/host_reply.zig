@@ -537,7 +537,7 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     @memset(&facts.items, longest_item);
     facts.call_activity = .{ .total = max, .count = 3 };
     @memset(&facts.call_activity.entries, .{ .operation = max, .ordinal = max, .presentation = presentation });
-    facts.queued = .{ .count = max, .oldest_position = max, .newest_admission = max, .newest_position = max };
+    facts.queued = .{ .count = max, .oldest_position = max, .newest_admission = max, .newest_position = max, .newest_content = .{ .parts = .{ .identity = .{ .length = max, .digest = @splat(0xff) }, .owner = .{ .message = max } } } };
     var longest_state: protocol.WorkState = undefined;
     var longest_state_bytes: usize = 0;
     for ([_]protocol.WorkState{

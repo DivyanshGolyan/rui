@@ -148,7 +148,7 @@ test "an activity page reports the queued Messages at its end, until applied or 
             const waiting = try store_core.activityPageForTesting(&storage, request);
             const first = waiting.items[0];
             const second = waiting.items[1];
-            try std.testing.expectEqual(@as(protocol.Queued, .{ .count = 2, .oldest_position = first.position, .newest_admission = second.value.admission.admission, .newest_position = second.position }), waiting.queued);
+            try std.testing.expectEqual(@as(protocol.Queued, .{ .count = 2, .oldest_position = first.position, .newest_admission = second.value.admission.admission, .newest_position = second.position, .newest_content = second.value.admission.content }), waiting.queued);
             var admitted = (try storage.admitNextModelAttempt(.{})).?;
             _ = try admitted.permit.consume();
             try std.testing.expectEqual(@as(u64, 0), (try store_core.activityPageForTesting(&storage, request)).queued.count);

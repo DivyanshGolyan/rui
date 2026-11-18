@@ -18,6 +18,8 @@ Explicit **Full** contains Current plus the following closed inventory:
 
 - for a Session, every Session Context Revision; admitted Message with its binding, application or exclusion and public outcome; canonical Conversation entry; Turn; model or Action Operation with its public Resolution; Tool Call and ordered Tool Result, including bounded call rejection; Permission Request, Decision and Authorization; and committed Session stop or Model Interruption command with its public outcome.
 
+A Message or Action Resolution with parts appears in both profiles as its `parts` content value with its owner, where text would be inlined; Full Conversation entries carry the same content value as Conversation pages.
+
 Full model Operations include `offered_tools`, the sorted tool names in the effective offer frozen at that Operation’s admission.
 Current settings and Full revision settings expose configured allowed intent as `tools` and loaded intent as `loaded_tools`; neither reconstructs an existing Operation’s offer.
 An allowed or loaded edit, later discovery, or a changed Host tool set cannot change that Operation’s `offered_tools`.
@@ -67,7 +69,8 @@ Results run newest-first, at most 16 items per page; Tool Results share their co
 Other entries use ordinal zero.
 Once a group settles its final acceptance position is newer than any prior fixed end, so incomplete results cannot materialize behind an existing cursor.
 Later appends are outside the fixed end.
-Each item carries kind, position, ordinal, exact byte length and SHA-256, with `display:"omitted"`; no payload is silently shortened into a preview.
+Each item carries kind, position, ordinal and its `content` value, with `display:"omitted"`; no payload is silently shortened into a preview.
+A `content` value is `{"type":"text",bytes,sha256}` or, for a Message or Action Resolution with parts, `{"type":"parts",bytes,sha256,owner}`, whose owner reads its parts through [the parts routes](#typed-message-and-action-resolution-parts).
 Reverse the retrieved sequence for chronological presentation.
 An empty first page has no continuation, even if work later appends.
 
@@ -83,6 +86,7 @@ These checks retain only constant-size identity/metadata values and no payload o
 Position and ordinal share the signed SQLite domain; invalid values fail as ordinary identities.
 By default the raw octet-stream response contains at most 4 KiB, with total `X-Rui-Content-Bytes` and exclusive `X-Rui-Next-Offset`; repeat until the offset equals total.
 A range can split UTF-8: join bytes before decoding/display.
+A parts value has no text bytes: `conversation-content` and `activity-content` refuse it with `409` and `ContentIsParts`, without fencing, and the caller reads it through its owner.
 Out-of-range or nonpublic identities fail without leaking content.
 The server requests public byte ranges; the Store owns representation selection, positioning, decoding and validation.
 Every public text is its own content row, so a range seeks directly.
@@ -122,7 +126,7 @@ A part read is indexed: it finds the owner, then the part by ordinal, without re
 Damage found by either read fences the Store.
 
 `session list-parts --session ID --admission ID` and `action list-parts --session ID --action ID` print the list reply as one JSON value. `session read-part` and `action read-part` take the same selectors and `--part N` and write the exact bytes of a Text or Image part to stdout, checked against the length and digest the list certified. A missing part, a value without parts, or a foreign or nonpublic selection fails without writing to stdout.
-The public text readers retain their refusal of values with parts.
+Every other public reader projects such a value as its `parts` content value with its owner: Activity and Conversation pages, the Action read, Session listing, Current and Full reports and keyed observation. Only text routes, which serve bytes, refuse it with `ContentIsParts`.
 
 ### Tool Call proposals
 
@@ -174,7 +178,7 @@ The additional per-call canonical data is at most 200 description bytes plus 120
 Each Activity page also captures `call_activity` under the same Store lock, with an exact total and at most the three oldest `(operation, ordinal)` identities awaiting presentation.
 A page whose `kinds` are not every kind reads neither `call_activity` nor `queued`, and reports both empty.
 Its boundary is the last returned row for a forward page with `more`, otherwise `(end, null)`, including backward opening.
-At the same boundary the page reports `queued`: how many Messages without a sender were admitted and neither applied nor excluded, the oldest one's Admission position, and the newest one's admission ID and position.
+At the same boundary the page reports `queued`: how many Messages without a sender were admitted and neither applied nor excluded, the oldest one's Admission position, and the newest one's admission ID, position and `newest_content`, its content value, or `null` when none waits.
 Selection and a stop take admission-order prefixes, and Admission positions follow admission order, so the Store seeks the boundary in the index of those Messages by Admission position and walks down, stopping at the first taken: it reads the waiting Messages and one more, however many Messages precede or follow the boundary.
 Unpublished groups retain all calls, including settled siblings.
 Published calls retire only before that boundary or at its position through the presented one-based result ordinal.
@@ -229,11 +233,12 @@ Query work may grow with history; item bounds do not promise traversal latency.
 The query is 1 to 256 UTF-8 bytes; matching folds only ASCII A–Z and keeps every other byte exact, independent of the Store engine.
 The Host streams existing public content through `ContentReader`, with a fixed 8 MiB content-byte scan budget per request, and SQL chooses only candidate identities, never text matches.
 Searched text is Message text (admission, user, received and sent), assistant text, Turn-ending content, Tool Results, and a call's tool name followed by a newline and its stored arguments JSON; instructions, output schemas, usage, call IDs and private provider material are not searched.
+In a parts value each Text part is searched on its own, so no match spans two parts, and Image bytes are never searched; reading the manifest charges its bytes to the scan budget before any part, and an entry whose manifest does not fit waits for the continuation.
 The reply is `type:"activity_search"` with newest-first `items`, each naming `position`, `ordinal`, `kind` and up to three `hits`, and nullable `next` naming the last scanned entry.
-A hit carries a UTF-8-aligned `snippet` of at most 160 bytes and decimal-string byte `offset` and `length` inside that snippet; when the full matched query exceeds the snippet bound, the highlight is its visible prefix, but matching still uses the entire query.
+A hit carries a UTF-8-aligned `snippet` of at most 160 bytes, decimal-string byte `offset` and `length` inside that snippet, and `part`, the zero-based ordinal of the Text part it matched in a parts value or `null` for text; when the full matched query exceeds the snippet bound, the highlight is its visible prefix, but matching still uses the entire query.
 Malformed stored text bytes appear as `?` in snippets, one byte each, preserving byte offsets.
 A budget-limited reply may contain no matches and still have `next`; the exclusive cursor proceeds to older entries, including when scanning stopped inside a large entry, rather than resuming that entry's remaining bytes.
-`read_transcript` with `query` uses this same search, prints each matching entry's outline followed by quoted snippets, and preserves the query in its continuation hint; `query` with `full` is refused.
+`read_transcript` with `query` uses this same search, prints each matching entry's outline followed by quoted snippets, each prefixed `part N: ` when it matched inside a parts value, and preserves the query in its continuation hint; `query` with `full` is refused.
 Search adds no Store format, index or SQL text-matching dependency.
 
 `POST /v1/model-list` takes `kind:"model_list"` and returns `providers`: for each provider the Host serves, in Provider order, its `provider`, `source` and `models`, each an `id` with `known`, whether Rui's model catalog knows its facts.
@@ -588,7 +593,7 @@ Restart never imports leftover ingress.
 
 | Contract | Canonical checks | Limits and exceptions |
 | --- | --- | --- |
-| [Typed Message and Action Resolution parts](#typed-message-and-action-resolution-parts) | `public-parts-integration` (INS-10) seeds Messages and Action Resolutions through the Store, then lists every part and reads Text, PNG and JPEG bytes through the native CLI; `read-image-integration` checks a real `read_image` Action; `store/tests/public_parts.zig` (INS-9) checks owner resolution from the receiving, sending, Action and foreign Sessions, certification before the first part, metadata, indexed byte reads and damage; the Host test INS-11 checks windows, streams and refusals on the wire; the Store round-budget test checks each cursor step and the indexed open | Existing text readers retain their refusal of values with parts. |
+| [Typed Message and Action Resolution parts](#typed-message-and-action-resolution-parts) | `public-parts-integration` (INS-10) seeds Messages and Action Resolutions through the Store, then lists every part and reads Text, PNG and JPEG bytes through the native CLI; `read-image-integration` checks a real `read_image` Action; `store/tests/public_parts.zig` (INS-9) checks owner resolution from the receiving, sending, Action and foreign Sessions, certification before the first part, metadata, indexed byte reads and damage; the Host test INS-11 checks windows, streams and refusals on the wire; the Store round-budget test checks each cursor step and the indexed open | The text routes refuse a parts value with `ContentIsParts`; every other public reader projects it with its owner (INS-12, SH-51). |
 | [Request and adapter waits](#work-state-and-wait-conditions) | `request_wait_integration.py`: completion and ask-mode permission return exit 0; timeout returns exit 5 with the latest observation; unknown key returns exit 4; Host stopped mid-wait returns the keyed read-error envelope and its status; restart mid-Bash exposes `recovery`; a Host-side count or lossless test observation proves a tier-2 `not_modified` hit while a sibling Session commits. Focused client tests pin poll schedule and state-to-exit mapping without sleeps; CLI argument tests pin the 300-second default and positive 86400-second bound. | Waits never start, resume or retarget work, or hold capture/Host resources between polls. Permission returns do not replace exact-target validation. Timing alone is not evidence of a token-tier hit |
 | Current selection, pending count, ten recent Messages | `'Current facts'`, `current-facts-integration`, `store/sqlite_tests/` `'Current selects active then queued'` | Suppressing callbacks beyond 128 rows must fail the complete count. Fixed storage is not process memory or Mac evidence |
 | [Per-key outcomes as data](#outcomes-and-observation-errors) | `human_cli_integration.py`, `store/tests/` `'Current reports progress alongside'` | Composed reads may span commits. A timeout proves neither rejection nor work failure |

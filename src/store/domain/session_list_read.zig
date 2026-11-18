@@ -331,10 +331,7 @@ noinline fn readRowSettings(a: *ReadAccess, rows: []const ShownRow, decoded: *Li
             a.readEach(list_row, .{ .session = row.reference, .first_action = work.first_action, .first = row.first }, 1, &read);
     }
     const ran = runList(a);
-    if (read.failure) |err| {
-        if (read.unsupported_first) |first| try report_domain.verifyFirstMessage(a, first);
-        return err;
-    }
+    if (read.failure) |err| return err;
     try ran;
     if (read.shown != rows.len) return error.CorruptStore;
 }
@@ -347,7 +344,6 @@ fn RowsRead(comptime Visitor: type) type {
         now_ms: u64,
         visitor: Visitor,
         shown: usize = 0,
-        unsupported_first: ?struct { first_admission: ?rsql.Positive, first_form: ?u8, first_length: ?u64, first_digest: ?[32]u8 } = null,
         failure: ?(ErrorOf(rowValues) || ErrorOf(@typeInfo(Visitor).pointer.child.row)) = null,
 
         pub fn visit(read: *@This(), row: *const ListRow) bool {
@@ -355,7 +351,6 @@ fn RowsRead(comptime Visitor: type) type {
             var sorted: [tool_name.max_tools][]const u8 = undefined;
             var last_text: Bounded(session_list.max_last_line_bytes) = undefined;
             var values = rowValues(read.rows, read.shown, read.now_ms, row, &sorted, &last_text) catch |err| {
-                if (err == error.InputPartsNotSupported) read.unsupported_first = .{ .first_admission = row.first_admission, .first_form = row.first_form, .first_length = row.first_length, .first_digest = row.first_digest };
                 read.failure = err;
                 return false;
             };

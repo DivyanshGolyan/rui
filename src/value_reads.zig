@@ -135,7 +135,7 @@ const protocol = @import("protocol.zig");
 
 /// Serves one parts value under one owner, and one text value at every activity and
 /// conversation coordinate, through the routes a Display reads.
-const PartsHost = struct {
+pub const PartsHost = struct {
     parts: []const content_value.Part,
     texts: []const []const u8,
     /// Bytes served for a part instead of its certified ones.
@@ -149,7 +149,7 @@ const PartsHost = struct {
 
     const owner: content_value.Owner = .{ .action = 9 };
     const manifest: content_value.Reference = .{ .length = 215, .digest = @splat(0x4b) };
-    const value: content_value.Value = .{ .parts = .{ .identity = manifest, .owner = owner } };
+    pub const value: content_value.Value = .{ .parts = .{ .identity = manifest, .owner = owner } };
     const plain = "plain text\nsecond line";
 
     fn plainValue() content_value.Value {
@@ -162,11 +162,11 @@ const PartsHost = struct {
         return hash.finalResult();
     }
 
-    fn textPart(ordinal: u32, bytes: []const u8) content_value.Part {
+    pub fn textPart(ordinal: u32, bytes: []const u8) content_value.Part {
         return .{ .ordinal = ordinal, .kind = .text, .reference = .{ .length = bytes.len, .digest = digest(bytes) } };
     }
 
-    fn imagePart(ordinal: u32, width: u32, height: u32, bytes: u64) content_value.Part {
+    pub fn imagePart(ordinal: u32, width: u32, height: u32, bytes: u64) content_value.Part {
         return .{ .ordinal = ordinal, .kind = .{ .image = .{ .media = .{ .format = .png, .width = width, .height = height }, .name = null } }, .reference = .{ .length = bytes, .digest = @splat(0xe3) } };
     }
 
@@ -181,7 +181,11 @@ const PartsHost = struct {
 
     pub fn answer(self: *PartsHost, fd: std.posix.fd_t) !void {
         var buffer: [8192]u8 = undefined;
-        const request = try fake_host.readRequest(fd, &buffer) orelse return;
+        try self.serve(fd, try fake_host.readRequest(fd, &buffer) orelse return);
+    }
+
+    /// Answers one request already read.
+    pub fn serve(self: *PartsHost, fd: std.posix.fd_t, request: fake_host.Request) !void {
         if (request.is("/v1/public-parts")) {
             self.lists += 1;
             if (self.refuse_list) return fake_host.refuse(fd, .parts_unavailable, "ContentIsText");
