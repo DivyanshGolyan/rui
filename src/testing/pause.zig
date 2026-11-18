@@ -92,10 +92,12 @@ const EnabledController = struct {
     changed: std.Io.Condition = .init,
     selections: std.ArrayList(Armed) = .empty,
     arrivals: std.ArrayList(Entry) = .empty,
+    counts: std.ArrayList(Count) = .empty,
     next_id: u64 = 1,
     closed: bool = false,
 
-    const Armed = struct { selection: Selection, occurrence: u64 = 0 };
+    const Armed = struct { selection: Selection };
+    const Count = struct { point: Point, context: Context, total: u64 };
     const Entry = struct {
         arrival: Arrival,
         expected: Decision,
@@ -113,6 +115,7 @@ const EnabledController = struct {
     pub fn deinit(self: *EnabledController) void {
         self.selections.deinit(self.allocator);
         self.arrivals.deinit(self.allocator);
+        self.counts.deinit(self.allocator);
     }
     pub fn arm(self: *EnabledController, selection: Selection) !void {
         self.mutex.lockUncancelable(self.io);
@@ -128,19 +131,36 @@ const EnabledController = struct {
                 selection.occurrence != null and other.occurrence.? != selection.occurrence.?) continue;
             return error.AlreadyArmed;
         }
+        if (selection.occurrence) |occurrence| {
+            if (occurrence <= try self.count(selection.point, selection.context)) return error.OccurrencePassed;
+        }
         try self.selections.append(self.allocator, .{ .selection = selection });
+    }
+    // Store counts by actual context so a filter first armed later can count
+    // all prior matching arrivals, including those without any selection.
+    fn count(self: *EnabledController, point: Point, filter: Context) !u64 {
+        var total: u64 = 0;
+        for (self.counts.items) |entry| {
+            if (entry.point == point and matchesContext(filter, entry.context))
+                total = std.math.add(u64, total, entry.total) catch return error.Exhausted;
+        }
+        return total;
     }
     fn register(self: *EnabledController, point: Point, context: Context, work: ?u64, wake: ?Wake) !?usize {
         if (self.closed) return error.Closed;
-        for (self.selections.items) |*armed| {
-            const selection = armed.selection;
-            if (selection.point == point and matchesContext(selection.context, context))
-                armed.occurrence = std.math.add(u64, armed.occurrence, 1) catch return error.Exhausted;
+        var found = false;
+        for (self.counts.items) |*entry| {
+            if (entry.point == point and std.meta.eql(entry.context, context)) {
+                entry.total = std.math.add(u64, entry.total, 1) catch return error.Exhausted;
+                found = true;
+                break;
+            }
         }
+        if (!found) try self.counts.append(self.allocator, .{ .point = point, .context = context, .total = 1 });
         for (self.selections.items) |armed| {
             const selection = armed.selection;
             if (selection.point != point or !matchesContext(selection.context, context)) continue;
-            const occurrence = armed.occurrence;
+            const occurrence = try self.count(point, selection.context);
             if (selection.occurrence != null and selection.occurrence.? != occurrence) continue;
             const id = self.next_id;
             const next_id = std.math.add(u64, id, 1) catch return error.Exhausted;
@@ -358,31 +378,77 @@ test "pause PAU-3 concurrent arrivals have distinct ids and release independentl
 }
 
 test "pause PAU-7 selections count matching contexts independently" {
+    const point: Point = .action_result_ready;
+    const Case = struct { first: u64, second: u64, between: bool, disjoint: bool };
+    const cases = [_]Case{
+        .{ .first = 1, .second = 2, .between = false, .disjoint = false },
+        .{ .first = 2, .second = 1, .between = false, .disjoint = false },
+        .{ .first = 1, .second = 2, .between = true, .disjoint = false },
+        .{ .first = 2, .second = 1, .between = true, .disjoint = false },
+        .{ .first = 1, .second = 2, .between = false, .disjoint = true },
+        .{ .first = 2, .second = 1, .between = false, .disjoint = true },
+        .{ .first = 1, .second = 2, .between = true, .disjoint = true },
+        .{ .first = 2, .second = 1, .between = true, .disjoint = true },
+    };
+    for (cases) |case| {
+        var owner = EnabledController.init(std.testing.io, std.testing.allocator);
+        defer owner.deinit();
+        defer owner.close();
+        const a: Context = .{ .action = 1 };
+        const b: Context = if (case.disjoint) .{ .action = 2 } else a;
+        const first: Selection = .{ .point = point, .context = a, .occurrence = case.first };
+        const second: Selection = .{ .point = point, .context = b, .occurrence = case.second };
+        var wakes: usize = 0;
+        const wake: Wake = .{ .context = &wakes, .call = struct {
+            fn call(ctx: *anyopaque, _: u64) void {
+                const n: *usize = @ptrCast(@alignCast(ctx));
+                n.* += 1;
+            }
+        }.call };
+        try owner.arm(first);
+        if (!case.between) try owner.arm(second);
+        try std.testing.expectError(error.AlreadyArmed, owner.arm(.{ .point = point }));
+        var work: u64 = 1;
+        for (0..2) |step| {
+            if (step == 1 and case.between) {
+                if (case.second == 1) {
+                    try std.testing.expectError(error.OccurrencePassed, owner.arm(second));
+                } else try owner.arm(second);
+            }
+            for (if (case.disjoint) &[_]Context{ a, b } else &[_]Context{a}) |context| {
+                const occurrence: u64 = @intCast(step + 1);
+                const selected = (std.meta.eql(context, a) and case.first == occurrence) or
+                    ((!case.between or step == 1) and std.meta.eql(context, b) and case.second == occurrence);
+                const result = try owner.poll(work, point, context, wake);
+                if (selected) {
+                    try std.testing.expect(result == .pending);
+                    try std.testing.expectEqual(occurrence, result.pending.occurrence);
+                    try owner.release(result.pending.id, .proceed);
+                    try std.testing.expect((try owner.poll(work, point, context, wake)) == .ready);
+                } else try std.testing.expect(result == .ready);
+                work += 1;
+            }
+        }
+        try std.testing.expectError(error.OccurrencePassed, owner.arm(.{ .point = point, .context = .{ .action = 3 }, .occurrence = 0 }));
+    }
+    // A filter first armed after several different actual contexts counts all
+    // prior matches, including arrivals at a point with no armed selections.
     var owner = EnabledController.init(std.testing.io, std.testing.allocator);
     defer owner.deinit();
     defer owner.close();
-    const point: Point = .action_result_ready;
-    try owner.arm(.{ .point = point, .context = .{ .action = 1 }, .occurrence = 1 });
-    try owner.arm(.{ .point = point, .context = .{ .action = 1 }, .occurrence = 2 });
-    try owner.arm(.{ .point = point, .context = .{ .action = 2 }, .occurrence = 1 });
-    try std.testing.expectError(error.AlreadyArmed, owner.arm(.{ .point = point }));
+    _ = try owner.reach(point, .{ .action = 1 });
+    _ = try owner.reach(point, .{ .action = 2 });
+    _ = try owner.reach(.action_attempt_committed, .{ .action = 3 });
+    try std.testing.expectError(error.OccurrencePassed, owner.arm(.{ .point = point, .occurrence = 2 }));
+    try owner.arm(.{ .point = point, .occurrence = 3 });
     var wakes: usize = 0;
     const wake: Wake = .{ .context = &wakes, .call = struct {
-        fn call(ctx: *anyopaque, _: u64) void {
-            const n: *usize = @ptrCast(@alignCast(ctx));
-            n.* += 1;
-        }
+        fn call(_: *anyopaque, _: u64) void {}
     }.call };
-    const contexts = [_]Context{ .{ .action = 2 }, .{ .action = 1 }, .{ .action = 1 } };
-    const expected = [_]u64{ 1, 1, 2 };
-    for (contexts, expected, 0..) |context, occurrence, i| {
-        const result = try owner.poll(i + 1, point, context, wake);
-        try std.testing.expect(result == .pending);
-        try std.testing.expectEqual(occurrence, result.pending.occurrence);
-        try owner.release(result.pending.id, .proceed);
-        try std.testing.expect((try owner.poll(i + 1, point, context, wake)) == .ready);
-    }
-    try std.testing.expectEqual(@as(usize, 3), wakes);
+    const result = try owner.poll(1, point, .{ .action = 3 }, wake);
+    try std.testing.expect(result == .pending);
+    try std.testing.expectEqual(@as(u64, 3), result.pending.occurrence);
+    try owner.release(result.pending.id, .proceed);
 }
 
 test "pause PAU-4 poll remains pending until release and consumes once" {

@@ -10,7 +10,7 @@ The pause controller is a test-only seam; these promises apply to its callers an
 | PAU-4 | Module | Poll stays pending until release and consumes the decision once. | PauseController | `pause PAU-4 poll remains pending until release and consumes once` | `src/testing/pause.zig` |
 | PAU-5 | Module | Arming rejects faults unsupported by the point. | PauseController | `pause PAU-5 rejects unsupported faults before arming` | `src/testing/pause.zig` |
 | PAU-6 | Module | Closing the controller unblocks parked workers with an error. | PauseController | `pause PAU-6 close releases parked workers with closed` | `src/testing/pause.zig` |
-| PAU-7 | Module | Disjoint selections count matching arrivals independently and overlapping selections are rejected. | PauseController | `pause PAU-7 selections count matching contexts independently` | `src/testing/pause.zig` |
+| PAU-7 | Module | Occurrences count all matching arrivals per point and filter regardless of arming time; passed occurrences and ambiguous overlapping selections are rejected. | PauseController | `pause PAU-7 selections count matching contexts independently` | `src/testing/pause.zig` |
 | PAU-8 | Process | Arming is acknowledged before execution starts and rejected afterwards; arrivals remain available to a later wait. | Socket protocol | `test_pau_8_arm_ack_then_repeated_arrivals` | `tests/integration/pause_socket_test.py` |
 | PAU-9 | Process | A pending wait does not block other socket requests. | Socket protocol | `test_pau_9_wait_does_not_block_other_requests` | `tests/integration/pause_socket_test.py` |
 | PAU-10 | Process | Socket EOF closes the owner and releases parked work. | Socket EOF | `test_pau_10_eof_closes_owner_and_releases_worker` | `tests/integration/pause_socket_test.py` |
