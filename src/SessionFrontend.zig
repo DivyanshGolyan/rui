@@ -8508,12 +8508,12 @@ fn paginatedReplayCount() !void {
             try writer.interface.writeAll(bytes);
         }
         fn page(frontend: *Self, listener: *std.Io.net.Server, read: feed_reads.Read, first: u64, last: u64, end: u64) !void {
-            var facts: protocol.ActivityFacts = .{ .end = end, .direction = if (read == .opening or read == .fill_above) .backward else .forward, .count = @intCast(last - first + 1), .queued = .{ .count = 1, .oldest_position = 1, .newest_admission = 1, .newest_position = 1, .newest_content = .{ .text = .{ .length = 1, .digest = @splat(1) } } }, .work = .{ .revision = 1, .work = .{ .state = .{ .working = .{ .since = 1 } }, .turn = 1, .operation = 1 } } };
+            const content: content_value.Value = .{ .text = .{ .length = 0, .digest = protocol.contentDigest("") } };
+            var facts: protocol.ActivityFacts = .{ .end = end, .direction = if (read == .opening or read == .fill_above) .backward else .forward, .count = @intCast(last - first + 1), .queued = .{ .count = 1, .oldest_position = 1, .newest_admission = 1, .newest_position = 1, .newest_content = content }, .work = .{ .revision = 1, .work = .{ .state = .{ .working = .{ .since = 1 } }, .turn = 1, .operation = 1 } } };
             facts.more = if (facts.direction == .backward) first != 1 else last < end;
             try facts.work.workspace.set("/");
             var peer: protocol.NamedPeer = .{ .session = .{} };
             try peer.session.set("9f8e7d");
-            const content: content_value.Value = .{ .text = .{ .length = 0, .digest = protocol.contentDigest("") } };
             for (facts.items[0..facts.count], 0..) |*item, i| {
                 const position = if (facts.direction == .backward) last - i else first + i;
                 item.* = .{ .position = position, .ordinal = 0, .at = 1, .value = if (position == 1) .{ .admission = .{ .admission = 1, .key = .{}, .turn = null, .state = .queued, .content = content, .admitted_at = 1 } } else .{ .sent = .{ .admission = position, .admitted_at = 1, .target = peer, .content = content } } };

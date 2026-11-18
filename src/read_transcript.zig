@@ -539,6 +539,14 @@ test "EXR-65 read_transcript renders parts entries" {
     const page = try arena.create(protocol.ActivityFacts);
     try database.activityPage(&.{ .session = other, .direction = .backward }, page);
     const position = page.items[0].position;
+    const long_text = try arena.alloc(u8, window_bytes - 4);
+    @memset(long_text, 'a');
+    try storage.testing.submitTestMessageParts(&database, &tmp, "parts-long-message", other.slice(), &.{
+        .{ .bytes = long_text }, .{ .bytes = png, .kind = .{ .image = .{} } }, .{ .bytes = "tail" },
+    });
+    try database.activityPage(&.{ .session = other, .direction = .backward }, page);
+    const long_position = page.items[0].position;
+    const long_display = try std.fmt.allocPrint(arena, "{s}\n[image 1: PNG 1x1, 0.1 KB]\ntail", .{long_text});
     const Case = struct { arguments: []const u8, expected: []const u8, whole: bool = false };
     const cases = [_]Case{
         .{ .arguments = try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"limit\":1}}", .{other.slice()}), .expected = try std.fmt.allocPrint(arena, "{d}.0 admission person 3 parts, 1 images: \"before\"\n", .{position}) },
@@ -546,6 +554,8 @@ test "EXR-65 read_transcript renders parts entries" {
         // Starts inside the placeholder, then on the separator before it.
         .{ .arguments = try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"full\":\"{d}.0\",\"offset\":10}}", .{ other.slice(), position }), .whole = true, .expected = try std.fmt.allocPrint(arena, "Entry {d}.0 admission, bytes 10 to {d} of {d}:\n{s}", .{ position, display.len, display.len, display[10..] }) },
         .{ .arguments = try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"full\":\"{d}.0\",\"offset\":6}}", .{ other.slice(), position }), .whole = true, .expected = try std.fmt.allocPrint(arena, "Entry {d}.0 admission, bytes 6 to {d} of {d}:\n{s}", .{ position, display.len, display.len, display[6..] }) },
+        .{ .arguments = try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"full\":\"{d}.0\"}}", .{ other.slice(), long_position }), .whole = true, .expected = try std.fmt.allocPrint(arena, "Entry {d}.0 admission, bytes 0 to {d} of {d}:\n{s}\nMore: call read_transcript with {{\"id\":\"{s}\",\"full\":\"{d}.0\",\"offset\":{d}}}.\n", .{ long_position, window_bytes, long_display.len, long_display[0..window_bytes], other.slice(), long_position, window_bytes }) },
+        .{ .arguments = try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"full\":\"{d}.0\",\"offset\":{d}}}", .{ other.slice(), long_position, window_bytes }), .whole = true, .expected = try std.fmt.allocPrint(arena, "Entry {d}.0 admission, bytes {d} to {d} of {d}:\n{s}", .{ long_position, window_bytes, long_display.len, long_display.len, long_display[window_bytes..] }) },
         .{ .arguments = try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"query\":\"AFTER\",\"kinds\":[\"admission\"]}}", .{other.slice()}), .expected = "part 2: \"after text\"\n" },
     };
     var calls: [cases.len]storage.TestingCall = undefined;

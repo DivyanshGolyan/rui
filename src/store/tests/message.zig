@@ -786,6 +786,12 @@ test "INS-12 every public reader projects parts with their owner" {
     }
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
+            try projections(case);
+            try ownerless(case, .assistant);
+            try ownerless(case, .rejection);
+        }
+
+        fn projections(case: *store_testing.Case) !void {
             const Capture = @import("../../InputCapture.zig");
             const custody = @import("../../content_custody.zig");
             const compound = @import("../domain/content_parts.zig");
@@ -988,8 +994,92 @@ test "INS-12 every public reader projects parts with their owner" {
             const single_id = try store_testing.queryU64(&storage, "SELECT primary_content_id FROM core_command WHERE command_key='single-text-key'", .{});
             try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT form FROM content WHERE content_id=?1", .{single_id}));
 
+            // The Store shares the value across Sessions, while each admission owns its own read.
+            const second_session = try configureTestSession(&storage, "deduplicated-parts-config");
+            try command.key.set("deduplicated-parts-message");
+            try command.session.set(second_session.slice());
+            const second = try storage.submitMessageParts(&command, loan, null, .{});
+            try std.testing.expect(second == .accepted and !second.accepted.replayed);
+            try std.testing.expectEqualDeep(accepted.accepted.content, second.accepted.content);
+            try std.testing.expectEqual(id, try store_testing.queryU64(&storage, "SELECT content_id FROM message_admission WHERE command_key=?1", .{command.key.slice()}));
+            const second_admission = try store_testing.queryU64(&storage, "SELECT admission_id FROM message_admission WHERE command_key=?1", .{command.key.slice()});
+            try std.testing.expect(admission != second_admission);
+            const owners = [_]@import("../../content_value.zig").Owner{ .{ .message = admission }, .{ .message = second_admission } };
+            for ([_]@TypeOf(session){ session, second_session }, owners, 0..) |receiving, owner, index_in_pair| {
+                const page = try store_core.activityPageForTesting(&storage, .{ .session = receiving });
+                const expected: @import("../../content_value.zig").Value = .{ .parts = .{ .identity = accepted.accepted.content, .owner = owner } };
+                var admissions: usize = 0;
+                for (page.items[0..page.count]) |item| {
+                    if (item.value != .admission) continue;
+                    try std.testing.expectEqualDeep(expected, item.value.admission.content);
+                    admissions += 1;
+                }
+                try std.testing.expectEqual(@as(usize, 1), admissions);
+                var reader: ContentReader = undefined;
+                reader.open(try storage.openPublicPart(receiving.slice(), owner, 0, 0));
+                defer reader.close();
+                var bytes: [16]u8 = undefined;
+                const length = try reader.read(0, &bytes);
+                try std.testing.expectEqualStrings("before", bytes[0..length]);
+                try std.testing.expectError(error.ContentNotFound, storage.openPublicPart(receiving.slice(), owners[1 - index_in_pair], 0, 0));
+                try std.testing.expectError(error.ContentNotFound, storage.openPublicPart(single_session.slice(), owner, 0, 0));
+            }
+            try std.testing.expect(!storage.isFenced());
+
             // A background notice has no owner, so a parts value there is damage, and it fences.
             try std.testing.expectError(error.CorruptStore, store_core.activityPageForTesting(&storage, .{ .session = action_session }));
+            try std.testing.expect(storage.isFenced());
+        }
+
+        fn ownerless(case: *store_testing.Case, source: enum { assistant, rejection }) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try configureTestSession(&storage, "ownerless-parts-config");
+            try store_testing.submitTestMessageParts(&storage, &tmp, "ownerless-parts-message", session.slice(), &.{
+                .{ .bytes = "look" },
+                .{ .bytes = @embedFile("../../testing/fixtures/input-baseline.jpg"), .kind = .{ .image = .{ .assertion = .jpeg } } },
+            });
+            const content = try store_testing.queryU64(&storage, "SELECT content_id FROM message_admission WHERE command_key='ownerless-parts-message'", .{});
+            const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            switch (source) {
+                .assistant => {
+                    try store_testing.settleItemsForTesting(&storage, &tmp, binding, &.{"{\"type\":\"message\",\"id\":\"answer\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"Done.\"}]}"}, "Done.");
+                },
+                .rejection => {
+                    try shared_fixtures.settleCallsForTesting(&storage, &tmp, binding, "rejected-call", &.{.{
+                        .item_id = "rejected-item",
+                        .name = "unknown_tool",
+                        .encoded_call_id = "rejected-call",
+                        .decoded_call_id = "rejected-call",
+                        .encoded_arguments = "{}",
+                        .decoded_arguments = "{}",
+                    }});
+                },
+            }
+            const activity_read = @import("../../activity_read.zig");
+            const kind: activity_read.Kind = switch (source) {
+                .assistant => .assistant,
+                .rejection => .tool_result,
+            };
+            const request: activity_read.ActivityPage = .{ .session = session, .kinds = .initOne(kind) };
+            {
+                const page = try store_core.activityPageForTesting(&storage, request);
+                try std.testing.expectEqual(@as(usize, 1), page.count);
+                try std.testing.expectEqual(kind, std.meta.activeTag(page.items[0].value));
+            }
+            switch (source) {
+                .assistant => {
+                    // Keep the assistant entry and its source item linked so the projection sees the parts form.
+                    try store_testing.exec(&storage, "UPDATE model_output_item SET message_content_id=?1 WHERE operation_id=?2 AND item_kind=2", .{ content, binding.operation_id });
+                    try store_testing.exec(&storage, "UPDATE conversation_entry SET content_id=?1 WHERE source_operation_id=?2 AND entry_kind=3", .{ content, binding.operation_id });
+                },
+                .rejection => try store_testing.exec(&storage, "UPDATE model_tool_call SET rejection_content_id=?1 WHERE operation_id=?2 AND call_ordinal=0", .{ content, binding.operation_id }),
+            }
+            try std.testing.expect(!storage.isFenced());
+            try std.testing.expectError(error.CorruptStore, store_core.activityPageForTesting(&storage, request));
             try std.testing.expect(storage.isFenced());
         }
     }.run);

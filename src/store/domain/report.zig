@@ -1573,19 +1573,21 @@ pub const Conversation = struct {
 
     pub fn values(_: *ReadAccess, row: *const S.Row, _: *ListState(@This())) error{CorruptStore}!session_report.FullRow {
         if (row.entry_kind < 1 or row.entry_kind > 4 or !row.consistent) return error.CorruptStore;
-        return .{ .conversation = .{
-            .ordinal = row.entry_ordinal.get(),
-            .position = row.session_position.get(),
-            .kind = @fromBackingInt(@intCast(row.entry_kind - 1)),
-            .turn = optional(row.turn_id),
-            .source_admission = optional(row.source_admission_id),
-            .source_revision = optional(row.source_revision),
-            .source_catalog_position = optional(row.source_catalog_position),
-            .source_skill_position = optional(row.source_skill_position),
-            .source_operation = optional(row.source_operation_id),
-            // Only a Message entry has an owner; any other entry holding parts fences.
-            .content = try content_parts.publicValue(&.{ .byte_length = row.content_length, .digest = row.content_digest, .private = false, .form = row.content_form }, if (row.entry_kind == 1) .{ .message = (row.source_admission_id orelse return error.CorruptStore).get() } else null),
-        } };
+        return .{
+            .conversation = .{
+                .ordinal = row.entry_ordinal.get(),
+                .position = row.session_position.get(),
+                .kind = @fromBackingInt(@intCast(row.entry_kind - 1)),
+                .turn = optional(row.turn_id),
+                .source_admission = optional(row.source_admission_id),
+                .source_revision = optional(row.source_revision),
+                .source_catalog_position = optional(row.source_catalog_position),
+                .source_skill_position = optional(row.source_skill_position),
+                .source_operation = optional(row.source_operation_id),
+                // Only a Message entry has an owner; any other entry holding parts fences.
+                .content = try content_parts.publicValue(&.{ .byte_length = row.content_length, .digest = row.content_digest, .private = false, .form = row.content_form }, if (row.entry_kind == 1) .{ .message = (row.source_admission_id orelse return error.CorruptStore).get() } else null),
+            },
+        };
     }
 };
 
@@ -1977,7 +1979,7 @@ const Results = struct {
     pub const S = full_results;
     pub const failed = error.CallReadFailed;
     pub const list = session_report.FullList.tool_results;
-    pub const kept_rows = 8;
+    pub const kept_rows = 12;
 
     pub fn values(_: *ReadAccess, row: *const S.Row, _: *ListState(@This())) error{CorruptStore}!session_report.FullRow {
         return .{ .result = .{

@@ -143,6 +143,7 @@ pub const PartsHost = struct {
     refuse_list: bool = false,
     /// The manifest identity the served list names.
     identity: content_value.Reference = manifest,
+    served_owner: content_value.Owner = owner,
     lists: usize = 0,
     part_reads: usize = 0,
     text_reads: usize = 0,
@@ -191,7 +192,7 @@ pub const PartsHost = struct {
             if (self.refuse_list) return fake_host.refuse(fd, .parts_unavailable, "ContentIsText");
             var capture: Capture = .{};
             var writer: protocol.public_parts_reply.Writer(Capture) = .{ .capture = &capture, .session = "k7m2qx" };
-            try writer.head(.{ .identity = self.identity, .owner = owner });
+            try writer.head(.{ .identity = self.identity, .owner = self.served_owner });
             for (self.parts) |part| try writer.part(part);
             try writer.finish();
             fake_host.respond(fd, "200 OK", "application/json", "", capture.buffer[0..capture.len]);

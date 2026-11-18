@@ -1409,9 +1409,10 @@ test "session_reads the queued row's line fails the read when the Host refuses i
 test "SUI-60 the queued strip reads a parts Message's first line through its owner" {
     const texts = [_][]const u8{ "Describe this screenshot.\nmore", "" };
     const parts = [_]content_value.Part{ value_reads.PartsHost.textPart(0, texts[0]), value_reads.PartsHost.imagePart(1, 2, 2, 70) };
-    var parts_host: value_reads.PartsHost = .{ .parts = &parts, .texts = &texts };
+    var parts_host: value_reads.PartsHost = .{ .parts = &parts, .texts = &texts, .served_owner = .{ .message = 1 } };
     var queued = FakeHost.message(1).admission;
     queued.content = value_reads.PartsHost.value;
+    queued.content.parts.owner = .{ .message = queued.admission };
     const tail = [_]FakeHost.Tail{.{ .value = .{ .admission = queued } }};
     var host: FakeHost = .{ .history = 20, .tail = &tail, .end = 21, .held = true, .parts = &parts_host };
     var job: Job = .{ .session = "k7m2qx", .opening = true, .line_read = .{ .revision = 1, .end = 21 } };
