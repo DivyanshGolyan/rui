@@ -793,7 +793,7 @@ pub const migrations = [_]Migration{
     },
     .{
         .from = 82,
-        .sqlite = &.{"CREATE TABLE action_value(action_id INTEGER NOT NULL REFERENCES action_operation(action_id), ordinal INTEGER NOT NULL CHECK(ordinal>0), handle TEXT NOT NULL CHECK(length(CAST(handle AS BLOB))=32 AND handle NOT GLOB '*[^0-9a-f]*'), publication_key TEXT NOT NULL CHECK(length(CAST(publication_key AS BLOB)) BETWEEN 1 AND 128), content_id INTEGER NOT NULL REFERENCES content(content_id), admission_id INTEGER UNIQUE REFERENCES message_admission(admission_id), published_at INTEGER NOT NULL CHECK(published_at>0), PRIMARY KEY(action_id,ordinal), UNIQUE(handle,publication_key)) STRICT, WITHOUT ROWID"},
+        .sqlite = &.{"CREATE TABLE action_value(\n action_id INTEGER NOT NULL REFERENCES action_operation(action_id),\n ordinal INTEGER NOT NULL CHECK(ordinal>0),\n handle TEXT NOT NULL CHECK(length(CAST(handle AS BLOB))=32 AND (handle NOT GLOB '*[^0-9a-f]*' AND length(handle)=length(CAST(handle AS BLOB)))),\n publication_key TEXT NOT NULL CHECK(length(CAST(publication_key AS BLOB)) BETWEEN 1 AND 128),\n content_id INTEGER NOT NULL REFERENCES content(content_id),\n admission_id INTEGER UNIQUE REFERENCES message_admission(admission_id),\n published_at INTEGER NOT NULL CHECK(published_at>0),\n PRIMARY KEY(action_id,ordinal),\n UNIQUE(handle,publication_key)\n) STRICT, WITHOUT ROWID"},
         .mysql = &.{"CREATE TABLE action_value(action_id BIGINT NOT NULL, ordinal BIGINT NOT NULL, handle VARCHAR(32) NOT NULL, publication_key VARCHAR(128) NOT NULL, content_id BIGINT NOT NULL, admission_id BIGINT, published_at BIGINT NOT NULL, PRIMARY KEY(action_id,ordinal), UNIQUE(handle,publication_key), UNIQUE(admission_id), FOREIGN KEY(action_id) REFERENCES action_operation(action_id), FOREIGN KEY(content_id) REFERENCES content(content_id), FOREIGN KEY(admission_id) REFERENCES message_admission(admission_id), CHECK(ordinal>0), CHECK(OCTET_LENGTH(handle)=32 AND NOT REGEXP_LIKE(handle,'[^0-9a-f]','c')), CHECK(OCTET_LENGTH(publication_key) BETWEEN 1 AND 128), CHECK(published_at>0)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin"},
     },
 };
@@ -3512,6 +3512,15 @@ test "schema 82 backfills input sources and preserves admissions" {
         for (migrations[81 - migration_baseline].sqlite) |statement| found = found or std.mem.eql(u8, object.sql, statement);
         try std.testing.expect(found);
     }
+}
+
+test "schema 83 migration creates the canonical SQLite action value table" {
+    for (comptime objects(.sqlite)) |object| {
+        if (!std.mem.eql(u8, object.name, "action_value")) continue;
+        try std.testing.expectEqualStrings(object.sql, migrations[82 - migration_baseline].sqlite[0]);
+        return;
+    }
+    return error.MissingActionValue;
 }
 
 test "schema 83 migration creates constrained action values" {
