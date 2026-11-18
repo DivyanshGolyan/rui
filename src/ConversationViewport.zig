@@ -10,6 +10,8 @@ const display_text = @import("display_text.zig");
 pub const Document = Sized(capacity, true);
 pub const Method = gwidth.Method;
 
+const prose_width = 88;
+
 pub const capacity = 256 * 1024;
 pub const widest_cluster = display_text.widest_cluster;
 pub const longest_cluster = display_text.longest_cluster;
@@ -86,6 +88,7 @@ const exit_bit: RetainedStyle = 1 << 9;
 const user_message_bit: RetainedStyle = 1 << 10;
 const user_start_bit: RetainedStyle = 1 << 11;
 const user_end_bit: RetainedStyle = 1 << 12;
+const full_width_bit: RetainedStyle = 1 << 13;
 const AllText = struct {
     pub fn includes(_: *@This(), _: usize) bool {
         return true;
@@ -98,7 +101,7 @@ const linked_index: u8 = 6;
 const address_index: u8 = 7;
 
 pub fn seamStyle(value: RetainedStyle) RetainedStyle {
-    return (value & (body_bit | user_message_bit | user_start_bit | user_end_bit)) | (if (foregroundIndex(value) == code_index) @as(RetainedStyle, code_index) << 3 else 0);
+    return (value & (body_bit | user_message_bit | user_start_bit | user_end_bit | full_width_bit)) | (if (foregroundIndex(value) == code_index) @as(RetainedStyle, code_index) << 3 else 0);
 }
 
 fn foregroundIndex(value: RetainedStyle) u8 {
@@ -183,7 +186,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                             if (self.length != 0 and !self.user_start_pending and self.styles[self.length - 1] & user_message_bit != 0) self.styles[self.length - 1] |= user_end_bit;
                             self.style &= ~user_message_bit;
                             self.user_start_pending = false;
-                        } else if (std.mem.eql(u8, code, TerminalText.body_on)) self.style |= body_bit else if (std.mem.eql(u8, code, TerminalText.body_off)) self.style &= ~body_bit else if (std.mem.eql(u8, code, "\x1b[0m")) self.style &= body_bit | user_message_bit else if (std.mem.eql(u8, code, "\x1b[1m")) self.style |= 1 else if (std.mem.eql(u8, code, "\x1b[3m")) self.style |= 2 else if (std.mem.eql(u8, code, "\x1b[4m")) self.style |= 4 else if (std.mem.eql(u8, code, "\x1b[2m")) self.style |= user_bit else if (std.mem.eql(u8, code, "\x1b[2;8m")) self.style |= user_bit | summary_bit else if (std.mem.eql(u8, code, "\x1b[8m")) self.style = (self.style & ~user_bit) | summary_bit else if (std.mem.eql(u8, code, "\x1b[39m")) self.style &= ~foreground_mask else {
+                        } else if (std.mem.eql(u8, code, TerminalText.full_width_on)) self.style |= full_width_bit else if (std.mem.eql(u8, code, TerminalText.full_width_off)) self.style &= ~full_width_bit else if (std.mem.eql(u8, code, TerminalText.body_on)) self.style |= body_bit else if (std.mem.eql(u8, code, TerminalText.body_off)) self.style &= ~(body_bit | full_width_bit) else if (std.mem.eql(u8, code, "\x1b[0m")) self.style &= body_bit | user_message_bit | full_width_bit else if (std.mem.eql(u8, code, "\x1b[1m")) self.style |= 1 else if (std.mem.eql(u8, code, "\x1b[3m")) self.style |= 2 else if (std.mem.eql(u8, code, "\x1b[4m")) self.style |= 4 else if (std.mem.eql(u8, code, "\x1b[2m")) self.style |= user_bit else if (std.mem.eql(u8, code, "\x1b[2;8m")) self.style |= user_bit | summary_bit else if (std.mem.eql(u8, code, "\x1b[8m")) self.style = (self.style & ~user_bit) | summary_bit else if (std.mem.eql(u8, code, "\x1b[39m")) self.style &= ~foreground_mask else {
                             const colour_index: u8 = if (std.mem.eql(u8, code, "\x1b[33m")) 1 else if (std.mem.eql(u8, code, "\x1b[90m")) 2 else if (std.mem.eql(u8, code, "\x1b[91m")) 3 else if (std.mem.eql(u8, code, "\x1b[94m")) 4 else if (std.mem.eql(u8, code, "\x1b[40m")) code_index else unreachable;
                             self.style = (self.style & ~foreground_mask) | (@as(RetainedStyle, colour_index) << 3);
                         }
@@ -561,7 +564,9 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             const margin: u16 = if (styled and self.sidenotes and window.width >= sidenote_width) sidenote_margin + (if (kind == .user_message) feed_inset else 0) else 0;
             const inset: u16 = if (kind == .user_message) @min(feed_inset, window.width) else 0;
             const right: u16 = if (kind == .user_message and margin == 0) @min(feed_inset, window.width -| inset) else 0;
-            const body = window.child(.{ .x_off = inset, .width = window.width -| margin -| inset -| right });
+            const available = window.width -| margin -| inset -| right;
+            const prose = styled and offset < self.length and (self.styles[offset] & body_bit != 0 or kind == .user_message) and self.styles[offset] & full_width_bit == 0 and !output;
+            const body = window.child(.{ .x_off = inset, .width = if (prose) @min(available, prose_width) else available });
             if (commit and margin != 0) if (note) |range| {
                 if (self.timestampShown(range.start, range.end)) {
                     _ = self.printRange(window.child(.{ .x_off = window.width -| sidenote_cells -| (if (kind == .user_message) feed_inset else 0), .y_off = row, .width = sidenote_cells, .height = 1 }), range.start, range.end, .none, true, true, colour, plain, colours);
@@ -1948,7 +1953,7 @@ fn bandPadding() !void {
         const layout: Layout = .{ .width = width, .method = method };
         try testing.expectEqual(@as(u16, 3), document.lineRows(layout, 0));
         const second_rows = document.lineRows(layout, second);
-        try testing.expectEqual(@as(u16, 5), second_rows);
+        try testing.expectEqual(@as(u16, if (width == 46) 5 else 6), second_rows);
         const colour = depth != 0;
         const band: vaxis.Color = if (depth == 1) .{ .index = 8 } else .{ .rgb = .{ 10, 20, 30 } };
         const ground: vaxis.Style = .{ .bg = .{ .index = 1 } };
@@ -2022,4 +2027,74 @@ pub fn testMessageLayout() !void {
     try bandLines();
     try bandPadding();
     try legacyBandShape();
+}
+
+test "SUI-34 user message bands retain padded rows and selectable source text" {
+    try bandPadding();
+}
+
+test "SUI-31 answer prose has a bounded measure while code and tables use the pane" {
+    const word = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
+    const input = word ++ "\n- " ++ word ++ "\n> " ++ word ++ "\n# " ++ word ++ "\n```\n" ++ word ++ "\n```\n| " ++ word ++ " | z |\n| --- | --- |\n| " ++ word ++ " | z |\n";
+    for ([_]bool{ false, true }) |colour| {
+        var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer output.deinit();
+        var renderer: @import("AnswerRenderer.zig") = .{ .out = &output.writer, .colour = colour, .destination = .{ .viewport = .unicode } };
+        try renderer.feed(input);
+        try renderer.finish();
+        var view: Sized(2048, true) = .{};
+        try view.append(TerminalText.body_on);
+        try view.append(output.written());
+        try view.append(TerminalText.body_off);
+        try view.prepare();
+        const paragraph: usize = 0;
+        const list = view.nextLine(paragraph).?;
+        const quote = view.nextLine(list).?;
+        const heading = view.nextLine(quote).?;
+        const code = view.nextLine(heading).?;
+        const table = view.nextLine(code).?;
+        for ([_]u16{ 86, 88, 89, 120 }) |width| {
+            const layout: Layout = .{ .width = width, .method = .unicode };
+            try std.testing.expectEqual(@as(u16, 2), view.lineRows(layout, paragraph));
+            var screen: TestScreen = undefined;
+            const window = screen.window(width, 12);
+            _ = view.draw(window, .{}, true, colour, .{}, .{});
+            var row_buffer: [512]u8 = undefined;
+            try std.testing.expectEqual(@as(usize, @min(width, 88)), screen.row(0, &row_buffer).len);
+            try std.testing.expectEqual(@as(u16, 2), view.lineRows(layout, list));
+            try std.testing.expectEqual(@as(u16, 2), view.lineRows(layout, quote));
+            try std.testing.expectEqual(@as(u16, 2), view.lineRows(layout, heading));
+            try std.testing.expectEqual(@as(u16, if (width < 103) 2 else 1), view.lineRows(layout, code));
+            try std.testing.expectEqual(@as(u16, if (width < 105) 2 else 1), view.lineRows(layout, table));
+        }
+        var user: Sized(256, true) = .{};
+        try user.append(TerminalText.user_message_on ++ TerminalText.body_on ++ word ++ TerminalText.body_off ++ TerminalText.user_message_off);
+        try user.prepare();
+        try std.testing.expectEqual(@as(u16, 4), user.lineRows(.{ .width = 120, .method = .unicode }, 0));
+    }
+
+    const long = @as([4200]u8, @splat('x'));
+    for ([_][]const u8{ "```\n", "| h |\n| --- |\n| " }) |opening| {
+        for ([_]bool{ false, true }) |colour| {
+            var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+            defer output.deinit();
+            var renderer: @import("AnswerRenderer.zig") = .{ .out = &output.writer, .colour = colour, .destination = .{ .viewport = .unicode } };
+            try renderer.feed(opening);
+            for (long) |byte| try renderer.feed(&.{byte});
+            try renderer.feed(if (opening[0] == '`') "\n```\n" else " |\n");
+            try renderer.finish();
+            var view: Sized(8192, true) = .{};
+            try view.append(TerminalText.body_on);
+            for (output.written()) |byte| try view.append(&.{byte});
+            try view.append(TerminalText.body_off);
+            try view.prepare();
+            const at = std.mem.indexOf(u8, view.text(), "xxxxxxxx").?;
+            try std.testing.expect(view.lineRows(.{ .width = 120, .method = .unicode }, view.previousLine(at + 1) orelse 0) < 48);
+        }
+    }
+    var cut: Sized(512, true) = .{};
+    try cut.append(TerminalText.body_on ++ TerminalText.full_width_on ++ "code\n" ++ TerminalText.body_off ++ "\x1b[0m\n" ++ TerminalText.body_on ++ "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n");
+    try cut.prepare();
+    const prose = std.mem.indexOf(u8, cut.text(), "xxxxxxxx").?;
+    try std.testing.expectEqual(@as(u16, 2), cut.lineRows(.{ .width = 120, .method = .unicode }, prose));
 }

@@ -1358,14 +1358,23 @@ fn consecutiveBands() !void {
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         const frame = try testFrame(&view, arena.allocator(), width, 10);
-        try std.testing.expectEqualStrings("›", testCell(frame, 2, 2));
-        try std.testing.expectEqualStrings("›", testCell(frame, 6, 2));
+        var first: ?u16 = null;
+        var second: ?u16 = null;
+        for (0..frame.size.height) |row| {
+            if (std.mem.eql(u8, testCell(frame, row, 2), "›")) {
+                if (first == null) first = @intCast(row) else if (second == null) second = @intCast(row) else return error.TestUnexpectedResult;
+            }
+        }
+        const first_row = first orelse return error.TestUnexpectedResult;
+        const second_row = second orelse return error.TestUnexpectedResult;
+        try std.testing.expect(second_row >= first_row + 4);
+        const gap_row = second_row - 2;
         for (0..width) |column| {
-            const gap = frame.readCell(@intCast(column), 4);
+            const gap = frame.readCell(@intCast(column), gap_row);
             try std.testing.expectEqualStrings(" ", gap.char.grapheme);
             try std.testing.expectEqual(view.style.bg, gap.style.bg);
             try std.testing.expect(!gap.style.reverse);
-            for ([_]u16{ 3, 5 }) |row| {
+            for ([_]u16{ gap_row - 1, gap_row + 1 }) |row| {
                 const padding = frame.readCell(@intCast(column), row);
                 try std.testing.expectEqualStrings(" ", padding.char.grapheme);
                 if (colour) try std.testing.expectEqual(view.colours.user_band, padding.style.bg) else try std.testing.expect(padding.style.reverse);

@@ -1148,7 +1148,20 @@ test "answer adapters pass NO_COLOR through inline names tables and fenced code"
         try std.testing.expectEqual(colour, std.mem.indexOf(u8, output.written(), "\x1b[94m") != null);
         try std.testing.expectEqual(colour, std.mem.indexOf(u8, output.written(), "\x1b[90m") != null);
         try std.testing.expectEqual(destination == .viewport and colour, std.mem.indexOf(u8, output.written(), "\x1b[40m") != null);
-        if (!colour) try std.testing.expectEqualStrings("name\n  A\n  B\n  code\n  \n", output.written());
+        if (!colour) try std.testing.expectEqualStrings(if (destination == .viewport)
+            "name\n" ++ Text.full_width_on ++ "  A\n  B\n" ++ Text.full_width_off ++ Text.full_width_on ++ "  code\n  \n" ++ Text.full_width_off
+        else
+            "name\n  A\n  B\n  code\n  \n", output.written());
+        if (destination == .terminal) {
+            try std.testing.expect(std.mem.indexOf(u8, output.written(), Text.full_width_on) == null);
+            try std.testing.expect(std.mem.indexOf(u8, output.written(), Text.full_width_off) == null);
+        } else {
+            const Viewport = @import("ConversationViewport.zig");
+            var view: Viewport.Sized(512, true) = .{};
+            try view.append(output.written());
+            try view.prepare();
+            try std.testing.expectEqualStrings(if (colour) "name\n  A\n  B\ncode\n\n" else "name\n  A\n  B\n  code\n  \n", view.text());
+        }
     };
 }
 

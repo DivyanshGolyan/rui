@@ -191,7 +191,7 @@ pub const Settings = struct {
     }
 };
 
-fn sui30TabsGeometry() !void {
+fn sui45TabsGeometry() !void {
     var state: overview_view.State = undefined;
     try state.init(std.testing.allocator, .{ .cwd = "/w", .home = "/h" });
     defer state.deinit();
@@ -338,7 +338,7 @@ test "Session pin alternate gestures never activate New Session or Settings" {
     };
 }
 
-fn sui30TabsTint() !void {
+fn sui45TabsTint() !void {
     var state: overview_view.State = undefined;
     try state.init(std.testing.allocator, .{ .cwd = "/w", .home = "/h" });
     defer state.deinit();
@@ -372,10 +372,10 @@ fn sui30TabsTint() !void {
     };
 }
 
-test "SUI-30 chat tabs paint and accept only their visible cells" {
+test "SUI-45 chat tabs paint and accept only their visible cells" {
     const cases = [_]*const fn () anyerror!void{
-        sui30TabsGeometry,
-        sui30TabsTint,
+        sui45TabsGeometry,
+        sui45TabsTint,
     };
     for (cases) |case| try case();
 }
