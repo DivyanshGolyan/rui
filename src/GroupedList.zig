@@ -169,7 +169,7 @@ test "GroupedList quiet rows normalize whole lines before selection and hover in
             .provider = .codex,
             .label = "Quiet row",
             .state = .{ .finished = .{ .since = 100 } },
-            .first = .{ .position = 1, .admission = 1, .sender = null },
+            .first = .{ .position = 1, .admission = 1, .sender = null, .content = .{ .text = .{ .length = 5, .digest = @splat(0xaa) } } },
             .from_person_at = if (wrote) 100 else null,
             .last_line = .{ .position = 1, .text = "Last answer" },
         };

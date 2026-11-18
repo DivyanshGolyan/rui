@@ -930,11 +930,18 @@ noinline fn runUpgrade(init: std.process.Init, args: []const []const u8) !void {
     var output = std.Io.File.stdout().writerStreaming(init.io, &buffer);
     try upgrade.writeCheck(&output.interface, &checked);
     try output.flush();
-    if (checking) return;
-    if (!upgrade.canInstall(&checked)) {
-        recordExit(.environment);
-        return error.Reported;
-    }
+    const upgrade_run = @import("upgrade_run.zig");
+    var resumed = checked.facts(if (checking) .check else .install);
+    resumed.resumed = true;
+    if (upgrade_run.next(resumed) == .end) switch (upgrade_run.exit(resumed)) {
+        .done => return,
+        .not_installable => {
+            recordExit(.environment);
+            return error.Reported;
+        },
+        // A failed check or install returns its error before this point.
+        .check_failed, .install_failed, .restart_failed => unreachable,
+    };
     var cleanup: upgrade.CleanupReceipts = .{};
     defer {
         var cleanup_buffer: [512]u8 = undefined;
@@ -954,7 +961,12 @@ noinline fn runUpgrade(init: std.process.Init, args: []const []const u8) !void {
     defer result.deinit(allocator);
     try upgrade.writeResult(&output.interface, &result);
     try output.flush();
-    if (result.hosts.totals().failed != 0) return error.HostRestartFailed;
+    switch (upgrade_run.exit(result.facts(&checked))) {
+        .done => {},
+        .restart_failed => return error.HostRestartFailed,
+        // A failed check or install returns its error before publication.
+        .check_failed, .not_installable, .install_failed => unreachable,
+    }
 }
 
 noinline fn upgradeDownload(err: anyerror, download: *const @import("upgrade.zig").Download) void {
@@ -2640,7 +2652,7 @@ test "chat info inspection takes Session facts from Current and detects changes"
     defer file.close(io);
     const listed = try tmp.dir.createFile(io, "actions", .{ .read = true });
     defer listed.close(io);
-    const report = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"delta\":\"full\",\"since\":null,\"profile\":\"current\",\"archive_state\":\"active\",\"session\":{\"reference\":\"k7m2qx\",\"parent\":null,\"workspace\":\"/home/d/w\",\"provider\":\"openai\",\"model\":\"gpt-6.1-sol\",\"revision\":\"3\",\"tools\":[\"bash\",\"find_tools\",\"lookup\",\"none\"],\"loaded_tools\":[\"find_tools\",\"none\"],\"permission_mode\":\"ask\",\"instructions\":{\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"},\"output_schema\":null,\"reasoning_effort\":\"high\",\"reasoning_effort_override\":\"high\",\"compaction_trigger\":\"1000\",\"context_estimate\":\"310\",\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":\"lane four\",\"created_at\":\"1\"},\"pending_messages\":\"0\",\"work\":{\"state\":{\"kind\":\"finished\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"attention\":{\"kind\":\"finished\",\"turn\":\"0\",\"step\":\"18446744073709551615\"},\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null},\"latest_outcome\":null},\"peers\":{\"from_person_at\":null},\"first_message\":null,\"selected_message\":\"m1\",\"recent_messages\":[{\"turn\":\"1\",\"message\":\"m1\",\"outcome\":\"completed\"}],\"actions\":{\"count\":\"0\",\"unresolved\":[],\"resolved\":[]},\"rejected_calls\":{\"count\":\"0\",\"items\":[]},\"actionable_permissions\":[],\"execution\":{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"0\",\"scratch_used_bytes\":\"0\",\"unavailable\":[\"structured_output\"]}}";
+    const report = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"delta\":\"full\",\"since\":null,\"profile\":\"current\",\"archive_state\":\"active\",\"session\":{\"reference\":\"k7m2qx\",\"parent\":null,\"workspace\":\"/home/d/w\",\"provider\":\"openai\",\"model\":\"gpt-6.1-sol\",\"revision\":\"3\",\"tools\":[\"bash\",\"find_tools\",\"lookup\",\"none\"],\"loaded_tools\":[\"find_tools\",\"none\"],\"permission_mode\":\"ask\",\"instructions\":{\"type\":\"text\",\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"},\"output_schema\":null,\"reasoning_effort\":\"high\",\"reasoning_effort_override\":\"high\",\"compaction_trigger\":\"1000\",\"context_estimate\":\"310\",\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":\"lane four\",\"created_at\":\"1\"},\"pending_messages\":\"0\",\"work\":{\"state\":{\"kind\":\"finished\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"attention\":{\"kind\":\"finished\",\"turn\":\"0\",\"step\":\"18446744073709551615\"},\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null},\"latest_outcome\":null},\"peers\":{\"from_person_at\":null},\"first_message\":null,\"selected_message\":\"m1\",\"recent_messages\":[{\"turn\":\"1\",\"message\":\"m1\",\"outcome\":\"completed\"}],\"actions\":{\"count\":\"0\",\"unresolved\":[],\"resolved\":[]},\"rejected_calls\":{\"count\":\"0\",\"items\":[]},\"actionable_permissions\":[],\"execution\":{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"0\",\"scratch_used_bytes\":\"0\",\"unavailable\":[\"structured_output\"]}}";
     try file.writePositionalAll(io, report, 0);
     var reply = try protocol_reply.CurrentReply.decode(io, file, "k7m2qx", .{ .report = .{ .bytes = report.len } });
     const taken = try std.testing.allocator.create([2]status_page.Session);
@@ -2690,7 +2702,7 @@ fn takeStatus(taken: *status_page.Session, current: *const protocol_reply.Curren
     };
     taken.tools = settings.tools.names;
     taken.loaded_tools = settings.loaded_tools.names;
-    taken.instructions = settings.instructions.bytes.value != 0;
+    taken.instructions = settings.instructions.value.identity().length != 0;
     taken.compaction_trigger = if (settings.compaction_trigger) |tokens| tokens.value else null;
     taken.compaction_override = settings.compaction_trigger_override != null;
     taken.context_estimate = if (settings.context_estimate.value orelse null) |estimate| estimate.value else null;

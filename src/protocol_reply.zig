@@ -37,7 +37,8 @@ pub const ConversationPage = struct {
         position: u64,
         ordinal: u64,
         kind: protocol.ConversationItemKind,
-        content: CommandObservation.ContentReference,
+        /// Always text on an `assistant` item.
+        content: content_value.Value,
         presentation: ?protocol.ToolPresentation = null,
         admitted_at: ?u64 = null,
         sender: ?protocol.NamedPeer = null,
@@ -58,7 +59,7 @@ pub const ConversationPage = struct {
             position: JsonString(20),
             ordinal: JsonString(20),
             kind: JsonEnum(@FieldType(Item, "kind")),
-            content: ?struct { bytes: JsonString(20), sha256: JsonString(64), display: JsonString(16) } = null,
+            content: ?JsonContentValue = null,
             presentation: ?JsonToolPresentation = null,
             admitted_at: ?JsonString(20) = null,
             sender: ?JsonNamedPeer = null,
@@ -86,7 +87,7 @@ pub const ConversationPage = struct {
         for (wire.items.values[0..page.count], page.items[0..page.count]) |row, *item| {
             const hosted = row.kind.value == .hosted_call;
             if (hosted == (row.content != null)) return error.InvalidConversationPage;
-            item.* = .{ .position = try decimalId(row.position, false), .ordinal = try decimalId(row.ordinal, true), .kind = row.kind.value, .content = .{ .bytes = 0, .digest = protocol.contentDigest("") } };
+            item.* = .{ .position = try decimalId(row.position, false), .ordinal = try decimalId(row.ordinal, true), .kind = row.kind.value, .content = .{ .text = .{ .length = 0, .digest = protocol.contentDigest("") } } };
             item.presentation = if (row.presentation) |p| p.value else null;
             item.admitted_at = if (row.admitted_at) |second| try decimalId(second, false) else null;
             item.sender = if (row.sender) |sender| sender.peer() catch return error.InvalidConversationPage else null;
@@ -96,12 +97,8 @@ pub const ConversationPage = struct {
                 (item.sender != null and item.source_action != null) or
                 (item.admitted_at orelse 0) > std.math.maxInt(i64)) return error.InvalidConversationPage;
             if (item.presentation) |p| if (p.publication_position != item.position or (hosted and p.description == null)) return error.InvalidConversationPage;
-            if (row.content) |reference| {
-                item.content.bytes = try decimalId(reference.bytes, true);
-                if (!reference.display.eql("omitted") or reference.sha256.slice().len != 64) return error.InvalidConversationPage;
-                _ = std.fmt.hexToBytes(&item.content.digest, reference.sha256.slice()) catch return error.InvalidConversationPage;
-            }
-            if (item.position > page.end or item.ordinal > std.math.maxInt(i64) or item.content.bytes > protocol.max_sqlite_content_bytes or
+            if (row.content) |value| item.content = if (item.kind == .assistant) .{ .text = value.text() catch return error.InvalidConversationPage } else value.value;
+            if (item.position > page.end or item.ordinal > std.math.maxInt(i64) or
                 ((item.kind == .tool_result) != (item.ordinal != 0)) or
                 (position != 0 and (item.position > position or (item.position == position and item.ordinal >= ordinal)))) return error.InvalidConversationPage;
             position = item.position;
@@ -143,7 +140,7 @@ pub const ActivityPage = struct {
     pub fn parse(bytes: []const u8, cursor: ActivityCursor) !ActivityPage {
         try cursor.validate();
         if (bytes.len > activity_reply.max_page_bytes) return error.InvalidActivityPage;
-        const Ref = struct { bytes: JsonString(20), sha256: JsonString(64) };
+        const Ref = JsonContentValue;
         const Fact = protocol.ActivityItem;
         const Message = struct { admission: JsonString(20), key: JsonString(protocol.max_key_bytes), turn: ?JsonString(20), state: JsonEnum(@FieldType(Fact.Message, "state")), admitted_at: JsonString(20), sender: ?JsonNamedPeer, source_action: ?JsonString(20) = null, content: Ref };
         const Sent = struct { admission: JsonString(20), admitted_at: JsonString(20), target: JsonNamedPeer, content: Ref };
@@ -197,13 +194,13 @@ pub const ActivityPage = struct {
                 }) or !cursor.kinds.contains(std.meta.stringToEnum(protocol.ActivityItem.Kind, @tagName(item.value)).?)) return error.InvalidActivityPage;
             switch (item.value) {
                 inline .admission, .user, .received => |message, kind| {
-                    const value: Fact.Message = .{ .admission = try id(message.admission, false), .key = message.key.value, .turn = if (message.turn) |turn| try id(turn, false) else null, .state = message.state.value, .content = try content(message.content), .admitted_at = try id(message.admitted_at, false), .sender = if (message.sender) |sender| try sender.peer() else null, .source_action = if (message.source_action) |action| try id(action, false) else null };
+                    const value: Fact.Message = .{ .admission = try id(message.admission, false), .key = message.key.value, .turn = if (message.turn) |turn| try id(turn, false) else null, .state = message.state.value, .content = message.content.value, .admitted_at = try id(message.admitted_at, false), .sender = if (message.sender) |sender| try sender.peer() else null, .source_action = if (message.source_action) |action| try id(action, false) else null };
                     if ((value.state == .applied) != (value.turn != null) or (kind == .user and value.state != .applied)) return error.InvalidActivityPage;
                     if ((value.sender != null and value.source_action != null) or (kind != .user and (fact.at != value.admitted_at or (kind == .received) != (value.sender != null or value.source_action != null)))) return error.InvalidActivityPage;
                     fact.value = @unionInit(Fact.Value, @tagName(kind), value);
                 },
                 .sent => |sent| {
-                    fact.value = .{ .sent = .{ .admission = try id(sent.admission, false), .admitted_at = try id(sent.admitted_at, false), .target = try sent.target.peer(), .content = try content(sent.content) } };
+                    fact.value = .{ .sent = .{ .admission = try id(sent.admission, false), .admitted_at = try id(sent.admitted_at, false), .target = try sent.target.peer(), .content = sent.content.value } };
                     if (fact.at != fact.value.sent.admitted_at) return error.InvalidActivityPage;
                 },
                 .approval_requested => |request| {
@@ -234,10 +231,10 @@ pub const ActivityPage = struct {
                     if (failed.code.slice().len == 0) return error.InvalidActivityPage;
                     fact.value = .{ .send_failed = .{ .key = failed.key.value, .target = if (failed.target) |peer| try peer.peer() else null, .code = failed.code.value } };
                 },
-                .assistant => |assistant| fact.value = .{ .assistant = .{ .content = try content(assistant.content), .final = assistant.final } },
+                .assistant => |assistant| fact.value = .{ .assistant = .{ .content = try textOf(assistant.content), .final = assistant.final } },
                 .tool_result => |result| {
                     if (result.presentation.value.publication_position != fact.position) return error.InvalidActivityPage;
-                    fact.value = .{ .tool_result = .{ .content = try content(result.content), .presentation = result.presentation.value } };
+                    fact.value = .{ .tool_result = .{ .content = result.content.value, .presentation = result.presentation.value } };
                 },
                 .hosted_call => |call| {
                     if (call.presentation.value.publication_position != fact.position or call.presentation.value.description == null) return error.InvalidActivityPage;
@@ -247,7 +244,7 @@ pub const ActivityPage = struct {
                     var value: Fact.Call = .{ .position = fact.position, .operation = try id(call.operation, false), .turn = try id(call.turn, false), .call_ordinal = try id(call.call_ordinal, true), .action = if (call.action) |action| try id(action, false) else null, .rejection = if (call.rejection) |code| code.value else null, .fields = undefined, .description = if (call.description) |text| text.value else null, .tool = if (call.tool) |text| text.value else null, .server = if (call.server) |text| text.value else null };
                     if ((value.action != null) == (value.rejection != null)) return error.InvalidActivityPage;
                     for (call.fields, &value.fields) |reference, *field| {
-                        const decoded = try content(reference);
+                        const decoded = try textOf(reference);
                         field.* = .{ .length = decoded.length, .digest = decoded.digest };
                     }
                     fact.value = .{ .call = value };
@@ -259,7 +256,7 @@ pub const ActivityPage = struct {
                     const cancelled = ending == .stopped or ending == .interrupted;
                     if (ended.code.slice().len == 0 or done != ended.code.eql("completed") or cancelled != ended.code.eql("cancelled") or
                         (done and ended.content == null) or (cancelled and ended.content != null)) return error.InvalidActivityPage;
-                    fact.value = .{ .turn_ended = .{ .session = ended.session.value, .turn = try id(ended.turn, false), .operation = try id(ended.operation, false), .ending = ending, .code = ended.code.value, .content = if (ended.content) |reference| try content(reference) else null } };
+                    fact.value = .{ .turn_ended = .{ .session = ended.session.value, .turn = try id(ended.turn, false), .operation = try id(ended.operation, false), .ending = ending, .code = ended.code.value, .content = if (ended.content) |reference| try textOf(reference) else null } };
                 },
                 .stop => |stop| {
                     fact.value = .{ .stop = .{ .key = stop.key.value, .turn = if (stop.turn) |turn| try id(turn, false) else null, .cutoff = try id(stop.cutoff, true), .completion = stop.completion.value } };
@@ -318,10 +315,8 @@ pub const ActivityPage = struct {
         if (result > std.math.maxInt(i64)) return error.InvalidActivityPage;
         return result;
     }
-    fn content(value: anytype) !protocol.ActivityItem.Content {
-        const reference = try CommandObservation.decodeReference(value);
-        if (reference.bytes > protocol.max_sqlite_content_bytes) return error.InvalidActivityPage;
-        return .{ .length = reference.bytes, .digest = reference.digest };
+    fn textOf(value: JsonContentValue) !content_value.Reference {
+        return value.text() catch error.InvalidActivityPage;
     }
 };
 
@@ -1087,24 +1082,7 @@ pub const CurrentReply = union(enum) {
 pub const Current = struct {
     pub const Id = ReportNumber(false);
     pub const Count = ReportNumber(true);
-    pub const Reference = struct {
-        bytes: Count,
-        sha256: JsonString(64),
-        type: OmittableJson(JsonEnum(enum { text })) = .{},
-
-        pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !Reference {
-            const Wire = struct { bytes: Count, sha256: JsonString(64), type: @FieldType(Reference, "type") = .{} };
-            const wire = try std.json.innerParse(Wire, allocator, source, options);
-            var digest: [32]u8 = undefined;
-            if (wire.sha256.slice().len != 64) return error.InvalidObservation;
-            _ = std.fmt.hexToBytes(&digest, wire.sha256.slice()) catch return error.InvalidObservation;
-            return .{ .bytes = wire.bytes, .sha256 = wire.sha256, .type = wire.type };
-        }
-
-        pub fn jsonStringify(self: Reference, jw: anytype) !void {
-            try writeObject(self, jw);
-        }
-    };
+    pub const Reference = JsonContentValue;
     pub const Settings = struct {
         reference: JsonString(protocol.max_session_bytes),
         parent: ?JsonString(protocol.session_id_bytes),
@@ -1363,14 +1341,14 @@ pub const Current = struct {
             (if (settings.parent) |parent| !protocol.validSessionId(parent.slice()) or parent.eql(session) else false) or
             (if (settings.label) |label| !protocol.validLabel(label.slice()) else false) or
             (if (settings.context_estimate.value) |estimate| estimate != null and settings.compaction_trigger == null else false) or
-            settings.instructions.type.value != null or (if (settings.output_schema) |schema| schema.type.value != null else false) or
+            settings.instructions.value != .text or (if (settings.output_schema) |schema| schema.value != .text else false) or
             execution.status.value != .partial or execution.reason.value != null or execution.dispatch_fenced.value == null or
             execution.custody_occupied.value == null or execution.scratch_used_bytes.value == null or execution.unavailable.value == null) return error.InvalidObservation;
         const work = wire.work.value orelse return error.InvalidObservation;
         const peers = wire.peers.value orelse return error.InvalidObservation;
         if ((work.turn == null) != (work.operation == null) or (work.latest_outcome != null and work.turn == null)) return error.InvalidObservation;
         if (work.latest_outcome) |outcome| {
-            if (outcome.code.slice().len == 0 or (if (outcome.content) |content| content.type.value != null else false)) return error.InvalidObservation;
+            if (outcome.code.slice().len == 0 or (if (outcome.content) |content| content.value != .text else false)) return error.InvalidObservation;
         }
         const recent = wire.recent_messages.value orelse return error.InvalidObservation;
         const actions = wire.actions.value orelse return error.InvalidObservation;
@@ -1481,7 +1459,9 @@ fn AttentionRows(comptime tag: std.meta.Tag(Current.Attention)) type {
             while (try source.peekNextTokenType() != .array_end) {
                 const row = try std.json.innerParse(@FieldType(Current.Attention, @tagName(tag)), allocator, source, options);
                 inline for (comptime std.meta.fieldNames(@TypeOf(row))) |name| {
-                    if (@FieldType(@TypeOf(row), name) == Current.Reference and @field(row, name).type.value == null) return error.InvalidObservation;
+                    // Only a resolved Action's result can be a parts value; call fields and rejections are model text.
+                    const parts_allowed = tag == .resolved and comptime std.mem.eql(u8, name, "result");
+                    if (@FieldType(@TypeOf(row), name) == Current.Reference and !parts_allowed and @field(row, name).value != .text) return error.InvalidObservation;
                 }
                 if ((tag == .resolved or tag == .rejected) and row.code.slice().len == 0) return error.InvalidObservation;
                 if (tag == .unresolved) {
@@ -2103,15 +2083,14 @@ pub const JsonFirstMessage = struct {
     value: protocol.FirstMessage,
 
     pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
-        const Ref = struct { bytes: JsonString(20), sha256: JsonString(64) };
-        const Wire = struct { position: JsonString(20), admission: JsonString(20), admitted_at: JsonString(20), sender: ?JsonPeer, content: Ref };
+        const Wire = struct { position: JsonString(20), admission: JsonString(20), admitted_at: JsonString(20), sender: ?JsonPeer, content: JsonContentValue };
         const wire = try std.json.innerParse(Wire, allocator, source, options);
         return .{ .value = .{
             .position = ActivityPage.id(wire.position, false) catch return error.InvalidCharacter,
             .admission = ActivityPage.id(wire.admission, false) catch return error.InvalidCharacter,
             .admitted_at = ActivityPage.id(wire.admitted_at, false) catch return error.InvalidCharacter,
             .sender = if (wire.sender) |sender| sender.peer() catch return error.InvalidCharacter else null,
-            .content = ActivityPage.content(wire.content) catch return error.InvalidCharacter,
+            .content = wire.content.value,
         } };
     }
 
@@ -2120,6 +2099,52 @@ pub const JsonFirstMessage = struct {
         var out = std.Io.Writer.fixed(&buffer);
         self.value.writeJson(&out) catch unreachable;
         try jw.print("{s}", .{out.buffered()});
+    }
+};
+
+/// The one reader of a `ContentValue` member: `{"type":"text","bytes","sha256"}`, or
+/// `{"type":"parts","bytes","sha256","owner":{"message"|"action":ID}}`.
+pub const JsonContentValue = struct {
+    value: content_value.Value,
+
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+        const Owner = struct { message: ?JsonString(20) = null, action: ?JsonString(20) = null };
+        const Wire = struct { type: JsonEnum(std.meta.Tag(content_value.Value)), bytes: JsonString(20), sha256: JsonString(64), owner: ?Owner = null };
+        const wire = try std.json.innerParse(Wire, allocator, source, options);
+        var reference: content_value.Reference = .{ .length = try number(wire.bytes, true), .digest = undefined };
+        const hex = wire.sha256.slice();
+        if (reference.length > protocol.max_sqlite_content_bytes or hex.len != 64) return error.InvalidCharacter;
+        for (hex) |byte| if (!std.ascii.isDigit(byte) and (byte < 'a' or byte > 'f')) return error.InvalidCharacter;
+        _ = std.fmt.hexToBytes(&reference.digest, hex) catch return error.InvalidCharacter;
+        return .{ .value = switch (wire.type.value) {
+            .text => if (wire.owner != null) return error.InvalidCharacter else .{ .text = reference },
+            .parts => .{ .parts = .{ .identity = reference, .owner = owner: {
+                const owner = wire.owner orelse return error.InvalidCharacter;
+                if ((owner.message == null) == (owner.action == null)) return error.InvalidCharacter;
+                break :owner if (owner.message) |id| .{ .message = try number(id, false) } else .{ .action = try number(owner.action.?, false) };
+            } } },
+        } };
+    }
+
+    /// Model text (an answer, an outcome, a call field) is never parts.
+    pub fn text(self: JsonContentValue) error{InvalidCharacter}!content_value.Reference {
+        return switch (self.value) {
+            .text => |reference| reference,
+            .parts => error.InvalidCharacter,
+        };
+    }
+
+    pub fn jsonStringify(self: @This(), jw: anytype) !void {
+        var buffer: [protocol.ContentValueJson.max_json_bytes]u8 = undefined;
+        var out = std.Io.Writer.fixed(&buffer);
+        (protocol.ContentValueJson{ .value = self.value }).writeJson(&out) catch unreachable;
+        try jw.print("{s}", .{out.buffered()});
+    }
+
+    fn number(digits: JsonString(20), zero: bool) error{InvalidCharacter}!u64 {
+        const value = decimalId(digits, zero) catch return error.InvalidCharacter;
+        if (value > std.math.maxInt(i64)) return error.InvalidCharacter;
+        return value;
     }
 };
 
@@ -2310,7 +2335,7 @@ test "canonical presentation typed ingress owns escaped labels and closed facts"
         .position = index + 1,
         .ordinal = 1,
         .at = std.math.maxInt(i64) - index,
-        .value = .{ .tool_result = .{ .content = .{ .length = 0, .digest = protocol.contentDigest("") }, .presentation = .{ .description = maximum.value.value.description, .code = .succeeded, .publication_position = index + 1 } } },
+        .value = .{ .tool_result = .{ .content = .{ .text = .{ .length = 0, .digest = protocol.contentDigest("") } }, .presentation = .{ .description = maximum.value.value.description, .code = .succeeded, .publication_position = index + 1 } } },
     };
     facts.call_activity = .{ .total = std.math.maxInt(i64), .count = 3 };
     for (&facts.call_activity.entries, 0..) |*entry, index| entry.* = .{
@@ -2502,8 +2527,8 @@ test "an activity page's queued Messages are none or a span at its boundary" {
 }
 
 test "a turn_ended row's ending agrees with its saved code and content, and a final answer crosses" {
-    const content: protocol.ActivityItem.Content = .{ .length = 1, .digest = @splat(1) };
-    const Case = struct { ending: protocol.TurnEnding, code: []const u8, content: ?protocol.ActivityItem.Content, valid: bool };
+    const content: content_value.Reference = .{ .length = 1, .digest = @splat(1) };
+    const Case = struct { ending: protocol.TurnEnding, code: []const u8, content: ?content_value.Reference, valid: bool };
     for ([_]Case{
         .{ .ending = .done, .code = "completed", .content = content, .valid = true },
         .{ .ending = .done, .code = "completed", .content = null, .valid = false },
@@ -2535,7 +2560,7 @@ test "a turn_ended row's ending agrees with its saved code and content, and a fi
 }
 
 test "an activity row carries its time, and a Message's rows carry its admission time" {
-    const content: protocol.ActivityItem.Content = .{ .length = 0, .digest = protocol.contentDigest("") };
+    const content: content_value.Value = .{ .text = .{ .length = 0, .digest = protocol.contentDigest("") } };
     const message: protocol.ActivityItem.Message = .{ .admission = 1, .key = .{}, .turn = null, .state = .queued, .content = content, .admitted_at = 1792925000 };
     var peer: protocol.NamedPeer = .{ .session = .{} };
     try peer.session.set("k7m2qx");
@@ -2545,7 +2570,7 @@ test "an activity row carries its time, and a Message's rows carry its admission
         .{ .value = .{ .admission = message }, .at = 1792925001, .failure = error.InvalidActivityPage },
         .{ .value = .{ .sent = sent }, .at = 1792925000 },
         .{ .value = .{ .sent = sent }, .at = 1, .failure = error.InvalidActivityPage },
-        .{ .value = .{ .assistant = .{ .content = content } }, .at = 0, .failure = error.InvalidResponse },
+        .{ .value = .{ .assistant = .{ .content = content.text } }, .at = 0, .failure = error.InvalidResponse },
     }) |case| {
         var facts: protocol.ActivityFacts = .{ .end = 1, .count = 1, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
         facts.items[0] = .{ .position = 1, .at = case.at, .value = case.value };
@@ -2571,7 +2596,7 @@ test "an activity row carries its time, and a Message's rows carry its admission
         try std.testing.expectEqualStrings(if (label.len == 0) "k7m2qx" else label, target.name());
     }
     var facts: protocol.ActivityFacts = .{ .end = 1, .count = 1, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
-    facts.items[0] = .{ .position = 1, .at = 7, .value = .{ .assistant = .{ .content = content } } };
+    facts.items[0] = .{ .position = 1, .at = 7, .value = .{ .assistant = .{ .content = content.text } } };
     try facts.work.workspace.set("/w");
     var buffer: [activity_reply.max_page_bytes]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
@@ -2997,7 +3022,7 @@ const testing_row_facts = ",\"read_version\":\"00000000000000000000000000000000.
 const testing_row_details = ",\"parent\":null,\"creator\":null,\"label\":null,\"created_at\":\"1\",\"revision\":\"1\",\"end\":\"0\",\"first_message\":null,\"last_line\":null," ++
     "\"work\":{\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"attention\":null,\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null}},\"peers\":{\"from_person_at\":null}";
 const testing_started_row_facts = ",\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"pin_order\":null,\"parent\":null,\"creator\":null,\"label\":\"Review PR 412\",\"created_at\":\"1792925000\",\"revision\":\"1\",\"end\":\"9\"," ++
-    "\"first_message\":{\"position\":\"1\",\"admission\":\"4\",\"admitted_at\":\"1792925001\",\"sender\":null,\"content\":{\"bytes\":\"5\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"}}," ++
+    "\"first_message\":{\"position\":\"1\",\"admission\":\"4\",\"admitted_at\":\"1792925001\",\"sender\":null,\"content\":{\"type\":\"text\",\"bytes\":\"5\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"}}," ++
     "\"last_line\":null,\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"1792925300\"},\"turn\":\"2\",\"operation\":\"6\",\"first_action\":null,\"attention\":null,\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null}},\"peers\":{\"from_person_at\":\"1792925001\"}";
 
 fn listValidationCase0() !void {
@@ -3008,7 +3033,7 @@ fn listValidationCase0() !void {
     defer file.close(io);
     const digest = @as([64]u8, @splat('a'));
     const facts = "\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"pin_order\":null,\"parent\":\"p33rs1\",\"creator\":\"cr3at0\",\"label\":\"Review \\u0050R\",\"created_at\":\"1792925000\",\"revision\":\"3\",\"end\":\"9\"," ++
-        "\"first_message\":{\"position\":\"1\",\"admission\":\"4\",\"admitted_at\":\"1792925001\",\"sender\":{\"session\":\"p33rs1\"},\"content\":{\"bytes\":\"5\",\"sha256\":\"" ++ digest ++ "\"}}," ++
+        "\"first_message\":{\"position\":\"1\",\"admission\":\"4\",\"admitted_at\":\"1792925001\",\"sender\":{\"session\":\"p33rs1\"},\"content\":{\"type\":\"text\",\"bytes\":\"5\",\"sha256\":\"" ++ digest ++ "\"}}," ++
         "\"last_line\":{\"position\":\"8\",\"text\":\"Saved preview\"},\"work\":{\"state\":{\"kind\":\"bash\",\"since\":\"1792925300\",\"call\":\"0\",\"description\":\"Run the tests\",\"running\":\"1\",\"approvals\":\"0\"},\"turn\":\"2\",\"operation\":\"6\",\"first_action\":null,\"attention\":{\"kind\":\"approval\",\"turn\":\"2\",\"step\":\"8\"},\"group\":\"needs_you\",\"actions\":{\"stop\":true,\"interrupt\":{\"turn\":\"2\",\"operation\":\"6\"},\"decide\":null}}," ++
         "\"peers\":{\"from_person_at\":\"1792925200\"}";
     const wire = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[{\"reference\":\"k7m2q\\u0078\",\"workspace\":\"/w\\nµ\",\"provider\":\"codex\",\"model\":\"m\\\"\",\"tools\":[\"bash\"],\"permission_mode\":\"ask\"," ++
@@ -3416,7 +3441,7 @@ fn listValidationCase2() !void {
     try maximal.workspace.set(&workspace);
     try maximal.model.set(&model);
     try maximal.label.?.set(&text);
-    maximal.first_message = .{ .position = largest, .admission = largest, .admitted_at = largest, .sender = .{ .session = .{} }, .content = .{ .length = protocol.max_sqlite_content_bytes, .digest = @splat(0xff) } };
+    maximal.first_message = .{ .position = largest, .admission = largest, .admitted_at = largest, .sender = .{ .session = .{} }, .content = .{ .parts = .{ .identity = .{ .length = protocol.max_sqlite_content_bytes, .digest = @splat(0xff) }, .owner = .{ .message = largest } } } };
     try maximal.first_message.?.sender.?.session.set("zzzzzz");
     const call_text = @as([protocol.max_tool_description_bytes]u8, @splat(1));
     var description: protocol.Bounded(protocol.session_work.max_description_bytes) = .{};
@@ -3830,7 +3855,7 @@ test "Current settings preserve decimal token heuristics in projections" {
     defer tmp.cleanup();
     const file = try tmp.dir.createFile(io, "current", .{ .read = true });
     defer file.close(io);
-    const wire = "{\"reference\":\"k7m2qx\",\"parent\":null,\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"revision\":\"1\",\"tools\":[],\"loaded_tools\":[],\"permission_mode\":\"ask\",\"instructions\":{\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"},\"output_schema\":null,\"reasoning_effort\":\"high\",\"reasoning_effort_override\":\"high\",\"compaction_trigger\":\"100000\",\"output_reservation\":\"16384\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":null,\"created_at\":\"1\"}";
+    const wire = "{\"reference\":\"k7m2qx\",\"parent\":null,\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"revision\":\"1\",\"tools\":[],\"loaded_tools\":[],\"permission_mode\":\"ask\",\"instructions\":{\"type\":\"text\",\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"},\"output_schema\":null,\"reasoning_effort\":\"high\",\"reasoning_effort_override\":\"high\",\"compaction_trigger\":\"100000\",\"output_reservation\":\"16384\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":null,\"created_at\":\"1\"}";
     const report = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"delta\":\"full\",\"since\":null,\"profile\":\"current\",\"archive_state\":\"active\",\"session\":" ++ wire ++ ",\"pending_messages\":\"0\",\"work\":{\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"attention\":null,\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null},\"latest_outcome\":null},\"peers\":{\"from_person_at\":null},\"selected_message\":null,\"recent_messages\":[],\"actions\":{\"count\":\"0\",\"unresolved\":[],\"resolved\":[]},\"rejected_calls\":{\"count\":\"0\",\"items\":[]},\"actionable_permissions\":[],\"execution\":{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"0\",\"scratch_used_bytes\":\"0\",\"unavailable\":[\"structured_output\"]}}";
     try file.writePositionalAll(io, report, 0);
     const reply = try CurrentReply.decode(io, file, "k7m2qx", .{ .report = .{ .bytes = report.len } });
@@ -3964,7 +3989,7 @@ test "Current facts retain settings selected empty key and ten recent bindings" 
     var buffer: [protocol.content_window_bytes]u8 = undefined;
     var output = file.writerStreaming(io, &buffer);
     const writer = &output.interface;
-    const reference = "{\"bytes\":\"7\",\"sha256\":\"" ++ @as([64]u8, @bitCast(@as([4][16]u8, @splat("0123456789abcdef".*)))) ++ "\"}";
+    const reference = "{\"type\":\"text\",\"bytes\":\"7\",\"sha256\":\"" ++ @as([64]u8, @bitCast(@as([4][16]u8, @splat("0123456789abcdef".*)))) ++ "\"}";
     try writer.writeAll("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"delta\":\"full\",\"since\":null,\"profile\":\"current\",\"archive_state\":\"active\",\"session\":{\"reference\":\"k7m2qx\",\"parent\":\"p33rs1\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"exact\\u0001model\",\"revision\":\"17\",\"tools\":[],\"loaded_tools\":[],\"permission_mode\":\"ask\",\"instructions\":" ++ reference ++ ",\"output_schema\":null,\"reasoning_effort\":null,\"reasoning_effort_override\":null,\"compaction_trigger\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":\"Review PR 412\",\"created_at\":\"1792925000\"},\"pending_messages\":\"2\",\"work\":{\"state\":{\"kind\":\"pending\",\"since\":\"1792925300\"},\"turn\":\"37\",\"operation\":\"91\",\"first_action\":null,\"attention\":null,\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null},\"latest_outcome\":{\"code\":\"failed_saved\",\"content\":null}},\"peers\":{\"from_person_at\":\"1792925300\"},\"first_message\":{\"position\":\"1\",\"admission\":\"4\",\"admitted_at\":\"1792925001\",\"sender\":null,\"content\":" ++ reference ++ "},\"selected_message\":\"\",\"recent_messages\":[");
     for (0..10) |i| {
         if (i != 0) try writer.writeAll(",");
@@ -3978,7 +4003,7 @@ test "Current facts retain settings selected empty key and ten recent bindings" 
     try std.testing.expectEqualStrings("exact\x01model", facts.settings.model.slice());
     try std.testing.expectEqualStrings("p33rs1", facts.settings.parent.?.slice());
     try std.testing.expectEqual(@as(u64, 17), facts.settings.revision.value);
-    try std.testing.expectEqual(@as(u64, 7), facts.settings.instructions.bytes.value);
+    try std.testing.expectEqual(@as(u64, 7), facts.settings.instructions.value.text.length);
     try std.testing.expect(facts.settings.reasoning_effort == null and facts.settings.reasoning_effort_override == null and facts.selected_message != null);
     try std.testing.expectEqualStrings("", facts.selected_message.?.slice());
     try std.testing.expectEqual(@as(u64, 91), facts.work.operation.?.value);
@@ -4015,10 +4040,10 @@ test "a hosted call travels as its presentation alone, in the conversation and t
     const page = try ConversationPage.parse(conversation, .{ .end = 0 });
     try std.testing.expectEqual(@as(usize, 1), page.count);
     try std.testing.expectEqual(protocol.ConversationItemKind.hosted_call, page.items[0].kind);
-    try std.testing.expectEqual(@as(u64, 0), page.items[0].content.bytes);
+    try std.testing.expectEqual(@as(u64, 0), page.items[0].content.text.length);
     try std.testing.expectEqualDeep(presentation, page.items[0].presentation.?);
     for ([_][]const u8{
-        "{\"position\":\"7\",\"ordinal\":\"0\",\"kind\":\"hosted_call\",\"content\":{\"bytes\":\"0\",\"sha256\":\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"display\":\"omitted\"},\"presentation\":{\"description\":\"a\",\"code\":\"failed\",\"publication_position\":\"7\"}}",
+        "{\"position\":\"7\",\"ordinal\":\"0\",\"kind\":\"hosted_call\",\"content\":{\"type\":\"text\",\"bytes\":\"0\",\"sha256\":\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\"},\"presentation\":{\"description\":\"a\",\"code\":\"failed\",\"publication_position\":\"7\"}}",
         "{\"position\":\"7\",\"ordinal\":\"0\",\"kind\":\"hosted_call\",\"presentation\":{\"description\":null,\"code\":\"failed\",\"publication_position\":\"7\"}}",
         "{\"position\":\"7\",\"ordinal\":\"0\",\"kind\":\"hosted_call\"}",
         "{\"position\":\"7\",\"ordinal\":\"1\",\"kind\":\"hosted_call\",\"presentation\":{\"description\":\"a\",\"code\":\"failed\",\"publication_position\":\"7\"}}",
@@ -4371,6 +4396,51 @@ test "WIR-5 released_host_info_profiles" {
         const incomplete = try std.mem.replaceOwned(u8, std.testing.allocator, body, "\"paused\":true,", "");
         defer std.testing.allocator.free(incomplete);
         try std.testing.expectError(error.MissingField, parseHostInfoForProfile(incomplete, "/one", profile));
+    }
+}
+
+test "WIR-4 a content value reads back only as text or as parts with one owner" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const identity: content_value.Reference = .{ .length = 7, .digest = @bitCast(@as([2][16]u8, @splat(.{ 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef }))) };
+    const largest = std.math.maxInt(i64);
+    for ([_]content_value.Value{
+        .{ .text = identity },
+        .{ .text = .{ .length = 0, .digest = identity.digest } },
+        .{ .text = .{ .length = protocol.max_sqlite_content_bytes, .digest = identity.digest } },
+        .{ .parts = .{ .identity = identity, .owner = .{ .message = 1 } } },
+        .{ .parts = .{ .identity = identity, .owner = .{ .action = largest } } },
+    }) |value| {
+        var buffer: [protocol.ContentValueJson.max_json_bytes]u8 = undefined;
+        var out = std.Io.Writer.fixed(&buffer);
+        try (protocol.ContentValueJson{ .value = value }).writeJson(&out);
+        const decoded = try std.json.parseFromSliceLeaky(JsonContentValue, arena.allocator(), out.buffered(), .{});
+        try std.testing.expectEqualDeep(value, decoded.value);
+        try std.testing.expectEqual(value == .text, if (decoded.text()) |_| true else |_| false);
+    }
+    const head = "{\"bytes\":\"7\",\"sha256\":\"" ++ digest ++ "\"";
+    for ([_][]const u8{
+        head ++ "}",
+        "{\"type\":\"text\"," ++ head[1..] ++ ",\"display\":\"omitted\"}",
+        "{\"type\":\"text\"," ++ head[1..] ++ ",\"owner\":{\"message\":\"1\"}}",
+        "{\"type\":\"parts\"," ++ head[1..] ++ "}",
+        "{\"type\":\"parts\"," ++ head[1..] ++ ",\"owner\":null}",
+        "{\"type\":\"parts\"," ++ head[1..] ++ ",\"owner\":{}}",
+        "{\"type\":\"parts\"," ++ head[1..] ++ ",\"owner\":{\"message\":\"1\",\"action\":\"2\"}}",
+        "{\"type\":\"parts\"," ++ head[1..] ++ ",\"owner\":{\"message\":\"0\"}}",
+        "{\"type\":\"parts\"," ++ head[1..] ++ ",\"owner\":{\"action\":\"9223372036854775808\"}}",
+        "{\"type\":\"parts\"," ++ head[1..] ++ ",\"owner\":{\"turn\":\"1\"}}",
+        "{\"type\":\"image\"," ++ head[1..] ++ "}",
+        "{\"type\":\"text\",\"bytes\":\"07\",\"sha256\":\"" ++ digest ++ "\"}",
+        "{\"type\":\"text\",\"bytes\":\"7\",\"sha256\":\"" ++ digest[0..63] ++ "F\"}",
+        "{\"type\":\"text\",\"bytes\":\"7\",\"sha256\":\"" ++ digest[0..62] ++ "\"}",
+        std.fmt.comptimePrint("{{\"type\":\"text\",\"bytes\":\"{d}\",\"sha256\":\"" ++ digest ++ "\"}}", .{protocol.max_sqlite_content_bytes + 1}),
+    }) |wire| {
+        if (std.json.parseFromSliceLeaky(JsonContentValue, arena.allocator(), wire, .{})) |_| {
+            std.debug.print("accepted {s}\n", .{wire});
+            return error.TestUnexpectedResult;
+        } else |_| {}
     }
 }
 

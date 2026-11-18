@@ -82,7 +82,7 @@ pub const Resolved = struct {
     call_ordinal: u64,
     code: []const u8,
     acceptance_position: u64,
-    result: Content,
+    result: @import("content_value.zig").Value,
     presentation: tool_presentation.ToolPresentation,
 };
 
