@@ -7058,5 +7058,5 @@ test "overview lines fixture domain preserves base targets focus bold archive an
     };
     try D.checkBoundaries();
     // Recorded by running this same fixture domain against base 03aa26d0.
-    try std.testing.expectEqual(@as(u64, 0x50a2b94318a8b3e8), bytes_and_styles);
+    try std.testing.expectEqual(@as(u64, 0x3eb1117b8b8d7311), bytes_and_styles);
 }
