@@ -110,7 +110,7 @@ runs:
         echo "ZIG_GLOBAL_CACHE_DIR=$root/global" >> "$GITHUB_ENV"
         echo "ZIG_LOCAL_PKG_DIR=$root/packages" >> "$GITHUB_ENV"
     - name: Fetch the existing pinned dependency graph
-      if: ${{ inputs.compiled != 'true' && (inputs.cold == 'true' || steps.caches.outputs.build-hit != 'true') }}
+      if: ${{ inputs.compiled != 'true' && (inputs.cold == 'true' || steps.caches.outputs.packages-hit != 'true') }}
       shell: bash
       env:
         # GitHub-hosted archives come through the API, which anonymous load shedding spares.

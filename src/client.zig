@@ -231,13 +231,13 @@ pub const Requests = struct {
         return readReportResponse(self, fd, sink, reply_buffer);
     }
 
-    pub fn readAction(self: Requests, store_path: []const u8, session: []const u8, action_id: u64, offset: u64, sink: anytype, reply_buffer: *ReplyBuffer) !protocol_reply.ReportReply {
+    pub fn readAction(self: Requests, store_path: []const u8, session: []const u8, action_id: u64, offset: u64, after: u64, sink: anytype, reply_buffer: *ReplyBuffer) !protocol_reply.ReportReply {
         reply_buffer.len = 0;
         try self.check();
-        if (!protocol.validSessionId(session) or action_id == 0 or action_id > std.math.maxInt(i64) or offset > protocol.max_sqlite_content_bytes) return error.InvalidTarget;
+        if (!protocol.validSessionId(session) or action_id == 0 or action_id > std.math.maxInt(i64) or offset > protocol.max_sqlite_content_bytes or after > std.math.maxInt(i64)) return error.InvalidTarget;
         const paths = try resolveClientPaths(self.io, store_path);
         var body: protocol.RequestBuffer = .{};
-        try body.appendShape(protocol.read_action_request.all, .{ paths.store_identity.slice(), session, action_id, offset });
+        try body.appendShape(protocol.read_action_request.all, .{ paths.store_identity.slice(), session, action_id, offset, after });
         const fd = try openRead(self, &paths, "/v1/read-action", body.slice());
         defer closeSocket(self.io, fd);
         return readReportResponse(self, fd, sink, reply_buffer);
@@ -3878,7 +3878,7 @@ test "client read boundaries reject noncanonical Sessions before path or socket 
         try std.testing.expectError(error.InvalidSession, protocol_reply.MessageAddress.init("/never-open", session, "key\x00雪"));
         try std.testing.expectError(error.InvalidSession, requests.inspectSession("/never-open", session, .current, file, &reply));
         try std.testing.expectError(error.InvalidSession, requests.exportFailedResponse("/never-open", session, .{ .operation = 1, .attempt = 1, .part = .metadata }, file, &reply));
-        try std.testing.expectError(error.InvalidTarget, requests.readAction("/never-open", session, 1, 0, file, &reply));
+        try std.testing.expectError(error.InvalidTarget, requests.readAction("/never-open", session, 1, 0, 0, file, &reply));
         try std.testing.expectError(error.InvalidTarget, requests.readActionArguments("/never-open", session, 1, file, &reply));
         try std.testing.expectError(error.InvalidTarget, requests.readActionCallId("/never-open", session, 1, file, &reply));
         try std.testing.expectError(error.InvalidSession, requests.conversationPage("/never-open", session, .{ .end = 0 }));
@@ -3887,9 +3887,9 @@ test "client read boundaries reject noncanonical Sessions before path or socket 
         try std.testing.expectError(error.InvalidSession, requests.readActivityContent("/never-open", session, 1, 0, null, file));
     }
     for ([_]u64{ 0, std.math.maxInt(u64) }) |action_id| {
-        try std.testing.expectError(error.InvalidTarget, requests.readAction("/never-open", "k7m2qx", action_id, 0, file, &reply));
+        try std.testing.expectError(error.InvalidTarget, requests.readAction("/never-open", "k7m2qx", action_id, 0, 0, file, &reply));
     }
-    try std.testing.expectError(error.InvalidTarget, requests.readAction("/never-open", "k7m2qx", 1, protocol.max_sqlite_content_bytes + 1, file, &reply));
+    try std.testing.expectError(error.InvalidTarget, requests.readAction("/never-open", "k7m2qx", 1, protocol.max_sqlite_content_bytes + 1, 0, file, &reply));
     try std.testing.expectEqual(@as(u64, 0), try file.length(std.testing.io));
 }
 
@@ -5409,7 +5409,7 @@ test "transport cancellation preserves caller capture and rejects before path ac
     try std.testing.expectError(error.Cancelled, requests.readResultStream("/never-open", "k", file, &buffer));
     try std.testing.expectError(error.Cancelled, requests.inspectSession("/never-open", "s", .current, file, &buffer));
     try std.testing.expectError(error.Cancelled, requests.listSessions("/never-open", null, .{}, file, &buffer));
-    try std.testing.expectError(error.Cancelled, requests.readAction("/never-open", "s", 1, 0, file, &buffer));
+    try std.testing.expectError(error.Cancelled, requests.readAction("/never-open", "s", 1, 0, 0, file, &buffer));
     try std.testing.expectError(error.Cancelled, requests.readActionArguments("/never-open", "s", 1, file, &buffer));
     try std.testing.expectError(error.Cancelled, requests.readActionCallId("/never-open", "s", 1, file, &buffer));
     try std.testing.expectEqual(@as(usize, 0), buffer.len);

@@ -2921,6 +2921,15 @@ export interface components {
             /** @enum {string} */
             state: "waiting_approval" | "queued" | "attempted";
             final: null;
+            values: {
+                items: {
+                    ordinal: components["schemas"]["Decimal"];
+                    key: string;
+                    text: string;
+                }[];
+                next: components["schemas"]["Decimal"];
+                more: boolean;
+            };
         } | {
             /** @constant */
             version: "21";
@@ -2941,6 +2950,15 @@ export interface components {
                     text: string;
                 };
             };
+            values: {
+                items: {
+                    ordinal: components["schemas"]["Decimal"];
+                    key: string;
+                    text: string;
+                }[];
+                next: components["schemas"]["Decimal"];
+                more: boolean;
+            };
         } | {
             /** @constant */
             version: "21";
@@ -2956,6 +2974,15 @@ export interface components {
                 content: components["schemas"]["ContentValue"];
                 window: null;
             };
+            values: {
+                items: {
+                    ordinal: components["schemas"]["Decimal"];
+                    key: string;
+                    text: string;
+                }[];
+                next: components["schemas"]["Decimal"];
+                more: boolean;
+            };
         };
         ReadActionRequest: {
             /** @constant */
@@ -2966,6 +2993,7 @@ export interface components {
             session: string;
             action: components["schemas"]["Decimal"];
             offset?: components["schemas"]["Decimal"];
+            after?: components["schemas"]["Decimal"];
         };
         ReadResultRequest: {
             /** @constant */

@@ -178,6 +178,14 @@ pub fn renderActionRead(response: protocol.JsonOut, value: *const @import("actio
         .resolved => |*final| try response.appendShape(shapes.final, .{ final.resolution.position, final.resolution.code.slice(), protocol.ContentValueJson{ .value = final.resolution.content }, final.window.offset, final.window.next, final.window.more, final.window.text.slice() }),
         .resolved_parts => |*final| try response.appendShape(shapes.parts, .{ final.position, final.code.slice(), protocol.ContentValueJson{ .value = final.content } }),
     }
+    try response.writer.writeAll(shapes.values_head);
+    try response.writer.writeByte('[');
+    for (value.values.items[0..value.values.count], 0..) |item, index| {
+        if (index != 0) try response.writer.writeByte(',');
+        try response.appendShape(shapes.item, .{ item.ordinal, item.key.slice(), value.values.bytes[item.start..][0..item.length] });
+    }
+    try response.writer.writeByte(']');
+    try response.appendShape(shapes.values_tail, .{ value.values.next, value.values.more });
 }
 
 pub fn commandObservationBytes(observed: *const command_reply.Observed) usize {
@@ -590,6 +598,7 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
 }
 
 test "Action read JSON reaches its exact bound with an escaped final window" {
+    // ARD-3
     const Read = @import("action_read.zig").Read;
     const value = try std.testing.allocator.create(Read);
     defer std.testing.allocator.destroy(value);
@@ -602,6 +611,13 @@ test "Action read JSON reaches its exact bound with an escaped final window" {
             .window = .{ .offset = max, .next = max, .more = false, .text = .{ .bytes = @splat(1), .len = @import("action_read.zig").window_bytes } },
         } },
     };
+    value.values.count = @import("action_read.zig").page_items;
+    value.values.length = @import("action_read.zig").page_bytes;
+    value.values.next = max;
+    @memset(&value.values.bytes, 1);
+    for (&value.values.items, 0..) |*item, i| {
+        item.* = .{ .ordinal = max, .key = .{ .bytes = @splat(1), .len = 128 }, .start = 0, .length = if (i == 0) value.values.length else 0 };
+    }
     const bytes = try std.testing.allocator.alloc(u8, protocol.action_read_reply.max_bytes);
     defer std.testing.allocator.free(bytes);
     var writer = std.Io.Writer.fixed(bytes);
@@ -612,10 +628,17 @@ test "Action read JSON reaches its exact bound with an escaped final window" {
     const decoded = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, writer.buffered(), .{});
     defer decoded.deinit();
     try std.testing.expectEqualStrings("resolved", decoded.value.object.get("state").?.string);
+    const values = decoded.value.object.get("values").?.object;
+    try std.testing.expectEqual(@as(usize, 16), values.get("items").?.array.items.len);
+    try std.testing.expectEqualStrings("18446744073709551615", values.get("next").?.string);
+    try std.testing.expect(!values.get("more").?.bool);
+    const first = values.get("items").?.array.items[0].object;
+    try std.testing.expectEqual(@as(usize, 16384), first.get("text").?.string.len);
+    try std.testing.expectEqualSlices(u8, value.values.bytes[0..value.values.length], first.get("text").?.string);
     value.status = .{ .pending = .queued };
     writer = .fixed(bytes);
     try renderActionRead(.{ .writer = &writer }, value);
-    try std.testing.expect(std.mem.endsWith(u8, writer.buffered(), "\"final\":null}"));
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "\"final\":null,\"values\":") != null);
 }
 
 test "SH-60 Message replies and observations preserve the input form" {
