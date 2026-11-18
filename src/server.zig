@@ -5689,8 +5689,13 @@ const ReplyDomainWitness = struct {
             // An old successful or binding-mismatch Message work reply now needs
             // the three required Host-derived members before it can be decoded.
             const missing_work = if (legacy_work) |missing| missing[index] else false;
+            // Adding an input receipt to a rejected Message observation now invalidates the reply.
+            const rejected_message_input = std.mem.eql(u8, label, "observation/message/rejected") and edit == 0 and
+                field != null and field.?.path.len == 2 and std.mem.eql(u8, field.?.path[0], "observation") and
+                std.mem.eql(u8, field.?.path[1], "input");
+            if (rejected_message_input) try std.testing.expectEqual(@as(u8, 'r'), base);
             const want: u8 = if (tighten_pinned and field != null and edit == 0 and
-                std.mem.eql(u8, field.?.path[field.?.path.len - 1], "pinned")) 'i' else if (missing_work and (base == 'a' or base == 'b')) 'o' else base;
+                std.mem.eql(u8, field.?.path[field.?.path.len - 1], "pinned")) 'i' else if (rejected_message_input or (missing_work and (base == 'a' or base == 'b'))) 'o' else base;
             if (want != got) {
                 std.debug.print("domain {s}: field {any}, edit {s}: base={c}, expected={c}, actual={c}\n", .{
                     label, if (field) |value| value.path else @as([]const []const u8, &.{"<unedited>"}),
