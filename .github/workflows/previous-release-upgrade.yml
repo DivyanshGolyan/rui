@@ -28,7 +28,8 @@ permissions:
 cache-mode: read
 
 concurrency:
-  group: previous-release-upgrade-${{ github.ref }}-${{ github.sha }}
+  # The caller's name keeps Promote and Qualify main on one SHA from cancelling each other.
+  group: previous-release-upgrade-${{ github.workflow }}-${{ github.ref }}-${{ github.sha }}
   cancel-in-progress: true
 
 jobs:

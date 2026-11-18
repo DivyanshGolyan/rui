@@ -17,12 +17,14 @@ from strict_paths import STRICT, strict
 
 ROOT = Path(__file__).resolve().parents[2]
 CHECK = ROOT / '.github/workflows/check.yml'
+POLICY = ROOT / '.github/actions/policy/action.yml'
 UPGRADE = ROOT / '.github/workflows/previous-release-upgrade.yml'
 PROMOTE = ROOT / '.github/workflows/promote.yml'
 RELEASE = ROOT / '.github/workflows/release.yml'
 RELEASE_BUILD = ROOT / '.github/workflows/release-build.yml'
 RENDERER = ROOT / '.github/workflows/renderer-contracts.yml'
-MAIN_BUILD = ROOT / '.github/workflows/main-build.yml'
+QUALIFIER = ROOT / '.github/workflows/main-qualifier.yml'
+TIER = ROOT / '.github/workflows/qualification-tier.yml'
 
 
 def job(text, name):
@@ -30,6 +32,11 @@ def job(text, name):
     if not match:
         raise AssertionError(f'missing job {name}')
     return match[1]
+
+
+def permissions_of(body):
+    block = body.split('\n    permissions:\n', 1)[1]
+    return dict(re.findall(r'(?m)^      ([a-z-]+): (read|write)$', block.split('\n    uses:', 1)[0].split('\n    runs-on:', 1)[0]))
 
 
 def step_script(text, name):
@@ -180,12 +187,20 @@ class AdmissionTest(unittest.TestCase):
 
     def admission(self, **changes):
         env = dict(CHANGE_KIND='normal', DRAFT='false', PLAN_RESULT='success', POLICY_RESULT='success',
-                   LINUX_RESULT='success', MACOS_RESULT='success',
+                   LINUX_RESULT='success', MACOS_RESULT='success', PR_JOB='false',
                    NATIVE='true', CACHE_SELECTED='false', CACHE_RESULT='skipped')
         env.update(changes)
         script = step_script(job(CHECK.read_text(), 'admission'), 'Require candidate acceptance')
         return subprocess.run(['bash', '-c', script], env=dict(os.environ, **env),
                               capture_output=True, text=True)
+
+    def test_single_pr_job_admits_only_with_policy_folded_into_it(self):
+        self.assertEqual(self.admission(PR_JOB='true', POLICY_RESULT='skipped', NATIVE='false',
+                                        MACOS_RESULT='skipped').returncode, 0)
+        for pr_job, policy in (('true', 'success'), ('true', 'failure'), ('false', 'skipped'),
+                               ('', 'success'), ('unknown', 'skipped')):
+            with self.subTest(pr_job=pr_job, policy=policy):
+                self.assertNotEqual(self.admission(PR_JOB=pr_job, POLICY_RESULT=policy).returncode, 0)
 
     def test_all_green_and_only_unselected_cache_skip_pass(self):
         self.assertEqual(self.admission().returncode, 0)
@@ -260,7 +275,7 @@ class AdmissionTest(unittest.TestCase):
         script = step_script(job(CHECK.read_text(), 'linux'), 'Require every selected Linux part')
         env = dict(DRAFT_RUN='false', CHANGE_KIND='documentation', PLAN_RESULT='success', POLICY_RESULT='skipped',
                    TARGETS='[]', COMPILE_TARGETS='[]', SPLIT='false', BUILD_RESULT='skipped',
-                   UNIT_RESULT='skipped', NATIVE_RESULT='skipped',
+                   UNIT_RESULT='skipped', NATIVE_RESULT='skipped', PR_JOB='false', PR_RESULT='skipped',
                    TYPECHECK='false', TYPECHECK_RESULT='skipped', COMPILE_ONLY='false')
 
         def run(values):
@@ -285,7 +300,7 @@ class AdmissionTest(unittest.TestCase):
         env = dict(DRAFT_RUN='false', PLAN_RESULT='success', POLICY_RESULT='success', TARGETS='[]', COMPILE_TARGETS='[]', SPLIT='false',
                    BUILD_RESULT='skipped', UNIT_RESULT='skipped',
                    NATIVE_RESULT='skipped', TYPECHECK='false', TYPECHECK_RESULT='skipped',
-                   COMPILE_ONLY='false')
+                   PR_JOB='false', PR_RESULT='skipped', COMPILE_ONLY='false')
         self.assertEqual(subprocess.run(['bash', '-euc', script], env=env).returncode, 0)
         for kind in ('', 'docs', 'unknown'):
             with self.subTest(kind=kind):
@@ -311,14 +326,18 @@ class AdmissionTest(unittest.TestCase):
         self.assertNotIn('paths-ignore', text)
 
     def test_policy_runs_live_client_locality_with_trusted_main_history(self):
-        policy = job(CHECK.read_text(), 'policy')
-        self.assertIn('fetch-depth: 0', policy)
-        self.assertIn('        run: python3 -B tests/ci/client_locality.py\n', policy)
+        for name in ('policy', 'pr_linux'):
+            body = job(CHECK.read_text(), name)
+            self.assertIn('fetch-depth: 0', body)
+            self.assertIn('uses: ./.github/actions/policy\n', body)
+        self.assertIn('      run: python3 -B tests/ci/client_locality.py\n', POLICY.read_text())
 
     def test_policy_skips_only_the_named_unchanged_self_checks(self):
-        policy = job(CHECK.read_text(), 'policy')
         script = 'python3 -B tests/ci/policy_suite.py --skips "$SKIPS"'
-        self.assertIn('        run: ' + script + '\n', policy)
+        self.assertIn('      run: ' + script + '\n', POLICY.read_text())
+        self.assertIn('        SKIPS: ${{ inputs.skips }}\n', POLICY.read_text())
+        for name in ('policy', 'pr_linux'):
+            self.assertIn('skips: ${{ needs.plan.outputs.policy_skips }}', job(CHECK.read_text(), name))
         modules = {
             'test_alpha': 'class Alpha(unittest.TestCase):\n    def test_one(self): pass\n    def test_two(self): pass\n',
             'test_beta': ('class Kept(unittest.TestCase):\n    def test_kept(self): pass\n'
@@ -387,7 +406,7 @@ class AdmissionTest(unittest.TestCase):
 
     def test_upgrade_runs_both_platforms_in_promotion_and_never_on_prs(self):
         self.assertNotIn('uses: ./.github/workflows/previous-release-upgrade.yml', CHECK.read_text())
-        promotion = job(PROMOTE.read_text(), 'upgrade')
+        promotion = job(TIER.read_text(), 'upgrade')
         self.assertIn('uses: ./.github/workflows/previous-release-upgrade.yml', promotion)
         text = UPGRADE.read_text()
         self.assertNotIn('pull_request', text)
@@ -493,41 +512,41 @@ class CandidatePlanTest(unittest.TestCase):
 
     # CI-1: written as literals, independent of select_tests' tier constants.
     PR_TIER_NEVER = {'check', 'check-full', 'test', 'test-full', 'stack-frames', 'mysql-wire-integration'}
+    # Unit roots the diff reaches, plus fixtures whose own script, executable or owner changed.
     PR_TIER_CASES = {
-        'documentation': (['README.md'], set(), set()),
-        'tests/ci only': (['tests/ci/select_tests.py'], set(), set()),
-        'unreached source': (['src/future_owner.zig'], {'test-logic', 'test-native'}, set()),
-        'slow fixture owner': (['src/Upgrade.zig'], {'test-logic', 'upgrade-integration'}, set()),
-        'build hub': (['build.zig'],
-                      {'admission-debug-integration', 'canonical-failure-integration', 'codex-h2-integration',
-                       'current-facts-integration', 'installer-integration', 'login-signal-integration',
-                       'server-delivery-integration', 'test-logic', 'test-native', 'transport-h2-integration'}, set()),
-        'portable core': (['src/request_encoding.zig'], {'test-logic', 'test-native', 'dispatch-integration'},
-                          {'test-store', 'human-cli-integration', 'upgrade-integration'}),
-        'Store': (['src/store.zig'], {'test-logic', 'test-native', 'test-store', 'dispatch-debug-integration'},
-                  {'human-cli-integration', 'upgrade-integration'}),
-        'Mac path': (['src/client.zig'], {'test-logic', 'test-native', 'human-cli-integration', 'request-wait-integration'},
-                     {'test-store', 'upgrade-integration'}),
+        'documentation': (['README.md'], set()),
+        'tests/ci only': (['tests/ci/select_tests.py'], set()),
+        'unreached source': (['src/future_owner.zig'], {'test-logic', 'test-native'}),
+        'build hub': (['build.zig'], {'test-logic', 'test-native'}),
+        'Store': (['src/store.zig'], {'test-native', 'test-store'}),
+        'fixture script': (['tests/integration/overview_integration.py'], {'overview-integration'}),
+        'slow fixture owner': (['src/Upgrade.zig'], {'upgrade-integration'}),
+        'core owning no fixture': (['src/request_encoding.zig'], {'test-logic', 'test-native'}),
+        'core owning one fixture': (['src/session_skills.zig'], {'skills-integration', 'test-logic', 'test-native'}),
+        'core owning many fixtures (Mac path)': (['src/client.zig'], {
+            'activity-integration', 'admission-integration', 'control-integration', 'conversation-page-integration',
+            'host-status-integration', 'host-stop-integration', 'human-cli-integration', 'request-wait-integration',
+            'session-list-integration', 'test-logic', 'test-native'}),
     }
 
     def test_ready_candidate_runs_its_pr_tier_and_promotion_the_full_selection(self):
         from ci_plan import plan
         from docs_only import ChangeKind
         available = set(build_files.steps())
-        exact = {'documentation', 'tests/ci only', 'unreached source', 'slow fixture owner', 'build hub'}
-        for name, (paths, required, forbidden) in self.PR_TIER_CASES.items():
+        for name, (paths, expected) in self.PR_TIER_CASES.items():
             with self.subTest(case=name):
                 selected = select(paths, 'review', available)
 
+                kind = ChangeKind.DOCUMENTATION if name == 'documentation' else ChangeKind.NORMAL
+
                 def run(event, draft=False, promotion=False):
                     return plan(selected, event_name=event, draft=draft, promotion=promotion,
-                                change_kind=ChangeKind.NORMAL).outputs
-                ready = set(run('pull_request')['targets'])
-                if name in exact:
-                    self.assertEqual(ready, required)
-                else:
-                    self.assertLessEqual(required, ready)
-                self.assertFalse(ready & (forbidden | self.PR_TIER_NEVER), sorted(ready & (forbidden | self.PR_TIER_NEVER)))
+                                change_kind=kind).outputs
+                ready = run('pull_request')
+                self.assertEqual(set(ready['targets']), expected)
+                self.assertFalse(set(ready['targets']) & self.PR_TIER_NEVER)
+                self.assertEqual(ready['pr_job'], name != 'documentation', 'every ready normal PR is one job')
+                self.assertEqual(ready['linux_matrix'], {'include': []})
                 self.assertEqual(run('pull_request', draft=True)['targets'], [])
                 self.assertEqual(run('workflow_dispatch')['targets'], selected['targets'])
                 promoted = set(run('workflow_dispatch', promotion=True)['targets'])
@@ -630,7 +649,7 @@ def plan(selection, *, event_name, draft, promotion, change_kind, compile_only):
             candidate = fixture.commit()
             output = fixture.plan(self, candidate=candidate)
             results = dict(plan='success', policy='skipped', linux='success', macos='skipped',
-                           cache_execution='skipped',
+                           cache_execution='skipped', pr_linux='skipped',
                            linux_build='skipped', linux_build_unit='skipped',
                            linux_suites='skipped', macos_typecheck='skipped')
             for name, script in (('linux', linux), ('admission', admission)):
@@ -669,7 +688,7 @@ def plan(selection, *, event_name, draft, promotion, change_kind, compile_only):
             self.assertEqual(draft['draft_run'], 'true')
             self.assert_quick_plan(draft)
             results = {name: 'skipped' for name in (
-                'policy', 'macos', 'cache_execution',
+                'policy', 'macos', 'cache_execution', 'pr_linux',
                 'linux_build', 'linux_build_unit', 'linux_suites', 'macos_typecheck')}
             results.update(plan='success', linux='success')
             self.assertEqual(self.aggregate(workflow, 'linux', linux, draft, results, draft=True).returncode, 0)
@@ -679,19 +698,19 @@ def plan(selection, *, event_name, draft, promotion, change_kind, compile_only):
             ready = fixture.plan(self, candidate=candidate)
             self.assertEqual(ready['change_kind'], 'normal')
             self.assertEqual(ready['draft_run'], 'false')
-            has_targets = bool(json.loads(ready['targets']))
-            self.assertTrue(has_targets)
-            selected = dict(results, policy='success',
-                            linux_build='success' if has_targets else 'skipped',
-                            linux_suites='success' if has_targets else 'skipped',
-                            linux_build_unit='success' if ready['linux_split'] == 'true' else 'skipped',
-                            macos_typecheck='success' if ready['typecheck_macos'] == 'true' else 'skipped')
+            self.assertTrue(json.loads(ready['targets']))
+            self.assertEqual(ready['pr_job'], 'true')
+            selected = dict(results, pr_linux='success')
             self.assertEqual(self.aggregate(workflow, 'linux', linux, ready, selected).returncode, 0)
-            for part in ('policy', 'linux_build', 'linux_build_unit', 'linux_suites', 'macos_typecheck'):
-                if selected[part] == 'success':
-                    with self.subTest(skipped=part):
+            for part in ('pr_linux',):
+                for value in ('skipped', 'failure', 'cancelled'):
+                    with self.subTest(part=part, value=value):
                         self.assertNotEqual(self.aggregate(workflow, 'linux', linux, ready,
-                            dict(selected, **{part: 'skipped'})).returncode, 0)
+                            dict(selected, **{part: value})).returncode, 0)
+            for part in ('policy', 'linux_build', 'linux_build_unit', 'linux_suites', 'macos_typecheck'):
+                with self.subTest(ran_beside_the_single_job=part):
+                    self.assertNotEqual(self.aggregate(workflow, 'linux', linux, ready,
+                        dict(selected, **{part: 'success'})).returncode, 0)
             accepted = dict(selected,
                 macos='success' if ready['native'] == 'true' else 'skipped',
                 cache_execution='success' if ready['cache_execution'] == 'true' else 'skipped')
@@ -724,14 +743,15 @@ def plan(selection, *, event_name, draft, promotion, change_kind, compile_only):
             self.assertEqual(json.loads(output['linux_compile_targets']), ['test'])
             self.assertEqual(output['linux_matrix'], '{"include": []}')
             self.assertEqual(output['linux_split'], 'false')
-            results = dict(plan='success', policy='success', linux_build='success',
+            self.assertEqual(json.loads(output['pr_setup_targets']), ['test'])
+            results = dict(plan='success', policy='skipped', pr_linux='success', linux_build='skipped',
                            linux_build_unit='skipped',
                            linux_suites='skipped', macos_typecheck='skipped')
             self.assertEqual(self.aggregate(workflow, 'linux', linux, output, results).returncode, 0)
             for status in ('skipped', 'failure', 'cancelled', ''):
                 with self.subTest(status=status):
                     self.assertNotEqual(self.aggregate(workflow, 'linux', linux, output,
-                        dict(results, linux_build=status)).returncode, 0)
+                        dict(results, pr_linux=status)).returncode, 0)
             self.assertNotEqual(self.aggregate(workflow, 'linux', linux, output,
                 dict(results, linux_suites='success')).returncode, 0)
 
@@ -745,7 +765,11 @@ def plan(selection, *, event_name, draft, promotion, change_kind, compile_only):
             for required in (False, True):
                 source = dict(select([], 'review', set(build_files.steps())), targets=targets,
                               fast_targets=targets, unit_compile_required=required)
-                output = plan(source, event_name='pull_request', draft=False,
+                # Shards serve every non-PR run; a ready PR runs its single job instead.
+                ready = plan(source, event_name='pull_request', draft=False,
+                             promotion=False, change_kind=ChangeKind.NORMAL).outputs
+                self.assertTrue(ready['pr_job'])
+                output = plan(source, event_name='workflow_dispatch', draft=False,
                               promotion=False, change_kind=ChangeKind.NORMAL).outputs
                 encoded = {key: json.dumps(value) if not isinstance(value, str) else value
                            for key, value in output.items()}
@@ -781,7 +805,7 @@ def plan(selection, *, event_name, draft, promotion, change_kind, compile_only):
             output = fixture.plan(self, candidate=candidate, event='push', compile_only=True)
             self.assertEqual(output['compile_only'], 'true')
             self.assertEqual(json.loads(output['targets']), ['check', 'test-logic'])
-            built = {name: 'skipped' for name in ('policy', 'macos', 'cache_execution', 'linux_suites')}
+            built = {name: 'skipped' for name in ('policy', 'macos', 'cache_execution', 'linux_suites', 'pr_linux')}
             built.update(plan='success', linux_build='success', linux_build_unit='success',
                          macos_typecheck='success')
             result = self.aggregate(workflow, 'linux', linux, output, built)
@@ -815,14 +839,19 @@ class ReleaseFlowTest(unittest.TestCase):
                 self.assertNotRegex(path.read_text(), r'auto_land|auto-land\.yml|stable_hold|completed_run')
 
     def test_only_a_manual_promotion_publishes_main(self):
-        for workflow in (RELEASE, RELEASE_BUILD):
+        # One tier builds and judges the archives for Qualify main and Promote; only Promote publishes them.
+        for workflow, expected in ((RELEASE, ['promote.yml']), (RELEASE_BUILD, ['qualification-tier.yml']),
+                                   (UPGRADE, ['qualification-tier.yml']), (RENDERER, ['qualification-tier.yml']),
+                                   (TIER, ['main-qualifier.yml', 'promote.yml'])):
             release = workflow.read_text().split('\npermissions:', 1)[0]
             self.assertIn('  workflow_call:', release)
+            # The upgrade check and renderer contracts also run by hand for diagnosis.
             for trigger in ('push:', 'workflow_dispatch:', 'workflow_run:', 'schedule:'):
-                self.assertNotIn(trigger, release)
+                if workflow not in (UPGRADE, RENDERER) or trigger != 'workflow_dispatch:':
+                    self.assertNotIn(trigger, release)
             callers = [path.name for path in (ROOT / '.github/workflows').glob('*.yml')
                        if f'uses: ./.github/workflows/{workflow.name}' in path.read_text()]
-            self.assertEqual(callers, ['promote.yml'])
+            self.assertCountEqual(callers, expected)
         promote = PROMOTE.read_text()
         self.assertEqual(re.findall(r'(?m)^  ([a-z_]+):', promote.split('\npermissions:', 1)[0]), ['workflow_dispatch'])
         selected = CHECK.read_text().split('\npermissions:', 1)[0]
@@ -830,64 +859,117 @@ class ReleaseFlowTest(unittest.TestCase):
         self.assertNotIn('  push:', selected)
         self.assertNotIn('workflow_run:', selected)
 
-    def test_main_build_compiles_through_selected_checks_and_reports_outside_it(self):
-        text = MAIN_BUILD.read_text()
+    def test_main_qualifier_runs_promotions_tier_and_records_without_publishing(self):
+        self.assertFalse((ROOT / '.github/workflows/main-build.yml').exists())
+        text = QUALIFIER.read_text()
         on = text.split('\npermissions:', 1)[0]
-        self.assertIn('  push:\n    branches: [main]\n', on)
-        self.assertNotIn('pull_request', on)
-        self.assertRegex(text, r'(?m)^concurrency:\n  # .*\n  group: main-build\n  cancel-in-progress: true$')
-        build = job(text, 'build')
-        self.assertIn('uses: ./.github/workflows/check.yml', build)
-        self.assertIn('compile_only: true', build)
-        self.assertIn('promotion: false', build)
-        self.assertNotIn('write', build)
-        self.assertNotRegex(text, r'zig build|build_artifact|\.github/actions/setup')
-        report = job(text, 'report')
-        self.assertIn('needs: build', report)
-        self.assertIn('issues: write', report)
-        self.assertIn('python3 -B tests/ci/main_build.py', report)
-        self.assertIn('compile_only:', CHECK.read_text().split('\npermissions:', 1)[0])
-
-    def test_promotion_publishes_only_after_every_tier_on_the_same_sha(self):
-        text = PROMOTE.read_text()
+        self.assertRegex(on, r"(?m)^  schedule:\n    - cron: '[0-9]+ \*/3 \* \* \*'$")
+        self.assertIn('  workflow_dispatch:', on)
+        self.assertNotRegex(on, r'push:|pull_request')
+        self.assertRegex(text, r'(?m)^concurrency:\n  # .*\n  group: main-qualifier\n  cancel-in-progress: false$')
+        self.assertNotRegex(text, r'/release\.yml|id-token|actions: write|secrets')
+        self.assertEqual(re.findall(r'(?m)^  ([a-z_]+):', text.split('\njobs:\n', 1)[1]), ['batch', 'qualify'])
         self.assertIn("github.ref == 'refs/heads/main'", job(text, 'batch'))
+        self.assertIn('main_qualified.py batch --head "$HEAD_SHA"', job(text, 'batch'))
+        qualify = job(text, 'qualify')
+        for line in ('uses: ./.github/workflows/qualification-tier.yml', "if: ${{ needs.batch.outputs.needed == 'true' }}",
+                     'base: ${{ needs.batch.outputs.base }}', 'head: ${{ needs.batch.outputs.head }}',
+                     'red-label: main-red'):
+            self.assertIn(line, qualify)
+        self.assertEqual(permissions_of(qualify), {'contents': 'write', 'actions': 'read', 'pull-requests': 'read',
+                                                   'checks': 'read', 'statuses': 'write', 'issues': 'write'})
+        # Promote and Qualify main on one SHA never cancel each other's tiers.
+        self.assertIn('${{ github.workflow }}', UPGRADE.read_text().split('\nconcurrency:', 1)[1].split('\n\n', 1)[0])
+        self.assertIn('github.workflow', RENDERER.read_text().split('\nconcurrency:', 1)[1].split('\n\n', 1)[0])
+        self.assertIn('github.workflow', CHECK.read_text().split('\nconcurrency:', 1)[1].split('\n\n', 1)[0])
+
+    def test_one_tier_owns_qualification_and_its_verdict(self):
+        text = TIER.read_text()
+        on = text.split('\npermissions:', 1)[0]
+        self.assertEqual(re.findall(r'(?m)^  ([a-z_]+):', on), ['workflow_call'])
+        self.assertEqual(re.findall(r'(?m)^      ([a-z-]+):\n        description', on), ['base', 'head', 'red-label', 'version'])
+        self.assertEqual(re.findall(r'(?m)^  ([a-z_]+):', text.split('\njobs:\n', 1)[1]),
+                         ['release_build', 'selected', 'upgrade', 'renderer', 'qualified', 'report'])
+        self.assertNotRegex(text, r'/release\.yml|id-token|actions: write')
+        build = job(text, 'release_build')
+        self.assertIn('uses: ./.github/workflows/release-build.yml', build)
+        self.assertIn('sha: ${{ inputs.head }}', build)
         selected = job(text, 'selected')
         self.assertIn('uses: ./.github/workflows/check.yml', selected)
         self.assertIn('promotion: true', selected)
-        build = job(text, 'release_build')
-        self.assertIn('uses: ./.github/workflows/release-build.yml', build)
-        self.assertIn('sha: ${{ needs.batch.outputs.head }}', build)
+        self.assertIn('base: ${{ inputs.base }}', selected)
         for name, workflow in (('upgrade', 'previous-release-upgrade.yml'), ('renderer', 'renderer-contracts.yml')):
             body = job(text, name)
             self.assertIn(f'uses: ./.github/workflows/{workflow}', body)
-            self.assertIn('${{ needs.batch.outputs.head }}', body)
-            self.assertIn('batch-base: ${{ needs.batch.outputs.base }}', body)
+            self.assertIn('${{ inputs.head }}', body)
+            self.assertIn('batch-base: ${{ inputs.base }}', body)
             # The tiers test the bytes the release publishes.
-            self.assertIn('needs: [batch, release_build]', body)
+            self.assertIn('needs: release_build', body)
             self.assertIn('release-version: ${{ needs.release_build.outputs.version }}', body)
         qualified = job(text, 'qualified')
-        needs = re.search(r'(?m)^    needs: \[(.*?)\]$', qualified)[1].split(', ')
-        self.assertCountEqual(needs, ['batch', 'release_build', 'selected', 'upgrade', 'renderer'])
+        self.assertIn('needs: [release_build, selected, upgrade, renderer]', qualified)
+        self.assertIn('if: ${{ always() }}', qualified)
+        self.assertEqual(permissions_of(qualified), {'contents': 'read', 'statuses': 'write'})
+        script = step_script(qualified, 'Record the verdict on HEAD')
+        self.assertIn('main_qualified.py verdict $RESULTS', script)
+        self.assertIn('main_qualified.py record --sha "$HEAD_SHA" --state "$state" --run-id "$GITHUB_RUN_ID" --version "$VERSION"',
+                      script)
+        for tier in ('release_build', 'selected', 'upgrade', 'renderer'):
+            self.assertIn(f'${{{{ needs.{tier}.result }}}}', qualified)
+        # The requirement is report_issue.py's aggregate step: it files nothing of its own.
+        self.assertIn('      - name: Require every selected qualification tier\n', qualified)
+        self.assertIn('run: test "$STATE" = success', qualified.split('Require every selected qualification tier', 1)[1])
+        report = job(text, 'report')
+        self.assertIn('if: ${{ failure() }}', report)
+        self.assertIn('WORKFLOW: ${{ github.workflow }}', report)
+        self.assertIn('report_issue.py --workflow "$WORKFLOW" --run-id "$GITHUB_RUN_ID" --sha "$HEAD_SHA" --label "$RED_LABEL"',
+                      report)
+        # No caller enumerates the tiers, collects their results or records a verdict itself.
+        workflows = {path.name: path.read_text() for path in (ROOT / '.github/workflows').glob('*.yml')}
+        authorities = {
+            'calls the release build': r'uses: \./\.github/workflows/release-build\.yml',
+            'calls the upgrade check': r'uses: \./\.github/workflows/previous-release-upgrade\.yml',
+            'calls the renderer contracts': r'uses: \./\.github/workflows/renderer-contracts\.yml',
+            'runs Selected checks as a promotion': r'promotion: true',
+            'derives a verdict': r'main_qualified\.py verdict',
+            'records a final verdict': r'main_qualified\.py record [^\n]*--state "\$state"',
+        }
+        for what, pattern in authorities.items():
+            with self.subTest(authority=what):
+                self.assertEqual([name for name, body in sorted(workflows.items()) if re.search(pattern, body)],
+                                 ['qualification-tier.yml'])
+
+    def test_promotion_publishes_only_after_every_tier_on_the_same_sha(self):
+        text = PROMOTE.read_text()
+        self.assertEqual(re.findall(r'(?m)^  ([a-z_]+):', text.split('\njobs:\n', 1)[1]), ['batch', 'qualify', 'release'])
+        self.assertIn("github.ref == 'refs/heads/main'", job(text, 'batch'))
+        self.assertIn('main_qualified.py choose --main "$MAIN_SHA" --sha "$CHOSEN"', job(text, 'batch'))
+        qualify = job(text, 'qualify')
+        for line in ('uses: ./.github/workflows/qualification-tier.yml',
+                     "if: ${{ needs.batch.outputs.size != '0' && needs.batch.outputs.reuse != 'true' }}",
+                     'base: ${{ needs.batch.outputs.base }}', 'head: ${{ needs.batch.outputs.head }}',
+                     'red-label: promotion-red'):
+            self.assertIn(line, qualify)
+        self.assertEqual(permissions_of(qualify), {'contents': 'write', 'actions': 'read', 'pull-requests': 'read',
+                                                   'checks': 'read', 'statuses': 'write', 'issues': 'write'})
         release = job(text, 'release')
-        self.assertIn('needs: [batch, release_build, qualified]', release)
-        self.assertNotIn('if:', release)
+        self.assertIn('needs: [batch, qualify]', release)
+        self.assertIn("if: ${{ !cancelled() && needs.batch.result == 'success' && needs.batch.outputs.size != '0' && "
+                      "(needs.batch.outputs.reuse == 'true' || needs.qualify.result == 'success') }}", release)
         self.assertIn('sha: ${{ needs.batch.outputs.head }}', release)
-        self.assertIn('version: ${{ needs.release_build.outputs.version }}', release)
+        self.assertIn("version: ${{ needs.batch.outputs.reuse == 'true' && needs.batch.outputs.version"
+                      " || needs.qualify.outputs.version }}", release)
+        self.assertIn('value: ${{ jobs.release_build.outputs.version }}', TIER.read_text())
+        # A green qualification publishes that run's archives without qualifying again.
+        self.assertIn('artifact-run: ${{ needs.batch.outputs.run }}', release)
+        self.assertEqual(RELEASE.read_text().count('gh run download "$ARTIFACT_RUN"'), 3)
+        self.assertNotIn('gh run download "$GITHUB_RUN_ID"', RELEASE.read_text())
         # Publication never rebuilds: it checks the archives against the digests recorded at build time.
         publication = RELEASE.read_text()
         self.assertNotRegex(publication, r'zig build|\.github/actions/setup')
         self.assertIn('rui-digests/SHA256SUMS', publication)
         self.assertIn('sha256sum --check --strict SHA256SUMS', publication)
         self.assertIn('name: rui-digests', RELEASE_BUILD.read_text())
-        script = step_script(qualified, 'Require every selected promotion tier')
-        good = dict(BATCH_RESULT='success', RELEASE_BUILD_RESULT='success', SELECTED_RESULT='success',
-                    UPGRADE_RESULT='success', RENDERER_RESULT='success')
-        self.assertEqual(subprocess.run(['bash', '-c', script], env=good).returncode, 0)
-        for key in good:
-            for result in ('failure', 'cancelled', 'skipped', ''):
-                with self.subTest(key=key, result=result):
-                    self.assertNotEqual(subprocess.run(['bash', '-c', script],
-                        env=dict(good, **{key: result}), capture_output=True).returncode, 0)
 
     BISECT = 'python3 -B tests/ci/promotion.py --base "$BASE" --head "$HEAD_SHA" --logs "$RUNNER_TEMP/promotion-bisect"'
 

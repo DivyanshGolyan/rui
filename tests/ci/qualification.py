@@ -36,7 +36,7 @@ def split_build(targets):
     return bool(UNIT_TARGETS & set(targets)) and set(targets) not in ({"test"}, {"test-native"}, {"test-store"})
 
 
-def shards(targets, platform="linux", limit=LINUX_SHARDS, *, mysql_suites=None, live=True):
+def shards(targets, platform="linux", limit=LINUX_SHARDS, *, mysql_suites=None):
     from select_tests import mysql_provisioning, tree_graph
     if mysql_suites is None:
         mysql_suites = tree_graph().live_mysql if platform == "linux" and targets else set()
@@ -44,7 +44,7 @@ def shards(targets, platform="linux", limit=LINUX_SHARDS, *, mysql_suites=None, 
 
     def provision(rows):
         for row in rows:
-            row.update(mysql_provisioning(row["targets"], row["part"], platform, mysql_suites, live=live))
+            row.update(mysql_provisioning(row["targets"], row["part"], platform, mysql_suites))
         return {"include": rows}
 
     if platform == "macos":
@@ -58,7 +58,7 @@ def shards(targets, platform="linux", limit=LINUX_SHARDS, *, mysql_suites=None, 
                      and not (t == "test-logic" and "check-full" in targets)]
         if remaining:
             rows.append(dict(name="native", targets=remaining, part="all", resource=False, args=[]))
-        rows.extend(shards([t for t in targets if t in RESOURCES], limit=None, mysql_suites=set(), live=live)["include"])
+        rows.extend(shards([t for t in targets if t in RESOURCES], limit=None, mysql_suites=set())["include"])
         return provision(rows)
     rows, packed = [], []
     for target in targets:

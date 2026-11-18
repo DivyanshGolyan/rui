@@ -7,6 +7,11 @@ inputs:
   check-part:
     description: Full-check partition, keeping concurrent cache writers separate
     default: all
+  cache-part:
+    # A job that both compiles and executes (check.yml's single PR job) needs
+    # check-part's executor setup (tmux and the rest) but a producer's snapshot.
+    description: Build-cache snapshot to restore when it differs from check-part; empty restores check-part's own
+    default: ''
   cold:
     description: Use genuinely empty build, package and global compiler caches
     default: 'false'
@@ -32,7 +37,7 @@ runs:
     - uses: ./.github/actions/setup/caches
       id: caches
       with:
-        check-part: ${{ inputs.check-part }}
+        check-part: ${{ inputs.cache-part || inputs.check-part }}
         cold: ${{ inputs.cold }}
         compiled: ${{ inputs.compiled }}
         publish-caches: ${{ inputs.publish-caches }}

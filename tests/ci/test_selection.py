@@ -351,12 +351,13 @@ class BinarySourceSelectionTest(unittest.TestCase):
 
 
 class WorkflowEntrypointsTest(unittest.TestCase):
-    def test_workflows_have_no_scheduled_triggers_or_branches(self):
+    def test_only_qualify_main_is_scheduled_and_no_workflow_branches_on_it(self):
         workflows = sorted(Path(".github/workflows").glob("*.y*ml"))
         self.assertTrue(workflows)
         for path in workflows:
             with self.subTest(workflow=path.name):
-                self.assertNotRegex(path.read_text(), r"(?m)^\s*schedule\s*:")
+                scheduled = re.findall(r"(?m)^\s*schedule\s*:", path.read_text())
+                self.assertEqual(len(scheduled), path.name == "main-qualifier.yml")
                 self.assertNotRegex(path.read_text(), r"github\.event_name\s*==\s*[\"']schedule[\"']")
 
     def test_removed_scheduled_wrappers_have_no_live_references(self):
@@ -566,8 +567,6 @@ class SelectionTest(unittest.TestCase):
                                      {"live_mysql": live and platform == "linux",
                                       "mysql_dialect": dialect and platform == "linux",
                                       "live_postgres": postgres})
-                    self.assertEqual(mysql_provisioning(targets, part, platform, {"fixture"}, live=False),
-                                     {"live_mysql": False, "mysql_dialect": False, "live_postgres": False})
                     for row in shards(targets, platform, mysql_suites={"fixture"})["include"]:
                         self.assertEqual(row["live_mysql"], platform == "linux" and (
                             "fixture" in row["targets"] or row["mysql_dialect"]))
@@ -987,7 +986,7 @@ class SelectionTest(unittest.TestCase):
                                                  'NATIVE_RESULT': native, 'TYPECHECK_RESULT': typecheck,
                                                  'TYPECHECK': typecheck_selected,
                                                  'SPLIT': split, 'UNIT_RESULT': unit,
-                                                 'COMPILE_ONLY': 'false'})
+                                                 'COMPILE_ONLY': 'false', 'PR_JOB': 'false', 'PR_RESULT': 'skipped'})
                     actual = 'success' if result.returncode == 0 else 'failure'
                 self.assertEqual(actual, expected)
 
@@ -1660,23 +1659,26 @@ fi
                 workflow = path.read_text()
                 if path.name == 'check.yml':
                     policy = re.search(r'(?ms)^  policy:\n(.*?)(?=^  [\w-]+:\n|\Z)', workflow).group(1)
+                    self.assertNotIn('uses: ./.github/actions/setup', policy)
+                    self.assertIn('uses: ./.github/actions/policy', policy)
+                    composite = Path('.github/actions/policy/action.yml').read_text()
                     bootstrap_steps = re.findall(
-                        r'(?m)^      - uses: \./\.github/actions/setup\n(?:        .*\n)*', policy)
+                        r'(?m)^    - uses: \./\.github/actions/setup\n(?:      .*\n)*', composite)
                     self.assertEqual(len(bootstrap_steps), 1)
-                    self.assertEqual(policy.count('uses: ./.github/actions/setup'), 1)
+                    self.assertEqual(composite.count('uses: ./.github/actions/setup'), 1)
                     bootstrap = bootstrap_steps[0]
                     self.assertEqual([line.strip() for line in bootstrap.splitlines()
                                       if line.strip() and not line.lstrip().startswith('#')], [
                         '- uses: ./.github/actions/setup',
-                        "if: ${{ steps.caller-bootstrap.outputs.needed == 'true' }}",
+                        "if: ${{ steps.caller-bootstrap.outputs.needed == 'true' && inputs.compiler-installed != 'true' }}",
                         'with:',
                         "targets: '[]'",
                         "compiled: 'true'",
                         "cold: 'true'",
                         "publish-caches: 'false'",
                     ])
-                    self.assertIn('id: caller-bootstrap', policy)
-                    self.assertIn('python3 -B tests/ci/caller_errors.py --bootstrap-needed', policy)
+                    self.assertIn('id: caller-bootstrap', composite)
+                    self.assertIn('python3 -B tests/ci/caller_errors.py --bootstrap-needed', composite)
                     workflow = workflow.replace(bootstrap, '', 1)
                     producer = re.search(r'(?ms)^  linux_build:\n(.*?)(?=^  [\w-]+:\n|\Z)', workflow)[1]
                     diagnostic_gate = ("publish-caches: ${{ github.ref == 'refs/heads/main' && "
@@ -1692,6 +1694,11 @@ fi
                         self.assertEqual(native.count(mac_gate), 1, name)
                     self.assertEqual(workflow.count(mac_gate), 3)
                     workflow = workflow.replace(mac_gate, '')
+                    pr_job = re.search(r'(?ms)^  pr_linux:\n(.*?)(?=^  [\w-]+:\n|\Z)', workflow)[1]
+                    self.assertIn("if: ${{ needs.plan.outputs.pr_job == 'true' }}", pr_job)
+                    self.assertEqual(pr_job.count("publish-caches: 'false'"), 1)
+                    self.assertEqual(pr_job.count('uses: ./.github/actions/setup'), 1)
+                    workflow = workflow.replace(pr_job, pr_job.replace("publish-caches: 'false'", ''), 1)
                 self.assertNotIn('publish-caches', workflow, f'{path.name} native checks must keep publishing')
         self.assertNotIn('actions/cache', Path('.github/actions/setup/action.yml').read_text())
         setup = Path('.github/actions/setup/caches/action.yml').read_text()
@@ -1787,8 +1794,9 @@ fi
         caches = Path(".github/actions/setup/caches/action.yml").read_text()
         self.assertTrue(cache(".github/actions/setup/caches/action.yml", caches, caches.replace("~/.cache/zig", "~/.cache/zig2", 1)))
         check = Path(".github/workflows/check.yml").read_text()
+        policy = Path(".github/actions/policy/action.yml").read_text()
         policy_step = "Reject undefined fixture names before native builds"
-        self.assertFalse(cache(".github/workflows/check.yml", check, check.replace(policy_step, policy_step + " here")))
+        self.assertFalse(cache(".github/actions/policy/action.yml", policy, policy.replace(policy_step, policy_step + " here")))
         job = re.search(r"(?ms)^  cache_execution:\n.*?timeout-minutes: (\d+)", check)
         edited = check[:job.start(1)] + "21" + check[job.end(1):]
         self.assertNotEqual(edited, check)

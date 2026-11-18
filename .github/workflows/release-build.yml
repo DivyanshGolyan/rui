@@ -1,8 +1,10 @@
 name: Release build
-# Promote (promote.yml) calls this first, beside qualification, with the main SHA
-# it is qualifying. It numbers the release and builds the archives the
-# qualification tiers test and Release (release.yml) publishes unchanged once
-# every tier is green. It publishes nothing.
+# Promote (promote.yml) and Qualify main (main-qualifier.yml) call this first,
+# beside qualification, with the main SHA they qualify. It numbers the release
+# and builds the archives the qualification tiers test and Release (release.yml)
+# publishes unchanged once every tier is green. It publishes nothing. The
+# archives stay seven days, so Promote can publish a commit Qualify main
+# qualified days earlier; past that, Promote qualifies the commit again.
 on:
   workflow_call:
     inputs:
@@ -113,7 +115,7 @@ jobs:
         with:
           name: rui-${{ matrix.platform }}
           path: dist/*.tar.gz
-          retention-days: 3
+          retention-days: 7
           if-no-files-found: error
   npm:
     # The npm tarballs: the compiled client (npm name ruicode) and one package per platform. Release's npm_publish publishes them.
@@ -166,11 +168,11 @@ jobs:
         with:
           name: rui-npm
           path: ${{ runner.temp }}/npm/*.tgz
-          retention-days: 3
+          retention-days: 7
           if-no-files-found: error
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: rui-digests
           path: ${{ runner.temp }}/digests/SHA256SUMS
-          retention-days: 3
+          retention-days: 7
           if-no-files-found: error

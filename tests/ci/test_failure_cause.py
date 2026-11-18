@@ -114,11 +114,14 @@ class CauseTest(unittest.TestCase):
                          ["macos suites (check)", "macos_build_unit"])
 
     def test_promotion_aggregates_under_their_caller_job_are_not_causes(self):
-        verdicts = [job(f"selected / {name}", step("Require every selected Linux part", "failure")) for name in AGGREGATES]
-        verdicts += [job(name, step("Require every selected promotion tier", "failure")) for name in PROMOTE_AGGREGATES]
-        unacquired = job("selected / macos suites (check)", conclusion="cancelled", labels=("macos-15",))
+        # The shared tier nests under Promote's qualify job: "qualify / selected / linux".
+        verdicts = [job(f"qualify / selected / {name}", step("Require every selected Linux part", "failure"))
+                    for name in AGGREGATES]
+        verdicts += [job(f"qualify / {name}", step("Require every selected qualification tier", "failure"))
+                     for name in PROMOTE_AGGREGATES]
+        unacquired = job("qualify / selected / macos suites (check)", conclusion="cancelled", labels=("macos-15",))
         found = causes(verdicts + [unacquired], lambda job: [], lambda job: None)
-        self.assertEqual(found, [("selected / macos suites (check)", "infra", "cancelled before any step ran")])
+        self.assertEqual(found, [("qualify / selected / macos suites (check)", "infra", "cancelled before any step ran")])
 
     def test_a_job_routed_to_the_personal_mac_says_so(self):
         lost = job("macos_build", conclusion="cancelled", labels=("self-hosted", "macOS", "ARM64", "rui-mac"))
@@ -144,14 +147,17 @@ class WiringTest(unittest.TestCase):
                 self.assertIn("python3 -B tests/ci/failure_cause.py explain", explain)
 
     def test_promotion_publishes_only_after_its_verdict(self):
-        text = (ROOT / ".github/workflows/promote.yml").read_text()
+        tier = (ROOT / ".github/workflows/qualification-tier.yml").read_text()
         for name in PROMOTE_AGGREGATES:
-            body = re.search(rf"(?ms)^  {name}:\n(.*?)(?=^  [a-z_]+:|\Z)", text)[1]
-            self.assertIn("needs: [batch, release_build, selected, upgrade, renderer]", body)
+            body = re.search(rf"(?ms)^  {name}:\n(.*?)(?=^  [a-z_]+:|\Z)", tier)[1]
+            self.assertIn("needs: [release_build, selected, upgrade, renderer]", body)
+        text = (ROOT / ".github/workflows/promote.yml").read_text()
         release = re.search(r"(?ms)^  release:\n(.*?)(?=^  [a-z_]+:|\Z)", text)[1]
-        # Release reads the version from release_build, which a rerun keeps unless it failed.
-        self.assertIn("needs: [batch, release_build, qualified]", release, "a rerun's Release waits for the rerun verdict")
-        self.assertNotIn("if:", release, "Release runs only when qualified succeeds")
+        # A rerun reruns the failed tier jobs, its verdict and Release, which waits for the rerun verdict.
+        self.assertIn("needs: [batch, qualify]", release, "a rerun's Release waits for the rerun verdict")
+        self.assertIn("if: ${{ !cancelled() && needs.batch.result == 'success' && needs.batch.outputs.size != '0' && "
+                      "(needs.batch.outputs.reuse == 'true' || needs.qualify.result == 'success') }}", release,
+                      "Release runs only on a reused green record or a successful tier")
 
     def test_the_retry_runs_trusted_code_once_per_failed_pr_run_or_promotion(self):
         text = (ROOT / ".github/workflows/infra-retry.yml").read_text()
@@ -190,8 +196,8 @@ class RetryTest(unittest.TestCase):
             "no open PR": (self.RUN, self.INFRA, None),
             "a diagnostic dispatch": (dict(self.RUN, event="workflow_dispatch"), self.INFRA, "a" * 40),
             "a job on the personal Mac": (self.RUN, [("macos_build", "infra", "lost" + PINNED)], "a" * 40),
-            "a promotion's check failed": (self.PROMOTION, self.INFRA + [("selected / linux suites (check)", "check",
-                                                                          "failure")], 7),
+            "a promotion's check failed": (self.PROMOTION, self.INFRA + [("qualify / selected / linux suites (check)",
+                                                                          "check", "failure")], 7),
             "a promotion's verdict alone failed": (self.PROMOTION, [], 7),
             "a promotion already retried": (dict(self.PROMOTION, run_attempt=2), self.INFRA, 7),
             "a promotion cancelled": (dict(self.PROMOTION, conclusion="cancelled"), self.INFRA, 7),
