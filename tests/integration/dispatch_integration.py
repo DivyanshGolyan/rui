@@ -3947,11 +3947,13 @@ def main(mode="all", correlation_case="all"):
         endpoints[sealed_endpoint] = sealed_thread
         sealed_thread.start()
         sealed_store = state / "crash-sealed-store"
+        # EXR-62
+        sealed_result = PauseGate("model.result_ready")
+        releases.append(sealed_result.close)
         sealed_host = start_host(
             sealed_store,
             f"http://127.0.0.1:{sealed_endpoint.server_port}/responses",
-            "--test-before-result-delay-ms",
-            "5000",
+            pause=sealed_result,
         )
         processes.append(sealed_host)
         sealed_session = configure(state, sealed_store, "sealed-config", None, "gpt-6-sol")
@@ -3962,12 +3964,17 @@ def main(mode="all", correlation_case="all"):
             sealed_session,
             "crash after seal",
         )
-        wait_for(lambda: len(sealed_endpoint.requests) == 1, "sealed response delivery")
-        time.sleep(0.5)
+        held = sealed_result.wait()
+        assert len(sealed_endpoint.requests) == 1, sealed_endpoint.requests
         sealed_observation = observe(sealed_store, "sealed-message")
-        assert sealed_observation["binding"]["attempt"] == "1" and "result" not in sealed_observation, sealed_observation
+        assert sealed_observation["binding"] == {
+            "turn": sealed_observation["binding"]["turn"],
+            "operation": str(held["context"]["operation"]),
+            "attempt": "1",
+        } and "result" not in sealed_observation, sealed_observation
         stop_host(sealed_host)
         processes.remove(sealed_host)
+        sealed_result.close()
         database = sqlite3.connect(sealed_store / "rui.sqlite3")
         assert database.execute(
             "SELECT attempt_ordinal,(resolution_code IS NULL AND retry_due_at_ms IS 0),resolution_code FROM model_operation"

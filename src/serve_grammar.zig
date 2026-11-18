@@ -157,6 +157,8 @@ const serve_test = &[_]Option{
     // runner, which measures the release product, still separates admission
     // from launch with this delay.
     hiddenNumber("test-before-launch-delay-ms", 0, 10_000),
+    // Fixtures hold results at the model.result_ready and action.result_ready
+    // pause points; only the model-control qualification runner still uses it.
     hiddenNumber("test-before-result-delay-ms", 0, 10_000),
     hiddenValue("test-retry-recovery-gate-path"),
     hiddenValue("test-inspection-reply-gate-path"),

@@ -251,7 +251,7 @@
   "tests/integration/dispatch_integration.py": {
     "fixed_sleep": {
       "main": [
-        9,
+        8,
         "settle sleeps before asserting no further provider request or result"
       ]
     },
