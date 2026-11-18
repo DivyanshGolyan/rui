@@ -440,6 +440,29 @@ test "each text has its own checked flag" {
     try std.testing.expect(&Once("SELECT 1").done == &Once("SELECT 1").done);
 }
 
+test "SH-91 a PREPARE quotes the statement's text whole, doubling each quote" {
+    const repeat = struct {
+        fn of(comptime text: []const u8, comptime times: usize) []const u8 {
+            comptime {
+                var out: [text.len * times]u8 = undefined;
+                for (0..times) |index| @memcpy(out[index * text.len ..][0..text.len], text);
+                const final = out;
+                return &final;
+            }
+        }
+    }.of;
+    const head = "PREPARE rui_dialect_check FROM '";
+    const tail = "';DEALLOCATE PREPARE rui_dialect_check";
+    const cases = [_]struct { prepared: []const u8, want: []const u8 }{
+        .{ .prepared = comptime prepareQuery(""), .want = head ++ tail },
+        .{ .prepared = comptime prepareQuery("SELECT 1"), .want = head ++ "SELECT 1" ++ tail },
+        .{ .prepared = comptime prepareQuery("SELECT 'a'"), .want = head ++ "SELECT ''a''" ++ tail },
+        .{ .prepared = comptime prepareQuery("'''x''y'"), .want = head ++ "''''''x''''y''" ++ tail },
+        .{ .prepared = comptime prepareQuery("SELECT " ++ repeat("'ab',", 220) ++ "1"), .want = head ++ "SELECT " ++ comptime repeat("''ab'',", 220) ++ "1" ++ tail },
+    };
+    for (cases) |case| try std.testing.expectEqualStrings(case.want, case.prepared);
+}
+
 test "fixture text splits at semicolons outside string literals, and PREPARE quotes it whole" {
     const pieces = comptime statements("DELETE FROM turn; INSERT INTO t VALUES('a;b','it''s;');\n");
     try std.testing.expectEqual(2, pieces.len);
