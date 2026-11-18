@@ -264,6 +264,69 @@ def thinking_queue_case():
                 next_release.set()
     print("session chrome: a mid-Thinking submission is queued once, then shown once as a taken Message at both sizes", flush=True)
 
+
+def rejected_tool_thinking_queue_case():
+    for width, height in ((140, 40), (46, 30)):
+        next_release, final_release = threading.Event(), threading.Event()
+        calls = fixture.sse_tool_calls("rejected-thinking", [("unavailable_tool", "unknown-call", "{}")])
+        answer = fixture.sse_answer("rejected-after", "r1", "m1", "AFTER-REJECTION")[0]
+        final = fixture.sse_answer("rejected-final", "r2", "m2", "FINAL-ANSWER")[0]
+        with Chrome("rui-rejected-thinking.", [calls, (answer, next_release), (final, final_release)]) as chrome:
+            session = chrome.session()
+            master, caller, _ = chrome.open(session, lambda screen: True, columns=width, height=height)
+            try:
+                chrome.frame(master, b"FIRST-QUESTION\r", lambda screen:
+                    "Tool call · rejected" in screen and "Thinking" in screen, timeout=30)
+                initial = chrome.frame(master, b"MIDTURN-HI\r", lambda screen:
+                    "◌ MIDTURN-HI" in screen and composing(screen, ""))
+                assert initial.count("MIDTURN-HI") == 1 and "› MIDTURN-HI" not in initial, initial
+                stable = chrome.frame(master, b"", lambda screen:
+                    "◌ MIDTURN-HI" in screen and re.search(r"Thinking · [2-9]s", screen), timeout=15)
+                assert "Tool call · rejected" in stable and stable.count("MIDTURN-HI") == 1, stable
+                assert "› MIDTURN-HI" not in stable, stable
+                next_release.set()
+                taken = chrome.frame(master, b"", lambda screen:
+                    "AFTER-REJECTION" in screen and "› MIDTURN-HI" in screen and "Thinking" in screen, timeout=30)
+                assert taken.count("MIDTURN-HI") == 1 and "◌ MIDTURN-HI" not in taken, taken
+                final_release.set()
+                chrome.frame(master, b"", lambda screen: "FINAL-ANSWER" in screen, timeout=30)
+                chrome.leave(master, caller)
+            finally:
+                next_release.set()
+                final_release.set()
+    print("session chrome: rejected tool and resumed Thinking keep a queued follow-up once until taken at both sizes", flush=True)
+
+
+
+def rejection_after_queued_send_case():
+    for width, height in ((140, 40), (46, 30)):
+        first_release, next_release = threading.Event(), threading.Event()
+        calls = fixture.sse_tool_calls("queued-before-rejection", [("unavailable_tool", "unknown-call", "{}")])
+        answer = fixture.sse_answer("after-queued-rejection", "r1", "m1", "FINAL-ANSWER")[0]
+        with Chrome("rui-queued-before-rejection.", [(calls, first_release), (answer, next_release)]) as chrome:
+            session = chrome.session()
+            master, caller, _ = chrome.open(session, lambda screen: True, columns=width, height=height)
+            try:
+                chrome.frame(master, b"FIRST-QUESTION\r", lambda screen: "Thinking" in screen)
+                queued = chrome.frame(master, b"MIDTURN-HI\r", lambda screen:
+                    "◌ MIDTURN-HI" in screen and composing(screen, ""))
+                assert queued.count("MIDTURN-HI") == 1 and "› MIDTURN-HI" not in queued, queued
+                first_release.set()
+                taken = chrome.frame(master, b"", lambda screen:
+                    "Tool call · rejected" in screen and "Thinking" in screen and "› MIDTURN-HI" in screen, timeout=30)
+                assert taken.count("MIDTURN-HI") == 1 and "◌ MIDTURN-HI" not in taken, taken
+                stable = chrome.frame(master, b"", lambda screen:
+                    "› MIDTURN-HI" in screen and re.search(r"Thinking · [2-9]s", screen), timeout=15)
+                assert stable.count("MIDTURN-HI") == 1 and "◌ MIDTURN-HI" not in stable, stable
+                next_release.set()
+                chrome.frame(master, b"", lambda screen: "FINAL-ANSWER" in screen, timeout=30)
+                chrome.leave(master, caller)
+            finally:
+                first_release.set()
+                next_release.set()
+    print("session chrome: a rejected tool after a queued send preserves one representation as work continues", flush=True)
+
+
 def send_state_case():
     with Chrome("rui-chrome-send.", [fixture.sse_answer("sent", "r", "m", "SENT-ANSWER")[0]]) as chrome:
         session = chrome.session()
@@ -793,6 +856,8 @@ def main():
     send_recovery_case()
     activity_case()
     thinking_queue_case()
+    rejected_tool_thinking_queue_case()
+    rejection_after_queued_send_case()
     scroll_marker_case()
     pages_case()
     info_natural_height_case()
