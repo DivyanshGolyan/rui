@@ -2815,6 +2815,17 @@ test "Session list facts own complete rows and render semantic output after scra
         "\"parent\":\"p33rs1\",\"creator\":\"cr3at0\",\"label\":\"Review PR\"" ++ facts["\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"pin_order\":null,\"parent\":\"p33rs1\",\"creator\":\"cr3at0\",\"label\":\"Review \\u0050R\"".len..] ++ "}" ++ testing_list_facts ++ "null}", writer.buffered());
     var exhausted = std.Io.Writer.fixed(&.{});
     try std.testing.expectError(error.WriteFailed, page.writeJson(&exhausted));
+    for ([_][]const u8{
+        "\"attention\":{\"kind\":\"approval\",\"turn\":\"2\",\"step\":\"8\"},",
+        "\"group\":\"needs_you\",",
+        ",\"actions\":{\"stop\":true,\"interrupt\":{\"turn\":\"2\",\"operation\":\"6\"},\"decide\":null}",
+    }) |field| {
+        try std.testing.expect(std.mem.indexOf(u8, wire, field) != null);
+        const missing = try std.mem.replaceOwned(u8, std.testing.allocator, wire, field, "");
+        defer std.testing.allocator.free(missing);
+        try file.writePositionalAll(io, missing, 0);
+        try std.testing.expectError(error.InvalidSessionPage, SessionListPage.read(io, file, missing.len, "/w\nµ", .{}));
+    }
     const collision = try std.mem.replaceOwned(u8, std.testing.allocator, wire, "\"interrupt\":{\"turn\":\"2\",\"operation\":\"6\"}", "\"interrupt\":null");
     defer std.testing.allocator.free(collision);
     try file.writePositionalAll(io, collision, 0);
