@@ -1188,7 +1188,14 @@ def saved_settings(root, env):
     for path, value, leaf in (("tools.bash.path", "relative/bash", "tools.bash.path: a Host started in / has no base"),
                               ("interface.lifetime", "stdin", "interface.lifetime: a Host started by bare rui")):
         unrooted = root / f"saved-unrooted-{path}"
-        host_ok(env, "set", "--store", unrooted, path, value)
+        if path == "tools.bash.path":
+            # Existing files from before detached-safe edits must still refuse at start.
+            unrooted.mkdir(mode=0o700)
+            saved = unrooted / "host.json"
+            saved.write_text(json.dumps({"tools": {"bash": {"path": value}}}))
+            saved.chmod(0o600)
+        else:
+            host_ok(env, "set", "--store", unrooted, path, value)
         refused = run_start(unrooted, env)
         assert refused.returncode == 2 and leaf in refused.stderr and '"settings_invalid"' in refused.stdout, refused
         assert not matching_processes(unrooted), refused
