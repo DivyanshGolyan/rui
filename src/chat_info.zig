@@ -1984,7 +1984,7 @@ test "Chat info contains only chat settings and never an app Memory row" {
 }
 
 test "Chat info allowed picker retains MCP names on no-op cancellation and built-in edits" {
-    for ([_]enum { noop, cancel, remove_bash }{ .noop, .cancel, .remove_bash }) |mode| {
+    for ([_]u16{ 140, 46 }) |width| for ([_]enum { noop, cancel, remove_bash, add_message_agent }{ .noop, .cancel, .remove_bash, .add_message_agent }) |mode| {
         var fixture: Fixture = .{};
         fixture.init();
         fixture.session.tools = try .of(&.{ "bash", "find_tools", "lookup", "none" });
@@ -1994,11 +1994,15 @@ test "Chat info allowed picker retains MCP names on no-op cancellation and built
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-        _ = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 30 }, .cell_size = .{} });
+        _ = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 30 }, .cell_size = .{} });
         try std.testing.expectEqualStrings("Allowed tools", page.fields[2].label);
-        try std.testing.expectEqualStrings("bash, find_tools, lookup, none", page.fields[2].value);
+        try std.testing.expectEqualStrings(if (width == 140) "bash, find_tools, lookup, none" else "bash, find_tools, lookup…", page.fields[2].value);
         page.panel.selected = 2;
         try press(&page, &ctx, vaxis.Key.enter);
+        if (mode == .add_message_agent) {
+            try press(&page, &ctx, vaxis.Key.down);
+            try press(&page, &ctx, vaxis.Key.down);
+        }
         if (mode != .noop) try press(&page, &ctx, ' ');
         try press(&page, &ctx, if (mode == .cancel) vaxis.Key.escape else vaxis.Key.enter);
         try std.testing.expectEqualStrings("bash find_tools lookup none", page.session.tools.names.slice());
@@ -2006,10 +2010,16 @@ test "Chat info allowed picker retains MCP names on no-op cancellation and built
         if (mode == .cancel) {
             try std.testing.expect(fixture.edit == null);
         } else {
-            try std.testing.expectEqualStrings(if (mode == .noop) "bash find_tools lookup none" else "find_tools lookup none", fixture.edit.?.tools.allowed.names.slice());
+            const expected = switch (mode) {
+                .noop => "bash find_tools lookup none",
+                .remove_bash => "find_tools lookup none",
+                .add_message_agent => "bash find_tools lookup message_agent none",
+                .cancel => unreachable,
+            };
+            try std.testing.expectEqualStrings(expected, fixture.edit.?.tools.allowed.names.slice());
             try std.testing.expectEqualStrings("find_tools none", fixture.edit.?.tools.loaded.names.slice());
         }
-    }
+    };
 }
 
 test "Chat info distinguishes empty allowed intent from an MCP tool named none" {

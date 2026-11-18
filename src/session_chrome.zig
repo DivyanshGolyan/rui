@@ -659,3 +659,47 @@ test "footer facts domain fits projected list visibility and context threshold a
         try std.testing.expectEqual(@as(usize, 2), fields);
     };
 }
+
+test "SUI-14 send state and transient notice occupy their intended footer slots" {
+    const Case = struct {
+        status: ?[]const u8,
+        in_flight: bool,
+        needs: ?[]const u8,
+        progress: ?[]const u8,
+    };
+    const cases = [_]Case{
+        .{ .status = null, .in_flight = false, .needs = null, .progress = null },
+        .{ .status = null, .in_flight = true, .needs = null, .progress = null },
+        .{ .status = "", .in_flight = false, .needs = null, .progress = null },
+        .{ .status = "", .in_flight = true, .needs = null, .progress = null },
+        .{ .status = "Opening…", .in_flight = true, .needs = null, .progress = "Opening…" },
+        .{ .status = "Sending…", .in_flight = true, .needs = null, .progress = "Sending…" },
+        .{ .status = "! Decision not confirmed · ctrl+r retries original", .in_flight = false, .needs = "! Decision not confirmed · ctrl+r retries original", .progress = null },
+        .{ .status = "Rejected · /discard", .in_flight = false, .needs = "Rejected · /discard", .progress = null },
+    };
+    const checkText = struct {
+        fn check(expected: ?[]const u8, actual: ?[]const u8) !void {
+            try std.testing.expectEqual(expected == null, actual == null);
+            if (expected) |text| try std.testing.expectEqualStrings(text, actual.?);
+        }
+    }.check;
+    for (cases) |case| {
+        const result = send(case.status, case.in_flight);
+        try checkText(case.needs, result.needs);
+        try checkText(case.progress, result.progress);
+        for ([_]u16{ 46, 140 }) |width| {
+            const ordinary = bar(.{ .needs = result.needs, .progress = result.progress, .width = width });
+            try std.testing.expectEqualStrings(case.needs orelse "", ordinary.left);
+            try checkText(case.progress, ordinary.notice);
+            try std.testing.expectEqual(if (case.needs == null) Tone.quiet else Tone.attention, ordinary.tone);
+            const with_notice = bar(.{ .needs = result.needs, .progress = result.progress, .notice = "! Usage: /new", .width = width });
+            try std.testing.expectEqualStrings(case.needs orelse "", with_notice.left);
+            try std.testing.expectEqualStrings("! Usage: /new", with_notice.notice.?);
+        }
+    }
+    var notice: Notice(64) = .{};
+    notice.show("! Usage: /new", 100);
+    try std.testing.expectEqualStrings("! Usage: /new", notice.current(100).?);
+    notice.dismiss();
+    try std.testing.expectEqual(@as(?[]const u8, null), notice.current(101));
+}

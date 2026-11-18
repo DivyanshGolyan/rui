@@ -1777,6 +1777,12 @@ test "frontend answers local and unknown commands in place and keeps Host comman
         .{ "/recover 01234567-89ab-4cde-8012-0123456789ab", "! Unknown command /recover" },
         .{ "/wait", "! Unknown command /wait" },
         .{ "/model gpt-5.5", "! Usage: /model" },
+        .{ "/new unexpected", "! Usage: /new" },
+        .{ "/clear unexpected", "! Usage: /clear" },
+        .{ "/model unexpected", "! Usage: /model" },
+        .{ "/archive unexpected", "! Usage: /archive" },
+        .{ "/unarchive unexpected", "! Usage: /unarchive" },
+        .{ "/requests unexpected", "! Usage: /requests" },
         .{ "/configure --permission-mode ask", "! Unknown command /configure" },
 
         .{ "/result 01234567-89ab-4cde-8012-0123456789ab", "" },
@@ -6962,6 +6968,28 @@ fn idleRead(self: *Self) ?feed_reads.Read {
     return FeedPolicy.nextRead(state);
 }
 
+test "SUI-17 fresh conversation scroll keeps each Message once in order" {
+    for ([_]u16{ 46, 140 }) |width| {
+        const fixture = try FeedFixture.create();
+        defer fixture.destroy();
+        const held = fixture.held;
+        held.size = .{ .width = width, .height = 30 };
+        try fixture.page(.opening, &.{
+            .{ .key = 1, .text = "› fresh start\n" },
+            .{ .key = 2, .text = "renderer answer fresh start\n" },
+        }, true, true);
+        for (0..3) |_| {
+            try held.keys("\x1b[5~");
+            const shown = try held.shown();
+            try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, shown, "› fresh start"));
+            try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, shown, "renderer answer fresh start"));
+            try std.testing.expect(std.mem.indexOf(u8, shown, "› fresh start").? < std.mem.indexOf(u8, shown, "renderer answer fresh start").?);
+            try std.testing.expect(std.mem.indexOf(u8, shown, "Start of conversation") == null);
+            try std.testing.expect(std.mem.indexOf(u8, shown, "Earlier messages unavailable") == null);
+        }
+    }
+}
+
 test "SessionFrontend feed opens full bottom aligned and page round trip is an identical frame" {
     const fixture = try FeedFixture.create();
     defer fixture.destroy();
@@ -10567,6 +10595,24 @@ test "App Session bracketed paste keeps Tab literal with drawn command and skill
         try std.testing.expect(self.submission.intent == null and self.input.submitted == null);
         try std.testing.expect(held.left == null);
     };
+}
+
+test "SUI-12 rejected paste preserves the draft and editing clears the notice" {
+    for ([_][]const u8{ "\u{301}discarded", "prefix\n\u{301}discarded" }) |paste| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        try held.keys("kept\x01");
+        try held.keys("\x1b[200~");
+        try held.keys(paste);
+        try held.keys("\x1b[201~");
+        try std.testing.expectEqualStrings("kept", held.self.input.composition().bytes);
+        try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "Input rejected") != null);
+        try std.testing.expect(held.self.submission.intent == null);
+        try held.keys("x\x7f");
+        try std.testing.expectEqualStrings("kept", held.self.input.composition().bytes);
+        try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "Input rejected") == null);
+        try std.testing.expect(held.self.submission.intent == null);
+    }
 }
 
 test "App Session paste completion preserves retained draft caret after empty newline and ordinary pastes" {

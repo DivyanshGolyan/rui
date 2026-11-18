@@ -67,7 +67,7 @@ test "Keys panel renders shared rows in two columns at 140 and one column at 46"
             index += count;
         }
         try std.testing.expectEqual(keymap.list.len, index);
-        for ([_][]const u8{ "/help", "Ctrl-X twice", "?", "Commands", "Marks", "press", "close", "ctrl+g", "ctrl+d", "ctrl+n", "ctrl+end", "pgup", "pgdn", "home", "latest", "select" }) |absent| try std.testing.expect(std.mem.indexOf(u8, rendered, absent) == null);
+        for ([_][]const u8{ "/help", "Ctrl-X twice", "?", "Commands", "Marks", "press", "close", "ctrl+g", "ctrl+d", "ctrl+n", "ctrl+end", "pgup", "pgdn", "home", "latest", "select", "shift+enter or ctrl+j", "Esc returns", "‹ Rui · settings", "ctrl+c/d", "first session", "scroll / select" }) |absent| try std.testing.expect(std.mem.indexOf(u8, rendered, absent) == null);
     }
 }
 
