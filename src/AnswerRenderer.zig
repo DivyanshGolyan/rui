@@ -1159,7 +1159,7 @@ test "chunked subset, malformed markup and terminal controls" {
     for (input) |byte| try renderer.feed(&.{byte});
     try renderer.finish();
     try std.testing.expectEqualStrings("\x1b[1mHeading\x1b[0m\n\x1b[1m-\x1b[0m \x1b[3mitem\x1b[0m and \x1b[94mcode\x1b[0m\n" ++
-        "\x1b[1mbold\x1b[0m\n\x1b[40m  x\t= 1\n\x1b[0munfinished *mark\n\\*literal*\n" ++
+        "\x1b[1mbold\x1b[0m\n" ++ TerminalText.full_width_on ++ "\x1b[40m  x\t= 1\n\x1b[0m" ++ TerminalText.full_width_off ++ "unfinished *mark\n\\*literal*\n" ++
         "bad \\x1b]2;title\\x07 \\x0d \\x7f \\u202e café\n", output.written());
 }
 
@@ -1478,7 +1478,7 @@ test "indented fences render code without marker lines or reverse video" {
     var renderer: Renderer = .{ .destination = .{ .viewport = .wcwidth }, .out = &output.writer };
     for ("   ```sh\n  echo `hello`\n   ```\n`inline`\n") |byte| try renderer.feed(&.{byte});
     try renderer.finish();
-    try std.testing.expectEqualStrings("\x1b[40m  echo `hello`\n\x1b[0m\x1b[94minline\x1b[0m\n", output.written());
+    try std.testing.expectEqualStrings(TerminalText.full_width_on ++ "\x1b[40m  echo `hello`\n\x1b[0m" ++ TerminalText.full_width_off ++ "\x1b[94minline\x1b[0m\n", output.written());
 }
 
 test "closing fence at end of answer needs no final newline" {
@@ -1487,7 +1487,7 @@ test "closing fence at end of answer needs no final newline" {
     var renderer: Renderer = .{ .destination = .{ .viewport = .wcwidth }, .out = &output.writer };
     for ("   ```sh\n  echo hi\n   ```") |byte| try renderer.feed(&.{byte});
     try renderer.finish();
-    try std.testing.expectEqualStrings("\x1b[40m  echo hi\n\x1b[0m", output.written());
+    try std.testing.expectEqualStrings(TerminalText.full_width_on ++ "\x1b[40m  echo hi\n\x1b[0m" ++ TerminalText.full_width_off, output.written());
 }
 
 test "rendered content and unsupported fence syntax stay visible without a gutter" {
@@ -1496,7 +1496,7 @@ test "rendered content and unsupported fence syntax stay visible without a gutte
     var renderer: Renderer = .{ .destination = .{ .viewport = .wcwidth }, .out = &output.writer };
     for ("# Title\n```zig\n  call\n```\n```bad info\ntrailing `open\n") |byte| try renderer.feed(&.{byte});
     try renderer.finish();
-    try std.testing.expectEqualStrings("\x1b[1mTitle\x1b[0m\n\x1b[40m  call\n\x1b[0m```bad info\ntrailing `open\n", output.written());
+    try std.testing.expectEqualStrings("\x1b[1mTitle\x1b[0m\n" ++ TerminalText.full_width_on ++ "\x1b[40m  call\n\x1b[0m" ++ TerminalText.full_width_off ++ "```bad info\ntrailing `open\n", output.written());
 }
 
 test "oversized fence candidate is literal and does not enter code state" {
@@ -1754,7 +1754,7 @@ test "bare local paths are prose tokens not relative paths or Markdown targets" 
         "\\/tmp/a \\~/a",
     }) |input| try expectRenderedHome(input, input, "/home/test");
     try expectRenderedHome("~user/a;/tmp/b //host/~/b /tmp/ok;", "~user/a;/tmp/b //host/~/b " ++ comptime linked("file:///tmp/ok", "/tmp/ok") ++ ";", "/home/test");
-    try expectRenderedHome("`~/a` *~/b* **/tmp/c**\n```\n/tmp/d ~/e\n```\n", "\x1b[94m~/a\x1b[0m \x1b[3m~/b\x1b[0m \x1b[1m/tmp/c\x1b[0m\n\x1b[40m/tmp/d ~/e\n\x1b[0m", "/home/test");
+    try expectRenderedHome("`~/a` *~/b* **/tmp/c**\n```\n/tmp/d ~/e\n```\n", "\x1b[94m~/a\x1b[0m \x1b[3m~/b\x1b[0m \x1b[1m/tmp/c\x1b[0m\n" ++ TerminalText.full_width_on ++ "\x1b[40m/tmp/d ~/e\n\x1b[0m" ++ TerminalText.full_width_off, "/home/test");
     try expectRendered("[a](https://x y)", "[a](" ++ comptime linked("https://x", "https://x") ++ " y)");
 }
 
