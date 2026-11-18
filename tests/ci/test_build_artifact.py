@@ -60,7 +60,9 @@ import subprocess
 import sys
 if sys.argv[2] == 'ci-build':
     Path('compiled').write_text(' '.join(sys.argv[1:]))
-    assert Path('zig-pkg/pinned-source').read_text() == 'fetched\\n'
+    # A fresh fetch, or the package sources setup restored for a single job's own compile.
+    assert Path('zig-pkg/pinned-source').read_text() in ('fetched\\n', 'restored by setup\\n')
+    Path('compiled-packages').write_text(Path('zig-pkg/pinned-source').read_text())
     assert not Path('.zig-cache/o/ci-compiled').exists()
     if int(os.environ['BUILD_EXIT']):
         sys.exit(int(os.environ['BUILD_EXIT']))
@@ -402,6 +404,9 @@ else:
             for exit in ('37', '0'):
                 with self.subTest(operation=operation, exit=exit):
                     (self.root / 'gates').unlink(missing_ok=True)
+                    (self.root / 'compiled-packages').unlink(missing_ok=True)
+                    if operation == 'compile':
+                        (self.root / 'zig-pkg/pinned-source').write_text('restored by setup\n')
                     with patch.dict(os.environ, BUILD_EXIT=exit), \
                             patch.object(sys, 'argv', ['build_artifact.py', operation, '["test"]', *options]), \
                             contextlib.redirect_stdout(io.StringIO()) as output:
@@ -412,10 +417,14 @@ else:
                             code = failure.code
                     self.assertEqual(code, int(exit))
                     self.assertFalse((self.root / 'gates').exists())
+                    # restore refetches over a rejected handoff; compile keeps setup's sources
+                    # so their restored, restat-repaired manifests still hit.
+                    packages = 'fetched\n' if operation == 'restore' else 'restored by setup\n'
+                    self.assertEqual((self.root / 'compiled-packages').read_text(), packages)
+                    self.assertEqual((self.root / 'zig-pkg/pinned-source').read_text(), packages)
                     if exit != '0':
                         self.assertFalse(build_artifact.roots()['binaries'].exists())
                         continue
-                    self.assertEqual((self.root / 'zig-pkg/pinned-source').read_text(), 'fetched\n')
                     if operation == 'compile':
                         self.assertIn("Compiled locally for this job's own gates; compiled only, acceptance not yet "
                                       "established", output.getvalue())

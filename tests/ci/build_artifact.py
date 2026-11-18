@@ -235,14 +235,25 @@ def fetch(artifact_id, targets):
     return receipt
 
 
-def rebuild(targets):
-    for root in roots().values():
-        if root.is_symlink():
-            root.unlink()
-        elif root.exists():
-            shutil.rmtree(root)
-    subprocess.run(["bash", "src/fetch_dependencies.sh"], check=True)
+def remove(root):
+    if root.is_symlink():
+        root.unlink()
+    elif root.exists():
+        shutil.rmtree(root)
+
+
+def compile_here(targets):
+    """Compile into the local artifact directory with setup's package sources, so the
+    manifests setup restored and restat-repaired still hit for identical bytes."""
+    remove(roots()["binaries"])
     shutil.copytree(build(targets), roots()["binaries"])
+
+
+def rebuild(targets):
+    """A rejected handoff may have left untrusted package sources: replace them first."""
+    remove(roots()["packages"])
+    subprocess.run(["bash", "src/fetch_dependencies.sh"], check=True)
+    compile_here(targets)
 
 
 def restore(artifact_ids, targets):
@@ -278,7 +289,7 @@ def main():
         if args.operation == "build":
             package(targets, Path(os.environ["RUNNER_TEMP"]) / "rui-compiled", build(targets, args.part), args.part)
         elif args.operation == "compile":
-            rebuild(targets)
+            compile_here(targets)
             print("Compiled locally for this job's own gates; compiled only, acceptance not yet established", flush=True)
         else:
             restore([artifact_id for artifact_id in args.artifact_id if artifact_id], targets)
