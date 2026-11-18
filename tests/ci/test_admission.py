@@ -333,84 +333,97 @@ class AdmissionTest(unittest.TestCase):
             self.assertIn('fetch-depth: 0', job(CHECK.read_text(), name))
         self.assertIn('uses: ./.github/actions/policy\n', job(CHECK.read_text(), 'policy'))
         self.assertIn('      run: bash .github/actions/policy/checks.sh\n', POLICY.read_text())
-        self.assertIn('bash .github/actions/policy/beside.sh -- ', job(CHECK.read_text(), 'pr_linux'))
-        self.assertIn('bash .github/actions/policy/checks.sh', BESIDE.read_text())
-        self.assertIn(' python3 -B tests/ci/client_locality.py\n', POLICY_CHECKS.read_text())
 
-    def test_policy_beside_a_command_reports_both_and_fails_only_for_the_command(self):
-        """beside.sh over policy {passes, fails, killed by a signal} x command {passes, fails}.
-        The stubs order themselves: the command blocks on a fifo until the policy stub has opened it,
-        so policy demonstrably started before the command finished. The timeout is only a watchdog."""
+    def test_policy_beside_the_compile_keeps_its_status_and_fails_the_job_through_its_final_gate(self):
+        # CI-76: policy {passes, fails, killed by a signal} x compile {passes, fails}, through the real
+        # PR job's compile step and final gate. The compile stub blocks on a fifo until the policy stub
+        # has written it, so the two run at once; the subprocess timeout is only a watchdog.
+        workflow = job(CHECK.read_text(), 'pr_linux')
+        compile_step = step_script(workflow, 'Compile only the binaries the selected targets need')
+        gate = 'Fail for the policy or format checks that failed above'
+        gate_script = step_script(workflow, gate)
+        gate_if = re.search(r'(?m)^        if: \$\{\{ (.*) \}\}$',
+                            workflow.split(f'      - name: {gate}\n', 1)[1].split('\n      - ', 1)[0])[1]
+
+        def gate_runs(policy):
+            expression = gate_if.replace('!cancelled()', 'True').replace('&&', ' and ').replace('||', ' or ')
+            expression = expression.replace('steps.compile.outputs.policy', repr(policy))
+            return eval(expression.replace('steps.format.outcome', repr('success')), {})
+
+        plan = {'linux_compile_targets': '["test-logic"]', 'policy_skips': '["test_unchanged"]'}
+        step_env = re.search(r'(?ms)^      - name: Compile only the binaries the selected targets need\n.*?^        run:',
+                             workflow)[0]
+        env = {key: plan[output] for key, output in
+               re.findall(r'(?m)^          ([A-Z_]+): \$\{\{ needs\.plan\.outputs\.(\w+) \}\}$', step_env)}
         policies = {'passes': 'exit 0', 'fails': 'exit 3', 'killed by a signal': 'kill -KILL $$'}
-        commands = {'passes': 0, 'fails': 5}
-        for (policy, ending), (command, code) in product(policies.items(), commands.items()):
-            with self.subTest(policy=policy, command=command), tempfile.TemporaryDirectory() as root:
+        compiles = {'passes': 0, 'fails': 5}
+        for (policy, ending), (compiled, code) in product(policies.items(), compiles.items()):
+            with self.subTest(policy=policy, compile=compiled), tempfile.TemporaryDirectory() as root:
                 root = Path(root)
                 (root / '.github/actions/policy').mkdir(parents=True)
+                (root / 'bin').mkdir()
                 (root / '.github/actions/policy/beside.sh').write_text(BESIDE.read_text())
-                fifo = root / 'started'
+                fifo, calls, output = root / 'started', root / 'calls', root / 'output'
                 os.mkfifo(fifo)
                 (root / '.github/actions/policy/checks.sh').write_text(
-                    f'echo "policy log line"\necho started > "{fifo}"\n{ending}\n')
-                output = root / 'output'
-                result = subprocess.run(
-                    ['bash', '.github/actions/policy/beside.sh', '--', 'bash', '-c',
-                     f'read line < "{fifo}"; [ "$line" = started ] || exit 9; exit {code}'],
-                    cwd=root, capture_output=True, text=True, timeout=120,
-                    env=dict(os.environ, RUNNER_TEMP=str(root), GITHUB_OUTPUT=str(output), SKIPS='[]'))
+                    f'echo "checks SKIPS=$SKIPS" >> "{calls}"\necho "policy log line"\n'
+                    f'echo started > "{fifo}"\n{ending}\n')
+                (root / 'bin/python3').write_text(
+                    f'#!/bin/sh\necho "python3 $*" >> "{calls}"\nread line < "{fifo}"\n'
+                    f'[ "$line" = started ] || exit 9\necho "compile log line"\nexit {code}\n')
+                (root / 'bin/zig').write_text(f'#!/bin/sh\necho "zig $*" >> "{calls}"\n')
+                for tool in ('python3', 'zig'):
+                    (root / 'bin' / tool).chmod(0o755)
+                result = subprocess.run(['bash', '-euo', 'pipefail', '-c', compile_step], cwd=root,
+                                        capture_output=True, text=True, timeout=120,
+                                        env=dict(os.environ, **env, PATH=f"{root / 'bin'}:{os.environ['PATH']}",
+                                                 RUNNER_TEMP=str(root), GITHUB_OUTPUT=str(output)))
                 self.assertEqual(result.returncode, code, result.stdout + result.stderr)
-                self.assertIn('::group::Policy checks, run beside: bash -c', result.stdout)
-                self.assertIn('policy log line', result.stdout.split('::group::', 1)[1].split('::endgroup::')[0])
-                expected = {'passes': None, 'fails': 3, 'killed by a signal': 137}[policy]
-                if expected is None:
-                    self.assertNotIn('Policy checks failed', result.stdout)
-                    self.assertEqual(output.read_text(), 'policy=success\n')
-                else:
-                    self.assertIn(f'::error::Policy checks failed (exit {expected})', result.stdout)
-                    self.assertEqual(output.read_text(), 'policy=failure\n')
-                self.assertEqual('::error::The command beside the policy checks failed (exit 5)' in result.stdout,
-                                 command == 'fails')
+                expected = ['checks SKIPS=["test_unchanged"]', 'python3 -B tests/ci/build_artifact.py compile ["test-logic"]']
+                if code == 0:
+                    expected.append('zig build --fetch=all')
+                self.assertEqual(sorted(calls.read_text().splitlines()), sorted(expected))
+                self.assertIn('policy log line', result.stdout)
+                self.assertIn('compile log line', result.stdout)
+                outputs = dict(line.split('=', 1) for line in output.read_text().splitlines())
+                self.assertEqual(gate_runs(outputs.get('policy', '')), policy != 'passes')
+                if policy != 'passes':
+                    failed = subprocess.run(['bash', '-euc', gate_script], capture_output=True, text=True,
+                                            env=dict(POLICY=outputs['policy'], FORMAT='success'))
+                    self.assertNotEqual(failed.returncode, 0)
 
-    def test_policy_checks_all_run_after_a_failure_and_the_script_fails_naming_it(self):
-        names = ["Check caller error coverage and shrink-only pending causes",
-                 "Check flake sources and shrink-only allowances",
-                 "Check client locality and shrink-only exceptions",
-                 "Run tests/ci, less self-checks whose inputs are unchanged",
-                 "Reject undefined fixture names before native builds",
-                 "Check the TypeScript client's generated wire types and type-check it",
-                 "Validate workflows with pinned-linter compatibility exceptions"]
-        for failing in (None, 1, 5, 6):
+    def test_every_policy_check_runs_after_another_fails_and_any_failure_fails_the_suite(self):
+        # CI-75: checks.sh over its fake tools, with no check, each check's last call, or every check failing.
+        calls = ['python3 -B tests/ci/caller_errors.py', 'python3 -B tests/ci/flake_sources.py',
+                 'python3 -B tests/ci/client_locality.py',
+                 'python3 -B tests/ci/policy_suite.py --skips ["test_unchanged"]',
+                 'python3 -m ruff check --select F821 tests', 'npm ci --ignore-scripts --no-audit --no-fund',
+                 'npm run check', 'npm test', 'actionlint -shellcheck= .github/workflows/check.yml']
+        last_of_each_check = [calls[index] for index in (0, 1, 2, 3, 4, 7, 8)]
+        for failing in [[]] + [[call] for call in last_of_each_check] + [last_of_each_check]:
             with self.subTest(failing=failing), tempfile.TemporaryDirectory() as root:
                 root = Path(root)
-                (root / 'bin').mkdir()
-                (root / 'clients/ts').mkdir(parents=True)
-                (root / '.github/workflows').mkdir(parents=True)
+                for directory in ('bin', 'clients/ts', '.github/workflows', 'actionlint'):
+                    (root / directory).mkdir(parents=True)
                 (root / '.github/workflows/check.yml').write_text('on: push\n')
-                (root / 'actionlint').mkdir()
-                marker = {1: 'flake_sources', 5: 'npm', 6: 'actionlint'}.get(failing, 'never')
-                for tool in ('python3', 'npm', 'actionlint/actionlint'):
-                    fake = root / ('bin/' + tool if '/' not in tool else tool)
-                    fake.write_text('#!/bin/sh\necho "$0 $*" >> "$CALLS"\n'
-                                    f'case "$0 $*" in *{marker}*) exit 3;; esac\nexit 0\n')
-                    fake.chmod(0o755)
+                (root / 'failing').write_text(''.join(call + '\n' for call in failing))
+                for tool in ('bin/python3', 'bin/npm', 'actionlint/actionlint'):
+                    (root / tool).write_text(
+                        '#!/bin/sh\ncall="$(basename "$0") $*"\necho "$call" >> "$CALLS"\n'
+                        'if grep -qxF -- "$call" "$FAILING"; then exit 3; fi\n')
+                    (root / tool).chmod(0o755)
                 result = subprocess.run(['bash', str(POLICY_CHECKS)], cwd=root, capture_output=True, text=True,
                                         env=dict(os.environ, PATH=f"{root / 'bin'}:{os.environ['PATH']}",
-                                                 RUNNER_TEMP=str(root), SKIPS='[]', CALLS=str(root / 'calls')))
-                for name in names:
-                    self.assertEqual(result.stdout.count(f"{name}: exit "), 1, name)
-                if failing is None:
-                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                else:
-                    self.assertEqual(result.returncode, 1)
-                    self.assertIn(f"{names[failing]}: exit 3", result.stdout)
-                    self.assertIn(f"Policy checks failed: {names[failing]}", result.stdout)
+                                                 RUNNER_TEMP=str(root), SKIPS='["test_unchanged"]',
+                                                 CALLS=str(root / 'calls'), FAILING=str(root / 'failing')))
+                self.assertEqual(sorted((root / 'calls').read_text().splitlines()), sorted(calls), result.stdout)
+                self.assertEqual(result.returncode, 1 if failing else 0, result.stdout + result.stderr)
 
     def test_policy_skips_only_the_named_unchanged_self_checks(self):
         script = 'python3 -B tests/ci/policy_suite.py --skips "$SKIPS"'
         self.assertIn(' ' + script + '\n', POLICY_CHECKS.read_text())
         self.assertIn('        SKIPS: ${{ inputs.skips }}\n', POLICY.read_text())
         self.assertIn('skips: ${{ needs.plan.outputs.policy_skips }}', job(CHECK.read_text(), 'policy'))
-        self.assertIn('SKIPS: ${{ needs.plan.outputs.policy_skips }}', job(CHECK.read_text(), 'pr_linux'))
         modules = {
             'test_alpha': 'class Alpha(unittest.TestCase):\n    def test_one(self): pass\n    def test_two(self): pass\n',
             'test_beta': ('class Kept(unittest.TestCase):\n    def test_kept(self): pass\n'
@@ -800,6 +813,7 @@ def plan(selection, *, event_name, draft, promotion, change_kind, compile_only):
             self.assertNotEqual(self.aggregate(workflow, 'admission', admission, draft, results).returncode, 0)
 
     def test_a_branch_that_merged_main_gets_only_its_own_diffs_pr_tier(self):
+        # CI-4: a branch merge alone adds nothing to the PR tier.
         workflow = CHECK.read_text()
         linux = step_script(job(workflow, 'linux'), 'Require every selected Linux part')
         with PlanFixture() as fixture:

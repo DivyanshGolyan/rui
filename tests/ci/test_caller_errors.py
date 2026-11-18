@@ -181,8 +181,6 @@ fn live() anyerror!void { return error.NewCallerError; }
         self.assertIn(" python3 -B tests/ci/caller_errors.py\n", policy)
         workflow = (ROOT / ".github/workflows/check.yml").read_text()
         self.assertEqual(workflow.count("uses: ./.github/actions/policy"), 1)
-        self.assertEqual(workflow.count("bash .github/actions/policy/beside.sh -- "), 1)
-        self.assertIn("bash .github/actions/policy/checks.sh", (ROOT / ".github/actions/policy/beside.sh").read_text())
 
 
 class TrustedPending(unittest.TestCase):

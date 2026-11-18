@@ -177,6 +177,7 @@ class PlanTest(unittest.TestCase):
                     self.assertEqual(source['targets'], targets)
 
     def test_only_a_store_schema_edit_compiles_every_unit_partition_on_the_pr_tier(self):
+        # CI-4: of these diffs only the Store schema edit widens the ready compile; promotion compiles all.
         import build_files
         from select_tests import select
         available = set(build_files.steps())
