@@ -79,7 +79,8 @@ class CoverageTest(unittest.TestCase):
         result = plan(selected, event_name="workflow_dispatch", draft=False, promotion=True,
                       change_kind=ChangeKind.NORMAL)
         core = {"check-full", "test-logic", "admission-debug-integration"}
-        self.assertEqual(result.outputs["targets"], sorted(core | {"host-status-integration", "stack-frames"}))
+        self.assertEqual(result.outputs["targets"], ["admission-debug-integration", "check-full", "host-status-integration",
+                                                     "mysql-wire-integration", "stack-frames", "test-logic"])
         self.assertEqual(result.outputs["native_targets"], sorted(core))
         self.assertEqual(selected["targets"], ["check", "stack-frames", "host-status-integration"])
 

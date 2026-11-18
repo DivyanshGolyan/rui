@@ -70,6 +70,16 @@ def api(path, *fields, method="GET"):
     return json.loads(gh(*args) or "null")
 
 
+def run_of(repository, run_id, request=api):
+    """The qualifying run, or None when GitHub no longer has it (HTTP 404); other errors raise."""
+    try:
+        return request(f"repos/{repository}/actions/runs/{run_id}")
+    except subprocess.CalledProcessError as failure:
+        if "HTTP 404" in (failure.stderr or ""):
+            return None
+        raise
+
+
 def describe(state, version):
     """The status description; parse() reads the version back from it."""
     if state != "success":
@@ -238,7 +248,7 @@ def main():
         commits = first_parent(floor, args.main)
 
         def publishable(own, sha):
-            run = api(f"repos/{repository}/actions/runs/{own.run_id}") if own.run_id else None
+            run = run_of(repository, own.run_id) if own.run_id else None
             artifacts = api(f"repos/{repository}/actions/runs/{own.run_id}/artifacts?per_page=100")["artifacts"] if run else []
             return reusable(own, run, artifacts, plan(sha), sha, datetime.now(timezone.utc))
 

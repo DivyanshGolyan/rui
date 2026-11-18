@@ -52,7 +52,9 @@ def plan(selection: dict, *, event_name: str, draft: bool, promotion: bool,
         quarantine = 'off'
     elif promotion:
         core = {'check-full', 'test-logic', 'admission-debug-integration'}
-        p['targets'] = sorted(normalize(set(p['targets']) | core) | {'stack-frames'})
+        # Every check the PR tier skips runs here whatever the batch touched: the LLVM frame
+        # gate and the live MySQL wire client, as well as native macOS below.
+        p['targets'] = sorted(normalize(set(p['targets']) | core) | {'stack-frames', 'mysql-wire-integration'})
         p['targets'] = sorted(set(p['targets']) | live_mysql_suites(p['targets'], p['mysql_suites']))
         p['native_targets'] = sorted(normalize(set(p['native_targets']) | core))
         p['retry'] = False

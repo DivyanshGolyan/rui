@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import subprocess
 import unittest
 
 import main_qualified as mq
@@ -112,6 +113,24 @@ class PromotionChoiceTest(unittest.TestCase):
         for case, (record, found, held, planned, expected) in reusable.items():
             with self.subTest(reusable=case):
                 self.assertEqual(mq.reusable(record, found, held, planned, A, NOW), expected)
+
+        # The run lookup: a run GitHub no longer has is no evidence, so Promote qualifies HEAD instead.
+        def found(path):
+            self.assertEqual(path, "repos/o/r/actions/runs/41")
+            return {"head_sha": A, "path": QUALIFIER}
+
+        def failing(stderr):
+            def request(path):
+                raise subprocess.CalledProcessError(1, ["gh", "api", path], stderr=stderr)
+            return request
+        with self.subTest(run_of="found"):
+            self.assertEqual(mq.run_of("o/r", "41", found), {"head_sha": A, "path": QUALIFIER})
+        with self.subTest(run_of="deleted"):
+            self.assertIsNone(mq.run_of("o/r", "41", failing("gh: Not Found (HTTP 404)")))
+            self.assertEqual(mq.reusable(green, None, [], "0.80.0", A, NOW), f"run 41 is not a qualification of {A}")
+        for case, stderr in (("server error", "gh: Server Error (HTTP 502)"), ("no network", "connection reset")):
+            with self.subTest(run_of=case), self.assertRaises(subprocess.CalledProcessError):
+                mq.run_of("o/r", "41", failing(stderr))
 
         # Main HEAD is A; commits after stable are A, B, C. (sha input, records, publishable reason)
         # -> (chosen, reused, reason) or the refusal's text.

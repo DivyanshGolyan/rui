@@ -58,8 +58,9 @@ class PlanTest(unittest.TestCase):
             ('promotion', 'workflow_dispatch', False, True),
         )
         normal_linux = ['check', 'test-native', 'transport-h2-integration']
+        # CI-69: promotion, and so Qualify main, runs every check the PR tier skips, whatever the batch touched.
         promoted_linux = ['admission-debug-integration', 'check-full', 'host-status-integration',
-                          'stack-frames', 'test-logic', 'transport-h2-integration']
+                          'mysql-wire-integration', 'stack-frames', 'test-logic', 'transport-h2-integration']
         promoted_mac = ['admission-debug-integration', 'check-full', 'test-logic', 'transport-h2-integration']
         expected_targets = {
             ('draft', False): ([], []), ('draft', True): ([], []),
@@ -142,7 +143,11 @@ class PlanTest(unittest.TestCase):
                 self.assertEqual(output['quarantine'], 'admission' if retry else 'off')
                 promoted = plan(original, event_name='workflow_dispatch', draft=False,
                                 promotion=True, change_kind=ChangeKind.NORMAL).outputs
-                self.assertIn('stack-frames', promoted['targets'])
+                for target in ('stack-frames', 'mysql-wire-integration', 'check-full', 'test-logic',
+                               'admission-debug-integration'):
+                    self.assertIn(target, promoted['targets'])
+                self.assertEqual(promoted['native_targets'],
+                                 ['admission-debug-integration', 'check-full', 'test-logic'])
                 self.assertTrue(promoted['native'])
                 for key in ('cache_execution', 'typecheck_macos', 'linux_memory'):
                     self.assertEqual(promoted[key], obligations, key)
