@@ -191,3 +191,44 @@ test "Esc leaves the settled view with an empty draft unless the held original i
         try std.testing.expectEqualStrings("Esc returns to the overview once the original is confirmed.", close(.submitting, false, empty).stay);
     }
 }
+
+test "SUI-14 message and decision notices retain their placement during opening and waiting" {
+    const Case = struct {
+        held: Held,
+        note: ?[]const u8,
+        status: ?[]const u8,
+        action: ?Key,
+        details: bool,
+        in_flight: bool,
+    };
+    const cases = [_]Case{
+        .{ .held = .{ .kind = .message, .state = .not_started }, .note = "Not sent · ctrl+r retries original", .status = null, .action = .retry, .details = true, .in_flight = false },
+        .{ .held = .{ .kind = .message, .state = .submitting }, .note = null, .status = null, .action = null, .details = false, .in_flight = false },
+        .{ .held = .{ .kind = .message, .state = .unconfirmed }, .note = "Not confirmed · ctrl+r retries original", .status = null, .action = .retry, .details = true, .in_flight = false },
+        .{ .held = .{ .kind = .message, .state = .rejected }, .note = "Rejected · /discard", .status = null, .action = .discard, .details = true, .in_flight = false },
+        .{ .held = .{ .kind = .decision, .state = .not_started }, .note = null, .status = "Not sent · ctrl+r retries original", .action = .retry, .details = true, .in_flight = false },
+        .{ .held = .{ .kind = .decision, .state = .submitting }, .note = null, .status = "Sending…", .action = null, .details = false, .in_flight = true },
+        .{ .held = .{ .kind = .decision, .state = .unconfirmed }, .note = null, .status = "! Decision not confirmed · ctrl+r retries original", .action = .retry, .details = true, .in_flight = false },
+        .{ .held = .{ .kind = .decision, .state = .rejected }, .note = null, .status = "Rejected · /discard", .action = .discard, .details = true, .in_flight = false },
+    };
+    const checkText = struct {
+        fn check(expected: ?[]const u8, actual: ?[]const u8) !void {
+            try std.testing.expectEqual(expected == null, actual == null);
+            if (expected) |text| try std.testing.expectEqualStrings(text, actual.?);
+        }
+    }.check;
+    for (cases) |case| {
+        for ([_]bool{ false, true }) |opening| {
+            for ([_]bool{ false, true }) |waiting| {
+                const shown = presentation(opening, waiting, case.held);
+                try checkText(case.note, shown.note);
+                try checkText(if (opening) "Opening…" else if (waiting) "" else case.status, shown.status);
+                try std.testing.expectEqual(case.action, shown.action);
+                try std.testing.expectEqual(case.details, shown.details);
+                try std.testing.expect(shown.details_available);
+                try std.testing.expect(!shown.repair_details);
+                try std.testing.expectEqual(if (opening) true else if (waiting) false else case.in_flight, shown.in_flight);
+            }
+        }
+    }
+}

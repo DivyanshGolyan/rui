@@ -113,6 +113,7 @@ const cores = .{
     .{ "overview_view.zig", @import("overview_view.zig") },
     .{ "part_text.zig", @import("part_text.zig") },
     .{ "path_list.zig", @import("path_list.zig") },
+    .{ "preference_document.zig", @import("preference_document.zig") },
     .{ "preset_value.zig", @import("preset_value.zig") },
     .{ "process_memory.zig", @import("process_memory.zig") },
     .{ "product_defaults.zig", @import("product_defaults.zig") },

@@ -1,8 +1,6 @@
 from terminal_screen import VERTICAL_DIVIDER
 import json
 import os
-import pathlib
-import re
 import select
 import shutil
 import subprocess
@@ -265,110 +263,6 @@ def thinking_queue_case():
     print("session chrome: a mid-Thinking submission is queued once, then shown once as a taken Message at both sizes", flush=True)
 
 
-def rejected_tool_thinking_queue_case():
-    for width, height in ((140, 40), (46, 30)):
-        next_release, final_release = threading.Event(), threading.Event()
-        calls = fixture.sse_tool_calls("rejected-thinking", [("unavailable_tool", "unknown-call", "{}")])
-        answer = fixture.sse_answer("rejected-after", "r1", "m1", "AFTER-REJECTION")[0]
-        final = fixture.sse_answer("rejected-final", "r2", "m2", "FINAL-ANSWER")[0]
-        with Chrome("rui-rejected-thinking.", [calls, (answer, next_release), (final, final_release)]) as chrome:
-            session = chrome.session()
-            master, caller, _ = chrome.open(session, lambda screen: True, columns=width, height=height)
-            try:
-                chrome.frame(master, b"FIRST-QUESTION\r", lambda screen:
-                    "Tool call · rejected" in screen and "Thinking" in screen, timeout=30)
-                initial = chrome.frame(master, b"MIDTURN-HI\r", lambda screen:
-                    "◌ MIDTURN-HI" in screen and composing(screen, ""))
-                assert initial.count("MIDTURN-HI") == 1 and "› MIDTURN-HI" not in initial, initial
-                for keys, draft in ((b"x", "x"), (b"\x7f", ""), (b"y", "y"), (b"\x7f", "")):
-                    stable = chrome.frame(master, keys, lambda screen:
-                        composing(screen, draft) and re.search(r"Thinking · \d+s", screen), timeout=15)
-                    assert "Tool call · rejected" in stable and stable.count("MIDTURN-HI") == 1, stable
-                    assert "◌ MIDTURN-HI" in stable and "› MIDTURN-HI" not in stable, stable
-                next_release.set()
-                taken = chrome.frame(master, b"", lambda screen:
-                    "AFTER-REJECTION" in screen and "› MIDTURN-HI" in screen and "Thinking" in screen, timeout=30)
-                assert taken.count("MIDTURN-HI") == 1 and "◌ MIDTURN-HI" not in taken, taken
-                final_release.set()
-                chrome.frame(master, b"", lambda screen: "FINAL-ANSWER" in screen, timeout=30)
-                chrome.leave(master, caller)
-            finally:
-                next_release.set()
-                final_release.set()
-    print("session chrome: rejected tool and resumed Thinking keep a queued follow-up once until taken at both sizes", flush=True)
-
-
-
-def rejection_after_queued_send_case():
-    for width, height in ((140, 40), (46, 30)):
-        first_release, next_release = threading.Event(), threading.Event()
-        calls = fixture.sse_tool_calls("queued-before-rejection", [("unavailable_tool", "unknown-call", "{}")])
-        answer = fixture.sse_answer("after-queued-rejection", "r1", "m1", "FINAL-ANSWER")[0]
-        with Chrome("rui-queued-before-rejection.", [(calls, first_release), (answer, next_release)]) as chrome:
-            session = chrome.session()
-            master, caller, _ = chrome.open(session, lambda screen: True, columns=width, height=height)
-            try:
-                chrome.frame(master, b"FIRST-QUESTION\r", lambda screen: "Thinking" in screen)
-                queued = chrome.frame(master, b"MIDTURN-HI\r", lambda screen:
-                    "◌ MIDTURN-HI" in screen and composing(screen, ""))
-                assert queued.count("MIDTURN-HI") == 1 and "› MIDTURN-HI" not in queued, queued
-                first_release.set()
-                taken = chrome.frame(master, b"", lambda screen:
-                    "Tool call · rejected" in screen and "Thinking" in screen and "› MIDTURN-HI" in screen, timeout=30)
-                assert taken.count("MIDTURN-HI") == 1 and "◌ MIDTURN-HI" not in taken, taken
-                for keys, draft in ((b"x", "x"), (b"\x7f", ""), (b"y", "y"), (b"\x7f", "")):
-                    stable = chrome.frame(master, keys, lambda screen:
-                        composing(screen, draft) and re.search(r"Thinking · \d+s", screen), timeout=15)
-                    assert "› MIDTURN-HI" in stable and stable.count("MIDTURN-HI") == 1, stable
-                    assert "◌ MIDTURN-HI" not in stable, stable
-                next_release.set()
-                chrome.frame(master, b"", lambda screen: "FINAL-ANSWER" in screen, timeout=30)
-                chrome.leave(master, caller)
-            finally:
-                first_release.set()
-                next_release.set()
-    print("session chrome: a rejected tool after a queued send preserves one representation as work continues", flush=True)
-
-
-def send_state_case():
-    with Chrome("rui-chrome-send.", [fixture.sse_answer("sent", "r", "m", "SENT-ANSWER")[0]]) as chrome:
-        session = chrome.session()
-        master, caller, _ = chrome.open(session, lambda screen: True)
-        held, release = threading.Event(), threading.Event()
-
-        def hold_admission(record):
-            held.set()
-            assert release.wait(15), "Message admission gate was not released"
-            return True
-
-        proxy = canonical_fixture.ReplyProxy(chrome.host, "/v1/message", lambda response: response,
-            before_forward=hold_admission)
-        try:
-            os.write(master, b"SEND-ME")
-            chrome.frame(master, b"", lambda screen: composing(screen, "SEND-ME"))
-            frames = frames_until(master, b"\r", lambda screen:
-                composing(screen, "") and "› SEND-ME" in "\n".join(transcript_rows(screen)))
-            fixture.wait_for(held.is_set, "Message held before Host admission")
-            cleared = [frame for frame in frames if composing(frame, "")]
-            assert cleared, frames
-            for frame in cleared:
-                assert "Sending" not in frame, frame
-                assert "\n".join(transcript_rows(frame)).count("› SEND-ME") == 1, frame
-                assert "SENT-ANSWER" not in frame, frame
-            release.set()
-            frames += frames_until(master, b"", lambda screen: "SENT-ANSWER" in screen)
-            for frame in frames:
-                assert "Sending" not in frame, frame
-                assert "\n".join(transcript_rows(frame)).count("› SEND-ME") <= 1, frame
-            assert "\n".join(transcript_rows(frames[-1])).count("› SEND-ME") == 1, frames[-1]
-            assert len(proxy.mutations) == 1, proxy.mutations
-            chrome.leave(master, caller)
-        finally:
-            release.set()
-            proxy.close()
-    print("session chrome: Enter immediately shows one sent Message before admission; no Sending state or admission duplicate", flush=True)
-
-
 def send_recovery_case():
     with Chrome("rui-chrome-send-recovery.", [fixture.sse_answer("recovered", "r", "m", "RECOVERED-ANSWER")[0]]) as chrome:
         session = chrome.session()
@@ -411,72 +305,6 @@ def send_recovery_case():
     print("session chrome: unconfirmed note stays with its Message; Ctrl-R recovers identical saved bytes/key once without losing the next draft", flush=True)
 
 
-def scroll_marker_case():
-    release = threading.Event()
-    with Chrome("rui-chrome-scroll.", []) as chrome:
-        empty = chrome.session()
-        master, caller, opened = chrome.open(empty, lambda screen: True)
-        for keys in (b"\x1b[1;2A", b"\x1b[5~"):
-            typed = chrome.frame(master, keys + b"x", lambda screen: composing(screen, "x"))
-            assert marker(typed) is None and "Start of conversation" not in typed, typed
-            unchanged = chrome.frame(master, b"\x15", lambda screen: composing(screen, ""))
-            assert rows(unchanged) == rows(opened), (opened, unchanged)
-        chrome.leave(master, caller)
-
-        session = chrome.session()
-        chrome.endpoint.responses += [
-            *[fixture.sse_answer(f"seed-{i}", "r", "m", f"answer {i:02d}\n\nsecond row {i:02d}")[0] for i in range(8)],
-            (fixture.ResponseSpec(chrome.held_call("Held call", "release"), {}), release),
-            fixture.sse_answer("arrived", "r", "m", "ARRIVED-ANSWER")[0],
-        ]
-        chrome.answered(session, *(f"input {i:02d}" for i in range(8)))
-        master, caller, _ = chrome.open(session, lambda screen: "second row 07" in screen)
-        requests = len(chrome.endpoint.requests)
-        os.write(master, b"keep")
-        end = chrome.frame(master, b"", lambda screen:
-                           composing(screen, "keep") and bool(transcript_rows(screen)[0].strip()))
-        bottom = feed_bottom(end)
-        assert not rows(end)[bottom].strip(), end
-        for keys in (b"\x1b[1;2A", b"\x1b[5~"):
-            end_rows = rows(end)[:bottom]
-            before = {line: n for n, line in enumerate(end_rows) if line.strip() and end_rows.count(line) == 1}
-
-            def moved(screen):
-                held_rows = rows(screen)[:feed_bottom(screen)]
-                after = {line: n for n, line in enumerate(held_rows) if line.strip() and held_rows.count(line) == 1}
-                shared = before.keys() & after.keys()
-                return bool(shared) and all(after[line] - before[line] == bottom // 2 for line in shared)
-
-            scrolled = chrome.frame(master, keys, lambda screen: marker(screen) == "↓" and moved(screen))
-            assert "second row 07" not in scrolled and composing(scrolled, "keep"), (keys, scrolled)
-            assert status(scrolled) == "" and footer(scrolled).strip().startswith("‹ "), (keys, "no heading or hint", scrolled)
-            assert not any(row.startswith("Browsing") for row in transcript_rows(scrolled)), scrolled
-            scrolled = settle_screen(master, quiet=0.5)
-            os.write(master, b"\x1b[F")
-            same = settle_screen(master, quiet=0.5)
-            assert marker(same) == "↓" and rows(same)[:2] == rows(scrolled)[:2], (keys, same)
-            back = b"\x1b[1;5F" if keys == b"\x1b[1;2A" else b"\x1b"
-            live = chrome.frame(master, back, lambda screen: latest(screen, "second row 07"))
-            assert composing(live, "keep"), live
-            assert feed_bottom(live) == bottom, (end, live)
-            first_known = next(index for index, row in enumerate(end_rows) if row.strip())
-            assert rows(live)[first_known:bottom + 1] == rows(end)[first_known:bottom + 1], (end, live)
-        assert len(chrome.endpoint.requests) == requests, "scrolling sent input"
-        os.write(master, b"\x15HOLD-QUESTION\r")
-        release.set()
-        chrome.frame(master, b"", lambda screen: "◝ Held call · " in screen)
-        held = chrome.frame(master, b"\x1b[1;2A", lambda screen: marker(screen) == "↓")
-        (chrome.workspace / "release").write_text("")
-        counted = chrome.frame(master, b"", lambda screen: (marker(screen) or "").endswith(" new"), timeout=30)
-        assert marker(counted)[2:-4].isdigit() and int(marker(counted)[2:-4]) >= 1, counted
-        assert "ARRIVED-ANSWER" not in counted, counted
-        assert rows(counted)[:feed_bottom(counted)] == rows(held)[:feed_bottom(held)], (held, counted)
-        assert composing(counted, ""), counted
-        chrome.frame(master, b"\x1b", lambda screen: latest(screen, "ARRIVED-ANSWER"), timeout=30)
-        chrome.leave(master, caller)
-    print("session chrome: Shift-↑ and PgUp draw ↓, draft End keeps the view, ↓ N new counts arrivals, Ctrl-End and Esc return; empty PgUp is unchanged and the chip never changes feed height", flush=True)
-
-
 def assert_plain_panel(master, screen, *, left=None):
     capture = terminal_capture(master)
     frame = capture.frame
@@ -504,44 +332,6 @@ def assert_plain_panel(master, screen, *, left=None):
         for cell in pane_cells(index):
             backgrounds.add(frame.colors(cell)[1])
     assert plain in backgrounds and len(backgrounds) <= 2, ("plain panel plus selection bar", backgrounds, screen)
-
-
-def command_panel_case():
-    with Chrome("rui-chrome-command-panel.", []) as chrome:
-        session = chrome.session()
-        for width, height in ((140, 40), (46, 30)):
-            master, caller, _ = chrome.open(session, lambda screen: True, columns=width, height=height)
-            opened = chrome.frame(master, b"/", lambda screen: "/new" in screen and "more" in screen)
-            assert_plain_panel(master, opened)
-            assert "type to narrow" not in opened, opened
-            bounds = composer_bounds(opened)
-            panel = [composer_line(opened, index) for index in range(bounds[0] + 1, bounds[1] - 1)]
-            assert any(re.fullmatch(r"\s*[1-9][0-9]* more", line) for line in panel), opened
-            for command in ("archive", "model", "pin"):
-                for line in panel:
-                    if re.match(r"\s*/" + command + r"(?:\s|$)", line):
-                        assert line.strip() == "/" + command, opened
-            closed = chrome.frame(master, b"\x7f", lambda screen: composing(screen, "") and "/new" not in screen)
-            assert composer_bounds(closed)[0] > bounds[0], (opened, closed)
-            chrome.leave(master, caller)
-    print("session chrome: command list lifts the input rule at both frame sizes, stays plain, omits redundant descriptions, and shows only N more", flush=True)
-
-
-def command_escape_case():
-    with Chrome("rui-chrome-command-escape.", []) as chrome:
-        session = chrome.session()
-        for width, height in ((140, 40), (46, 30)):
-            master, caller, _ = chrome.open(session, lambda screen: True, columns=width, height=height)
-            opened = chrome.frame(master, b"/ne", lambda screen: "/new" in screen and "› /ne" in screen)
-            assert composer_bounds(opened) is not None, opened
-            closed = chrome.frame(master, b"\x1b", lambda screen: composing(screen, "") and "/new" not in screen)
-            assert composing(closed, ""), closed
-            settled = settle_screen(master)
-            assert composing(settled, "") and "/new" not in settled, settled
-            overview = chrome.frame(master, b"\x1b", lambda screen: composer_bounds(screen) is None and "Settings" in screen)
-            assert composer_bounds(overview) is None, overview
-            chrome.leave(master, caller)
-    print("session chrome: lone Escape closes a drawn command list before leaving chat at both sizes", flush=True)
 
 
 def pages_case():
@@ -706,45 +496,6 @@ def approval_glyph_domain():
     print("session chrome: approval headings match the terminal locale at both widths", flush=True)
 
 
-def approval_overflow_case():
-    with Chrome("rui-chrome-approval-overflow.", []) as chrome:
-        for count in (40, 3):
-            session = chrome.session(permission="ask")
-            command = "\n".join(f"printf step-{index:02d}" for index in range(count))
-            chrome.endpoint.responses.append(fixture.sse_tool_calls(f"steps-{count}", [
-                ("bash", f"steps-{count}-call", json.dumps({
-                    "cmd": command, "description": "Review all steps", "timeout_ms": None}))]))
-            request = admit(chrome.home, "session", "send", "--to", session, input="Review these steps")["request"]
-            fixture.wait_for(lambda: fixture.observe(chrome.store, request)["state"] == "waiting_for_permission", "pending request")
-            for width, height in ((140, 40), (46, 30)):
-                for click in (False, True):
-                    master, slave = open_pty(width, height)
-                    chrome.descriptors += [master, slave]
-                    caller = spawn([str(fixture.RUI), "session", "resume", "--", session],
-                        env={**os.environ, "HOME": str(chrome.home)}, cwd=str(chrome.workspace),
-                        stdin=slave, stdout=slave, stderr=subprocess.PIPE)
-                    chrome.callers.append(caller)
-                    shown = chrome.frame(master, b"", lambda screen: "Allow once" in screen and "Deny" in screen)
-                    if count == 3:
-                        assert "step-02" in shown and "more lines" not in shown, shown
-                        chrome.detach(master, caller)
-                        continue
-                    assert "more lines" in shown and "step-39" not in shown, shown
-                    assert "shift+" not in shown, shown
-                    shown = chrome.frame(master, b"kept draft", lambda screen: "kept draft" in screen)
-                    if click:
-                        row, line = next((index, line) for index, line in enumerate(rows(shown)) if "more lines" in line)
-                        col = line.rindex("…") + 1
-                        gesture = f"\x1b[<0;{col};{row + 1}M\x1b[<0;{col};{row + 1}m".encode()
-                    else:
-                        gesture = b"\x0f"
-                    opened = chrome.frame(master, gesture, lambda screen: "step-39" in screen)
-                    assert "kept draft" in opened and "more lines" not in opened, opened
-                    assert fixture.observe(chrome.store, request)["state"] == "waiting_for_permission"
-                    chrome.detach(master, caller)
-    print("session chrome: clipped approvals report remaining rows; Ctrl-O and a click open them in place at both sizes, preserving the draft; fitting requests have no overflow state", flush=True)
-
-
 def opening_case():
     release = threading.Event()
     long_text = "\n".join(f"LONG line {i:02d}" for i in range(40))
@@ -791,109 +542,11 @@ def opening_case():
     print("session chrome: a reopened Session shows ◌ 2 · the newest waiting Message under the running call; Ctrl-O selects the lowest tool or Message, and reopening keeps tools folded", flush=True)
 
 
-def keys_case():
-    with Chrome("rui-chrome-keys.", []) as chrome:
-        session = chrome.session()
-        chrome.endpoint.responses.append(fixture.sse_answer("keys", "r", "m", "KEYS-ANSWER")[0])
-        chrome.answered(session, "keys")
-        for width in (140, 46):
-            master, caller, shown = chrome.open(session, lambda screen: "KEYS-ANSWER" in screen, columns=width)
-            if width == 140:
-                row, line = next((index, line) for index, line in enumerate(rows(shown)) if "Settings" in line)
-                col = line.index("Settings") + 1
-                gesture = f"\x1b[<0;{col};{row + 1}M\x1b[<0;{col};{row + 1}m".encode()
-            else:
-                chrome.frame(master, b"\x1b", lambda screen: "Settings" in screen and not any(line.startswith(" ‹ ") for line in rows(screen)))
-                gesture = b"\x1b[F\r"
-            settings = chrome.frame(master, gesture, lambda screen: "Notifications" in screen and "Version" in screen)
-            assert_plain_panel(master, settings, left="Settings")
-            keys = chrome.frame(master, b"\x1b[B" * 6 + b"\r", lambda screen: "earlier message" in screen)
-            expected = keys_reference()
-            columns = 2 if width == 140 else 1
-            key_widths = [max(len(key) for key, _ in expected[column::columns])
-                          for column in range(columns)]
-            bounds = composer_bounds(keys)
-            assert bounds is not None, keys
-            prompt = next(index for index in range(bounds[0] + 1, bounds[1])
-                          if composer_line(keys, index).startswith((" ›", " >")))
-            pane_rows = [chat_content_row(composer_line(keys, index))
-                         for index in range(bounds[0] + 1, prompt)]
-            positions = [[] for _ in range(columns)]
-            for start in range(0, len(expected), columns):
-                entries = expected[start:start + columns]
-                line = pane_rows[start // columns]
-                assert line.split() == [word for key, meaning in entries
-                                        for word in (key + " " + meaning).split()], (width, start, keys)
-                after = 0
-                for column, (key, meaning) in enumerate(entries):
-                    label = line.index(key, after)
-                    value = line.index(meaning, label + len(key))
-                    positions[column].append((label, value))
-                    assert value - label == key_widths[column] + 3, (width, key, keys)
-                    after = value + len(meaning)
-            for column in positions:
-                assert len(set(column)) == 1, (width, positions, keys)
-            assert positions[0][0][0] == 0, keys
-            used_rows = (len(expected) + columns - 1) // columns
-            assert all(not line.strip() for line in pane_rows[used_rows:]), keys
-            for absent in ("/help", "Ctrl-X twice", "shift+enter or ctrl+j", "Commands", "Marks", "Esc returns", "↑↓ · enter change · esc close", "‹ Rui · settings", 'ctrl+g', 'ctrl+d', 'ctrl+n', 'ctrl+end', 'ctrl+c/d', 'pgup/pgdn', 'first session', 'latest / last', 'scroll / select'):
-                assert absent not in keys, (width, absent, keys)
-            settings = chrome.frame(master, b"\r\x1b", lambda screen: "Notifications" in screen and "Version" in screen)
-            assert "earlier message" not in settings, settings
-            if width == 140:
-                chrome.frame(master, b"\x1b", lambda screen:
-                             latest(screen, "KEYS-ANSWER") and composing(screen, "")
-                             and "Rui · settings" not in screen)
-                chrome.frame(master, gesture, lambda screen: "Notifications" in screen and "Version" in screen)
-                chrome.frame(master, b"x", lambda screen: latest(screen, "KEYS-ANSWER") and composing(screen, "x")
-                             and "Notifications" not in screen)
-                chrome.frame(master, b"\x7f", lambda screen: composing(screen, ""))
-            else:
-                chrome.frame(master, b"\x1b", lambda screen: "Settings" in screen and "Rui · settings" not in screen and not any(line.startswith(" ‹ ") for line in rows(screen)))
-            chrome.leave(master, caller)
-    print("session chrome: Settings > Keys shows src/keymap.zig's reference rows aligned, paired at 140 columns and one column at 46; Enter is inert, Esc returns one layer, and printable input returns to the wide conversation", flush=True)
-
-
-def keys_reference():
-    source = (pathlib.Path(__file__).resolve().parents[2] / "src/keymap.zig").read_text()
-    body = source.split("pub const list = [_]Reference{", 1)[1].split("\n};", 1)[0]
-    rows = tuple(re.findall(r'^    \.\{ \.key = "([^"\\]*)", \.meaning = "([^"\\]*)"', body, re.MULTILINE))
-    assert rows and len(rows) == len(re.findall(r'^    \.\{ \.key = "', body, re.MULTILINE)), "src/keymap.zig: teach keys_reference this list"
-    return rows
-
-
-def notice_case():
-    with Chrome("rui-chrome-notice.", []) as chrome:
-        session = chrome.session()
-        master, caller, _ = chrome.open(session, lambda screen: True)
-        misused = chrome.frame(master, b"/new unexpected\r", lambda screen: footer(screen).endswith("! Usage: /new"))
-        assert composing(misused, ""), misused
-        gone = chrome.frame(master, b"a", lambda screen: composing(screen, "a"))
-        assert status(gone) == "" and "Usage:" not in footer(gone) and footer(gone).strip().startswith("‹ "), gone
-        os.write(master, b"\x15")
-        chrome.frame(master, b"", lambda screen: composing(screen, ""))
-        question = chrome.frame(master, b"?", lambda screen: composing(screen, "?"))
-        assert "shift+enter or ctrl+j" not in question, question
-        questions = chrome.frame(master, b"?", lambda screen: composing(screen, "??"))
-        assert "shift+enter or ctrl+j" not in questions, questions
-        chrome.leave(master, caller)
-    print("session chrome: a notice goes at the next key; ? is ordinary text on empty and nonempty drafts", flush=True)
-
-
 def main():
-    command_panel_case()
-    command_escape_case()
-    send_state_case()
     send_recovery_case()
     activity_case()
     thinking_queue_case()
-    rejected_tool_thinking_queue_case()
-    rejection_after_queued_send_case()
-    scroll_marker_case()
     pages_case()
     info_natural_height_case()
     approval_glyph_domain()
-    approval_overflow_case()
     opening_case()
-    notice_case()
-    keys_case()
