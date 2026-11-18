@@ -2233,7 +2233,7 @@ test "APV-9 resolved Actions reject fresh publications" {
     }.run);
 }
 
-test "APV-10 published action values retain public provenance while queued and applied" {
+test "APV-10 public pages omit Action values while preserving other inputs" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
@@ -2246,36 +2246,100 @@ test "APV-10 published action values retain public provenance while queued and a
             const binding = (try storage.admitNextActionAttempt(.fromFree(2, true), 30_000, .{})).?.permit.binding;
             var input: action_domain.ActionExecutionInput = undefined;
             try storage.readActionExecutionInput(.bash, binding, &input);
-            try std.testing.expect((try storage.publishActionValue(input.sender_handle.slice(), "value", "published value")) == .accepted);
+            for (0..20) |index| {
+                var key_buffer: [32]u8 = undefined;
+                const key = try std.fmt.bufPrint(&key_buffer, "value-{d}", .{index});
+                try std.testing.expect((try storage.publishActionValue(input.sender_handle.slice(), key, "hidden value")) == .accepted);
+            }
+            for (0..20) |index| {
+                var key_buffer: [32]u8 = undefined;
+                const key = try std.fmt.bufPrint(&key_buffer, "visible-person-{d}", .{index});
+                try submitTestMessage(&storage, &tmp, key, key, session.slice(), "visible person");
+            }
+            const peer_text = "visible peer";
+            const file = try tmp.dir.createFile(std.testing.io, "visible-peer", .{ .read = true });
+            try file.writeStreamingAll(std.testing.io, peer_text);
+            try file.sync(std.testing.io);
+            var peer = try store_testing.completeMessage("visible-peer", session.slice(), file, peer_text);
+            defer peer.removeTemporaryContent(std.testing.io) catch unreachable;
+            peer.sender = .{ .store = storage.selector, .session = session };
+            peer.sender_handle = input.sender_handle;
+            try std.testing.expect(storage.submitMessageWithModel(&peer, null, .{}) == .accepted);
+            _ = try storage.settleActionAttempt(binding, .succeeded, "visible final", .{});
 
             const queued = try store_core.activityPageForTesting(&storage, .{ .session = session, .kinds = .initOne(.received) });
-            try std.testing.expectEqual(@as(usize, 1), queued.count);
-            try std.testing.expectEqual(action_id, queued.items[0].value.received.source_action.?);
-            try std.testing.expect(queued.items[0].value.received.sender == null);
-            try std.testing.expect(queued.items[0].value.received.state == .queued);
-            try std.testing.expectEqualSlices(u8, &protocol.contentDigest("published value"), &queued.items[0].value.received.content.digest);
-
+            try std.testing.expectEqual(@as(usize, 2), queued.count);
+            var peer_queued = false;
+            var final_queued = false;
+            for (queued.items[0..queued.count]) |item| {
+                const message = item.value.received;
+                try std.testing.expect(message.state == .queued);
+                if (message.sender != null) peer_queued = true;
+                if (message.source_action != null and message.source_action.? == action_id) final_queued = true;
+            }
+            try std.testing.expect(peer_queued and final_queued);
             const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-            const applied = try store_core.activityPageForTesting(&storage, .{ .session = session, .kinds = .initMany(&.{ .received, .user }) });
-            var count: usize = 0;
-            for (applied.items[0..applied.count]) |item| switch (item.value) {
-                .received, .user => |message| if (std.mem.eql(u8, &message.content.digest, &protocol.contentDigest("published value"))) {
-                    try std.testing.expectEqual(action_id, message.source_action.?);
-                    try std.testing.expect(message.sender == null);
-                    try std.testing.expect(message.state == .applied);
-                    count += 1;
-                },
-                else => {},
-            };
-            try std.testing.expectEqual(@as(usize, 2), count);
-            const public = try store_core.publicConversationPageForTesting(&storage, .{ .session = session });
-            var found = false;
-            for (public.items[0..public.count]) |item| if (std.mem.eql(u8, &item.content.digest, &protocol.contentDigest("published value"))) {
-                try std.testing.expectEqual(action_id, item.source_action.?);
-                try std.testing.expect(item.sender == null);
-                found = true;
-            };
-            try std.testing.expect(found);
+            const hidden_admission = try store_testing.queryU64(&storage, "SELECT min(admission_position) FROM message_admission WHERE session_ref=?1 AND source_kind=4", .{session.slice()});
+            const hidden_entry = try store_testing.queryU64(&storage, "SELECT min(e.session_position) FROM conversation_entry e JOIN message_admission m ON m.admission_id=e.source_admission_id WHERE m.session_ref=?1 AND m.source_kind=4", .{session.slice()});
+            try std.testing.expectError(error.ContentNotFound, storage.openActivityContent(&.{ .session = session, .position = hidden_admission }));
+            try std.testing.expectError(error.ContentNotFound, storage.openActivityContent(&.{ .session = session, .position = hidden_entry }));
+            try std.testing.expectError(error.ContentNotFound, storage.openPublicConversationContent(&.{ .session = session, .position = hidden_entry }));
+
+            for ([_]@FieldType(protocol.ActivityPage, "direction"){ .forward, .backward }) |direction| {
+                var request: protocol.ActivityPage = .{ .session = session, .direction = direction, .kinds = .initMany(&.{ .admission, .received, .user }), .limit = 3 };
+                var person_count: usize = 0;
+                var peer_count: usize = 0;
+                var final_count: usize = 0;
+                var pages: usize = 0;
+                while (true) {
+                    const page = try store_core.activityPageForTesting(&storage, request);
+                    pages += 1;
+                    for (page.items[0..page.count]) |item| {
+                        const message = switch (item.value) {
+                            .admission, .received, .user => |value| value,
+                            else => unreachable,
+                        };
+                        try std.testing.expect(!std.mem.eql(u8, &message.content.digest, &protocol.contentDigest("hidden value")));
+                        if (std.mem.eql(u8, &message.content.digest, &protocol.contentDigest("visible person"))) person_count += 1;
+                        if (message.sender != null) peer_count += 1;
+                        if (message.source_action != null and message.source_action.? == action_id) final_count += 1;
+                    }
+                    if (!page.more) break;
+                    try std.testing.expectEqual(@as(usize, 3), page.count);
+                    request.end = page.end;
+                    request.position = page.items[page.count - 1].position;
+                    request.ordinal = page.items[page.count - 1].ordinal;
+                }
+                try std.testing.expect(pages > 1);
+                try std.testing.expectEqual(@as(usize, 40), person_count);
+                try std.testing.expectEqual(@as(usize, 2), peer_count);
+                try std.testing.expectEqual(@as(usize, 2), final_count);
+            }
+            var conversation: protocol.ConversationPage = .{ .session = session };
+            var person_count: usize = 0;
+            var peer_count: usize = 0;
+            var final_count: usize = 0;
+            var pages: usize = 0;
+            while (true) {
+                const page = try store_core.publicConversationPageForTesting(&storage, conversation);
+                pages += 1;
+                for (page.items[0..page.count]) |item| {
+                    try std.testing.expect(!std.mem.eql(u8, &item.content.digest, &protocol.contentDigest("hidden value")));
+                    if (std.mem.eql(u8, &item.content.digest, &protocol.contentDigest("visible person"))) person_count += 1;
+                    if (item.sender != null) peer_count += 1;
+                    if (item.source_action != null and item.source_action.? == action_id) final_count += 1;
+                }
+                if (!page.more) break;
+                try std.testing.expectEqual(@as(usize, 16), page.count);
+                conversation.end = page.end;
+                conversation.before_position = page.items[page.count - 1].position;
+                conversation.before_ordinal = page.items[page.count - 1].ordinal;
+            }
+            try std.testing.expect(pages > 1);
+            try std.testing.expectEqual(@as(usize, 20), person_count);
+            try std.testing.expectEqual(@as(usize, 1), peer_count);
+            try std.testing.expectEqual(@as(usize, 1), final_count);
+            try std.testing.expectError(error.InvalidCursor, store_core.publicConversationPageForTesting(&storage, .{ .session = session, .end = conversation.end, .before_position = hidden_entry }));
             try NativePromotion.finishModel(&storage, &tmp, model);
         }
     }.run);

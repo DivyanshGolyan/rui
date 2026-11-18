@@ -579,3 +579,39 @@ test "a one-row page of a person's Messages costs the same steps after 10 or 10,
     }
     try std.testing.expectEqual(steps[0], steps[1]);
 }
+
+test "hidden value admissions and user entries do not increase Activity page work" {
+    var costs: [2][2]i64 = undefined;
+    for ([_]usize{ 10, 10_000 }, &costs) |history, *directions| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try configureTestSession(&storage, "hidden-work");
+        const insert = try std.testing.allocator.printSentinel(
+            "CREATE TEMP TABLE hidden_history AS WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
+                "SELECT value,next_position+2*value-2 AS position,instructions_content_id AS content FROM sequence,session WHERE session_ref='{1s}'; " ++
+                "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at,source_kind) " ++
+                "SELECT 1000+value,'{1s}',printf('hidden-%d',value),content,position,1,1,4 FROM hidden_history; " ++
+                "INSERT INTO conversation_entry(session_ref,entry_ordinal,session_position,entry_kind,turn_id,source_admission_id,source_kind,content_id,recorded_at) " ++
+                "SELECT '{1s}',value,position+1,1,1,1000+value,4,content,1 FROM hidden_history; " ++
+                "UPDATE session SET next_position=next_position+2*{0} WHERE session_ref='{1s}'; DROP TABLE hidden_history",
+            .{ history, session.slice() },
+            0,
+        );
+        defer std.testing.allocator.free(insert);
+        try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=OFF");
+        try sqlite.exec(storage.sqliteDatabase(), insert);
+        try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=ON");
+        try store_core.reloadIdentitiesForTesting(&storage);
+        for ([_]@FieldType(protocol.ActivityPage, "direction"){ .forward, .backward }, directions) |direction, *cost| {
+            const request: protocol.ActivityPage = .{ .session = session, .direction = direction, .kinds = .initMany(&.{ .received, .user }), .limit = 1 };
+            const page = try store_core.activityPageForTesting(&storage, request);
+            try std.testing.expectEqual(@as(usize, 0), page.count);
+            cost.* = try activityPageSteps(&storage, request);
+        }
+    }
+    try std.testing.expectEqual(costs[0][0], costs[1][0]);
+    try std.testing.expectEqual(costs[0][1], costs[1][1]);
+}

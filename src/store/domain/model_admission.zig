@@ -836,7 +836,7 @@ const bind_messages = rsql.Write(.{
     .expect = .{ .counted = .{ .otherwise = error.SelectionChanged } },
 });
 
-const entry_columns = "INSERT INTO conversation_entry(session_ref,entry_ordinal,session_position,entry_kind,turn_id,source_admission_id," ++
+const entry_columns = "INSERT INTO conversation_entry(session_ref,entry_ordinal,session_position,entry_kind,turn_id,source_admission_id,source_kind," ++
     "source_revision,source_operation_id,content_id,recorded_at) ";
 
 fn selectedBeforeSql(comptime ahead: []const u8) []const u8 {
@@ -845,7 +845,7 @@ fn selectedBeforeSql(comptime ahead: []const u8) []const u8 {
 
 const project_messages = rsql.Write(.{
     .sql = entry_columns ++ "SELECT m.session_ref," ++ lastOrdinalSql("@session(?1)") ++ "+row_number() OVER (ORDER BY m.admission_id)+" ++ prior_skills_sql ++ "," ++
-        "?3+row_number() OVER (ORDER BY m.admission_id)-1+" ++ prior_skills_sql ++ ",1,?2,m.admission_id,NULL,NULL,m.content_id,@now " ++
+        "?3+row_number() OVER (ORDER BY m.admission_id)-1+" ++ prior_skills_sql ++ ",1,?2,m.admission_id,m.source_kind,NULL,NULL,m.content_id,@now " ++
         "FROM message_admission m WHERE m.session_ref=@session(?1) AND m.turn_id=?2 AND m.admission_id>=?4 ORDER BY m.admission_id",
     .Args = struct { session: rsql.SessionHead, turn_id: u64, position_base: u64, first_admission: u64 },
     .expect = .{ .counted = .{ .otherwise = error.ProjectionFailed } },
@@ -863,7 +863,7 @@ const project_skills = rsql.Write(.{
 
 const project_instructions = rsql.Write(.{
     .sql = entry_columns ++ "SELECT r.session_ref," ++ lastOrdinalSql("@session(?1)") ++ "+row_number() OVER (ORDER BY r.revision)," ++
-        "?3+row_number() OVER (ORDER BY r.revision)-1,2,?2,NULL,r.revision,NULL,r.instructions_content_id,@now " ++
+        "?3+row_number() OVER (ORDER BY r.revision)-1,2,?2,NULL,NULL,r.revision,NULL,r.instructions_content_id,@now " ++
         "FROM session_revision r WHERE " ++ pendingInstructionsSql("@session(?1)", "?4") ++ " ORDER BY r.revision",
     .Args = struct { session: rsql.SessionHead, turn_id: u64, position_base: u64, revision: u64 },
     .expect = .{ .counted = .{ .otherwise = error.InstructionSelectionFailed } },

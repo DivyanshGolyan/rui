@@ -523,6 +523,10 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
         const key: Key = .{ .position = item.position, .ordinal = item.ordinal };
         if (job.result.low == null) job.result.low = key;
         job.result.high = key;
+        switch (item.value) {
+            .admission, .received, .user => |message| if (!View.visibleMessage(message)) continue,
+            else => {},
+        }
         const pending = item.value == .admission and item.value.admission.state == .queued;
         var row: RenderedRow = .{ .key = key, .offset = offset, .length = 0, .tight = false, .provisional = pending };
         if (toggled != null and toggled.?.key.order(key) != .eq) continue;
@@ -1168,7 +1172,7 @@ const FakeHost = struct {
         for (self.tail, @as(usize, @intCast(self.history)) + 1..) |_, at| {
             if (at > boundary) break;
             const value = self.item(.{ .position = at }, boundary).value;
-            if (value != .admission or value.admission.state != .queued) continue;
+            if (value != .admission or value.admission.state != .queued or value.admission.sender != null or value.admission.source_action != null) continue;
             if (facts.queued.count == 0) facts.queued.oldest_position = at;
             facts.queued.count += 1;
             facts.queued.newest_admission = value.admission.admission;
@@ -2339,7 +2343,7 @@ test "chat info worker owns semantic tool edits across source reuse" {
     try std.testing.expectEqualStrings("none", job.info_edit.?.tools.loaded.names.slice());
 }
 
-test "session_reads native queued personal bands preserve peer and background Action presentation" {
+test "session_reads native queued personal bands preserve peer presentation and hide background Actions" {
     var peer: protocol.NamedPeer = .{ .session = .{} };
     try peer.session.set("9f8e7d");
     var incoming = FakeHost.message(1).admission;
@@ -2351,12 +2355,87 @@ test "session_reads native queued personal bands preserve peer and background Ac
     var job: Job = .{ .session = "k7m2qx", .opening = true, .line_read = .{ .revision = 1, .end = 2 } };
     try host.read(&job);
     try std.testing.expect(std.mem.indexOf(u8, host.shown, "Received message") != null);
-    try std.testing.expect(std.mem.indexOf(u8, host.shown, "Background Action 19") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host.shown, "Background Action 19") == null);
     try std.testing.expect(std.mem.indexOf(u8, host.shown, TerminalText.user_message_on) == null);
-    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, host.shown, "please wait"));
-    try std.testing.expectEqual(@as(usize, 2), job.result.row_count);
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, host.shown, "please wait"));
+    try std.testing.expectEqual(@as(usize, 1), job.result.row_count);
     for (job.result.rows[0..job.result.row_count]) |row| {
         try std.testing.expect(row.length != 0);
         try std.testing.expect(!row.provisional and row.message_key == null);
     }
+}
+
+test "session_reads hides every background Action admission without fetching content" {
+    for ([_]bool{ false, true }) |held| {
+        for ([_]protocol.ActivityItem.Kind{ .received, .user }) |kind| for (std.enums.values(@FieldType(protocol.ActivityItem.Message, "state"))) |state| {
+            if (kind == .user and state != .applied) continue;
+            var background = FakeHost.message(7).admission;
+            background.state = state;
+            background.turn = if (state == .applied) 1 else null;
+            background.source_action = 19;
+            const value: protocol.ActivityItem.Value = switch (kind) {
+                .received => .{ .received = background },
+                .user => .{ .user = background },
+                else => unreachable,
+            };
+            const tail = [_]FakeHost.Tail{.{ .value = value }};
+            var host: FakeHost = .{ .history = 0, .tail = &tail, .end = 1, .held = held, .refuse_content = true };
+            var job: Job = .{ .opening = true, .line_read = .{ .revision = 1, .end = 1 } };
+            try host.read(&job);
+            try std.testing.expectEqual(@as(usize, 0), host.contents);
+            try std.testing.expectEqual(@as(usize, 0), job.result.row_count);
+            try std.testing.expectEqual(@as(u64, 0), job.result.queued.count);
+            try std.testing.expect(job.result.queued_line == null);
+            try std.testing.expectEqualDeep(@as(?Key, .{ .position = 1 }), job.result.low);
+            try std.testing.expectEqual(@as(u64, 1), job.result.cursor.position);
+        };
+    }
+}
+
+test "session_reads queued summary ignores background Actions among person and peer Messages" {
+    var peer: protocol.NamedPeer = .{ .session = .{} };
+    try peer.session.set("9f8e7d");
+    var incoming = FakeHost.message(3).admission;
+    incoming.sender = peer;
+    var background = FakeHost.message(4).admission;
+    background.source_action = 19;
+    const tail = [_]FakeHost.Tail{
+        .{ .value = FakeHost.message(1) },
+        .{ .value = FakeHost.message(2) },
+        .{ .value = .{ .received = incoming } },
+        .{ .value = .{ .received = background } },
+    };
+    for ([_]bool{ false, true }) |held| {
+        var host: FakeHost = .{ .history = 0, .tail = &tail, .end = 4, .held = held };
+        var job: Job = .{ .opening = true, .line_read = .{ .revision = 1, .end = 4 } };
+        try host.read(&job);
+        try std.testing.expectEqualDeep(protocol.Queued{ .count = 2, .oldest_position = 1, .newest_admission = 2, .newest_position = 2 }, job.result.queued);
+        try std.testing.expectEqual(@as(u64, 2), job.result.queued_line.?.admission);
+        try std.testing.expectEqualStrings("please wait", job.result.queued_line.?.line.slice());
+        try std.testing.expectEqual(@as(usize, 3), job.result.row_count);
+        try std.testing.expect(std.mem.indexOf(u8, host.shown, "Received message") != null);
+        try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, host.shown, "Background Action"));
+    }
+}
+
+test "session_reads advances through pages containing only hidden background Actions" {
+    var background = FakeHost.message(1).admission;
+    background.source_action = 19;
+    var tail: [21]FakeHost.Tail = undefined;
+    for (tail[0..20]) |*row| row.* = .{ .value = .{ .received = background } };
+    tail[20] = .{ .value = FakeHost.message(21) };
+    var host: FakeHost = .{ .history = 0, .tail = &tail, .end = 21, .held = true };
+    var job: Job = .{ .line_read = .{ .revision = 1, .end = 21 } };
+    try host.read(&job);
+    try std.testing.expectEqual(@as(usize, 0), job.result.row_count);
+    try std.testing.expectEqual(@as(u64, 16), job.result.cursor.position);
+    try std.testing.expect(!job.result.at_end);
+    job.cursor = job.result.cursor;
+    job.result = .{};
+    try host.read(&job);
+    try std.testing.expectEqual(@as(u64, 21), job.result.cursor.position);
+    try std.testing.expect(job.result.at_end);
+    try std.testing.expectEqual(@as(usize, 1), job.result.row_count);
+    try std.testing.expectEqual(@as(u64, 21), job.result.rows[0].key.position);
+    try std.testing.expect(job.result.rows[0].provisional);
 }

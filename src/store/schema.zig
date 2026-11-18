@@ -61,7 +61,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 80, .digest = 0xa19f085a8611c762 },
     .{ .schema_version = 81, .digest = 0x3fc38cd4bb9b66b9 },
     .{ .schema_version = 82, .digest = 0x367836567791809e },
-    .{ .schema_version = 83, .digest = 0xad86d8b30da91d1c },
+    .{ .schema_version = 83, .digest = 0x235fc8eca5e9f4b9 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -793,8 +793,38 @@ pub const migrations = [_]Migration{
     },
     .{
         .from = 82,
-        .sqlite = &.{"CREATE TABLE action_value(\n action_id INTEGER NOT NULL REFERENCES action_operation(action_id),\n ordinal INTEGER NOT NULL CHECK(ordinal>0),\n handle TEXT NOT NULL CHECK(length(CAST(handle AS BLOB))=32 AND (handle NOT GLOB '*[^0-9a-f]*' AND length(handle)=length(CAST(handle AS BLOB)))),\n publication_key TEXT NOT NULL CHECK(length(CAST(publication_key AS BLOB)) BETWEEN 1 AND 128),\n content_id INTEGER NOT NULL REFERENCES content(content_id),\n admission_id INTEGER UNIQUE REFERENCES message_admission(admission_id),\n published_at INTEGER NOT NULL CHECK(published_at>0),\n PRIMARY KEY(action_id,ordinal),\n UNIQUE(handle,publication_key)\n) STRICT, WITHOUT ROWID"},
-        .mysql = &.{"CREATE TABLE action_value(action_id BIGINT NOT NULL, ordinal BIGINT NOT NULL, handle VARCHAR(32) NOT NULL, publication_key VARCHAR(128) NOT NULL, content_id BIGINT NOT NULL, admission_id BIGINT, published_at BIGINT NOT NULL, PRIMARY KEY(action_id,ordinal), UNIQUE(handle,publication_key), UNIQUE(admission_id), FOREIGN KEY(action_id) REFERENCES action_operation(action_id), FOREIGN KEY(content_id) REFERENCES content(content_id), FOREIGN KEY(admission_id) REFERENCES message_admission(admission_id), CHECK(ordinal>0), CHECK(OCTET_LENGTH(handle)=32 AND NOT REGEXP_LIKE(handle,'[^0-9a-f]','c')), CHECK(OCTET_LENGTH(publication_key) BETWEEN 1 AND 128), CHECK(published_at>0)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin"},
+        .sqlite = &.{
+            "CREATE TABLE action_value(\n action_id INTEGER NOT NULL REFERENCES action_operation(action_id),\n ordinal INTEGER NOT NULL CHECK(ordinal>0),\n handle TEXT NOT NULL CHECK(length(CAST(handle AS BLOB))=32 AND (handle NOT GLOB '*[^0-9a-f]*' AND length(handle)=length(CAST(handle AS BLOB)))),\n publication_key TEXT NOT NULL CHECK(length(CAST(publication_key AS BLOB)) BETWEEN 1 AND 128),\n content_id INTEGER NOT NULL REFERENCES content(content_id),\n admission_id INTEGER UNIQUE REFERENCES message_admission(admission_id),\n published_at INTEGER NOT NULL CHECK(published_at>0),\n PRIMARY KEY(action_id,ordinal),\n UNIQUE(handle,publication_key)\n) STRICT, WITHOUT ROWID",
+            "ALTER TABLE message_admission RENAME TO message_admission_before_83",
+            "CREATE TABLE message_admission(\n admission_id INTEGER PRIMARY KEY NOT NULL CHECK(admission_id>0),\n session_ref TEXT NOT NULL REFERENCES session(session_ref),\n command_key TEXT NOT NULL UNIQUE REFERENCES core_command(command_key),\n content_id INTEGER NOT NULL REFERENCES content(content_id),\n admission_position INTEGER CHECK(admission_position>0),\n turn_id INTEGER REFERENCES turn(turn_id),\n admitted_at INTEGER NOT NULL CHECK(admitted_at>0),\n sender_session_ref TEXT REFERENCES session(session_ref),\n sender_position INTEGER CHECK(sender_position>0),\n source_action_id INTEGER UNIQUE REFERENCES action_operation(action_id),\n source_kind INTEGER NOT NULL CHECK(source_kind BETWEEN 1 AND 5),\n UNIQUE(admission_id,source_kind),\n CHECK((sender_session_ref IS NULL)=(sender_position IS NULL)),\n CHECK(source_action_id IS NULL OR sender_session_ref IS NULL),\n CHECK((source_kind=1 AND sender_session_ref IS NULL AND source_action_id IS NULL) OR (source_kind=2 AND sender_session_ref IS NOT NULL) OR (source_kind=3 AND source_action_id IS NOT NULL) OR (source_kind IN (4,5) AND sender_session_ref IS NULL))\n) STRICT",
+            "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at,sender_session_ref,sender_position,source_action_id,source_kind) SELECT admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at,sender_session_ref,sender_position,source_action_id,source_kind FROM message_admission_before_83",
+            "DROP TABLE message_admission_before_83",
+            "CREATE UNIQUE INDEX message_admission_sent ON message_admission(sender_session_ref,sender_position) WHERE sender_session_ref IS NOT NULL",
+            "CREATE INDEX message_admission_session_order ON message_admission(session_ref,turn_id,admission_id)",
+            "CREATE INDEX message_admission_pending ON message_admission(admission_id,session_ref) WHERE turn_id IS NULL",
+            "CREATE INDEX message_admission_session_pending ON message_admission(session_ref,admission_id) WHERE turn_id IS NULL",
+            "CREATE INDEX message_admission_person ON message_admission(session_ref,admission_position) WHERE source_kind=1",
+            "CREATE INDEX message_admission_unpositioned ON message_admission(session_ref) WHERE admission_position IS NULL",
+            "CREATE INDEX message_admission_position ON message_admission(session_ref,admission_position)",
+            "ALTER TABLE conversation_entry RENAME TO conversation_entry_before_83",
+            "CREATE TABLE conversation_entry(\n session_ref TEXT NOT NULL,\n entry_ordinal INTEGER NOT NULL CHECK(entry_ordinal>0),\n session_position INTEGER NOT NULL CHECK(session_position>0),\n entry_kind INTEGER NOT NULL CHECK(entry_kind BETWEEN 1 AND 4),\n turn_id INTEGER REFERENCES turn(turn_id),\n source_admission_id INTEGER UNIQUE REFERENCES message_admission(admission_id),\n source_kind INTEGER,\n source_revision INTEGER,\n source_catalog_position INTEGER,\n source_skill_admission_id INTEGER,\n source_skill_position INTEGER,\n source_operation_id INTEGER REFERENCES model_operation(operation_id),\n source_item_ordinal INTEGER CHECK(source_item_ordinal IS NULL OR source_item_ordinal>=0),\n content_id INTEGER NOT NULL REFERENCES content(content_id),\n recorded_at INTEGER NOT NULL CHECK(recorded_at>0),\n PRIMARY KEY(session_ref,entry_ordinal),\n UNIQUE(session_ref,session_position),\n UNIQUE(session_ref,source_revision),\n UNIQUE(session_ref,source_catalog_position),\n UNIQUE(source_skill_admission_id,source_skill_position),\n FOREIGN KEY(source_admission_id,source_kind) REFERENCES message_admission(admission_id,source_kind),\n FOREIGN KEY(session_ref,source_revision) REFERENCES session_revision(session_ref,revision),\n FOREIGN KEY(session_ref,source_catalog_position) REFERENCES session_skill_catalog(session_ref,position),\n FOREIGN KEY(source_skill_admission_id,source_skill_position) REFERENCES message_skill(admission_id,position),\n FOREIGN KEY(source_operation_id,source_item_ordinal) REFERENCES model_output_item(operation_id,item_ordinal),\n CHECK((entry_kind=1)=(source_kind IS NOT NULL)),\n CHECK((entry_kind=3)=(source_item_ordinal IS NOT NULL)),\n CHECK((turn_id IS NULL)=(source_catalog_position IS NOT NULL)),\n CHECK(source_catalog_position IS NULL OR source_catalog_position=session_position),\n CHECK((source_skill_admission_id IS NULL)=(source_skill_position IS NULL)),\n CHECK((entry_kind=4)=(source_skill_position IS NOT NULL)),\n CHECK((entry_kind=1 AND source_admission_id IS NOT NULL AND source_revision IS NULL AND source_catalog_position IS NULL AND source_operation_id IS NULL) OR (entry_kind=2 AND source_admission_id IS NULL AND ((source_revision IS NOT NULL AND source_catalog_position IS NULL) OR (source_revision IS NULL AND source_catalog_position IS NOT NULL)) AND source_operation_id IS NULL) OR (entry_kind=3 AND source_admission_id IS NULL AND source_revision IS NULL AND source_catalog_position IS NULL AND source_operation_id IS NOT NULL) OR (entry_kind=4 AND source_admission_id IS NULL AND source_revision IS NULL AND source_catalog_position IS NULL AND source_operation_id IS NULL))\n) STRICT, WITHOUT ROWID",
+            "INSERT INTO conversation_entry(session_ref,entry_ordinal,session_position,entry_kind,turn_id,source_admission_id,source_kind,source_revision,source_catalog_position,source_skill_admission_id,source_skill_position,source_operation_id,source_item_ordinal,content_id,recorded_at) SELECT e.session_ref,e.entry_ordinal,e.session_position,e.entry_kind,e.turn_id,e.source_admission_id,m.source_kind,e.source_revision,e.source_catalog_position,e.source_skill_admission_id,e.source_skill_position,e.source_operation_id,e.source_item_ordinal,e.content_id,e.recorded_at FROM conversation_entry_before_83 e LEFT JOIN message_admission m ON m.admission_id=e.source_admission_id",
+            "DROP TABLE conversation_entry_before_83",
+            "CREATE INDEX conversation_entry_history ON conversation_entry(session_ref,session_position)",
+            "CREATE INDEX conversation_entry_activity_user ON conversation_entry(session_ref,entry_kind,source_kind,session_position)",
+            "CREATE INDEX conversation_entry_activity_assistant ON conversation_entry(session_ref,entry_kind,session_position)",
+            "CREATE INDEX message_admission_activity ON message_admission(session_ref,source_kind,admission_position)",
+        },
+        .mysql = &.{
+            "CREATE TABLE action_value(action_id BIGINT NOT NULL, ordinal BIGINT NOT NULL, handle VARCHAR(32) NOT NULL, publication_key VARCHAR(128) NOT NULL, content_id BIGINT NOT NULL, admission_id BIGINT, published_at BIGINT NOT NULL, PRIMARY KEY(action_id,ordinal), UNIQUE(handle,publication_key), UNIQUE(admission_id), FOREIGN KEY(action_id) REFERENCES action_operation(action_id), FOREIGN KEY(content_id) REFERENCES content(content_id), FOREIGN KEY(admission_id) REFERENCES message_admission(admission_id), CHECK(ordinal>0), CHECK(OCTET_LENGTH(handle)=32 AND NOT REGEXP_LIKE(handle,'[^0-9a-f]','c')), CHECK(OCTET_LENGTH(publication_key) BETWEEN 1 AND 128), CHECK(published_at>0)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
+            "ALTER TABLE message_admission ADD UNIQUE(admission_id,source_kind)",
+            "ALTER TABLE conversation_entry ADD COLUMN source_kind BIGINT NULL AFTER source_admission_id",
+            "UPDATE conversation_entry e LEFT JOIN message_admission m ON m.admission_id=e.source_admission_id SET e.source_kind=m.source_kind",
+            "ALTER TABLE conversation_entry ADD CHECK((entry_kind=1)=(source_kind IS NOT NULL)), ADD FOREIGN KEY(source_admission_id,source_kind) REFERENCES message_admission(admission_id,source_kind)",
+            "CREATE INDEX conversation_entry_activity_user ON conversation_entry(session_ref,entry_kind,source_kind,session_position)",
+            "CREATE INDEX conversation_entry_activity_assistant ON conversation_entry(session_ref,entry_kind,session_position)",
+            "CREATE INDEX message_admission_activity ON message_admission(session_ref,source_kind,admission_position)",
+        },
     },
 };
 
@@ -1291,7 +1321,7 @@ pub const tables = [_]Table{
             .{ .name = "source_kind", .type = .int, .check = "source_kind BETWEEN 1 AND 5" },
         },
         .primary_key = &.{"admission_id"},
-        .uniques = &.{ &.{"command_key"}, &.{"source_action_id"} },
+        .uniques = &.{ &.{"command_key"}, &.{"source_action_id"}, &.{ "admission_id", "source_kind" } },
         .foreign_keys = &.{
             references("session_ref", "session", session_reference),
             references("command_key", "core_command", command_reference),
@@ -1576,6 +1606,7 @@ pub const tables = [_]Table{
             .{ .name = "entry_kind", .type = .int, .check = "entry_kind BETWEEN 1 AND 4" },
             .{ .name = "turn_id", .type = .int, .nullable = true },
             .{ .name = "source_admission_id", .type = .int, .nullable = true },
+            .{ .name = "source_kind", .type = .int, .nullable = true },
             .{ .name = "source_revision", .type = .int, .nullable = true },
             .{ .name = "source_catalog_position", .type = .int, .nullable = true },
             .{ .name = "source_skill_admission_id", .type = .int, .nullable = true },
@@ -1590,6 +1621,7 @@ pub const tables = [_]Table{
         .foreign_keys = &.{
             references("turn_id", "turn", &.{"turn_id"}),
             references("source_admission_id", "message_admission", &.{"admission_id"}),
+            .{ .columns = &.{ "source_admission_id", "source_kind" }, .references = "message_admission", .referenced = &.{ "admission_id", "source_kind" } },
             references("source_operation_id", "model_operation", &.{"operation_id"}),
             references("content_id", "content", content_reference),
             .{ .columns = &.{ "session_ref", "source_revision" }, .references = "session_revision", .referenced = &.{ "session_ref", "revision" } },
@@ -1598,6 +1630,7 @@ pub const tables = [_]Table{
             .{ .columns = &.{ "source_operation_id", "source_item_ordinal" }, .references = "model_output_item", .referenced = &.{ "operation_id", "item_ordinal" } },
         },
         .checks = &.{
+            "(entry_kind=1)=(source_kind IS NOT NULL)",
             "(entry_kind=3)=(source_item_ordinal IS NOT NULL)",
             "(turn_id IS NULL)=(source_catalog_position IS NOT NULL)",
             "source_catalog_position IS NULL OR source_catalog_position=session_position",
@@ -1800,6 +1833,9 @@ pub const tables = [_]Table{
 };
 
 pub const indexes = [_]Index{
+    .{ .name = "message_admission_activity", .table = "message_admission", .columns = &.{ "session_ref", "source_kind", "admission_position" } },
+    .{ .name = "conversation_entry_activity_user", .table = "conversation_entry", .columns = &.{ "session_ref", "entry_kind", "source_kind", "session_position" } },
+    .{ .name = "conversation_entry_activity_assistant", .table = "conversation_entry", .columns = &.{ "session_ref", "entry_kind", "session_position" } },
     .{ .name = "action_stop_target", .table = "action_stop", .columns = &.{"target_action_id"} },
     .{ .name = "content_part_by_part", .table = "content_part", .columns = &.{"part_content_id"} },
     .{ .name = "session_obligation_parent", .table = "session", .columns = &.{ "parent_ref", "obligation_since", "session_ref" }, .where = "obligation_since IS NOT NULL" },
@@ -1956,8 +1992,7 @@ pub const objects_quota = 120_000 * (tables.len + indexes.len);
 
 pub fn hasIndex(comptime name: []const u8) bool {
     comptime {
-        @setEvalBranchQuota(objects_quota);
-        for (objects(.sqlite)) |object| if (object.kind == .index and std.mem.eql(u8, object.name, name)) return true;
+        for (indexes) |index| if (std.mem.eql(u8, index.name, name)) return true;
         return false;
     }
 }
@@ -3507,9 +3542,19 @@ test "schema 82 backfills input sources and preserves admissions" {
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM pragma_foreign_key_check"));
     try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, "UPDATE message_admission SET source_kind=1 WHERE admission_id=1"));
     for (comptime objects(.sqlite)) |object| {
-        if (!std.mem.eql(u8, object.name, "message_admission") and !std.mem.startsWith(u8, object.name, "message_admission_")) continue;
+        if (std.mem.eql(u8, object.name, "message_admission") or std.mem.eql(u8, object.name, "message_admission_activity")) continue;
+        if (!std.mem.startsWith(u8, object.name, "message_admission_")) continue;
         var found = false;
         for (migrations[81 - migration_baseline].sqlite) |statement| found = found or std.mem.eql(u8, object.sql, statement);
+        try std.testing.expect(found);
+    }
+}
+
+test "schema 83 migration rebuilds canonical input tables" {
+    for (comptime objects(.sqlite)) |object| {
+        if (!std.mem.eql(u8, object.name, "message_admission") and !std.mem.eql(u8, object.name, "conversation_entry")) continue;
+        var found = false;
+        for (migrations[82 - migration_baseline].sqlite) |statement| found = found or std.mem.eql(u8, object.sql, statement);
         try std.testing.expect(found);
     }
 }
@@ -3538,10 +3583,16 @@ test "schema 83 migration creates constrained action values" {
     try sqlite.exec(database, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
     try sqlite.exec(database, @embedFile("migration_baseline_rows.sql"));
     for (migrations) |step| {
-        if (step.from > 82) break;
+        if (step.from >= 82) break;
         for (step.sqlite) |statement| try sqlite.exec(database, statement);
     }
+    try sqlite.exec(database, "CREATE TEMP TABLE old_entries AS SELECT * FROM conversation_entry");
+    for (migrations[82 - migration_baseline].sqlite) |statement| try sqlite.exec(database, statement);
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM old_entries EXCEPT SELECT session_ref,entry_ordinal,session_position,entry_kind,turn_id,source_admission_id,source_revision,source_catalog_position,source_skill_admission_id,source_skill_position,source_operation_id,source_item_ordinal,content_id,recorded_at FROM conversation_entry)"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM conversation_entry e JOIN message_admission m ON e.source_admission_id=m.admission_id WHERE e.source_kind<>m.source_kind OR e.source_kind IS NULL"));
     try sqlite.exec(database, "PRAGMA foreign_keys=ON;PRAGMA legacy_alter_table=OFF");
+    try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, "UPDATE conversation_entry SET source_kind=4 WHERE source_admission_id IS NOT NULL"));
+    try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, "UPDATE conversation_entry SET source_kind=NULL WHERE source_admission_id IS NOT NULL"));
     try sqlite.exec(database, "INSERT INTO action_value(action_id,ordinal,handle,publication_key,content_id,published_at) SELECT min(action_id),1,'0123456789abcdef0123456789abcdef','test',1,1 FROM action_operation");
     try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT count(*) FROM action_value"));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM pragma_foreign_key_check"));

@@ -437,6 +437,7 @@ The conversation frontend is one full-screen libvaxis interface with a composer;
 Interactive entry requires a terminal and refuses `TERM=dumb` with guidance before changing any Host or Session state.
 A User Message is an upright block on its themed tint band, with a quiet `›` at the margin. Its Host-written admission time is `HH:MM` in the right sidenote margin from 40 columns, subject to the shared timestamp rule below.
 Assistant prose starts at column 0 without speaker labels.
+A background Action’s published values and final input draw no conversation row, including while queued or excluded. Their delivery to the model is unchanged; the tool row and its fold retain the stored result.
 A Message over 1,024 bytes, 4 non-blank lines or 12 lines from its first to its last non-blank line shows its first two non-blank lines and a dim `┄ N more lines` row; Ctrl-O or a click on its summary opens it whole.
 Tool activity follows the conversation's last line as the activity tail, whose rows `ActivityBlock` alone decides.
 It shows at most the three oldest calls awaiting permanent presentation, oldest first and fewer on short terminals, then `+N more running · info`, `+N · info` on a narrow row, counting every call not drawn; a click on that row opens chat info.

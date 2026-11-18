@@ -1143,21 +1143,15 @@ test "a queued Message is labelled only while work under way holds it" {
     inline for (.{ .queued, .excluded, .applied }) |state| try std.testing.expect(messageLabel(state, .none) == null);
 }
 
-fn inputPrefix(sink: anytype, colour: bool, admitted_at: u64, action: ?u64) !void {
-    if (action) |id| {
-        try print(sink, "{s}Background Action {d}{s}\n", .{ Style.quiet.code(colour), id, Style.normal.code(colour) });
-    } else try userPrefix(sink, colour, admitted_at);
-}
-
 pub fn message(requests: client.Requests, store: []const u8, session: []const u8, item: protocol.ActivityItem, value: protocol.ActivityItem.Message, labels: Labels, sink: anytype, colour: bool) !void {
+    if (!visibleMessage(value)) return;
     if (messageLabel(value.state, labels)) |text| {
         try print(sink, "{s}{s}{s}\n", .{ Style.quiet.code(colour), text, Style.normal.code(colour) });
     }
     if (value.sender) |sender| return peerLine(sink, .inbound, sender, value.admitted_at);
-    const personal = value.source_action == null;
-    if (comptime std.meta.hasMethod(@TypeOf(sink), "userMessage")) try sink.userMessage(personal);
+    if (comptime std.meta.hasMethod(@TypeOf(sink), "userMessage")) try sink.userMessage(true);
     const block: Collapsed = .{ .source = .activity, .position = item.position, .ordinal = item.ordinal, .content = value.content, .row = item.value == .user };
-    try inputPrefix(sink, colour, value.admitted_at, value.source_action);
+    try userPrefix(sink, colour, value.admitted_at);
     var body: UserBody(@TypeOf(sink)) = undefined;
     try body.init(sink, value.content.length, false);
     try content(requests, store, session, item, value.content, &body);
@@ -1507,7 +1501,15 @@ pub fn gap(above: bool, below: bool, tool_pair: bool) bool {
     return !(tool_pair or (above and below));
 }
 
+pub fn visibleMessage(value: protocol.ActivityItem.Message) bool {
+    return value.source_action == null;
+}
+
 pub fn render(requests: client.Requests, store: []const u8, session: []const u8, provider: ?protocol.Provider, item: protocol.ActivityItem, queued: protocol.Queued, held: bool, sink: anytype, colour: bool, home: []const u8, destination: Destination, fold: Fold) !bool {
+    switch (item.value) {
+        .admission, .received, .user => |value| if (!visibleMessage(value)) return false,
+        else => {},
+    }
     switch (item.value) {
         .admission => |value| {
             if (!showsAtAdmission(item.position, value, queued, held)) return false;
@@ -1600,7 +1602,7 @@ fn excludedAtStop(requests: client.Requests, store: []const u8, session: []const
         };
         for (page.facts.items[0..page.facts.count]) |item| {
             var value = item.value.admission;
-            if (value.state != .queued or value.admission > stop.value.stop.cutoff) continue;
+            if (value.state != .queued or value.admission > stop.value.stop.cutoff or !visibleMessage(value)) continue;
             value.state = .excluded;
             if (wrote) try sink.feed("\n");
             wrote = true;
@@ -1806,15 +1808,28 @@ test "MCP approval marks argument lines escapes controls and refuses a viewport 
     try std.testing.expect(Consent.offered(screen.consent, projection.approval) == null);
 }
 
-test "background final input prefix names the Action instead of a person" {
+test "SUI-29 Action-sourced inputs draw nothing in the conversation" {
     const Sink = struct {
-        bytes: std.Io.Writer.Allocating,
-        pub fn feed(self: *@This(), text: []const u8) !void {
-            try self.bytes.writer.writeAll(text);
+        pub fn feed(_: *@This(), _: []const u8) !void {
+            return error.UnexpectedOutput;
         }
+        pub fn excluding(_: *@This(), _: u64) void {}
     };
-    var sink: Sink = .{ .bytes = .init(std.testing.allocator) };
-    defer sink.bytes.deinit();
-    try inputPrefix(&sink, false, 1, 42);
-    try std.testing.expectEqualStrings("Background Action 42\n", sink.bytes.written());
+    var sink: Sink = .{};
+    const content_ref: protocol.ActivityItem.Content = .{ .length = 5, .digest = @splat(0) };
+    for (std.enums.values(@FieldType(protocol.ActivityItem.Message, "state"))) |state| {
+        const value: protocol.ActivityItem.Message = .{
+            .admission = 1,
+            .key = .{},
+            .turn = null,
+            .state = state,
+            .content = content_ref,
+            .admitted_at = 1,
+            .source_action = 42,
+        };
+        for ([_]protocol.ActivityItem.Value{ .{ .received = value }, .{ .user = value }, .{ .admission = value } }) |row| {
+            const item: protocol.ActivityItem = .{ .position = 1, .at = 1, .value = row };
+            try std.testing.expect(!try render(undefined, "unused", "k7m2qx", null, item, .{ .count = 1, .oldest_position = 1, .newest_admission = 1, .newest_position = 1 }, false, &sink, false, "", .{ .viewport = .wcwidth }, .none));
+        }
+    }
 }
