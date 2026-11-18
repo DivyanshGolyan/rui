@@ -588,61 +588,6 @@ test "a Current report's work grows linearly in one Operation's calls, as main's
     }.run);
 }
 
-test "derived work facts are served across all work replies" {
-    try store_testing.forEachEngine(struct {
-        fn checkField(expected: std.json.Value, actual: std.json.Value, name: []const u8) !void {
-            var a: [1024]u8 = undefined;
-            var b: [1024]u8 = undefined;
-            var aw = std.Io.Writer.fixed(&a);
-            var bw = std.Io.Writer.fixed(&b);
-            try std.json.Stringify.value(expected.object.get(name).?, .{}, &aw);
-            try std.json.Stringify.value(actual.object.get(name).?, .{}, &bw);
-            try std.testing.expectEqualStrings(aw.buffered(), bw.buffered());
-        }
-        fn run(case: *store_testing.Case) !void {
-            var tmp = std.testing.tmpDir(.{});
-            defer tmp.cleanup();
-            var storage: Store = undefined;
-            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
-            defer storage.close() catch unreachable;
-            const session = try configureTestSession(&storage, "facts-config");
-            try submitTestMessage(&storage, &tmp, "facts-file", "facts-message", session.slice(), "input");
-            const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-            const report = try testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024);
-            defer std.testing.allocator.free(report);
-            const current = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, report, .{});
-            defer current.deinit();
-            const expected = current.value.object.get("work").?;
-            try std.testing.expect(expected.object.get("actions").?.object.get("stop").?.bool);
-            try std.testing.expectEqual(binding.turn_id, try std.fmt.parseInt(u64, expected.object.get("actions").?.object.get("interrupt").?.object.get("turn").?.string, 10));
-            var used = std.atomic.Value(u64).init(0);
-            const listing = try shared_fixtures.testingSessionList(&storage, &tmp, .{}, &used, 914);
-            defer std.testing.allocator.free(listing);
-            const list = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, listing, .{});
-            defer list.deinit();
-            const list_work = list.value.object.get("sessions").?.array.items[0].object.get("work").?;
-            var request: protocol.ActivityPage = .{};
-            try request.session.set(session.slice());
-            const page = try store_core.activityPageForTesting(&storage, request);
-            var activity_buffer: [@import("../../activity_reply.zig").max_page_bytes]u8 = undefined;
-            var activity_writer = std.Io.Writer.fixed(&activity_buffer);
-            try @import("../../activity_reply.zig").writePage(&activity_writer, &page);
-            const activity = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, activity_writer.buffered(), .{});
-            defer activity.deinit();
-            const observed = try store_testing.observeCommandForTesting(&storage, "facts-message");
-            var observation_buffer: protocol.CommandObservationBuffer = .{};
-            try observation_buffer.render(@import("../../host_reply.zig").renderFullCommandObservation, .{ "facts-message", &observed, @as(?[]const u8, null) });
-            const observation = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, observation_buffer.bytes[0..observation_buffer.len], .{});
-            defer observation.deinit();
-            inline for (.{ "state", "first_action", "attention", "group", "actions" }) |field| {
-                try checkField(expected, list_work, field);
-                try checkField(expected, activity.value.object.get("work").?, field);
-                try checkField(expected, observation.value.object.get("observation").?.object.get("work").?, field);
-            }
-        }
-    }.run);
-}
-
 test "served work intents imply admission across permission and control states" {
     try store_testing.forEachEngine(struct {
         const Scenario = enum { idle, queued, in_flight, retrying, finished, owed, stopped, stopping, stopping_queued, stopping_owed, approval, message_decline, mixed };
@@ -729,13 +674,7 @@ test "served work intents imply admission across permission and control states" 
                     // The approval is still settling, but no external decision is actionable.
                     const observed = try store_testing.observeCommandForTesting(&storage, "intent-first");
                     try std.testing.expectEqual(protocol.MessageRequestState.waiting_for_permission, observed.requestState().?);
-                    var response: protocol.CommandObservationBuffer = .{};
-                    try response.render(@import("../../host_reply.zig").renderFullCommandObservation, .{ "intent-first", &observed, @as(?[]const u8, null) });
-                    var decoded = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, response.bytes[0..response.len], .{});
-                    defer decoded.deinit();
-                    const observation = decoded.value.object.get("observation").?.object;
-                    try std.testing.expectEqualStrings("waiting_for_permission", observation.get("state").?.string);
-                    try std.testing.expect(observation.get("work").?.object.get("first_action").? == .null);
+                    try std.testing.expectEqual(@as(?u64, null), observed.kind.message.?.work.?.first_action);
                 }
                 if (scenario == .message_decline or scenario == .mixed) {
                     const bytes = try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, .current);

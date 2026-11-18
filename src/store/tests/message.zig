@@ -1559,6 +1559,7 @@ test "creation image defaults and parent authority match receipts on replay" {
                 var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
                 const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
                 var create = try completeConfiguration("image-default-create", "", workspace, if (images) "unlisted-model" else "gpt-3.5-turbo");
+                create.configuration.compaction_trigger.state = .omitted;
                 create.configuration.tools = if (explicit) try .of(&.{"bash"}) else .{};
                 if (loaded != .omitted) create.configuration.loaded_tools = if (!explicit and loaded == .reachable) try .of(&.{ "bash", "find_tools" }) else try .of(&.{"bash"});
                 if (with_parent) {
