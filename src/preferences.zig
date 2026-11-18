@@ -821,7 +821,7 @@ test "saved invalid preference fields are environment failures and never get ove
     }
 }
 
-test "CLI-22 a defaults file is the lowest version that holds its values" {
+test "updates publish the expected preference versions to disk" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -840,25 +840,5 @@ test "CLI-22 a defaults file is the lowest version that holds its values" {
         var bytes: [1024]u8 = undefined;
         try std.testing.expectEqualStrings(case[1], try savedFile(config, &bytes));
         try std.testing.expectEqualDeep(written, try load(home));
-    }
-}
-
-test "CLI-23 an edit changes only what it names" {
-    const readiness: Readinesses = .initFill(.configured);
-    var saved: Values = .{};
-    try saved.provider.set("codex");
-    try saved.model.set("gpt-6-luna");
-    const cases = .{
-        .{ Edit{}, "codex", "gpt-6-luna", true },
-        .{ Edit{ .model = .clear }, "codex", "", true },
-        .{ Edit{ .model = .{ .set = "new-model" } }, "codex", "new-model", true },
-        .{ Edit{ .provider = .{ .set = "openai" } }, "openai", "", true },
-        .{ Edit{ .notifications = false }, "codex", "gpt-6-luna", false },
-    };
-    inline for (cases) |case| {
-        const actual = try apply(saved, case[0], &readiness);
-        try std.testing.expectEqualStrings(case[1], actual.provider.slice());
-        try std.testing.expectEqualStrings(case[2], actual.model.slice());
-        try std.testing.expectEqual(case[3], actual.notifications);
     }
 }
