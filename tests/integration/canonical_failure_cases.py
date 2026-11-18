@@ -322,7 +322,7 @@ def interactive_cases(state, binding=False, null_code=False):
                         os.write(master, b"\x04")
                 else:
                     if route == "/v1/control/permission-decision":
-                        title = "? Check successful shell exit"
+                        title = "● Check successful shell exit"
                         proposal = human.keyed_frame(master, b"",
                             lambda frame, x, y: human.CHOICE in frame and title in frame)
                         rows = [row.strip() for row in proposal.splitlines()]

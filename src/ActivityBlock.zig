@@ -218,15 +218,15 @@ test "the activity tail puts the clock on the running call's own row, and the wo
     block.live.entries[2] = entry(7, 3, "Run zig build test-store", .unresolved);
     block.live.count = 3;
     block.live.total = 5;
-    block.work = .{ .mark = "⠹", .tone = .normal, .words = "Run zig build test", .clock = .{ .elapsed = 42 }, .call = .{ .operation = 7, .ordinal = 2 } };
+    block.work = .{ .mark = "◝", .tone = .normal, .words = "Run zig build test", .clock = .{ .elapsed = 42 }, .call = .{ .operation = 7, .ordinal = 2 } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 20 }, .cell_size = .{} };
     const drawn = try block.widget().draw(ctx);
     try std.testing.expectEqual(@as(u16, 4), drawn.size.height);
     try std.testing.expectEqualStrings("✓ Read src/overview_view.zig", try rowText(drawn, 0));
-    try std.testing.expectEqualStrings("⠹ Run zig build test · 42s", try rowText(drawn, 1));
-    try std.testing.expectEqualStrings("⠹ Run zig build test-store", try rowText(drawn, 2));
+    try std.testing.expectEqualStrings("◝ Run zig build test · 42s", try rowText(drawn, 1));
+    try std.testing.expectEqualStrings("◝ Run zig build test-store", try rowText(drawn, 2));
     try std.testing.expectEqual(vaxis.Color{ .index = 8 }, drawn.readCell(2, 0).style.fg);
     for ([_]u16{ 1, 2 }) |row| {
         try std.testing.expectEqual(vaxis.Color{ .index = 4 }, drawn.readCell(0, row).style.fg);
@@ -249,8 +249,8 @@ test "the activity tail puts the clock on the running call's own row, and the wo
         .failure = widget_style.of(.{ .depth = .none }, .{ .colour = .failure }),
     };
     const plain = try block.widget().draw(ctx);
-    try std.testing.expectEqualStrings("⠹ Run zig build test · 42s", try rowText(plain, 1));
-    try std.testing.expectEqualStrings("⠹ Run zig build test-store", try rowText(plain, 2));
+    try std.testing.expectEqualStrings("◝ Run zig build test · 42s", try rowText(plain, 1));
+    try std.testing.expectEqualStrings("◝ Run zig build test-store", try rowText(plain, 2));
     for (plain.buffer) |cell| {
         try std.testing.expectEqual(vaxis.Color.default, cell.style.fg);
         try std.testing.expectEqual(vaxis.Color.default, cell.style.bg);
@@ -258,18 +258,18 @@ test "the activity tail puts the clock on the running call's own row, and the wo
     block.styles = coloured;
 
     block.live = .{};
-    block.work = .{ .mark = "⠹", .tone = .normal, .words = "Thinking", .clock = .{ .elapsed = 12 } };
+    block.work = .{ .mark = "◝", .tone = .normal, .words = "Thinking", .clock = .{ .elapsed = 12 } };
     block.queued = .{ .line = "also update docs/using-rui.md", .count = 1 };
     const waiting = try block.widget().draw(ctx);
     try std.testing.expectEqual(@as(u16, 2), waiting.size.height);
-    try std.testing.expectEqualStrings("⠹ Thinking · 12s", try rowText(waiting, 0));
+    try std.testing.expectEqualStrings("◝ Thinking · 12s", try rowText(waiting, 0));
     try std.testing.expectEqualStrings("◌ also update docs/using-rui.md", try rowText(waiting, 1));
     try std.testing.expectEqual(@as(usize, 0), waiting.children.len);
 
-    block.work = .{ .mark = "⠹", .tone = .attention, .words = "Rate limited", .clock = .{ .retry = .{ .attempt = 2, .seconds = 18 } } };
+    block.work = .{ .mark = "◝", .tone = .attention, .words = "Rate limited", .clock = .{ .retry = .{ .attempt = 2, .seconds = 18 } } };
     const retry = try block.widget().draw(ctx);
     try std.testing.expectEqual(@as(u16, 2), retry.size.height);
-    try std.testing.expectEqualStrings("⠹ Rate limited · retry 2 in 18s", try rowText(retry, 0));
+    try std.testing.expectEqualStrings("◝ Rate limited · retry 2 in 18s", try rowText(retry, 0));
 
     block.work = null;
     block.queued = null;
@@ -283,23 +283,23 @@ test "a narrow or short activity tail keeps the clock and the oldest calls" {
     block.live.entries[1] = entry(7, 2, "Run the whole store conformance suite on every dialect", .unresolved);
     block.live.count = 2;
     block.live.total = 30;
-    block.work = .{ .mark = "⠹", .tone = .normal, .words = "Run the whole store conformance suite on every dialect", .clock = .{ .elapsed = 61 }, .call = .{ .operation = 7, .ordinal = 2 } };
+    block.work = .{ .mark = "◝", .tone = .normal, .words = "Run the whole store conformance suite on every dialect", .clock = .{ .elapsed = 61 }, .call = .{ .operation = 7, .ordinal = 2 } };
     block.queued = .{ .line = "and then summarize", .count = 3 };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const narrow = try block.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 30, .height = 20 }, .cell_size = .{} });
-    try std.testing.expectEqualStrings("⠹ Run the whole store… · 1m 1s", try rowText(narrow, 1));
+    try std.testing.expectEqualStrings("◝ Run the whole store… · 1m 1s", try rowText(narrow, 1));
     try std.testing.expectEqualStrings("+28 more running · info", block.more.label);
     try std.testing.expectEqualStrings("◌ 3 · and then summarize", try rowText(narrow, 3));
     _ = try block.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 21, .height = 20 }, .cell_size = .{} });
     try std.testing.expectEqualStrings("+28 · info", block.more.label);
     const short = try block.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 30, .height = 2 }, .cell_size = .{} });
     try std.testing.expectEqual(@as(u16, 2), short.size.height);
-    try std.testing.expectEqualStrings("⠹ Run the whole store… · 1m 1s", try rowText(short, 0));
+    try std.testing.expectEqualStrings("◝ Run the whole store… · 1m 1s", try rowText(short, 0));
     try std.testing.expectEqualStrings("◌ 3 · and then summarize", try rowText(short, 1));
     const three = try block.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 30, .height = 3 }, .cell_size = .{} });
     try std.testing.expectEqualStrings("+30 more running · info", block.more.label);
-    try std.testing.expectEqualStrings("⠹ Run the whole store… · 1m 1s", try rowText(three, 1));
+    try std.testing.expectEqualStrings("◝ Run the whole store… · 1m 1s", try rowText(three, 1));
     try std.testing.expectEqualStrings("◌ 3 · and then summarize", try rowText(three, 2));
     const work = block.work;
     block.work = null;
