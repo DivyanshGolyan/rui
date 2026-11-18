@@ -628,7 +628,7 @@ class SelectionTest(unittest.TestCase):
                   "install.sh": True, "build.zig": True}
         source = Path(__file__).resolve().parents[2] / "src"
         own = {f"src/{path.name}" for path in source.glob("*.zig") if path.name.lower().startswith("upgrade")}
-        self.assertLessEqual({"src/upgrade.zig", "src/upgrade_process.zig", "src/UpgradeJob.zig", "src/upgrade_status.zig"}, own)
+        self.assertLessEqual({"src/upgrade.zig", "src/upgrade_process.zig", "src/upgrade_run.zig", "src/UpgradeJob.zig", "src/upgrade_status.zig"}, own)
         self.assertEqual(own, {path for path in tree_graph().owners["upgrade-integration"] if "pgrade" in path})
         expected = others | dict.fromkeys(own | {"src/upgrade_new.zig", "src/UpgradeNew.zig"}, True)
         for path, upgrade_required in expected.items():
