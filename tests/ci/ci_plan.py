@@ -59,9 +59,10 @@ def plan(selection: dict, *, event_name: str, draft: bool, promotion: bool,
         p['native_targets'] = sorted(normalize(set(p['native_targets']) | core))
         p['retry'] = False
     elif ready_pr:
-        # The PR tier: Linux compilation and the selected Linux suites only. Promotion owns
-        # macOS, the LLVM frame gate, the upgrade, cache-execution and Linux memory checks.
-        p['targets'] = [t for t in p['targets'] if t != 'stack-frames']
+        # The PR tier: Linux compilation and select_tests.fast_tier's Linux suites, on SQLite
+        # only. Promotion owns whole-suite gates, live engines, macOS, the LLVM frame gate,
+        # the upgrade, cache-execution and Linux memory checks.
+        p['targets'] = list(p['fast_targets'])
         p['native_targets'] = []
         p['cache_execution_checks'] = False
         p['typecheck_macos'] = False
@@ -92,7 +93,7 @@ def plan(selection: dict, *, event_name: str, draft: bool, promotion: bool,
         targets=p['targets'],
         linux_compile_targets=compile_targets,
         native_targets=p['native_targets'],
-        linux_matrix=shards(p['targets'], mysql_suites=p['mysql_suites']),
+        linux_matrix=shards(p['targets'], mysql_suites=p['mysql_suites'], live=not ready_pr),
         linux_split=split_build(compile_targets),
         macos_split=split_build(p['native_targets']),
         macos_matrix=shards(p['native_targets'], 'macos', mysql_suites=p['mysql_suites']),

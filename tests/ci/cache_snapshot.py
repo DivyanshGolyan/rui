@@ -1,10 +1,16 @@
-"""Audit superseded Linux CLI outputs in the pinned Zig cache.
+"""Audit superseded Linux linked outputs in the pinned Zig cache.
 
 Preserve manifest inputs, current installed executables and unknown outputs.
 Historical CLI-own manifests can outlive the Git revision they compile; remove
 those proven owners before their obsolete executable directories. The compiler
 owns discovered-hash calculation (zig cache-cat). Other namespaces, C objects,
 libraries and generated inputs remain untouched.
+
+When setup marked the restored manifests (--mark), main's publisher keeps only
+the linked outputs its own compilation read: every executable or shared
+library whose local owners all stayed unread is removed with those owners, so
+the snapshot that PRs restore holds one generation instead of every revision
+main ever built.
 """
 import argparse
 import hashlib
@@ -26,6 +32,11 @@ PRODUCTS = frozenset(("rui-release-safe-check", "rui-release-small-check",
                       "rui-debug-check", "rui-upgrade-release-fixture", "rui-pr-check"))
 ELF = struct.Struct("<16sHHIQQQIHHHHHH")
 HEADER = struct.Struct("<QQq16sB")  # std.Build.Cache.Manifest.File, Zig 0.17.1
+# Access time given to every restored manifest before compilation (1970-01-02).
+# Zig reads a manifest whenever its step checks for a hit; Linux moves an atime
+# older than a day on the next read under relatime and strictatime alike.
+UNREAD_NS = 86_400 * 10**9
+MARK = "rui-cache-mark.json"
 
 
 class SnapshotError(ValueError):
@@ -156,6 +167,94 @@ def obsolete_cli(directory, products=PRODUCTS):
     return native_cli(directory / product)
 
 
+def linked_output(directory):
+    """One linked Zig compile's output: native executables or shared libraries,
+    their compilation-unit objects and in-directory library aliases. C objects,
+    archives and generated sources are other classes and stay."""
+    entries = list(directory.iterdir())
+    names = {path.name for path in entries}
+    linked = False
+    for path in entries:
+        info = path.lstat()
+        if stat.S_ISLNK(info.st_mode):
+            target = os.readlink(path)
+            if "/" in target or target not in names:
+                return False
+        elif not stat.S_ISREG(info.st_mode):
+            return False
+        elif native_cli(path):
+            linked = True
+        elif not path.name.endswith("_zcu.o"):
+            return False
+    return linked
+
+
+def reads_move_atime(before_ns, after_ns):
+    """Whether one read moved the probe's access time forward from the mark.
+
+    Unchanged means noatime; backwards means the clock or filesystem cannot be
+    trusted to order reads after the mark. Either keeps the CLI-only rule.
+    """
+    return after_ns > before_ns
+
+
+def unread_names(record, atimes):
+    """Manifests still at the mark's access time, or None without a usable mark.
+
+    record is the decoded mark (None when absent or unreadable); atimes maps
+    each local manifest name to its access time in nanoseconds.
+    """
+    if not isinstance(record, dict) or record.get("atime") is not True:
+        return None
+    return {name for name, atime in atimes.items() if atime == UNREAD_NS}
+
+
+def mark(local, record):
+    """After restat and before compilation, make every local manifest unread.
+
+    Writes the record only when a probe shows reads move the access time, so a
+    noatime filesystem leaves publication on the CLI-only rule.
+    """
+    local = Path(local).absolute()
+    real_namespace(local)
+    probe = local / "rui-atime-probe"
+    probe.write_bytes(b"probe")
+    try:
+        os.utime(probe, ns=(UNREAD_NS, probe.stat().st_mtime_ns))
+        probe.read_bytes()
+        moved = reads_move_atime(UNREAD_NS, probe.stat().st_atime_ns)
+    finally:
+        probe.unlink()
+    marked = 0
+    if moved and (local / "h").exists():
+        real_namespace(local / "h")
+        for path in (local / "h").iterdir():
+            if HEX.fullmatch(path.name) and not path.is_symlink() and path.is_file():
+                os.utime(path, ns=(UNREAD_NS, path.stat().st_mtime_ns), follow_symlinks=False)
+                marked += 1
+    report = dict(atime=moved, marked=marked)
+    if moved:
+        Path(record).write_text(json.dumps(report))
+    return report
+
+
+def unread_manifests(local, record):
+    """Local manifests no step read since the mark; None without a usable mark.
+
+    Call before anything else reads manifests, including zig cache-cat.
+    """
+    try:
+        decoded = json.loads(Path(record).read_text())
+    except (OSError, ValueError):
+        decoded = None
+    if unread_names(decoded, {}) is None:
+        return None
+    directory = Path(local) / "h"
+    real_namespace(directory)
+    return unread_names(decoded, {path.name: path.stat().st_atime_ns for path in directory.iterdir()
+                                  if HEX.fullmatch(path.name) and not path.is_symlink()})
+
+
 def native_cli(executable):
     if executable.is_symlink() or not executable.is_file():
         return False
@@ -215,8 +314,12 @@ def protected_outputs(local, prefixes, manifest_roots):
     return protected, set(current)
 
 
-def audit(local, global_cache, *, prefixes=()):
+def audit(local, global_cache, *, prefixes=(), unread=None):
+    """With unread (setup's mark), every linked output whose local owners all
+    stayed unread is eligible; without it, only the five CLI layouts."""
     roots = [Path(local), Path(global_cache)]
+    if unread is not None and not prefixes:
+        raise SnapshotError("read liveness needs the current producer outputs")
     outputs, references, owners, manifest_count, input_count, unfinalized = manifests(roots)
     live = outputs | references
     protected, products = protected_outputs(roots[0], prefixes, live) if prefixes else (set(), PRODUCTS)
@@ -226,20 +329,28 @@ def audit(local, global_cache, *, prefixes=()):
     # installed current executables; only this explicit CLI class may expire.
     cli_live = references | protected if prefixes else live
     report = dict(manifests=manifest_count, inputs=input_count, unfinalized_manifests=unfinalized,
-                  retained_hashes=len(live),
+                  unread_manifests=None if unread is None else len(unread), retained_hashes=len(live),
                   protected_hashes=sorted(protected), eligible_products=sorted(products),
-                  removable_bytes=0, removable=[], retained_cli=[], unknown=[])
+                  removable_bytes=0, removable=[], retained_cli=[], retained_read=[], unknown=[])
     for directory in sorted((roots[0] / "o").iterdir()):
         if not HEX.fullmatch(directory.name) or directory.is_symlink() or not directory.is_dir():
             report["unknown"].append(str(directory))
         elif directory.name in cli_live:
             if obsolete_cli(directory, products):
                 report["retained_cli"].append(str(directory))
-        elif obsolete_cli(directory, products):
-            local_owners = [owner for owner in owners.get(directory.name, [])
+            if directory.name in protected and unread is not None and all(
+                    Path(owner["path"]).name in unread for owner in owners.get(directory.name, [])):
+                raise SnapshotError(f"the mark missed the producer's current output: {directory}")
+        elif obsolete_cli(directory, products) if unread is None else linked_output(directory):
+            all_owners = owners.get(directory.name, [])
+            local_owners = [owner for owner in all_owners
                             if Path(owner["path"]).parent == roots[0] / "h"]
             if prefixes and not local_owners:
                 report["unknown"].append(str(directory))
+                continue
+            if unread is not None and (len(local_owners) != len(all_owners) or any(
+                    Path(owner["path"]).name not in unread for owner in local_owners)):
+                report["retained_read"].append(str(directory))
                 continue
             size = sum(path.stat().st_size for path in directory.iterdir())
             report["removable"].append(dict(path=str(directory), bytes=size, manifests=local_owners))
@@ -261,7 +372,7 @@ def invalidate_manifest_owners(report, local):
     for item in report["removable"]:
         directory = Path(item["path"]).absolute()
         if (directory.parent != local / "o" or not HEX.fullmatch(directory.name)
-                or directory.is_symlink() or not obsolete_cli(directory)):
+                or directory.is_symlink() or not linked_output(directory)):
             raise SnapshotError("candidate directory changed before invalidation")
         if not item["manifests"]:
             raise SnapshotError("candidate has no proven local manifest owner")
@@ -277,10 +388,10 @@ def invalidate_manifest_owners(report, local):
     return len(manifests_to_remove)
 
 
-def compact(local, global_cache, *, prefixes):
+def compact(local, global_cache, *, prefixes, unread=None):
     if not prefixes:
         raise SnapshotError("compaction requires current installed producer outputs")
-    report = audit(local, global_cache, prefixes=prefixes)
+    report = audit(local, global_cache, prefixes=prefixes, unread=unread)
     report["invalidated_manifests"] = invalidate_manifest_owners(report, local)
     for item in report["removable"]:
         shutil.rmtree(item["path"])
@@ -330,10 +441,13 @@ def publication_report(env, key, local, global_cache, *, prefixes=()):
     # publish its whole restored cache under a newer partial fallback key.
     if key != original:
         raise SnapshotError("Linux compiled partial publication requires successful complete compaction")
+    # Read access times before publication_prefix or the audit read anything.
+    temporary = env.get("RUNNER_TEMP")
+    unread = unread_manifests(local, Path(temporary) / MARK) if temporary else None
     prefix = publication_prefix(env)
     if prefixes and list(prefixes) != [prefix]:
         raise SnapshotError("publisher uses only its current producer prefix")
-    report = compact(local, global_cache, prefixes=[prefix])
+    report = compact(local, global_cache, prefixes=[prefix], unread=unread)
     report["key"] = key
     return report
 
@@ -345,10 +459,13 @@ def main():
     parser.add_argument("--protect-prefix", type=Path, action="append", default=[])
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--prune", action="store_true")
+    mode.add_argument("--mark", action="store_true", help="after restat, before compilation: mark manifests unread")
     mode.add_argument("--publication-key", help="prepare this candidate or return an empty save key")
     args = parser.parse_args()
     try:
-        if args.publication_key is not None:
+        if args.mark:
+            report = mark(args.local, Path(os.environ["RUNNER_TEMP"]) / MARK)
+        elif args.publication_key is not None:
             report = publication_report(os.environ, args.publication_key, args.local, args.global_cache,
                                         prefixes=args.protect_prefix)
         elif args.prune:

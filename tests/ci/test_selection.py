@@ -538,6 +538,7 @@ class SelectionTest(unittest.TestCase):
     def test_mysql_provisioning_owner_combinations(self):
         cases = (([], "all", False, False),
                  (["plain"], "all", False, False),
+                 (["test-pg"], "all", False, False),
                  (["fixture"], "all", True, False),
                  (["test-native"], "all", False, False),
                  (["test"], "all", True, True),
@@ -551,9 +552,14 @@ class SelectionTest(unittest.TestCase):
         for targets, part, live, dialect in cases:
             for platform in ("linux", "macos"):
                 with self.subTest(targets=targets, part=part, platform=platform):
+                    postgres = platform == "linux" and bool(
+                        {"test-pg", "check"} & set(targets) or "check-full" in targets and part != "callers")
                     self.assertEqual(mysql_provisioning(targets, part, platform, {"fixture"}),
                                      {"live_mysql": live and platform == "linux",
-                                      "mysql_dialect": dialect and platform == "linux"})
+                                      "mysql_dialect": dialect and platform == "linux",
+                                      "live_postgres": postgres})
+                    self.assertEqual(mysql_provisioning(targets, part, platform, {"fixture"}, live=False),
+                                     {"live_mysql": False, "mysql_dialect": False, "live_postgres": False})
                     for row in shards(targets, platform, mysql_suites={"fixture"})["include"]:
                         self.assertEqual(row["live_mysql"], platform == "linux" and (
                             "fixture" in row["targets"] or row["mysql_dialect"]))
@@ -707,14 +713,13 @@ class SelectionTest(unittest.TestCase):
     def test_workflow_consumes_mysql_provisioning_and_postgres_condition(self):
         workflow = Path(".github/workflows/check.yml").read_text()
 
-        def named(line):
-            return frozenset(re.findall(r"contains\(matrix\.targets, '([a-z0-9-]+)'\)", line))
-
         self.assertIn("LIVE_MYSQL: ${{ matrix.live_mysql }}", workflow)
         self.assertIn("if: ${{ !cancelled() && matrix.mysql_dialect }}", workflow)
         postgres = workflow.split("- name: Start Postgres 15", 1)[1].splitlines()[1]
-        self.assertTrue(postgres.strip().startswith("if:"), postgres)
-        self.assertEqual(named(postgres), LIVE_POSTGRES_TARGETS)
+        self.assertEqual(postgres.strip(), "if: ${{ matrix.live_postgres }}")
+        self.assertEqual({target for target in LIVE_POSTGRES_TARGETS
+                          if mysql_provisioning([target], "all", "linux", set())["live_postgres"]},
+                         LIVE_POSTGRES_TARGETS)
 
     def test_portable_owner_does_not_require_full_suite(self):
         result = select(["src/request_encoding.zig"], "review", AVAILABLE)
@@ -1214,6 +1219,13 @@ class SelectionTest(unittest.TestCase):
                 result = select([f"tests/integration/{path}"], "review", AVAILABLE)
                 self.assertIn(target, result["targets"])
                 self.assertNotIn("human-cli-integration", result["targets"])
+
+    def test_public_parts_owner_selects_image_export_fixture(self):
+        for path in ("src/store/domain/public_parts.zig", "src/store/tests/action_parts.zig",
+                     "src/protocol.zig", "src/cli_args.zig", "src/cli.zig", "src/server.zig"):
+            with self.subTest(path=path):
+                result = select([path], "review", AVAILABLE)
+                self.assertTrue({"public-parts-integration", "check"} & set(result["targets"]))
 
     def test_shared_fixture_helpers_keep_composed_and_separate_consumers(self):
         for name in ("host_process.py",):
