@@ -444,13 +444,15 @@ class ProcessCensusTest(unittest.TestCase):
         self.assertEqual(census[os.getpid()][1:], sys.orig_argv[1:])
 
     def test_launch_records_hold_arguments_and_environment_where_the_kernel_shows_them(self):
-        child = subprocess.Popen([sys.executable, "-S", "-c", "import sys; sys.stdin.read()", "argument-marker"],
-                                 env={"RUI_LAUNCH_MARKER": "environment-marker"}, stdin=subprocess.PIPE)
+        # The child announces itself after exec, so its launch records are populated before sampling.
+        child = subprocess.Popen([sys.executable, "-S", "-c", "import sys; print('ready', flush=True); sys.stdin.read()",
+                                  "argument-marker"],
+                                 env={"RUI_LAUNCH_MARKER": "environment-marker"}, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
         try:
+            self.assertEqual(child.stdout.readline(), b"ready\n")
             records = self.semantics.launch_records(child.pid)
         finally:
-            child.stdin.close()
-            child.wait(timeout=5)
+            child.communicate(timeout=5)
         if not self.semantics.PROC_FS:
             self.assertIsNone(records)
             return
