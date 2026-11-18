@@ -3899,8 +3899,9 @@ fn writeMutationJson(writer: *std.Io.Writer, reply: protocol_reply.MutationReply
     }
     try writer.writeByte('}');
     if (reply.target == .message and answer.result != .conflict) {
-        const input = answer.input orelse protocol_reply.CommandObservation.ContentReference{ .bytes = reply.target.message.bytes, .digest = reply.target.message.digest };
-        try writer.print(",\"input\":{{\"type\":\"text\",\"bytes\":\"{d}\",\"sha256\":\"{s}\"}}", .{ input.bytes, std.fmt.bytesToHex(input.digest, .lower) });
+        const input = answer.input orelse protocol_reply.CommandObservation.InputReference{ .form = reply.target.message.form, .content = .{ .bytes = reply.target.message.bytes, .digest = reply.target.message.digest } };
+        try writer.writeAll(",\"input\":");
+        try input.writeJson(writer);
         if (answer.result == .accepted) try writer.print(",\"queue\":{{\"status\":\"queued\",\"admission\":\"{d}\"}}", .{answer.result.accepted.message.admission});
     }
     if (reply.target == .session_stop) try writer.print(",\"completion\":{{\"status\":\"{s}\"}}", .{if (answer.result == .accepted) @tagName(answer.result.accepted.session_stop.completion) else "unavailable"});

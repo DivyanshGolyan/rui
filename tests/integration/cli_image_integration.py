@@ -30,6 +30,14 @@ def wait_message(store, key):
     return observation, answer
 
 
+def cli_observation(store, receipt, observation):
+    # CLI-19: inspect and wait expose the same multipart identity as admission.
+    assert receipt["input"]["type"] == "parts", receipt
+    assert observation["input"] == receipt["input"], (observation, receipt)
+    waited = fixture.command("request", "wait", "--store", store, "--key", "message", "--timeout-seconds", "15")
+    assert waited["observation"]["input"] == receipt["input"], waited
+
+
 def run_case(root, provider, operation):
     state = root / (provider + "-" + operation)
     state.mkdir(mode=0o700)
@@ -85,6 +93,7 @@ def run_case(root, provider, operation):
         session = result["context"]["session"]
         observation, answer_bytes = wait_message(store, "message")
         assert observation["state"] == "completed" and answer_bytes == b"received", observation
+        cli_observation(store, result, observation)
         assert len(endpoint.requests) == 2, endpoint.requests
         assert endpoint.requests[0] == endpoint.requests[1], endpoint.requests
         right = json.loads(endpoint.requests[1])
