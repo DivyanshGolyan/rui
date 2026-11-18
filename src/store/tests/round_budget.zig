@@ -102,6 +102,7 @@ test "every function that enters the Store has a round budget" {
         @embedFile("../sqlite.zig"),
         @embedFile("../testing.zig"),
         @embedFile("../queue.zig"),
+        @embedFile("../write_batch.zig"),
         @embedFile("../transition.zig"),
     };
     var found: std.EnumSet(EntryPoint) = .empty;
