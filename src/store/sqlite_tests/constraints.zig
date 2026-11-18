@@ -97,7 +97,7 @@ test "closed value columns accept exactly their values" {
         .{ .update = "UPDATE core_command SET kind={s}", .accepted = &.{ "1", "2", "3", "4", "5", "6", "7", "8", "9" }, .rejected = &.{ "0", "10" } },
         .{ .update = "UPDATE model_output_item SET item_kind=v.k,message_content_id=CASE WHEN v.k=2 THEN extras_content_id END FROM (SELECT {s} AS k) v", .accepted = &.{ "1", "2", "3", "4", "5" }, .rejected = &.{ "0", "6" } },
         .{
-            .update = "UPDATE conversation_entry SET entry_kind=v.k,source_admission_id=CASE WHEN v.k=1 THEN source_admission_id END," ++
+            .update = "UPDATE conversation_entry SET entry_kind=v.k,source_admission_id=CASE WHEN v.k=1 THEN source_admission_id END,source_kind=CASE WHEN v.k=1 THEN source_kind END," ++
                 "source_revision=CASE WHEN v.k=2 THEN 1 END,source_operation_id=CASE WHEN v.k=3 THEN (SELECT min(operation_id) FROM model_output_item) END," ++
                 "source_item_ordinal=CASE WHEN v.k=3 THEN 0 END FROM (SELECT {s} AS k) v WHERE entry_kind=1",
             .accepted = &.{ "1", "2", "3" },

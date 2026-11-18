@@ -99,15 +99,6 @@ const MessageProjection = struct {
     },
 };
 
-const message_sender = rsql.Read(.{
-    .sql = "SELECT s.session_ref,s.workspace_key,s.next_position FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
-        "JOIN session s ON s.session_ref=action.session_ref WHERE action.sender_handle=?1 AND action.attempt_ordinal=1 AND action.resolution_code IS NULL " ++
-        "AND NOT " ++ action_domain.actionStoppedSql("action", "operation") ++ " LIMIT 1",
-    .Args = struct { handle: []const u8 },
-    .Row = struct { session: rsql.SessionHead },
-    .cardinality = .optional,
-});
-
 const message_replay = rsql.Read(.{
     .sql = "SELECT m.admission_id,m.session_ref,m.content_id,content.byte_length AS length,content.digest FROM message_admission m " ++
         "JOIN content ON content.content_id=m.content_id WHERE m.command_key=?1",
@@ -154,7 +145,7 @@ const reject_sent = rsql.Write(.{
 pub const MessageReads = struct {
     digest: [32]u8,
     saved: saved_command.Result = undefined,
-    sender: message_sender.Result = null,
+    sender: action_domain.peer_by_handle.Result = null,
     text: content_domain.Import,
     bound: []const skills_domain.BoundSkill = &.{},
 };
@@ -166,7 +157,7 @@ fn claimedHandle(command: *const content_custody.MessageCommand, selector: []con
     return handle.slice();
 }
 
-fn senderValid(command: *const content_custody.MessageCommand, selector: []const u8, found: message_sender.Result) bool {
+fn senderValid(command: *const content_custody.MessageCommand, selector: []const u8, found: action_domain.peer_by_handle.Result) bool {
     if (command.sender_handle == null) return command.sender == null;
     if (claimedHandle(command, selector) == null) return false;
     const row = found orelse return false;
@@ -175,7 +166,7 @@ fn senderValid(command: *const content_custody.MessageCommand, selector: []const
 
 fn readMessage(a: anytype, selector: []const u8, command: *const content_custody.MessageCommand, reads: *MessageReads) void {
     lookupCommand(a, command.key.slice(), &reads.saved);
-    if (claimedHandle(command, selector)) |handle| a.read(message_sender, .{ .handle = handle }, &reads.sender);
+    if (claimedHandle(command, selector)) |handle| action_domain.liveByHandle(a, handle, &reads.sender);
 }
 
 pub const SubmitMessage = struct {

@@ -48,6 +48,7 @@ pub const Command = enum {
     action_read,
     action_background,
     action_stop,
+    action_publish,
     action_allow,
     action_deny,
     action_read_call_id,
@@ -98,6 +99,7 @@ pub const Command = enum {
             .request_read_result => .{ .resource = .request, .name = "read-result", .description = "Stream the originally bound saved answer, skill refusal or reload acknowledgement, without waiting or substituting newer Session work. Use HANDLE or --store and --key.", .options = destination ++ key, .positional = "HANDLE", .positional_conflicts = saved_identity, .requires = &.{&.{ "", "key", "key-hex" }} },
             .request_list => .{ .resource = .request, .name = "list", .description = "Enumerate local generated captures as JSON. This is not Store history or guaranteed correlation after all output from concurrent calls is lost." },
             .action_inspect => .{ .resource = .action, .name = "inspect", .description = "Read the exact saved Action proposal before allowing or denying it. Inspection grants nothing.", .options = destination ++ session ++ action, .requires = need_action },
+            .action_publish => .{ .resource = .action, .name = "publish", .description = "Publish exact UTF-8 stdin as a value from the running Action using its sender handle.", .options = &.{value("key", "KEY")}, .requires = &.{&.{"key"}} },
             .action_stop => .{ .resource = .action, .name = "stop", .description = "Stop one owned Action. Preserve its existing Resolution if ended; read completion with action read. Reuse the captured request handle to recover a lost reply.", .options = destination ++ session ++ action ++ capture, .mutation = true, .requires = need_action },
             .action_background => .{ .resource = .action, .name = "background", .description = "Release the original tool call with an immutable receipt and let this same Action continue under its Session. Read completion with action read; no automatic final input or model wake is delivered.", .options = destination ++ session ++ action ++ capture, .mutation = true, .requires = need_action },
             .action_allow => .{ .resource = .action, .name = "allow", .description = "Admit permission to run this exact inspected Action once; the Host revalidates its target.", .options = destination ++ session ++ action ++ capture, .mutation = true, .requires = need_action },
@@ -917,6 +919,12 @@ test "preset is a Configure option and Start refuses it" {
     try expectValidation(.session_configure, &.{ "--preset", "x", "--preset", "x" }, error.DuplicateArgument);
     try expectValidation(.session_start, &.{ "--preset", "x" }, error.UnknownArgument);
     try expectValidation(.session_configure, &.{ "--session", "k7m2qx", "--preset", "x" }, false);
+}
+
+test "action publish requires its key without a capture record" {
+    try expectValidation(.action_publish, &.{ "--key", "first" }, false);
+    try std.testing.expectEqualStrings("key", (try expectMissing(.action_publish, &.{})).?);
+    try expectValidation(.action_publish, &.{ "--key", "first", "payload" }, error.InvalidArguments);
 }
 
 test "CLI-20 preserve interleaving for start and send" {

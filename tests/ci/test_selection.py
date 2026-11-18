@@ -628,7 +628,7 @@ class SelectionTest(unittest.TestCase):
                   "install.sh": True, "build.zig": True}
         source = Path(__file__).resolve().parents[2] / "src"
         own = {f"src/{path.name}" for path in source.glob("*.zig") if path.name.lower().startswith("upgrade")}
-        self.assertLessEqual({"src/upgrade.zig", "src/upgrade_process.zig", "src/UpgradeJob.zig", "src/upgrade_status.zig"}, own)
+        self.assertLessEqual({"src/upgrade.zig", "src/upgrade_process.zig", "src/upgrade_run.zig", "src/UpgradeJob.zig", "src/upgrade_status.zig"}, own)
         self.assertEqual(own, {path for path in tree_graph().owners["upgrade-integration"] if "pgrade" in path})
         expected = others | dict.fromkeys(own | {"src/upgrade_new.zig", "src/UpgradeNew.zig"}, True)
         for path, upgrade_required in expected.items():
@@ -1326,6 +1326,7 @@ class SelectionTest(unittest.TestCase):
         cases = {
             "src/new_session_selection.zig": {"admission-debug-integration", "human-cli-integration", "test-logic"},
             "src/preference_values.zig": {"admission-debug-integration", "admission-integration", "test-logic"},
+            "src/preference_document.zig": {"admission-debug-integration", "test-logic"},
             "src/provider_selection.zig": {"admission-debug-integration", "test-logic"},
             "src/model_capability.zig": {"dispatch-integration", "test", "test-logic", "transport-h2-integration"},
         }
