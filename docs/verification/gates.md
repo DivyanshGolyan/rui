@@ -255,7 +255,7 @@ In PR mode only, that fixture also strips debug data, matching shipped Linux arc
 Promotion, release and default local builds retain Zig's default backend, as does the production binary used by `stack-frames`.
 
 Each platform builds its target closure once with `ci-build -Dci-targets=...`.
-A ready PR's single `linux pr` job instead compiles its closure in place with `build_artifact.py compile` and transfers no artifact.
+A ready PR's single `linux pr` job instead compiles its closure in place with `build_artifact.py compile` and transfers no artifact. It restores, read-only, the Linux `compiled` snapshot that main's `linux_build` producer publishes (setup's `cache-part`), keeping the package sources setup restored.
 Linux x86_64 producers use eight Zig async job slots so subprocess waits do not serialize independent compiles; this also applies to promotion's LLVM builds, while `-Dpr-ci` remains exclusive to pull requests.
 Changes to the shared artifact producer select the full Linux build gate and Debug admission so PR CI exercises the artifacts its command emits; promotion retains native macOS coverage.
 On Linux and macOS, when the selection compiles the single-threaded unit test binary alongside other gates, one producer builds only that binary (`-Dci-part=unit`) and another builds the rest (`-Dci-part=rest`); build.zig refuses a split whose selection never reaches the unit compile.

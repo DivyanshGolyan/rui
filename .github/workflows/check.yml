@@ -308,6 +308,9 @@ jobs:
         id: setup
         with:
           targets: ${{ needs.plan.outputs.pr_setup_targets }}
+          # Restore the Linux producer's snapshot that main publishes (linux_build); its
+          # C objects and build runner serve this job's one compile of every selected root.
+          cache-part: compiled
           # Only main saves caches; this job runs only for pull requests.
           publish-caches: 'false'
       - name: Install the pinned packages tests/ci imports
