@@ -21,13 +21,7 @@ DEFAULT_IMPORT = "imports product_defaults.zig"
 CLASSIFIER = "classifies Session work"
 TS_DEFAULT = "hard-codes a Session default"
 ISSUES = {DEFAULT_IMPORT: "#1621", CLASSIFIER: "#1622", TS_DEFAULT: "#1621"}
-# These existing imports only select a provider or model, deferred to #1697.
-# Other imports still cover Session defaults or Host lifecycle constants.
-SELECTION_ISSUES = {
-    ("src/SignIn.zig", DEFAULT_IMPORT): "#1697",
-    ("src/new_session_selection.zig", DEFAULT_IMPORT): "#1697",
-    ("src/status_page.zig", DEFAULT_IMPORT): "#1697",
-}
+
 # Shared dependencies can be in graph.host even though these client entry points
 # themselves must remain covered. Keep the requested minimum inventory together.
 REQUIRED_SOURCES = (
@@ -43,12 +37,12 @@ REQUIRED_SOURCES = (
 # New pairs are forbidden once this file exists at the trusted review base.
 ALLOWED = {
     ("src/HostLifecycle.zig", "imports product_defaults.zig"): "#1621",
-    ("src/SignIn.zig", "imports product_defaults.zig"): "#1697",
+    ("src/SignIn.zig", "imports product_defaults.zig"): "#1621",
     ("src/app_settings.zig", "imports product_defaults.zig"): "#1621",
     ("src/cli.zig", "imports product_defaults.zig"): "#1621",
     ("src/cli_args.zig", "imports product_defaults.zig"): "#1621",
-    ("src/new_session_selection.zig", "imports product_defaults.zig"): "#1697",
-    ("src/status_page.zig", "imports product_defaults.zig"): "#1697",
+    ("src/new_session_selection.zig", "imports product_defaults.zig"): "#1621",
+    ("src/status_page.zig", "imports product_defaults.zig"): "#1621",
 }
 
 WORK_KINDS = frozenset("idle pending working retrying bash approval stopping finished failed stopped".split())
@@ -209,7 +203,7 @@ def stale_allowances(root=ROOT, allowed=ALLOWED):
             for file, rule in sorted(allowed.keys() - actual)]
 
 
-def allowed_entries(source, *, trusted=False):
+def allowed_entries(source):
     declarations = [node.value for node in ast.parse(source).body if isinstance(node, ast.Assign)
                     and any(isinstance(target, ast.Name) and target.id == "ALLOWED" for target in node.targets)]
     if len(declarations) != 1:
@@ -219,11 +213,7 @@ def allowed_entries(source, *, trusted=False):
         raise ValueError("client_locality.py ALLOWED must be a mapping")
     for pair, issue in entries.items():
         if (not isinstance(pair, tuple) or len(pair) != 2 or not all(isinstance(part, str) for part in pair)
-                or pair[1] not in ISSUES):
-            raise ValueError(f"client_locality.py allowance needs its removal issue: {pair!r}")
-        expected = SELECTION_ISSUES.get(pair, ISSUES[pair[1]])
-        historical = trusted and pair in SELECTION_ISSUES and issue == ISSUES[pair[1]]
-        if issue != expected and not historical:
+                or pair[1] not in ISSUES or issue != ISSUES[pair[1]]):
             raise ValueError(f"client_locality.py allowance needs its removal issue: {pair!r}")
     return entries
 
@@ -233,7 +223,7 @@ def allowance_growth(root=ROOT):
     current = allowed_entries((root / GATE).read_text())
     if not git(root, "ls-tree", "--name-only", base, "--", GATE):
         return []
-    trusted = allowed_entries(git(root, "show", f"{base}:{GATE}"), trusted=True)
+    trusted = allowed_entries(git(root, "show", f"{base}:{GATE}"))
     return [f"{file}: {rule}: allowance exceeds the trusted review base: {MESSAGE}"
             for file, rule in sorted(current.keys() - trusted.keys())]
 
