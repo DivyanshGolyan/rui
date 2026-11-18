@@ -286,7 +286,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y tmux ffmpeg
+          sudo apt-get install -y tmux ffmpeg libfaketime
           npm install --prefix "$RUNNER_TEMP/screens-node" playwright@1.55.1
           echo "NODE_PATH=$RUNNER_TEMP/screens-node/node_modules" >> "$GITHUB_ENV"
           echo "VERIFY_RUI_UPGRADE_FIXTURE_USER=$(id -un)" >> "$GITHUB_ENV"
@@ -369,7 +369,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y tmux ffmpeg
+          sudo apt-get install -y tmux ffmpeg libfaketime
           npm install --prefix "$RUNNER_TEMP/screens-node" playwright@1.55.1
           echo "NODE_PATH=$RUNNER_TEMP/screens-node/node_modules" >> "$GITHUB_ENV"
           echo "VERIFY_RUI_UPGRADE_FIXTURE_USER=$(id -un)" >> "$GITHUB_ENV"

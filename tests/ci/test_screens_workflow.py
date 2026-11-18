@@ -27,6 +27,13 @@ class ScreensWorkflowTest(unittest.TestCase):
         self.assertEqual(workflow.count('V="$RUNNER_TEMP/screens-tooling/.claude/skills/verify-rui/scripts/verify-rui"'), 5)
         self.assertEqual(workflow.count('--scenario "$RUNNER_TEMP/screens-tooling/.claude/skills/verify-rui/scripts/frames.json"'), 2)
 
+    def test_each_capture_job_installs_libfaketime(self):
+        workflow = WORKFLOW.read_text()
+        for name in ('capture', 'baseline_capture'):
+            with self.subTest(job=name):
+                job = re.search(r'(?ms)^  ' + name + r':\n(.*?)(?=^  [a-z_]+:\n|\Z)', workflow)[1]
+                self.assertRegex(job, r'(?m)^\s*sudo apt-get install -y [^\n]*\blibfaketime\b')
+
     def test_build_is_transferred_once_and_all_four_shards_are_required(self):
         workflow = WORKFLOW.read_text()
         self.assertIn('matrix:\n        shard: [1, 2, 3, 4]', workflow)
