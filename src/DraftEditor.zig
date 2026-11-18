@@ -291,6 +291,7 @@ test "SUI-12 typed bytes give the draft and caret" {
         .{ .typed = "\x1b[123;4~Z", .text = "Z", .caret = 1 },
         .{ .typed = "ok\x1bZ", .text = "ok", .caret = 2 },
         .{ .typed = "abc\x1b[D\x1b[DZ", .text = "aZbc", .caret = 2 },
+        .{ .typed = "A中e\u{301}\x1b[DX", .text = "A中Xe\u{301}", .caret = 5 },
         .{ .typed = "\x1b[200~line1\nline2\x1b[201~\x1b[A\x01X", .text = "Xline1\nline2", .caret = 1 },
     };
     for (cases) |case| {
