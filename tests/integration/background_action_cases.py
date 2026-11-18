@@ -569,7 +569,8 @@ gate() {
     cat <&3 >/dev/null
     exec 3<&-
 }
-printf '%%s' "$$" >ready
+printf '%%s' "$$" >ready.tmp
+mv ready.tmp ready
 printf 'ordinary stdout before values\\n'
 gate 0
 printf '%%s' %s | "$rui" action publish --key first >first-receipt
