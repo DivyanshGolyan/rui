@@ -460,6 +460,28 @@ class ProcessCensusTest(unittest.TestCase):
         with self.semantics.simulate("darwin"):
             self.assertIsNone(self.semantics.launch_records(os.getpid()))
 
+    def test_resource_readers_observe_a_live_process(self):
+        child = subprocess.Popen([sys.executable, "-S", "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE)
+        try:
+            names = self.semantics.open_descriptor_names(child.pid)
+            self.assertGreaterEqual(len(names), 3, names)
+            self.assertGreater(self.semantics.process_resident_kib(child.pid), 0)
+            self.assertGreaterEqual(self.semantics.process_cpu_seconds(child.pid), 0)
+            memory = self.semantics.process_memory(child.pid)
+            if self.semantics.PROC_FS:
+                self.assertEqual(set(memory), {"rss_kib", "peak_kib"})
+                self.assertGreaterEqual(memory["peak_kib"], memory["rss_kib"])
+                self.assertEqual(len(self.semantics.descriptor_links(child.pid)), len(names))
+                self.assertIsNotNone(self.semantics.socket_table("unix"))
+            else:
+                self.assertIsNone(memory)
+            self.assertEqual(self.semantics.physical_footprint_peak(child.pid) is not None, self.semantics.FOOTPRINT)
+        finally:
+            child.stdin.close()
+            child.wait(timeout=5)
+        self.assertIsNone(self.semantics.process_memory(child.pid))
+        self.assertIsNone(self.semantics.socket_table("rui-no-such-table"))
+
     def test_locks_exclude_other_open_descriptions_until_released(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "host.lock"

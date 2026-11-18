@@ -2041,9 +2041,8 @@ def cancel_selected_version_check(root, binary, releases, artifacts):
                 child_pid = int(receipt.read_text().strip())
 
                 def alive():
-                    running = subprocess.run(["ps", "-p", str(child_pid), "-o", "stat="],
-                                             env=c.env, capture_output=True, text=True, timeout=5)
-                    return running.returncode == 0 and not running.stdout.strip().startswith("Z")
+                    state = os_semantics.process_state(child_pid, env=c.env)
+                    return state is not None and not state.startswith("Z")
 
                 assert alive()
                 screen.contains("checking for updates")
@@ -2053,12 +2052,7 @@ def cancel_selected_version_check(root, binary, releases, artifacts):
                 screen.save(artifacts, "selected-version-escape")
 
                 def reaped():
-                    observed = subprocess.run(["ps", "-p", str(child_pid), "-o", "stat="],
-                                              env=c.env, capture_output=True, text=True, timeout=5)
-                    if observed.returncode == 1 and not observed.stdout and not observed.stderr:
-                        return True
-                    assert observed.returncode == 0 and observed.stdout.strip(), observed
-                    return False
+                    return os_semantics.process_state(child_pid, env=c.env) is None
 
                 wait_for(reaped, "cancelled exact selected --version child reap")
                 assert releases.requests[start:] == [], "cancelled check reached latest discovery"

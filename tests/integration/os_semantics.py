@@ -3,6 +3,7 @@ import fcntl
 import os
 import pathlib
 import platform
+import re
 import shlex
 import shutil
 import socket
@@ -158,6 +159,66 @@ def descriptor_link(pid, descriptor):
 
 def working_directory_link(pid):
     return PROCESS_RECORDS / str(pid) / "cwd"
+
+
+def process_memory(pid):
+    """pid's resident and peak resident memory as {"rss_kib", "peak_kib"}, holding only what the kernel
+    reports (an exited, unreaped process reports neither); None where pid has no record (Darwin, or reaped)."""
+    status = PROCESS_RECORDS / str(pid) / "status"
+    if not status.exists():
+        return None
+    fields = {"VmRSS": "rss_kib", "VmHWM": "peak_kib"}
+    memory = {}
+    for line in status.read_text().splitlines():
+        name, _, value = line.partition(":")
+        if name in fields:
+            amount, unit = value.split()
+            assert unit == "kB", line
+            memory[fields[name]] = int(amount)
+    return memory
+
+
+def socket_table(name):
+    """The rows of the kernel's socket table name ("tcp", "tcp6", "unix"), split into fields without the
+    header, or None when this kernel keeps no such table."""
+    table = PROCESS_RECORDS / "net" / name
+    try:
+        return [line.split() for line in table.read_text().splitlines()[1:]]
+    except FileNotFoundError:
+        return None
+
+
+def open_descriptor_names(pid):
+    """One name per descriptor pid holds open: the open file's link target from procfs, or its lsof row on
+    Darwin. A descriptor that closes while it is read is left out."""
+    if _module.PROC_FS:
+        names = []
+        for link in descriptor_links(pid):
+            try:
+                names.append(os.readlink(link))
+            except FileNotFoundError:
+                pass
+        return names
+    rows = subprocess.check_output(["/usr/sbin/lsof", "-n", "-P", "-p", str(pid)], text=True).splitlines()
+    return [row for row in rows[1:] if re.fullmatch(r"\d+[rwu]?", row.split()[3])]
+
+
+def process_cpu_seconds(pid):
+    value = subprocess.check_output(["ps", "-o", "time=", "-p", str(pid)], text=True).strip()
+    return sum(float(part) * 60 ** index for index, part in enumerate(reversed(value.split(":"))))
+
+
+def process_resident_kib(pid):
+    return int(subprocess.check_output(["ps", "-o", "rss=", "-p", str(pid)]))
+
+
+def physical_footprint_peak(pid):
+    """pid's peak physical footprint in bytes where the kernel accounts one (Darwin), otherwise None."""
+    if not _module.FOOTPRINT:
+        return None
+    report = subprocess.run(["/usr/bin/footprint", "-f", "bytes", "-p", str(pid)],
+                            capture_output=True, text=True, check=True, timeout=30).stdout
+    return int(re.search(r"^\s*phys_footprint_peak: (\d+) B$", report, re.M).group(1))
 
 
 def launch_records(pid):
