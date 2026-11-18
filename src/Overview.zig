@@ -3239,7 +3239,7 @@ test "a stop answered under a conversation says so there, and goes before a list
     finished.overview.opened = "k7m2qx".*;
     try finished.lend();
     try std.testing.expectEqual(@as(usize, 2), Seen.now.lists);
-    try std.testing.expectEqualStrings(unsure, conversationLine(finished.overview, .working).notice.?);
+    try std.testing.expectEqualStrings(unsure, conversationLine(finished.overview, true).notice.?);
 
     const queued = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, ops, &cancellation);
     defer queued.close();
@@ -3253,7 +3253,7 @@ test "a stop answered under a conversation says so there, and goes before a list
     try queued.lend();
     try std.testing.expectEqual(@as(usize, 1), Seen.now.stops);
     try std.testing.expectEqual(@as(usize, 2), Seen.now.lists);
-    try std.testing.expectEqualStrings(unsure, conversationLine(queued.overview, .working).notice.?);
+    try std.testing.expectEqualStrings(unsure, conversationLine(queued.overview, true).notice.?);
 }
 
 test "a failed terminal restore still prints the departure guidance" {
