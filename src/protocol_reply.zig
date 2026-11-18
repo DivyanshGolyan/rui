@@ -2170,6 +2170,16 @@ test "activity page retains served work actions for identical bindings" {
         try activity_reply.writePage(&out, &facts);
         const parsed = try ActivityPage.parse(out.buffered(), .{});
         try std.testing.expectEqualDeep(facts.work.work, parsed.facts.work.work);
+        for ([_][]const u8{
+            "\"attention\":{\"kind\":\"approval\",\"turn\":\"1\",\"step\":\"7\"},",
+            "\"group\":\"needs_you\",",
+            if (i == 0) ",\"actions\":{\"stop\":true,\"interrupt\":{\"turn\":\"1\",\"operation\":\"2\"},\"decide\":null}" else ",\"actions\":{\"stop\":true,\"interrupt\":null,\"decide\":null}",
+        }) |field| {
+            try std.testing.expect(std.mem.indexOf(u8, out.buffered(), field) != null);
+            const missing = try std.mem.replaceOwned(u8, std.testing.allocator, out.buffered(), field, "");
+            defer std.testing.allocator.free(missing);
+            try std.testing.expectError(error.InvalidActivityPage, ActivityPage.parse(missing, .{}));
+        }
     }
 }
 
