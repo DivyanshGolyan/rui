@@ -274,7 +274,7 @@ def main():
             inspector = fixture.start_command("session", "inspect", "--store", store, "--session", session)
             exchange_phase(diagnostics, "test_gate_waiting", began, time.monotonic() + 5,
                            subject=str(reply_gate))
-            held_fds = len(os.listdir(f"/proc/{host.pid}/fd")) if os_semantics.PROC_FS else None
+            held_fds = len(os_semantics.descriptor_links(host.pid)) if os_semantics.PROC_FS else None
 
             for kind in ("message", "configure"):
                 for phase in ("header", "body"):
@@ -343,7 +343,7 @@ def main():
             diagnostics.wait("cleanup_completed", action=str(action["action"]))
             assert host.poll() is None, "owned report must retain lease"
             assert status(store) == "owned_unavailable"
-            drained_fds = len(os.listdir(f"/proc/{host.pid}/fd")) if held_fds is not None else None
+            drained_fds = len(os_semantics.descriptor_links(host.pid)) if held_fds is not None else None
             if held_fds is not None:
                 assert drained_fds < held_fds, (held_fds, drained_fds)
             assert transferred.recv(1) == b"", "unhanded read survived the intake fence"

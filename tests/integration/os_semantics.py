@@ -1,7 +1,9 @@
 import ctypes
+import fcntl
 import os
 import pathlib
 import platform
+import shlex
 import shutil
 import socket
 import struct
@@ -137,6 +139,69 @@ def process_executable(pid):
     count = library.proc_pidpath(pid, buffer, len(buffer))
     assert count > 0, "native process path unavailable"
     return pathlib.Path(os.fsdecode(buffer.value))
+
+
+# Linux keeps one record per process here; Darwin has none, so every reader
+# below is Linux-only unless it says otherwise.
+PROCESS_RECORDS = pathlib.Path("/proc")
+
+
+def descriptor_links(pid):
+    """One link per descriptor pid holds open, named by its number: os.readlink names the open file.
+    Raises FileNotFoundError once pid has no record."""
+    return list((PROCESS_RECORDS / str(pid) / "fd").iterdir())
+
+
+def descriptor_link(pid, descriptor):
+    return PROCESS_RECORDS / str(pid) / "fd" / str(descriptor)
+
+
+def working_directory_link(pid):
+    return PROCESS_RECORDS / str(pid) / "cwd"
+
+
+def process_commands():
+    """(pid, argv) for every process the census can read. A process that ends while it is read is left
+    out; any other read failure propagates, so a caller never acts on an incomplete census."""
+    candidates = []
+    if _module.PROC_FS:
+        for entry in PROCESS_RECORDS.iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                argv = (entry / "cmdline").read_bytes().split(b"\0")
+                candidates.append((int(entry.name), [part.decode() for part in argv if part]))
+            except (FileNotFoundError, ProcessLookupError, PermissionError, UnicodeDecodeError):
+                continue
+        return candidates
+    listing = subprocess.run(["ps", "-axo", "pid=,command="], capture_output=True, text=True, timeout=5, check=True)
+    for line in listing.stdout.splitlines():
+        try:
+            pid_text, command = line.strip().split(maxsplit=1)
+            candidates.append((int(pid_text), shlex.split(command)))
+        except (ValueError, IndexError):
+            continue
+    return candidates
+
+
+# Rui's Store lease and credential locks are flock locks, whose release on
+# process exit differs across kernels; fixtures contend for them only here.
+def try_lock(file, *, shared=False):
+    """Take file's lock without waiting; False when another open description holds it."""
+    try:
+        fcntl.flock(file, (fcntl.LOCK_SH if shared else fcntl.LOCK_EX) | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return False
+    return True
+
+
+def take_lock(file, *, shared=False):
+    """Take file's lock, waiting for any holder to release it."""
+    fcntl.flock(file, fcntl.LOCK_SH if shared else fcntl.LOCK_EX)
+
+
+def release_lock(file):
+    fcntl.flock(file, fcntl.LOCK_UN)
 
 
 def process_state(pid, *, env=None):

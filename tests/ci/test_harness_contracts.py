@@ -438,6 +438,24 @@ class ProcessCensusTest(unittest.TestCase):
         listing = self.semantics.describe_processes((os.getpid(),))
         self.assertIn(str(os.getpid()), listing)
 
+    def test_command_census_reads_each_process_argv(self):
+        census = dict(self.semantics.process_commands())
+        self.assertEqual(Path(census[os.getpid()][0]).name, Path(sys.orig_argv[0]).name)
+        self.assertEqual(census[os.getpid()][1:], sys.orig_argv[1:])
+
+    def test_locks_exclude_other_open_descriptions_until_released(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "host.lock"
+            path.touch()
+            with path.open("rb") as holder, path.open("rb") as other:
+                self.semantics.take_lock(holder)
+                self.assertFalse(self.semantics.try_lock(other))
+                self.assertFalse(self.semantics.try_lock(other, shared=True))
+                self.semantics.release_lock(holder)
+                self.assertTrue(self.semantics.try_lock(other, shared=True))
+                self.assertTrue(self.semantics.try_lock(holder, shared=True))
+                self.assertFalse(self.semantics.try_lock(holder))
+
     def test_darwin_census_fails_loudly_when_lsof_fails(self):
         def lsof(returncode, stdout="", stderr=""):
             return patch.object(self.semantics.subprocess, "run",
