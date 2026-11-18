@@ -137,7 +137,7 @@ Credential-location defaults for client and Host share `src/credential_location.
 
 Retired environment inputs are refused by name: replace `RUI_OPENAI_BASE_URL` with `providers.openai.endpoint`, and `RUI_TEST_MODELS_DEV_URL` with `models.catalogUrl`. Hidden Host `--test-*-fixture-endpoint` flags are gone; fixture identity derives from the loopback endpoint and transport trust. The `providers.chatgpt.tokenEndpoint` leaf supplies the loopback token URL required for an authenticated ChatGPT fixture.
 
-A typed refusal writes the same `rui_start_error` JSON line on stdout for start, save and check. On stderr the respective sentences begin `rui: the Host did not start`, `rui: the setting was not saved`, and `rui: these settings would not start a Host`; a refused detached start emits its refusal once.
+On stderr, typed start, save and check refusal sentences respectively begin `rui: the Host did not start`, `rui: the setting was not saved`, and `rui: these settings would not start a Host`. For their `rui_start_error` stdout receipt and detached refusal presentation, see [CLI-17 and CLI-18](invariants/cli-inspection.md).
 `settings --check` checks a detached start without opening or locking a Store: it reads and applies every source, refuses stdin lifetime and unrooted paths, checks saved placement, resolves credentials, anchors and seals. Pass absolute `--settings FILE`, `@FILE` and path/secret sources; unlike a newly typed `host start`, this check does not rebase argv. It does not prove database availability or lock acquisition.
 Changes apply to the next Host; they do not reconfigure a running one.
 `rui host start` takes `--settings FILE` but not `-`, because a started Host has no stdin; pass a document on stdin with `rui host serve --settings -`.
@@ -148,7 +148,7 @@ Save Store and interface placement with `rui host set`; a differing placement su
 Other one-off settings still apply to a new Host. Foreground `host serve` permits unsaved placement, but directory-based clients need the same placement saved.
 New generated and explicit request captures retain the selected Host directory in a private `.routing` companion, separately from the immutable request's Store identity. HANDLE-based recover, inspect, wait and read-result rediscover that directory's current saved placement and refuse if it identifies a different Store. Legacy opaque MySQL selection retains its runtime hint. Keep the companion with the request; older records without one retain their existing identity-based lookup.
 A started Host runs in `/` without stdin. Relative paths you type on the command line (`--settings FILE`, `@FILE`, and `--set` paths or `file:` sources) are taken from the directory you run the command in.
-`rui host set` refuses relative path values before saving. A relative path already saved in `host.json` or written inside a document has no such directory, so bare `rui` and `rui host start` refuse it, as they refuse `interface.lifetime` `stdin`; give an absolute path.
+For saved-path admission, see [SH-47](invariants/store-host.md). A relative path already saved in `host.json` or written inside a document has no such directory, so bare `rui` and `rui host start` refuse it, as they refuse `interface.lifetime` `stdin`; give an absolute path.
 Run such a Host with `rui host serve --store PATH`.
 
 ## MySQL
