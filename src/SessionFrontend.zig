@@ -1018,6 +1018,9 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     self.app_content.hover_style = hover;
     self.app_content.colours = colours;
     self.app_content.method = self.app_caps.width;
+    self.app_content.welcome = self.line.read != null and self.line.folder != null and self.line.first_position == null and self.submission.messageText() == null;
+    self.app_content.welcome_unicode = self.app_caps.unicode;
+    self.app_content.welcome_quiet = quiet;
     const original_presentation = session_notice.presentation(self.reading.opening, self.app_consent.request != null, self.heldOriginal());
     const message_note = original_presentation.note;
     self.app_content.message_note = if (message_note) |note| .{ .key = self.submission.messageKey().?, .text = note } else null;
@@ -10735,4 +10738,27 @@ test "consent and full panels compose across adoption, nested choices, and draft
         try std.testing.expectEqual(@as(?u64, 0xa), held.self.app_consent.request);
         try std.testing.expect(held.self.submission.intent == null);
     };
+}
+
+test "empty chat welcome follows observed first message at both widths" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    self.line.read = .{ .revision = 1, .end = 0 };
+    self.line.folder = .{};
+    try self.line.folder.?.set("/work");
+    for ([_]u16{ 46, 140 }) |width| {
+        held.size = .{ .width = width, .height = 30 };
+        const empty = try held.shown();
+        try std.testing.expect(std.mem.indexOf(u8, empty, "rui") != null);
+        try std.testing.expect(std.mem.indexOf(u8, empty, "cotton") != null);
+        try std.testing.expect(std.mem.indexOf(u8, empty, "रुई") == null);
+        self.line.folder = null;
+        self.line.first_position = 1;
+        const started = try held.shown();
+        try std.testing.expect(std.mem.indexOf(u8, started, "cotton") == null);
+        self.line.first_position = null;
+        self.line.folder = .{};
+        try self.line.folder.?.set("/work");
+    }
 }

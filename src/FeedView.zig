@@ -16,6 +16,9 @@ const PendingText = @import("TerminalText.zig");
 window: *Window,
 anchor: *Feed,
 tail: ?vxfw.Widget = null,
+welcome: bool = false,
+welcome_unicode: bool = true,
+welcome_quiet: vaxis.Style = .{},
 pending: ?struct { text: []const u8, note: ?[]const u8 = null } = null,
 message_note: ?resident.MessageNote = null,
 latest_ending: ?resident.LatestEnding = null,
@@ -438,6 +441,17 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     var screen: vaxis.Screen = .{ .width = self.size.width, .height = self.size.height, .width_method = self.method, .buf = surface.buffer };
     const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = screen.width, .height = screen.height, .screen = &screen };
     try self.window.drawWith(visible, win, self.colour, self.style, self.colours, self.presentation(), ctx.arena);
+    if (self.welcome and self.window.count == 0 and self.pending == null and self.size.height >= 2) {
+        const title = "rui";
+        const subtitle = if (self.welcome_unicode) "cotton · light enough to carry far" else "cotton - light enough to carry far";
+        const row = self.size.height / 3;
+        _ = win.print(&.{.{ .text = title, .style = self.style }}, .{ .row_offset = row, .col_offset = (self.size.width -| @as(u16, title.len)) / 2, .wrap = .none });
+        if (row + 1 < self.size.height) {
+            const subtitle_width = @import("display_text.zig").width(subtitle, .{ .viewport = self.method });
+            _ = win.print(&.{.{ .text = subtitle, .style = self.welcome_quiet }}, .{ .row_offset = row + 1, .col_offset = @intCast((self.size.width -| subtitle_width) / 2), .wrap = .none });
+        }
+    }
+
     var first: ?resident.Point = null;
     if (visible.first < self.window.count) {
         const entry = self.window.entries[visible.first];
