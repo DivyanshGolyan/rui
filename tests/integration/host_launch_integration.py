@@ -1442,11 +1442,16 @@ def typed_child_refusal(root, env):
     child = subprocess.run([RUI, "host", "serve", "--store", directory], env=selected_env,
                            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=COMMAND_TIMEOUT)
     assert child.returncode == 2 and json.loads(child.stdout)["rui_start_error"]["code"] == "settings_invalid", child
-    for args in ([RUI, "host", "start", "--store", directory], [RUI]):
-        result = subprocess.run(args, env=selected_env, stdin=subprocess.DEVNULL, capture_output=True,
-                                text=True, timeout=COMMAND_TIMEOUT)
-        assert result.returncode == 1 and result.stdout == child.stdout, result
-        assert result.stderr == child.stderr and "internal_unexpected" not in result.stderr, (child, result)
+    result = run_start(directory, selected_env)
+    assert result.returncode == 1 and result.stdout == child.stdout, result
+    assert result.stderr == child.stderr and "internal_unexpected" not in result.stderr, (child, result)
+    master, slave = open_pty()
+    try:
+        bare = spawn([RUI], env=selected_env, cwd=root, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+        _, diagnostic = bare.communicate(timeout=COMMAND_TIMEOUT)
+        assert bare.returncode == 1 and diagnostic.decode() == child.stderr, (bare.returncode, diagnostic, child)
+    finally:
+        close_pty(master, slave)
     managed_descriptor_rejection(root / "unexpected-parent", selected_env, 64)
 
 
