@@ -26,17 +26,12 @@ MAC_PATHS = (
     "src/os/*", "src/cli.zig", "src/client.zig", "src/platform.zig", "src/HostLifecycle.zig",
     "src/host_coordinator.zig", "src/host_restart_all.zig", "src/host_start.zig", "src/host_identity.zig",
     "src/upgrade.zig", "src/upgrade_process.zig",
-    "tests/integration/upgrade_integration.py",
-    "tests/integration/activity_integration.py", "tests/integration/bash_fixture.py",
-    "tests/integration/codex_credential_integration.py", "tests/integration/codex_integration.py",
-    "tests/integration/conversation_page_fixture.py", "tests/integration/host_launch_exit_test.py",
-    "tests/integration/host_launch_fixture.py", "tests/integration/host_launch_integration.py",
-    "tests/integration/host_status_integration.py", "tests/integration/host_stop_integration.py",
-    "tests/integration/live_engines.py", "tests/integration/proc_sample.py",
-    "tests/integration/server_delivery_integration.py", "tests/integration/session_list_fixture.py",
-    "tests/integration/settings_integration.py", "tests/integration/settings_mysql_integration.py",
-    "tests/integration/terminal_process_test.py", "tests/integration/transport_h2_cases.py",
+    # The Python fixtures' platform owner. Fixtures ask it for platform facts
+    # and stay off this list.
     "tests/integration/os_semantics.py",
+    # The PTY launcher exists for Darwin's rules: a session leader's exit
+    # revokes the terminal, and hangup and EOF differ. The restoration cases
+    # embed the C interposer, which handles Darwin's tty queue.
     "tests/integration/terminal_process.py", "tests/integration/terminal_leader.py",
     "tests/integration/terminal_restoration_cases.py",
     "src/*.c", "src/*.h", "src/*.inc", "src/*.patch", "src/*.sh", "tests/integration/*.c",

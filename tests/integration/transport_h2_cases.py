@@ -2,7 +2,6 @@ import http.server
 import json
 import os
 import pathlib
-import re
 import sqlite3
 import ssl
 import subprocess
@@ -79,29 +78,8 @@ class HeldHandler(http.server.BaseHTTPRequestHandler):
         pass
 
 
-def host_physical_peak(pid):
-    if not os_semantics.FOOTPRINT:
-        return None
-    report = subprocess.run(
-        ["/usr/bin/footprint", "-f", "bytes", "-p", str(pid)],
-        capture_output=True, text=True, check=True, timeout=30,
-    ).stdout
-    return int(re.search(r"^\s*phys_footprint_peak: (\d+) B$", report, re.M).group(1))
-
-
 def open_descriptors(pid):
-    if os.path.isdir(f"/proc/{pid}/fd"):
-        names = []
-        for fd in os.listdir(f"/proc/{pid}/fd"):
-            try:
-                names.append(os.readlink(f"/proc/{pid}/fd/{fd}"))
-            except FileNotFoundError:
-                pass
-        return sum("etilqs_" not in name for name in names)
-    rows = subprocess.check_output(["/usr/sbin/lsof", "-n", "-P", "-p", str(pid)],
-                                   text=True).splitlines()
-    return sum(bool(re.fullmatch(r"\d+[rwu]?", row.split()[3])) and "etilqs_" not in row
-               for row in rows[1:])
+    return sum("etilqs_" not in name for name in os_semantics.open_descriptor_names(pid))
 
 
 def assert_round_trip_history(streams, capacity, rounds, answers):
@@ -212,7 +190,7 @@ def round_trip(root, endpoint, capacity, ca_file, rounds=2, *, observe=None):
             )
             idle_fds.append(requests.idle_descriptors(drain_deadline))
             if endpoint.observed_shape:
-                physical_peaks.append(host_physical_peak(host.pid))
+                physical_peaks.append(os_semantics.physical_footprint_peak(host.pid))
                 print(json.dumps({"case": "observed_shape_wave", "round": round_number + 1,
                                   "capacity": capacity, "host_physical_peak_bytes": physical_peaks[-1],
                                   "native_connection_observations": True,
@@ -343,14 +321,10 @@ def held_population(root):
                     if key != held_key:
                         wait_result(key, result_deadline)
 
-                def cpu_seconds():
-                    value = subprocess.check_output(["ps", "-o", "time=", "-p", str(host.pid)], text=True).strip()
-                    return sum(float(part) * 60 ** index for index, part in enumerate(reversed(value.split(":"))))
-
                 time.sleep(0.2)
-                before_cpu = cpu_seconds()
+                before_cpu = os_semantics.process_cpu_seconds(host.pid)
                 time.sleep(3)
-                held_cpu = cpu_seconds() - before_cpu
+                held_cpu = os_semantics.process_cpu_seconds(host.pid) - before_cpu
                 with endpoint.lock:
                     assert len(endpoint.requests) == capacity and endpoint.active == 1, endpoint.requests
                 held_fds = open_descriptors(host.pid)
@@ -441,8 +415,8 @@ def held_streams(root, endpoint, after_progress=False):
                           "interrupted stream reset", deadline=result_deadline)
         assert not endpoint.release.is_set()
         assert dispatch.observe(store, "held-message-1").get("result") is None
-        held_rss_kib = int(subprocess.check_output(["ps", "-o", "rss=", "-p", str(host.pid)]))
-        held_physical_peak = host_physical_peak(host.pid) if endpoint.observed_shape else None
+        held_rss_kib = os_semantics.process_resident_kib(host.pid)
+        held_physical_peak = os_semantics.physical_footprint_peak(host.pid) if endpoint.observed_shape else None
         endpoint.release.set()
         for index in range(1, 100):
             key = f"held-message-{index}"
@@ -460,8 +434,8 @@ def held_streams(root, endpoint, after_progress=False):
             result_deadline,
         )
         assert len(endpoint.connections) == 1, endpoint.connections
-        idle_rss_kib = int(subprocess.check_output(["ps", "-o", "rss=", "-p", str(host.pid)]))
-        idle_physical_peak = host_physical_peak(host.pid) if endpoint.observed_shape else None
+        idle_rss_kib = os_semantics.process_resident_kib(host.pid)
+        idle_physical_peak = os_semantics.physical_footprint_peak(host.pid) if endpoint.observed_shape else None
         print(json.dumps({"case": "held_observed_shape" if endpoint.observed_shape else "held_streams",
                           "phase": phase, "live_streams": 100,
                           "connections": 1, "cancelled_before_release": True,

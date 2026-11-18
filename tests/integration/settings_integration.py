@@ -410,9 +410,8 @@ def main(network, ci):
     info = host_info(sock, str(store))
     assert info["active_capacity"] == "2", info
     assert info["capabilities"]["providers"]["openai"] == "key_file", info
-    if os_semantics.PROC_FS:
-        for name in ("cmdline", "environ"):
-            assert b"sk-launch-test" not in pathlib.Path(f"/proc/{host.pid}/{name}").read_bytes(), name
+    for name, data in (os_semantics.launch_records(host.pid) or {}).items():
+        assert b"sk-launch-test" not in data, name
 
     source_modes(root, good)
     flag_start_failures(root)

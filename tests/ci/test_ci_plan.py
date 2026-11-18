@@ -76,6 +76,7 @@ class PlanTest(unittest.TestCase):
                 original = selection(documentation)
                 before = deepcopy(original)
                 kind = ChangeKind.DOCUMENTATION if documentation else ChangeKind.NORMAL
+                pr_job = name == 'ready' and not documentation
                 with patch('select_tests.tree_graph', side_effect=AssertionError('plan performed I/O')):
                     result = plan(original, event_name=event, draft=draft,
                                   promotion=promotion, change_kind=kind)
@@ -83,9 +84,10 @@ class PlanTest(unittest.TestCase):
                 expected = dict(
                     change_kind='documentation' if documentation and event == 'pull_request' else 'normal',
                     draft_run=draft, targets=linux, linux_compile_targets=linux, native_targets=mac,
-                    linux_matrix=shards(linux, mysql_suites=original['mysql_suites'], live=name != 'ready'),
+                    linux_matrix=shards([] if pr_job else linux, mysql_suites=original['mysql_suites']),
                     macos_matrix=shards(mac, 'macos', mysql_suites=original['mysql_suites']),
-                    linux_split=split_build(linux), macos_split=split_build(mac),
+                    linux_split=not pr_job and split_build(linux), macos_split=split_build(mac),
+                    pr_job=pr_job, pr_setup_targets=sorted(linux) if pr_job else [],
                     native=bool(mac),
                     retry=name == 'manual',
                     quarantine={'draft': 'off', 'ready': 'admission', 'manual': 'admission',
@@ -137,8 +139,8 @@ class PlanTest(unittest.TestCase):
                 self.assertEqual(output['native_targets'], [])
                 self.assertFalse(output['native'])
                 self.assertEqual(output['macos_matrix'], shards([], 'macos', mysql_suites=original['mysql_suites']))
-                for row in output['linux_matrix']['include']:
-                    self.assertFalse(row['live_mysql'] or row['mysql_dialect'] or row['live_postgres'], row)
+                self.assertEqual(output['linux_matrix'], {'include': []}, 'one PR job, no shards or live engines')
+                self.assertTrue(output['pr_job'])
                 for key in ('cache_execution', 'typecheck_macos', 'linux_memory', 'retry'):
                     self.assertFalse(output[key], key)
                 self.assertNotIn('upgrade', output)
@@ -167,8 +169,10 @@ class PlanTest(unittest.TestCase):
                         compiled = sorted(set(targets) | {'test'})
                     self.assertEqual(result['targets'], execution)
                     self.assertEqual(result['linux_compile_targets'], compiled)
-                    self.assertEqual(result['linux_matrix'], shards(execution, mysql_suites=[], live=False))
-                    self.assertEqual(result['linux_split'], split_build(compiled))
+                    self.assertEqual(result['linux_matrix'], shards([], mysql_suites=[]))
+                    self.assertFalse(result['linux_split'], 'a ready PR compiles in its single job')
+                    self.assertEqual(result['pr_job'], not draft)
+                    self.assertEqual(result['pr_setup_targets'], [] if draft else sorted(set(execution) | set(compiled)))
                     self.assertFalse(result['native'])
                     self.assertEqual(source['targets'], targets)
 

@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 
 import json
-import fcntl
 import os
 import pathlib
 import re
@@ -17,6 +16,7 @@ import bash_fixture as bash
 import model_fixture as fixture
 from product_defaults import DEFAULTS, compaction_trigger, start_effort
 import host_process
+import os_semantics
 from host_process import HostDiagnostics, PauseGate, retain_failure_state, start_ready_process
 from control_fixture import raw_request
 from codex_fixture import ACCESS, ACCOUNT, OPENAI_KEY, credentials, expected_user_agent
@@ -41,11 +41,9 @@ def credential_facts(path):
 
 
 def lock_available(lock):
-    try:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
+    if not os_semantics.try_lock(lock):
         return False
-    fcntl.flock(lock, fcntl.LOCK_UN)
+    os_semantics.release_lock(lock)
     return True
 
 
@@ -263,7 +261,7 @@ def run():
         assert configured["answer"]["status"] == "accepted"
         stopped_session = configured["answer"]["session"]
         with open(credential_dir / ".codex.json.lock", "r+b") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+            os_semantics.take_lock(lock)
             fixture.message(state, stop_store, "stop-message", stopped_session, "do not launch")
             diagnostics.wait("preparation_completed", timeout=10)
             stopped = fixture.command(
@@ -592,7 +590,7 @@ def forced_refresh_journey():
         assert credential_facts(credential_file) == ("3", "refresh_pending")
 
         with open(credential_dir / ".codex.json.lock", "r+b") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+            os_semantics.take_lock(lock)
             credentials(credential_file, generation=4)
         newer_release = threading.Event()
         with endpoint.lock:
@@ -600,7 +598,7 @@ def forced_refresh_journey():
         fixture.message(state, store, "newer-pending", session, "another owner claimed refresh")
         fixture.wait_for(lambda: len(endpoint.requests) == 6, "request before newer pending generation")
         with open(credential_dir / ".codex.json.lock", "r+b") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+            os_semantics.take_lock(lock)
             credentials(credential_file, state="refresh_pending", generation=5)
             newer_record = credential_file.read_bytes()
         newer_release.set()

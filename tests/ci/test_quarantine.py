@@ -126,6 +126,10 @@ class ListedTest(unittest.TestCase):
 class RunSelectedTest(unittest.TestCase):
 
     def verdict(self, mode, *runs):
+        code, calls, _ = self.selected(mode, runs, '["codex-h2-integration"]')
+        return code, len(calls)
+
+    def selected(self, mode, runs, targets):
         runs = list(runs)
         calls = []
 
@@ -138,14 +142,15 @@ class RunSelectedTest(unittest.TestCase):
                 patch.object(run_selected, "execute", execute), \
                 patch.object(quarantine, "entries", return_value=[FLAKE]), \
                 patch.object(quarantine, "today", return_value="2026-11-10"), \
-                patch.object(sys, "argv", ["run_selected.py", '["codex-h2-integration"]', "--quarantine", mode]), \
-                redirect_stdout(io.StringIO()):
+                patch.object(sys, "argv", ["run_selected.py", targets, "--quarantine", mode]), \
+                redirect_stdout(io.StringIO()) as output:
             try:
                 run_selected.main()
                 code = 0
             except SystemExit as exit:
                 code = exit.code
-        return code, len(calls)
+            summary = Path(scratch, "summary").read_text() if Path(scratch, "summary").exists() else ""
+        return code, calls, output.getvalue() + summary
 
     FLAKY = (1, FLAKY_RUN + summary(1))
     PASS = (0, "")
@@ -164,6 +169,19 @@ class RunSelectedTest(unittest.TestCase):
         self.assertEqual(self.verdict("admission", self.REAL), (1, 1))
         self.assertEqual(self.verdict("off", self.FLAKY), (1, 1))
 
+    def test_the_first_red_batch_stops_the_rest_and_names_every_target_not_run(self):
+        targets = '["host-launch-integration", "host-stop-integration", "test-native", "upgrade-integration"]'
+        batches = [["host-stop-integration", "test-native"], ["host-launch-integration"], ["upgrade-integration"]]
+        for failing, not_run in ((0, "Not run after that failure: host-launch-integration, upgrade-integration."),
+                                 (1, "Not run after that failure: upgrade-integration."),
+                                 (2, None)):
+            with self.subTest(failing=failing):
+                code, calls, report = self.selected("admission", [self.PASS] * failing + [self.REAL], targets)
+                self.assertEqual(code, 1)
+                self.assertEqual(calls, batches[:failing + 1])
+                self.assertEqual(report.count("Not run after that failure"), 2 if not_run else 0)
+                if not_run:
+                    self.assertIn(not_run, report)
 
 if __name__ == "__main__":
     unittest.main()
