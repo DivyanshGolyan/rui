@@ -507,7 +507,7 @@ class PrModeTest(unittest.TestCase):
             self.assertNotIn(".strip", constructor)
 
     def test_backend_and_job_limit_cover_each_event_and_platform(self):
-        """CI-76: only a PR compile on Linux x86_64 builds the PR backend with 16 job slots; other producers keep 8."""
+        """CI-78: only a PR compile on Linux x86_64 builds the PR backend with 16 job slots; other producers keep 8."""
         for event, system, machine, fast in (
                 (event, system, machine,
                  event == "pull_request" and system == "Linux" and machine == "x86_64")

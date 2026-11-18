@@ -2485,7 +2485,7 @@ fn repeated(comptime text: []const u8, comptime times: usize) []const u8 {
     }
 }
 
-test "SH-69 a statement renders the same SQLite and MySQL text whatever its pieces" {
+test "SH-72 a statement renders the same SQLite and MySQL text whatever its pieces" {
     const Reordered = Write(.{
         .sql = "UPDATE turn SET outcome_at=@now WHERE turn_id=?2 AND session_ref=@session(?1) AND operation_id>?2",
         .Args = struct { session: SessionHead, turn_id: u64 },
