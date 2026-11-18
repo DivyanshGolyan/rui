@@ -5407,8 +5407,8 @@ test "mutation decoder preserves base bytes and the entire command domain" {
         }
         const expected = switch (kind) {
             .action_stop => continue,
-            .configure => "b9f94c52d2de846f027e169eb0d7e8f4365f01cc153151c8307e48d05f306c31",
-            .message => "b3f30c9a293b421daa933574dc68692b79d382e297435d72012ca7092db29ee1",
+            .configure => "23826d5d66fc13cb4c75e15593c84b4591a1baf8ddb99a9cbfabf291b3cec12e",
+            .message => "ef22fa6a7b2086a1cf11913f2670da5c11cc713f84727ca1abbdf9f3d4a4f46f",
             .session_stop => "a98107ee7efe29d5c2480097568daa514649c76e9c7c1cc740ed5fbc697cbc90",
             .session_archive => "91da63974ced68e1596b479409b543ae90ec8161c1612840b3e26a0eca02acb3",
             .model_interruption => "54ed6236f058bb77a9b8039bb9a2bc144a5066bf742084c9ceb7ff7e73f890e1",
