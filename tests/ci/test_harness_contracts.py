@@ -7,6 +7,7 @@ import mmap
 import os
 from pathlib import Path
 import re
+import select
 import site
 import struct
 import subprocess
@@ -425,8 +426,22 @@ class ProcessCensusTest(unittest.TestCase):
                     *(lambda process=process: HOST.close_stdin(process) for process in reversed(children)),
                     *(lambda process=process: HOST.stop_process(process) for process in reversed(children)))
 
+    def ready_child(self, *arguments, env=None):
+        """Starts a child that announces itself once initialised, then waits on stdin.
+
+        Samples taken after the announcement see its exec'd arguments and settled descriptors.
+        """
+        child = subprocess.Popen([sys.executable, "-S", "-c", "import sys; print('ready', flush=True); sys.stdin.read()",
+                                  *arguments], env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        readable, _, _ = select.select([child.stdout], [], [], 10)
+        if not readable or child.stdout.readline() != b"ready\n":
+            child.kill()
+            child.communicate(timeout=5)
+            self.fail("the child did not announce readiness within 10 s")
+        return child
+
     def test_process_state_tells_running_from_zombie_from_reaped(self):
-        child = subprocess.Popen([sys.executable, "-S", "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE)
+        child = self.ready_child()
         try:
             self.assertFalse(self.semantics.process_state(child.pid).startswith("Z"))
             child.stdin.close()
@@ -444,12 +459,8 @@ class ProcessCensusTest(unittest.TestCase):
         self.assertEqual(census[os.getpid()][1:], sys.orig_argv[1:])
 
     def test_launch_records_hold_arguments_and_environment_where_the_kernel_shows_them(self):
-        # The child announces itself after exec, so its launch records are populated before sampling.
-        child = subprocess.Popen([sys.executable, "-S", "-c", "import sys; print('ready', flush=True); sys.stdin.read()",
-                                  "argument-marker"],
-                                 env={"RUI_LAUNCH_MARKER": "environment-marker"}, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        child = self.ready_child("argument-marker", env={"RUI_LAUNCH_MARKER": "environment-marker"})
         try:
-            self.assertEqual(child.stdout.readline(), b"ready\n")
             records = self.semantics.launch_records(child.pid)
         finally:
             child.communicate(timeout=5)
@@ -463,7 +474,7 @@ class ProcessCensusTest(unittest.TestCase):
             self.assertIsNone(self.semantics.launch_records(os.getpid()))
 
     def test_resource_readers_observe_a_live_process(self):
-        child = subprocess.Popen([sys.executable, "-S", "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE)
+        child = self.ready_child()
         try:
             names = self.semantics.open_descriptor_names(child.pid)
             self.assertGreaterEqual(len(names), 3, names)
@@ -479,8 +490,7 @@ class ProcessCensusTest(unittest.TestCase):
                 self.assertIsNone(memory)
             self.assertEqual(self.semantics.physical_footprint_peak(child.pid) is not None, self.semantics.FOOTPRINT)
         finally:
-            child.stdin.close()
-            child.wait(timeout=5)
+            child.communicate(timeout=5)
         self.assertIsNone(self.semantics.process_memory(child.pid))
         self.assertIsNone(self.semantics.socket_table("rui-no-such-table"))
 
