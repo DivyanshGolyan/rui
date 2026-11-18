@@ -18,18 +18,15 @@ pub const Bound = struct {
 
 pub const Error = error{IntegerOutOfRange};
 
-// The template is a run-time value, so these are instantiated once per Args type, not
-// once per statement text: typed statements and test fixtures share one traversal.
-pub fn length(template: rsql.Template, comptime Args: type, args: *const Args, bound: Bound) Error!usize {
-    var total: usize = 0;
-    for (template.parts) |part| total += part.len;
-    for (template.slots) |slot| total += try slotLength(Args, slot, args, bound);
+pub fn length(comptime template: rsql.Template, comptime Args: type, args: *const Args, bound: Bound) Error!usize {
+    var total: usize = comptime partsLength(template);
+    inline for (template.slots) |slot| total += try slotLength(Args, slot, args, bound);
     return total;
 }
 
-pub fn write(template: rsql.Template, comptime Args: type, args: *const Args, bound: Bound, w: *std.Io.Writer) std.Io.Writer.Error!void {
+pub fn write(comptime template: rsql.Template, comptime Args: type, args: *const Args, bound: Bound, w: *std.Io.Writer) std.Io.Writer.Error!void {
     try w.writeAll(template.parts[0]);
-    for (template.slots, template.parts[1..]) |slot, part| {
+    inline for (template.slots, template.parts[1..]) |slot, part| {
         try writeSlot(Args, slot, args, bound, w);
         try w.writeAll(part);
     }
@@ -58,6 +55,12 @@ pub fn writeHex(w: *std.Io.Writer, bytes: []const u8) std.Io.Writer.Error!void {
     }
 }
 
+fn partsLength(comptime template: rsql.Template) usize {
+    var total: usize = 0;
+    for (template.parts) |part| total += part.len;
+    return total;
+}
+
 fn ArgType(comptime Args: type, comptime index: usize) type {
     return @typeInfo(Args).@"struct".field_types[index];
 }
@@ -70,34 +73,23 @@ fn served(provider: provider_name.Provider, bound: Bound) []const u8 {
     return rsql.servedBinding(provider, provider_route.of(bound.served.*, provider) != .unserved);
 }
 
-fn slotLength(comptime Args: type, slot: rsql.Slot, args: *const Args, bound: Bound) Error!usize {
+fn slotLength(comptime Args: type, comptime slot: rsql.Slot, args: *const Args, bound: Bound) Error!usize {
     return switch (slot) {
-        .argument => |index| {
-            // rsql's parameter check (and mysql_testing's for fixtures) binds every ?N to a field.
-            inline for (0..@typeInfo(Args).@"struct".field_types.len) |field| {
-                if (field == index) return valueLength(ArgType(Args, field), argument(Args, field, args));
-            }
-            unreachable;
-        },
+        .argument => |index| valueLength(ArgType(Args, index), argument(Args, index, args)),
         .now => std.fmt.count("{d}", .{bound.now}),
         .served => |provider| textLength(served(provider, bound).len),
     };
 }
 
-fn writeSlot(comptime Args: type, slot: rsql.Slot, args: *const Args, bound: Bound, w: *std.Io.Writer) std.Io.Writer.Error!void {
+fn writeSlot(comptime Args: type, comptime slot: rsql.Slot, args: *const Args, bound: Bound, w: *std.Io.Writer) std.Io.Writer.Error!void {
     switch (slot) {
-        .argument => |index| {
-            inline for (0..@typeInfo(Args).@"struct".field_types.len) |field| {
-                if (field == index) return writeValue(ArgType(Args, field), argument(Args, field, args), w);
-            }
-            unreachable;
-        },
+        .argument => |index| try writeValue(ArgType(Args, index), argument(Args, index, args), w),
         .now => try w.print("{d}", .{bound.now}),
         .served => |provider| try writeText(served(provider, bound), w),
     }
 }
 
-fn valueLength(comptime T: type, value: T) Error!usize {
+pub fn valueLength(comptime T: type, value: T) Error!usize {
     if (T == []const u8) return textLength(value.len);
     if (T == rsql.Positive) return std.fmt.count("{d}", .{value.get()});
     if (T == rsql.Bytes) return bytesLength(value.bytes.len);
@@ -113,7 +105,7 @@ fn valueLength(comptime T: type, value: T) Error!usize {
     };
 }
 
-fn writeValue(comptime T: type, value: T, w: *std.Io.Writer) std.Io.Writer.Error!void {
+pub fn writeValue(comptime T: type, value: T, w: *std.Io.Writer) std.Io.Writer.Error!void {
     if (T == []const u8) return writeText(value, w);
     if (T == rsql.Positive) return w.print("{d}", .{value.get()});
     if (T == rsql.Bytes) return writeBytes(value.bytes, w);
