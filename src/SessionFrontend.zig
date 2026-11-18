@@ -4998,10 +4998,10 @@ test "one settled stop read updates the chat and its list row without a listing"
     _ = try overview_view.step(&overview.state, .{ .host = .{ .instance = @splat(0xab), .started_at = 1, .slots = 2, .slots_in_use = 0 } });
     const ref = "k7m2qx".*;
     const stopping: protocol.WorkState = .{ .stopping = .{ .since = 1 } };
-    const stopped: protocol.session_work.Work = .{ .state = .{ .stopped = .{ .since = 2, .cause = .stop } }, .turn = 7 };
+    const stopped: protocol.session_work.Work = .{ .state = .{ .stopped = .{ .since = 2, .cause = .stop } }, .turn = 7, .served_group = .done };
     _ = try overview_view.step(&overview.state, .{ .tick = 1000 });
     _ = try overview_view.step(&overview.state, .{ .list = .{ .page = .{
-        .rows = &.{.{ .read_version = .{ .instance = @splat(0xab), .generation = 1 }, .reference = ref, .workspace = "/work", .provider = .codex, .label = "Stop the slow job", .state = stopping, .turn = 7, .last_line = .{ .position = 1, .text = "Old completed answer" } }},
+        .rows = &.{.{ .read_version = .{ .instance = @splat(0xab), .generation = 1 }, .reference = ref, .workspace = "/work", .provider = .codex, .label = "Stop the slow job", .state = stopping, .turn = 7, .group = .working, .last_line = .{ .position = 1, .text = "Old completed answer" } }},
         .answer = .{ .delta = .full, .since = .{ .instance = @splat(0xab), .generation = 1 } },
     } } });
     _ = try overview_view.step(&overview.state, .{ .conversation = ref });
