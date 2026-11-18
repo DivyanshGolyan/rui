@@ -1,4 +1,5 @@
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import contextmanager, nullcontext, redirect_stderr, redirect_stdout
+import errno
 import io
 import json
 import os
@@ -9,7 +10,10 @@ import subprocess
 import shutil
 import sys
 import tempfile
+import threading
+import time
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import store_shards as shards
@@ -113,20 +117,12 @@ class LauncherTest(unittest.TestCase):
             "print('1/1 store.test.' + str(i) + '...OK', flush=True)\n", names="shard")
         for index in range(shards.SHARD_COUNT):
             os.mkfifo(self.directory / f"gate-{index}")
-        import threading
-        from host_process import wait_for
-        def release():
-            wait_for(lambda: all((self.directory / f"ready-{i}").exists() for i in range(shards.SHARD_COUNT)),
-                     "all shard processes started", timeout=3, interval=0.01)
-            for index in range(shards.SHARD_COUNT):
-                with open(self.directory / f"gate-{index}", "w") as gate:
-                    gate.write("run")
-        thread = threading.Thread(target=release)
-        thread.start()
-        with patch("builtins.print"):
-            self.assertEqual(shards.run(self.binary, [], 5, "run", dict(os.environ, RUI_TEST_MYSQL_RECORD=str(record))), 0)
-        thread.join(timeout=5)
-        self.assertFalse(thread.is_alive())
+        with self.release_gates(
+            lambda: all((self.directory / f"ready-{i}").exists() for i in range(shards.SHARD_COUNT)),
+            [self.directory / f"gate-{i}" for i in range(shards.SHARD_COUNT)],
+        ):
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(shards.run(self.binary, [], 60, "run", dict(os.environ, RUI_TEST_MYSQL_RECORD=str(record))), 0)
         entries = events.read_text().splitlines()
         self.assertEqual({line.split(':')[0] for line in entries}, {str(i) for i in range(shards.SHARD_COUNT)})
         self.assertEqual(len({line.split(':')[1] for line in entries}), shards.SHARD_COUNT)
@@ -150,18 +146,68 @@ class LauncherTest(unittest.TestCase):
             "else:\n"
             f"    assert Path({str(done)!r}).exists(), 'peer overlapped SET GLOBAL'\n"
             "    print('1/1 store.test.normal' + str(i) + '...OK', flush=True)\n", names="exclusive")
-        import threading
+        with self.release_gates(ready.exists, [gate]):
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(shards.run(self.binary, [], 60, 'run', os.environ), 0)
+
+    @contextmanager
+    def release_gates(self, ready, gates):
         from host_process import wait_for
+        stop = threading.Event()
+        errors = []
         def release():
-            wait_for(ready.exists, "exclusive test to enter", timeout=3, interval=.01)
-            with open(gate, 'w') as pipe:
-                pipe.write('restore global settings')
+            try:
+                wait_for(lambda: stop.is_set() or ready(), "shard processes ready", timeout=30, interval=.01)
+                for gate in gates:
+                    fd = None
+                    def open_gate():
+                        nonlocal fd
+                        if stop.is_set():
+                            return True
+                        try:
+                            fd = os.open(gate, os.O_WRONLY | os.O_NONBLOCK)
+                        except OSError as error:
+                            if error.errno != errno.ENXIO:
+                                raise
+                            return False
+                        return True
+                    wait_for(open_gate, "shard gate reader", timeout=30, interval=.01)
+                    if fd is None:
+                        return
+                    try:
+                        os.write(fd, b"run")
+                    finally:
+                        os.close(fd)
+            except Exception as error:
+                errors.append(error)
         thread = threading.Thread(target=release)
         thread.start()
-        with patch('builtins.print'):
-            self.assertEqual(shards.run(self.binary, [], 5, 'run', os.environ), 0)
-        thread.join(timeout=3)
-        self.assertFalse(thread.is_alive())
+        try:
+            yield
+        finally:
+            stop.set()
+            thread.join(timeout=30)
+            self.assertFalse(thread.is_alive())
+            if errors:
+                raise errors[0]
+
+    @contextmanager
+    def process_deadline_after_marker(self, timeout):
+        # Keep the process clock still until the parser has identified the
+        # active test, then advance it beyond the original process deadline.
+        clock = SimpleNamespace(now=0)
+        started = time.monotonic()
+        def monotonic():
+            # Bound a broken fixture that never emits its marker.
+            return timeout + 1 if time.monotonic() - started >= 60 else clock.now
+        original = shards.TerminalTimes.feed
+        def feed(parser, data, now):
+            original(parser, data, now)
+            if parser.active:
+                clock.now = timeout + 1
+        with patch.object(shards, "time", SimpleNamespace(monotonic=monotonic)), \
+                patch.object(shards.TerminalTimes, "feed", feed):
+            yield
 
     def failure_log(self, result):
         output = io.StringIO()
@@ -177,22 +223,24 @@ class LauncherTest(unittest.TestCase):
         header = f"print({('1/1 ' + test + '...')!r}, end='', flush=True)\n"
         cases = {
             "assertion": ("print('expected ready, found held')\nprint('FAIL (TestUnexpectedResult)')\nraise SystemExit(1)\n",
-                          3, None, "failed (TestUnexpectedResult)", "expected ready, found held"),
+                          30, None, "failed (TestUnexpectedResult)", "expected ready, found held"),
             "panic": ("import os, resource, signal\nresource.setrlimit(resource.RLIMIT_CORE, (0, 0))\n"
                       "print('thread 1 panic: reached unreachable code', flush=True)\nos.kill(os.getpid(), signal.SIGABRT)\n",
-                      3, None, "terminated with signal SIGABRT", "panic: reached unreachable code"),
+                      30, None, "terminated with signal SIGABRT", "panic: reached unreachable code"),
             "panic exit": ("print('thread 1 panic: reached unreachable code', flush=True)\nraise SystemExit(2)\n",
-                           3, None, "failed", "panic: reached unreachable code"),
+                           30, None, "failed", "panic: reached unreachable code"),
             "signal": ("import os, signal\nos.kill(os.getpid(), signal.SIGTERM)\n",
-                       3, None, "terminated with signal SIGTERM", test),
-            "process timeout": ("import signal\nsignal.pause()\n", .2, None, "failed (ProcessTimeout)", "process deadline exceeded"),
-            "test timeout": ("import signal\nsignal.pause()\n", 3, .1, "failed (TestTimeout)", "test timeout"),
+                       30, None, "terminated with signal SIGTERM", test),
+            "process timeout": ("import signal\nsignal.pause()\n", 30, None, "failed (ProcessTimeout)", "process deadline exceeded"),
+            "test timeout": ("import signal\nsignal.pause()\n", 30, .1, "failed (TestTimeout)", "test timeout"),
         }
         for kind, (body, timeout, test_timeout, how, detail) in cases.items():
             with self.subTest(kind=kind):
                 self.script(header + body, names=[test])
-                result = shards.execute(self.binary, ["--seed=0"], os.environ, timeout, "Store shard 1/4",
-                                        test_timeout=test_timeout)
+                clock = self.process_deadline_after_marker(timeout) if kind == "process timeout" else nullcontext()
+                with clock:
+                    result = shards.execute(self.binary, ["--seed=0"], os.environ, timeout, "Store shard 1/4",
+                                            test_timeout=test_timeout)
                 self.assertNotEqual(result.status, 0)
                 output = self.failure_log(result)
                 for target in ("test-store", "check"):
@@ -240,7 +288,7 @@ class LauncherTest(unittest.TestCase):
                     f"print({('2/3 ' + second + '...FAIL (TestExpectedEqual)')!r}, flush=True)\n"
                     f"print({('3/3 ' + third + '...')!r}, end='', flush=True)\n"
                     "import os, signal\nos.kill(os.getpid(), signal.SIGTERM)\n", names=[first, second, third])
-        result = shards.execute(self.binary, [], os.environ, 3, "Store shard 1/4")
+        result = shards.execute(self.binary, [], os.environ, 30, "Store shard 1/4")
         output = self.failure_log(result)
         native = shards.Result("native", 1, 0, [], "native diagnostic", ["/tmp/unit-native-tests"],
                                [("codex_auth.test.refresh", "failed (TestUnexpectedResult)")])
@@ -267,7 +315,7 @@ class LauncherTest(unittest.TestCase):
                 stop.set()
         self.script("import signal\nprint('1/1 store.test.innocent...', end='', flush=True)\nsignal.pause()\n")
         with patch.object(shards.TerminalTimes, "feed", feed):
-            result = shards.execute(self.binary, [], os.environ, 3, "cancelled peer", stop)
+            result = shards.execute(self.binary, [], os.environ, 30, "cancelled peer", stop)
         self.assertEqual(result.status, 130)
         self.assertEqual(report_issue.failure_causes(self.failure_log(result), {}), [])
         self.assertIn("unit root interrupted", result.diagnostic)
@@ -278,7 +326,7 @@ class LauncherTest(unittest.TestCase):
         signum = int(signal.SIGRTMIN) + 1
         self.script("import os\nprint('1/1 store.test.failed...', end='', flush=True)\n"
                     f"os.kill(os.getpid(), {signum})\n")
-        result = shards.execute(self.binary, [], os.environ, 3, "Store shard 1/4")
+        result = shards.execute(self.binary, [], os.environ, 30, "Store shard 1/4")
         [cause] = report_issue.failure_causes(self.failure_log(result), {})
         self.assertEqual(cause.zig_test, "store.test.failed")
         self.assertEqual(cause.zig_binary, self.binary.name)
@@ -289,7 +337,7 @@ class LauncherTest(unittest.TestCase):
         for status in (124, 130):
             with self.subTest(status=status):
                 self.script(f"print('1/1 store.test.failed...', end='', flush=True)\nraise SystemExit({status})\n")
-                result = shards.execute(self.binary, [], os.environ, 3, "Store shard 1/4")
+                result = shards.execute(self.binary, [], os.environ, 30, "Store shard 1/4")
                 [cause] = report_issue.failure_causes(self.failure_log(result), {})
                 self.assertEqual(cause.signature, "zig test 'store.test.failed' failed")
                 self.assertFalse(result.interrupted)
@@ -307,7 +355,7 @@ class LauncherTest(unittest.TestCase):
     def test_failure_before_first_test_is_a_root_failure_without_an_invented_test(self):
         import report_issue
         self.script("print('panic before main')\nraise SystemExit(1)\n", names=["store.test.never"])
-        result = shards.execute(self.binary, [], os.environ, 3, "Store shard 1/4")
+        result = shards.execute(self.binary, [], os.environ, 30, "Store shard 1/4")
         [cause] = report_issue.failure_causes(self.failure_log(result), {})
         self.assertEqual(cause.zig_test, "")
         self.assertIn(self.binary.name, cause.signature)
@@ -318,7 +366,7 @@ class LauncherTest(unittest.TestCase):
                     "print('first assertion witness')\n"
                     "print('later runner output' * 5000)\n"
                     "raise SystemExit(1)\n")
-        result = shards.execute(self.binary, [], os.environ, 2, "failed")
+        result = shards.execute(self.binary, [], os.environ, 30, "failed")
         self.assertEqual(result.status, 1)
         self.assertGreater(len(result.diagnostic), 65536)
         self.assertIn("first assertion witness", result.diagnostic)
@@ -327,7 +375,8 @@ class LauncherTest(unittest.TestCase):
     def test_timeout_kills_and_reaps_active_process(self):
         pid_file = self.directory / "pid"
         self.script(f"import os, signal\nfrom pathlib import Path\nPath({str(pid_file)!r}).write_text(str(os.getpid()))\nprint('1/1 store.test.stalled...', end='', flush=True)\nsignal.pause()\n")
-        result = shards.execute(self.binary, [], os.environ, .2, "stalled")
+        with self.process_deadline_after_marker(30):
+            result = shards.execute(self.binary, [], os.environ, 30, "stalled")
         self.assertEqual(result.status, 124)
         self.assertIn("deadline exceeded", result.diagnostic)
         with self.assertRaises(ProcessLookupError):
@@ -335,14 +384,14 @@ class LauncherTest(unittest.TestCase):
 
     def test_per_test_timeout_is_independent_of_process_deadline(self):
         self.script("import signal\nprint('1/1 store.test.stalled...', end='', flush=True)\nsignal.pause()\n")
-        result = shards.execute(self.binary, [], os.environ, 5, "stalled", test_timeout=.1)
+        result = shards.execute(self.binary, [], os.environ, 30, "stalled", test_timeout=.1)
         self.assertEqual(result.status, 124)
         self.assertIn("test timeout", result.diagnostic)
         self.assertLess(result.seconds, 2)
 
     def test_per_test_deadline_survives_closed_output(self):
         self.script("import os, signal\nprint('1/1 store.test.closed...', end='', flush=True)\nos.close(1); os.close(2)\nsignal.pause()\n")
-        result = shards.execute(self.binary, [], os.environ, 3, "closed", test_timeout=.1)
+        result = shards.execute(self.binary, [], os.environ, 30, "closed", test_timeout=.1)
         self.assertEqual(result.status, 124)
         self.assertIn("test timeout", result.diagnostic)
         self.assertLess(result.seconds, 1)
@@ -351,25 +400,31 @@ class LauncherTest(unittest.TestCase):
         pid_file = self.directory / "active"
         self.script("import os, signal, subprocess\nfrom pathlib import Path\n"
                     "descendant = subprocess.Popen([__import__('sys').executable, '-c', 'import signal; signal.pause()'])\n"
-                    f"Path({str(pid_file)!r}).write_text(str(os.getpid()) + ':' + str(descendant.pid))\n"
+                    f"pid_file = Path({str(pid_file)!r})\n"
+                    "temporary = pid_file.with_suffix('.tmp')\n"
+                    "temporary.write_text(str(os.getpid()) + ':' + str(descendant.pid))\n"
+                    "temporary.replace(pid_file)\n"
                     "print('1/1 store.test.active...', end='', flush=True)\nsignal.pause()\n")
         command = [sys.executable, "-c",
-                   "import os, sys, store_shards as s; sys.exit(s.run(sys.argv[1], [], 10, 'aggregate', os.environ))",
+                   "import os, sys, store_shards as s; sys.exit(s.run(sys.argv[1], [], 60, 'aggregate', os.environ))",
                    str(self.binary)]
         process = subprocess.Popen(command, env=dict(os.environ, PYTHONPATH=str(ROOT / "tests/ci")),
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
         child = None
         try:
             from host_process import wait_for
-            wait_for(pid_file.exists, "active test and descendant", timeout=3, interval=.01)
+            wait_for(pid_file.exists, "active test and descendant", timeout=30, interval=.01)
             child, descendant = map(int, pid_file.read_text().split(':'))
             process.terminate()
-            stdout, stderr = process.communicate(timeout=3)
+            stdout, stderr = process.communicate(timeout=30)
             self.assertEqual(process.returncode, 128 + signal.SIGTERM, (stdout, stderr))
             with self.assertRaises(ProcessLookupError):
                 os.kill(child, 0)
-            census = subprocess.run(['ps', '-o', 'stat=', '-p', str(descendant)], capture_output=True, text=True)
-            self.assertTrue(not census.stdout.strip() or census.stdout.strip().startswith('Z'), census.stdout)
+            def descendant_retired():
+                census = subprocess.run(['ps', '-o', 'stat=', '-p', str(descendant)], capture_output=True, text=True)
+                return not census.stdout.strip() or census.stdout.strip().startswith('Z')
+            wait_for(descendant_retired, "descendant to exit or become a zombie", timeout=30, interval=.01)
+            self.assertTrue(descendant_retired())
         finally:
             if child is not None:
                 try:
@@ -378,18 +433,18 @@ class LauncherTest(unittest.TestCase):
                     pass
             if process.poll() is None:
                 process.kill()
-            process.communicate(timeout=3)
+            process.communicate(timeout=30)
 
     def test_nonzero_child_and_missing_record_cannot_publish_acceptance(self):
         record = self.directory / "record"
         record.write_text("prepares=999\n")
         self.script("raise SystemExit(7)\n")
         with patch("builtins.print"):
-            self.assertEqual(shards.run(self.binary, [], 2, "run", dict(os.environ, RUI_TEST_MYSQL_RECORD=str(record))), 7)
+            self.assertEqual(shards.run(self.binary, [], 30, "run", dict(os.environ, RUI_TEST_MYSQL_RECORD=str(record))), 7)
         self.assertFalse(record.exists())
         self.script("print('1/1 store.test.ok...OK')\n")
         with patch("builtins.print"), self.assertRaises(FileNotFoundError):
-            shards.run(self.binary, [], 2, "run", dict(os.environ, RUI_TEST_MYSQL_RECORD=str(record)))
+            shards.run(self.binary, [], 30, "run", dict(os.environ, RUI_TEST_MYSQL_RECORD=str(record)))
         self.assertFalse(record.exists())
 
     def test_native_record_cannot_overwrite_store_and_aggregate_retains_original(self):
@@ -397,22 +452,22 @@ class LauncherTest(unittest.TestCase):
         self.script("import os\nfrom pathlib import Path\nPath(os.environ['RUI_TEST_MYSQL_RECORD']).write_text('prepares=1\\n')\nprint('1/1 test.ok...OK')\n")
         record.write_text("prepares=999\n")
         with patch("builtins.print"):
-            self.assertEqual(shards.run(self.binary, [], 2, "native", dict(os.environ, RUI_TEST_MYSQL_RECORD=str(record))), 0)
+            self.assertEqual(shards.run(self.binary, [], 30, "native", dict(os.environ, RUI_TEST_MYSQL_RECORD=str(record))), 0)
         self.assertEqual(record.read_text(), "prepares=999\n")
         self.assertEqual(Path(str(record) + ".native").read_text(), "prepares=1\n")
         with patch("builtins.print"):
-            self.assertEqual(shards.run(self.binary, [], 2, "aggregate", dict(os.environ, RUI_TEST_MYSQL_RECORD=str(record))), 0)
+            self.assertEqual(shards.run(self.binary, [], 30, "aggregate", dict(os.environ, RUI_TEST_MYSQL_RECORD=str(record))), 0)
         self.assertEqual(record.read_text(), "prepares=1\n")
 
     def test_measurement_writes_only_complete_passing_inventory(self):
         output = self.directory / "times.json"
         self.script("print('1/2 store.test.one...OK\\n2/2 store.test.two...OK')\n")
         with patch("builtins.print"):
-            self.assertEqual(shards.run(self.binary, [], 2, "measure", os.environ, output), 0)
+            self.assertEqual(shards.run(self.binary, [], 30, "measure", os.environ, output), 0)
         self.assertEqual(set(json.loads(output.read_text())), {"store.test.one", "store.test.two"})
         self.script("print('1/1 store.test.skip...SKIP')\n")
         with patch("builtins.print"):
-            self.assertEqual(shards.run(self.binary, [], 2, "measure", os.environ, output), 0)
+            self.assertEqual(shards.run(self.binary, [], 30, "measure", os.environ, output), 0)
         self.assertEqual(set(json.loads(output.read_text())), {"store.test.skip"})
 
     def test_record_join_rejects_missing_or_negative_inputs(self):

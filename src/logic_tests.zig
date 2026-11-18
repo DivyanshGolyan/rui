@@ -170,6 +170,7 @@ const cores = .{
     .{ "turn_ending.zig", @import("turn_ending.zig") },
     .{ "turn_policy.zig", @import("turn_policy.zig") },
     .{ "unit_test_partition.zig", @import("unit_test_partition.zig") },
+    .{ "upgrade_run.zig", @import("upgrade_run.zig") },
     .{ "upgrade_status.zig", @import("upgrade_status.zig") },
     .{ "url.zig", @import("url") },
     .{ "utf8_validation.zig", @import("utf8_validation.zig") },

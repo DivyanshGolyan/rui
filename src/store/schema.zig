@@ -859,7 +859,14 @@ pub fn mysqlMigration(comptime from: u32) [:0]const u8 {
 }
 
 pub fn mysqlMigrationFrom(from: u64) ?[:0]const u8 {
-    const texts = comptime blk: {
+    const texts = comptime mysqlMigrationTexts();
+    if (from < migration_baseline or from > schema_version) return null;
+    return texts[@intCast(from - migration_baseline)];
+}
+
+fn mysqlMigrationTexts() [schema_version - migration_baseline + 1][:0]const u8 {
+    return comptime blk: {
+        if (rsql.generatedSchema()) |generated| break :blk generated.mysql_migrations;
         var result: [schema_version - migration_baseline + 1][:0]const u8 = undefined;
         result[result.len - 1] = "";
         const metadata = "UPDATE store_meta SET meta_value='" ++ format_text ++ "' WHERE meta_key='format';\n";
@@ -873,8 +880,6 @@ pub fn mysqlMigrationFrom(from: u64) ?[:0]const u8 {
         }
         break :blk result;
     };
-    if (from < migration_baseline or from > schema_version) return null;
-    return texts[@intCast(from - migration_baseline)];
 }
 
 test "store schema --from prints every remaining MySQL migration then sets the format once" {
@@ -2036,6 +2041,7 @@ fn canForceMysqlIndex(comptime every: []const Table, comptime all_indexes: []con
 
 pub fn ddl(comptime dialect: rsql.Dialect) [:0]const u8 {
     return comptime blk: {
+        if (rsql.generatedSchema()) |generated| break :blk if (dialect == .sqlite) generated.sqlite_ddl else generated.mysql_ddl;
         @setEvalBranchQuota(objects_quota);
         var text: []const u8 = "";
         for (objects(dialect)) |object| text = text ++ object.sql ++ ";\n";
@@ -2060,20 +2066,48 @@ fn onEngine(comptime all: []const Table, comptime dialect: rsql.Dialect) []const
     }
 }
 
+/// The schema values a collect build records, one separator between items; counted then filled, not grown by `++`.
+fn joined(comptime items: []const []const u8, comptime separator: []const u8) []const u8 {
+    comptime {
+        var length: usize = 0;
+        for (items, 0..) |item, position| length += item.len + if (position == 0) 0 else separator.len;
+        var buffer: [length]u8 = undefined;
+        var at: usize = 0;
+        for (items, 0..) |item, position| {
+            if (position != 0) {
+                @memcpy(buffer[at..][0..separator.len], separator);
+                at += separator.len;
+            }
+            @memcpy(buffer[at..][0..item.len], item);
+            at += item.len;
+        }
+        const result = buffer;
+        return &result;
+    }
+}
+
 pub const Object = struct { kind: enum { table, index, foreign_key }, name: []const u8, sql: []const u8 };
 
 pub fn objects(comptime dialect: rsql.Dialect) []const Object {
     return comptime blk: {
+        if (rsql.generatedSchema()) |generated| break :blk if (dialect == .sqlite) generated.sqlite_objects else generated.mysql_objects;
         @setEvalBranchQuota(objects_quota);
-        if (dialect == .mysql) break :blk switch (mysqlObjects(&tables, &indexes)) {
+        const result = renderedObjects(dialect);
+        break :blk result;
+    };
+}
+
+fn renderedObjects(comptime dialect: rsql.Dialect) []const Object {
+    comptime {
+        if (dialect == .mysql) return switch (mysqlObjects(&tables, &indexes)) {
             .refused => |message| @compileError(message),
             .objects => |result| result,
         };
         var result: []const Object = &.{};
         for (onEngine(&tables, .sqlite)) |table| result = result ++ .{Object{ .kind = .table, .name = table.name, .sql = createTable(table) }};
         for (indexes) |index| result = result ++ .{Object{ .kind = .index, .name = index.name, .sql = createIndex(index) }};
-        break :blk result;
-    };
+        return result;
+    }
 }
 
 pub const mysql_session = [_][:0]const u8{
@@ -2405,10 +2439,12 @@ fn joinLines(comptime lines: []const []const u8) []const u8 {
 
 pub fn digest() u64 {
     return comptime blk: {
+        if (rsql.generatedSchema()) |generated| break :blk generated.digest;
         var text: []const u8 = "";
         for (bootstrap_sql) |statement| text = text ++ statement ++ "\x00";
         @setEvalBranchQuota(10 * text.len + 1000);
-        break :blk std.hash.Fnv1a_64.hash(text);
+        const hash = std.hash.Fnv1a_64.hash(text);
+        break :blk hash;
     };
 }
 
@@ -3598,4 +3634,23 @@ test "schema 83 migration creates constrained action values" {
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM pragma_foreign_key_check"));
     try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, "UPDATE action_value SET ordinal=0"));
     try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, "UPDATE action_value SET handle='invalid'"));
+}
+
+// Export each schema value once per collect binary, under a stable symbol name.
+comptime {
+    if (rsql.collecting()) {
+        @setEvalBranchQuota(objects_quota);
+        for (.{ rsql.Dialect.sqlite, rsql.Dialect.mysql }) |dialect| {
+            const all = objects(dialect);
+            var items: [all.len][]const u8 = undefined;
+            for (all, &items) |object, *item| item.* = @tagName(object.kind) ++ "\x1e" ++ object.name ++ "\x1e" ++ object.sql;
+            rsql.collectSchema(@tagName(dialect) ++ "_objects", joined(&items, "\x1d"));
+            rsql.collectSchema(@tagName(dialect) ++ "_ddl", ddl(dialect));
+        }
+        const texts = mysqlMigrationTexts();
+        for (texts, 0..) |text, index| {
+            rsql.collectSchema(std.fmt.comptimePrint("mysql_migrations_{d}", .{index}), text);
+        }
+        rsql.collectSchema("digest", std.fmt.comptimePrint("{d}", .{digest()}));
+    }
 }

@@ -27,25 +27,6 @@ pub const Progress = struct {
 };
 pub const Limitation = activation.Limitation;
 
-/// Classify the facts acquired at each ownership check without reading a clock.
-/// Deadlines and I/O errors are resolved by the observing client before this call.
-pub const OwnershipCheck = union(enum) {
-    status: protocol_reply.HostStatus,
-    observation: bool,
-    directory: ?struct { canonical: []const u8, observed: []const u8 },
-    confirmation: bool,
-};
-pub fn ownershipLimitation(check: OwnershipCheck) ?Limitation {
-    return switch (check) {
-        .status => |status| if (status == .owned_unavailable) .ownership_status else null,
-        .observation => |ok| if (ok) null else .ownership_observation,
-        .directory => |paths| if (paths) |p|
-            (if (std.mem.eql(u8, p.canonical, p.observed)) null else .ownership_directory_mismatch)
-        else
-            .ownership_directory_unavailable,
-        .confirmation => |ok| if (ok) null else .ownership_confirmation,
-    };
-}
 pub const ActivationOutcome = activation.Outcome;
 
 // The arena's allocator context must not move when an Observation is returned.
@@ -105,38 +86,73 @@ fn installedVersion(allocator: std.mem.Allocator, io: std.Io, home: []const u8, 
     };
 }
 
+/// Reads what `host_activation.eligibility` asks for, in its order, and keeps
+/// the handles of a managed Host as its Plan.
 pub fn observe(allocator: std.mem.Allocator, io: std.Io, home: []const u8, directory: []const u8, cancellation: ?*const client.Cancellation) !Observation {
     try process.check(cancellation);
-    switch (client.hostStatus(io, directory)) {
-        .unavailable => return .absent,
-        .owned_unavailable => return .{ .unsupported = ownershipLimitation(.{ .status = .owned_unavailable }).? },
-        .access_failure => return .{ .unsupported = .inaccessible },
-        .incompatible, .ready => {},
-    }
-    const observed = client.observeHostForUpgrade(io, directory, null) catch return .{ .unsupported = ownershipLimitation(.{ .observation = false }).? };
-    var snapshot = identity.snapshot(allocator, observed.pid) catch return .{ .unsupported = .configuration_unavailable };
-    var owned = true;
-    defer if (owned) snapshot.deinit(allocator);
-    const version = (try installedVersion(allocator, io, home, snapshot.executable, cancellation)) orelse return .{ .unsupported = .application_owned };
-    if (!restartableEnvironment(snapshot.environment)) return .{ .unsupported = .configuration_unavailable };
-    const sources = Sources.init(allocator, snapshot.argv) catch |err| {
-        if (err == error.OutOfMemory) return err;
-        return .{ .unsupported = .configuration_unavailable };
+    var seen: activation.Seen = .{};
+    var observed: client.HostControlObservation = undefined;
+    var snapshot: ?identity.Snapshot = null;
+    defer if (snapshot) |*value| value.deinit(allocator);
+    var version: candidate.Version = undefined;
+    var sources: ?*Sources = null;
+    defer if (sources) |value| value.deinit(allocator);
+    while (true) switch (activation.eligibility(seen)) {
+        .read => |read| switch (read) {
+            .status => seen.status = switch (client.hostStatus(io, directory)) {
+                .unavailable => .unavailable,
+                .owned_unavailable => .owned_unavailable,
+                .access_failure => .access_failure,
+                .incompatible => .incompatible,
+                .ready => .ready,
+            },
+            .observe => seen.observed = if (client.observeHostForUpgrade(io, directory, null)) |value| observed: {
+                observed = value;
+                break :observed true;
+            } else |_| false,
+            .snapshot => seen.snapshot = if (identity.snapshot(allocator, observed.pid)) |value| taken: {
+                snapshot = value;
+                break :taken true;
+            } else |_| false,
+            .version => seen.managed = if (try installedVersion(allocator, io, home, snapshot.?.executable, cancellation)) |value| managed: {
+                version = value;
+                break :managed true;
+            } else false,
+            .environment => seen.environment = restartableEnvironment(snapshot.?.environment),
+            .sources => seen.sources = if (Sources.init(allocator, snapshot.?.argv)) |value| reconstructed: {
+                sources = value;
+                break :reconstructed true;
+            } else |err| if (err == error.OutOfMemory) return err else false,
+            .directory => {
+                // The argv spelling can be an absolute alias of the selected Host DIR.
+                // Placement already canonicalizes selectors; compare the same fact here,
+                // without changing settings-file or assignment byte spellings.
+                var directory_buffer: [protocol.max_store_bytes]u8 = undefined;
+                const request = &sources.?.request;
+                const canonical = platform.canonicalStoreDestination(io, request.dir, &directory_buffer) catch {
+                    seen.directory = .unavailable;
+                    continue;
+                };
+                if (!std.mem.eql(u8, canonical, observed.directory())) {
+                    seen.directory = .mismatch;
+                    continue;
+                }
+                request.dir = try sources.?.arena.allocator().dupe(u8, canonical);
+                seen.directory = .same;
+            },
+            .confirm => seen.confirmed = if (client.observeHostForUpgradeProfile(io, directory, observed.profile, null)) |confirmed|
+                sameHost(observed, confirmed) and (identity.generation(observed.pid) catch 0) == snapshot.?.started
+            else |_|
+                false,
+        },
+        .absent => return .absent,
+        .unsupported => |reason| return .{ .unsupported = reason },
+        .managed => {
+            defer snapshot = null;
+            defer sources = null;
+            return .{ .managed = .{ .observed = observed, .snapshot = snapshot.?, .sources = sources.?, .version = version } };
+        },
     };
-    var source_owned = true;
-    defer if (source_owned) sources.deinit(allocator);
-    // The argv spelling can be an absolute alias of the selected Host DIR.
-    // Placement already canonicalizes selectors; compare the same fact here,
-    // without changing settings-file or assignment byte spellings.
-    var directory_buffer: [protocol.max_store_bytes]u8 = undefined;
-    const canonical_directory = platform.canonicalStoreDestination(io, sources.request.dir, &directory_buffer) catch return .{ .unsupported = ownershipLimitation(.{ .directory = null }).? };
-    if (ownershipLimitation(.{ .directory = .{ .canonical = canonical_directory, .observed = observed.directory() } })) |reason| return .{ .unsupported = reason };
-    sources.request.dir = try sources.arena.allocator().dupe(u8, canonical_directory);
-    const confirmed = client.observeHostForUpgradeProfile(io, directory, observed.profile, null) catch return .{ .unsupported = ownershipLimitation(.{ .confirmation = false }).? };
-    if (ownershipLimitation(.{ .confirmation = sameHost(observed, confirmed) and (identity.generation(observed.pid) catch 0) == snapshot.started })) |reason| return .{ .unsupported = reason };
-    owned = false;
-    source_owned = false;
-    return .{ .managed = .{ .observed = observed, .snapshot = snapshot, .sources = sources, .version = version } };
 }
 
 fn sameHost(a: client.HostControlObservation, b: client.HostControlObservation) bool {
@@ -268,140 +284,208 @@ fn retired(io: std.Io, allocator: std.mem.Allocator, plan: *const Plan) !bool {
     }
 }
 
+/// Repeats `host_activation.verdict` passes until it decides or the readiness
+/// deadline passes. The shell owns the clock; each pass reads only what the
+/// verdict asks for.
 fn verify(init: std.process.Init, allocator: std.mem.Allocator, plan: *const Plan, executable: []const u8, version: candidate.Version, context: process.Context) !ActivationOutcome {
     const until = nowNanos(init.io) + @import("HostStartupWait.zig").readiness_ns;
     const argv = try arguments(allocator, executable, plan.sources.request, .status);
     defer allocator.free(argv);
     while (nowNanos(init.io) < until) {
-        if (client.observeUpgradePeer(allocator, init.io, plan.sources.request.dir, until)) |first| {
-            var before = first;
-            defer before.deinit(allocator);
-            const result = process.runIn(allocator, init.io, argv, null, 8192, .fromNanoseconds(@intCast(@max(1, until - nowNanos(init.io)))), context) catch return .{ .unconfirmed = .verifying };
-            defer process.dispose(allocator, result);
-            if (result.term.success()) {
-                if (try client.parseUpgradeStatus(allocator, result.stdout)) |facts| {
-                    if (client.observeUpgradePeer(allocator, init.io, plan.sources.request.dir, until)) |last| {
-                        var after = last;
-                        defer after.deinit(allocator);
-                        if (sameSnapshot(&before, &after)) {
-                            const actual = (try installedVersion(allocator, init.io, init.environ_map.get("HOME") orelse return .{ .unconfirmed = .verifying }, after.executable, null)) orelse return .{ .unconfirmed = .verifying };
-                            if (replacementMatches(plan, facts, actual, version)) {
-                                const status = client.hostStatus(init.io, plan.sources.request.dir);
-                                const usable = statusAgrees(status, facts);
-                                if (usable) {
-                                    if (client.observeUpgradePeer(allocator, init.io, plan.sources.request.dir, until)) |last_peer| {
-                                        var final_peer = last_peer;
-                                        defer final_peer.deinit(allocator);
-                                        if (sameSnapshot(&after, &final_peer)) return if (status == .incompatible)
-                                            .{ .client_incompatible = final_peer.pid }
-                                        else
-                                            .{ .ready = .{ .instance = facts.instance, .pid = final_peer.pid } };
-                                    } else |_| {}
-                                }
-                            } else {
-                                return .replacement_observed;
-                            }
-                        }
-                    } else |_| {}
-                }
-            }
-        } else |_| {}
+        if (try verifyPass(init, allocator, plan, argv, version, context, until)) |outcome| return outcome;
         _ = try sleepToward(init.io, until);
     }
     return .{ .unconfirmed = .verifying };
 }
 
-/// Used ONLY after target-public readiness, instance and answering release
-/// proof. An explicit negative final probe must never become success.
-fn statusAgrees(status: protocol_reply.HostStatus, facts: client.ReplacementFacts) bool {
-    return switch (status) {
-        .ready => |ready| std.mem.eql(u8, &ready.instance, &facts.instance) and std.mem.eql(u8, ready.store.slice(), facts.store.slice()) and ready.active_capacity == facts.active_capacity,
-        .incompatible => true,
-        .unavailable, .owned_unavailable, .access_failure => false,
+fn verifyPass(init: std.process.Init, allocator: std.mem.Allocator, plan: *const Plan, argv: []const []const u8, version: candidate.Version, context: process.Context, until: i96) !?ActivationOutcome {
+    const directory = plan.sources.request.dir;
+    var probe: activation.Probe = .{ .stopped = .{
+        .instance = plan.observed.facts.instance,
+        .store = plan.observed.facts.store.slice(),
+        .capacity = plan.observed.facts.active_capacity,
+    } };
+    var before: ?identity.Snapshot = null;
+    defer if (before) |*peer| peer.deinit(allocator);
+    var after: ?identity.Snapshot = null;
+    defer if (after) |*peer| peer.deinit(allocator);
+    var facts: client.ReplacementFacts = undefined;
+    // The probe borrows Store bytes from both answers until the pass ends.
+    var own: protocol_reply.HostStatus = undefined;
+    while (true) switch (activation.verdict(probe)) {
+        .read => |read| switch (read) {
+            .before => probe.before = if (client.observeUpgradePeer(allocator, init.io, directory, until)) |peer| peer: {
+                before = peer;
+                break :peer true;
+            } else |_| false,
+            .status => {
+                const result = process.runIn(allocator, init.io, argv, null, 8192, .fromNanoseconds(@intCast(@max(1, until - nowNanos(init.io)))), context) catch {
+                    probe.status = .unavailable;
+                    continue;
+                };
+                defer process.dispose(allocator, result);
+                const parsed = if (result.term.success()) try client.parseUpgradeStatus(allocator, result.stdout) else null;
+                if (parsed) |value| {
+                    facts = value;
+                    probe.status = .{ .answered = .{ .instance = facts.instance, .store = facts.store.slice(), .capacity = facts.active_capacity } };
+                } else probe.status = .unanswered;
+            },
+            .after => probe.after = if (client.observeUpgradePeer(allocator, init.io, directory, until)) |peer| peer: {
+                after = peer;
+                break :peer sameSnapshot(&before.?, &after.?);
+            } else |_| false,
+            .version => probe.version = version: {
+                const home = init.environ_map.get("HOME") orelse break :version .unknown;
+                const actual = (try installedVersion(allocator, init.io, home, after.?.executable, null)) orelse break :version .unknown;
+                break :version .{ .order = actual.order(version) };
+            },
+            .own => probe.own = own: {
+                own = client.hostStatus(init.io, directory);
+                break :own switch (own) {
+                    .ready => |*ready| .{ .ready = .{ .instance = ready.instance, .store = ready.store.slice(), .capacity = ready.active_capacity } },
+                    .incompatible => .incompatible,
+                    .unavailable, .owned_unavailable, .access_failure => .unavailable,
+                };
+            },
+            .final => probe.final = if (client.observeUpgradePeer(allocator, init.io, directory, until)) |peer| final: {
+                var last = peer;
+                defer last.deinit(allocator);
+                break :final if (sameSnapshot(&after.?, &last)) .{ .same = last.pid } else .differs;
+            } else |_| .differs,
+        },
+        .again => return null,
+        .done => |outcome| return outcome,
     };
 }
 
-fn replacementMatches(plan: *const Plan, facts: client.ReplacementFacts, actual: candidate.Version, target: candidate.Version) bool {
-    return actual.order(target) == .eq and !std.mem.eql(u8, &facts.instance, &plan.observed.facts.instance) and
-        std.mem.eql(u8, facts.store.slice(), plan.observed.facts.store.slice()) and facts.active_capacity == plan.observed.facts.active_capacity;
-}
-
-pub fn activate(init: std.process.Init, allocator: std.mem.Allocator, observation: *const Observation, target: []const u8, version: candidate.Version, cancellation: ?*const client.Cancellation, progress: ?Progress) !ActivationOutcome {
-    const plan = switch (observation.*) {
-        .absent => return .not_needed,
-        .unsupported => |reason| return .{ .unsupported = reason },
-        .managed => |*value| value,
+/// Reads and does what `host_activation.next` asks for, in its order. The
+/// captured environment and every secret it reaches stay in this wiping
+/// allocator; handles and child results stay here.
+pub fn activate(init: std.process.Init, allocator: std.mem.Allocator, observation: *const Observation, census: @FieldType(activation.Facts, "census"), target: []const u8, version: candidate.Version, cancellation: ?*const client.Cancellation, progress: ?Progress) !ActivationOutcome {
+    var facts: activation.Facts = .{
+        .eligibility = switch (observation.*) {
+            .absent => .absent,
+            .unsupported => |reason| .{ .unsupported = reason },
+            .managed => |*plan| .{ .managed = .{
+                .order = plan.version.order(version),
+                .environment_parses = for (plan.snapshot.environment) |entry| {
+                    if (std.mem.indexOfScalar(u8, entry, '=') == null) break false;
+                } else true,
+            } },
+        },
+        .census = census,
     };
-    process.check(cancellation) catch return .cancelled;
-    if (plan.version.order(version) == .gt) return .superseded;
+    const plan: *const Plan = if (observation.* == .managed) &observation.managed else undefined;
     var wiping: secret_value.WipingAllocator = .{ .backing = allocator };
     const private = wiping.allocator();
     var arena: std.heap.ArenaAllocator = .init(private);
     defer arena.deinit();
     var environment: std.process.Environ.Map = .init(private);
     defer environment.deinit();
-    for (plan.snapshot.environment) |entry| {
-        const equal = std.mem.indexOfScalar(u8, entry, '=') orelse return .{ .unsupported = .configuration_unavailable };
-        try environment.put(entry[0..equal], entry[equal + 1 ..]);
-    }
     const context: process.Context = .{ .environ_map = &environment, .cwd = .{ .path = "/" } };
     var captured = init;
     captured.gpa = private;
     captured.arena = &arena;
     captured.environ_map = &environment;
-    const path = try std.fmt.allocPrint(arena.allocator(), "{s}/bin/rui", .{target});
-    const executable = try std.Io.Dir.cwd().realPathFileAlloc(init.io, path, arena.allocator());
-    if (std.mem.eql(u8, executable, plan.snapshot.executable)) {
-        const current = client.observeHostForUpgradeProfile(init.io, plan.sources.request.dir, plan.observed.profile, null) catch return .{ .unconfirmed = .verifying };
-        if (!sameHost(current, plan.observed) or (identity.generation(current.pid) catch 0) != plan.snapshot.started) return .replacement_observed;
-        return .{ .already_ready = .{ .instance = current.facts.instance, .pid = current.pid } };
+    var executable: []const u8 = undefined;
+    var request: host_start.Spawn = undefined;
+    var checked: ?process.Result = null;
+    defer if (checked) |result| process.dispose(private, result);
+    var current: client.HostControlObservation = undefined;
+    while (true) {
+        const cancelled = if (process.check(cancellation)) false else |_| true;
+        switch (activation.next(facts, cancelled)) {
+            .resolve_target => {
+                for (plan.snapshot.environment) |entry| {
+                    const equal = std.mem.indexOfScalar(u8, entry, '=').?;
+                    try environment.put(entry[0..equal], entry[equal + 1 ..]);
+                }
+                const path = try std.fmt.allocPrint(arena.allocator(), "{s}/bin/rui", .{target});
+                // #1791: an error here escapes, and restart-all reports it as an unconfirmed start.
+                executable = try std.Io.Dir.cwd().realPathFileAlloc(init.io, path, arena.allocator());
+                facts.same_executable = std.mem.eql(u8, executable, plan.snapshot.executable);
+            },
+            .confirm_current => facts.current = if (client.observeHostForUpgradeProfile(init.io, plan.sources.request.dir, plan.observed.profile, null)) |value|
+                (if (!sameHost(value, plan.observed) or (identity.generation(value.pid) catch 0) != plan.snapshot.started)
+                    .changed
+                else
+                    .{ .same = .{ .instance = value.facts.instance, .pid = value.pid } })
+            else |_|
+                .unreadable,
+            .inspect_target => {
+                var build = try Installation.inspectBuild(private, init.io, init.environ_map.get("HOME") orelse return error.HomeNotFound, target, cancellation);
+                defer build.deinit(private);
+                facts.known_bad = knownBadTarget(build);
+            },
+            .reconstruct_sources => facts.sources = if (host_start.restartSources(captured, arena.allocator(), plan.sources.request, plan.version.order(.{ .schema = 75, .patch = 0 }) == .lt, plan.observed.facts.active_capacity)) |value| sources: {
+                request = value;
+                break :sources true;
+            } else |err| if (err == error.OutOfMemory) return err else false,
+            .check_target => {
+                const check_argv = try arguments(arena.allocator(), executable, request, .check);
+                const result = process.runIn(private, init.io, check_argv, cancellation, settings_handoff.max_bytes, .fromSeconds(300), context) catch |err| {
+                    // #1793: a check that could not run is reported as a configuration limit.
+                    facts.check = if (err == error.Cancelled) .cancelled else .unavailable;
+                    continue;
+                };
+                checked = result;
+                facts.check = if (!result.term.success())
+                    (if (try refusal(private, result)) |failure| .{ .refused = failure } else .untyped)
+                else if (settings_handoff.accept(result.stdout)) |_|
+                    // The frame owner validates version/framing/bounds. Lifecycle neither
+                    // decodes settings nor reconstructs the target's admitted input.
+                    .ok
+                else |_|
+                    .bad_frame;
+            },
+            .reobserve => facts.before_stop = if (client.observeHostForUpgradeProfile(init.io, request.dir, plan.observed.profile, null)) |value| reobserved: {
+                current = value;
+                break :reobserved if (sameHost(current, plan.observed)) .same else .changed;
+            } else |_| .unreadable,
+            .snapshot => facts.snapshot = if (identity.snapshot(private, current.pid)) |value| fresh: {
+                var taken = value;
+                defer taken.deinit(private);
+                break :fresh if (sameSnapshot(&plan.snapshot, &taken)) .same else .changed;
+            } else |_| .unreadable,
+            .stop => {
+                // EOF already transferred batch custody. After stop, caller cancellation
+                // cannot abandon this or later entries; start and verification are bounded.
+                Progress.send(progress, .stopping);
+                const stopped = stopObserved(init.io, private, plan, context) catch {
+                    facts.stop = .failed;
+                    continue;
+                };
+                facts.stop = if (stopped == .instance_changed) .instance_changed else .done;
+            },
+            .await_retirement => {
+                Progress.send(progress, .awaiting_retirement);
+                facts.retired = try retired(init.io, private, plan);
+            },
+            .start => {
+                Progress.send(progress, .starting);
+                process.waitForTestGate(allocator, init.io, init.environ_map.get("RUI_TEST_UPGRADE_BEFORE_START_GATE"), null, .fromSeconds(300)) catch {
+                    facts.start = .unavailable;
+                    continue;
+                };
+                const start_argv = try arguments(arena.allocator(), executable, request, .start);
+                var start_context = context;
+                start_context.input = checked.?.stdout;
+                const started = process.runIn(private, init.io, start_argv, null, 8192, .fromSeconds(300), start_context) catch {
+                    facts.start = .unavailable;
+                    continue;
+                };
+                defer process.dispose(private, started);
+                facts.start = if (started.term.success())
+                    .started
+                else if (try refusal(private, started)) |failure| .{ .refused = failure } else .untyped;
+            },
+            .verify => {
+                Progress.send(progress, .verifying);
+                facts.proof = try verify(init, private, plan, executable, version, context);
+            },
+            .done => |outcome| return outcome,
+        }
     }
-    var build = try Installation.inspectBuild(private, init.io, init.environ_map.get("HOME") orelse return error.HomeNotFound, target, cancellation);
-    defer build.deinit(private);
-    if (knownBadTarget(build)) return .{ .unsupported = .target_capability };
-    const request = host_start.restartSources(captured, arena.allocator(), plan.sources.request, plan.version.order(.{ .schema = 75, .patch = 0 }) == .lt, plan.observed.facts.active_capacity) catch |err| {
-        if (err == error.OutOfMemory) return err;
-        return .{ .unsupported = .configuration_unavailable };
-    };
-    const check_argv = try arguments(arena.allocator(), executable, request, .check);
-    const checked = process.runIn(private, init.io, check_argv, cancellation, settings_handoff.max_bytes, .fromSeconds(300), context) catch |err| {
-        if (err == error.Cancelled) return .cancelled;
-        return .{ .unsupported = .configuration_unavailable };
-    };
-    defer process.dispose(private, checked);
-    if (!checked.term.success()) {
-        if (try refusal(private, checked)) |failure| return .{ .refused = .{ .stage = .checking, .failure = failure } };
-        return .{ .unsupported = .target_capability };
-    }
-    // The frame owner validates version/framing/bounds. Lifecycle neither
-    // decodes settings nor reconstructs the target's admitted input.
-    settings_handoff.accept(checked.stdout) catch return .{ .unsupported = .target_capability };
-    process.check(cancellation) catch return .cancelled;
-    const current = client.observeHostForUpgradeProfile(init.io, request.dir, plan.observed.profile, null) catch return .{ .unconfirmed = .stopping };
-    if (!sameHost(current, plan.observed)) return .replacement_observed;
-    var fresh = identity.snapshot(private, current.pid) catch return .{ .unconfirmed = .stopping };
-    defer fresh.deinit(private);
-    if (!sameSnapshot(&plan.snapshot, &fresh)) return .{ .unsupported = .configuration_unavailable };
-    // EOF already transferred batch custody. After stop, caller cancellation
-    // cannot abandon this or later entries; start and verification are bounded.
-    Progress.send(progress, .stopping);
-    const stopped = stopObserved(init.io, private, plan, context) catch return .{ .unconfirmed = .stopping };
-    if (stopped == .instance_changed) return .replacement_observed;
-    Progress.send(progress, .awaiting_retirement);
-    if (!try retired(init.io, private, plan)) return .{ .unconfirmed = .awaiting_retirement };
-    Progress.send(progress, .starting);
-    process.waitForTestGate(allocator, init.io, init.environ_map.get("RUI_TEST_UPGRADE_BEFORE_START_GATE"), null, .fromSeconds(300)) catch return .{ .unconfirmed = .starting };
-    const start_argv = try arguments(arena.allocator(), executable, request, .start);
-    var start_context = context;
-    start_context.input = checked.stdout;
-    const started = process.runIn(private, init.io, start_argv, null, 8192, .fromSeconds(300), start_context) catch return .{ .unconfirmed = .starting };
-    defer process.dispose(private, started);
-    if (!started.term.success()) {
-        if (try refusal(private, started)) |failure| return .{ .refused = .{ .stage = .starting, .failure = failure } };
-        return .{ .failed = .starting };
-    }
-    Progress.send(progress, .verifying);
-    return verify(init, private, plan, executable, version, context);
 }
 
 test "upgrade lifecycle control cannot equate different wire profiles or instances" {
@@ -469,36 +553,6 @@ test "upgrade public commands preserve semantic sources and Host directory routi
     }
 }
 
-test "upgrade replacement proof accepts adopted target version but not old instance or guessed readiness" {
-    var plan: Plan = undefined;
-    plan.observed.facts = .{ .store = .{}, .instance = @splat(1), .active_capacity = 3, .started_at = 0, .custody_occupied = 0, .paused = false, .capabilities = .{ .bash = true, .providers = protocol.routesAll(.unserved) } };
-    try plan.observed.facts.store.set("database-wire-identity");
-    const target: candidate.Version = .{ .schema = 76, .patch = 1 };
-    var facts: client.ReplacementFacts = .{ .instance = @splat(2), .store = .{}, .active_capacity = 3 };
-    try facts.store.set("database-wire-identity");
-    try std.testing.expect(replacementMatches(&plan, facts, target, target));
-    var ready = plan.observed.facts;
-    ready.instance = facts.instance;
-    try std.testing.expect(statusAgrees(.{ .ready = ready }, facts));
-    for ([_]protocol_reply.HostStatus{ .unavailable, .owned_unavailable, .access_failure }) |status| try std.testing.expect(!statusAgrees(status, facts));
-    try std.testing.expect(statusAgrees(.incompatible, facts));
-    ready.instance = plan.observed.facts.instance;
-    try std.testing.expect(!statusAgrees(.{ .ready = ready }, facts));
-    ready.instance = facts.instance;
-    ready.active_capacity += 1;
-    try std.testing.expect(!statusAgrees(.{ .ready = ready }, facts));
-
-    facts.instance = @splat(1);
-    try std.testing.expect(!replacementMatches(&plan, facts, target, target));
-    facts.instance = @splat(2);
-    facts.active_capacity = 4;
-    try std.testing.expect(!replacementMatches(&plan, facts, target, target));
-    facts.active_capacity = 3;
-    try std.testing.expect(!replacementMatches(&plan, facts, .{ .schema = 75, .patch = 9 }, target));
-    try facts.store.set("other-store");
-    try std.testing.expect(!replacementMatches(&plan, facts, target, target));
-}
-
 test "all credential location variables must be restartable paths" {
     inline for (credential_location.variables) |name| {
         try std.testing.expect(!restartableEnvironment(&.{name ++ "=relative"}));
@@ -548,21 +602,4 @@ test "upgrade running sources wipe on success and every allocation failure" {
         }
     };
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.exercise, .{});
-}
-
-test "SH-49 ownership checks identify the refused observation" {
-    const cases = [_]struct { check: OwnershipCheck, expected: ?Limitation }{
-        .{ .check = .{ .status = .owned_unavailable }, .expected = .ownership_status },
-        .{ .check = .{ .status = .unavailable }, .expected = null },
-        .{ .check = .{ .status = .incompatible }, .expected = null },
-        .{ .check = .{ .status = .access_failure }, .expected = null },
-        .{ .check = .{ .observation = false }, .expected = .ownership_observation },
-        .{ .check = .{ .observation = true }, .expected = null },
-        .{ .check = .{ .directory = null }, .expected = .ownership_directory_unavailable },
-        .{ .check = .{ .directory = .{ .canonical = "/a", .observed = "/b" } }, .expected = .ownership_directory_mismatch },
-        .{ .check = .{ .directory = .{ .canonical = "/a", .observed = "/a" } }, .expected = null },
-        .{ .check = .{ .confirmation = false }, .expected = .ownership_confirmation },
-        .{ .check = .{ .confirmation = true }, .expected = null },
-    };
-    for (cases) |case| try std.testing.expectEqual(case.expected, ownershipLimitation(case.check));
 }

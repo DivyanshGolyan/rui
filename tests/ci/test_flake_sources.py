@@ -4,6 +4,7 @@ import contextlib
 import io
 from collections import Counter
 from pathlib import Path
+import os
 import subprocess
 import tempfile
 import unittest
@@ -27,7 +28,18 @@ class FlakeSourcesTest(unittest.TestCase):
             for path in ('zig-pkg/dep/src/a.zig', 'screen-emulator/zig-pkg/dep/src/b.zig', 'src/own.zig'):
                 (root / path).parent.mkdir(parents=True, exist_ok=True)
                 (root / path).write_text(sleeping)
-            self.assertEqual(set(flake.read_sources(root)), {'src/own.zig'})
+            (root / 'clients/ts/node_modules/pkg').mkdir(parents=True)
+            (root / 'clients/ts/node_modules/pkg/hidden.zig').write_text(sleeping)
+            scandir = os.scandir
+            def readable(path):
+                if Path(path).name in ('node_modules', 'zig-pkg'):
+                    raise RuntimeError('excluded directory changed during scan')
+                return scandir(path)
+            try:
+                os.scandir = readable
+                self.assertEqual(set(flake.read_sources(root)), {'src/own.zig'})
+            finally:
+                os.scandir = scandir
 
     def test_every_rule_shares_the_zig_test_scope(self):
         helper = ('fn helper() void {\n'
@@ -231,6 +243,13 @@ class SleepOrderingTest(unittest.TestCase):
         self.assertEqual(python_sleep_ordering("tests/integration/cases.py", python),
                          {("tests/integration/cases.py", "cached_parsing"): 1})
         self.assertEqual(python_sleep_ordering("tests/integration/cases.py", python.replace("sleep", "wake")), {})
+        for source, expected in (
+            ('def case():\n    time.sleep(1)\n', {("tests/cases.py", "case"): 1}),
+            ('def case():\n    time.ｓｌｅｅｐ(1)\n', {("tests/cases.py", "case"): 1}),
+            ('def case():\n    time.wake(1)\n', {}),
+        ):
+            with self.subTest(source=source):
+                self.assertEqual(python_sleep_ordering("tests/cases.py", source), expected)
 
     def test_a_moved_test_keeps_only_its_own_allowance(self):
         base = Counter({("a.zig", "t"): 2, ("a.zig", "u"): 1})
