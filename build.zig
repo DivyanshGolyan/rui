@@ -513,6 +513,7 @@ pub fn build(b: *std.Build) void {
     unit_module.attach("check-full", check_part, native_gate, &unit_runs, .runs);
     if (unit_module.includes("check-full", check_part, .native_pair)) {
         native_gate.dependOn(&units.run_renderer_allocation.step);
+        native_gate.dependOn(&units.run_os_tests.step);
     }
     if (!pr_ci) process_integrations.addFileInput(ci.path(release_small));
     full_check_step.dependOn(&process_integrations.step);
