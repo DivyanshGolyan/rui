@@ -116,7 +116,7 @@ class FailureArtifactsTest(unittest.TestCase):
             self.assertEqual(list((root / "real").iterdir()), [])
 
     def test_native_workflow_uploads_each_failed_part_with_short_retention(self):
-        for name, parts in (("check.yml", 2), ("previous-release-upgrade.yml", 1)):
+        for name, parts in (("check.yml", 3), ("previous-release-upgrade.yml", 1)):
             with self.subTest(workflow=name):
                 workflow = Path(".github/workflows", name).read_text()
                 self.assertEqual(len(re.findall(r"RUI_FAILURE_ARTIFACTS[:=]", workflow)), parts)

@@ -622,10 +622,10 @@ def matches(path, patterns):
     return included and not any(fnmatch.fnmatchcase(path, pattern[1:]) for pattern in patterns if pattern.startswith("!"))
 
 
-def mysql_provisioning(targets, part, platform, mysql_suites, *, live=True):
-    """Which live engine servers a shard starts; the PR tier (live=False) starts none."""
+def mysql_provisioning(targets, part, platform, mysql_suites):
+    """Which live engine servers a Linux shard starts."""
     targets = set(targets)
-    linux = live and platform == "linux"
+    linux = platform == "linux"
     dialect = linux and bool(
         targets & (LIVE_MYSQL_DIALECT_TARGETS - {"check-full"})
         or "check-full" in targets and part != "callers")
@@ -666,35 +666,36 @@ def normalize(targets: set) -> set:
     return {target for target in checks if not covers(target, checks - {target})}
 
 
-# The PR tier: whole-suite gates, the LLVM frame gate and live-server suites run in promotion only.
+# The PR tier runs unit roots and the fixtures whose own sources changed; everything else,
+# including every whole-suite gate and live-server suite, runs on main and in promotion.
 WHOLE_SUITE_GATES = frozenset({"check", "check-full", "test", "test-full"})
-PROMOTION_ONLY = frozenset({"stack-frames", "mysql-wire-integration"})
-# Fixtures over ~3 minutes alone run on a PR only when the diff touches their own sources.
-SLOW_FIXTURES = frozenset({"upgrade-integration", "human-cli-integration"})
+PR_UNIT_ROOTS = frozenset({"test-native", "test-store", "test-logic", "test-h2", "test-pg"})
 # Store unit tests run on a PR only for a change to the Store itself.
 STORE_PATHS = ("src/store.zig", "src/store/*")
+
+
+def own_fixture(target, paths):
+    """Whether the diff touches the fixture's own script, executable or FIXTURES owner."""
+    scripts, executables, owners = FIXTURES[target]
+    return any(matches(path, (*scripts, *executables, *owners)) for path in paths)
 
 
 def fast_tier(targets, paths):
     """The PR tier of a raw (unnormalized) selection.
 
-    Whole-suite gates become the native unit root; selected short fixtures and
-    unit roots stay; `test-logic` runs whenever any product target was selected.
-    Store unit tests stay only when the diff reaches the Store, on SQLite alone.
+    It keeps the unit roots the diff reaches (a whole-suite gate becomes
+    `test-native` and `test-logic`; `test-store` only for Store paths) and the
+    fixtures whose own sources the diff touches. A fixture the diff reaches
+    only through imports runs on main and in promotion, never on the PR.
     """
     targets = set(targets)
-    if not targets:
-        return []
-    fast = targets - WHOLE_SUITE_GATES - PROMOTION_ONLY
+    fast = targets & PR_UNIT_ROOTS
     if targets & WHOLE_SUITE_GATES:
-        fast.add("test-native")
+        fast |= {"test-native", "test-logic"}
     if not any(matches(path, STORE_PATHS) for path in paths):
         fast.discard("test-store")
-    for target in SLOW_FIXTURES & fast:
-        scripts, executables, owners = FIXTURES[target]
-        if not any(matches(path, (*scripts, *executables, *owners)) for path in paths):
-            fast.discard(target)
-    fast.add("test-logic")
+    fast |= {target for target in targets & FIXTURES.keys() - PR_UNIT_ROOTS - {"mysql-wire-integration"}
+             if own_fixture(target, paths)}
     for broad, covered in FIXTURE_COVERS.items():
         if broad in fast:
             fast -= covered

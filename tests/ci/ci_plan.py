@@ -59,8 +59,8 @@ def plan(selection: dict, *, event_name: str, draft: bool, promotion: bool,
         p['native_targets'] = sorted(normalize(set(p['native_targets']) | core))
         p['retry'] = False
     elif ready_pr:
-        # The PR tier: Linux compilation and select_tests.fast_tier's Linux suites, on SQLite
-        # only. Promotion owns whole-suite gates, live engines, macOS, the LLVM frame gate,
+        # The PR tier: select_tests.fast_tier's Linux targets, on SQLite only. Promotion owns
+        # every other fixture, whole-suite gates, live engines, macOS, the LLVM frame gate,
         # the upgrade, cache-execution and Linux memory checks.
         p['targets'] = list(p['fast_targets'])
         p['native_targets'] = []
@@ -87,14 +87,18 @@ def plan(selection: dict, *, event_name: str, draft: bool, promotion: bool,
         if not {'test', 'check', 'check-full'} & set(compile_targets):
             compile_targets = sorted(set(compile_targets) | {'test'})
     p['linux_compile_targets'] = compile_targets
+    # A ready normal PR runs as one job: policy, one compile and its tier's targets on one runner.
+    pr_job = ready_pr and kind == ChangeKind.NORMAL
     outputs = dict(
+        pr_job=pr_job,
+        pr_setup_targets=sorted(set(p['targets']) | set(compile_targets)) if pr_job else [],
         change_kind=kind.value,
         draft_run=draft_run,
         targets=p['targets'],
         linux_compile_targets=compile_targets,
         native_targets=p['native_targets'],
-        linux_matrix=shards(p['targets'], mysql_suites=p['mysql_suites'], live=not ready_pr),
-        linux_split=split_build(compile_targets),
+        linux_matrix=shards([] if pr_job else p['targets'], mysql_suites=p['mysql_suites']),
+        linux_split=not pr_job and split_build(compile_targets),
         macos_split=split_build(p['native_targets']),
         macos_matrix=shards(p['native_targets'], 'macos', mysql_suites=p['mysql_suites']),
         native=p['native_required'],

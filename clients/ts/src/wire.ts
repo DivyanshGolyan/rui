@@ -3567,6 +3567,12 @@ export interface components {
             since: components["schemas"]["Decimal"];
         } | {
             /** @constant */
+            kind: "working";
+            since: components["schemas"]["Decimal"];
+            /** @constant */
+            compaction: true;
+        } | {
+            /** @constant */
             kind: "retrying";
             since: components["schemas"]["Decimal"];
             due_at_ms: components["schemas"]["Decimal"];

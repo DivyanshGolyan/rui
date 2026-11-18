@@ -28,7 +28,7 @@ pub const WorkState = union(Kind) {
     failed: Failed,
     stopped: Stopped,
 
-    pub const Since = struct { since: u64 };
+    pub const Since = struct { since: u64, compaction: bool = false };
     pub const Retrying = struct { since: u64, due_at_ms: u64, cause: Bounded(max_code_bytes), attempt: u64 };
     pub const Bash = struct { since: u64, call: ?u64, description: ?Bounded(max_description_bytes), running: u64, approvals: u64 };
     pub const Failed = struct { since: u64, code: Bounded(max_code_bytes), resets_at: ?u64 };
@@ -81,6 +81,7 @@ pub const Inputs = struct {
         turn_id: u64,
         operation_id: u64,
         input_cutoff: u64,
+        compaction: bool = false,
         stopped_at: ?u64 = null,
         interruptible: bool = false,
         stop_remaining: bool = false,
@@ -205,7 +206,7 @@ fn deriveOwn(inputs: Inputs) error{CorruptStore}!Work {
         return work;
     }
     work.state = switch (latest.op) {
-        .in_flight => |attempt| .{ .working = .{ .since = attempt.attempt_at } },
+        .in_flight => |attempt| .{ .working = .{ .since = attempt.attempt_at, .compaction = latest.compaction } },
         .waiting => |retry| if (retry.attempt == 0 or retry.attempt > max_retried_attempt) return error.CorruptStore else (WorkState{ .retrying = .{
             .since = retry.scheduled_at,
             .due_at_ms = retry.due_at_ms,
@@ -325,8 +326,16 @@ test "a Session with no Turn is idle, pending or stopped by its queue" {
     try std.testing.expect(work.turn == null and work.operation == null and work.first_action == null);
 }
 
-test "an active Turn reports its Operation's state from the row that set it" {
+test "SUI-46 active Turn work reflects its Operation and purpose" {
     try expectState(.{ .working = .{ .since = 300 } }, .{ .now_ms = 0, .created_at = 1, .latest = activeTurn(.{ .in_flight = .{ .attempt_at = 300 } }, .{}) });
+    for ([_]bool{ false, true }) |compaction| {
+        var latest = activeTurn(.{ .in_flight = .{ .attempt_at = 123 } }, .{});
+        latest.compaction = compaction;
+        const work = try derive(.{ .now_ms = 124000, .created_at = 1, .latest = latest });
+        try std.testing.expectEqual(compaction, work.state.working.compaction);
+        try std.testing.expectEqual(@as(u64, 123), work.state.working.since);
+        try std.testing.expectEqual(WorkState.Progress.in_flight, work.state.progress().?);
+    }
     const waiting: Inputs.Op = .{ .waiting = .{ .scheduled_at = 310, .due_at_ms = 320_500, .cause = "provider_temporary_http_429", .attempt = 2 } };
     try expectState(.{ .retrying = .{ .since = 310, .due_at_ms = 320_500, .cause = fixed(max_code_bytes, "provider_temporary_http_429"), .attempt = 2 } }, .{
         .now_ms = 320_499,
