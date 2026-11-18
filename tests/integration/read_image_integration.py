@@ -334,25 +334,25 @@ def prove_unsupported_retained(root):
         images = [part for part in parts if part.get("type") == "input_image"]
         assert len(images) == 1, parts
         assert base64.b64decode(images[0]["image_url"].split(",", 1)[1], validate=True) == PNG.read_bytes()
-        before = fixture.command("session", "inspect", "--store", store, "--session", session,
-                                 "--profile", "full")
-        actions = before["full"]["actions"]
-        assert before["actions"]["count"] == "1" and len(actions) == 1, before
-        action = actions[0]["action"]
+        fixture.stop_host(processes.pop())
+        query = "SELECT action_id,attempt_ordinal,resolution_code FROM action_operation WHERE session_ref=?"
+        before = rows(store, query, (session,))
+        assert len(before) == 1 and before[0][2] == "succeeded", before
+        processes.append(fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses"))
         image.unlink()
         switched = fixture.command(
             "session", "configure", "--store", store, "--session", session,
             "--record", state / "switch.json", "--key", "switch", "--model", "gpt-3.5-turbo",
+            "--compaction-trigger", "default",
         )
         assert switched["answer"]["status"] == "accepted", switched
         fixture.message(state, store, "after-switch", session, "Recall the image")
         result, _, _ = fixture.wait_for_result_release(store, "after-switch", session, time.monotonic() + 20)
         assert result["state"] == "failed" and result["result"]["code"] == "model_image_input_unsupported", result
         assert len(endpoint.requests) == 2, endpoint.requests
-        after = fixture.command("session", "inspect", "--store", store, "--session", session,
-                                "--profile", "full")
-        assert after["actions"]["count"] == "1" and len(after["full"]["actions"]) == 1, after
-        assert after["full"]["actions"][0]["action"] == action, after
+        fixture.stop_host(processes.pop())
+        after = rows(store, query, (session,))
+        assert after == before, (before, after)
         print("retained image on unsupported model: refused before provider HTTP")
     finally:
         fixture.dispose_dispatch(processes, {endpoint: thread}, [])
