@@ -57,12 +57,9 @@ def compile_command(targets, part="all", *, jobs=None, pr_mode=False):
     # Zig async slots also wait for subprocesses. Give every Linux x86_64
     # producer the same overlap, including LLVM promotion builds. Local
     # feedback supplies its own serialized budget without changing the graph.
-    # A PR compile needs a slot for every root at once: under -j8 the runner, which
-    # starts ready steps in a shuffled order, left unit-store queued behind the
-    # small compiles for 16.9 s of its 237 s (#1770 ground state, cut 2).
     mode = ["-Dpr-ci=true"] if pr_mode else []
     if jobs is None and platform.system() == "Linux" and platform.machine() == "x86_64":
-        jobs = 16 if pr_mode else 8
+        jobs = 8
     if jobs is not None:
         mode.append(f"-j{jobs}")
     return ["zig", "build", "ci-build", *mode, "-Dci-targets=" + ",".join(targets), "-Dci-part=" + part]

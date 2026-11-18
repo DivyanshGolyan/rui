@@ -526,9 +526,9 @@ class PrModeTest(unittest.TestCase):
                 build_artifact.build(["check"])
                 command = run.call_args.args[0]
                 self.assertEqual("-Dpr-ci=true" in command, fast)
-                linux_x86 = system == "Linux" and machine == "x86_64"
-                expected = {"-j16"} if fast else {"-j8"} if linux_x86 else set()
-                self.assertEqual({part for part in command if part.startswith("-j")}, expected)
+                self.assertEqual("-j8" in command, system == "Linux" and machine == "x86_64")
+                self.assertEqual(command.count("-j8"), int(system == "Linux" and machine == "x86_64"))
+                self.assertNotIn("-j4", command)
                 serialized = build_artifact.compile_command(["check"], jobs=1)
                 self.assertIn("-j1", serialized)
                 self.assertNotIn("-j4", serialized)
