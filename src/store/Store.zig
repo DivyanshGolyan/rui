@@ -970,6 +970,7 @@ pub const Store = struct {
             read.deinit();
             read.init(coverage.session, coverage.covered, coverage.frontier, coverage.results, std.math.maxInt(i64));
             read.boundary = pressure.needed_boundary;
+            read.rule = pressure.needed_rule;
             while (!try self.advancePartsPressure(read)) {}
             pressure.read = read;
         }

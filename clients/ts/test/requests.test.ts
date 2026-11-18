@@ -30,6 +30,14 @@ test("configuration preserves omitted, null and value states and normalizes tool
     assert.deepEqual(third.configuration, {});
 });
 
+test("the shared write key takes precedence over idempotencyKey", async () => {
+	const session = new Session({ async exchange(_path, build) {
+		assert.equal(JSON.parse(build("store")).key, "preferred");
+		return Buffer.from(JSON.stringify({ answer: { status: "accepted" } }));
+	} }, "session");
+	await session.update({}, { key: "preferred", idempotencyKey: "older" });
+});
+
 type CurrentReport = Extract<components["schemas"]["InspectSessionReply"], { profile: "current"; work: unknown }>;
 
 function report(work: CurrentReport["work"], parent: string | null = null): CurrentReport {
@@ -68,7 +76,7 @@ test("status requests the Current profile and maps reported facts and parent los
 			},
 		};
 		assert.deepEqual(await new Session(link, 'session"\n').status(), {
-			archiveState, state: "idle", since: "9007199254740993", turn: null, operation: null, pendingMessages: "9007199254740993",
+			archiveState, state: "idle", since: "9007199254740993", turn: null, operation: null, interruptTarget: null, pendingMessages: "9007199254740993",
 			parent, label: "Review", model: "model-a", effort: "high", tools: ["bash"], loadedTools: ["bash"], permissionMode: "ask", latestOutcome,
 		});
 	}
@@ -107,31 +115,80 @@ test("status reports a missing Session as a request error", async () => {
 	await assert.rejects(new Session(link, "absent").status(), (error: unknown) => error instanceof RuiRequestError && error.code === "session_not_found");
 });
 
-test("interrupt selects its exact target from status and ignores non-model work", async () => {
-	for (const state of ["idle", "approval", "bash", "working", "retrying", "pending"] as const) {
-		const paths: string[] = [];
-		const link: Link = {
-			async exchange(path, build) {
-				paths.push(path);
-				if (path === "/v1/inspect-session") return Buffer.from(JSON.stringify(report({
-					...idleWork, state: { kind: state, since: "1" }, turn: "7", operation: "19",
-				})));
-				assert.equal(path, "/v1/control/model-interruption");
-				const body = JSON.parse(build("store"));
-				assert.deepEqual(body.target, { session: "session", turn: "7", operation: "19" });
-				assert.equal(body.kind, "model_interruption");
-				assert.equal(typeof body.key, "string");
-				return Buffer.from(JSON.stringify({ answer: { status: "accepted" } }));
-			},
-		};
-		await new Session(link, "session").interrupt();
-		assert.deepEqual(paths, ["working", "retrying", "pending"].includes(state)
-			? ["/v1/inspect-session", "/v1/control/model-interruption"] : ["/v1/inspect-session"]);
+test("interrupt sends one keyed request naming the explicit target", async () => {
+	const requests: unknown[] = [];
+	const session = new Session({ async exchange(path, build) {
+		requests.push({ path, body: JSON.parse(build("store")) });
+		return Buffer.from(JSON.stringify({ answer: { status: "accepted" } }));
+	} }, "session");
+	await session.interrupt({ turn: "7", operation: "19" }, { key: "saved" });
+	assert.deepEqual(requests, [{ path: "/v1/control/model-interruption", body: {
+		version: WIRE_VERSION, kind: "model_interruption", store: "store", key: "saved",
+		target: { session: "session", turn: "7", operation: "19" },
+	} }]);
+});
+
+test("interrupt snapshots its explicit target before transport readiness", async () => {
+	let release!: () => void;
+	const ready = new Promise<void>((resolve) => { release = resolve; });
+	let request: components["schemas"]["ModelInterruptionRequest"] | undefined;
+	const session = new Session({ async exchange(_path, build) {
+		await ready;
+		request = JSON.parse(build("store"));
+		return Buffer.from(JSON.stringify({ answer: { status: "accepted" } }));
+	} }, "session");
+	const target = { turn: "1", operation: "2" };
+	const pending = session.interrupt(target, { key: "saved" });
+	target.operation = "3";
+	release();
+	await pending;
+	assert.deepEqual(request?.target, { session: "session", turn: "1", operation: "2" });
+});
+
+test("interrupt also uses the established idempotencyKey option", async () => {
+	const keys: string[] = [];
+	const session = new Session({ async exchange(_path, build) {
+		keys.push(JSON.parse(build("store")).key);
+		return Buffer.from(JSON.stringify({ answer: { status: "accepted" } }));
+	} }, "session");
+	const target = { turn: "1", operation: "2" };
+	await session.interrupt(target, { idempotencyKey: "same" });
+	await session.interrupt(target, { idempotencyKey: "same" });
+	assert.deepEqual(keys, ["same", "same"]);
+});
+
+test("interrupt uses the last status observation without another read", async () => {
+	const paths: string[] = [];
+	let target: { turn: string; operation: string } | null = { turn: "7", operation: "19" };
+	const session = new Session({ async exchange(path, build) {
+		paths.push(path);
+		if (path === "/v1/inspect-session") return Buffer.from(JSON.stringify(report({ ...idleWork, actions: { ...idleWork.actions, interrupt: target } })));
+		const body = JSON.parse(build("store"));
+		assert.deepEqual(body.target, { session: "session", turn: "7", operation: "19" });
+		assert.equal(body.key, "repeat");
+		return Buffer.from(JSON.stringify({ answer: { status: "accepted" } }));
+	} }, "session");
+	await session.interrupt();
+	assert.deepEqual(paths, []);
+	const observed = (await session.status()).interruptTarget;
+	assert.deepEqual(observed, target);
+	assert.ok(observed);
+	observed.operation = "changed by caller";
+	await session.interrupt({ key: "repeat" });
+	assert.deepEqual(paths, ["/v1/inspect-session", "/v1/control/model-interruption"]);
+	target = null;
+	await session.status();
+	await session.interrupt();
+	assert.deepEqual(paths, ["/v1/inspect-session", "/v1/control/model-interruption", "/v1/inspect-session"]);
+});
+
+test("interrupt treats only resolved or mismatched targets as no effect", async () => {
+	for (const code of ["operation_resolved", "target_mismatch", "unknown_operation"]) {
+		const session = new Session({ async exchange() { return Buffer.from(JSON.stringify({ answer: { status: "rejected", code } })); } }, "session");
+		const result = session.interrupt({ turn: "1", operation: "2" });
+		if (code === "unknown_operation") await assert.rejects(result, (error: unknown) => error instanceof RuiRequestError && error.code === code);
+		else await result;
 	}
-	let calls = 0;
-	const link: Link = { exchange: async () => { calls++; return Buffer.from(JSON.stringify(report(idleWork))); } };
-	await new Session(link, "session").interrupt();
-	assert.equal(calls, 1);
 });
 
 

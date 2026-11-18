@@ -1393,3 +1393,49 @@ test "compound Action Resolution pressure counts Text bytes and images through u
         }
     }.run);
 }
+
+test "known image costs affect uncovered context pressure" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            const choices = [_]struct { model: []const u8, image_tokens: u64 }{
+                .{ .model = "gpt-6-astra", .image_tokens = 2 },
+                .{ .model = "gpt-4.1", .image_tokens = 255 },
+                .{ .model = "unknown-image-model", .image_tokens = 0 },
+            };
+            for (choices) |choice| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+                const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+                var patch = try completeConfiguration("image-cost-session", "", workspace, choice.model);
+                try patch.configuration.provider.value.set("openai");
+                patch.configuration.compaction_trigger.state = .value;
+                try patch.configuration.compaction_trigger.value.set("1000");
+                patch.configuration.output_reservation.state = .value;
+                try patch.configuration.output_reservation.value.set("0");
+                const configured = try storage.configure(&patch, .{});
+                try std.testing.expect(configured == .accepted);
+                const session = configured.accepted.session;
+                try submitTestMessage(&storage, &tmp, "image-cost-first", "image-cost-first", session.slice(), "first");
+                const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                try store_testing.submitTestMessageParts(&storage, &tmp, "image-cost-next", session.slice(), &.{
+                    .{ .bytes = @embedFile("../../codecs/fixtures/image-input/pixel.png"), .kind = .{ .image = .{} } },
+                });
+                try settleCallsForTestingWithFaults(&storage, &tmp, first, "image-cost-answer", &.{}, .{}, "{\"input_tokens\":990,\"output_tokens\":0}");
+                try std.testing.expectEqual(@as(?u64, 990 + choice.image_tokens), try testingContextEstimate(&storage, &tmp, session.slice()));
+                const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                try std.testing.expectEqual(if (choice.image_tokens >= 10) ModelOperationKind.compaction else ModelOperationKind.assistant_response, try storage.modelOperationKind(next));
+                if (choice.image_tokens == 2) {
+                    try store_testing.settleItemsForTestingWithUsage(&storage, &tmp, next, &.{
+                        "{\"type\":\"message\",\"id\":\"covered-image-answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}",
+                    }, "done", "{\"input_tokens\":100,\"output_tokens\":0}");
+                    try submitTestMessage(&storage, &tmp, "after-image", "after-image", session.slice(), "x");
+                    try std.testing.expectEqual(@as(?u64, 100), try testingContextEstimate(&storage, &tmp, session.slice()));
+                }
+            }
+        }
+    }.run);
+}
