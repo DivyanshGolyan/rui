@@ -186,6 +186,9 @@ pub const Listed = struct {
     turn: ?u64 = null,
 
     first_action: ?u64 = null,
+    attention: ?session_work.Attention = null,
+    group: ?session_work.Group = null,
+    actions: session_work.Actions = .{},
     first: ?First = null,
 
     from_person_at: ?u64 = null,
@@ -205,6 +208,9 @@ pub const Listed = struct {
             .state = row.work.state,
             .turn = row.work.turn,
             .first_action = row.work.first_action,
+            .attention = row.work.attention,
+            .group = row.work.group,
+            .actions = row.work.actions,
             .first = if (row.first_message) |*message| .{
                 .position = message.position,
                 .admission = message.admission,
@@ -611,13 +617,16 @@ pub const Row = struct {
     turn: ?u64,
 
     first_action: ?u64,
+    attention: ?session_work.Attention = null,
+    group: ?session_work.Group = null,
+    actions: session_work.Actions = .{},
     first: ?First,
     from_person_at: ?u64,
     last_line: ?session_list.SavedLastLine = null,
     line: FirstLineRead = .unread,
 
     fn work(self: *const Row) session_work.Work {
-        return .{ .state = self.state, .turn = self.turn, .operation = self.operation, .first_action = self.first_action };
+        return .{ .state = self.state, .turn = self.turn, .operation = self.operation, .first_action = self.first_action, .served_attention = self.attention, .served_group = self.group, .actions = self.actions };
     }
 };
 
@@ -1567,6 +1576,9 @@ fn listPage(state: *State, page: Page, effects: *Effects) error{OutOfMemory}!voi
             .state = shown,
             .turn = listed.turn,
             .first_action = listed.first_action,
+            .attention = listed.attention,
+            .group = listed.group,
+            .actions = listed.actions,
             .first = listed.first,
             .from_person_at = listed.from_person_at,
             .last_line = if (listed.last_line) |last| .{ .position = last.position, .text = if (last.text) |text| bounded(session_list.max_last_line_bytes, text) else null } else null,
@@ -1681,6 +1693,9 @@ fn settleRow(state: *const State, row: *Row, read: session_list.Snapshot) void {
     row.turn = read.work.turn;
     row.operation = read.work.operation;
     row.first_action = read.work.first_action;
+    row.attention = read.work.served_attention;
+    row.group = read.work.served_group;
+    row.actions = read.work.actions;
     row.last_line = read.last_line;
 }
 
@@ -4972,6 +4987,23 @@ test "overview refresh removes selection to next row else New Session and preser
     var empty = try opened(&.{});
     defer empty.deinit();
     try std.testing.expectEqual(Selection.new_session, empty.selected);
+}
+
+test "overview retains served work facts from list and session observation" {
+    const protocol = @import("protocol.zig");
+    var source: protocol.SessionRow = .{};
+    try source.reference.set("k7m2qx");
+    try source.workspace.set("/work/rui/");
+    source.read_version = testToken(1);
+    source.work = .{ .state = .{ .approval = ago(1) }, .turn = 1, .operation = 2, .attention = .{ .kind = .approval, .turn = 1, .step = 7 }, .group = .needs_you, .actions = .{ .stop = true, .interrupt = .{ .turn = 1, .operation = 2 }, .decide = null } };
+    var state = try opened(&.{Listed.of(&source)});
+    defer state.deinit();
+    const row = @constCast(state.find("k7m2qx".*).?);
+    try std.testing.expectEqualDeep(source.work.core(), row.work());
+    var observed = source.work.core();
+    observed.actions.interrupt = null;
+    settleRow(&state, row, .{ .read_version = testToken(2), .work = observed });
+    try std.testing.expectEqualDeep(observed, row.work());
 }
 
 test "overview Listed copies last line into bounded owned rows and refresh replaces it" {

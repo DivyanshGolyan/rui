@@ -2157,6 +2157,22 @@ test "activity page preserves the canonical row preview with its work" {
     }
 }
 
+test "activity page retains served work actions for identical bindings" {
+    var facts: protocol.ActivityFacts = .{ .end = 0, .work = .{
+        .revision = 1,
+        .work = .{ .state = .{ .working = .{ .since = 1 } }, .turn = 1, .operation = 2, .served_attention = .{ .kind = .approval, .turn = 1, .step = 7 }, .served_group = .needs_you, .actions = .{ .stop = true, .interrupt = .{ .turn = 1, .operation = 2 } } },
+    } };
+    try facts.work.workspace.set("/work");
+    var buffer: [activity_reply.max_page_bytes]u8 = undefined;
+    for (0..2) |i| {
+        if (i == 1) facts.work.work.actions.interrupt = null;
+        var out = std.Io.Writer.fixed(&buffer);
+        try activity_reply.writePage(&out, &facts);
+        const parsed = try ActivityPage.parse(out.buffered(), .{});
+        try std.testing.expectEqualDeep(facts.work.work, parsed.facts.work.work);
+    }
+}
+
 test "activity page creator is required nullable canonical provenance" {
     var facts: protocol.ActivityFacts = .{ .end = 0, .work = .{ .revision = 1, .work = .{ .state = .{ .idle = .{ .since = 1 } } } } };
     try facts.work.workspace.set("/work");
@@ -2756,7 +2772,7 @@ test "Session list facts own complete rows and render semantic output after scra
     const digest = @as([64]u8, @splat('a'));
     const facts = "\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"pin_order\":null,\"parent\":\"p33rs1\",\"creator\":\"cr3at0\",\"label\":\"Review \\u0050R\",\"created_at\":\"1792925000\",\"revision\":\"3\",\"end\":\"9\"," ++
         "\"first_message\":{\"position\":\"1\",\"admission\":\"4\",\"admitted_at\":\"1792925001\",\"sender\":{\"session\":\"p33rs1\"},\"content\":{\"bytes\":\"5\",\"sha256\":\"" ++ digest ++ "\"}}," ++
-        "\"last_line\":{\"position\":\"8\",\"text\":\"Saved preview\"},\"work\":{\"state\":{\"kind\":\"bash\",\"since\":\"1792925300\",\"call\":\"0\",\"description\":\"Run the tests\",\"running\":\"1\",\"approvals\":\"0\"},\"turn\":\"2\",\"operation\":\"6\",\"first_action\":null,\"attention\":null,\"group\":\"done\",\"actions\":{\"stop\":false,\"interrupt\":null,\"decide\":null}}," ++
+        "\"last_line\":{\"position\":\"8\",\"text\":\"Saved preview\"},\"work\":{\"state\":{\"kind\":\"bash\",\"since\":\"1792925300\",\"call\":\"0\",\"description\":\"Run the tests\",\"running\":\"1\",\"approvals\":\"0\"},\"turn\":\"2\",\"operation\":\"6\",\"first_action\":null,\"attention\":{\"kind\":\"approval\",\"turn\":\"2\",\"step\":\"8\"},\"group\":\"needs_you\",\"actions\":{\"stop\":true,\"interrupt\":{\"turn\":\"2\",\"operation\":\"6\"},\"decide\":null}}," ++
         "\"peers\":{\"from_person_at\":\"1792925200\"}";
     const wire = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[{\"reference\":\"k7m2q\\u0078\",\"workspace\":\"/w\\nµ\",\"provider\":\"codex\",\"model\":\"m\\\"\",\"tools\":[\"bash\"],\"permission_mode\":\"ask\"," ++
         facts ++ ",\"extra\":[null,{\"discard\":true}]}" ++ testing_list_facts ++ "null,\"extra\":1}";
@@ -2778,6 +2794,9 @@ test "Session list facts own complete rows and render semantic output after scra
     try std.testing.expectEqualStrings("p33rs1", row.first_message.?.sender.?.session.slice());
     try std.testing.expectEqual(@as(u64, 1792925300), row.work.state.since());
     try std.testing.expectEqualStrings("Run the tests", row.work.state.bash.description.?.slice());
+    try std.testing.expectEqual(@import("session_work.zig").Group.needs_you, row.work.group);
+    try std.testing.expectEqualDeep(@as(?@import("session_work.zig").Attention, .{ .kind = .approval, .turn = 2, .step = 8 }), row.work.attention);
+    try std.testing.expectEqualDeep(@import("session_work.zig").Actions{ .stop = true, .interrupt = .{ .turn = 2, .operation = 6 } }, row.work.actions);
     try std.testing.expectEqual(@as(?u64, 1792925200), row.peers.from_person_at);
     var output: [2048]u8 = undefined;
     var writer = std.Io.Writer.fixed(&output);
