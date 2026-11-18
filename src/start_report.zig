@@ -35,6 +35,8 @@ pub const Failure = struct {
     }
 };
 
+pub const Attempt = enum { start, save, check };
+
 pub fn parseLine(gpa: std.mem.Allocator, bytes: []const u8) error{OutOfMemory}!?Failure {
     if (bytes.len > max_line_bytes or !std.mem.endsWith(u8, bytes, "\n")) return null;
     const Envelope = struct { rui_start_error: struct { code: StartError, message: []const u8 } };

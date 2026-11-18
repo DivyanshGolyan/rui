@@ -101,6 +101,29 @@ An empty or one-window canonical failure returns an error before successful head
 A later fault fences the Host and closes an incomplete advertised body without another HTTP response; a caller must not treat that prefix as a complete value.
 Sequential decoded work avoids repeated prefix positioning, but does not guarantee traversal time or a measured speedup.
 
+### Typed Message and Action Resolution parts
+
+A Message or Action Resolution whose saved value has parts is addressed by its **owner**: the Message admission, `{"message":"17"}`, or the Action, `{"action":"42"}`.
+The caller passes the owner with the Session it read it from; the Host never accepts a content identity from the caller.
+A Message resolves in the Session that received it and in the Session that sent it, including a saved admission that has not been applied.
+An Action resolves only in its own Session, through its saved public Resolution.
+Content rows are deduplicated across Sessions, so one value can be reachable from several owners; each read is authorized by its owner, never by the value.
+
+Two routes read a parts value:
+
+- `POST /v1/public-parts {session, owner}` returns the whole part list in one JSON reply: the value, `{"type":"parts","bytes":D,"sha256":H,"owner":…}`, then every part in ordinal order. A Text part carries its exact byte length and digest; an Image part also carries its MIME type (`image/png` or `image/jpeg`), its width and height and its name or `null`. The value's `bytes` and `sha256` identify its manifest, not the sum of its parts.
+- `POST /v1/public-part-content {session, owner, part, start[, stream:true]}` returns one zero-based part's exact bytes with the [conversation-content framing](#public-conversation-pages): one 4 KiB window from `start` with `X-Rui-Content-Bytes` and `X-Rui-Next-Offset`, or, with `stream:true` and `start` 0, the whole part checked against its digest.
+
+Every `sha256` is the [Store content digest](store.md#sqlite-and-representation): SHA-256 over the eight-byte big-endian length of `rui/content/v1`, followed by that domain and the bytes; it is not the raw bytes' SHA-256.
+Both routes answer `409 parts_unavailable` with `ContentNotFound` for an unknown owner, an owner outside the Session or a missing part, and with `ContentIsText` for a value without parts; a part read also answers `RangeOutOfBounds` for a `start` past the part's length.
+
+The Store certifies the manifest digest, its encoding and count, the contiguous ordered index and every part identity before the list yields its first part, advancing a bounded cursor between Store entries so other work can proceed; the Host captures the whole list in report scratch and sends nothing on a fault.
+A part read is indexed: it finds the owner, then the part by ordinal, without re-certifying the manifest, and a whole read authenticates the part's bytes against that part's own identity.
+Damage found by either read fences the Store.
+
+`session list-parts --session ID --admission ID` and `action list-parts --session ID --action ID` print the list reply as one JSON value. `session read-part` and `action read-part` take the same selectors and `--part N` and write the exact bytes of a Text or Image part to stdout, checked against the length and digest the list certified. A missing part, a value without parts, or a foreign or nonpublic selection fails without writing to stdout.
+The public text readers retain their refusal of values with parts.
+
 ### Tool Call proposals
 
 A proposal is an accepted Tool Call in the model's output: Activity pages list each one as a call row, and Action inspection and replay read its fields.
@@ -262,7 +285,7 @@ The live `work` object also carries required nullable `creator`, read from the s
 A non-null value is a canonical six-character Session reference; malformed IDs reject during decoding.
 Detached children retain this creator even though they have no lifecycle parent.
 Like live work, this preview may postdate a page's pinned historical end.
-A listing row and completed live-work read carry `read_version`, the actual Store opening identity and commit generation sampled under their read Access (not a traversal's frozen `since`). The overview settles both into one keyed presentation row: newer revisions replace work and last line together, equal revisions retain that value after retry-clock normalization, and older reads cannot regress its state, detail or age. Conversation departure changes focus, not the accepted row. Listing membership and listing-only terminal-status accounting remain separate. Only a Host handshake establishes the opening identity; foreign reads cannot rebase it or consume listing tokens. The served Host and its Store tokens share that incarnation. A row outside membership is retained only while its conversation owns a reader, then retired with that producer.
+A listing row and completed live-work read carry `read_version`, the actual Store opening identity and work version sampled under their read Access (not a traversal's frozen `since`). The overview settles both into one keyed presentation row: newer revisions replace work and last line together, equal revisions retain that value after retry-clock normalization, and older reads cannot regress its state, detail or age. Conversation departure changes focus, not the accepted row. Listing membership and listing-only terminal-status accounting remain separate. Only a Host handshake establishes the opening identity; foreign reads cannot rebase it or consume listing tokens. The served Host and its Store tokens share that incarnation. A row outside membership is retained only while its conversation owns a reader, then retired with that producer.
 This is a logical inventory prefix, not a historical transaction snapshot: immutable call classification remains attached to its item even at an interior end before the rejection-result position.
 Call fields are in `name`, `call_id`, `arguments` order.
 Content references carry exact decimal-string bytes and SHA-256; no preview truncation or private provider content enters activity.
@@ -337,6 +360,8 @@ A true action indicates that admission accepts the intent if the described facts
 | The latest Turn failed | `failed`, with its code and, for a quota code, the saved `resets_at` | its outcome |
 | No Turn | `idle` | Session creation |
 
+A `working` state for an in-flight compaction adds `compaction:true`; ordinary work omits it.
+
 - **Attached tree obligations (D239):** a Session owes its parent until its active
   Turn, eligible queued Message past its stop cutoff, unpublished forwarded rows,
   undelivered ending Message and recursively owed descendants have transferred
@@ -358,8 +383,7 @@ A true action indicates that admission accepts the intent if the described facts
   Whether Active Capacity is why it waits is not a Store fact; host information's slots in use supply that context.
 - **A stop that selected no Turn** counts only if it excluded queued Messages.
   A stop that excluded nothing leaves the state unchanged.
-- **A retry falling due** commits nothing, so Session listing's `since` does not report it.
-  Every reader applies the same past-due rule when it reads, so a past-due retry reads `pending` everywhere.
+- **A retry falling due** changes the Host's work version even without a Store commit. The Host records affected Sessions in the existing change ring, so incremental list and Activity readers receive the new work even when execution capacity is full. The same Host rule reads a past-due retry as `pending`.
 - **`resets_at`** comes from the failed Operation's saved diagnostic.
   A missing or unreadable diagnostic reads `null` and fences nothing.
 - **Inputs that contradict** the table's preconditions are canonical corruption, and the Store fences, as other readers do.
@@ -563,6 +587,7 @@ Restart never imports leftover ingress.
 
 | Contract | Canonical checks | Limits and exceptions |
 | --- | --- | --- |
+| [Typed Message and Action Resolution parts](#typed-message-and-action-resolution-parts) | `public-parts-integration` (INS-10) seeds Messages and Action Resolutions through the Store, then lists every part and reads Text, PNG and JPEG bytes through the native CLI; `read-image-integration` checks a real `read_image` Action; `store/tests/public_parts.zig` (INS-9) checks owner resolution from the receiving, sending, Action and foreign Sessions, certification before the first part, metadata, indexed byte reads and damage; the Host test INS-11 checks windows, streams and refusals on the wire; the Store round-budget test checks each cursor step and the indexed open | Existing text readers retain their refusal of values with parts. |
 | [Request and adapter waits](#work-state-and-wait-conditions) | `request_wait_integration.py`: completion and ask-mode permission return exit 0; timeout returns exit 5 with the latest observation; unknown key returns exit 4; Host stopped mid-wait returns the keyed read-error envelope and its status; restart mid-Bash exposes `recovery`; a Host-side count or lossless test observation proves a tier-2 `not_modified` hit while a sibling Session commits. Focused client tests pin poll schedule and state-to-exit mapping without sleeps; CLI argument tests pin the 300-second default and positive 86400-second bound. | Waits never start, resume or retarget work, or hold capture/Host resources between polls. Permission returns do not replace exact-target validation. Timing alone is not evidence of a token-tier hit |
 | Current selection, pending count, ten recent Messages | `'Current facts'`, `current-facts-integration`, `store/sqlite_tests/` `'Current selects active then queued'` | Suppressing callbacks beyond 128 rows must fail the complete count. Fixed storage is not process memory or Mac evidence |
 | [Per-key outcomes as data](#outcomes-and-observation-errors) | `human_cli_integration.py`, `store/tests/` `'Current reports progress alongside'` | Composed reads may span commits. A timeout proves neither rejection nor work failure |

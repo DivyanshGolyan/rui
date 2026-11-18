@@ -1,8 +1,9 @@
 const std = @import("std");
 const utf8_validation = @import("utf8_validation.zig");
-const socket_os = @import("os/socket.zig");
+const socket_os = @import("os").socket;
 const platform = @import("platform.zig");
 const protocol = @import("protocol.zig");
+const content_value = @import("content_value.zig");
 pub const activity_reply = @import("activity_reply.zig");
 const configure_input = @import("configure_input.zig");
 const ConfigureInput = configure_input.ConfigureInput;
@@ -358,6 +359,34 @@ pub const Requests = struct {
         errdefer page.deinit(gpa);
         for (page.entries) |entry| if (!std.mem.startsWith(u8, entry.name, prefix)) return error.InvalidResponse;
         return page;
+    }
+
+    /// The owner's whole certified part list, streamed into `sink` (a report scratch file);
+    /// decode it with `protocol_reply.PublicPartsReply`.
+    pub fn readPublicParts(self: Requests, store_path: []const u8, session: []const u8, owner: content_value.Owner, sink: anytype, reply_buffer: *ReplyBuffer) !protocol_reply.ReportReply {
+        reply_buffer.len = 0;
+        try self.check();
+        try protocol_reply.validateIdentityInputs("", session);
+        if (owner.id() == 0 or owner.id() > std.math.maxInt(i64)) return error.InvalidTarget;
+        const paths = try resolveClientPaths(self.io, store_path);
+        var body: protocol.RequestBuffer = .{};
+        try body.appendShape(protocol.public_parts_request, .{ paths.store_identity.slice(), session, protocol.OwnerJson{ .owner = owner } });
+        const fd = try openRead(self, &paths, "/v1/public-parts", body.slice());
+        defer closeSocket(self.io, fd);
+        return readReportResponse(self, fd, sink, reply_buffer);
+    }
+
+    /// One part's whole stream; its length and digest must match the certified `part`.
+    pub fn readPublicPartContent(self: Requests, store_path: []const u8, session: []const u8, owner: content_value.Owner, part: content_value.Part, sink: anytype) !?protocol_reply.ReadFailure {
+        try self.check();
+        try protocol_reply.validateIdentityInputs("", session);
+        if (owner.id() == 0 or owner.id() > std.math.maxInt(i64) or part.ordinal >= @import("input_parts.zig").max_parts) return error.InvalidTarget;
+        const paths = try resolveClientPaths(self.io, store_path);
+        var body: protocol.RequestBuffer = .{};
+        try body.appendShape(protocol.public_part_content_request.all, .{ paths.store_identity.slice(), session, protocol.OwnerJson{ .owner = owner }, part.ordinal, 0 });
+        const fd = try openRead(self, &paths, "/v1/public-part-content", body.slice());
+        defer closeSocket(self.io, fd);
+        return readPublicContentResponse(self, fd, .{ .bytes = part.reference.length, .digest = part.reference.digest }, sink);
     }
 
     pub fn readActivityContent(self: Requests, store_path: []const u8, session: []const u8, position: u64, ordinal: u64, expected: ?protocol_reply.CommandObservation.ContentReference, sink: anytype) !?protocol_reply.ReadFailure {
@@ -1027,6 +1056,7 @@ test "upgrade Host observation uses exact read-only profiles on each authenticat
     const Mode = enum {
         current,
         historical,
+        historical_20,
         historical_18,
         historical_17,
         historical_16,
@@ -1035,6 +1065,7 @@ test "upgrade Host observation uses exact read-only profiles on each authenticat
         historical_13,
         historical_13_chatgpt,
         strict,
+        strict_20,
         strict_18,
         strict_17,
         strict_16,
@@ -1042,6 +1073,7 @@ test "upgrade Host observation uses exact read-only profiles on each authenticat
         strict_14,
         strict_13,
         exact,
+        exact_20,
         exact_18,
         exact_17,
         exact_16,
@@ -1092,13 +1124,14 @@ test "upgrade Host observation uses exact read-only profiles on each authenticat
             const io = std.testing.io;
             const until = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + 2 * std.time.ns_per_s;
             const count: usize = switch (self.mode) {
-                .historical, .body_mismatch, .unknown => 8,
-                .historical_13, .historical_13_chatgpt => 7,
-                .historical_14 => 6,
-                .historical_15 => 5,
-                .historical_16 => 4,
-                .historical_17 => 3,
-                .historical_18, .budget => 2,
+                .historical, .body_mismatch, .unknown => 9,
+                .historical_13, .historical_13_chatgpt => 8,
+                .historical_14 => 7,
+                .historical_15 => 6,
+                .historical_16 => 5,
+                .historical_17 => 4,
+                .historical_18 => 3,
+                .historical_20, .budget => 2,
                 else => 1,
             };
             for (0..count) |index| {
@@ -1106,9 +1139,10 @@ test "upgrade Host observation uses exact read-only profiles on each authenticat
                 const connection = try self.listener.accept(io);
                 defer connection.close(io);
                 const fd = connection.socket.handle;
-                const order = [_][]const u8{ protocol.wire_version, protocol_reply.HostInfoProfile.released_18.wire(), protocol_reply.HostInfoProfile.released_17.wire(), protocol_reply.HostInfoProfile.released_16.wire(), protocol_reply.HostInfoProfile.released_15.wire(), protocol_reply.HostInfoProfile.released_14.wire(), protocol_reply.HostInfoProfile.released_13.wire(), protocol_reply.HostInfoProfile.released_9.wire() };
+                const order = [_][]const u8{ protocol.wire_version, protocol_reply.HostInfoProfile.released_20.wire(), protocol_reply.HostInfoProfile.released_18.wire(), protocol_reply.HostInfoProfile.released_17.wire(), protocol_reply.HostInfoProfile.released_16.wire(), protocol_reply.HostInfoProfile.released_15.wire(), protocol_reply.HostInfoProfile.released_14.wire(), protocol_reply.HostInfoProfile.released_13.wire(), protocol_reply.HostInfoProfile.released_9.wire() };
                 const expected_wire = switch (self.mode) {
                     .exact => protocol_reply.HostInfoProfile.released_9.wire(),
+                    .exact_20 => protocol_reply.HostInfoProfile.released_20.wire(),
                     .exact_18 => protocol_reply.HostInfoProfile.released_18.wire(),
                     .exact_17 => protocol_reply.HostInfoProfile.released_17.wire(),
                     .exact_16 => protocol_reply.HostInfoProfile.released_16.wire(),
@@ -1156,6 +1190,7 @@ test "upgrade Host observation uses exact read-only profiles on each authenticat
                 const response_wire = switch (self.mode) {
                     .current, .unavailable, .activation_current => protocol.wire_version,
                     .unknown => "8",
+                    .historical_20, .strict_20, .exact_20 => protocol_reply.HostInfoProfile.released_20.wire(),
                     .historical_18, .strict_18, .exact_18 => protocol_reply.HostInfoProfile.released_18.wire(),
                     .historical_17, .strict_17, .exact_17 => protocol_reply.HostInfoProfile.released_17.wire(),
                     .historical_16, .strict_16, .exact_16 => protocol_reply.HostInfoProfile.released_16.wire(),
@@ -1166,7 +1201,7 @@ test "upgrade Host observation uses exact read-only profiles on each authenticat
                 };
                 const body_wire = if (self.mode == .body_mismatch or self.mode == .activation_body_version) protocol.wire_version else response_wire;
                 var body_buffer: [1024]u8 = undefined;
-                const host_body = try std.fmt.bufPrint(&body_buffer, "{{\"version\":\"{s}\",\"type\":\"host_info\",\"store\":\"{s}\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"17\",\"intake_capacity\":\"10\",\"descriptor_limit\":\"256\",\"started_at\":\"1792918800\",\"custody_occupied\":\"3\",\"paused\":true,\"capabilities\":{{\"bash\":true,\"providers\":{{\"codex\":\"endpoint\",\"openai\":\"unserved\"{s}}}}}}}", .{ body_wire, if (self.mode == .activation_wrong_store) "/wrong-store" else self.store, if (std.mem.eql(u8, response_wire, protocol.wire_version) or std.mem.eql(u8, response_wire, protocol_reply.HostInfoProfile.released_18.wire()) or std.mem.eql(u8, response_wire, protocol_reply.HostInfoProfile.released_17.wire()) or std.mem.eql(u8, response_wire, protocol_reply.HostInfoProfile.released_16.wire()) or std.mem.eql(u8, response_wire, protocol_reply.HostInfoProfile.released_15.wire()) or std.mem.eql(u8, response_wire, protocol_reply.HostInfoProfile.released_14.wire()) or self.mode == .historical_13_chatgpt) ",\"chatgpt\":\"unserved\"" else "" });
+                const host_body = try std.fmt.bufPrint(&body_buffer, "{{\"version\":\"{s}\",\"type\":\"host_info\",\"store\":\"{s}\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"17\",\"intake_capacity\":\"10\",\"descriptor_limit\":\"256\",\"started_at\":\"1792918800\",\"custody_occupied\":\"3\",\"paused\":true,\"capabilities\":{{\"bash\":true,\"providers\":{{\"codex\":\"endpoint\",\"openai\":\"unserved\"{s}}}}}}}", .{ body_wire, if (self.mode == .activation_wrong_store) "/wrong-store" else self.store, if (std.mem.eql(u8, response_wire, protocol.wire_version) or std.mem.eql(u8, response_wire, protocol_reply.HostInfoProfile.released_20.wire()) or std.mem.eql(u8, response_wire, protocol_reply.HostInfoProfile.released_18.wire()) or std.mem.eql(u8, response_wire, protocol_reply.HostInfoProfile.released_17.wire()) or std.mem.eql(u8, response_wire, protocol_reply.HostInfoProfile.released_16.wire()) or std.mem.eql(u8, response_wire, protocol_reply.HostInfoProfile.released_15.wire()) or std.mem.eql(u8, response_wire, protocol_reply.HostInfoProfile.released_14.wire()) or self.mode == .historical_13_chatgpt) ",\"chatgpt\":\"unserved\"" else "" });
                 var error_buffer: [256]u8 = undefined;
                 const body: []const u8 = switch (self.mode) {
                     .activation_400, .activation_bad_rejection, .activation_500, .activation_503, .strict_503 => try std.fmt.bufPrint(&error_buffer, "{{\"version\":\"{s}\",\"type\":\"invocation_error\",\"code\":\"{s}\"}}", .{ response_wire, if (self.mode == .activation_bad_rejection) "SomeOtherFailure" else "WrongWireVersion" }),
@@ -1209,8 +1244,9 @@ test "upgrade Host observation uses exact read-only profiles on each authenticat
                 else => {},
             }
             const observed = switch (mode) {
-                .strict, .strict_18, .strict_17, .strict_16, .strict_15, .strict_14, .strict_13, .strict_503 => if (observeHostProcess(io, root, null)) |_| return error.TestUnexpectedResult else |err| return err,
+                .strict, .strict_20, .strict_18, .strict_17, .strict_16, .strict_15, .strict_14, .strict_13, .strict_503 => if (observeHostProcess(io, root, null)) |_| return error.TestUnexpectedResult else |err| return err,
                 .exact => try observeHostForUpgradeProfile(io, root, .released_9, null),
+                .exact_20 => try observeHostForUpgradeProfile(io, root, .released_20, null),
                 .exact_18 => try observeHostForUpgradeProfile(io, root, .released_18, null),
                 .exact_17 => try observeHostForUpgradeProfile(io, root, .released_17, null),
                 .exact_16 => try observeHostForUpgradeProfile(io, root, .released_16, null),
@@ -1272,7 +1308,7 @@ test "upgrade Host observation uses exact read-only profiles on each authenticat
                     }
                 }
                 switch (mode) {
-                    .strict, .strict_18, .strict_17, .strict_16, .strict_15, .strict_14, .strict_13, .strict_503, .unknown => try std.testing.expectError(error.WrongWireVersion, result),
+                    .strict, .strict_20, .strict_18, .strict_17, .strict_16, .strict_15, .strict_14, .strict_13, .strict_503, .unknown => try std.testing.expectError(error.WrongWireVersion, result),
                     .budget => try std.testing.expectError(error.ResponseInactive, result),
                     .body_mismatch,
                     .unavailable,
@@ -1291,12 +1327,13 @@ test "upgrade Host observation uses exact read-only profiles on each authenticat
                         try std.testing.expect(reading == .incompatible);
                         try std.testing.expectEqual(std.c.getpid(), reading.incompatible);
                     },
-                    .current, .historical, .historical_18, .historical_17, .historical_16, .historical_15, .historical_14, .historical_13, .historical_13_chatgpt, .exact, .exact_18, .exact_17, .exact_16, .exact_15, .exact_14, .exact_13, .activation_current => {
+                    .current, .historical, .historical_20, .historical_18, .historical_17, .historical_16, .historical_15, .historical_14, .historical_13, .historical_13_chatgpt, .exact, .exact_20, .exact_18, .exact_17, .exact_16, .exact_15, .exact_14, .exact_13, .activation_current => {
                         const reading = try result;
                         try std.testing.expect(reading == .compatible);
                         const observed = reading.compatible;
                         const expected_profile: protocol_reply.HostInfoProfile = switch (mode) {
                             .current, .activation_current => .current,
+                            .historical_20, .exact_20 => .released_20,
                             .historical_18, .exact_18 => .released_18,
                             .historical_17, .exact_17 => .released_17,
                             .historical_16, .exact_16 => .released_16,
@@ -1318,13 +1355,14 @@ test "upgrade Host observation uses exact read-only profiles on each authenticat
                 }
                 try std.testing.expectEqual(@as(?anyerror, null), peer.failure);
                 try std.testing.expectEqual(@as(usize, switch (mode) {
-                    .historical, .body_mismatch, .unknown => 8,
-                    .historical_13, .historical_13_chatgpt => 7,
-                    .historical_14 => 6,
-                    .historical_15 => 5,
-                    .historical_16 => 4,
-                    .historical_17 => 3,
-                    .historical_18, .budget => 2,
+                    .historical, .body_mismatch, .unknown => 9,
+                    .historical_13, .historical_13_chatgpt => 8,
+                    .historical_14 => 7,
+                    .historical_15 => 6,
+                    .historical_16 => 5,
+                    .historical_17 => 4,
+                    .historical_18 => 3,
+                    .historical_20, .budget => 2,
                     else => 1,
                 }), peer.seen);
             }
@@ -5389,7 +5427,7 @@ test "transport cancellation saturated Unix backlog is not a connected writable 
     // pending until the deadline or cancellation. Darwin reads a zero backlog
     // as its maximum, so request one and queue peers until one does not
     // connect.
-    const blocks = @import("os/os.zig").full_backlog_blocks_connect;
+    const blocks = @import("os").full_backlog_blocks_connect;
     const io = std.testing.io;
     var tmp = try @import("socket_fixture.zig").Directory.init();
     defer tmp.cleanup();
@@ -5755,7 +5793,7 @@ test "socket upgrade discovery never infers absence from missing stale backlog o
         const unreadable = try listener.accept(io);
         unreadable.close(io);
 
-        const blocks = @import("os/os.zig").full_backlog_blocks_connect;
+        const blocks = @import("os").full_backlog_blocks_connect;
         var peers: [8]std.posix.fd_t = undefined;
         var count: usize = 0;
         defer for (peers[0..count]) |fd| closeTestDescriptor(fd);

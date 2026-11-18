@@ -172,6 +172,14 @@ class SelectionTest(unittest.TestCase):
         for conclusion in ("success", "failure", "cancelled", "timed_out", "action_required"):
             with self.subTest(conclusion=conclusion):
                 self.assertEqual(self.select(jobs=[job(conclusion=conclusion)]).job_id, 100)
+        skipped_policy = job(conclusion="skipped")
+        for jobs, expected in (([skipped_policy, job(101, name="linux pr")], 101),
+                               ([job(101, name="linux pr", conclusion="skipped"), job()], 100),
+                               ([skipped_policy, job(101, name="linux pr", conclusion="skipped")], None),
+                               ([skipped_policy, job(101, name="linux pr", status="in_progress", conclusion=None)], None),
+                               ([job(101, name="linux suites (test-native)")], None)):
+            with self.subTest(jobs=[(item["name"], item["conclusion"]) for item in jobs]):
+                self.assertEqual(self.select(jobs=jobs).job_id, expected)
 
     def test_ambiguous_policy_jobs_fail_loudly(self):
         with self.assertRaisesRegex(ValueError, "multiple latest policy"):
@@ -587,22 +595,29 @@ class AdapterTest(unittest.TestCase):
         workflow = (Path(__file__).resolve().parents[2] / ".github/workflows/check.yml").read_text()
         policy, admission = workflow_job(workflow, "policy"), workflow_job(workflow, "admission")
         self.assertIn("fetch-depth: 0", policy)
-        self.assertIn('python3 -B tests/ci/policy_suite.py --skips "$SKIPS"', policy)
+        self.assertIn("uses: ./.github/actions/policy", policy)
+        single = workflow_job(workflow, "pr_linux")
+        self.assertIn("name: linux pr", single)
+        self.assertIn("fetch-depth: 0", single)
+        self.assertIn("uses: ./.github/actions/policy", single)
+        composite = (Path(__file__).resolve().parents[2] / ".github/actions/policy/action.yml").read_text()
+        self.assertIn('python3 -B tests/ci/policy_suite.py --skips "$SKIPS"', composite)
         needs = re.search(r"needs: \[([^\]]+)\]", admission)[1].split(", ")
         self.assertIn("policy", needs)
+        self.assertTrue({"linux", "pr_linux"} & set(needs))
 
 
     def test_release_rechecks_only_after_a_new_successful_publication(self):
         root = Path(__file__).resolve().parents[2]
         workflow = (root / ".github/workflows/release.yml").read_text()
         job_body = workflow_job(workflow, "recheck_wire_prs")
-        self.assertIn("needs: [plan, publish]", job_body)
-        self.assertIn("if: ${{ needs.plan.outputs.version != '' && needs.publish.result == 'success' }}", job_body)
+        self.assertIn("needs: publish", job_body)
+        self.assertIn("if: ${{ inputs.version != '' && needs.publish.result == 'success' }}", job_body)
         self.assertEqual(permissions(job_body), {"actions": "write", "pull-requests": "read", "contents": "read"})
         self.assertIn("ref: ${{ github.sha }}", job_body)
         self.assertIn("persist-credentials: false", job_body)
         self.assertIn("GH_TOKEN: ${{ github.token }}", job_body)
-        self.assertIn("VERSION: ${{ needs.plan.outputs.version }}", job_body)
+        self.assertIn("VERSION: ${{ inputs.version }}", job_body)
         self.assertIn('RELEASE_PUBLISHED_AT=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/v$VERSION" --jq .published_at)',
                       job_body)
         self.assertIn("export RELEASE_PUBLISHED_AT", job_body)

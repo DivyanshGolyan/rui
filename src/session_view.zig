@@ -753,13 +753,13 @@ pub fn actionTool(requests: client.Requests, store: []const u8, session: []const
     return actionToolFromCapture(&observed, requests.io, scratch, action);
 }
 
-pub fn permission(requests: client.Requests, store: []const u8, session: []const u8, action: u64, scratch: std.Io.File, sink: anytype, colour: bool) !bool {
+pub fn permission(requests: client.Requests, store: []const u8, session: []const u8, action: u64, scratch: std.Io.File, sink: anytype, colour: bool, unicode_script: bool) !bool {
     const tool = try actionTool(requests, store, session, action, scratch) orelse return false;
-    try permissionForTool(requests, store, session, action, scratch, sink, colour, &tool);
+    try permissionForTool(requests, store, session, action, scratch, sink, colour, unicode_script, &tool);
     return true;
 }
 
-pub fn permissionForTool(requests: client.Requests, store: []const u8, session: []const u8, action: u64, scratch: std.Io.File, sink: anytype, colour: bool, tool: *const ActionTool) !void {
+pub fn permissionForTool(requests: client.Requests, store: []const u8, session: []const u8, action: u64, scratch: std.Io.File, sink: anytype, colour: bool, unicode_script: bool, tool: *const ActionTool) !void {
     try requests.io.vtable.fileSeekTo(requests.io.userdata, scratch, 0);
     try scratch.setLength(requests.io, 0);
     var reply: client.ReplyBuffer = .{};
@@ -772,7 +772,7 @@ pub fn permissionForTool(requests: client.Requests, store: []const u8, session: 
         if (failure.err() == error.CanonicalStoreFailure) return error.CanonicalStoreFailure;
         return error.ActionReadFailed;
     }
-    return renderPermissionArguments(requests.io, scratch, sink, colour, tool);
+    return renderPermissionArguments(requests.io, scratch, sink, colour, unicode_script, tool);
 }
 
 const ArgumentSource = struct {
@@ -788,10 +788,10 @@ const ArgumentSource = struct {
     }
 };
 
-pub fn renderPermissionArguments(io: std.Io, scratch: std.Io.File, sink: anytype, colour: bool, tool: *const ActionTool) !void {
+pub fn renderPermissionArguments(io: std.Io, scratch: std.Io.File, sink: anytype, colour: bool, unicode_script: bool, tool: *const ActionTool) !void {
     return switch (try tool.runner()) {
-        .bash => request(io, scratch, sink, colour),
-        .mcp, .read_image => toolRequest(io, scratch, sink, colour, tool),
+        .bash => request(io, scratch, sink, colour, unicode_script),
+        .mcp, .read_image => toolRequest(io, scratch, sink, colour, unicode_script, tool),
         .core, .provider => error.InvalidObservation,
     };
 }
@@ -818,13 +818,18 @@ pub fn bashCommand(io: std.Io, scratch: std.Io.File, tool: *const ActionTool, bu
     return if (shown) buffer[0..leading.len] else null;
 }
 
-fn toolRequest(io: std.Io, scratch: std.Io.File, sink: anytype, colour: bool, tool: *const ActionTool) !void {
+fn permissionMark(sink: anytype, colour: bool, unicode_script: bool) !void {
+    const mark = marks.marks.get(.needs_you);
+    try sink.feed(Style.fromTone(mark.tone).code(colour));
+    try sink.feed(if (unicode_script) mark.unicode else mark.ascii);
+    try sink.feed(Style.normal.code(colour));
+}
+
+fn toolRequest(io: std.Io, scratch: std.Io.File, sink: anytype, colour: bool, unicode_script: bool, tool: *const ActionTool) !void {
     var buffer: [4096]u8 = undefined;
     var reader = scratch.reader(io, &buffer);
     try sink.feed("\n");
-    try sink.feed(Style.attention.code(colour));
-    try sink.feed("?");
-    try sink.feed(Style.normal.code(colour));
+    try permissionMark(sink, colour, unicode_script);
     var indented: Indented(@TypeOf(sink)) = .{ .sink = sink };
     if (tool.description.len != 0) {
         try indented.feed(" ");
@@ -855,16 +860,14 @@ fn toolRequest(io: std.Io, scratch: std.Io.File, sink: anytype, colour: bool, to
     try indented.finish();
 }
 
-fn request(io: std.Io, scratch: std.Io.File, sink: anytype, colour: bool) !void {
+fn request(io: std.Io, scratch: std.Io.File, sink: anytype, colour: bool, unicode_script: bool) !void {
     var buffer: [4096]u8 = undefined;
     var reader = scratch.reader(io, &buffer);
     var source: ArgumentSource = .{ .reader = &reader.interface };
     const arguments = try tools.inspectBashArguments(&source) orelse return error.InvalidBashArguments;
     try reader.seekTo(0);
     try sink.feed("\n");
-    try sink.feed(Style.attention.code(colour));
-    try sink.feed("?");
-    try sink.feed(Style.normal.code(colour));
+    try permissionMark(sink, colour, unicode_script);
     var indented: Indented(@TypeOf(sink)) = .{ .sink = sink };
     if (arguments.description.len != 0) {
         try indented.feed(" ");
@@ -895,6 +898,46 @@ fn request(io: std.Io, scratch: std.Io.File, sink: anytype, colour: bool) !void 
     try indented.finish();
 }
 
+test "APPROVAL-1 permission headings use the shared glyph and tone in both scripts" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const scratch = try tmp.dir.createFile(std.testing.io, "arguments", .{ .read = true });
+    defer scratch.close(std.testing.io);
+    const Sink = struct {
+        bytes: [2048]u8 = undefined,
+        len: usize = 0,
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            @memcpy(self.bytes[self.len..][0..bytes.len], bytes);
+            self.len += bytes.len;
+        }
+    };
+    const Case = struct { name: []const u8, server: ?[]const u8 = null, arguments: []const u8 };
+    for ([_]Case{
+        .{ .name = "bash", .arguments = "{\"description\":\"Probe\",\"cmd\":\"true\",\"stdin\":null,\"timeout_ms\":null}" },
+        .{ .name = "read_image", .arguments = "{\"path\":\"image.png\"}" },
+        .{ .name = "fetch_page", .server = "docs", .arguments = "{}" },
+    }) |case| for ([_]bool{ false, true }) |unicode_script| for ([_]bool{ false, true }) |colour| {
+        var tool: ActionTool = .{ .name = .{}, .description = .{} };
+        try tool.name.set(case.name);
+        try tool.description.set("Probe");
+        if (case.server) |server| {
+            tool.server = .{};
+            try tool.server.?.set(server);
+        }
+        try scratch.setLength(std.testing.io, 0);
+        try scratch.writePositionalAll(std.testing.io, case.arguments, 0);
+        var sink: Sink = .{};
+        try renderPermissionArguments(std.testing.io, scratch, &sink, colour, unicode_script, &tool);
+        var expected: [64]u8 = undefined;
+        const prefix = try std.fmt.bufPrint(&expected, "\n{s}{s}{s} Probe\n", .{
+            if (colour) "\x1b[33m" else "",
+            if (unicode_script) "●" else "?",
+            if (colour) "\x1b[39m" else "",
+        });
+        try std.testing.expect(std.mem.startsWith(u8, sink.bytes[0..sink.len], prefix));
+    };
+}
+
 test "an Action's command and stdin lines carry the content mark, so neither can pass for a field" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -912,21 +955,21 @@ test "an Action's command and stdin lines carry the content mark, so neither can
     for ([_]Case{
         .{
             .arguments = "{\"description\":\"Probe\",\"cmd\":\"echo a\\nTime limit: 1 min\\n\\nstdin:\",\"stdin\":null,\"timeout_ms\":null}",
-            .expected = "\n? Probe\n  $ echo a\n  │ Time limit: 1 min\n  │\n  │ stdin:\n",
+            .expected = "\n● Probe\n  $ echo a\n  │ Time limit: 1 min\n  │\n  │ stdin:\n",
         },
         .{
             .arguments = "{\"description\":\"Probe\",\"cmd\":\"cat\",\"stdin\":\"Time limit: 1 min\\nx\",\"timeout_ms\":5000}",
-            .expected = "\n? Probe\n  $ cat\n  Time limit: 5 s\n  stdin:\n  │ Time limit: 1 min\n  │ x\n",
+            .expected = "\n● Probe\n  $ cat\n  Time limit: 5 s\n  stdin:\n  │ Time limit: 1 min\n  │ x\n",
         },
         .{
             .arguments = "{\"description\":\"Probe\",\"cmd\":\"cat\",\"stdin\":\"x\\n\",\"timeout_ms\":null}",
-            .expected = "\n? Probe\n  $ cat\n  stdin:\n  │ x\n  │\n",
+            .expected = "\n● Probe\n  $ cat\n  stdin:\n  │ x\n  │\n",
         },
     }) |case| {
         try scratch.setLength(std.testing.io, 0);
         try scratch.writePositionalAll(std.testing.io, case.arguments, 0);
         var sink: Sink = .{};
-        _ = try request(std.testing.io, scratch, &sink, false);
+        _ = try request(std.testing.io, scratch, &sink, false, true);
         try std.testing.expectEqualStrings(case.expected, sink.bytes[0..sink.length]);
     }
 }
@@ -1105,7 +1148,20 @@ test "answer adapters pass NO_COLOR through inline names tables and fenced code"
         try std.testing.expectEqual(colour, std.mem.indexOf(u8, output.written(), "\x1b[94m") != null);
         try std.testing.expectEqual(colour, std.mem.indexOf(u8, output.written(), "\x1b[90m") != null);
         try std.testing.expectEqual(destination == .viewport and colour, std.mem.indexOf(u8, output.written(), "\x1b[40m") != null);
-        if (!colour) try std.testing.expectEqualStrings("name\n  A\n  B\n  code\n  \n", output.written());
+        if (!colour) try std.testing.expectEqualStrings(if (destination == .viewport)
+            "name\n" ++ Text.full_width_on ++ "  A\n  B\n" ++ Text.full_width_off ++ Text.full_width_on ++ "  code\n  \n" ++ Text.full_width_off
+        else
+            "name\n  A\n  B\n  code\n  \n", output.written());
+        if (destination == .terminal) {
+            try std.testing.expect(std.mem.indexOf(u8, output.written(), Text.full_width_on) == null);
+            try std.testing.expect(std.mem.indexOf(u8, output.written(), Text.full_width_off) == null);
+        } else {
+            const Viewport = @import("ConversationViewport.zig");
+            var view: Viewport.Sized(512, true) = .{};
+            try view.append(output.written());
+            try view.prepare();
+            try std.testing.expectEqualStrings(if (colour) "name\n  A\n  B\ncode\n\n" else "name\n  A\n  B\n  code\n  \n", view.text());
+        }
     };
 }
 
@@ -1229,8 +1285,8 @@ test "tool header hides all body lines for every outcome and first-line split" {
         "Bash failed. Exit code: 7.\nCapture may be incomplete.\nstdout:\nhead\n[123 bytes left out]\ntail\nstderr:\n\x1b[2Jhidden\nFull stdout: /secret\nFull stderr: /secret-err\n",
     };
     const cases = .{
-        .{ protocol.ToolPresentation.Code.unresolved, "⠹ Tool call" },
-        .{ protocol.ToolPresentation.Code.pending_permission, "? Tool call" },
+        .{ protocol.ToolPresentation.Code.unresolved, "◝ Tool call" },
+        .{ protocol.ToolPresentation.Code.pending_permission, "● Tool call" },
         .{ protocol.ToolPresentation.Code.background, "✓ Tool call · background" },
         .{ protocol.ToolPresentation.Code.succeeded, "✓ Tool call" },
         .{ protocol.ToolPresentation.Code.failed, "× Tool call" ++ tool_fold.exit_open ++ "exit 7" ++ Text.link_close },
@@ -1238,9 +1294,9 @@ test "tool header hides all body lines for every outcome and first-line split" {
         .{ protocol.ToolPresentation.Code.indeterminate, "× Tool call · may have run" },
         .{ protocol.ToolPresentation.Code.storage_failed, "× Tool call · output lost" },
         .{ protocol.ToolPresentation.Code.spawn_failed, "× Tool call · could not start" },
-        .{ protocol.ToolPresentation.Code.cancelled, "■ Tool call" },
+        .{ protocol.ToolPresentation.Code.cancelled, "▪ Tool call" },
         .{ protocol.ToolPresentation.Code.infrastructure_shutdown, "× Tool call · may have run" },
-        .{ protocol.ToolPresentation.Code.denied, "■ Tool call · denied" },
+        .{ protocol.ToolPresentation.Code.denied, "▪ Tool call · denied" },
         .{ protocol.ToolPresentation.Code.unknown_tool, "× Tool call · rejected" },
         .{ protocol.ToolPresentation.Code.invalid_arguments, "× Tool call · rejected" },
     };
@@ -1385,7 +1441,7 @@ test "a descendant's ending names the agent without codes or advice" {
     try agentEnded(&sink, "9f8e7d", "provider_http_401", false);
     try agentEnded(&sink, "9f8e7d", "cancelled", false);
     try agentEnded(&sink, "bad\x1b[2J", "malformed_provider_output", false);
-    try std.testing.expectEqualStrings("× Agent 9f8e7d · Sign-in expired\n■ Agent 9f8e7d stopped\n× Agent bad\\x1b[2J · Model reply unreadable\n", out.buffered());
+    try std.testing.expectEqualStrings("× Agent 9f8e7d · Sign-in expired\n▪ Agent 9f8e7d stopped\n× Agent bad\\x1b[2J · The model's reply didn't come through\n", out.buffered());
 }
 
 test "an ended Turn shows one plain cause line for every failure class, and its provider's usage place for quota" {
@@ -1410,10 +1466,10 @@ test "an ended Turn shows one plain cause line for every failure class, and its 
         .{ "ResourceExceeded", null, "× Context full" },
         .{ "provider_tls_verification_failed", null, "× Provider unreachable" },
         .{ "retry_exhausted", null, "× Retries ran out" },
-        .{ "cancelled", null, "■ Stopped" },
+        .{ "cancelled", null, "▪ Stopped" },
         .{ "provider_http_400", null, "× Provider refused the request" },
-        .{ "unknown\x1b[2J", null, "× Something went wrong" },
-        .{ "malformed_provider_output", null, "× Model reply unreadable" },
+        .{ "unknown\x1b[2J", null, "× That didn't work" },
+        .{ "malformed_provider_output", null, "× The model's reply didn't come through" },
     };
     var seen: std.enums.EnumSet(failure_class.Class) = .empty;
     inline for (cases) |case| {
@@ -1441,10 +1497,10 @@ test "turn and agent ending marks use their table tones" {
     try workEnded(&sink, "cancelled", null, true);
     try agentEnded(&sink, "9f8e7d", "malformed_provider_output", true);
     try agentEnded(&sink, "9f8e7d", "cancelled", true);
-    try std.testing.expectEqualStrings("\x1b[91m×\x1b[39m Model reply unreadable\n" ++
-        "\x1b[39m■\x1b[39m Stopped\n" ++
-        "\x1b[91m×\x1b[39m Agent 9f8e7d · Model reply unreadable\n" ++
-        "\x1b[39m■\x1b[39m Agent 9f8e7d stopped\n", out.buffered());
+    try std.testing.expectEqualStrings("\x1b[91m×\x1b[39m The model's reply didn't come through\n" ++
+        "\x1b[39m▪\x1b[39m Stopped\n" ++
+        "\x1b[91m×\x1b[39m Agent 9f8e7d · The model's reply didn't come through\n" ++
+        "\x1b[39m▪\x1b[39m Agent 9f8e7d stopped\n", out.buffered());
 }
 
 test "ending tails are quiet and joined in destination then key order" {
@@ -1465,24 +1521,6 @@ test "ending tails are quiet and joined in destination then key order" {
     out.end = 0;
     try ending(&sink, .{ .mark = .failed, .words = "Cause", .key = "Key" }, false);
     try std.testing.expectEqualStrings("× Cause · Key\n", out.buffered());
-}
-
-pub fn showsAtAdmission(position: u64, value: protocol.ActivityItem.Message, queued: protocol.Queued, held: bool) bool {
-    return value.state == .queued and !held and position == queued.oldest_position;
-}
-
-test "a waiting Message shows at its Admission only when nothing holds it and nothing older waits" {
-    const body: protocol.ActivityItem.Content = .{ .length = 1, .digest = @splat(0) };
-    const waiting: protocol.ActivityItem.Message = .{ .admission = 12, .key = .{}, .turn = null, .state = .queued, .content = body, .admitted_at = 1, .sender = null };
-    const alone: protocol.Queued = .{ .count = 1, .oldest_position = 30, .newest_admission = 12, .newest_position = 30 };
-    try std.testing.expect(showsAtAdmission(30, waiting, alone, false));
-    try std.testing.expect(!showsAtAdmission(30, waiting, alone, true));
-    try std.testing.expect(!showsAtAdmission(34, waiting, .{ .count = 2, .oldest_position = 30, .newest_admission = 12, .newest_position = 34 }, false));
-    var taken = waiting;
-    taken.state = .applied;
-    try std.testing.expect(!showsAtAdmission(30, taken, .{}, false));
-    taken.state = .excluded;
-    try std.testing.expect(!showsAtAdmission(30, taken, alone, false));
 }
 
 pub const Fold = union(enum) { none, closed, open: *tool_fold.Output };
@@ -1512,9 +1550,10 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
     }
     switch (item.value) {
         .admission => |value| {
-            if (!showsAtAdmission(item.position, value, queued, held)) return false;
-            try message(requests, store, session, item, value, .none, sink, colour);
-            return true;
+            _ = value;
+            _ = queued;
+            _ = held;
+            return false;
         },
         .received => |value| try message(requests, store, session, item, value, .none, sink, colour),
         .user => |value| {
@@ -1664,7 +1703,7 @@ test "read_image approval displays the exact path arguments without a server" {
     var tool: ActionTool = .{ .name = .{}, .description = .{}, .server = null };
     try tool.name.set("read_image");
     try tool.description.set("Read image");
-    try renderPermissionArguments(std.testing.io, scratch, &sink, false, &tool);
+    try renderPermissionArguments(std.testing.io, scratch, &sink, false, true, &tool);
     const rendered = sink.bytes[0..sink.length];
     try std.testing.expect(std.mem.indexOf(u8, rendered, "Tool: read_image") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "{\"path\":\"image.png\"}") != null);
@@ -1710,11 +1749,11 @@ test "MCP approval uses the saved description and renders exact arguments with A
         try scratch.writePositionalAll(std.testing.io, case.arguments, 0);
         try action.setLength(std.testing.io, 0);
         var sink: Sink = .{ .file = action };
-        try renderPermissionArguments(std.testing.io, scratch, &sink, false, &tool);
+        try renderPermissionArguments(std.testing.io, scratch, &sink, false, true, &tool);
         var rendered: [2048]u8 = undefined;
         const count = try action.readPositionalAll(std.testing.io, &rendered, 0);
         var heading: [256]u8 = undefined;
-        try std.testing.expect(std.mem.startsWith(u8, rendered[0..count], try std.fmt.bufPrint(&heading, "\n? {s}\n", .{case.description})));
+        try std.testing.expect(std.mem.startsWith(u8, rendered[0..count], try std.fmt.bufPrint(&heading, "\n● {s}\n", .{case.description})));
         try std.testing.expect(std.mem.indexOf(u8, rendered[0..count], "\n  Tool: fetch_page\n  Server: docs\n  Arguments:\n  │ ") != null);
         try std.testing.expect(std.mem.indexOf(u8, rendered[0..count], case.arguments) != null);
         try std.testing.expect(std.mem.indexOf(u8, rendered[0..count], "\n  $ ") == null);
@@ -1792,11 +1831,11 @@ test "MCP approval marks argument lines escapes controls and refuses a viewport 
     while (at < Viewport.capacity + 4096) : (at += fill.len) try scratch.writePositionalAll(std.testing.io, &fill, at);
     try scratch.writePositionalAll(std.testing.io, "\"\n}", at);
     var sink: Sink = .{ .file = action };
-    try renderPermissionArguments(std.testing.io, scratch, &sink, false, &tool);
+    try renderPermissionArguments(std.testing.io, scratch, &sink, false, true, &tool);
     var beginning: [512]u8 = undefined;
     const count = try action.readPositionalAll(std.testing.io, &beginning, 0);
     const shown = beginning[0..count];
-    try std.testing.expect(std.mem.startsWith(u8, shown, "\n? Saved \\x1b[2J\n"));
+    try std.testing.expect(std.mem.startsWith(u8, shown, "\n● Saved \\x1b[2J\n"));
     try std.testing.expect(std.mem.indexOf(u8, shown, "\x1b") == null);
     try std.testing.expect(std.mem.indexOf(u8, shown, "‮") == null);
     try std.testing.expect(std.mem.indexOf(u8, shown, "\n  │ \"rui_call_description\"") != null);

@@ -56,7 +56,7 @@ pub fn detached(store: []const u8, opened: ?[]const u8, action: ?u64) void {
     const Text = @import("TerminalText.zig");
     var buffer: [4 * (4 * (protocol.max_store_bytes + protocol.max_session_bytes) + 128)]u8 = undefined;
     var notice = std.Io.Writer.fixed(&buffer);
-    notice.writeAll("\nDetached. Host work continues.\n") catch unreachable;
+    notice.writeAll("\nYour chats keep working while you are away.\nCome back with: rui\n") catch unreachable;
     if (opened) |session| {
         notice.writeAll("Resume: rui session resume --store ") catch unreachable;
         Text.writeShellWord(&notice, store) catch unreachable;

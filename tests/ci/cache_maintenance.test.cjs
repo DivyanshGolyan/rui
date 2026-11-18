@@ -131,7 +131,7 @@ test('build restores keep each part apart and seed parts without snapshots from 
   const workflows = `${root}/.github/workflows`;
   const parts = new Set(['all']);
   for (const file of readdirSync(workflows).filter(file => file.endsWith('.yml'))) {
-    for (const [, part] of readFileSync(`${workflows}/${file}`, 'utf8').matchAll(/^\s+check-part: (.*?)\s*$/gm)) {
+    for (const [, part] of readFileSync(`${workflows}/${file}`, 'utf8').matchAll(/^\s+(?:check|cache)-part: (.*?)\s*$/gm)) {
       if (part === '${{ matrix.part }}') {
         const matrix = readFileSync(`${workflows}/${file}`, 'utf8').match(/^        part: \[(.*?)\]/m);
         assert.ok(matrix, `${file} must enumerate its cache parts`);
@@ -145,7 +145,30 @@ test('build restores keep each part apart and seed parts without snapshots from 
       parts.add(part);
     }
   }
-  for (const part of ['compiled', 'compiled-unit', 'codegen', 'baseline']) assert.ok(parts.has(part), part);
+  for (const part of ['compiled', 'compiled-unit', 'baseline']) assert.ok(parts.has(part), part);
+  // The single PR job restores the snapshot main's Linux producer publishes, never an
+  // `all` namespace nobody writes.
+  const check = readFileSync(`${workflows}/check.yml`, 'utf8');
+  const job = name => check.match(new RegExp(`^  ${name}:\\n([\\s\\S]*?)(?=^  [a-z_]+:\\n|$(?![\\s\\S]))`, 'm'))[1];
+  const setupOf = body => body.match(/- uses: \.\/\.github\/actions\/setup\n(?: {8,}.*\n)+/)[0];
+  const prSetup = setupOf(job('pr_linux'));
+  const prPart = (prSetup.match(/^ +cache-part: (.*)$/m) || prSetup.match(/^ +check-part: (.*)$/m) || [, 'all'])[1];
+  const producer = setupOf(job('linux_build'));
+  assert.match(producer, /^ +check-part: compiled$/m);
+  assert.match(producer, /^ +publish-caches: \$\{\{ github\.ref == 'refs\/heads\/main' && /m);
+  const v2 = `rui-build-v2-Linux-X64-0.17.1-${'a'.repeat(64)}-`;
+  const prKeys = nameKeys(prPart, 'd'.repeat(64), 'b'.repeat(64));
+  assert.deepEqual(order.map(output => prKeys[output]).filter(key => key !== ''), [
+    `rui-build-v4-Linux-X64-0.17.1-${'a'.repeat(64)}-compiled.${'d'.repeat(64)}-`,
+    `rui-build-v4-Linux-X64-0.17.1-${'a'.repeat(64)}-compiled.`,
+    `rui-build-v3-Linux-X64-0.17.1-${'a'.repeat(64)}-compiled.${'d'.repeat(64)}-`,
+    `rui-build-v3-Linux-X64-0.17.1-${'a'.repeat(64)}-compiled.`,
+    `${v2}compiled.${'d'.repeat(64)}-`, `${v2}compiled.`, `${v2}baseline.${'d'.repeat(64)}-`,
+  ], 'linux pr restores main\'s compiled producer snapshot');
+  assert.match(prSetup, /^ +publish-caches: 'false'$/m);
+  const setupAction = readFileSync(`${root}/.github/actions/setup/action.yml`, 'utf8');
+  assert.match(setupAction, /- uses: \.\/\.github\/actions\/setup\/caches\n +id: caches\n +with:\n +check-part: \$\{\{ inputs\.cache-part \|\| inputs\.check-part \}\}\n/,
+               'setup restores cache-part when a job names one');
   const [d1, d2, s1, s2] = ['d', 'e', 'b', 'c'].map(c => c.repeat(64));
   const keys = (part, deps, sources = s2) => nameKeys(part, deps, sources);
   // actions/cache: an exact key, else the newest key matching the first restore
@@ -753,7 +776,7 @@ test('existing job timeout budgets are not increased to make space for saves', (
   const directory = `${__dirname}/../../.github/workflows`;
   for (const [file, expected] of [
     ['cache-maintenance.yml', {baseline: '30', runner: '15', previous_release: '45'}],
-    ['check.yml', {linux_build: '60', linux_build_unit: '15', macos_build: '60', macos_build_unit: '60', macos_typecheck: '15', cache_execution: '20', linux_codegen: '20', linux_suites: '${{ inputs.promotion && 300 || 35 }}', macos_suites: '${{ inputs.promotion && 300 || 35 }}'}],
+    ['check.yml', {linux_build: '60', linux_build_unit: '15', macos_build: '60', macos_build_unit: '60', macos_typecheck: '15', cache_execution: '20', linux_suites: '${{ inputs.promotion && 300 || 35 }}', macos_suites: '${{ inputs.promotion && 300 || 35 }}'}],
     ['renderer-contracts.yml', {contracts: '${{ inputs.batch-base && 300 || 45 }}', mutations: '60'}],
   ]) {
     const jobs = workflowJobs(readFileSync(`${directory}/${file}`, 'utf8'));
@@ -779,7 +802,6 @@ test('new work deadlines derive a save window and cover recorded green durations
       macos_build: [1117, '43720387127'],
       macos_build_unit: [760, '43720387127'],
       cache_execution: [351, '42755585733'],
-      linux_codegen: [593, '43762678033'],
     },
     'cache-maintenance.yml': {
       baseline: [568, '43433947643'],

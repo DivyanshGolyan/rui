@@ -82,7 +82,7 @@ pub fn width(bytes: []const u8, target: Target) u16 {
     return cells;
 }
 
-test "display width counts viewport escapes but a terminal's emitted text" {
+test "MRK-3 display width measures rendered text and saturates" {
     for (std.enums.values(Method)) |method| {
         try std.testing.expectEqual(@as(u16, 8), width("\u{200b}", .{ .viewport = method }));
         try std.testing.expectEqual(@as(u16, 7), width("\u{301}", .{ .viewport = method }));
@@ -91,9 +91,21 @@ test "display width counts viewport escapes but a terminal's emitted text" {
     }
     try std.testing.expectEqual(@as(u16, 0), width("\u{200b}", .terminal));
     try std.testing.expectEqual(@as(u16, 4), width("\\x1b", .terminal));
-}
-
-test "display width saturates for a retained line wider than any window" {
     const spaces: [70_000]u8 = @splat(' ');
     try std.testing.expectEqual(@as(u16, 65535), width(&spaces, .{ .viewport = .unicode }));
+}
+
+test "MRK-4 status marks and spinner frames occupy one cell" {
+    const status = @import("marks.zig");
+    for (std.enums.values(Method)) |method| {
+        for (std.enums.values(status.Mark)) |mark| {
+            const glyph = status.marks.get(mark).unicode;
+            try std.testing.expectEqual(@as(u16, 1), gwidth.gwidth(glyph, method));
+            try std.testing.expectEqual(@as(u16, 1), width(glyph, .{ .viewport = method }));
+        }
+        for (status.spinner) |frame| {
+            try std.testing.expectEqual(@as(u16, 1), gwidth.gwidth(frame, method));
+            try std.testing.expectEqual(@as(u16, 1), width(frame, .{ .viewport = method }));
+        }
+    }
 }

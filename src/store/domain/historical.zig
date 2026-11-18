@@ -944,46 +944,55 @@ pub const SettingsRead = struct {
     }
 };
 
+// readPage sits on the engine's deepest stack chain. Each exit used to build its
+// own copy of the page's Read exchange, and each question's reader inlined its
+// locals into the same frame; one keepRead per outcome and out-of-line readers
+// keep the frame small.
 pub noinline fn readPage(self: *Store, page: *RequestPage) !void {
     const read = page.read.?;
     std.debug.assert(read.answer == null);
     const question = read.question;
-    errdefer page.keepRead(.{ .question = question });
-    const answer: RequestPage.Answer = switch (question) {
+    const answer = answerQuestion(self, page, question) catch |err| {
+        page.keepRead(.{ .question = question });
+        return err;
+    };
+    if (answer) |value| page.keepRead(.{ .question = question, .answer = value }) else page.read = null;
+}
+
+// Returns null when the question's reader settles the page itself.
+noinline fn answerQuestion(self: *Store, page: *RequestPage, question: RequestPage.Question) !?RequestPage.Answer {
+    return switch (question) {
         .settings => |out| answer: {
-            try readHistoricalSettings(self, page, out);
+            try @call(.never_inline, readHistoricalSettings, .{ self, page, out });
             break :answer .settings;
         },
-        .outputs_step => .{ .outputs_step = try validateHistoricalOutputsStep(self, page) },
-        .entry => |after_position| .{ .entry = readHistoricalEntry(self, page, after_position) catch |err| switch (err) {
+        .outputs_step => .{ .outputs_step = try @call(.never_inline, validateHistoricalOutputsStep, .{ self, page }) },
+        .entry => |after_position| .{ .entry = @call(.never_inline, readHistoricalEntry, .{ self, page, after_position }) catch |err| switch (err) {
             error.HistoricalPending => .pending,
             else => return err,
         } },
-        .parts => {
-            try readHistoricalParts(self, page);
-            page.read = null;
-            return;
+        .parts => answer: {
+            try @call(.never_inline, readHistoricalParts, .{ self, page });
+            break :answer null;
         },
-        .message_part => .{ .message_part = try self.readHistoricalMessagePart(page) },
-        .tool_result => .{ .tool_result = try readHistoricalToolResult(self, page) },
-        .tools => |tools| {
-            try readTools(self, page, tools.walk, tools.ordinal);
-            page.read = null;
-            return;
+        .message_part => .{ .message_part = try @call(.never_inline, Store.readHistoricalMessagePart, .{ self, page }) },
+        .tool_result => .{ .tool_result = try @call(.never_inline, readHistoricalToolResult, .{ self, page }) },
+        .tools => |tools| answer: {
+            try @call(.never_inline, readTools, .{ self, page, tools.walk, tools.ordinal });
+            break :answer null;
         },
         .provider_tool => |out| answer: {
-            try readProviderTool(self, page, out);
+            try @call(.never_inline, readProviderTool, .{ self, page, out });
             break :answer .provider_tool;
         },
-        .prefix_seal => .{ .prefix_seal = try readPrefixSeal(self, page.binding) },
+        .prefix_seal => .{ .prefix_seal = try @call(.never_inline, readPrefixSeal, .{ self, page.binding }) },
         .record_seal => |*seal| answer: {
-            try self.recordPrefixSeal(page.binding, seal);
+            try @call(.never_inline, Store.recordPrefixSeal, .{ self, page.binding, seal });
             break :answer .record_seal;
         },
-        .content => |content| .{ .content = try content_domain.readContent(self, &content.reader.window, content.start, content.destination) },
+        .content => |content| .{ .content = try @call(.never_inline, content_domain.readContent, .{ self, &content.reader.window, content.start, content.destination }) },
         .corrupt => return store_core.fence(self, error.CorruptStore),
     };
-    page.keepRead(.{ .question = question, .answer = answer });
 }
 
 fn readHistoricalEntry(self: *Store, view: *RequestPage, after_position: u64) !RequestPage.EntryProgress {
@@ -2272,7 +2281,7 @@ fn partsExhausted(view: *RequestPage) bool {
 
 pub fn messagePartFrom(a: *ReadAccess, view: *RequestPage) !RequestPage.MessageProgress {
     return switch (try view.message_cursor.?.value.step(a)) {
-        .raw => .pending,
+        .raw, .certified => .pending,
         .rows => rows: {
             try store_access.runAs(a, error.CorruptStore);
             break :rows .pending;

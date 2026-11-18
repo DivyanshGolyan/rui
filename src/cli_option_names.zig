@@ -2,6 +2,7 @@ const std = @import("std");
 
 pub const names = [_][]const u8{
     "action",
+    "admission",
     "check",
     "paths",
     "set",
@@ -31,6 +32,7 @@ pub const names = [_][]const u8{
     "output-reservation",
     "output-schema",
     "parent",
+    "part",
     "permission-mode",
     "position",
     "preset",
@@ -47,7 +49,6 @@ pub const names = [_][]const u8{
     "store",
     "store-hex",
     "test-bash-cleanup-gate-path",
-    "test-bash-observed-exit-gate-path",
     "test-bash-scratch-limit-bytes",
     "test-before-launch-delay-ms",
     "test-before-result-delay-ms",
@@ -58,13 +59,11 @@ pub const names = [_][]const u8{
     "test-drop-reply",
     "test-inspection-reply-delay-ms",
     "test-inspection-reply-gate-path",
-    "test-model-result-gate-path",
     "test-observation-fd",
     "test-observation-plan",
     "test-observation-state-fd",
     "test-phase-trace",
     "test-provider-inactivity-seconds",
-    "test-request-preparation-advance-delay-ms",
     "test-request-preparation-byte-allowance",
     "test-request-preparation-item-allowance",
     "test-request-scratch-limit",
@@ -72,20 +71,17 @@ pub const names = [_][]const u8{
     "test-retention-removal-failure",
     "test-retry-recovery-gate-path",
     "test-retry-waits-ms",
-    "test-shutdown-signalled-gate-path",
     "test-sqlite-cache-kib",
     "test-sqlite-cache-spill-off",
     "test-sqlite-diagnostics",
     "test-suppress-first-control-hint",
-    "test-transition",
-    "test-transition-gate-path",
     "text-output",
     "timeout-seconds",
     "to",
     "tools",
     "turn",
     "workspace",
-};
+} ++ if (@import("build_options").test_pauses) [_][]const u8{"test-pause-fd"} else [_][]const u8{};
 
 pub fn contains(name: []const u8) bool {
     for (names) |candidate| {

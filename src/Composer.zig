@@ -106,7 +106,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     return surface;
 }
 
-test "Composer keeps the caret visible between rules without changing draft bytes" {
+fn caretViewport() !void {
     var bytes = "one\ntwo\nthree\nfour\nfive\nsix".*;
     var editor: Editor = .initText(&bytes, &bytes, bytes.len);
     var composer: Self = .{ .editor = &editor };
@@ -130,7 +130,7 @@ test "Composer keeps the caret visible between rules without changing draft byte
     try std.testing.expectEqualStrings("one\ntwo\nthree\nfour\nfive\nsix", &bytes);
 }
 
-test "Composer wraps and places the caret by its caps' width, whatever the frame's" {
+fn caretWidthMethods() !void {
     const draft = "a👩‍💻b";
     const methods = [_]vaxis.gwidth.Method{ .wcwidth, .unicode, .no_zwj };
     defer vxfw.DrawContext.init(.unicode);
@@ -187,22 +187,22 @@ test "Composer draws between paste fragments that join the original suffix" {
     }
 }
 
-test "Composer empty draft shows the screen's placeholder and an input cursor" {
+fn emptyDraftPlaceholder() !void {
     var bytes: [32]u8 = undefined;
     var editor: Editor = .init(&bytes);
-    var composer: Self = .{ .editor = &editor, .placeholder = "Type a task", .style = .{ .bg = .{ .index = 19 } }, .quiet = .{ .dim = true, .bg = .{ .index = 19 } } };
+    var composer: Self = .{ .editor = &editor, .placeholder = "What shall we work on?", .style = .{ .bg = .{ .index = 19 } }, .quiet = .{ .dim = true, .bg = .{ .index = 19 } } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const surface = try composer.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 10 }, .cell_size = .{} });
     try std.testing.expectEqual(@as(u16, 3), surface.size.height);
-    try std.testing.expectEqualStrings("T", surface.readCell(3, 1).char.grapheme);
+    try std.testing.expectEqualStrings("W", surface.readCell(3, 1).char.grapheme);
     try std.testing.expect(surface.readCell(3, 1).style.dim);
     try std.testing.expectEqual(@as(u16, 3), surface.cursor.?.col);
     try std.testing.expectEqual(@as(usize, 0), editor.text().len);
     for (0..surface.size.width) |col| try std.testing.expectEqual(vaxis.Color{ .index = 19 }, surface.readCell(col, 1).style.bg);
 }
 
-test "Composer clips wide text at every small size without moving its logical caret" {
+fn caretClipping() !void {
     var bytes = "中e\u{0301}\n👩‍💻end".*;
     var editor: Editor = .initText(&bytes, &bytes, 0);
     var composer: Self = .{ .editor = &editor };
@@ -231,7 +231,7 @@ test "Composer clips wide text at every small size without moving its logical ca
     }
 }
 
-test "Composer empty chat shows only its prompt and rules" {
+fn emptyChatPrompt() !void {
     var bytes: [16]u8 = undefined;
     var editor: Editor = .init(&bytes);
     var composer: Self = .{ .editor = &editor };
@@ -246,7 +246,7 @@ test "Composer empty chat shows only its prompt and rules" {
     }
 }
 
-test "Composer inactive prompt uses quiet style and no caret without dimming draft text" {
+pub fn sui4InactivePrompt() !void {
     var bytes: [5]u8 = undefined;
     var editor: Editor = .initText(&bytes, "draft", 0);
     var composer: Self = .{ .editor = &editor, .style = .{}, .quiet = .{ .dim = true } };
@@ -263,7 +263,7 @@ test "Composer inactive prompt uses quiet style and no caret without dimming dra
     try std.testing.expect(!inactive.readCell(3, 1).style.dim);
 }
 
-test "Composer stays untinted with a blinking block caret in both themes and widths" {
+fn composerTheme() !void {
     const draft = "first\nsecond\nthird";
     var bytes: [draft.len]u8 = undefined;
     var editor: Editor = .init(&bytes);
@@ -274,7 +274,7 @@ test "Composer stays untinted with a blinking block caret in both themes and wid
             const caps: view.Caps = .{ .background = background, .depth = depth };
             const input = widget_style.of(caps, .{});
             const ground = widget_style.of(caps, .{ .colour = .quiet });
-            for ([_]u16{ 140, 46 }) |width| for ([_][]const u8{ "Type a task", "" }) |placeholder| {
+            for ([_]u16{ 140, 46 }) |width| for ([_][]const u8{ "What shall we work on?", "" }) |placeholder| {
                 for ([_]bool{ false, true }) |has_draft| for ([_]bool{ false, true }) |caret| {
                     const text = if (has_draft) draft else "";
                     std.debug.assert(editor.set(text, text.len) == null);
@@ -381,4 +381,42 @@ test "Composer measures panels once between its rules without changing draft or 
         try std.testing.expectEqualStrings("kept\ndraft", editor.text());
         try std.testing.expectEqual(@as(usize, 4), editor.cursor());
     };
+}
+
+pub fn testMessageLayout() !void {
+    try caretViewport();
+    try caretWidthMethods();
+    try caretClipping();
+    try composerTheme();
+    try composerHiddenCounts();
+    try emptyDraftPlaceholder();
+    try emptyChatPrompt();
+}
+
+fn composerHiddenCounts() !void {
+    const draft = "one\ntwo\nthree\nfour\nfive\nsix";
+    var bytes: [draft.len]u8 = undefined;
+    var editor: Editor = .initText(&bytes, draft, draft.len);
+    var composer: Self = .{ .editor = &editor };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 5 }, .cell_size = .{} };
+    const cases = [_]struct { cursor: usize, label: []const u8 }{
+        .{ .cursor = draft.len, .label = "↑ 3 more lines" },
+        .{ .cursor = 0, .label = "↓ 3 more lines" },
+    };
+    for (cases) |case| {
+        editor.setCursor(case.cursor);
+        const surface = try composer.widget().draw(ctx);
+        var row: [512]u8 = undefined;
+        var used: usize = 0;
+        for (0..surface.size.width) |column| {
+            const glyph = surface.readCell(@intCast(column), 0).char.grapheme;
+            @memcpy(row[used..][0..glyph.len], glyph);
+            used += glyph.len;
+        }
+        try std.testing.expect(std.mem.indexOf(u8, row[0..used], case.label) != null);
+        try std.testing.expectEqual(case.cursor, editor.cursor());
+        try std.testing.expectEqualStrings(draft, editor.text());
+    }
 }

@@ -65,13 +65,29 @@ const traceOperationControl = server_host.traceOperationControl;
 const traceActionControl = server_host.traceActionControl;
 const traceActionControlOutcome = server_host.traceActionControlOutcome;
 const traceActionDeadline = server_host.traceActionDeadline;
-const testTransition = server_host.testTransition;
+const test_pause = @import("testing/pause.zig");
 const traceTransfer = server_host.traceTransfer;
 const pause = server_host.pause;
 const bashReclaimHeld = server_host.bashReclaimHeld;
 const retryRecoveryHeld = server_host.retryRecoveryHeld;
 const retryRecovered = server_host.retryRecovered;
 const observeUnprocessedCompletions = server_host.observeUnprocessedCompletions;
+
+fn reachAction(host: *Host, point: test_pause.Point, binding: store_module.ActionAttemptBinding) void {
+    if (comptime test_pause.enabled) if (host.pause_owner) |owner| {
+        _ = owner.reach(point, .{
+            .operation = binding.parent_operation_id,
+            .action = binding.action_id,
+            .attempt = @import("attempt.zig").action_attempt_ordinal,
+        }) catch {};
+    };
+}
+
+fn reachModel(host: *Host, point: test_pause.Point, binding: store_module.AttemptBinding) void {
+    if (comptime test_pause.enabled) if (host.pause_owner) |owner| {
+        _ = owner.reach(point, .{ .operation = binding.operation_id, .attempt = binding.attempt_ordinal }) catch {};
+    };
+}
 
 const AttemptOwner = struct {
     token: execution.CustodyToken = undefined,
@@ -656,6 +672,9 @@ pub fn executionMain(host: *Host) void {
     traceLifecycleService(host, measurement.maximum_gap_ns);
 }
 
+// executionMain runs every NativeTurn step through execution_turn.run. Steps
+// that never lead to a completion stay out of line, so their locals do not
+// widen the frame under serviceOneCompletion, the engine's deepest chain.
 const NativeTurn = struct {
     host: *Host,
     reactor: ?*provider.Reactor,
@@ -708,6 +727,15 @@ const NativeTurn = struct {
         return self.host.store.commitGeneration();
     }
 
+    pub fn publishRetryCrossings(self: *NativeTurn, from: u64, now_ms: u64) error{Fence}!execution_turn.DeadlineRead {
+        const read = self.host.store.publishRetryCrossings(from, now_ms) catch |err| {
+            fenceDispatch(self.host, "retry deadline read", err);
+            self.fenced = true;
+            return error.Fence;
+        };
+        return .{ .generation = read.generation, .next = read.next };
+    }
+
     pub fn controlGeneration(self: *const NativeTurn) u64 {
         return self.host.store.controlGeneration();
     }
@@ -716,7 +744,7 @@ const NativeTurn = struct {
         return self.host.slot_changes;
     }
 
-    pub fn reconcileControls(self: *NativeTurn) void {
+    pub noinline fn reconcileControls(self: *NativeTurn) void {
         self.workspace.model_admission.deinit();
         cancelSupersededTransfers(
             self.host,
@@ -726,11 +754,11 @@ const NativeTurn = struct {
         stopSupersededBash(self.host, self.slots, &self.workspace.bash_preparation);
     }
 
-    pub fn advanceBashPreparation(self: *NativeTurn) bool {
+    pub noinline fn advanceBashPreparation(self: *NativeTurn) bool {
         return callAdvanceBashPreparation(self.host, self.slots, self.workspace);
     }
 
-    pub fn advanceLiveBash(self: *NativeTurn) bool {
+    pub noinline fn advanceLiveBash(self: *NativeTurn) bool {
         const observed = std.Io.Clock.Timestamp.now(self.host.io, .awake);
         const generation = self.host.store.commitGeneration();
         var cursor: usize = 0;
@@ -758,7 +786,7 @@ const NativeTurn = struct {
         return advanceBash(self.host, self.slots, self.workspace) or mcp_progress or image_progress;
     }
 
-    pub fn advanceRetainedCleanup(self: *NativeTurn, observed: std.Io.Clock.Timestamp, retry_at: *std.Io.Clock.Timestamp) bool {
+    pub noinline fn advanceRetainedCleanup(self: *NativeTurn, observed: std.Io.Clock.Timestamp, retry_at: *std.Io.Clock.Timestamp) bool {
         return callAdvanceRetainedCleanup(self.host, self.slots, observed, retry_at);
     }
 
@@ -803,7 +831,7 @@ const NativeTurn = struct {
         return slotsHaveBash(self.slots) or self.mcp.any() or (if (self.images) |images| images.any() else false);
     }
 
-    pub fn recoverUncertainAction(self: *NativeTurn) error{Fence}!bool {
+    pub noinline fn recoverUncertainAction(self: *NativeTurn) error{Fence}!bool {
         const active_slots = ActiveSlots{ .slots = self.slots, .mcp = self.mcp, .images = self.images };
         const active_actions = store_module.ActiveOperationFilter{
             .context = &active_slots,
@@ -817,7 +845,7 @@ const NativeTurn = struct {
         };
     }
 
-    pub fn recoverExhaustedRetry(self: *NativeTurn) error{Fence}!bool {
+    pub noinline fn recoverExhaustedRetry(self: *NativeTurn) error{Fence}!bool {
         if (retryRecoveryHeld(self.host)) return false;
         const active_slots = ActiveSlots{ .slots = self.slots };
         const active_filter = store_module.ActiveOperationFilter{
@@ -884,13 +912,13 @@ const NativeTurn = struct {
         };
     }
 
-    pub fn scanWork(self: *NativeTurn, paused: bool, capacity: DispatchCapacity) error{Fence}!execution_turn.Work {
+    pub noinline fn scanWork(self: *NativeTurn, paused: bool, capacity: DispatchCapacity) error{Fence}!execution_turn.Work {
         const found = self.host.store.dispatchWork(paused, capacity) catch |err| {
             fenceDispatch(self.host, "dispatch work read", err);
             self.fenced = true;
             return error.Fence;
         };
-        return .{ .core = found.core, .mcp = found.mcp, .bash = found.bash, .message = found.message, .tool_continuation = found.tool_continuation, .retry = found.retry };
+        return .{ .core = found.core, .mcp = found.mcp, .bash = found.bash, .message = found.message, .tool_continuation = found.tool_continuation, .retry = found.retry, .retry_waiting = found.retry_waiting };
     }
 
     pub fn scheduledRetry(self: *const NativeTurn) execution_turn.ScheduledRetry {
@@ -922,7 +950,7 @@ const NativeTurn = struct {
         };
     }
 
-    pub fn advanceModelAdmission(self: *NativeTurn) bool {
+    pub noinline fn advanceModelAdmission(self: *NativeTurn) bool {
         const preparation = &self.workspace.model_admission;
         if (!preparation.pending()) return false;
         if (!self.host.launchAllowed() or
@@ -1003,7 +1031,7 @@ const NativeTurn = struct {
         };
     }
 
-    pub fn advanceModelPreparation(self: *NativeTurn, byte_allowance: usize, item_allowance: usize) bool {
+    pub noinline fn advanceModelPreparation(self: *NativeTurn, byte_allowance: usize, item_allowance: usize) bool {
         const pending_progress = advancePendingFailure(self.host, self.slots, self.workspace);
         return callAdvanceModelPreparation(
             self.host,
@@ -1352,7 +1380,7 @@ fn advanceBash(host: *Host, slots: []ExecutionSlot, workspace: *Workspace) bool 
             }
             if (service.leader_observed_with_open_pipes) {
                 traceAction(host, "bash_leader_observed_with_open_pipes", active.binding);
-                pause(host, .bash_exit_observed);
+                if (comptime test_pause.enabled) reachAction(host, .action_bash_exit_observed, active.binding);
             }
             if (service.fault) |err| {
                 made_progress = failBash(host, slot, "Bash process service", err) or made_progress;
@@ -1658,7 +1686,8 @@ fn admitBashAttempt(
         fenceDispatch(host, "Bash custody attachment", err);
         return .admitted;
     };
-    testTransition(host, .action_attempt_admitted, action_binding);
+    // This blocking pause holds the shared execution loop until release.
+    if (comptime test_pause.enabled) reachAction(host, .action_attempt_committed, action_binding);
     const input = &workspace.bash_input;
     host.store.readActionExecutionInput(.bash, action_binding, input) catch |err| {
         settleActionFailure(host, token, action_binding, .storage_failed, "Bash input could not be read.");
@@ -1755,7 +1784,8 @@ fn discardBashResources(
 fn launchPreparedBash(host: *Host, slot: *ExecutionSlot, prepared: *bash.Prepared) void {
     const token = slot.bash_preparing.token;
     const action_binding = slot.bash_preparing.binding;
-    testTransition(host, .prepared_before_handoff, action_binding);
+    // This blocking pause holds the shared execution loop until release.
+    if (comptime test_pause.enabled) reachAction(host, .action_before_handoff, action_binding);
     pause(host, .{ .action_launch = action_binding });
     if (!host.launchAllowed()) {
         discardBashResources(host, slot, prepared.takeCleanup());
@@ -1862,7 +1892,7 @@ fn stopSupersededBash(
     };
 }
 
-fn completeBash(host: *Host, slot: *ExecutionSlot) void {
+noinline fn completeBash(host: *Host, slot: *ExecutionSlot) void {
     const active = &slot.bash;
     const binding = active.binding;
     const profile = tool_record.Runner.bash.resultProfile(true);
@@ -1871,26 +1901,40 @@ fn completeBash(host: *Host, slot: *ExecutionSlot) void {
         return;
     };
     defer result.destroy();
-    const code = active.execution.writeResult(bashScratch(host), host.retention, result) catch |err| {
-        _ = failBash(host, slot, "Bash outcome materialization", err);
-        return;
-    };
-    const value = switch (result.finish()) {
-        .value => |value| value,
-        .failed => |failure| {
-            _ = tool_settle.fence(host, "Bash result finalization", failure.failure);
-            closeBashDelivery(host, slot);
-            return;
-        },
-    };
+    const materialized = materializeBashResult(host, slot, result) orelse return;
+    const code = materialized.code;
+    const value = materialized.value;
     pause(host, .{ .action_result = binding });
-    testTransition(host, .action_result_ready, binding);
+    // This blocking pause holds the shared execution loop until release.
+    if (comptime test_pause.enabled) reachAction(host, .action_result_ready, binding);
     const delivered = tool_settle.result(host, .{ .token = active.token, .binding = binding, .publication_phase = "Bash result settlement" }, profile, code, value, result);
     switch (delivered) {
-        .delivered, .session_stop => testTransition(host, .action_result_committed, binding),
+        // This blocking pause holds the shared execution loop until release.
+        .delivered, .session_stop => if (comptime test_pause.enabled) reachAction(host, .action_result_committed, binding),
         .lost, .fenced => {},
     }
     closeBashDelivery(host, slot);
+}
+
+const MaterializedBashResult = struct {
+    code: store_module.ActionResolutionCode,
+    value: @import("tool_result.zig").Value,
+};
+
+/// Keeps output materialization's frame off the stack while the result settles.
+noinline fn materializeBashResult(host: *Host, slot: *ExecutionSlot, result: *@import("tool_result.zig").Result) ?MaterializedBashResult {
+    const code = slot.bash.execution.writeResult(bashScratch(host), host.retention, result) catch |err| {
+        _ = failBash(host, slot, "Bash outcome materialization", err);
+        return null;
+    };
+    return switch (result.finish()) {
+        .value => |value| .{ .code = code, .value = value },
+        .failed => |failure| {
+            _ = tool_settle.fence(host, "Bash result finalization", failure.failure);
+            closeBashDelivery(host, slot);
+            return null;
+        },
+    };
 }
 
 fn failBash(host: *Host, slot: *ExecutionSlot, phase: []const u8, err: anyerror) bool {
@@ -2086,7 +2130,8 @@ fn advanceModelPreparation(
         .read => unreachable,
         .pending => {
             tracePreparationAdvance(host, "preparation_advance_completed", stats, owner.binding);
-            pause(host, .preparation_advanced);
+            // This blocking pause holds the shared execution loop until release.
+            if (comptime test_pause.enabled) reachModel(host, .model_preparation_advanced, owner.binding);
         },
         .failed => |err| {
             tracePreparationAdvanceError(host, "preparation_advance_failed", err, stats, owner.binding);
@@ -2314,6 +2359,8 @@ fn launchPreparedRequest(
         return;
     };
     host.hook_progress.response_write_once_spent = host.hooks.fails(.response_write_once);
+    // This blocking pause holds the shared execution loop until release.
+    if (comptime test_pause.enabled) reachModel(host, .model_before_handoff, binding);
     pause(host, .{ .model_launch = binding });
     host.custody.consumeLaunchAuthority(token, .{ .model = binding }, std.Io.Clock.Timestamp.now(host.io, .awake)) catch |err| {
         active.transfer.deinit();
@@ -2529,10 +2576,7 @@ noinline fn completeSuccessfulTransfer(host: *Host, workspace: *Workspace, activ
     defer if (response_owned) response.deinit();
     const rejected: failed_responses.Source = .{ .file = response.file, .length = response.length, .transfer = .complete };
     if (model_adapter.outputSchemaRejection(structured_output, response.length)) |rejection| {
-        var detail: [512]u8 = undefined;
-        const diagnostic = rejection.format(&detail);
-        retainFailedResponse(host, rejected, answered.retention(rejection.code, diagnostic, http_status));
-        answered.reject(rejection.code, diagnostic, "", .ordinary);
+        rejectOutputSchema(host, rejected, &answered, rejection, http_status);
         return .cleanup;
     }
 
@@ -2593,6 +2637,7 @@ noinline fn completeSuccessfulTransfer(host: *Host, workspace: *Workspace, activ
     };
     const validated = &accepted.output;
     traceOperation(host, "validation_completed", owner.binding);
+    if (comptime test_pause.enabled) reachModel(host, .model_result_ready, owner.binding);
     pause(host, .{ .model_result = owner.binding });
     if (!host.custody.claimTerminalDelivery(owner.token)) return .cleanup;
     var settlement_trace = SettlementTrace.init(host, owner.binding);
@@ -2613,15 +2658,7 @@ noinline fn completeSuccessfulTransfer(host: *Host, workspace: *Workspace, activ
         if (err == error.SupersededByControl) {
             traceOperation(host, "model_settlement_superseded", owner.binding);
         } else if (err == error.InvalidProviderEnvelope) {
-            const rejection: output_decode.Rejection = .{ .stage = .response, .byte_offset = response.length };
-            var detail: [512]u8 = undefined;
-            const diagnostic = rejection.format(err, &detail);
-            retainFailedResponse(host, rejected, answered.retention("contradictory_provider_output", diagnostic, http_status));
-            saveImmediateFailure(host, owner.binding, answered.rejection(
-                "contradictory_provider_output",
-                diagnostic,
-                "",
-            ), .ordinary);
+            rejectContradictoryOutput(host, rejected, &answered, err, http_status);
         } else {
             fenceDispatch(host, "model output import", err);
         }
@@ -2629,6 +2666,36 @@ noinline fn completeSuccessfulTransfer(host: *Host, workspace: *Workspace, activ
     };
     traceOperation(host, "model_settlement_committed", owner.binding);
     return .cleanup;
+}
+
+// Diagnostic buffers and the failure's Store settlement live in these frames,
+// not in completeSuccessfulTransfer's, which already holds the response
+// decode state on the engine's deepest stack chain.
+noinline fn rejectOutputSchema(
+    host: *Host,
+    rejected: failed_responses.Source,
+    answered: *const AnsweredAttempt,
+    rejection: output_decode.Rejected,
+    http_status: u16,
+) void {
+    var detail: [512]u8 = undefined;
+    const diagnostic = rejection.format(&detail);
+    retainFailedResponse(host, rejected, answered.retention(rejection.code, diagnostic, http_status));
+    answered.reject(rejection.code, diagnostic, "", .ordinary);
+}
+
+noinline fn rejectContradictoryOutput(
+    host: *Host,
+    rejected: failed_responses.Source,
+    answered: *const AnsweredAttempt,
+    err: anyerror,
+    http_status: u16,
+) void {
+    const rejection: output_decode.Rejection = .{ .stage = .response, .byte_offset = rejected.length };
+    var detail: [512]u8 = undefined;
+    const diagnostic = rejection.format(err, &detail);
+    retainFailedResponse(host, rejected, answered.retention("contradictory_provider_output", diagnostic, http_status));
+    saveImmediateFailure(host, answered.owner.binding, answered.rejection("contradictory_provider_output", diagnostic, ""), .ordinary);
 }
 
 fn advanceRetainedCleanup(
@@ -2681,7 +2748,9 @@ fn shutdownExecution(host: *Host, slots: []ExecutionSlot, workspace: *Workspace)
             finishCustodyNow(host, slot);
         },
     };
-    pause(host, .shutdown_signalled);
+    if (comptime test_pause.enabled) if (host.pause_owner) |owner| {
+        _ = owner.reach(.host_shutdown_signalled, .{}) catch {};
+    };
     var retained_cleanup_at = std.Io.Clock.Timestamp.now(host.io, .awake);
     while (hasOwnedSlots(slots)) {
         var made_progress = advanceBash(host, slots, workspace);
@@ -3657,32 +3726,12 @@ test "cleanup publication follows complete execution retirement" {
 }
 
 test "Bash releases both spills after lost custody or fenced settlement" {
-    // The result-ready transition runs after both capture files are adopted and
-    // before custody is claimed. Observe it without holding up the Host.
-    const Boundary = struct {
-        queue: *output_retention.Queue,
-        used: *std.atomic.Value(u64),
-        directory: std.Io.Dir,
-        stdout_name: protocol.Bounded(96),
-        stderr_name: protocol.Bounded(96),
-        saw_spills: bool = false,
-
-        fn now(context: ?*anyopaque, clock: std.Io.Clock) std.Io.Timestamp {
-            const self: *@This() = @ptrCast(@alignCast(context.?));
-            if (self.queue.occupied() == 2 and self.used.load(.acquire) == 48_000) {
-                const stdout = self.directory.statFile(std.testing.io, self.stdout_name.slice(), .{}) catch null;
-                const stderr_file = self.directory.statFile(std.testing.io, self.stderr_name.slice(), .{}) catch null;
-                var stdout_reserved = false;
-                var stderr_reserved = false;
-                for (self.queue.entries) |entry| {
-                    if (entry.state != .reserved) continue;
-                    stdout_reserved = stdout_reserved or std.mem.eql(u8, entry.name.slice(), self.stdout_name.slice());
-                    stderr_reserved = stderr_reserved or std.mem.eql(u8, entry.name.slice(), self.stderr_name.slice());
-                }
-                if (stdout_reserved and stderr_reserved and stdout != null and stderr_file != null and stdout.?.size == 24_000 and stderr_file.?.size == 24_000)
-                    self.saw_spills = true;
-            }
-            return clock.now(std.testing.io);
+    // EXR-54
+    const Completion = struct {
+        host: *Host,
+        slot: *ExecutionSlot,
+        fn run(self: *@This()) void {
+            completeBash(self.host, self.slot);
         }
     };
     for ([_]enum { lost, fenced }{ .lost, .fenced }) |outcome| {
@@ -3788,16 +3837,33 @@ test "Bash releases both spills after lost custody or fenced settlement" {
             try std.testing.expectEqual(tool_settle.Delivered.delivered, tool_settle.fixed(&host, .{ .token = token, .binding = binding, .publication_phase = "prior result" }, .succeeded, "prior result"));
         } else host.hooks.failures.insert(.result_before_commit);
 
-        var boundary: Boundary = .{ .queue = &retention, .used = &host.scratch_used, .directory = tmp.dir, .stdout_name = stdout_name, .stderr_name = stderr_name };
-        var vtable = std.testing.io.vtable.*;
-        vtable.now = Boundary.now;
-        host.io = .{ .userdata = &boundary, .vtable = &vtable };
-        host.hooks.phase_trace = true;
-        var gate_path: [platform.max_scratch_path_bytes]u8 = undefined;
-        host.hooks.transition = .{ .transition = .action_result_ready, .path = try std.fmt.bufPrint(&gate_path, "{s}/absent-result-gate", .{root}) };
-        completeBash(&host, &slot);
-        host.io = std.testing.io;
-        try std.testing.expect(boundary.saw_spills);
+        var owner = test_pause.PauseController.init(std.testing.io, std.heap.c_allocator);
+        defer owner.deinit();
+        try owner.arm(.{ .point = .action_result_ready });
+        host.pause_owner = &owner;
+        var completion: Completion = .{ .host = &host, .slot = &slot };
+        const thread = try std.Thread.spawn(.{}, Completion.run, .{&completion});
+        var joined = false;
+        defer {
+            owner.close();
+            if (!joined) thread.join();
+        }
+        const arrival = try owner.wait(.{ .point = .action_result_ready });
+        try std.testing.expectEqual(@as(usize, 2), retention.occupied());
+        try std.testing.expectEqual(@as(u64, 48_000), host.scratch_used.load(.acquire));
+        for ([_]protocol.Bounded(96){ stdout_name, stderr_name }) |name| {
+            const stat = try tmp.dir.statFile(std.testing.io, name.slice(), .{});
+            try std.testing.expectEqual(@as(u64, 24_000), stat.size);
+            var reserved = false;
+            for (retention.entries) |entry| {
+                if (entry.state == .reserved and std.mem.eql(u8, entry.name.slice(), name.slice())) reserved = true;
+            }
+            try std.testing.expect(reserved);
+        }
+        try owner.release(arrival.id, .proceed);
+        thread.join();
+        joined = true;
+        host.pause_owner = null;
         try std.testing.expect(slot == .bash and slot.bash.delivery == .closed);
         try host.custody.checkDetached(token, .{ .action = binding });
         try std.testing.expectEqual(outcome == .lost, host.launchAllowed());

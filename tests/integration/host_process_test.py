@@ -648,7 +648,6 @@ def prove_required_receipts():
     diagnostics = HostDiagnostics(process)
     diagnostics.thread.join(timeout=1)
     for phase in ("effect_stop_requested",
-                  "action_attempt_admitted", "action_result_ready", "action_result_committed",
                   "preparation_completed", "prepared_before_handoff", "codex_transfer",
                   "cleanup_started", "cleanup_completed", "cleanup_release_observed",
                   "inspection_captured",
@@ -1086,7 +1085,7 @@ def prove_intentional_crash_retirement():
             if case == "sealed":
                 struct.pack_into("<Q", state, 32, host_process.OBSERVATION_SEALED)
             observations = _Observations(process, reader, "recovery", state)
-            observations._accept(observation_frame(1, phase="action_result_ready", action="1"))
+            observations._accept(observation_frame(1, phase="prepared_before_handoff", action="1"))
             process.rui_observations = observations
 
             def sleep(_):

@@ -322,7 +322,7 @@ def interactive_cases(state, binding=False, null_code=False):
                         os.write(master, b"\x04")
                 else:
                     if route == "/v1/control/permission-decision":
-                        title = "? Check successful shell exit"
+                        title = "● Check successful shell exit"
                         proposal = human.keyed_frame(master, b"",
                             lambda frame, x, y: human.CHOICE in frame and title in frame)
                         rows = [row.strip() for row in proposal.splitlines()]
@@ -461,7 +461,7 @@ def interactive_cases(state, binding=False, null_code=False):
                 assert "admitted:" not in output and "Configured." not in output, output
                 assert "You: " not in output, output
                 if not binding:
-                    assert "Detached." not in output, output
+                    assert "Detached." not in output and "Your chats keep working while you are away." not in output, output
                 actual = termios.tcgetattr(slave)
                 assert os_semantics.user_termios(actual) == os_semantics.user_termios(original_terminal), "fatal invocation did not restore the terminal"
                 request, reply = proxy.exchanges[0]

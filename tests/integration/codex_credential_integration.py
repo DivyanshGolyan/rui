@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Native cross-process mutation of Rui's credential owner, without live tokens."""
 
-import fcntl
 import os
 import pathlib
 import select
@@ -13,6 +12,7 @@ import time
 
 import codex_fixture as codex
 import host_process
+import os_semantics
 
 
 def run(actor):
@@ -59,7 +59,7 @@ def run(actor):
         read_fd, write_fd = os.pipe()
         try:
             with open(private / ".codex.json.lock", "r+b") as lock:
-                fcntl.flock(lock, fcntl.LOCK_EX)
+                os_semantics.take_lock(lock)
                 for _ in range(2):
                     children.append(subprocess.Popen(
                         [actor, "claim", path], stderr=subprocess.PIPE, text=True,

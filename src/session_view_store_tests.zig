@@ -84,8 +84,8 @@ test "MCP ask approval uses the frozen server after its Session offer changes" {
         }
     };
     var sink: Sink = .{};
-    try View.renderPermissionArguments(std.testing.io, scratch, &sink, false, &tool);
-    try std.testing.expectEqualStrings("\n? fetch_page\n  Tool: fetch_page\n  Server: docs\n  Arguments:\n  │ {}\n", sink.bytes[0..sink.len]);
+    try View.renderPermissionArguments(std.testing.io, scratch, &sink, false, true, &tool);
+    try std.testing.expectEqualStrings("\n● fetch_page\n  Tool: fetch_page\n  Server: docs\n  Arguments:\n  │ {}\n", sink.bytes[0..sink.len]);
     try std.testing.expect((try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })) == null);
     try std.testing.expect(!(try storage.dispatchWork(false, .{ .free_credit = .one, .mcp_open = true })).mcp);
     var allow: protocol.PermissionDecisionCommand = .{ .action_id = action, .decision = .allow_once };
@@ -232,7 +232,7 @@ test "Current facts traverse every attention row and preserve metadata with fixe
     std.debug.print("Current facts={d}B, fixed scanner/token/input=16384B, capture={d}B; 4x257 rows, no population allocation\n", .{ @sizeOf(protocol_reply.Current), bytes });
 }
 
-test "SUI-29 Action-sourced inputs draw nothing in the conversation" {
+test "SUI-59 Action-sourced inputs draw nothing in the conversation" {
     const View = @import("session_view.zig");
     const Sink = struct {
         pub fn feed(_: *@This(), _: []const u8) !void {

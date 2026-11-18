@@ -378,6 +378,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/public-parts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** The complete certified, ordered part list of a Message or Action Resolution parts value, addressed by its owner in the Session. */
+        post: operations["publicParts"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/public-part-content": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** The exact bytes of one part of an owner's parts value, framed as conversation content. */
+        post: operations["publicPartContent"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/activity-search": {
         parameters: {
             query?: never;
@@ -1041,6 +1075,18 @@ export interface components {
             require_model?: true;
             preset?: string;
         };
+        ContentValue: {
+            /** @constant */
+            type: "text";
+            bytes: components["schemas"]["Decimal"];
+            sha256: string;
+        } | {
+            /** @constant */
+            type: "parts";
+            bytes: components["schemas"]["Decimal"];
+            sha256: string;
+            owner: components["schemas"]["PartOwner"];
+        };
         ConversationContentRequest: {
             /** @constant */
             version: "21";
@@ -1237,7 +1283,7 @@ export interface components {
             /** @constant */
             version: "21";
             /** @enum {string} */
-            type: "invocation_error" | "observation_error" | "busy" | "unsupported" | "host_unavailable" | "result_unavailable" | "action_unavailable" | "conversation_unavailable" | "activity_unavailable" | "failed_response_unavailable";
+            type: "invocation_error" | "observation_error" | "busy" | "unsupported" | "host_unavailable" | "result_unavailable" | "action_unavailable" | "conversation_unavailable" | "activity_unavailable" | "failed_response_unavailable" | "parts_unavailable";
             code: string;
         };
         FirstMessage: {
@@ -3090,6 +3136,11 @@ export interface components {
             revision: components["schemas"]["Decimal"];
             workspace: string;
         };
+        PartOwner: {
+            message: components["schemas"]["Decimal"];
+        } | {
+            action: components["schemas"]["Decimal"];
+        };
         Peer: {
             session: string;
         };
@@ -3156,6 +3207,54 @@ export interface components {
             action: components["schemas"]["Decimal"];
             /** @enum {string} */
             decision: "allow_once" | "deny";
+        };
+        PublicPart: {
+            ordinal: components["schemas"]["Decimal"];
+            /** @constant */
+            type: "text";
+            bytes: components["schemas"]["Decimal"];
+            sha256: string;
+        } | {
+            ordinal: components["schemas"]["Decimal"];
+            /** @constant */
+            type: "image";
+            mime: string;
+            width: components["schemas"]["Decimal"];
+            height: components["schemas"]["Decimal"];
+            name: string | null;
+            bytes: components["schemas"]["Decimal"];
+            sha256: string;
+        };
+        PublicPartContentRequest: {
+            /** @constant */
+            version: "21";
+            /** @constant */
+            kind: "public_part_content";
+            store: string;
+            session: string;
+            owner: components["schemas"]["PartOwner"];
+            part: components["schemas"]["Decimal"];
+            start: components["schemas"]["Decimal"];
+            /** @constant */
+            stream?: true;
+        };
+        PublicPartsReply: {
+            /** @constant */
+            version: "21";
+            /** @constant */
+            type: "public_parts";
+            session: string;
+            value: components["schemas"]["ContentValue"];
+            parts: components["schemas"]["PublicPart"][];
+        };
+        PublicPartsRequest: {
+            /** @constant */
+            version: "21";
+            /** @constant */
+            kind: "public_parts";
+            store: string;
+            session: string;
+            owner: components["schemas"]["PartOwner"];
         };
         Queued: {
             count: components["schemas"]["Decimal"];
@@ -3508,6 +3607,12 @@ export interface components {
             /** @enum {string} */
             kind: "idle" | "pending" | "working" | "retrying" | "bash" | "approval" | "stopping" | "finished" | "failed" | "stopped";
             since: components["schemas"]["Decimal"];
+        } | {
+            /** @constant */
+            kind: "working";
+            since: components["schemas"]["Decimal"];
+            /** @constant */
+            compaction: true;
         } | {
             /** @constant */
             kind: "retrying";
@@ -4748,6 +4853,82 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["ConversationContentRequest"];
+            };
+        };
+        responses: {
+            /** @description The content bytes, from the requested offset. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/octet-stream": string;
+                };
+            };
+            /** @description A refusal or failure. */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorReply"];
+                };
+            };
+        };
+    };
+    publicParts: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description The wire version this document describes. Any other version is refused. */
+                "X-Rui-Wire-Version": components["parameters"]["WireVersion"];
+                /** @description The Host instance (from host-info) the request is meant for; a different instance refuses it. */
+                "X-Rui-Host-Instance"?: components["parameters"]["HostInstance"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PublicPartsRequest"];
+            };
+        };
+        responses: {
+            /** @description The reply. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PublicPartsReply"];
+                };
+            };
+            /** @description A refusal or failure. */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorReply"];
+                };
+            };
+        };
+    };
+    publicPartContent: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description The wire version this document describes. Any other version is refused. */
+                "X-Rui-Wire-Version": components["parameters"]["WireVersion"];
+                /** @description The Host instance (from host-info) the request is meant for; a different instance refuses it. */
+                "X-Rui-Host-Instance"?: components["parameters"]["HostInstance"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PublicPartContentRequest"];
             };
         };
         responses: {

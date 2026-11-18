@@ -1,6 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const os = @import("os/os.zig");
+const os = @import("os");
 const client = @import("client.zig");
 const process = @import("upgrade_process.zig");
 
