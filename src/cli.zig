@@ -2690,7 +2690,7 @@ fn takeStatus(taken: *status_page.Session, current: *const protocol_reply.Curren
     };
     taken.tools = settings.tools.names;
     taken.loaded_tools = settings.loaded_tools.names;
-    taken.instructions = settings.instructions.bytes.value != 0;
+    taken.instructions = settings.instructions.value.identity().length != 0;
     taken.compaction_trigger = if (settings.compaction_trigger) |tokens| tokens.value else null;
     taken.compaction_override = settings.compaction_trigger_override != null;
     taken.context_estimate = if (settings.context_estimate.value orelse null) |estimate| estimate.value else null;

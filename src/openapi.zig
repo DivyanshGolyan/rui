@@ -9,6 +9,7 @@ const model_list = @import("model_list.zig");
 const store = @import("store.zig");
 const session_report_reply = @import("session_report_reply.zig");
 const activity_reply = @import("activity_reply.zig");
+const protocol_reply = @import("protocol_reply.zig");
 const host_settings = @import("host_settings.zig");
 const start_report = @import("start_report.zig");
 const core_tools = @import("core_tools.zig");
@@ -1693,13 +1694,19 @@ fn publishedReplyExamples() !void {
         try Case.check(schemas, "ReadActionReply", out.written(), a);
         out.clearRetainingCapacity();
     }
-    action.status = .{ .resolved = .{
-        .resolution = .{ .position = 2, .code = .{}, .content = .{ .length = 0, .digest = protocol.contentDigest("") } },
-        .window = .{ .offset = 0, .next = 0, .more = false, .text = .{} },
-    } };
-    try action.status.resolved.resolution.code.set("succeeded");
+    const empty: protocol.content_value.Reference = .{ .length = 0, .digest = protocol.contentDigest("") };
+    var resolution: action_read.Resolution = .{ .position = 2, .code = .{}, .content = .{ .text = empty } };
+    try resolution.code.set("succeeded");
+    action.status = .{ .resolved = .{ .resolution = resolution, .window = .{ .offset = 0, .next = 0, .more = false, .text = .{} } } };
     try host_reply.renderActionRead(.{ .writer = &out.writer }, action);
     try Case.check(schemas, "ReadActionReply", out.written(), a);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"content\":{\"type\":\"text\",\"bytes\":\"0\",") != null);
+    out.clearRetainingCapacity();
+    resolution.content = .{ .parts = .{ .identity = empty, .owner = .{ .action = 1 } } };
+    action.status = .{ .resolved_parts = resolution };
+    try host_reply.renderActionRead(.{ .writer = &out.writer }, action);
+    try Case.check(schemas, "ReadActionReply", out.written(), a);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"owner\":{\"action\":\"1\"}") != null);
     out.clearRetainingCapacity();
     var configured: reply.ConfigureReply = .{ .rejected = .{ .replayed = false, .code = .mcp_server_unavailable } };
     var host_tool_set = @import("tools.zig").built_in_tool_set;
@@ -1732,12 +1739,20 @@ fn publishedReplyExamples() !void {
     try Case.check(schemas, "ModelListReply", out.written(), a);
 
     out.clearRetainingCapacity();
-    var facts: protocol.ActivityFacts = .{ .end = 9, .count = 2 };
-    facts.items[0] = .{ .position = 1, .at = 7, .value = .{ .admission = .{ .admission = 1, .key = .{}, .turn = null, .state = .queued, .content = .{ .length = 3, .digest = @splat(1) }, .admitted_at = 7 } } };
+    var facts: protocol.ActivityFacts = .{ .end = 9, .count = 4 };
+    const three: protocol.content_value.Reference = .{ .length = 3, .digest = @splat(1) };
+    facts.items[0] = .{ .position = 1, .at = 7, .value = .{ .admission = .{ .admission = 1, .key = .{}, .turn = null, .state = .queued, .content = .{ .text = three }, .admitted_at = 7 } } };
     facts.items[1] = .{ .position = 2, .ordinal = 1, .at = 8, .value = .{ .turn_ended = .{ .session = .{ .bytes = "k7m2qx".*, .len = 6 }, .turn = 1, .operation = 1, .ending = @fromBackingInt(@intCast(0)), .code = .{}, .content = null } } };
+    facts.items[2] = .{ .position = 3, .at = 8, .value = .{ .user = .{ .admission = 2, .key = .{}, .turn = 2, .state = .applied, .content = .{ .parts = .{ .identity = three, .owner = .{ .message = 2 } } }, .admitted_at = 8 } } };
+    facts.items[3] = .{ .position = 4, .ordinal = 1, .at = 8, .value = .{ .tool_result = .{ .content = .{ .parts = .{ .identity = three, .owner = .{ .action = std.math.maxInt(i64) } } }, .presentation = .{ .description = .{}, .code = .succeeded, .publication_position = 4 } } } };
     facts.work.work.state = .{ .failed = .{ .since = 3, .code = .{}, .resets_at = 4 } };
     try activity_reply.writePage(&out.writer, &facts);
     try Case.check(schemas, "ActivityPageReply", out.written(), a);
+    for ([_][]const u8{ "{\"type\":\"text\",\"bytes\":\"3\",", "\"owner\":{\"message\":\"2\"}}", "\"owner\":{\"action\":\"9223372036854775807\"}}" }) |member| {
+        try std.testing.expect(std.mem.indexOf(u8, out.written(), member) != null);
+    }
+    const decoded = try protocol_reply.ActivityPage.parse(out.written(), .{});
+    for (facts.items[0..4], decoded.facts.items[0..4]) |want, got| try std.testing.expectEqualDeep(want.value, got.value);
 
     out.clearRetainingCapacity();
     const row: protocol.SessionRow = .{ .tools = try .of(&.{"bash"}), .label = .{} };
@@ -1960,7 +1975,7 @@ test "Activity schema requires a nullable failed-send target without weakening o
         .{ prefix ++ ",\"target\":\"\"}}}", false },
         .{ prefix ++ ",\"target\":{\"session\":\"absent\"}}}}", false },
         .{ prefix ++ ",\"target\":{\"session\":null,\"label\":null}}}}", false },
-        .{ "{\"position\":\"7\",\"ordinal\":\"0\",\"at\":\"1\",\"value\":{\"sent\":{\"admission\":\"1\",\"admitted_at\":\"1\",\"target\":null,\"content\":{\"bytes\":\"0\",\"sha256\":\"" ++ "abababababababababababababababababababababababababababababababab" ++ "\"}}}}", false },
+        .{ "{\"position\":\"7\",\"ordinal\":\"0\",\"at\":\"1\",\"value\":{\"sent\":{\"admission\":\"1\",\"admitted_at\":\"1\",\"target\":null,\"content\":{\"type\":\"text\",\"bytes\":\"0\",\"sha256\":\"" ++ "abababababababababababababababababababababababababababababababab" ++ "\"}}}}", false },
     };
     inline for (cases) |case| {
         const value = try std.json.parseFromSliceLeaky(Value, allocator, case[0], .{});
@@ -1976,7 +1991,7 @@ test "catalog full report schema represents turnless catalog source facts" {
     const json = try std.json.parseFromSliceLeaky(
         Value,
         arena.allocator(),
-        "{\"ordinal\":\"1\",\"position\":\"1\",\"kind\":\"settings\",\"turn\":null,\"source_admission\":null,\"source_revision\":null,\"source_catalog_position\":\"1\",\"source_skill_position\":null,\"source_operation\":null,\"content\":{\"bytes\":\"12\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"}}",
+        "{\"ordinal\":\"1\",\"position\":\"1\",\"kind\":\"settings\",\"turn\":null,\"source_admission\":null,\"source_revision\":null,\"source_catalog_position\":\"1\",\"source_skill_position\":null,\"source_operation\":null,\"content\":{\"type\":\"text\",\"bytes\":\"12\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"}}",
         .{},
     );
     try std.testing.expect(conforms(document.schemas, shape, json));

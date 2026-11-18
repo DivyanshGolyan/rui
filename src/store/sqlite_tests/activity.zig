@@ -124,7 +124,7 @@ test "public activity admission corruption fences page and content independently
             try std.testing.expectEqual(@as(usize, 1), queued.count);
             const item = queued.items[0];
             try std.testing.expectEqualStrings("message", item.value.admission.key.slice());
-            try std.testing.expectEqualSlices(u8, &protocol.contentDigest("input bytes"), &item.value.admission.content.digest);
+            try std.testing.expectEqualSlices(u8, &protocol.contentDigest("input bytes"), &item.value.admission.content.text.digest);
             _ = (try storage.admitNextModelAttempt(.{})).?;
             try sqlite.exec(storage.sqliteDatabase(), fault);
             try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.sqliteDatabase()));

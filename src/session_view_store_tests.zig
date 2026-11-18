@@ -159,8 +159,8 @@ test "Current facts traverse every attention row and preserve metadata with fixe
                     try std.testing.expectEqual(@as(u64, 31 + i), row.action.value);
                     try std.testing.expectEqual(@as(u64, 19), row.parent_operation.value);
                     try std.testing.expectEqual(@as(u64, i), row.call_ordinal.value);
-                    try std.testing.expectEqual(@as(u64, 13), row.arguments.bytes.value);
-                    try std.testing.expectEqualStrings(&@as([64]u8, @bitCast(@as([32][2]u8, @splat("ab".*)))), row.call_id.sha256.slice());
+                    try std.testing.expectEqual(@as(u64, 13), row.arguments.value.text.length);
+                    try std.testing.expectEqualStrings(&@as([64]u8, @bitCast(@as([32][2]u8, @splat("ab".*)))), &std.fmt.bytesToHex(row.call_id.value.text.digest, .lower));
                     try std.testing.expectEqualStrings(if (i == 0) &@as([200]u8, @splat('a')) else "Run parser tests", row.presentation.value.description.?.slice());
                     try std.testing.expectEqual(protocol.ToolPresentation.Code.pending_permission, row.presentation.value.code);
                 },
@@ -174,7 +174,7 @@ test "Current facts traverse every attention row and preserve metadata with fixe
                     try std.testing.expectEqual(@as(u64, 1000 + i), row.call_ordinal.value);
                     try std.testing.expectEqual(@as(u64, 5001 + i), row.acceptance_position.value);
                     try std.testing.expectEqualStrings("unknown_tool", row.code.slice());
-                    try std.testing.expectEqual(@as(u64, 13), row.name.bytes.value);
+                    try std.testing.expectEqual(@as(u64, 13), row.name.value.text.length);
                     try std.testing.expect(row.presentation.value.description == null);
                 },
                 .actionable => |row| {
