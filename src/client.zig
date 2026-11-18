@@ -3677,7 +3677,7 @@ test "client recovery rejects noncanonical Session references without retransmis
     }
 }
 
-test "capture creating Messages writes configuration and optional model admission" {
+fn checkCreatingMessageCapture() !void {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
@@ -3717,7 +3717,7 @@ test "capture creating Messages writes configuration and optional model admissio
     }
 }
 
-test "capture configure requests a Store allocated Session and retains model admission" {
+fn checkCreatingConfigureCapture() !void {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
@@ -6337,7 +6337,7 @@ test "read-only capture routing does not eagerly validate a replay body" {
     try std.testing.expectEqualStrings(key.slice(), observed.identity.key.slice());
 }
 
-test "capture semantic tool arrays distinguish singleton none from the CLI sentinel" {
+fn checkSemanticToolsCapture() !void {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
@@ -6379,7 +6379,7 @@ test "capture semantic tool arrays distinguish singleton none from the CLI senti
     }
 }
 
-test "parent relation survives Configure and creating Message capture through native ingress" {
+fn checkParentCapture() !void {
     const host_request = @import("wire_request.zig");
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
@@ -6438,7 +6438,7 @@ test "parent relation survives Configure and creating Message capture through na
     }
 }
 
-test "preset Configure capture reopens with sparse settings through native ingress" {
+fn checkPresetCapture() !void {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
@@ -6503,7 +6503,7 @@ test "Action stop captures preserve target and bytes through generated and expli
     }
 }
 
-test "creation capture preserves raw saved preferences independently of explicit settings" {
+fn checkPreferencesCapture() !void {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
@@ -6527,4 +6527,13 @@ test "creation capture preserves raw saved preferences independently of explicit
     const prefs = configuration.get("preferences").?.object;
     try std.testing.expectEqualStrings("high", prefs.get("reasoning_effort").?.string);
     try std.testing.expectEqualStrings("ask", prefs.get("permission_mode").?.string);
+}
+
+test "CLI-4 configuration_intent" {
+    try checkCreatingMessageCapture();
+    try checkCreatingConfigureCapture();
+    try checkSemanticToolsCapture();
+    try checkParentCapture();
+    try checkPresetCapture();
+    try checkPreferencesCapture();
 }

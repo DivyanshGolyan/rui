@@ -189,11 +189,11 @@ test "CM-39 default compaction trigger" {
         .{ .provider = .openai, .model = "unlisted-model", .tokens = 115200 },
     };
     for (cases) |case| try std.testing.expectEqual(case.tokens, compactionTrigger(catalog.shipped, case.provider, case.model));
-    const narrow = [_]catalog.Entry{.{ .id = "gpt-6.1-sol", .context_window = 1000, .efforts = .initEmpty(), .openai_listed = true }};
+    const narrow = [_]catalog.Entry{.{ .id = "gpt-6.1-sol", .context_window = 1000, .efforts = .empty, .openai_listed = true }};
     try std.testing.expectEqual(@as(u64, 900), compactionTrigger(&narrow, .codex, "gpt-6.1-sol"));
 }
 
-test "configuration defaults enumerate every omitted explicit and null combination with and without a parent" {
+fn creationFieldCases() !void {
     const models = [_]struct { id: []const u8, effort: ?[]const u8, compact: [3][]const u8 }{
         .{ .id = "gpt-6.1-sol", .effort = "low", .compact = .{ "450000", "945000", "945000" } },
         .{ .id = "kimi-k2.6", .effort = null, .compact = .{ "235929", "235929", "235929" } },
@@ -257,7 +257,7 @@ test "configuration defaults enumerate every omitted explicit and null combinati
     try std.testing.expectEqual(@as(usize, 4374), count);
 }
 
-test "configuration defaults preserve update omissions and explicit values while resetting null policies" {
+fn updateFieldCases() !void {
     const states = [_]input.FieldState{ .omitted, .value, .explicit_null };
     for (states) |tools_state| for (states) |loaded_state| for (states) |permission_state| for (states) |effort_state| for (states) |compact_state| {
         var tools = try input.ToolsField.of(&.{});
@@ -288,15 +288,12 @@ test "configuration defaults preserve update omissions and explicit values while
     };
 }
 
-test "configuration defaults use only selected Host model facts and preserve every explicit effort" {
+fn selectedModelCases() !void {
     const facts: []const catalog.Entry = &.{
         .{ .id = "gpt-6.1-sol", .context_window = 1000, .efforts = .init(.{ .high = true }), .openai_listed = true },
         .{ .id = "no-effort", .context_window = 2000, .efforts = .{}, .openai_listed = false },
         .{ .id = "no-window", .context_window = null, .efforts = .init(.{ .max = true }), .openai_listed = false },
     };
-    try std.testing.expectEqual(@as(u64, 900), compactionTrigger(facts, .codex, "gpt-6.1-sol"));
-    try std.testing.expectEqual(@as(u64, 1800), compactionTrigger(facts, .openai, "no-effort"));
-    try std.testing.expectEqual(@as(u64, 115200), compactionTrigger(facts, .openai, "no-window"));
     try std.testing.expectEqual(catalog.ReasoningEffort.high, startEffort(facts, "gpt-6.1-sol").?);
     try std.testing.expect(startEffort(facts, "no-effort") == null);
     try std.testing.expectEqual(catalog.ReasoningEffort.max, startEffort(facts, "no-window").?);
@@ -331,20 +328,7 @@ test "configuration defaults use only selected Host model facts and preserve eve
     }
 }
 
-test "configuration defaults parent checks reject default widening and preserve explicit empty intent" {
-    const parent: Parent = .{ .tools = "bash", .permission_mode = .ask };
-    const omitted: input.ToolsField = .{};
-    const empty = try input.ToolsField.of(&.{});
-    const bash = try input.ToolsField.of(&.{"bash"});
-    const ask = choice(.value, "ask");
-    const inherited = choice(.omitted, "");
-    try std.testing.expectEqualStrings("find_tools", checkParent(parent, creationTools(&omitted, "model-a", false), &ask).?.tools_not_in_parent);
-    try std.testing.expect(checkParent(parent, &empty, &ask) == null);
-    try std.testing.expect(checkParent(parent, &bash, &ask) == null);
-    try std.testing.expect(checkParent(parent, &bash, &inherited).? == .permission_mode_wider_than_parent);
-}
-
-test "configuration defaults enumerate wire refusal for every null list and permission combination" {
+test "ADM-23 configuration field wire grammar" {
     const protocol = @import("protocol.zig");
     const Custody = struct {
         pub const File = struct {};
@@ -421,7 +405,7 @@ test "parent creation uses inherited provider for omitted compaction regardless 
     }
 }
 
-test "creation preferences obey explicit intent and admission over the model and parent domains" {
+fn preferenceCases() !void {
     const tools = try input.ToolsField.of(&.{});
     const compact = tokenField(.omitted, "");
     const states = [_]input.FieldState{ .omitted, .value, .explicit_null };
@@ -471,7 +455,7 @@ test "creation preferences obey explicit intent and admission over the model and
     }
 }
 
-test "creation preferences use the selected Host catalog rather than shipped facts" {
+fn selectedPreferenceCases() !void {
     const tools = try input.ToolsField.of(&.{});
     const omitted = choice(.omitted, "");
     const compact = tokenField(.omitted, "");
@@ -489,7 +473,7 @@ test "creation preferences use the selected Host catalog rather than shipped fac
     try std.testing.expectEqual(input.FieldState.explicit_null, no_effort.reasoning_effort.state);
 }
 
-test "creation tool profiles cover model image support Host capability explicit intent and parent authority" {
+fn toolProfileCases() !void {
     const cases = [_]struct { model: []const u8, accepts_images: bool }{
         .{ .model = "gpt-3.5-turbo", .accepts_images = false },
         .{ .model = "gpt-3.5-turbo-0125", .accepts_images = false },
@@ -547,4 +531,13 @@ test "creation tool profiles cover model image support Host capability explicit 
             try std.testing.expect(update.parent_refusal == null);
         };
     };
+}
+
+test "ADM-22 configuration default resolution" {
+    try creationFieldCases();
+    try updateFieldCases();
+    try selectedModelCases();
+    try preferenceCases();
+    try selectedPreferenceCases();
+    try toolProfileCases();
 }

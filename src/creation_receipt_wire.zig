@@ -50,7 +50,7 @@ pub const Names = struct {
     }
 };
 
-test "receipt tool names round trip and reject invalid or oversized lists" {
+fn checkReceiptNamesRoundTrip() !void {
     const parsed = try std.json.parseFromSlice(Names, std.testing.allocator, "[\"bash\",\"find_tools\"]", .{});
     defer parsed.deinit();
     try std.testing.expectEqualStrings("bash,find_tools", parsed.value.value.slice());
@@ -59,9 +59,30 @@ test "receipt tool names round trip and reject invalid or oversized lists" {
     try (NamesJson{ .value = parsed.value.value.slice() }).writeJson(&writer);
     try std.testing.expectEqualStrings("[\"bash\",\"find_tools\"]", writer.buffered());
     try std.testing.expectError(error.InvalidCharacter, std.json.parseFromSlice(Names, std.testing.allocator, "[\"bad name\"]", .{}));
+    const empty = try std.json.parseFromSlice(Names, std.testing.allocator, "[]", .{});
+    defer empty.deinit();
+    try std.testing.expectEqualStrings("", empty.value.value.slice());
+    try std.testing.expectError(error.UnexpectedToken, std.json.parseFromSlice(Names, std.testing.allocator, "{}", .{}));
+    for ([_]bool{ false, true }) |over_limit| {
+        var json: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer json.deinit();
+        try json.writer.writeByte('[');
+        for (0..names.max_tools + @as(usize, @intFromBool(over_limit))) |index| {
+            if (index != 0) try json.writer.writeByte(',');
+            try json.writer.writeAll("\"bash\"");
+        }
+        try json.writer.writeByte(']');
+        if (over_limit) {
+            try std.testing.expectError(error.LengthMismatch, std.json.parseFromSlice(Names, std.testing.allocator, json.written(), .{}));
+        } else {
+            const parsed_limit = try std.json.parseFromSlice(Names, std.testing.allocator, json.written(), .{});
+            defer parsed_limit.deinit();
+            try std.testing.expectEqual(names.max_tools * "bash".len + names.max_tools - 1, parsed_limit.value.value.len);
+        }
+    }
 }
 
-test "receipt tool names enforce the total name byte limit" {
+fn checkReceiptNamesLimit() !void {
     for ([_]bool{ false, true }) |over_limit| {
         var json: std.Io.Writer.Allocating = .init(std.testing.allocator);
         defer json.deinit();
@@ -81,4 +102,9 @@ test "receipt tool names enforce the total name byte limit" {
             try std.testing.expectEqual(names.max_list_name_bytes + names.max_list_name_bytes / names.max_bytes - 1, parsed.value.value.len);
         }
     }
+}
+
+test "CLI-19 receipt tool list grammar" {
+    try checkReceiptNamesRoundTrip();
+    try checkReceiptNamesLimit();
 }

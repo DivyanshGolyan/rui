@@ -1916,7 +1916,30 @@ test "every item at its longest fits max_pieces and names only handles it has" {
     try std.testing.expectEqual(codec_abi.max_pieces, longest);
 }
 
-test "version two keeps the starting effort at the top and changes it at the Operation that changed it" {
+test "CM-40 provider effort encoding" {
+    for (std.enums.values(Version)) |version| {
+        for ([_]?codec_abi.Effort{null} ++ std.enums.values(codec_abi.Effort)) |effort| {
+            var encoder: Encoder = .{ .carry = initial(version, effort) };
+            const settings: codec_abi.Settings = .{ .effort = effort, .starting_effort = effort, .session_affinity = @splat(0), .model_length = 0 };
+            const header: ItemHeader = .{ .item = .{ .settings = settings }, .handles = 0b1 };
+            var encoded: Pieces = .{ .len = 0 };
+            try encoder.encodeItem(&header, &encoded);
+            var found: ?[]const u8 = null;
+            for (encoded.slice()) |piece| switch (piece) {
+                .literal => |bytes| if (std.mem.indexOf(u8, bytes, "\"reasoning\"") != null) {
+                    try std.testing.expect(found == null);
+                    found = bytes;
+                },
+                else => {},
+            };
+            if (effort) |value| {
+                var buffer: [64]u8 = undefined;
+                const expected = try std.fmt.bufPrint(&buffer, ",\"reasoning\":{{\"effort\":\"{s}\"}}", .{@tagName(value)});
+                try std.testing.expectEqualStrings(expected, found orelse return error.MissingReasoning);
+            } else try std.testing.expect(found == null);
+        }
+    }
+
     var pieces: Pieces = .{ .len = 0 };
     const settings: codec_abi.Settings = .{ .effort = .high, .starting_effort = .low, .session_affinity = @splat(0), .model_length = 0 };
     const header: ItemHeader = .{ .item = .{ .settings = settings }, .handles = 0b1 };

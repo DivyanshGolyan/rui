@@ -826,7 +826,7 @@ test "each Store entry point takes its round budget on its common path" {
     }.run);
 }
 
-test "creating configuration with a receipt keeps the configure round budget" {
+fn checkConfigurationReceiptBudget() !void {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             if (case.rerun) return;
@@ -851,7 +851,7 @@ test "creating configuration with a receipt keeps the configure round budget" {
     }.run);
 }
 
-test "creating Message with a receipt keeps the no-output creation rounds" {
+fn checkMessageReceiptBudget() !void {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             if (case.rerun) return;
@@ -888,4 +888,9 @@ test "creating Message with a receipt keeps the no-output creation rounds" {
             if (case.engine == .mysql) try std.testing.expectEqual(measured.shape.expected(), measured.shape.queries);
         }
     }.run);
+}
+
+test "ADM-35 fresh receipt round budget" {
+    try checkConfigurationReceiptBudget();
+    try checkMessageReceiptBudget();
 }

@@ -409,7 +409,7 @@ test "creating Message replay reads independently of Session history in SQLite s
     try std.testing.expectEqual(few, try Counter.steps(&storage, &message));
 }
 
-test "creating configuration receipt replay reads independently of Session history in SQLite steps" {
+test "ADM-36 bounded configuration receipt replay" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
@@ -451,7 +451,7 @@ test "creating configuration receipt replay reads independently of Session histo
     try std.testing.expectEqual(few, try Counter.steps(&storage, &create));
 }
 
-test "creation receipt rejects stored tool names with empty comma segments" {
+test "ADM-33 malformed receipt tool names" {
     const wire_request = @import("../../wire_request.zig");
     for ([_]bool{ false, true }) |as_message| {
         for ([_][]const u8{ ",bad", "bad,", "bad,,name", "bad,name" }) |invalid| for ([_]bool{ false, true }) |forged_count| {
@@ -499,7 +499,7 @@ test "creation receipt rejects stored tool names with empty comma segments" {
     }
 }
 
-test "creation receipt corruption work is bounded by ordinal range in SQLite steps" {
+test "ADM-34 bounded corrupt receipt work" {
     const wire_request = @import("../../wire_request.zig");
     const Run = struct {
         fn steps(as_message: bool, replay: bool, extra: usize) !u64 {

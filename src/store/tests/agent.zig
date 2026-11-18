@@ -753,7 +753,7 @@ test "ending migration preserves unsettled and settled Messages exactly once wit
     }.run);
 }
 
-test "configure parent inherits binding without a task, uses the create round budget and delivers child endings" {
+fn inheritedParentCases() !void {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
@@ -822,7 +822,7 @@ test "configure parent inherits binding without a task, uses the create round bu
     }.run);
 }
 
-test "configure parent refuses every widening field, missing or ended parents and parent on update" {
+fn refusedParentCases() !void {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
@@ -945,7 +945,7 @@ test "received and sent Activity reject disagreement with their accepted Message
     }.run);
 }
 
-test "parent authority refuses omitted defaults across Configure Message and start_agent and preserves refused replay" {
+fn parentDefaultCases() !void {
     try store_testing.forEachEngine(struct {
         const Surface = enum { configure, message, start_agent };
 
@@ -1076,4 +1076,46 @@ test "start_agent validates its model before parent tool authority" {
             try std.testing.expect(!storage.isFenced());
         }
     }.run);
+}
+
+fn inheritedCompactionCases() !void {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            var parent = try completeConfiguration("inherited-compaction-parent", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
+            parent.configuration.tools.state = .value;
+            parent.configuration.tools.count = 0;
+            parent.configuration.tools.names.len = 0;
+            for (tool_defs.built_in_tool_set.records) |record| try parent.configuration.tools.insert(record.name);
+            const parent_session = (try storage.configure(&parent, .{})).accepted.session;
+            for ([_][]const u8{ "openai", "codex" }) |saved_provider| {
+                var child: wire_request.ConfigureCommand = .{};
+                var key: [64]u8 = undefined;
+                try child.key.set(try std.fmt.bufPrint(&key, "inherited-compaction-saved-{s}", .{saved_provider}));
+                child.configuration.parent.state = .value;
+                try child.configuration.parent.value.set(parent_session.slice());
+                child.configuration.model.state = .value;
+                try child.configuration.model.value.set("gpt-6.1-sol");
+                const result = try storage.configure(&child, .{});
+                try std.testing.expect(result == .accepted);
+                const observed = try storage.inspectSessionForTesting(result.accepted.session.slice());
+                try std.testing.expectEqual(protocol.Provider.codex, observed.provider.?);
+                try std.testing.expectEqual(@as(?u64, 450000), observed.compaction_trigger);
+                try std.testing.expectEqualStrings("gpt-6.1-sol", observed.model.slice());
+                try std.testing.expect((try storage.configure(&child, .{})).accepted.replayed);
+            }
+        }
+    }.run);
+}
+
+test "ADM-6 child configuration" {
+    try inheritedParentCases();
+    try refusedParentCases();
+    try parentDefaultCases();
+    try inheritedCompactionCases();
 }

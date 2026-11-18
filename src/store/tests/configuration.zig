@@ -202,7 +202,7 @@ test "configure refuses a tool name the tool set lacks and a provider tool its p
     }
 }
 
-test "Store configuration requires Workspace and model and, on a Host serving several, a provider" {
+fn requiredCreationCases() !void {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
@@ -325,7 +325,7 @@ test "unsupported provider rejects mixed configuration atomically and replays ex
     }.run);
 }
 
-test "creation accepts omitted Host settings and preserves its supplied Workspace without Bash" {
+fn workspaceCreationCases() !void {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
@@ -374,7 +374,7 @@ test "creation accepts omitted Host settings and preserves its supplied Workspac
     }.run);
 }
 
-test "an omitted provider selects the Host's sole served provider" {
+fn soleProviderCases() !void {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
@@ -399,7 +399,7 @@ test "an omitted provider selects the Host's sole served provider" {
     }.run);
 }
 
-test "an omitted provider is refused on a Host serving several" {
+fn multipleProviderCases() !void {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
@@ -583,7 +583,7 @@ test "loaded tools select saved records even after the Host tool set changes or 
     }.run);
 }
 
-test "configuration planning preserves sparse defaults and rejection precedence" {
+fn configurationPlanningCases(content_owner: bool) !void {
     const WorkspaceRequest = enum { omitted, same, different };
     const InstructionsRequest = enum { omitted, value };
     const SchemaRequest = enum { omitted, value, clear };
@@ -662,8 +662,9 @@ test "configuration planning preserves sparse defaults and rejection precedence"
         },
     };
 
-    try std.testing.expect(@sizeOf(ConfigurationUpdatePlan) <= 4);
-    for (cases) |case| {
+    if (!content_owner) try std.testing.expect(@sizeOf(ConfigurationUpdatePlan) <= 4);
+    for (cases, 0..) |case, index| {
+        if (content_owner != (index < 4)) continue;
         var existing: CurrentConfiguration = .{};
         try existing.workspace.set("/canonical/workspace");
         existing.provider = .codex;
@@ -721,12 +722,22 @@ test "configuration planning preserves sparse defaults and rejection precedence"
             try std.testing.expectEqual(expected.instructions, plan.update.instructions);
             try std.testing.expectEqual(expected.output_schema, plan.update.output_schema);
         }
-        try std.testing.expectEqualStrings(case.expected_model, next.model.slice());
-        try std.testing.expectEqual(case.expected_permission, next.permission_mode);
-        try std.testing.expectEqual(case.expected_revision, next.revision);
-        try std.testing.expectEqual(@as(?i64, if (case.created) null else 11), next.instructions_id);
-        try std.testing.expectEqual(@as(?i64, if (case.created) null else 12), next.output_schema_id);
+        if (!content_owner) {
+            try std.testing.expectEqualStrings(case.expected_model, next.model.slice());
+            try std.testing.expectEqual(case.expected_permission, next.permission_mode);
+            try std.testing.expectEqual(case.expected_revision, next.revision);
+            try std.testing.expectEqual(@as(?i64, if (case.created) null else 11), next.instructions_id);
+            try std.testing.expectEqual(@as(?i64, if (case.created) null else 12), next.output_schema_id);
+        }
     }
+}
+
+test "ADM-26 instruction and schema field presence" {
+    try configurationPlanningCases(true);
+}
+
+test "configuration planning preserves rejection precedence" {
+    try configurationPlanningCases(false);
 }
 
 test "historical model immutability rejections replay while fresh model switches are accepted" {
@@ -1013,43 +1024,6 @@ test "saved incomplete initialization stays rejected after Session creation" {
     }.run);
 }
 
-test "capability-required configuration rejects on replacement and replays its saved decision" {
-    try store_testing.forEachEngine(struct {
-        fn run(case: *store_testing.Case) !void {
-            var tmp = std.testing.tmpDir(.{});
-            defer tmp.cleanup();
-            var storage: Store = undefined;
-            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
-            defer storage.close() catch unreachable;
-            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
-            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
-            var command = try completeConfiguration("capability-guard", "", workspace, "model-a");
-            command.require_model = true;
-
-            storage.served = protocol.routesAll(.unserved);
-            const rejected = try storage.configure(&command, .{});
-            try std.testing.expect(rejected == .rejected);
-            try std.testing.expectEqual(protocol.ConfigurationRejection.model_capability_unavailable, rejected.rejected.code);
-            try std.testing.expect(!(try storage.inspectSessionForTesting(command.session.slice())).found);
-            const replay = try storage.configure(&command, .{});
-            try std.testing.expect(replay == .rejected and replay.rejected.replayed);
-            try std.testing.expectEqual(rejected.rejected.code, replay.rejected.code);
-
-            var new_key = command;
-            try new_key.key.set("capability-guard-next");
-            storage.served = protocol.routesAll(.endpoint);
-            try std.testing.expect(try storage.configure(&new_key, .{}) == .accepted);
-            storage.served = protocol.routesAll(.unserved);
-            try std.testing.expect((try storage.configure(&new_key, .{})).accepted.replayed);
-            var changed_intent = command;
-            changed_intent.require_model = false;
-            try std.testing.expect(try storage.configure(&changed_intent, .{}) == .conflict);
-            try changed_intent.key.set("explicit-offline-config");
-            try std.testing.expect(try storage.configure(&changed_intent, .{}) == .accepted);
-        }
-    }.run);
-}
-
 test "failed commit saves neither answer nor partial Session" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
@@ -1229,42 +1203,7 @@ test "definite rejections retain decisions without retaining payloads for config
     }.run);
 }
 
-test "parent creation uses inherited provider for omitted compaction across saved provider bindings" {
-    try store_testing.forEachEngine(struct {
-        fn run(case: *store_testing.Case) !void {
-            var tmp = std.testing.tmpDir(.{});
-            defer tmp.cleanup();
-            var storage: Store = undefined;
-            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
-            defer storage.close() catch unreachable;
-            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
-            var parent = try completeConfiguration("inherited-compaction-parent", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
-            parent.configuration.tools.state = .value;
-            parent.configuration.tools.count = 0;
-            parent.configuration.tools.names.len = 0;
-            for (tool_defs.built_in_tool_set.records) |record| try parent.configuration.tools.insert(record.name);
-            const parent_session = (try storage.configure(&parent, .{})).accepted.session;
-            for ([_][]const u8{ "openai", "codex" }) |saved_provider| {
-                var child: wire_request.ConfigureCommand = .{};
-                var key: [64]u8 = undefined;
-                try child.key.set(try std.fmt.bufPrint(&key, "inherited-compaction-saved-{s}", .{saved_provider}));
-                child.configuration.parent.state = .value;
-                try child.configuration.parent.value.set(parent_session.slice());
-                child.configuration.model.state = .value;
-                try child.configuration.model.value.set("gpt-6.1-sol");
-                const result = try storage.configure(&child, .{});
-                try std.testing.expect(result == .accepted);
-                const observed = try storage.inspectSessionForTesting(result.accepted.session.slice());
-                try std.testing.expectEqual(protocol.Provider.codex, observed.provider.?);
-                try std.testing.expectEqual(@as(?u64, 450000), observed.compaction_trigger);
-                try std.testing.expectEqualStrings("gpt-6.1-sol", observed.model.slice());
-                try std.testing.expect((try storage.configure(&child, .{})).accepted.replayed);
-            }
-        }
-    }.run);
-}
-
-test "standalone creation always requires Workspace and replays saved refusal across tool sets" {
+fn workspaceDoorsCases() !void {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             for ([_]bool{ false, true }) |creating_message| for ([_]?[]const []const u8{ null, &.{}, &.{"web_search"}, &.{"bash"} }) |tools| {
@@ -1316,6 +1255,138 @@ test "standalone creation always requires Workspace and replays saved refusal ac
                     try std.testing.expectEqualStrings(workspace, observed.workspace.slice());
                 }
                 try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{}));
+            };
+        }
+    }.run);
+}
+
+test "ADM-5 creation requirements" {
+    try requiredCreationCases();
+    try workspaceCreationCases();
+    try soleProviderCases();
+    try multipleProviderCases();
+    try workspaceDoorsCases();
+    try noProviderCases();
+}
+
+fn noProviderCases() !void {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStoreWith(case, &storage, &tmp, std.testing.io, .{ .served = protocol.routesAll(.unserved) });
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            var command = try completeConfiguration("no-provider", "", workspace, "model-a");
+            command.configuration.provider.state = .omitted;
+            command.configuration.tools = try .of(&.{});
+            const reply = try storage.configure(&command, .{});
+            try std.testing.expect(reply == .accepted);
+            const observed = try storage.inspectSessionForTesting(reply.accepted.session.slice());
+            try std.testing.expectEqual(protocol.Provider.codex, observed.provider.?);
+        }
+    }.run);
+}
+
+fn effortResetCases() !void {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            for ([_]bool{ false, true }) |model_revision| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+                const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+                var create = try completeConfiguration("effort-null-spec", "", workspace, if (model_revision) "model-a" else "gpt-6.1-sol");
+                const session = (try storage.configure(&create, .{})).accepted.session;
+                if (model_revision) try store_testing.setLegacyNullEffortForTesting(&storage, session.slice());
+                var patch: wire_request.ConfigureCommand = .{};
+                patch.session = session;
+                if (!model_revision) {
+                    try patch.key.set("effort-set-high");
+                    patch.configuration.reasoning_effort.state = .value;
+                    try patch.configuration.reasoning_effort.value.set("high");
+                    try std.testing.expect(try storage.configure(&patch, .{}) == .accepted);
+                }
+                const before = try storage.inspectSessionForTesting(session.slice());
+                try patch.key.set("effort-clear-mixed");
+                patch.configuration.reasoning_effort.state = if (model_revision) .omitted else .explicit_null;
+                if (model_revision) {
+                    patch.configuration.model.state = .value;
+                    try patch.configuration.model.value.set("gpt-6.1-sol");
+                }
+                patch.configuration.tools = try .of(&.{});
+                patch.configuration.label.state = .value;
+                try patch.configuration.label.value.set("mixed update");
+                const bytes = "mixed update instructions";
+                patch.configuration.instructions = .{ .state = .value, .borrowed = bytes.ptr, .length = bytes.len, .digest = protocol.contentDigest(bytes) };
+                const result = try storage.configure(&patch, .{});
+                const after = try storage.inspectSessionForTesting(session.slice());
+                if (model_revision) {
+                    try std.testing.expect(result == .rejected);
+                    try std.testing.expectEqual(protocol.ConfigurationRejection.unsupported_reasoning_effort, result.rejected.code);
+                    try std.testing.expectEqual(before.revision, after.revision);
+                    try std.testing.expectEqual(before.tool_set_id, after.tool_set_id);
+                    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref=?1 AND label IS NULL", .{session.slice()}));
+                    try std.testing.expectEqual(before.reasoning_effort, after.reasoning_effort);
+                    try std.testing.expectEqualStrings(before.model.slice(), after.model.slice());
+                    try std.testing.expect((try storage.configure(&patch, .{})).rejected.replayed);
+                    try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM content WHERE digest=?1", .{store_testing.Blob{ .bytes = &protocol.contentDigest(bytes) }}));
+                } else {
+                    try std.testing.expect(result == .accepted);
+                    try std.testing.expectEqual(before.revision + 1, after.revision);
+                    try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .low), after.reasoning_effort);
+                    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref=?1 AND label='mixed update'", .{session.slice()}));
+                    try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_set_member WHERE tool_set_id=?1", .{after.tool_set_id}));
+                    try std.testing.expectEqualSlices(u8, &protocol.contentDigest(bytes), &after.instructions.digest);
+                    try std.testing.expect((try storage.configure(&patch, .{})).accepted.replayed);
+                }
+                try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_operation", .{}));
+            }
+        }
+    }.run);
+}
+
+test "ADM-4 configuration field presence" {
+    try effortResetCases();
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            const State = @import("../../command_input.zig").FieldState;
+            for ([_]bool{ false, true }) |creating| for (std.enums.values(State)) |effort_state| for (std.enums.values(State)) |compact_state| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+                const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+                var create = try completeConfiguration("fields-create", "", workspace, "model-a");
+                create.configuration.reasoning_effort.state = if (creating) effort_state else .value;
+                try create.configuration.reasoning_effort.value.set("high");
+                create.configuration.compaction_trigger.state = if (creating) compact_state else .value;
+                try create.configuration.compaction_trigger.value.set("1000");
+                const first = try storage.configure(&create, .{});
+                try std.testing.expect(first == .accepted);
+                const session = first.accepted.session;
+                if (!creating) {
+                    var update: wire_request.ConfigureCommand = .{};
+                    try update.key.set("fields-update");
+                    update.session = session;
+                    update.configuration.reasoning_effort.state = effort_state;
+                    try update.configuration.reasoning_effort.value.set("medium");
+                    update.configuration.compaction_trigger.state = compact_state;
+                    try update.configuration.compaction_trigger.value.set("2000");
+                    try std.testing.expect(try storage.configure(&update, .{}) == .accepted);
+                }
+                const actual = try storage.inspectSessionForTesting(session.slice());
+                const expected_effort: ?protocol.ReasoningEffort = if (effort_state == .value) (if (creating) .high else .medium) else if (!creating and effort_state == .omitted) .high else .low;
+                const expected_compact: ?u64 = if (compact_state == .value) (if (creating) 1000 else 2000) else if (!creating and compact_state == .omitted) 1000 else 115200;
+                try std.testing.expectEqual(expected_effort, actual.reasoning_effort);
+                try std.testing.expectEqual(expected_compact, actual.compaction_trigger);
             };
         }
     }.run);

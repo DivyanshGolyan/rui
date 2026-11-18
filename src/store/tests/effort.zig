@@ -21,67 +21,6 @@ const completeMessage = store_testing.completeMessage;
 const settleItemsForTesting = store_testing.settleItemsForTesting;
 const submitTestMessage = store_testing.submitTestMessage;
 
-test "explicit null effort resets mixed updates while omitted legacy null remains invalid on a listed model" {
-    try store_testing.forEachEngine(struct {
-        fn run(case: *store_testing.Case) !void {
-            for ([_]bool{ false, true }) |model_revision| {
-                var tmp = std.testing.tmpDir(.{});
-                defer tmp.cleanup();
-                var storage: Store = undefined;
-                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
-                defer storage.close() catch unreachable;
-                var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
-                const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
-                var create = try completeConfiguration("effort-null-spec", "", workspace, if (model_revision) "model-a" else "gpt-6.1-sol");
-                const session = (try storage.configure(&create, .{})).accepted.session;
-                if (model_revision) try store_testing.setLegacyNullEffortForTesting(&storage, session.slice());
-                var patch: wire_request.ConfigureCommand = .{};
-                patch.session = session;
-                if (!model_revision) {
-                    try patch.key.set("effort-set-high");
-                    patch.configuration.reasoning_effort.state = .value;
-                    try patch.configuration.reasoning_effort.value.set("high");
-                    try std.testing.expect(try storage.configure(&patch, .{}) == .accepted);
-                }
-                const before = try storage.inspectSessionForTesting(session.slice());
-                try patch.key.set("effort-clear-mixed");
-                patch.configuration.reasoning_effort.state = if (model_revision) .omitted else .explicit_null;
-                if (model_revision) {
-                    patch.configuration.model.state = .value;
-                    try patch.configuration.model.value.set("gpt-6.1-sol");
-                }
-                patch.configuration.tools = try .of(&.{});
-                patch.configuration.label.state = .value;
-                try patch.configuration.label.value.set("mixed update");
-                const bytes = "mixed update instructions";
-                patch.configuration.instructions = .{ .state = .value, .borrowed = bytes.ptr, .length = bytes.len, .digest = protocol.contentDigest(bytes) };
-                const result = try storage.configure(&patch, .{});
-                const after = try storage.inspectSessionForTesting(session.slice());
-                if (model_revision) {
-                    try std.testing.expect(result == .rejected);
-                    try std.testing.expectEqual(protocol.ConfigurationRejection.unsupported_reasoning_effort, result.rejected.code);
-                    try std.testing.expectEqual(before.revision, after.revision);
-                    try std.testing.expectEqual(before.tool_set_id, after.tool_set_id);
-                    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref=?1 AND label IS NULL", .{session.slice()}));
-                    try std.testing.expectEqual(before.reasoning_effort, after.reasoning_effort);
-                    try std.testing.expectEqualStrings(before.model.slice(), after.model.slice());
-                    try std.testing.expect((try storage.configure(&patch, .{})).rejected.replayed);
-                    try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM content WHERE digest=?1", .{store_testing.Blob{ .bytes = &protocol.contentDigest(bytes) }}));
-                } else {
-                    try std.testing.expect(result == .accepted);
-                    try std.testing.expectEqual(before.revision + 1, after.revision);
-                    try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .low), after.reasoning_effort);
-                    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref=?1 AND label='mixed update'", .{session.slice()}));
-                    try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_set_member WHERE tool_set_id=?1", .{after.tool_set_id}));
-                    try std.testing.expectEqualSlices(u8, &protocol.contentDigest(bytes), &after.instructions.digest);
-                    try std.testing.expect((try storage.configure(&patch, .{})).accepted.replayed);
-                }
-                try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_operation", .{}));
-            }
-        }
-    }.run);
-}
-
 test "unlisted effort passes configure preset Message creation and update unchanged" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {

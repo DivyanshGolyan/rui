@@ -14,7 +14,7 @@ const fields = [
 	["preferences", { reasoningEffort: "high", permissionMode: "ask" }, { reasoning_effort: "high", permission_mode: "ask" }],
 ] as const;
 
-test("creation sends only chosen settings for every omitted and explicit field combination", async () => {
+async function checkCreationCombinations() {
 	for (let mask = 0; mask < 1 << fields.length; mask++) {
 		const chosen = fields.filter((_, index) => (mask & (1 << index)) !== 0);
 		const spec: AgentSpec & { workspace: string } = { workspace: "/caller", model: "gpt-6.1-sol", ...Object.fromEntries(chosen.map(([name, value]) => [name, value])) };
@@ -40,9 +40,9 @@ test("creation sends only chosen settings for every omitted and explicit field c
 		}
 		assert.deepEqual(spec, before, "serializing chosen settings preserves caller input");
 	}
-});
+}
 
-test("creation preserves empty tools and Host default requests without completing omissions", async () => {
+async function checkEmptyAndNull() {
 	const spec = { workspace: "/caller", model: "custom-model", tools: [], loadedTools: [], effort: null, compactAt: null } satisfies AgentSpec;
 	const sessions = new Sessions({
 		async exchange(path, build) {
@@ -52,9 +52,9 @@ test("creation preserves empty tools and Host default requests without completin
 		},
 	});
 	await sessions.create(spec, { idempotencyKey: "chosen:empty" });
-});
+}
 
-test("a named preset forwards only the chosen overrides", async () => {
+async function checkPresetOverrides() {
 	const spec: SessionCreate = { preset: "review", permissionMode: "bypass", effort: null, tools: [] };
 	const sessions = new Sessions({
 		async exchange(path, build) {
@@ -67,10 +67,10 @@ test("a named preset forwards only the chosen overrides", async () => {
 		},
 	});
 	await sessions.create(spec, { idempotencyKey: "chosen:preset" });
-});
+}
 
 
-test("presets keep sparse settings until creation resolves a Workspace", () => {
+function checkSparsePreset() {
 	const spec: AgentSpec = { model: "gpt-6.1-sol" };
 	const launch = launchFor({ presets: { review: spec } }, "/runtime");
 	try {
@@ -78,9 +78,9 @@ test("presets keep sparse settings until creation resolves a Workspace", () => {
 	} finally {
 		launch.document.fill(0);
 	}
-});
+}
 
-test("child creation forwards the parent without inventing a Workspace or provider", async () => {
+async function checkParent() {
 	for (const spec of [{ parent: "p4rent", model: "gpt-6.1-sol" }, { parent: "p4rent", preset: "review" }] as const) {
 		const sessions = new Sessions({
 			async exchange(path, build) {
@@ -93,10 +93,10 @@ test("child creation forwards the parent without inventing a Workspace or provid
 		});
 		await sessions.create(spec, { idempotencyKey: "chosen:parent" });
 	}
-});
+}
 
 
-test("creation preserves an empty preferences object", async () => {
+async function checkEmptyPreferences() {
 	const sessions = new Sessions({
 		async exchange(_path, build) {
 			assert.deepEqual(JSON.parse(build("/store")).configuration, { workspace: "/caller", model: "gpt-6.1-sol", preferences: {} });
@@ -104,4 +104,13 @@ test("creation preserves an empty preferences object", async () => {
 		},
 	});
 	await sessions.create({ workspace: "/caller", model: "gpt-6.1-sol", preferences: {} }, { idempotencyKey: "chosen:preferences" });
+}
+
+test("TS-7 creation_intent", async () => {
+	await checkCreationCombinations();
+	await checkEmptyAndNull();
+	await checkPresetOverrides();
+	checkSparsePreset();
+	await checkParent();
+	await checkEmptyPreferences();
 });

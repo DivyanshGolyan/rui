@@ -959,7 +959,7 @@ test "stop_action effective offer preserves the historical settings limit" {
     }.run);
 }
 
-test "creation receipts retain maximum configured and loaded tools" {
+test "ADM-32 maximum creation receipt tools" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             const extras = comptime blk: {

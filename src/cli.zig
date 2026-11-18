@@ -3870,7 +3870,7 @@ fn writeMutationJson(writer: *std.Io.Writer, reply: protocol_reply.MutationReply
     try writer.writeByte('}');
 }
 
-test "session start configuration reports resolved effort and its source" {
+fn checkStartEffortSources() !void {
     const Case = struct {
         model: []const u8 = "gpt-6.1-sol",
         override: ?[]const u8 = "low",
@@ -3912,7 +3912,7 @@ test "session start configuration reports resolved effort and its source" {
     }
 }
 
-test "session start reports Host settings while retaining invocation effort source" {
+fn checkStartHostSettings() !void {
     const requested = StartConfiguration.resolve(.{
         .store = "/store",
         .session = .create,
@@ -3937,6 +3937,28 @@ test "session start reports Host settings while retaining invocation effort sour
     const attached_report = attached.observed("codex", "model-served", "high");
     try std.testing.expect(attached_report.provider == null);
     try std.testing.expectEqualStrings("k7m2qx", attached_report.parent.?);
+}
+
+test "CLI-6 start_receipt_configuration" {
+    try checkStartEffortSources();
+    try checkStartHostSettings();
+
+    const config = ",\"configuration\":{\"provider\":\"codex\",\"model\":\"gpt-5.5\",\"reasoning_effort\":\"high\",\"workspace\":\"/workspace\",\"tools\":[\"bash\"],\"loaded_tools\":[\"bash\"],\"permission_mode\":\"ask\",\"compaction_trigger\":\"100\"}";
+    const body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"message_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":true,\"session\":\"k7m2qx\",\"admission\":\"7\"" ++ config ++ "},\"input\":{\"type\":\"text\",\"bytes\":\"3\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"},\"queue\":{\"status\":\"queued\",\"admission\":\"7\"},\"execution\":{\"status\":\"queued\"}}";
+    const target: protocol_reply.MutationTarget = .{ .message = .{ .bytes = 3, .digest = @splat(0), .creates_session = true } };
+    const reply = protocol_reply.decodeMutationReply(.{ .status = 200, .body = body }, "", target);
+    const requested = StartConfiguration.resolve(.{ .store = "/store", .session = .create }, false, .high);
+    const observed = requested.observed("codex", "gpt-5.5", "high");
+    var bytes: [4096]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&bytes);
+    try writeMutationJson(&writer, reply, observed);
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, writer.buffered(), .{});
+    defer parsed.deinit();
+    const receipt = parsed.value.object.get("configuration").?.object;
+    try std.testing.expectEqualStrings("codex", receipt.get("provider").?.string);
+    try std.testing.expectEqualStrings("gpt-5.5", receipt.get("model").?.string);
+    try std.testing.expectEqualStrings("high", receipt.get("reasoning_effort").?.string);
+    try std.testing.expectEqualStrings("saved", receipt.get("effort_source").?.string);
 }
 
 test "mutation presentation renders owned diagnostics and context with bounded writer" {

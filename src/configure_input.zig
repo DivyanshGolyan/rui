@@ -76,7 +76,7 @@ test "a policy argument resets with default and keeps any other spelling" {
     try std.testing.expectEqualStrings("Default", policy("Default").value.?);
 }
 
-test "fresh creation preserves every omitted explicit and reset setting combination" {
+fn checkCreationCombinations() !void {
     // Independent oracle: an omitted member stays omitted, explicit empty tool
     // lists stay empty, and null policy resets stay null. Only saved choices fill.
     for (0..16) |mask| {
@@ -123,7 +123,7 @@ test "fresh creation preserves every omitted explicit and reset setting combinat
     }
 }
 
-test "saved creation sends unsupported effort unchanged" {
+fn checkSavedEffort() !void {
     var input: ConfigureInput = .{ .store = "", .session = .create };
     input.applySavedCreation(.max, .ask);
     try std.testing.expectEqual(@as(?ReasoningEffort, .max), input.preferences.reasoning_effort);
@@ -131,7 +131,7 @@ test "saved creation sends unsupported effort unchanged" {
     try std.testing.expect(!input.reasoning_effort.present and !input.permission_mode.present);
 }
 
-test "parent creation reads no binding or preferences when supplied choices suffice" {
+fn checkCreationReads() !void {
     var input: ConfigureInput = .{
         .store = "/store",
         .session = .create,
@@ -151,7 +151,7 @@ test "parent creation reads no binding or preferences when supplied choices suff
     try std.testing.expect(input.creationReads().binding and input.creationReads().preferences);
 }
 
-test "saved creation preserves every CLI and semantic tool intent" {
+fn checkToolIntent() !void {
     for ([_][]const u8{ "", "none", "bash", "find_tools" }) |allowed| {
         for ([_]?[]const u8{ null, "", "none", "find_tools" }) |loaded| {
             var input: ConfigureInput = .{ .store = "", .session = .create, .tools = .{ .cli = allowed }, .loaded_tools = if (loaded) |text| .{ .cli = text } else null };
@@ -172,7 +172,7 @@ test "saved creation preserves every CLI and semantic tool intent" {
     try std.testing.expectEqualStrings("find_tools", loaded_only.loaded_tools.?.cli);
 }
 
-test "saved preferences preserve explicit image tool selections" {
+fn checkImageToolIntent() !void {
     for ([_][]const []const u8{ &.{}, &.{"read_image"}, &.{ "bash", "read_image" } }) |allowed| {
         for ([_]?[]const []const u8{ null, &.{}, &.{"read_image"} }) |loaded| {
             var input: ConfigureInput = .{
@@ -188,4 +188,12 @@ test "saved preferences preserve explicit image tool selections" {
             try std.testing.expectEqual(@as(?PermissionMode, .ask), input.preferences.permission_mode);
         }
     }
+}
+
+test "CLI-17 saved creation intent" {
+    try checkCreationCombinations();
+    try checkSavedEffort();
+    try checkCreationReads();
+    try checkToolIntent();
+    try checkImageToolIntent();
 }

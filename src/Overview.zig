@@ -2515,7 +2515,7 @@ test "a default saved elsewhere while the overview is open outlasts its exit wit
     try std.testing.expectEqualStrings("gpt-6-luna", values.model.slice());
 }
 
-test "empty creation with no saved binding requires a model without inventing one" {
+fn checkEmptyCreationBinding() !void {
     var cancellation: client.Cancellation = .{};
     const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
     defer rig.close();
@@ -2527,7 +2527,7 @@ test "empty creation with no saved binding requires a model without inventing on
     try std.testing.expect(Seen.now.creation.label == null);
 }
 
-test "empty Session creation reads saved permissions even with explicit selectors" {
+fn checkCreationPermissionPreferences() !void {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -2547,7 +2547,7 @@ test "empty Session creation reads saved permissions even with explicit selector
     }
 }
 
-test "empty creation leaves the fresh tool profile to the Host" {
+fn checkCreationToolOmission() !void {
     const rig = try openOverview();
     defer rig.close();
     try std.testing.expect(try rig.press("\r") == null);
@@ -2556,7 +2556,7 @@ test "empty creation leaves the fresh tool profile to the Host" {
     try std.testing.expect(Seen.now.creation.loaded_tools == null);
 }
 
-test "empty creation sends saved effort with any selectors" {
+fn checkCreationEffortPreferences() !void {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -6594,7 +6594,7 @@ test "overview ignores printable ASCII Unicode unknown keys x r and bracketed pa
     }
 }
 
-test "New Session Enter and clicks cannot duplicate queued or answered creation" {
+fn checkCreationDeduplication() !void {
     for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |click_first| {
         const rig = try openListed();
         defer rig.close();
@@ -6621,7 +6621,7 @@ test "New Session Enter and clicks cannot duplicate queued or answered creation"
     };
 }
 
-test "creation rejection and uncertainty retain the Configure ledger result and recovery key" {
+fn checkCreationRecovery() !void {
     const CreationAnswer = struct {
         var uncertain: bool = false;
         fn create(_: *Self, _: client.Requests, _: configure_input.ConfigureInput, reply: *Reply) !void {
@@ -6658,7 +6658,7 @@ test "creation rejection and uncertainty retain the Configure ledger result and 
     }
 }
 
-test "accepted empty creation opens the returned Session with blank focused chat and no Message intent" {
+fn checkAcceptedEmptyCreation() !void {
     const Scratch = struct {
         var dir: std.Io.Dir = undefined;
         var files: u8 = 0;
@@ -6752,7 +6752,7 @@ const key_encodings = std.enums.EnumArray(keymap.Key, []const []const u8).init(.
     .end = &.{ "\x1b[F", "\x1bOF", "\x1b[4~", "\x1b[8~", "\x1b[1;1F" },
     .ctrl_end = &.{ "\x1b[1;5F", "\x1b[4;5~" },
 });
-test "empty creation captures fresh effort and permission at admitted Enter or click before its worker runs" {
+fn checkCreationSnapshotAtActivation() !void {
     for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |click| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
@@ -7524,7 +7524,7 @@ test "App list selection consumes the core projection through arrivals covered S
     try Check.draw(rig);
 }
 
-test "creation snapshot reads one owned preference pair with explicit null binding absent home and errors" {
+fn checkCreationSnapshot() !void {
     const Load = struct {
         var calls: usize = 0;
         var fail: bool = false;
@@ -7579,7 +7579,7 @@ test "creation snapshot reads one owned preference pair with explicit null bindi
     try std.testing.expectEqual(@as(usize, 5), Load.calls);
 }
 
-test "creation preference read failure is retained through repair and ordinary refusal then retry" {
+fn checkCreationPreferenceFailure() !void {
     const File = struct {
         fn write(dir: std.Io.Dir, bytes: []const u8) !void {
             const file = try dir.createFile(std.testing.io, ".config/rui/preferences", .{ .permissions = .fromMode(0o600) });
@@ -8583,7 +8583,7 @@ test "narrow empty chat exit retains every list row through spinner repaints and
     }
 }
 
-test "overview creation retains its displayed provider and model with saved preferences" {
+fn checkCreationDisplayedBinding() !void {
     const Load = struct {
         fn read(_: []const u8) !preferences.Values {
             return .{ .reasoning_effort = .max, .permission_mode = .ask };
@@ -8599,4 +8599,18 @@ test "overview creation retains its displayed provider and model with saved pref
     try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, .max), input.preferences.reasoning_effort);
     try std.testing.expectEqual(@as(?protocol.PermissionMode, .ask), input.preferences.permission_mode);
     try std.testing.expect(!input.reasoning_effort.present and !input.permission_mode.present);
+}
+
+test "SUI-2 new_session_capture" {
+    try checkEmptyCreationBinding();
+    try checkCreationPermissionPreferences();
+    try checkCreationToolOmission();
+    try checkCreationEffortPreferences();
+    try checkCreationDeduplication();
+    try checkCreationRecovery();
+    try checkAcceptedEmptyCreation();
+    try checkCreationSnapshotAtActivation();
+    try checkCreationSnapshot();
+    try checkCreationPreferenceFailure();
+    try checkCreationDisplayedBinding();
 }
