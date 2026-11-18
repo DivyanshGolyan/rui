@@ -9,7 +9,6 @@ from urllib.request import Request, urlopen
 
 MARKER = '<!-- rui-screens -->'
 LIMIT = 64999
-SIZES = ('140x40', '46x30')
 
 
 def text(value):
@@ -48,12 +47,18 @@ def render(diff, repo, pr, head, base, shots=()):
         for pair in diff.get(category, []):
             rows.setdefault(pair['name'], {})[pair['size']] = pair
     current = {(r['name'], r['size']): r for r in shots}
+    seen_sizes = dict.fromkeys(r['size'] for r in shots if r['name'] in rows)
+    for sizes in rows.values():
+        seen_sizes.update(dict.fromkeys(sizes))
+    columns = [size for size in ('140x40', '46x30') if size in seen_sizes]
+    columns.extend(size for size in seen_sizes if size not in columns)
     if rows:
         title = 'Selected screens' if diff.get('same') else 'Changed and new screens'
-        sections.append(f'\n### {title}\n\n| State | 140x40 before / after | 46x30 before / after |\n| --- | --- | --- |\n')
+        headings = ''.join(f' {text(size)} before / after |' for size in columns)
+        sections.append(f'\n### {title}\n\n| State |{headings}\n| --- |' + ' --- |' * len(columns) + '\n')
         for name, sizes in sorted(rows.items()):
             cells = []
-            for size in SIZES:
+            for size in columns:
                 pair = sizes.get(size)
                 if pair is None and (name, size) in current:
                     pair = {'before': None, 'after': current[(name, size)]}
@@ -62,7 +67,7 @@ def render(diff, repo, pr, head, base, shots=()):
                 else:
                     cells.append(image(pair.get('before'), repo, pr, head, 'Before') + ' / ' +
                                  image(pair.get('after'), repo, pr, head, 'After'))
-            sections.append(f'| {text(name)} | {cells[0]} | {cells[1]} |\n')
+            sections.append(f'| {text(name)} | ' + ' | '.join(cells) + ' |\n')
     if groups['removed']:
         sections.append('\n### Removed screens\n\n')
         for pair in groups['removed']:

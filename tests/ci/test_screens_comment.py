@@ -16,6 +16,35 @@ def diff(**overrides):
 
 
 class RenderTest(unittest.TestCase):
+    def test_screen_size_columns_cover_rendered_states(self):
+        # SCR-1: columns cover the sizes present in rendered states.
+        cases = [
+            (['46x30', '140x40'], ['140x40', '46x30']),
+            (['100x30'], ['100x30']),
+            (['100x30', '46x30', '80x24', '140x40'],
+             ['140x40', '46x30', '100x30', '80x24']),
+        ]
+        for manifest_sizes, expected in cases:
+            with self.subTest(sizes=manifest_sizes):
+                shots = [{'name': 'screen', 'size': size, **record(f'{size}.png')}
+                         for size in manifest_sizes]
+                data = diff(new=[pair('screen', size, None, record(f'{size}.png'))
+                                 for size in reversed(manifest_sizes)],
+                            changed=[pair('partial', manifest_sizes[0], record('old.png'),
+                                          record('partial.png'))])
+                body = comment.render(data, 'o/r', 7, 'head', 'base', shots)
+                heading = '| State |' + ''.join(f' {size} before / after |' for size in expected)
+                self.assertIn(heading, body)
+                screen_row = next(line for line in body.splitlines() if line.startswith('| screen |'))
+                for size in expected:
+                    self.assertIn(f'/head/{size}.png)', screen_row)
+                partial_row = next(line for line in body.splitlines() if line.startswith('| partial |'))
+                cells = partial_row.split(' | ')[1:]
+                for size, cell in zip(expected, cells):
+                    self.assertEqual('/head/partial.png)' in cell, size == manifest_sizes[0])
+                    if size != manifest_sizes[0]:
+                        self.assertEqual(cell.rstrip(' |'), '—')
+
     def test_comparison_groups_sizes_escapes_and_orders_failures(self):
         old = record('baseline/old screen.png')
         new = record('new.png')
