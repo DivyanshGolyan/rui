@@ -46,7 +46,6 @@ pub const Hooks = struct {
     failures: std.EnumSet(Failure) = .empty,
     bash_lifecycle: bash.LifecycleFault = .none,
     pauses: std.EnumArray(std.meta.Tag(Pause), Hold) = .initFill(.{}),
-    transition: ?TransitionGate = null,
     bash_reclaim_gate_path: ?[]const u8 = null,
     retry_recovery_gate_path: ?[]const u8 = null,
     retention_removal: bool = false,
@@ -115,15 +114,6 @@ pub const Hooks = struct {
         delay_ms: i64 = 0,
         gate_path: ?[]const u8 = null,
     };
-
-    pub const Transition = enum {
-        action_attempt_admitted,
-        prepared_before_handoff,
-        action_result_ready,
-        action_result_committed,
-    };
-
-    pub const TransitionGate = struct { transition: Transition, path: []const u8 };
 
     pub const ControlGate = struct { keys: []const u8, path: []const u8 };
 
@@ -262,11 +252,6 @@ pub const Tuning = struct {
         if (try parsed.number(c_int, "test-observation-state-fd")) |fd| hooks.observation_state_fd = fd;
         if (parsed.get("test-observation-plan")) |plan| hooks.observation_plan = std.meta.stringToEnum(TestObservation.Plan, plan) orelse
             return error.InvalidTestObservationPlan;
-        const transition: ?Hooks.Transition = if (parsed.get("test-transition")) |name|
-            Hooks.fromOptionName(Hooks.Transition, name) orelse return error.UnknownTestTransition
-        else
-            null;
-        const transition_gate_path = parsed.get("test-transition-gate-path");
         hooks.pauses.getPtr(.bash_exit_observed).gate_path = parsed.get("test-bash-observed-exit-gate-path");
         hooks.pauses.getPtr(.shutdown_signalled).gate_path = parsed.get("test-shutdown-signalled-gate-path");
         hooks.bash_reclaim_gate_path = parsed.get("test-bash-cleanup-gate-path");
@@ -281,9 +266,7 @@ pub const Tuning = struct {
         if (try parsed.number(usize, "test-request-preparation-item-allowance")) |allowance| limits.request_preparation_item_allowance = allowance;
         if (try parsed.number(i64, "test-request-preparation-advance-delay-ms")) |delay| hooks.pauses.getPtr(.preparation_advanced).delay_ms = delay;
         if ((control_gate_keys == null) != (control_gate_path == null)) return error.IncompleteControlGate;
-        if ((transition == null) != (transition_gate_path == null)) return error.IncompleteTestTransitionGate;
         if (control_gate_keys) |keys| hooks.control_gate = .{ .keys = keys, .path = control_gate_path.? };
-        if (transition) |value| hooks.transition = .{ .transition = value, .path = transition_gate_path.? };
         return tuning;
     }
 };
@@ -329,11 +312,8 @@ test "the hidden serve options narrow a Host" {
 
     try std.testing.expectError(error.IncompleteControlGate, tuningFor(&.{ "--test-control-gate-keys", "k" }));
     try std.testing.expectError(error.IncompleteControlGate, tuningFor(&.{ "--test-control-gate-path", "/g" }));
-    try std.testing.expectError(error.IncompleteTestTransitionGate, tuningFor(&.{ "--test-transition", "action-result-ready" }));
-    const gated = try tuningFor(&.{ "--test-control-gate-keys", "k", "--test-control-gate-path", "/g", "--test-transition", "action-result-ready", "--test-transition-gate-path", "/t" });
+    const gated = try tuningFor(&.{ "--test-control-gate-keys", "k", "--test-control-gate-path", "/g" });
     try std.testing.expectEqualStrings("/g", gated.hooks.control_gate.?.path);
-    try std.testing.expectEqual(Hooks.Transition.action_result_ready, gated.hooks.transition.?.transition);
-    try std.testing.expectError(error.UnknownTestTransition, tuningFor(&.{ "--test-transition", "action_result_ready", "--test-transition-gate-path", "/t" }));
 
     try std.testing.expect((try tuningFor(&.{ "--test-observation-fd", "3" })).hooks.phase_trace);
 }
@@ -966,13 +946,6 @@ noinline fn writeActionDeadlineTrace(
     writeTestTrace(host, &trace, &publication);
 }
 
-pub fn testTransition(host: *Host, transition: Hooks.Transition, binding: store_module.ActionAttemptBinding) void {
-    const gate = host.hooks.transition orelse return;
-    if (gate.transition != transition) return;
-    traceAction(host, @tagName(transition), binding);
-    waitAtTestGate(host, gate.path);
-}
-
 pub fn pause(host: *Host, point: Hooks.Pause) void {
     const hold = host.hooks.pauses.get(point);
     if (hold.delay_ms == 0 and hold.gate_path == null) return;
@@ -1210,7 +1183,6 @@ test "every --fault name reaches its own hook and nothing else" {
     var hooks: Hooks = .{};
     for ([_][]const u8{ "bash-none", "none", "retention-removal", "content_acquire", "content-acquire-", "" }) |name|
         try std.testing.expectError(error.UnknownFault, hooks.inject(name));
-    try std.testing.expectEqual(Hooks.Transition.action_result_committed, Hooks.fromOptionName(Hooks.Transition, "action-result-committed").?);
 }
 
 test "inspection counts held custody, not an in-flight admission reservation" {

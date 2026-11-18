@@ -77,8 +77,6 @@ pub const names = [_][]const u8{
     "test-sqlite-cache-spill-off",
     "test-sqlite-diagnostics",
     "test-suppress-first-control-hint",
-    "test-transition",
-    "test-transition-gate-path",
     "text-output",
     "timeout-seconds",
     "to",

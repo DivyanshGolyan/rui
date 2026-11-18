@@ -163,8 +163,6 @@ const serve_test = &[_]Option{
     hiddenNumber("test-observation-fd", 0, std.math.maxInt(c_int)),
     hiddenNumber("test-observation-state-fd", 0, std.math.maxInt(c_int)),
     hiddenValue("test-observation-plan"),
-    hiddenValue("test-transition"),
-    hiddenValue("test-transition-gate-path"),
     hiddenValue("test-bash-observed-exit-gate-path"),
     hiddenValue("test-shutdown-signalled-gate-path"),
     hiddenValue("test-bash-cleanup-gate-path"),

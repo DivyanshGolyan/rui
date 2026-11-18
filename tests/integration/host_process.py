@@ -836,15 +836,15 @@ class ReleaseGate:
             raise
 
     def assert_held(self):
-        assert self.fd is not None, "transition gate was released"
+        assert self.fd is not None, "gate was released"
         descriptor, name = os.fstat(self.fd), self.path.lstat()
-        assert stat.S_ISFIFO(name.st_mode), "transition gate is not a FIFO"
-        assert (descriptor.st_dev, descriptor.st_ino) == (name.st_dev, name.st_ino), "transition gate was replaced"
+        assert stat.S_ISFIFO(name.st_mode), "gate is not a FIFO"
+        assert (descriptor.st_dev, descriptor.st_ino) == (name.st_dev, name.st_ino), "gate was replaced"
         try:
             credit = os.read(self.fd, 1)
         except BlockingIOError:
             return
-        raise AssertionError(f"transition gate was not held: {credit!r}")
+        raise AssertionError(f"gate was not held: {credit!r}")
 
     def release(self):
         if self.fd is not None:
@@ -962,8 +962,6 @@ class HostDiagnostics:
             plans = ("request_wait",)
         elif phase == "effect_stop_requested":
             plans = ("interrupt",)
-        elif phase in ("action_attempt_admitted", "action_result_ready", "action_result_committed"):
-            plans = ("recovery", "status") if phase == "action_attempt_admitted" else ("recovery",)
         elif phase in ("preparation_completed", "codex_transfer"):
             plans = ("managed",)
         elif phase == "prepared_before_handoff":
@@ -1271,12 +1269,6 @@ def start_ready_process(args, *, timeout=10, required_fields=None, env=None, std
     if "--test-retry-recovery-gate-path" in args:
         observations = observations or "dispatch"
         assert observations == "dispatch", "retry recovery gate requires a selecting native plan"
-    if "--test-transition" in args and args[args.index("--test-transition") + 1] in (
-            "action-attempt-admitted", "prepared-before-handoff", "action-result-ready", "action-result-committed"):
-        transition = args[args.index("--test-transition") + 1]
-        observations = observations or "recovery"
-        plans = ("recovery", "status") if transition == "action-attempt-admitted" else ("recovery",)
-        assert observations in plans, "Bash crash cut requires a selecting native plan"
     destination = _failure_destination((env if env is not None else os.environ).get("RUI_FAILURE_ARTIFACTS")) if observations is not None else None
     if destination is not None and "--store" in args:
         root = pathlib.Path(args[args.index("--store") + 1]).resolve().parent
