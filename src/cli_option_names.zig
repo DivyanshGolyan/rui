@@ -85,7 +85,7 @@ pub const names = [_][]const u8{
     "tools",
     "turn",
     "workspace",
-};
+} ++ if (@import("build_options").test_pauses) [_][]const u8{"test-pause-fd"} else [_][]const u8{};
 
 pub fn contains(name: []const u8) bool {
     for (names) |candidate| {

@@ -1,4 +1,5 @@
 const std = @import("std");
+const test_pause = @import("testing/pause.zig");
 const cli_grammar = @import("cli_grammar.zig");
 const serve_grammar = @import("serve_grammar.zig");
 const core_tools = @import("core_tools.zig");
@@ -53,6 +54,7 @@ pub const Hooks = struct {
     control_gate: ?ControlGate = null,
     suppress_first_control_hint: bool = false,
     phase_trace: bool = false,
+    pause_fd: if (test_pause.enabled) ?c_int else void = if (test_pause.enabled) null else {},
     observation_fd: ?c_int = null,
     observation_state_fd: ?c_int = null,
     observation_plan: ?TestObservation.Plan = null,
@@ -252,6 +254,7 @@ pub const Tuning = struct {
         if (try parsed.number(i64, "test-inspection-reply-delay-ms")) |delay| hooks.inspection_reply.delay_ms = delay;
         limits.client_send_buffer_bytes = try parsed.number(u32, "test-client-send-buffer-bytes");
         if (parsed.has("test-phase-trace")) hooks.phase_trace = true;
+        if (comptime test_pause.enabled) hooks.pause_fd = try parsed.number(c_int, "test-pause-fd");
         if (try parsed.number(c_int, "test-observation-fd")) |fd| {
             hooks.observation_fd = fd;
             hooks.phase_trace = true;
@@ -349,6 +352,7 @@ pub const Host = struct {
     store: *store_module.Store,
     instance: protocol.InstanceId = undefined,
     hooks: Hooks = .{},
+    pause_owner: if (test_pause.enabled) ?*test_pause.PauseController else void = if (test_pause.enabled) null else {},
     limits: Limits = .{},
     providers: *const providers_module.Providers = &providers_module.none,
     catalog_url: ?[]const u8 = null,

@@ -11,3 +11,19 @@ The pause controller is a test-only seam; these promises apply to its callers an
 | PAU-5 | Module | Arming rejects faults unsupported by the point. | PauseController | `pause PAU-5 rejects unsupported faults before arming` | `src/testing/pause.zig` |
 | PAU-6 | Module | Closing the controller unblocks parked workers with an error. | PauseController | `pause PAU-6 close releases parked workers with closed` | `src/testing/pause.zig` |
 | PAU-7 | Module | Disjoint selections count matching arrivals independently and overlapping selections are rejected. | PauseController | `pause PAU-7 selections count matching contexts independently` | `src/testing/pause.zig` |
+| PAU-8 | Process | Arming is acknowledged before execution starts and rejected afterwards; arrivals remain available to a later wait. | Socket protocol | `test_pau_8_arm_ack_then_repeated_arrivals` | `tests/integration/pause_socket_test.py` |
+| PAU-9 | Process | A pending wait does not block other socket requests. | Socket protocol | `test_pau_9_wait_does_not_block_other_requests` | `tests/integration/pause_socket_test.py` |
+| PAU-10 | Process | Socket EOF closes the owner and releases parked work. | Socket EOF | `test_pau_10_eof_closes_owner_and_releases_worker` | `tests/integration/pause_socket_test.py` |
+| PAU-11 | Process | A killed parked child is reported with its PID and exit status. | Process watcher | `test_pau_11_child_death_while_parked_reports_status` | `tests/integration/pause_socket_test.py` |
+| PAU-12 | Process | Socket EOF unblocks the startup barrier. | Socket EOF | `test_pau_12_disconnect_unblocks_start_barrier` | `tests/integration/pause_socket_test.py` |
+| PAU-13 | Process | Client calls have a bounded watchdog. | Python client | `test_pau_13_watchdog_bounds_wait` | `tests/integration/pause_socket_test.py` |
+| PAU-14 | Process | Socket EOF while the child lives is distinguished from child exit. | Process watcher | `test_pau_14_independent_eof_is_not_child_exit` | `tests/integration/pause_socket_test.py` |
+
+The test-only socket adapter owns one inherited connected socket. Its `start`
+request is acknowledged after all preceding arms have completed; the Host waits
+for that request before starting execution. EOF closes the owner, waking parked
+work and pending waits. The socket is marked close-on-exec. A killed child cannot
+send an exit frame: the Python process watcher reaps it and synthesizes a
+length-prefixed JSON child-exit event with its PID and return code. EOF while
+the process remains alive immediately unblocks pending calls; callers can wait
+independently for the child-exit event.
