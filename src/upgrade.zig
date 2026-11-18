@@ -12,7 +12,7 @@ const installation_path = @import("installation_path.zig");
 const caller_error = @import("caller_error.zig");
 const upgrade_run = @import("upgrade_run.zig");
 
-pub const Phase = enum(u8) { checking, preparing, publishing, stopping, awaiting_retirement, starting, verifying, finished };
+pub const Phase = upgrade_run.Phase;
 pub const Progress = struct {
     context: *anyopaque,
     report: *const fn (*anyopaque, Phase) void,
@@ -115,10 +115,15 @@ pub const Result = struct {
         var value = checked.facts(.install);
         value.resumed = true;
         if (!upgrade_run.holdsRelease(value)) value.prepared = .{ .ok = {} };
-        value.published = .{ .ok = publishedOf(self.installation) };
+        self.addFacts(&value);
         value.pinned = .{ .ok = {} };
-        value.hosts = .{ .ok = self.hosts.summary(self.store) };
         return value;
+    }
+
+    /// Add the receipt and restart batch to facts already held by the caller.
+    pub fn addFacts(self: *const Result, value: *upgrade_run.Facts) void {
+        value.published = .{ .ok = publishedOf(self.installation) };
+        value.hosts = .{ .ok = self.hosts.summary(self.store) };
     }
 
     pub fn deinit(self: *Result, allocator: std.mem.Allocator) void {
@@ -138,7 +143,7 @@ fn selectionOf(selected: Installation.Selection) upgrade_run.Selection {
     };
 }
 
-fn versionOf(version: release.Version) upgrade_run.Version {
+pub fn versionOf(version: release.Version) upgrade_run.Version {
     return .{ .schema = version.schema, .patch = version.patch };
 }
 
@@ -147,9 +152,13 @@ fn publishedOf(installation: Installation.InstallationOutcome) upgrade_run.Publi
 }
 
 /// The class `upgrade_run` records for an effect's error.
-fn causeOf(err: anyerror) upgrade_run.Cause {
+pub fn causeOf(err: anyerror) upgrade_run.Cause {
     if (err == error.Cancelled) return .cancelled;
-    return switch (caller_error.of(err)) {
+    return causeOfCode(caller_error.of(err));
+}
+
+fn causeOfCode(code: caller_error.Code) upgrade_run.Cause {
+    return switch (code) {
         .upgrade_download_failed => .download,
         .upgrade_release_invalid => .release,
         .upgrade_preparation_failed => .preparation,
@@ -492,5 +501,65 @@ test "upgrade selected activation routes by Host directory not SQLite data or My
         const result: Result = .{ .installation = .{ .installed = receipt }, .store = "/selected-host", .hosts = .{ .entries = &entries } };
         try std.testing.expectEqual(HostLifecycle.Limitation.configuration_unavailable, result.selectedActivation().unsupported);
         try std.testing.expect(result.hosts.selectedOutcome(identity) == .not_needed);
+    }
+}
+
+test "SH-76 Upgrade fact conversions preserve every classified error and receipt" {
+    // Every error classified as an Upgrade download, release, or preparation
+    // failure by caller_error, plus cancellation and the catch-all class.
+    const cases = [_]struct { anyerror, upgrade_run.Cause }{
+        .{ error.Cancelled, .cancelled },
+        .{ error.ReleaseDownloadFailed, .download },
+        .{ error.InvalidReleaseVersion, .release },
+        .{ error.InvalidReleaseChecksum, .release },
+        .{ error.DuplicateReleaseChecksum, .release },
+        .{ error.MissingReleaseChecksum, .release },
+        .{ error.InvalidReleaseEndpoint, .release },
+        .{ error.UnsupportedReleasePlatform, .release },
+        .{ error.InvalidManagedBuild, .preparation },
+        .{ error.InvalidReleaseExecutable, .preparation },
+        .{ error.ReleaseArchiveTooLarge, .preparation },
+        .{ error.ReleaseChecksumMismatch, .preparation },
+        .{ error.ReleaseExecutableVersionMismatch, .preparation },
+        .{ error.UnsafeReleaseArchive, .preparation },
+        .{ error.UpgradeChildFailed, .preparation },
+        .{ error.UpgradeIneligible, .other },
+        .{ error.HostRestartFailed, .other },
+        .{ error.OutOfMemory, .other },
+        .{ error.AccessDenied, .other },
+        .{ error.UnclassifiedUpgradeTestFailure, .other },
+    };
+    for (cases) |row| try std.testing.expectEqual(row[1], causeOf(row[0]));
+    // `anyerror` is open-ended; after cancellation every possible classifier
+    // result belongs to this finite domain, including all non-Upgrade codes.
+    for (std.enums.values(caller_error.Code)) |code| {
+        const expected: upgrade_run.Cause = switch (code) {
+            .upgrade_download_failed => .download,
+            .upgrade_release_invalid => .release,
+            .upgrade_preparation_failed => .preparation,
+            else => .other,
+        };
+        try std.testing.expectEqual(expected, causeOfCode(code));
+    }
+
+    const receipt: Installation.Receipt = .{ .operation_build = "/operation", .selected_after = "/selected", .selected_version = .{ .schema = 61, .patch = 7 } };
+    const check_value: Check = .{
+        .candidate = .{ .version = .{ .schema = 60, .patch = 1 }, .tag = "", .archive_name = "", .archive_url = "", .checksum_url = "", .sha256 = @splat(0) },
+        .selected = .{ .released = .{ .build = "/old", .version = .{ .schema = 59, .patch = 2 } } },
+        .home = "/home",
+        .store = "/store",
+        .running_executable = "/rui",
+    };
+    for ([_]bool{ false, true }) |changed| {
+        const result: Result = .{ .installation = if (changed) .{ .installed = receipt } else .{ .unchanged = receipt }, .store = "/store" };
+        const expected: upgrade_run.Published = .{ .changed = changed, .selected = .{ .schema = 61, .patch = 7 } };
+        try std.testing.expectEqualDeep(expected, publishedOf(result.installation));
+        const full = result.facts(&check_value);
+        var partial: upgrade_run.Facts = .{ .mode = .install };
+        result.addFacts(&partial);
+        try std.testing.expectEqualDeep(expected, full.published.?.ok);
+        try std.testing.expectEqualDeep(expected, partial.published.?.ok);
+        try std.testing.expectEqualDeep(full.hosts.?.ok, partial.hosts.?.ok);
+        try std.testing.expectEqualDeep(upgrade_run.Version{ .schema = 60, .patch = 1 }, check_value.facts(.install).release.?.ok);
     }
 }
