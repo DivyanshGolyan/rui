@@ -3,6 +3,7 @@ const client = @import("client.zig");
 const release = @import("release_candidate.zig");
 const Installation = @import("Installation.zig");
 const HostLifecycle = @import("HostLifecycle.zig");
+const host_activation = @import("host_activation.zig");
 const restart_all = @import("host_restart_all.zig");
 const platform = @import("platform.zig");
 const TerminalText = @import("TerminalText.zig");
@@ -212,10 +213,7 @@ fn waitAfterPublication(init: std.process.Init, cancellation: ?*const client.Can
 }
 
 pub fn compatible(result: *const Result) bool {
-    return switch (result.selectedActivation()) {
-        .client_incompatible, .unconfirmed, .failed, .replacement_observed, .refused => false,
-        else => true,
-    };
+    return host_activation.clientSafe(result.selectedActivation());
 }
 
 fn field(writer: *std.Io.Writer, value: []const u8) !void {
