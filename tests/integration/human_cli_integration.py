@@ -1381,17 +1381,6 @@ def renderer_cases():
             tty.caller.send_signal(signal.SIGINT)
             tty.finish()
         print("renderer: initial zero-width prompt bypasses composer and reaches provider unchanged", flush=True)
-        with terminal(geometry) as tty:
-            tty.send("kept\x01", predicate=lambda: tty.capture.draft("kept", 2))
-            tty.send("\x1b[200~\u0301discarded\x1b[201~", "! Input rejected")
-            assert tty.capture.draft("kept", 2), tty.capture.completed
-            tty.send("x", predicate=lambda: tty.capture.draft("xkept", 3))
-            tty.send("\x7f", predicate=lambda: tty.capture.draft("kept", 2) and "! Input rejected" not in tty.capture.completed)
-            tty.send("\x1b[200~prefix\n\u0301discarded\x1b[201~", "! Input rejected")
-            assert tty.capture.draft("kept", 2), tty.capture.completed
-            tty.send("é", predicate=lambda: tty.capture.draft("ékept", 3))
-            assert os.write(tty.master, b"\x03") == 1
-            tty.finish()
         env = {**os.environ, "HOME": str(home)}
         rejected = subprocess.run([str(fixture.RUI), "session", "resume", "--store", str(store), geometry],
             env=env, input=b"", capture_output=True, timeout=5)

@@ -3452,8 +3452,13 @@ test "App Session request overflow opens in place with Ctrl-O or a continuation 
                 held.size = size;
                 const file = try held.adopt(40);
                 defer file.close(std.testing.io);
+                const initial = try held.shown();
+                try std.testing.expect(std.mem.indexOf(u8, initial, "Allow once") != null);
+                try std.testing.expect(std.mem.indexOf(u8, initial, "Deny") != null);
                 if (typing) try held.keys("kept draft");
                 const before = try held.shown();
+                if (typing) try std.testing.expect(std.mem.indexOf(u8, before, "kept draft") != null);
+                try std.testing.expect(std.mem.indexOf(u8, before, "shift+") == null);
                 const expected = if (size.height.? == 30) "… 15 more lines" else "… 5 more lines";
                 try std.testing.expect(std.mem.indexOf(u8, before, expected) != null);
                 try std.testing.expect(std.mem.indexOf(u8, before, "row 039") == null);
@@ -3490,6 +3495,7 @@ test "App Session request overflow opens in place with Ctrl-O or a continuation 
                 const opened = try held.shown();
                 try std.testing.expect(std.mem.indexOf(u8, opened, "row 039") != null);
                 try std.testing.expect(std.mem.indexOf(u8, opened, "more lines") == null);
+                if (typing) try std.testing.expect(std.mem.indexOf(u8, opened, "kept draft") != null);
                 try std.testing.expectEqual(.action, held.screen.view);
                 try std.testing.expectEqual(@as(?u64, 0xa), held.self.app_consent.request);
                 try std.testing.expectEqualStrings(if (typing) "kept draft" else "", held.self.input.composition().bytes);
@@ -3524,18 +3530,23 @@ test "App Session binds the hover role to every widget it owns with a hover styl
 }
 
 test "App Session fitting request has no overflow state or open side effect" {
-    const held = try HeldFrontend.create();
-    defer held.destroy();
-    const file = try held.adopt(3);
-    defer file.close(std.testing.io);
-    const before = try std.testing.allocator.dupe(u8, try held.shown());
-    defer std.testing.allocator.free(before);
-    try std.testing.expect(std.mem.indexOf(u8, before, "row 002") != null);
-    try std.testing.expect(std.mem.indexOf(u8, before, "more lines") == null);
-    try std.testing.expectEqual(null, held.self.app_preview.continuation());
-    try held.keys("\x0f");
-    try held.settle();
-    try std.testing.expectEqualStrings(before, try held.shown());
+    for ([_]vxfw.MaxSize{ .{ .width = 46, .height = 30 }, .{ .width = 140, .height = 40 } }) |size| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        held.size = size;
+        const file = try held.adopt(3);
+        defer file.close(std.testing.io);
+        const before = try std.testing.allocator.dupe(u8, try held.shown());
+        defer std.testing.allocator.free(before);
+        try std.testing.expect(std.mem.indexOf(u8, before, "Allow once") != null);
+        try std.testing.expect(std.mem.indexOf(u8, before, "Deny") != null);
+        try std.testing.expect(std.mem.indexOf(u8, before, "row 002") != null);
+        try std.testing.expect(std.mem.indexOf(u8, before, "more lines") == null);
+        try std.testing.expectEqual(null, held.self.app_preview.continuation());
+        try held.keys("\x0f");
+        try held.settle();
+        try std.testing.expectEqualStrings(before, try held.shown());
+    }
 }
 
 test "a held frontend stops a read still running and joins it before it is freed" {
