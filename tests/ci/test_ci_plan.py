@@ -63,7 +63,7 @@ class PlanTest(unittest.TestCase):
         promoted_mac = ['admission-debug-integration', 'check-full', 'test-logic', 'transport-h2-integration']
         expected_targets = {
             ('draft', False): ([], []), ('draft', True): ([], []),
-            ('ready', False): (normal_linux, ['test-native', 'transport-h2-integration']),
+            ('ready', False): (normal_linux, []),
             ('ready', True): ([], []),
             ('manual', False): (selection()['targets'], []), ('manual', True): ([], []),
             ('promotion', False): (promoted_linux, promoted_mac),
@@ -84,14 +84,13 @@ class PlanTest(unittest.TestCase):
                     linux_matrix=shards(linux, mysql_suites=original['mysql_suites']),
                     macos_matrix=shards(mac, 'macos', mysql_suites=original['mysql_suites']),
                     linux_split=split_build(linux), macos_split=split_build(mac),
-                    linux_codegen=name == 'ready' and not documentation,
-                    native=bool(mac), upgrade=name == 'ready' and not documentation,
+                    native=bool(mac),
                     retry=name == 'manual',
                     quarantine={'draft': 'off', 'ready': 'admission', 'manual': 'admission',
                                 'promotion': 'promotion'}[name],
-                    linux_memory=not documentation and name != 'draft',
-                    cache_execution=not documentation and name != 'draft',
-                    typecheck_macos=not documentation and name != 'draft',
+                    linux_memory=not documentation and name in ('manual', 'promotion'),
+                    cache_execution=not documentation and name in ('manual', 'promotion'),
+                    typecheck_macos=not documentation and name in ('manual', 'promotion'),
                     policy_skips=['test_unchanged'],
                     compile_only=False,
                 )
@@ -104,7 +103,6 @@ class PlanTest(unittest.TestCase):
                 if draft:
                     self.assertEqual(result.selection['server_targets'], [])
                     self.assertFalse(result.outputs['native'])
-                    self.assertFalse(result.outputs['upgrade'])
                     self.assertTrue(result.outputs['draft_run'])
 
     def test_every_selector_obligation_vetoes_documentation_even_on_a_draft(self):
@@ -120,23 +118,34 @@ class PlanTest(unittest.TestCase):
                 if draft:
                     self.assertEqual(result.outputs['targets'], [])
                     self.assertEqual(result.outputs['native_targets'], [])
-                    self.assertFalse(result.outputs['upgrade'])
 
-    def test_ready_normal_retains_selection_and_exact_native_and_upgrade_obligations(self):
-        for mac_required, native_targets, upgrade, retry in product(
-                (False, True), ([], ['test-logic']), (False, True), (False, True)):
-            with self.subTest(mac=mac_required, native=native_targets, upgrade=upgrade, retry=retry):
-                original = dict(selection(), targets=['test-logic'], mac_required=mac_required,
-                    native_targets=native_targets, upgrade_required=upgrade, retry=retry)
+    def test_ready_pr_tier_runs_only_linux_compile_and_selected_linux_suites(self):
+        promotion_only = ('cache_execution_checks', 'typecheck_macos', 'linux_memory_checks')
+        for mac_required, native_targets, upgrade, retry, stack, obligations in product(
+                (False, True), ([], ['test-logic']), (False, True), (False, True), (False, True),
+                (False, True)):
+            with self.subTest(mac=mac_required, native=native_targets, upgrade=upgrade, retry=retry,
+                              stack=stack, obligations=obligations):
+                targets = ['test-logic', 'stack-frames'] if stack else ['test-logic']
+                original = dict(selection(), targets=targets, mac_required=mac_required,
+                    native_targets=native_targets, upgrade_required=upgrade, retry=retry,
+                    **{key: obligations for key in promotion_only})
                 output = plan(original, event_name='pull_request', draft=False,
                               promotion=False, change_kind=ChangeKind.NORMAL).outputs
                 self.assertEqual(output['targets'], ['test-logic'])
-                self.assertEqual(output['native_targets'], (native_targets or ['check']) if mac_required else [])
-                self.assertEqual(output['native'], mac_required)
-                self.assertEqual(output['upgrade'], upgrade)
+                self.assertEqual(output['native_targets'], [])
+                self.assertFalse(output['native'])
+                self.assertEqual(output['macos_matrix'], shards([], 'macos', mysql_suites=original['mysql_suites']))
+                for key in ('cache_execution', 'typecheck_macos', 'linux_memory', 'retry'):
+                    self.assertFalse(output[key], key)
+                self.assertNotIn('upgrade', output)
                 self.assertEqual(output['quarantine'], 'admission' if retry else 'off')
-                self.assertFalse(output['retry'])
-                self.assertFalse(output['linux_codegen'])
+                promoted = plan(original, event_name='workflow_dispatch', draft=False,
+                                promotion=True, change_kind=ChangeKind.NORMAL).outputs
+                self.assertIn('stack-frames', promoted['targets'])
+                self.assertTrue(promoted['native'])
+                for key in ('cache_execution', 'typecheck_macos', 'linux_memory'):
+                    self.assertEqual(promoted[key], obligations, key)
 
     def test_all_unit_obligation_widens_only_compilation_on_ready_candidates(self):
         for targets in ([], ['test-native'], ['test-store'], ['test-logic'], ['test'], ['check'], ['check-full']):
@@ -154,23 +163,16 @@ class PlanTest(unittest.TestCase):
                     self.assertEqual(result['linux_matrix'], shards(execution, mysql_suites=[]))
                     self.assertEqual(result['linux_split'], split_build(compiled))
                     self.assertFalse(result['native'])
-                    self.assertFalse(result['upgrade'])
                     self.assertEqual(source['targets'], targets)
 
     def test_macos_matrix_and_split_use_the_final_native_selection(self):
-        for native, mac_required, expected, split in (
-                ([], True, ['check'], True),
-                (['test'], True, ['test'], False),
-                (['check-full'], True, ['check-full'], True),
-                (['test-logic'], True, ['test-logic'], False),
-                (['check'], False, [], False)):
-            with self.subTest(native=native, mac_required=mac_required):
-                output = plan(dict(selection(), targets=[], native_targets=native, mac_required=mac_required),
-                              event_name='pull_request', draft=False, promotion=False,
-                              change_kind=ChangeKind.NORMAL).outputs
-                self.assertEqual(output['native_targets'], expected)
+        for native, split in ((['check'], True), (['test'], False), (['check-full'], True), (['test-logic'], False)):
+            with self.subTest(native=native):
+                output = plan(dict(selection(), targets=[]), event_name='workflow_dispatch', draft=False,
+                              promotion=False, change_kind=ChangeKind.NORMAL, native_targets=native).outputs
+                self.assertEqual(output['native_targets'], native)
                 self.assertEqual(output['macos_split'], split)
-                self.assertEqual(output['macos_matrix'], shards(expected, 'macos', mysql_suites=[]))
+                self.assertEqual(output['macos_matrix'], shards(native, 'macos', mysql_suites=['host-status-integration']))
                 self.assertFalse(output['linux_split'])
 
     def test_compile_only_builds_every_gate_and_unit_root_and_runs_nothing(self):
@@ -189,7 +191,7 @@ class PlanTest(unittest.TestCase):
                 self.assertEqual(output['native_targets'], [])
                 self.assertFalse(output['native'])
                 self.assertEqual(output['macos_matrix'], shards([], 'macos', mysql_suites=[]))
-                for key in ('linux_codegen', 'upgrade', 'retry', 'cache_execution', 'linux_memory', 'draft_run'):
+                for key in ('retry', 'cache_execution', 'linux_memory', 'draft_run'):
                     self.assertFalse(output[key], key)
                 self.assertEqual(output['quarantine'], 'off')
                 self.assertTrue(output['compile_only'])
@@ -197,13 +199,15 @@ class PlanTest(unittest.TestCase):
             plan(selection(), event_name='workflow_dispatch', draft=False, promotion=True,
                  change_kind=ChangeKind.NORMAL, compile_only=True)
 
-    def test_pr_codegen_selects_check_or_stack_or_both_without_changing_other_targets(self):
+    def test_stack_frames_run_only_outside_pull_requests(self):
         for targets in (['check'], ['stack-frames'], ['check', 'stack-frames'], ['test-logic'], []):
             with self.subTest(targets=targets):
-                output = plan(dict(selection(), targets=targets), event_name='pull_request',
+                ready = plan(dict(selection(), targets=targets), event_name='pull_request',
+                             draft=False, promotion=False, change_kind=ChangeKind.NORMAL).outputs
+                self.assertEqual(ready['targets'], [target for target in targets if target != 'stack-frames'])
+                manual = plan(dict(selection(), targets=targets), event_name='workflow_dispatch',
                               draft=False, promotion=False, change_kind=ChangeKind.NORMAL).outputs
-                self.assertEqual(output['linux_codegen'], targets not in (['test-logic'], []))
-                self.assertEqual(output['targets'], [target for target in targets if target != 'stack-frames'])
+                self.assertEqual(manual['targets'], targets)
 
 
 if __name__ == '__main__':
