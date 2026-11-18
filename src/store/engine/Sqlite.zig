@@ -116,7 +116,7 @@ pub noinline fn open(io: std.Io, database_path: []const u8, selector: []const u8
     try sqlite.exec(database.?, cache_size);
     try sqlite.exec(database.?, if (options.cache_spill) "PRAGMA cache_spill=ON" else "PRAGMA cache_spill=OFF");
     try sqlite.exec(database.?, "PRAGMA synchronous=FULL");
-    if (@import("../../os/os.zig").full_fsync) try sqlite.exec(database.?, "PRAGMA fullfsync=ON");
+    if (@import("os").full_fsync) try sqlite.exec(database.?, "PRAGMA fullfsync=ON");
     const journal_mode = sqlite.diagnosticTextPragma(database.?, "PRAGMA journal_mode=WAL") orelse return error.StoreJournalModeFailed;
     if (!std.mem.eql(u8, journal_mode.slice(), "wal")) return error.StoreJournalModeFailed;
     try sqlite.exec(database.?, "PRAGMA journal_size_limit=4194304");

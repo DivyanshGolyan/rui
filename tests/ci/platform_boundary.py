@@ -26,7 +26,6 @@ MAC_PATHS = (
     "src/os/*", "src/cli.zig", "src/client.zig", "src/platform.zig", "src/HostLifecycle.zig",
     "src/host_coordinator.zig", "src/host_restart_all.zig", "src/host_start.zig", "src/host_identity.zig",
     "src/upgrade.zig", "src/upgrade_process.zig",
-    "src/store/mysql_testing.zig",
     # The Python fixtures' platform owner. Fixtures ask it for platform facts
     # and stay off this list.
     "tests/integration/os_semantics.py",
@@ -35,8 +34,6 @@ MAC_PATHS = (
     # embed the C interposer, which handles Darwin's tty queue.
     "tests/integration/terminal_process.py", "tests/integration/terminal_leader.py",
     "tests/integration/terminal_restoration_cases.py",
-    "src/h2/*",
-    "src/tls_client/*",
     "src/*.c", "src/*.h", "src/*.inc", "src/*.patch", "src/*.sh", "tests/integration/*.c",
     ".github/workflows/qualify-macos.yml",
     "install.sh", "release/*",

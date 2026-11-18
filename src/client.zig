@@ -1,6 +1,6 @@
 const std = @import("std");
 const utf8_validation = @import("utf8_validation.zig");
-const socket_os = @import("os/socket.zig");
+const socket_os = @import("os").socket;
 const platform = @import("platform.zig");
 const protocol = @import("protocol.zig");
 pub const activity_reply = @import("activity_reply.zig");
@@ -5417,7 +5417,7 @@ test "transport cancellation saturated Unix backlog is not a connected writable 
     // pending until the deadline or cancellation. Darwin reads a zero backlog
     // as its maximum, so request one and queue peers until one does not
     // connect.
-    const blocks = @import("os/os.zig").full_backlog_blocks_connect;
+    const blocks = @import("os").full_backlog_blocks_connect;
     const io = std.testing.io;
     var tmp = try @import("socket_fixture.zig").Directory.init();
     defer tmp.cleanup();
@@ -5783,7 +5783,7 @@ test "socket upgrade discovery never infers absence from missing stale backlog o
         const unreadable = try listener.accept(io);
         unreadable.close(io);
 
-        const blocks = @import("os/os.zig").full_backlog_blocks_connect;
+        const blocks = @import("os").full_backlog_blocks_connect;
         var peers: [8]std.posix.fd_t = undefined;
         var count: usize = 0;
         defer for (peers[0..count]) |fd| closeTestDescriptor(fd);
