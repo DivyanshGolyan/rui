@@ -1,11 +1,13 @@
 name: Retry infrastructure failures
-# Rerun a PR's failed Selected checks jobs once when GitHub, a mirror or the
-# runner failed and no check did: a 504 while fetching, a runner never acquired
-# or lost. tests/ci/failure_cause.py decides; a test or build failure, a later
-# attempt or a superseded head never reruns.
+# Rerun a PR's failed Selected checks jobs, or a promotion's failed jobs, once
+# when GitHub, a mirror or the runner failed and no check did: a 504 while
+# fetching, a runner never acquired or lost. tests/ci/failure_cause.py decides;
+# a test or build failure, a later attempt, a superseded head or a later
+# promotion never reruns. A promotion's rerun reruns qualified and Release too,
+# so nothing publishes without every tier, and Release resumes publication.
 on:
   workflow_run:
-    workflows: [Selected checks]
+    workflows: [Selected checks, Promote]
     types: [completed]
 
 permissions:
@@ -13,7 +15,7 @@ permissions:
 
 jobs:
   retry:
-    if: ${{ !github.event.repository.private && github.event.workflow_run.conclusion == 'failure' && github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.run_attempt == 1 }}
+    if: ${{ !github.event.repository.private && github.event.workflow_run.conclusion == 'failure' && (github.event.workflow_run.event == 'pull_request' || (github.event.workflow_run.name == 'Promote' && github.event.workflow_run.event == 'workflow_dispatch')) && github.event.workflow_run.run_attempt == 1 }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:

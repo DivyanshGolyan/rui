@@ -1112,7 +1112,7 @@ test "schema object custody is canonical and cannot collide with reference-shape
     }
 }
 
-test "SH-53 wire image decoding streams standard base64 into capture" {
+test "SH-63 wire image decoding streams standard base64 into capture" {
     const Capture = @import("InputCapture.zig");
     const jpeg = @embedFile("testing/fixtures/input-baseline.jpg");
     var encoded: [std.base64.standard.Encoder.calcSize(jpeg.len)]u8 = undefined;
@@ -1156,7 +1156,7 @@ test "SH-53 wire image decoding streams standard base64 into capture" {
     }
 }
 
-test "SH-54 ordered Message parts stream and reject invalid media" {
+test "SH-64 ordered Message parts stream and reject invalid media" {
     const jpeg = @embedFile("testing/fixtures/input-baseline.jpg");
     var encoded: [std.base64.standard.Encoder.calcSize(jpeg.len)]u8 = undefined;
     _ = std.base64.standard.Encoder.encode(&encoded, jpeg);
@@ -1210,7 +1210,7 @@ test "SH-54 ordered Message parts stream and reject invalid media" {
     }
 }
 
-test "SH-56 part ingress failures release scratch without publishing a loan" {
+test "SH-66 part ingress failures release scratch without publishing a loan" {
     for ([_]enum { acquire, write, seal, budget }{ .acquire, .write, .seal, .budget }) |scenario| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
@@ -1245,7 +1245,7 @@ test "SH-56 part ingress failures release scratch without publishing a loan" {
     }
 }
 
-test "SH-57 ordered wire input accepts the part limit and refuses the next part" {
+test "SH-67 ordered wire input accepts the part limit and refuses the next part" {
     const maximum = @import("input_parts.zig").max_parts;
     for ([_]usize{ maximum, maximum + 1 }) |count| {
         var tmp = std.testing.tmpDir(.{});

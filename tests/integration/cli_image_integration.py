@@ -110,7 +110,7 @@ def run_case(root, provider, operation):
 
 
 def cli_rules(root):
-    # CLI-18: syntax and stdin selection are local and preserve scalar text bytes.
+    # CLI-21: syntax and stdin selection are local and preserve scalar text bytes.
     state = root / "cli-rules"
     state.mkdir(mode=0o700)
     endpoint = fixture.SuccessEndpoint([

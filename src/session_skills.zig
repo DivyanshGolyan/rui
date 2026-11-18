@@ -702,7 +702,7 @@ test "skills invocation capture retains only final max-body bytes in the request
     try std.testing.expectEqual(@as(usize, 0), backing.live);
 }
 
-test "CM-39 skill references are read from ordered text parts only" {
+test "CM-42 skill references are read from ordered text parts only" {
     const InputCapture = @import("InputCapture.zig");
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

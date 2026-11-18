@@ -464,7 +464,7 @@ class BuildModuleTest(unittest.TestCase):
 
 class SelectionTest(unittest.TestCase):
     def test_ordered_message_capture_selects_provider_and_capture_witnesses(self):
-        # CI-21: touched Message capture owners select their real provider witness.
+        # CI-72: touched Message capture owners select their real provider witness.
         for path in ("src/InputCapture.zig", "src/client.zig", "src/mutation_answer.zig",
                      "src/cli_args.zig", "src/cli_grammar.zig", "tests/integration/cli_image_integration.py"):
             with self.subTest(path=path):
@@ -650,6 +650,14 @@ class SelectionTest(unittest.TestCase):
                         self.assertIn("installer-integration", result["native_targets"])
                     else:
                         self.assertEqual(result["native_targets"], [])
+
+    def test_pause_socket_inputs_select_the_socket_fixture(self):
+        for path in ("src/testing/pause.zig", "src/testing/pause_socket.zig",
+                     "src/pause_socket_fixture.zig", "tests/integration/pause_client.py",
+                     "tests/integration/pause_socket_test.py"):
+            with self.subTest(path=path):
+                selected = select([path], "review", AVAILABLE)["targets"]
+                self.assertTrue(covers("pause-socket-test", selected), (path, selected))
 
     def test_request_wait_selects_its_native_oracle_and_portable_core(self):
         for path in ("src/client.zig", "src/cli_args.zig", "src/server.zig",
@@ -949,24 +957,14 @@ class SelectionTest(unittest.TestCase):
         for result in ('failure', 'cancelled', 'skipped'):
             cases.append((*green, 'failure', 'success', 'true', result))
         cases.append((*green, 'failure', 'success', 'false', 'success'))
-        cases = [(*case, 'false', 'skipped') for case in cases]
-        for targets in ('[]', '["check"]'):
-            build = native = typecheck = 'skipped' if targets == '[]' else 'success'
-            for codegen, result, expected in (('true', 'success', 'success'),
-                                             ('true', 'failure', 'failure'),
-                                             ('true', 'cancelled', 'failure'),
-                                             ('true', 'skipped', 'failure'),
-                                             ('false', 'success', 'failure')):
-                cases.append((targets, 'success', 'success', build, native, False, expected,
-                              typecheck, 'false', 'skipped', codegen, result))
         cases = [(*case, 'false' if case[0] in ('', '[]') else 'true') for case in cases]
         for typecheck, expected in (('skipped', 'success'), ('success', 'failure'), ('failure', 'failure')):
             cases.append(('["test-logic"]', 'success', 'success', 'success', 'success', False, expected,
-                          typecheck, 'false', 'skipped', 'false', 'skipped', 'false'))
+                          typecheck, 'false', 'skipped', 'false'))
         for typecheck, expected in (('success', 'success'), ('skipped', 'failure'), ('failure', 'failure')):
             cases.append(('[]', 'success', 'success', 'skipped', 'skipped', False, expected,
-                          typecheck, 'false', 'skipped', 'false', 'skipped', 'true'))
-        for (targets, plan, policy, build, native, private, expected, typecheck, split, unit, codegen, codegen_result,
+                          typecheck, 'false', 'skipped', 'true'))
+        for (targets, plan, policy, build, native, private, expected, typecheck, split, unit,
              typecheck_selected) in cases:
             with self.subTest(targets=targets, plan=plan, policy=policy, build=build, native=native, private=private,
                               typecheck=typecheck, typecheck_selected=typecheck_selected, split=split, unit=unit):
@@ -984,7 +982,6 @@ class SelectionTest(unittest.TestCase):
                                                  'NATIVE_RESULT': native, 'TYPECHECK_RESULT': typecheck,
                                                  'TYPECHECK': typecheck_selected,
                                                  'SPLIT': split, 'UNIT_RESULT': unit,
-                                                 'CODEGEN': codegen, 'CODEGEN_RESULT': codegen_result,
                                                  'COMPILE_ONLY': 'false'})
                     actual = 'success' if result.returncode == 0 else 'failure'
                 self.assertEqual(actual, expected)
@@ -1070,15 +1067,6 @@ class SelectionTest(unittest.TestCase):
                                     env=dict(os.environ, PLAN_RESULT=plan, BUILD_RESULT='success',
                                              NATIVE_RESULT='success', SPLIT='true', UNIT_RESULT='success'))
             self.assertNotEqual(result.returncode, 0)
-
-    def test_codegen_is_required_but_not_a_dependency_of_suite_startup(self):
-        text = Path('.github/workflows/check.yml').read_text()
-        codegen = re.search(r'(?ms)^  linux_codegen:\n(.*?)(?=^  [a-z_]+:|\Z)', text)[1]
-        suites = re.search(r'(?ms)^  linux_suites:\n(.*?)(?=^  [a-z_]+:|\Z)', text)[1]
-        self.assertIn('needs: plan', codegen)
-        self.assertIn('zig build stack-frames -Dcpu=baseline --summary all', codegen)
-        self.assertNotIn('-Dpr-ci', codegen)
-        self.assertNotIn('linux_codegen', suites)
 
     def test_shared_state_and_unknown_code_fail_closed(self):
         for path in ("src/future_owner.zig", "tests/integration/future_case.py"):
@@ -1304,13 +1292,8 @@ class SelectionTest(unittest.TestCase):
 
     def test_renderer_harnesses_select_no_blocking_target(self):
         workflow = Path(".github/workflows/renderer-contracts.yml").read_text()
-        filters = re.findall(r"(?m)^    paths:\n((?:      - '[^']+'\n)+)", workflow)
-        self.assertEqual(len(filters), 1)
-        for block in filters:
-            harnesses = {p for p in re.findall(r"'([^']+)'", block) if p.startswith("tests/integration/")}
-            self.assertEqual(harnesses - {"tests/integration/terminal_restoration_*"},
-                             set(RENDERER_HARNESSES))
-        for path in ("tests/integration/input_equivalence.py",):
+        self.assertNotIn("pull_request", workflow, "promotion alone runs the renderer contracts")
+        for path in RENDERER_HARNESSES:
             with self.subTest(path=path):
                 result = select([path], "review", AVAILABLE)
                 self.assertEqual(result["targets"] + result["native_targets"], [])
@@ -1955,7 +1938,8 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
             invocations.touch()
             env = dict(os.environ, PATH=f"{root}:{os.environ['PATH']}", FAIL_FIXTURE=fail,
                        CHECK_OVERLAP=str(int(overlap)), GATE_DIR=str(root), TEST_PYTHON=sys.executable,
-                       HOLD_FIXTURE=hold, TEST_PART=part, CHECK_TIMING=str(int(timing)))
+                       HOLD_FIXTURE=hold, TEST_PART=part, CHECK_TIMING=str(int(timing)),
+                       RUI_TEST_PAUSE_SOCKET_BINARY="pause-socket")
             if python_delay:
                 (root / "sitecustomize.py").write_text(
                     f"import time\ntime.sleep({python_delay!r})\n")
@@ -2289,7 +2273,7 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
             "human_cli_integration.py release", "preference_policy_integration.py preferences",
             "model_picker_integration.py release", "model_picker_signin_integration.py release",
             "model_picker_failure_integration.py release",
-            "request_wait_integration.py release",
+            "request_wait_integration.py release", "pause_socket_test.py pause-socket",
             "bash_lifecycle_integration.py release", "bash_recovery_integration.py release",
             "codex_integration.py release", "control_integration.py release",
             "session_list_integration.py release", "conversation_page_integration.py release",

@@ -610,7 +610,7 @@ test "Action read JSON reaches its exact bound with an escaped final window" {
     try std.testing.expect(std.mem.endsWith(u8, writer.buffered(), "\"final\":null}"));
 }
 
-test "SH-50 Message replies and observations preserve the input form" {
+test "SH-60 Message replies and observations preserve the input form" {
     const content: command_reply.ContentReference = .{ .length = 41, .digest = @splat(0xab) };
     var session: protocol.Bounded(protocol.max_session_bytes) = .{};
     try session.set("k7m2qx");

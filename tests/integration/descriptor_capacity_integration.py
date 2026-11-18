@@ -20,7 +20,7 @@ import bash_fixture as bash
 import control_fixture as control
 import model_fixture as fixture
 import host_process
-from host_process import HeldReplies, HostDiagnostics, TestHTTPServer, canonical_fixture_root, dispose_all, hold, retain_failure_state, start_ready_process, stop_process, wait_for
+from host_process import HeldReplies, HostDiagnostics, PauseGate, TestHTTPServer, canonical_fixture_root, dispose_all, hold, retain_failure_state, start_ready_process, stop_process, wait_for
 import os_semantics
 from product_defaults import DEFAULTS
 
@@ -228,11 +228,6 @@ def execution_idle(state, store, session):
     return report if execution["custody_occupied"] == "0" and execution["scratch_used_bytes"] == "0" else None
 
 
-def open_gate(path):
-    os.mkfifo(path)
-    return os.open(path, os.O_RDWR | os.O_NONBLOCK)
-
-
 def assert_connections_live(connections):
     for ordinal, connection in enumerate(connections):
         original_timeout = connection.gettimeout()
@@ -246,12 +241,6 @@ def assert_connections_live(connections):
         raise AssertionError(
             f"held connection {ordinal} responded or closed before Bash spawn: {unexpected!r}"
         )
-
-
-def admitted_at_gate(diagnostics, ordinal):
-    records = diagnostics.wait("action_attempt_admitted", action=str(ordinal + 1))
-    assert len(records) == 1, records
-    return records[0]
 
 
 def prove_borrower_oracle():
@@ -292,9 +281,9 @@ def prove_borrower_oracle():
 
 
 def prove_bash_spawn_with_full_client_population(state, required):
+    # EXR-52
     store = state / "bash-client-overlap-store"
-    gate_path = state / "bash-client-overlap-gate"
-    keeper = open_gate(gate_path)
+    gate = PauseGate("action.attempt_committed")
     releases = [state / f"bash-release-{ordinal}" for ordinal in range(2)]
     markers = [state / f"bash-marker-{ordinal}" for ordinal in range(2)]
     commands = [
@@ -333,8 +322,10 @@ def prove_bash_spawn_with_full_client_population(state, required):
     held = []
     completed = False
     expected_routes = []
+    arrivals = []
     try:
-        witness_limit = required + 2 + 1
+        # The test-only pause socket consumes one descriptor for the Host lifetime.
+        witness_limit = required + 2 + 1 + 1
         host, ready = start_ready_process(
             limited_host(
                 witness_limit,
@@ -346,13 +337,10 @@ def prove_bash_spawn_with_full_client_population(state, required):
                     "--set", "providers.codex.endpoint=" + str(f"http://127.0.0.1:{endpoint.server_port}/responses"),
                     "--set", "providers.codex.unauthenticated=true",
                 "--test-phase-trace",
-                "--test-transition",
-                "action-attempt-admitted",
-                "--test-transition-gate-path",
-                gate_path,
             ),
-            required_fields={"descriptor_requirement": str(required + 2), "descriptor_limit": str(witness_limit)},
+            required_fields={"descriptor_requirement": str(required + 3), "descriptor_limit": str(witness_limit)},
             observations="status",
+            pause=gate,
         )
         diagnostics = HostDiagnostics(host)
         sessions = []
@@ -362,9 +350,9 @@ def prove_bash_spawn_with_full_client_population(state, required):
             sessions.append(session)
             expected_routes.append("message")
             fixture.message(state, store, f"bash-message-{ordinal}", session, f"run bash {ordinal}")
-            admitted_at_gate(diagnostics, ordinal)
+            arrivals.append(gate.wait(action=ordinal + 1))
             if ordinal == 0:
-                os.write(keeper, b"x")
+                gate.release()
                 wait_for(markers[0].exists, "first Bash process", timeout=10)
 
         socket_path = ready["socket"]
@@ -391,7 +379,7 @@ def prove_bash_spawn_with_full_client_population(state, required):
         for started in starts:
             assert not diagnostics.matching("connection_resources_released", subject=started["subject"]), started
 
-        os.write(keeper, b"x")
+        gate.release()
         wait_for(markers[1].exists, "second Bash spawn with full clients", timeout=10)
         assert_connections_live(held)
         deadline = time.monotonic() + 10
@@ -456,8 +444,8 @@ def prove_bash_spawn_with_full_client_population(state, required):
             connection.close()
         for release in releases:
             release.touch(exist_ok=True)
-        for dispose in (lambda: stop_process(host) if host is not None else None,
-                        lambda: os.close(keeper), endpoint.shutdown, endpoint.server_close,
+        for dispose in (gate.close, lambda: stop_process(host) if host is not None else None,
+                        endpoint.shutdown, endpoint.server_close,
                         lambda: endpoint_thread.join(timeout=3)):
             try:
                 dispose()
@@ -467,7 +455,7 @@ def prove_bash_spawn_with_full_client_population(state, required):
             if completed and diagnostics is not None:
                 diagnostics.borrower_census(time.monotonic(), expected_routes)
                 assert len(diagnostics.matching("connection_place_released")) == 2
-                assert len(diagnostics.matching("action_attempt_admitted")) == 2
+                assert [arrival["context"]["action"] for arrival in arrivals] == [1, 2]
         except BaseException as error:
             diagnostics.snapshot_failure(lambda: {"case": "descriptor_final_population"})
             diagnostics.observations.preserve_failure(getattr(host, "rui_failure_snapshot", None))
@@ -652,12 +640,12 @@ def prove_accept_pressure(state):
 
 
 def prove_accept_inheritance(state, library):
+    # EXR-53
     root = state / "accept-inheritance"
     root.mkdir(mode=0o700)
     store, hold, ready, release = (root / name for name in ("store", "hold", "ready", "release"))
     report, child_release = root / "child-report", root / "child-release"
-    gate = root / "launch-gate"
-    keeper = open_gate(gate)
+    gate = PauseGate("action.before_handoff")
     wrapper = root / "bash"
     wrapper.write_text(f"#!{sys.executable}\n" + f"""
 import json, os, pathlib, sys, time
@@ -694,18 +682,18 @@ os.execv('/bin/bash', ['/bin/bash', *sys.argv[1:]])
                 "--set", "providers.codex.endpoint=" + str(f"http://127.0.0.1:{endpoint.server_port}/responses"),
                 "--set", "providers.codex.unauthenticated=true",
                 "--set", "tools.bash.path=" + str(wrapper),
-            "--test-transition", "prepared-before-handoff", "--test-transition-gate-path", str(gate)], env=env)
-        diagnostics = HostDiagnostics(host)
+            ], env=env, observations="recovery", pause=gate)
+        HostDiagnostics(host)
         session = bash.configure(root, store, "configure", permission="bypass")
         fixture.message(root, store, "message", session, "check inheritance")
-        diagnostics.wait("prepared_before_handoff", timeout=10)
+        gate.wait()
         hold.touch()
         peer = os_semantics.unix_stream()
         peer.connect(fields["socket"])
         wait_for(lambda: ready.exists() and ready.read_bytes().endswith(b"\n"), "accepted socket before flags", timeout=10)
         timer = threading.Timer(2, release.touch)
         timer.start()
-        os.write(keeper, b"x")
+        gate.release()
         wait_for(lambda: report.exists() and report.read_bytes().endswith(b"\n"), "real Bash launch descriptor report", timeout=10)
         evidence = json.loads(report.read_text())
         print("accept inheritance child:", json.dumps(evidence), flush=True)
@@ -717,9 +705,9 @@ os.execv('/bin/bash', ['/bin/bash', *sys.argv[1:]])
         child_release.touch(exist_ok=True)
         dispose_all(lambda: timer.join() if timer is not None else None,
                     lambda: peer.close() if peer is not None else None,
-                    lambda: stop_process(host) if host is not None else None,
+                    gate.close, lambda: stop_process(host) if host is not None else None,
                     lambda: finish_accept_records(host, root / "accept.log"),
-                    lambda: os.close(keeper), endpoint.shutdown, endpoint.server_close, lambda: worker.join(timeout=3))
+                    endpoint.shutdown, endpoint.server_close, lambda: worker.join(timeout=3))
 
 
 def main():

@@ -765,7 +765,8 @@ def detached_settings_checks(root, env):
         else:
             assert checked.returncode == 2, (name, checked)
             failure = json.loads(checked.stdout)["rui_start_error"]
-            assert failure["code"] == "settings_invalid" and reason in failure["message"], (name, failure)
+            assert failure["code"] == "settings_invalid" and reason in failure["message"], (name, checked)
+            assert "[settings_invalid]" in checked.stderr and reason in checked.stderr, (name, checked)
         assert not matching_processes(directory), (name, checked)
     for arguments, reason in (
             (("--settings", "-"), "no stdin"),
@@ -775,7 +776,8 @@ def detached_settings_checks(root, env):
         checked = host_command(env, "settings", "--check", "--store", directory, *arguments)
         assert checked.returncode == 2, (arguments, checked)
         failure = json.loads(checked.stdout)["rui_start_error"]
-        assert failure["code"] == "settings_invalid" and reason in failure["message"], failure
+        assert failure["code"] == "settings_invalid" and reason in failure["message"], checked
+        assert "[settings_invalid]" in checked.stderr and reason in checked.stderr, checked
     # No database, diagnostics or lease was created by a check.
     assert {path.name for path in directory.iterdir()} == original_files
     assert json.loads((directory / "host.json").read_text()) == {"providers": {}}
@@ -1186,7 +1188,14 @@ def saved_settings(root, env):
     for path, value, leaf in (("tools.bash.path", "relative/bash", "tools.bash.path: a Host started in / has no base"),
                               ("interface.lifetime", "stdin", "interface.lifetime: a Host started by bare rui")):
         unrooted = root / f"saved-unrooted-{path}"
-        host_ok(env, "set", "--store", unrooted, path, value)
+        if path == "tools.bash.path":
+            # Existing files from before detached-safe edits must still refuse at start.
+            unrooted.mkdir(mode=0o700)
+            saved = unrooted / "host.json"
+            saved.write_text(json.dumps({"tools": {"bash": {"path": value}}}))
+            saved.chmod(0o600)
+        else:
+            host_ok(env, "set", "--store", unrooted, path, value)
         refused = run_start(unrooted, env)
         assert refused.returncode == 2 and leaf in refused.stderr and '"settings_invalid"' in refused.stdout, refused
         assert not matching_processes(unrooted), refused
@@ -1433,6 +1442,56 @@ def contended_starters(root, env):
     print("contended starters: delayed ready owner adopted; absent and retired winners preserve typed refusal", flush=True)
 
 
+def host_refusal_receipts(root, env):
+    # CLI-18
+    directory = root / "saved-path-refusal"
+    directory.mkdir(mode=0o700)
+    saved = directory / "host.json"
+    saved.write_text(json.dumps({"providers": {"openai": {"key": {"env": "PR7C_ABSENT_KEY"}}},
+                                 "tools": {"bash": {"path": "relative/bash"}}}))
+    saved.chmod(0o600)
+    start = run_start(directory, env)
+    assert start.returncode == 2, start
+    failure = json.loads(start.stdout)["rui_start_error"]
+    assert failure["code"] == "settings_invalid" and "tools.bash.path" in failure["message"], failure
+    saved.write_text(json.dumps({"providers": {"openai": {"key": {"env": "PR7C_ABSENT_KEY"}}}}))
+    before = saved.read_bytes()
+    edit = host_command(env, "set", "--store", directory, "tools.bash.path", "relative/bash")
+    assert edit.returncode == 2 and json.loads(edit.stdout)["rui_start_error"] == failure and saved.read_bytes() == before, edit
+    assert edit.stderr.split(": ", 2)[2] == start.stderr.split(": ", 2)[2], (edit, start)
+    after = run_start(directory, env)
+    assert after.returncode == 1 and "tools.bash.path" not in after.stderr, after
+
+    directory = root / "typed-child-refusal"
+    directory.mkdir(mode=0o700)
+    saved = directory / "host.json"
+    saved.write_text(json.dumps({"providers": {"openai": {"key": {"env": "PR7C_ABSENT_KEY"}}}}))
+    saved.chmod(0o600)
+    selected_env = {**env, "RUI_STORE": str(directory)}
+    selected_env.pop("PR7C_ABSENT_KEY", None)
+    child = subprocess.run([RUI, "host", "serve", "--store", directory], env=selected_env,
+                           stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=COMMAND_TIMEOUT)
+    assert child.returncode == 2 and json.loads(child.stdout)["rui_start_error"]["code"] == "settings_invalid", child
+    result = run_start(directory, selected_env)
+    assert result.returncode == 1 and result.stdout == child.stdout, result
+    assert result.stderr == child.stderr and "internal_unexpected" not in result.stderr, (child, result)
+    credential = root / "typed-child-codex.json"
+    codex_fixture.credentials(credential)
+    selected_env["RUI_CODEX_CREDENTIAL_FILE"] = str(credential)
+    master, slave = open_pty()
+    bare = None
+    try:
+        bare = spawn([RUI, "--store", directory, "--provider", "codex"], env=selected_env, cwd=root, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+        _, diagnostic = bare.communicate(timeout=COMMAND_TIMEOUT)
+        assert bare.returncode == 1 and diagnostic.decode() == child.stderr, (bare.returncode, diagnostic, child)
+    finally:
+        if bare is not None and bare.poll() is None:
+            bare.kill()
+            bare.wait(timeout=5)
+        close_pty(master, slave)
+    managed_descriptor_rejection(root / "unexpected-parent", selected_env, 64)
+
+
 def main():
     assert len(sys.argv) in (2, 3), "usage: host_launch_integration.py /absolute/path/to/rui [startup-limits|store-identity|provider-policy|detached-checks|frozen-settings|contention]"
     from host_launch_exit_test import check_exit_reader, check_process_discovery, check_failure_retention, check_provider_disposal
@@ -1442,6 +1501,10 @@ def main():
         home.mkdir(mode=0o700)
         credential = root / "credentials" / "missing.json"
         env = environment(home, credential)
+        if len(sys.argv) == 3 and sys.argv[2] == "typed-refusal":
+            host_refusal_receipts(root, env)
+            return
+        host_refusal_receipts(root, env)
         check_provider_disposal(dispose_provider_case, stop_endpoint)
         if len(sys.argv) == 3 and sys.argv[2] == "frozen-settings":
             frozen_settings_launches(root, env)

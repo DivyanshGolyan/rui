@@ -905,7 +905,7 @@ test "preset is a Configure option and Start refuses it" {
     try expectValidation(.session_configure, &.{ "--session", "k7m2qx", "--preset", "x" }, false);
 }
 
-test "CLI-17 preserve interleaving for start and send" {
+test "CLI-20 preserve interleaving for start and send" {
     for ([_]Command{ .session_start, .session_send }) |command| {
         const argv = &[_][]const u8{ "--text", "first", "--image", "a.png", "--text-file", "-", "--image", "b.jpg", "--text", "last" };
         var storage: [1024]u8 = undefined;

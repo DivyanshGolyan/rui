@@ -5,12 +5,12 @@ First drafts, written from the README and the contracts and checked against fixe
 
 | Area | Invariants |
 | --- | --- |
-| [Admission and Session stops](admission-sessions.md) | 42 |
-| [Store, Host lifetime, install and upgrade](store-host.md) | 46 |
-| [Tools, execution, recovery and resources](execution-resources.md) | 44 |
-| [Conversation, settings and model requests](conversation-model.md) | 32 |
-| [CLI, inspection, local protocol and the TypeScript client](cli-inspection.md) | 36 |
-| [Session UI and diagnostics](session-ui.md) | 38 |
-| [CI tooling and policy checks](ci-tooling.md) | 64 |
-| [Test pause point owner](pause.md) | 7 |
+| [Admission and Session stops](admission-sessions.md) | 48 |
+| [Store, Host lifetime, install and upgrade](store-host.md) | 60 |
+| [Tools, execution, recovery and resources](execution-resources.md) | 54 |
+| [Conversation, settings and model requests](conversation-model.md) | 36 |
+| [CLI, inspection, local protocol and the TypeScript client](cli-inspection.md) | 41 |
+| [Session UI and diagnostics](session-ui.md) | 53 |
+| [CI tooling and policy checks](ci-tooling.md) | 66 |
+| [Test pause point owner](pause.md) | 14 |
 | [Theme palette](theme.md) | 5 |

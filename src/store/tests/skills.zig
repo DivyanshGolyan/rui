@@ -1014,7 +1014,7 @@ test "the skill tool resolves an invocation or a failed capture with its text, a
     }.run);
 }
 
-test "SH-49 compound skills submission commits and rolls back with its callback" {
+test "SH-59 compound skills submission commits and rolls back with its callback" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             const Capture = @import("../../InputCapture.zig");

@@ -554,7 +554,7 @@ test "ADM-22 streamed text capture matches known-length capture" {
     }
 }
 
-test "SH-52 streamed image capture validates actual bytes and late MIME" {
+test "SH-62 streamed image capture validates actual bytes and late MIME" {
     const jpeg = @embedFile("testing/fixtures/input-baseline.jpg");
     for ([_]enum { accepted, wrong_mime, truncated, missing_mime }{ .accepted, .wrong_mime, .truncated, .missing_mime }) |scenario| {
         var tmp = std.testing.tmpDir(.{});

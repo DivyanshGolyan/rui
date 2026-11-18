@@ -76,6 +76,7 @@ pub fn feed(self: *Renderer, bytes: []const u8) !void {
                 self.table_len += 1;
                 continue;
             } else {
+                if (self.destination == .viewport) try self.out.writeAll(TerminalText.full_width_on);
                 try self.literalBlock(self.held[0..self.table_len]);
                 self.table_len = 0;
                 self.table_literal = true;
@@ -83,6 +84,7 @@ pub fn feed(self: *Renderer, bytes: []const u8) !void {
         }
         if (self.table_literal) {
             if (self.line_start and byte != '|') {
+                if (self.destination == .viewport) try self.out.writeAll(TerminalText.full_width_off);
                 self.table_literal = false;
             } else {
                 try self.literalBlock(&.{byte});
@@ -136,6 +138,7 @@ fn markdownByte(self: *Renderer, byte: u8) !void {
 }
 
 pub fn finish(self: *Renderer) !void {
+    if ((self.table_literal or self.fence_literal) and self.destination == .viewport) try self.out.writeAll(TerminalText.full_width_off);
     if (self.table_len != 0) try self.flushTable();
     if (self.line_start and self.prefix_len != 0) {
         if (fenceCandidate(self.prefix[0..self.prefix_len])) self.literal_line = true;
@@ -267,6 +270,7 @@ pub const LastCode = struct {
 
 fn fencedByte(self: *Renderer, byte: u8) !void {
     if (!self.fence_literal and self.fence_len == fence_limit) {
+        if (self.destination == .viewport) try self.out.writeAll(TerminalText.full_width_on);
         try self.literalBlock(self.held[0..self.fence_len]);
         self.fence_literal = true;
         self.fence_closer_possible = true;
@@ -279,6 +283,7 @@ fn fencedByte(self: *Renderer, byte: u8) !void {
         try self.literalBlock(&.{byte});
         if (byte == '\n') {
             if (self.fence_closer_possible and self.fence_closer_ticks == 3) {
+                if (self.destination == .viewport) try self.out.writeAll(TerminalText.full_width_off);
                 self.fence_pending = false;
                 self.fence_literal = false;
                 self.fence_body_start = 0;
@@ -332,6 +337,7 @@ fn flushTable(self: *Renderer) !void {
             widths[column] = @max(widths[column], try self.tableCell(cell, false));
         }
     }
+    if (self.destination == .viewport) try self.out.writeAll(TerminalText.full_width_on);
     var start: usize = 0;
     row = 0;
     while (start < bytes.len) : (row += 1) {
@@ -357,6 +363,7 @@ fn flushTable(self: *Renderer) !void {
         }
         start = end + 1;
     }
+    if (self.destination == .viewport) try self.out.writeAll(TerminalText.full_width_off);
 }
 
 fn replayProse(self: *Renderer, bytes: []const u8) !void {
@@ -493,6 +500,7 @@ const CellWidth = struct {
 
 fn codeBlock(self: *Renderer, bytes: []const u8) !void {
     const band = self.destination == .viewport and self.colour;
+    if (self.destination == .viewport) try self.out.writeAll(TerminalText.full_width_on);
     var start: usize = 0;
     while (start < bytes.len) {
         const end = if (std.mem.indexOfScalarPos(u8, bytes, start, '\n')) |at| at + 1 else bytes.len;
@@ -502,6 +510,7 @@ fn codeBlock(self: *Renderer, bytes: []const u8) !void {
         if (band) try self.out.writeAll("\x1b[0m");
         start = end;
     }
+    if (self.destination == .viewport) try self.out.writeAll(TerminalText.full_width_off);
 }
 
 fn literalBlock(self: *Renderer, bytes: []const u8) !void {
@@ -721,12 +730,13 @@ fn linkByte(self: *Renderer, byte: u8) !void {
         .target => switch (byte) {
             '(' => self.link_depth += 1,
             ')' => if (self.link_depth == 0) {
-                if (!TerminalText.linkTarget(self.held[self.link_text_end + 2 .. self.link_len])) return self.dropLink(byte);
+                const target = self.held[self.link_text_end + 2 .. self.link_len];
+                if (!TerminalText.linkTarget(target) and self.markdownLocalParts(target) == null) return self.dropLink(byte);
                 return self.showText();
             } else {
                 self.link_depth -= 1;
             },
-            else => if (byte <= ' ' or byte >= 0x7f or byte == '[') return self.dropLink(byte),
+            else => if (byte <= ' ' or byte == 0x7f or byte == '[') return self.dropLink(byte),
         },
     }
     if (self.link_len == self.held.len) return self.dropLink(byte);
@@ -801,28 +811,46 @@ fn showLocal(self: *Renderer) !void {
     const length = self.link_len;
     const end = trimmedEnd(self.held[0..length], 1, ".,:;!?'\"]");
     const path = self.held[0..end];
-    const tilde = path[0] == '~';
-    if (path.len <= @as(usize, if (tilde) 2 else 1)) return self.literalLocal();
-    if (!validPath(path, tilde)) return self.literalLocal();
-    var home = if (tilde) self.home else "";
-    if (tilde and !validPath(home, false)) return self.literalLocal();
-    while (home.len > 0 and home[home.len - 1] == '/') home = home[0 .. home.len - 1];
-    const tail = if (tilde) path[1..] else path;
-    const home_bytes = encodedSize(home) orelse return self.literalLocal();
-    const tail_bytes = encodedSize(tail) orelse return self.literalLocal();
-    if ("file://".len + home_bytes + tail_bytes > TerminalText.max_link_bytes) return self.literalLocal();
+    const parts = self.localParts(path) orelse return self.literalLocal();
     self.link = .none;
     self.link_len = 0;
-    try self.terminal_text.finish(self.out);
-    try self.out.writeAll(TerminalText.link_open ++ "file://");
-    try writeEncoded(self.out, home);
-    try writeEncoded(self.out, tail);
-    try self.out.writeAll(TerminalText.link_end);
-    self.in_link = true;
-    try self.transition(self.base());
+    try self.openLocal(parts);
     try self.safeSlice(path);
     try self.closeLink();
     for (self.held[end..length]) |byte| try self.prose(byte);
+}
+
+const LocalParts = struct { home: []const u8, tail: []const u8 };
+
+fn localParts(self: *const Renderer, path: []const u8) ?LocalParts {
+    if (path.len == 0) return null;
+    const tilde = path[0] == '~';
+    if (path.len <= @as(usize, if (tilde) 2 else 1) or !validPath(path, tilde)) return null;
+    var home = if (tilde) self.home else "";
+    if (tilde and !validPath(home, false)) return null;
+    while (home.len > 0 and home[home.len - 1] == '/') home = home[0 .. home.len - 1];
+    const tail = if (tilde) path[1..] else path;
+    const home_bytes = encodedSize(home) orelse return null;
+    const tail_bytes = encodedSize(tail) orelse return null;
+    if ("file://".len + home_bytes + tail_bytes > TerminalText.max_link_bytes) return null;
+    return .{ .home = home, .tail = tail };
+}
+
+fn markdownLocalParts(self: *const Renderer, target: []const u8) ?LocalParts {
+    var path = target;
+    for (0..2) |_| {
+        const colon = std.mem.lastIndexOfScalar(u8, path, ':') orelse break;
+        const suffix = path[colon + 1 ..];
+        if (suffix.len == 0) break;
+        var digits = true;
+        for (suffix) |byte| if (!std.ascii.isDigit(byte)) {
+            digits = false;
+            break;
+        };
+        if (!digits) break;
+        path = path[0..colon];
+    }
+    return self.localParts(path);
 }
 
 fn validPath(path: []const u8, tilde: bool) bool {
@@ -870,9 +898,22 @@ fn showText(self: *Renderer) !void {
     const length = self.link_len;
     self.link = .none;
     self.link_len = 0;
-    try self.openLink(self.held[text_end + 2 .. length]);
+    const target = self.held[text_end + 2 .. length];
+    if (self.markdownLocalParts(target)) |parts| {
+        try self.openLocal(parts);
+    } else try self.openLink(target);
     for (self.held[1..text_end]) |byte| try self.prose(byte);
     try self.closeLink();
+}
+
+fn openLocal(self: *Renderer, parts: LocalParts) !void {
+    try self.terminal_text.finish(self.out);
+    try self.out.writeAll(TerminalText.link_open ++ "file://");
+    try writeEncoded(self.out, parts.home);
+    try writeEncoded(self.out, parts.tail);
+    try self.out.writeAll(TerminalText.link_end);
+    self.in_link = true;
+    try self.transition(self.base());
 }
 
 fn openLink(self: *Renderer, address: []const u8) !void {
@@ -1150,7 +1191,7 @@ test "chunked subset, malformed markup and terminal controls" {
     for (input) |byte| try renderer.feed(&.{byte});
     try renderer.finish();
     try std.testing.expectEqualStrings("\x1b[1mHeading\x1b[0m\n\x1b[1m-\x1b[0m \x1b[3mitem\x1b[0m and \x1b[94mcode\x1b[0m\n" ++
-        "\x1b[1mbold\x1b[0m\n\x1b[40m  x\t= 1\n\x1b[0munfinished *mark\n\\*literal*\n" ++
+        "\x1b[1mbold\x1b[0m\n" ++ TerminalText.full_width_on ++ "\x1b[40m  x\t= 1\n\x1b[0m" ++ TerminalText.full_width_off ++ "unfinished *mark\n\\*literal*\n" ++
         "bad \\x1b]2;title\\x07 \\x0d \\x7f \\u202e café\n", output.written());
 }
 
@@ -1469,7 +1510,7 @@ test "indented fences render code without marker lines or reverse video" {
     var renderer: Renderer = .{ .destination = .{ .viewport = .wcwidth }, .out = &output.writer };
     for ("   ```sh\n  echo `hello`\n   ```\n`inline`\n") |byte| try renderer.feed(&.{byte});
     try renderer.finish();
-    try std.testing.expectEqualStrings("\x1b[40m  echo `hello`\n\x1b[0m\x1b[94minline\x1b[0m\n", output.written());
+    try std.testing.expectEqualStrings(TerminalText.full_width_on ++ "\x1b[40m  echo `hello`\n\x1b[0m" ++ TerminalText.full_width_off ++ "\x1b[94minline\x1b[0m\n", output.written());
 }
 
 test "closing fence at end of answer needs no final newline" {
@@ -1478,7 +1519,7 @@ test "closing fence at end of answer needs no final newline" {
     var renderer: Renderer = .{ .destination = .{ .viewport = .wcwidth }, .out = &output.writer };
     for ("   ```sh\n  echo hi\n   ```") |byte| try renderer.feed(&.{byte});
     try renderer.finish();
-    try std.testing.expectEqualStrings("\x1b[40m  echo hi\n\x1b[0m", output.written());
+    try std.testing.expectEqualStrings(TerminalText.full_width_on ++ "\x1b[40m  echo hi\n\x1b[0m" ++ TerminalText.full_width_off, output.written());
 }
 
 test "rendered content and unsupported fence syntax stay visible without a gutter" {
@@ -1487,7 +1528,7 @@ test "rendered content and unsupported fence syntax stay visible without a gutte
     var renderer: Renderer = .{ .destination = .{ .viewport = .wcwidth }, .out = &output.writer };
     for ("# Title\n```zig\n  call\n```\n```bad info\ntrailing `open\n") |byte| try renderer.feed(&.{byte});
     try renderer.finish();
-    try std.testing.expectEqualStrings("\x1b[1mTitle\x1b[0m\n\x1b[40m  call\n\x1b[0m```bad info\ntrailing `open\n", output.written());
+    try std.testing.expectEqualStrings("\x1b[1mTitle\x1b[0m\n" ++ TerminalText.full_width_on ++ "\x1b[40m  call\n\x1b[0m" ++ TerminalText.full_width_off ++ "```bad info\ntrailing `open\n", output.written());
 }
 
 test "oversized fence candidate is literal and does not enter code state" {
@@ -1656,20 +1697,6 @@ fn linked(comptime address: []const u8, comptime text: []const u8) []const u8 {
     return TerminalText.link_open ++ address ++ TerminalText.link_end ++ "\x1b[4m" ++ text ++ "\x1b[0m" ++ TerminalText.link_close;
 }
 
-test "a Markdown link shows its text as an OSC 8 link and hides its address" {
-    try expectRendered("See [github.com](https://github.com/a/b).", "See " ++ comptime linked("https://github.com/a/b", "github.com") ++ ".");
-    try expectRendered("Zig 0.17 ([ziglang.org](https://ziglang.org/download/))\n", "Zig 0.17 (" ++ comptime linked("https://ziglang.org/download/", "ziglang.org") ++ ")\n");
-    try expectRendered("[`main.zig`](https://x.dev/m) and [*a* b](http://y.dev/(1))", TerminalText.link_open ++ "https://x.dev/m" ++ TerminalText.link_end ++ "\x1b[4m\x1b[0m\x1b[4m\x1b[94mmain.zig\x1b[0m\x1b[4m\x1b[0m" ++ TerminalText.link_close ++ " and " ++
-        TerminalText.link_open ++ "http://y.dev/(1)" ++ TerminalText.link_end ++ "\x1b[4m\x1b[0m\x1b[3m\x1b[4ma\x1b[0m\x1b[4m b\x1b[0m" ++ TerminalText.link_close);
-    try expectRendered("# [Rui](https://r.dev)\n", "\x1b[1m" ++ TerminalText.link_open ++ "https://r.dev" ++ TerminalText.link_end ++ "\x1b[0m\x1b[1m\x1b[4mRui\x1b[0m\x1b[1m" ++ TerminalText.link_close ++ "\x1b[0m\n");
-}
-
-test "a bare address is its own OSC 8 link without the sentence's punctuation" {
-    try expectRendered("Docs: https://ziglang.org/doc/, then", "Docs: " ++ comptime linked("https://ziglang.org/doc/", "https://ziglang.org/doc/") ++ ", then");
-    try expectRendered("(see https://en.wikipedia.org/wiki/Zig_(language)).", "(see " ++ comptime linked("https://en.wikipedia.org/wiki/Zig_(language)", "https://en.wikipedia.org/wiki/Zig_(language)") ++ ").");
-    try expectRendered("- HTTP://A.dev\nhttp://b.dev", "\x1b[1m-\x1b[0m " ++ comptime linked("HTTP://A.dev", "HTTP://A.dev") ++ "\n" ++ linked("http://b.dev", "http://b.dev"));
-}
-
 fn visible(output: []const u8, shown: *std.Io.Writer) !void {
     var index: usize = 0;
     while (index < output.len) {
@@ -1684,117 +1711,145 @@ fn visible(output: []const u8, shown: *std.Io.Writer) !void {
     }
 }
 
-test "text that is not a complete web link shows every byte as written" {
-    inline for (.{
-        .{ "[a](src/a.zig)", false },        .{ "[a](ftp://x)", false },           .{ "[a](javascript:alert(1))", false },
-        .{ "xhttps://y.dev", false },        .{ "http:/x https:// httpx", false }, .{ "[a] (https://x)", true },
-        .{ "[](https://x)", true },          .{ "[a](https://x y)", true },        .{ "[a](https://x\nnext", true },
-        .{ "[a\n](https://x)", true },       .{ "[[a]](https://x)", true },        .{ "\\[a](https://x)", true },
-        .{ "https:/// https://. x", false },
-    }) |case| {
+test "content_link_render SUI-26 link targets and labels" {
+    {
+        try expectRendered("See [github.com](https://github.com/a/b).", "See " ++ comptime linked("https://github.com/a/b", "github.com") ++ ".");
+        try expectRendered("Zig 0.17 ([ziglang.org](https://ziglang.org/download/))\n", "Zig 0.17 (" ++ comptime linked("https://ziglang.org/download/", "ziglang.org") ++ ")\n");
+        try expectRendered("[`main.zig`](https://x.dev/m) and [*a* b](http://y.dev/(1))", TerminalText.link_open ++ "https://x.dev/m" ++ TerminalText.link_end ++ "\x1b[4m\x1b[0m\x1b[4m\x1b[94mmain.zig\x1b[0m\x1b[4m\x1b[0m" ++ TerminalText.link_close ++ " and " ++
+            TerminalText.link_open ++ "http://y.dev/(1)" ++ TerminalText.link_end ++ "\x1b[4m\x1b[0m\x1b[3m\x1b[4ma\x1b[0m\x1b[4m b\x1b[0m" ++ TerminalText.link_close);
+        try expectRendered("# [Rui](https://r.dev)\n", "\x1b[1m" ++ TerminalText.link_open ++ "https://r.dev" ++ TerminalText.link_end ++ "\x1b[0m\x1b[1m\x1b[4mRui\x1b[0m\x1b[1m" ++ TerminalText.link_close ++ "\x1b[0m\n");
+    }
+    {
+        try expectRendered("Docs: https://ziglang.org/doc/, then", "Docs: " ++ comptime linked("https://ziglang.org/doc/", "https://ziglang.org/doc/") ++ ", then");
+        try expectRendered("(see https://en.wikipedia.org/wiki/Zig_(language)).", "(see " ++ comptime linked("https://en.wikipedia.org/wiki/Zig_(language)", "https://en.wikipedia.org/wiki/Zig_(language)") ++ ").");
+        try expectRendered("- HTTP://A.dev\nhttp://b.dev", "\x1b[1m-\x1b[0m " ++ comptime linked("HTTP://A.dev", "HTTP://A.dev") ++ "\n" ++ linked("http://b.dev", "http://b.dev"));
+    }
+    {
+        inline for (.{
+            .{ "[a](src/a.zig)", false },        .{ "[a](ftp://x)", false },           .{ "[a](javascript:alert(1))", false },
+            .{ "xhttps://y.dev", false },        .{ "http:/x https:// httpx", false }, .{ "[a] (https://x)", true },
+            .{ "[](https://x)", true },          .{ "[a](https://x y)", true },        .{ "[a](https://x\nnext", true },
+            .{ "[a\n](https://x)", true },       .{ "[[a]](https://x)", true },        .{ "\\[a](https://x)", true },
+            .{ "https:/// https://. x", false },
+        }) |case| {
+            var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+            defer output.deinit();
+            var renderer: Renderer = .{ .out = &output.writer };
+            try renderer.feed(case[0]);
+            try renderer.finish();
+            errdefer std.debug.print("input={s} output={f}\n", .{ case[0], std.zig.fmtString(output.written()) });
+            var shown = std.Io.Writer.Allocating.init(std.testing.allocator);
+            defer shown.deinit();
+            try visible(output.written(), &shown.writer);
+            try std.testing.expectEqualStrings(case[0], shown.written());
+            try std.testing.expectEqual(case[1], std.mem.indexOf(u8, output.written(), TerminalText.link_open) != null);
+        }
+        try expectRendered("[a](./b) [c](https://d.dev)", "[a](./b) " ++ comptime linked("https://d.dev", "c"));
+        try expectRendered("[a](https://x\x1b)", "[a](" ++ comptime linked("https://x", "https://x") ++ "\\x1b)");
+        try expectRendered("`https://x.dev` ok", "\x1b[94mhttps://x.dev\x1b[0m ok");
+        try expectRendered("[a](https://x\nnext", "[a](" ++ comptime linked("https://x", "https://x") ++ "\nnext");
+    }
+    {
+        const long = "https://" ++ @as([TerminalText.max_link_bytes]u8, @splat('a'));
+        try expectRendered(long ++ " ok", long ++ " ok");
+        const text = @as([fence_limit - "[](https://x)".len + 1]u8, @splat('a'));
+        try expectRendered("[" ++ text ++ "](https://x)", comptime linked("https://x", &text));
+        try expectRendered("[" ++ text ++ "a](https://x)", "[" ++ text ++ "a](" ++ comptime linked("https://x", "https://x") ++ ")");
+        const closers = "https://a" ++ @as([2000]u8, @splat(')'));
+        try expectRendered(closers ++ " ", comptime linked("https://a", "https://a") ++ @as([2000]u8, @splat(')')) ++ " ");
+    }
+    {
+        try expectRendered("The report is at /tmp/report.md;", "The report is at " ++ comptime linked("file:///tmp/report.md", "/tmp/report.md") ++ ";");
+    }
+    {
+        try expectRenderedHome("The report is at ~/code/personal/rui-implicit-state-machines.md;", "The report is at " ++ comptime linked("file:///Users/test/code/personal/rui-implicit-state-machines.md", "~/code/personal/rui-implicit-state-machines.md") ++ ";", "/Users/test");
+        try expectRendered("(/tmp/a;b(c)). /tmp/x?y#z%q;", "(" ++ comptime linked("file:///tmp/a%3Bb%28c%29", "/tmp/a;b(c)") ++ "). " ++ linked("file:///tmp/x%3Fy%23z%25q", "/tmp/x?y#z%q") ++ ";");
+        try expectRenderedHome("~/é🙂;", comptime linked("file:///home/a%20b%25%23%3F/%C3%A9%F0%9F%99%82", "~/é🙂") ++ ";", "/home/a b%#?/");
+        try expectRenderedHome("~/x", comptime linked("file:///x", "~/x"), "/");
+        try expectRenderedHome("~/x", comptime linked("file:///home/%C3%A9/x", "~/x"), "/home/é///");
+    }
+    {
+        try expectRendered("/tmp/a:12 /tmp/a:12:3", comptime linked("file:///tmp/a%3A12", "/tmp/a:12") ++ " " ++ linked("file:///tmp/a%3A12%3A3", "/tmp/a:12:3"));
+        inline for (.{ "", "relative", "//host/home", "/bad\xff", "/bad\x1b", "/bad\u{202e}" }) |home| {
+            try expectRenderedHome("~/a; /tmp/a;", "~/a; " ++ comptime linked("file:///tmp/a", "/tmp/a") ++ ";", home);
+        }
+    }
+    {
+        inline for (.{
+            "a/b x/tmp/a x~/a ./a ../a ~user/a //host/a ///tmp/a ftp://x/a httpx:/x file:///tmp/a",
+            "[label](file:///tmp/a)",
+            "\\/tmp/a \\~/a",
+        }) |input| try expectRenderedHome(input, input, "/home/test");
+        try expectRenderedHome("~user/a;/tmp/b //host/~/b /tmp/ok;", "~user/a;/tmp/b //host/~/b " ++ comptime linked("file:///tmp/ok", "/tmp/ok") ++ ";", "/home/test");
+        try expectRenderedHome("`~/a` *~/b* **/tmp/c**\n```\n/tmp/d ~/e\n```\n", "\x1b[94m~/a\x1b[0m \x1b[3m~/b\x1b[0m \x1b[1m/tmp/c\x1b[0m\n" ++ TerminalText.full_width_on ++ "\x1b[40m/tmp/d ~/e\n\x1b[0m" ++ TerminalText.full_width_off, "/home/test");
+        try expectRendered("[a](https://x y)", "[a](" ++ comptime linked("https://x", "https://x") ++ " y)");
+    }
+    {
+        inline for (.{
+            .{ "/tmp/a\xff;", "/tmp/a\\xff;" },
+            .{ "/tmp/a\xc3;", "/tmp/a\\xc3;" },
+            .{ "/tmp/a\x1b\\b;", "/tmp/a\\x1b\\b;" },
+            .{ "/tmp/a\x7f;", "/tmp/a\\x7f;" },
+            .{ "/tmp/a\u{0085};", "/tmp/a\\u0085;" },
+            .{ "/tmp/a\u{202e};", "/tmp/a\\u202e;" },
+            .{ "/tmp/a\u{2066};", "/tmp/a\\u2066;" },
+        }) |case| try expectRendered(case[0] ++ " /tmp/ok;", case[1] ++ " " ++ comptime linked("file:///tmp/ok", "/tmp/ok") ++ ";");
+    }
+    {
+        const prefix = "file:///home/a%20%C3%A9/";
+        const body = @as([TerminalText.max_link_bytes - prefix.len]u8, @splat('a'));
+        try expectRenderedHome("~/" ++ body ++ ";", comptime linked(prefix ++ body, "~/" ++ body) ++ ";", "/home/a é");
+        try expectRenderedHome("~/" ++ body ++ "a; /tmp/ok", "~/" ++ body ++ "a; " ++ comptime linked("file:///tmp/ok", "/tmp/ok"), "/home/a é");
+        const absolute = "/" ++ @as([TerminalText.max_link_bytes - "file:///".len]u8, @splat('a'));
+        try expectRendered(absolute ++ ";", comptime linked("file://" ++ absolute, absolute) ++ ";");
+        try expectRendered(absolute ++ "a;", absolute ++ "a;");
+    }
+    {
+        const long = "/" ++ @as([TerminalText.max_link_bytes]u8, @splat('a')) ++ "/tmp/no;~/no";
+        try expectRenderedHome(long ++ " /tmp/ok;", long ++ " " ++ comptime linked("file:///tmp/ok", "/tmp/ok") ++ ";", "/home/test");
         var output = std.Io.Writer.Allocating.init(std.testing.allocator);
         defer output.deinit();
         var renderer: Renderer = .{ .out = &output.writer };
-        try renderer.feed(case[0]);
+        try renderer.feed("/");
+        const chunk = @as([4096]u8, @splat('a'));
+        for (0..32) |_| try renderer.feed(&chunk);
+        try renderer.feed("/tmp/no /tmp/ok;");
         try renderer.finish();
-        errdefer std.debug.print("input={s} output={f}\n", .{ case[0], std.zig.fmtString(output.written()) });
-        var shown = std.Io.Writer.Allocating.init(std.testing.allocator);
-        defer shown.deinit();
-        try visible(output.written(), &shown.writer);
-        try std.testing.expectEqualStrings(case[0], shown.written());
-        try std.testing.expectEqual(case[1], std.mem.indexOf(u8, output.written(), TerminalText.link_open) != null);
+        try std.testing.expectEqual(@as(u8, '/'), output.written()[0]);
+        for (output.written()[1..][0 .. 32 * chunk.len]) |byte| try std.testing.expectEqual(@as(u8, 'a'), byte);
+        try std.testing.expectEqualStrings("/tmp/no " ++ comptime linked("file:///tmp/ok", "/tmp/ok") ++ ";", output.written()[1 + 32 * chunk.len ..]);
     }
-    try expectRendered("[a](./b) [c](https://d.dev)", "[a](./b) " ++ comptime linked("https://d.dev", "c"));
-    try expectRendered("[a](https://x\x1b)", "[a](" ++ comptime linked("https://x", "https://x") ++ "\\x1b)");
-    try expectRendered("`https://x.dev` ok", "\x1b[94mhttps://x.dev\x1b[0m ok");
-    try expectRendered("[a](https://x\nnext", "[a](" ++ comptime linked("https://x", "https://x") ++ "\nnext");
-}
-
-test "a bare address longer than a link may carry stays plain text" {
-    const long = "https://" ++ @as([TerminalText.max_link_bytes]u8, @splat('a'));
-    try expectRendered(long ++ " ok", long ++ " ok");
-    const text = @as([fence_limit - "[](https://x)".len + 1]u8, @splat('a'));
-    try expectRendered("[" ++ text ++ "](https://x)", comptime linked("https://x", &text));
-    try expectRendered("[" ++ text ++ "a](https://x)", "[" ++ text ++ "a](" ++ comptime linked("https://x", "https://x") ++ ")");
-    const closers = "https://a" ++ @as([2000]u8, @splat(')'));
-    try expectRendered(closers ++ " ", comptime linked("https://a", "https://a") ++ @as([2000]u8, @splat(')')) ++ " ");
-}
-
-test "a bare local path excludes the sentence semicolon from its OSC 8 link" {
-    try expectRendered("The report is at /tmp/report.md;", "The report is at " ++ comptime linked("file:///tmp/report.md", "/tmp/report.md") ++ ";");
-}
-
-test "bare local paths expand borrowed HOME without linking sentence punctuation" {
-    try expectRenderedHome("The report is at ~/code/personal/rui-implicit-state-machines.md;", "The report is at " ++ comptime linked("file:///Users/test/code/personal/rui-implicit-state-machines.md", "~/code/personal/rui-implicit-state-machines.md") ++ ";", "/Users/test");
-    try expectRendered("(/tmp/a;b(c)). /tmp/x?y#z%q;", "(" ++ comptime linked("file:///tmp/a%3Bb%28c%29", "/tmp/a;b(c)") ++ "). " ++ linked("file:///tmp/x%3Fy%23z%25q", "/tmp/x?y#z%q") ++ ";");
-    try expectRenderedHome("~/é🙂;", comptime linked("file:///home/a%20b%25%23%3F/%C3%A9%F0%9F%99%82", "~/é🙂") ++ ";", "/home/a b%#?/");
-    try expectRenderedHome("~/x", comptime linked("file:///x", "~/x"), "/");
-    try expectRenderedHome("~/x", comptime linked("file:///home/%C3%A9/x", "~/x"), "/home/é///");
-}
-
-test "bare local paths require valid HOME only for tilde paths" {
-    inline for (.{ "", "relative", "//host/home", "/bad\xff", "/bad\x1b", "/bad\u{202e}" }) |home| {
-        try expectRenderedHome("~/a; /tmp/a;", "~/a; " ++ comptime linked("file:///tmp/a", "/tmp/a") ++ ";", home);
+    {
+        try expectRendered("/tmp/report_;", comptime linked("file:///tmp/report_", "/tmp/report_") ++ ";");
+        try expectRendered("/tmp/backup~;", comptime linked("file:///tmp/backup~", "/tmp/backup~") ++ ";");
+        try expectRendered("/tmp/name*;", comptime linked("file:///tmp/name%2A", "/tmp/name*") ++ ";");
     }
-}
-
-test "bare local paths are prose tokens not relative paths or Markdown targets" {
-    inline for (.{
-        "a/b x/tmp/a x~/a ./a ../a ~user/a //host/a ///tmp/a ftp://x/a httpx:/x file:///tmp/a",
-        "[label](/tmp/a) [label](~/a) [label](file:///tmp/a)",
-        "\\/tmp/a \\~/a",
-    }) |input| try expectRenderedHome(input, input, "/home/test");
-    try expectRenderedHome("~user/a;/tmp/b //host/~/b /tmp/ok;", "~user/a;/tmp/b //host/~/b " ++ comptime linked("file:///tmp/ok", "/tmp/ok") ++ ";", "/home/test");
-    try expectRenderedHome("`~/a` *~/b* **/tmp/c**\n```\n/tmp/d ~/e\n```\n", "\x1b[94m~/a\x1b[0m \x1b[3m~/b\x1b[0m \x1b[1m/tmp/c\x1b[0m\n\x1b[40m/tmp/d ~/e\n\x1b[0m", "/home/test");
-    try expectRendered("[a](https://x y)", "[a](" ++ comptime linked("https://x", "https://x") ++ " y)");
-}
-
-test "bare local paths reject unsafe complete filenames instead of linking an ASCII prefix" {
-    inline for (.{
-        .{ "/tmp/a\xff;", "/tmp/a\\xff;" },
-        .{ "/tmp/a\xc3;", "/tmp/a\\xc3;" },
-        .{ "/tmp/a\x1b\\b;", "/tmp/a\\x1b\\b;" },
-        .{ "/tmp/a\x7f;", "/tmp/a\\x7f;" },
-        .{ "/tmp/a\u{0085};", "/tmp/a\\u0085;" },
-        .{ "/tmp/a\u{202e};", "/tmp/a\\u202e;" },
-        .{ "/tmp/a\u{2066};", "/tmp/a\\u2066;" },
-    }) |case| try expectRendered(case[0] ++ " /tmp/ok;", case[1] ++ " " ++ comptime linked("file:///tmp/ok", "/tmp/ok") ++ ";");
-}
-
-test "bare local paths bound the complete encoded URI after HOME expansion" {
-    const prefix = "file:///home/a%20%C3%A9/";
-    const body = @as([TerminalText.max_link_bytes - prefix.len]u8, @splat('a'));
-    try expectRenderedHome("~/" ++ body ++ ";", comptime linked(prefix ++ body, "~/" ++ body) ++ ";", "/home/a é");
-    try expectRenderedHome("~/" ++ body ++ "a; /tmp/ok", "~/" ++ body ++ "a; " ++ comptime linked("file:///tmp/ok", "/tmp/ok"), "/home/a é");
-    const absolute = "/" ++ @as([TerminalText.max_link_bytes - "file:///".len]u8, @splat('a'));
-    try expectRendered(absolute ++ ";", comptime linked("file://" ++ absolute, absolute) ++ ";");
-    try expectRendered(absolute ++ "a;", absolute ++ "a;");
-}
-
-test "bare local paths overflow literally through the token and resume after a delimiter" {
-    const long = "/" ++ @as([TerminalText.max_link_bytes]u8, @splat('a')) ++ "/tmp/no;~/no";
-    try expectRenderedHome(long ++ " /tmp/ok;", long ++ " " ++ comptime linked("file:///tmp/ok", "/tmp/ok") ++ ";", "/home/test");
-    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
-    defer output.deinit();
-    var renderer: Renderer = .{ .out = &output.writer };
-    try renderer.feed("/");
-    const chunk = @as([4096]u8, @splat('a'));
-    for (0..32) |_| try renderer.feed(&chunk);
-    try renderer.feed("/tmp/no /tmp/ok;");
-    try renderer.finish();
-    try std.testing.expectEqual(@as(u8, '/'), output.written()[0]);
-    for (output.written()[1..][0 .. 32 * chunk.len]) |byte| try std.testing.expectEqual(@as(u8, 'a'), byte);
-    try std.testing.expectEqualStrings("/tmp/no " ++ comptime linked("file:///tmp/ok", "/tmp/ok") ++ ";", output.written()[1 + 32 * chunk.len ..]);
-}
-
-test "local path filename suffixes survive trimming the sentence semicolon" {
-    try expectRendered("/tmp/report_;", comptime linked("file:///tmp/report_", "/tmp/report_") ++ ";");
-    try expectRendered("/tmp/backup~;", comptime linked("file:///tmp/backup~", "/tmp/backup~") ++ ";");
-    try expectRendered("/tmp/name*;", comptime linked("file:///tmp/name%2A", "/tmp/name*") ++ ";");
-}
-
-test "a lone slash or tilde slash is not a local path link" {
-    try expectRenderedHome("/ ~/ /; ~/;", "/ ~/ /; ~/;", "/home/test");
+    {
+        try expectRenderedHome("/ ~/ /; ~/;", "/ ~/ /; ~/;", "/home/test");
+    }
+    {
+        const cases = [_]struct { input: []const u8, home: []const u8, output: []const u8 }{
+            .{ .input = "[here](~/é(a):2), [web](https://x) /tmp/z;", .home = "/home/test", .output = comptime linked("file:///home/test/%C3%A9%28a%29", "here") ++ ", " ++ linked("https://x", "web") ++ " " ++ linked("file:///tmp/z", "/tmp/z") ++ ";" },
+            .{ .input = "[x](/tmp/a:12:3) [y](/tmp/a:abc)", .home = "", .output = comptime linked("file:///tmp/a", "x") ++ " " ++ linked("file:///tmp/a%3Aabc", "y") },
+            .{ .input = "[x](~/a)", .home = "", .output = "[x](~/a)" },
+            .{ .input = "[x](//host/a) [x](./a)", .home = "/home/test", .output = "[x](//host/a) [x](./a)" },
+            .{ .input = "[Tool loading docs](/Users/divyanshgolyan/code/personal/rui/docs/using-rui.md:316)", .home = "", .output = comptime linked("file:///Users/divyanshgolyan/code/personal/rui/docs/using-rui.md", "Tool loading docs") },
+        };
+        for (cases) |case| try expectRenderedHome(case.input, case.output, case.home);
+        inline for (.{ "", "relative", "//host/home", "/bad\xff", "/bad\x1b", "/bad\u{202e}" }) |home| {
+            try expectRenderedHome("[x](~/a)", "[x](~/a)", home);
+        }
+        inline for (.{
+            .{ "[x](/tmp/a\xff)", "[x](/tmp/a\\xff)" },
+            .{ "[x](/tmp/a\xc3)", "[x](/tmp/a\\xc3)" },
+            .{ "[x](/tmp/a\x1b)", "[x](/tmp/a\\x1b)" },
+            .{ "[x](/tmp/a\u{202e})", "[x](/tmp/a\\u202e)" },
+        }) |case| try expectRendered(case[0], case[1]);
+        const prefix = "file:///home/a%20%C3%A9/";
+        const body = @as([TerminalText.max_link_bytes - prefix.len]u8, @splat('a'));
+        try expectRenderedHome("[x](~/" ++ body ++ ")", comptime linked(prefix ++ body, "x"), "/home/a é");
+        try expectRenderedHome("[x](~/" ++ body ++ "a)", "[x](~/" ++ body ++ "a)", "/home/a é");
+    }
 }
 
 test "tables buffer complete runs and retain every inline style at every feed split with and without colour" {

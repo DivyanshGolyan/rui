@@ -61,7 +61,7 @@ test "Message recovery observation seeks stay bounded as the Turn accumulates re
     try std.testing.expectEqual(costs[0], costs[1]);
 }
 
-test "SH-58 compound observations certify content without holding the queue" {
+test "SH-68 compound observations certify content without holding the queue" {
     const sqlite = @import("../sqlite.zig");
     const cases = [_][:0]const u8{
         "UPDATE content SET digest=zeroblob(32) WHERE content_id=(SELECT content_id FROM message_admission WHERE command_key='observe-parts')",

@@ -79,8 +79,6 @@ pub const names = [_][]const u8{
     "test-sqlite-cache-spill-off",
     "test-sqlite-diagnostics",
     "test-suppress-first-control-hint",
-    "test-transition",
-    "test-transition-gate-path",
     "text",
     "text-file",
     "text-output",
@@ -89,7 +87,7 @@ pub const names = [_][]const u8{
     "tools",
     "turn",
     "workspace",
-};
+} ++ if (@import("build_options").test_pauses) [_][]const u8{"test-pause-fd"} else [_][]const u8{};
 
 pub fn contains(name: []const u8) bool {
     for (names) |candidate| {
