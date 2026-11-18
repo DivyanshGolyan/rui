@@ -3723,7 +3723,7 @@ fn stopCase3() !void {
         _ = try step(&state, .{ .conversation = null });
         _ = try respond(&state, delta, testToken(2), &.{old});
         _ = try refresh(&state, .not_modified, testToken(3), &.{});
-        try std.testing.expectEqualDeep(stopped, state.workOf(state.find(ref).?));
+        try std.testing.expect(std.meta.eql(stopped, state.workOf(state.find(ref).?)));
         try std.testing.expectEqual(Kind.stopped, shownKind(&state, state.find(ref).?));
         try std.testing.expectEqual(@as(u64, test_now_s), shownSince(&state, state.find(ref).?));
         var finished = session(&ref, .{ .finished = ago(0) }, .{ .label = "Same Session", .turn = 8 });
@@ -5040,11 +5040,11 @@ fn projectionCase2() !void {
     var state = try opened(&.{Listed.of(&source)});
     defer state.deinit();
     const row = @constCast(state.find("k7m2qx".*).?);
-    try std.testing.expectEqualDeep(source.work.core(), row.work());
+    try std.testing.expect(std.meta.eql(source.work.core(), row.work()));
     var observed = source.work.core();
     observed.actions.interrupt = null;
     settleRow(&state, row, .{ .read_version = testToken(2), .work = observed });
-    try std.testing.expectEqualDeep(observed, row.work());
+    try std.testing.expect(std.meta.eql(observed, row.work()));
 }
 
 test "overview Listed copies last line into bounded owned rows and refresh replaces it" {
